@@ -1,0 +1,99 @@
+version: "3.8"
+
+services:
+  # --- Ingress ---
+  gateway:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-server
+      - web-dashboard
+    restart: always
+
+  # --- Apps ---
+  web-dashboard:
+    build:
+      context: ../apps/web-dashboard
+      dockerfile: Dockerfile
+    restart: always
+
+  api-server:
+    build:
+      context: ../apps/api-server
+      dockerfile: Dockerfile
+    depends_on:
+      - db
+      - cache
+      - broker
+    environment:
+      - DATABASE_URL=postgresql://droplet:droplet@db:5432/droplet
+      - REDIS_URL=redis://cache:6379
+      - MQTT_BROKER=mqtt://broker:1883
+    restart: always
+
+  # --- Infrastructure ---
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=droplet
+      - POSTGRES_PASSWORD=droplet
+      - POSTGRES_DB=droplet
+    restart: always
+
+  cache:
+    image: redis:7-alpine
+    restart: always
+
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: always
+
+  # --- Services ---
+  routing:
+    build:
+      context: ../services/routing
+      dockerfile: Dockerfile
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    restart: always
+
+  file-sync:
+    build:
+      context: ../services/file-sync
+      dockerfile: Dockerfile
+    volumes:
+      - filedata:/data/files
+    restart: always
+
+  nvr:
+    build:
+      context: ../services/nvr
+      dockerfile: Dockerfile
+    volumes:
+      - nvrdata:/data/recordings
+    restart: always
+
+  ai-gateway:
+    build:
+      context: ../services/ai-gateway
+      dockerfile: Dockerfile
+    environment:
+      - JETSON_OLLAMA_URL=http://jetson-ai.local:11434
+    depends_on:
+      - cache
+      - broker
+    restart: always
+
+volumes:
+  pgdata:
+  filedata:
+  nvrdata:
