@@ -10,28 +10,28 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
   const isUser = message.role === "user";
 
   return (
-    <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : ""}`}>
+    <div className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}>
       {/* Avatar */}
       <div
-        className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center
-          ${isUser ? "bg-droplet-500/20 text-droplet-400" : "bg-slate-800 text-slate-400"}`}
+        className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center
+          ${isUser ? "bg-accent-subtle text-accent" : "bg-surface-tertiary text-label-secondary"}`}
       >
-        {isUser ? <User size={16} /> : <Bot size={16} />}
+        {isUser ? <User size={14} /> : <Bot size={14} />}
       </div>
 
-      {/* Content */}
+      {/* Bubble */}
       <div
-        className={`max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed
+        className={`max-w-[70%] px-4 py-2.5 type-body
           ${
             isUser
-              ? "bg-droplet-600 text-white rounded-tr-md"
-              : "bg-slate-800 text-slate-200 rounded-tl-md"
+              ? "bg-accent text-white rounded-[20px] rounded-tr-[6px]"
+              : "bg-surface-tertiary text-label-primary rounded-[20px] rounded-tl-[6px]"
           }`}
       >
         <p className="whitespace-pre-wrap">
           {message.content}
           {isStreaming && !isUser && (
-            <span className="inline-block w-1.5 h-4 ml-0.5 bg-droplet-400 animate-pulse" />
+            <span className="inline-block w-[2px] h-[18px] ml-0.5 -mb-[3px] bg-accent animate-pulse rounded-full" />
           )}
         </p>
       </div>

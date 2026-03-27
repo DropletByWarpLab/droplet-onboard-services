@@ -1,7 +1,6 @@
 "use client";
 
 import { useModels } from "@/lib/hooks/useModels";
-import type { ModelInfo } from "@/lib/types";
 
 interface ModelSelectorProps {
   value: string;
@@ -9,9 +8,9 @@ interface ModelSelectorProps {
 }
 
 const providerBadge: Record<string, string> = {
-  ollama: "bg-emerald-500/20 text-emerald-400",
-  anthropic: "bg-orange-500/20 text-orange-400",
-  openai: "bg-blue-500/20 text-blue-400",
+  ollama: "bg-system-green/15 text-system-green",
+  anthropic: "bg-system-orange/15 text-system-orange",
+  openai: "bg-system-blue/15 text-system-blue",
 };
 
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
@@ -25,8 +24,10 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-200
-          focus:outline-none focus:ring-2 focus:ring-droplet-500/50"
+        className="bg-surface-tertiary border border-separator rounded-sm px-3 py-1.5
+          type-subheadline text-label-primary
+          focus:outline-none focus:ring-2 focus:ring-accent/40
+          transition-all duration-200 ease-smooth"
       >
         {isLoading && <option>Loading models...</option>}
         {!isLoading && models.length === 0 && (
@@ -41,7 +42,9 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
 
       {provider && (
         <span
-          className={`px-2 py-0.5 rounded-full text-xs font-medium ${providerBadge[provider] ?? "bg-slate-700 text-slate-400"}`}
+          className={`px-2 py-0.5 rounded-full type-caption-2 font-medium ${
+            providerBadge[provider] ?? "bg-surface-tertiary text-label-secondary"
+          }`}
         >
           {provider}
         </span>

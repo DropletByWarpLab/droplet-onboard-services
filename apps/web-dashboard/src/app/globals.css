@@ -2,6 +2,220 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-slate-950 text-slate-100;
+/* ============================================================
+   Droplet Design System — Light & Dark Mode Tokens
+   ============================================================ */
+
+:root {
+  /* Surfaces */
+  --color-surface-primary: #ffffff;
+  --color-surface-secondary: #f2f2f7;
+  --color-surface-tertiary: #ffffff;
+  --color-surface-elevated: #ffffff;
+
+  /* Labels */
+  --color-label-primary: #000000;
+  --color-label-secondary: rgba(60, 60, 67, 0.6);
+  --color-label-tertiary: rgba(60, 60, 67, 0.3);
+  --color-label-quaternary: rgba(60, 60, 67, 0.18);
+
+  /* Separator */
+  --color-separator: rgba(60, 60, 67, 0.12);
+
+  /* Accent (brand teal) */
+  --color-accent: #0d9488;
+  --color-accent-hover: #0f766e;
+  --color-accent-subtle: rgba(13, 148, 136, 0.1);
+
+  /* System status */
+  --color-system-red: #ff3b30;
+  --color-system-orange: #ff9500;
+  --color-system-green: #34c759;
+  --color-system-blue: #007aff;
+
+  /* Material backgrounds */
+  --color-sidebar-bg: rgba(242, 242, 247, 0.82);
+  --color-toolbar-bg: rgba(255, 255, 255, 0.82);
+}
+
+.dark {
+  /* Surfaces */
+  --color-surface-primary: #000000;
+  --color-surface-secondary: #1c1c1e;
+  --color-surface-tertiary: #2c2c2e;
+  --color-surface-elevated: #1c1c1e;
+
+  /* Labels */
+  --color-label-primary: #ffffff;
+  --color-label-secondary: rgba(235, 235, 245, 0.6);
+  --color-label-tertiary: rgba(235, 235, 245, 0.3);
+  --color-label-quaternary: rgba(235, 235, 245, 0.18);
+
+  /* Separator */
+  --color-separator: rgba(84, 84, 88, 0.65);
+
+  /* Accent (brighter for dark bg) */
+  --color-accent: #2dd4bf;
+  --color-accent-hover: #5eead4;
+  --color-accent-subtle: rgba(45, 212, 191, 0.15);
+
+  /* System status (dark variants) */
+  --color-system-red: #ff453a;
+  --color-system-orange: #ff9f0a;
+  --color-system-green: #30d158;
+  --color-system-blue: #0a84ff;
+
+  /* Material backgrounds */
+  --color-sidebar-bg: rgba(28, 28, 30, 0.82);
+  --color-toolbar-bg: rgba(0, 0, 0, 0.82);
+}
+
+/* ============================================================
+   Base Layer
+   ============================================================ */
+
+@layer base {
+  body {
+    @apply bg-surface-secondary text-label-primary antialiased;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background: var(--color-accent-subtle);
+  }
+}
+
+/* ============================================================
+   Typography Scale
+   ============================================================ */
+
+@layer components {
+  .type-large-title {
+    @apply text-[34px] leading-[41px] font-bold tracking-[0.37px];
+  }
+  .type-title-1 {
+    @apply text-[28px] leading-[34px] font-bold tracking-[0.36px];
+  }
+  .type-title-2 {
+    @apply text-[22px] leading-[28px] font-bold tracking-[0.35px];
+  }
+  .type-title-3 {
+    @apply text-[20px] leading-[25px] font-semibold tracking-[0.38px];
+  }
+  .type-headline {
+    @apply text-[17px] leading-[22px] font-semibold tracking-[-0.41px];
+  }
+  .type-body {
+    @apply text-[17px] leading-[22px] font-normal tracking-[-0.41px];
+  }
+  .type-callout {
+    @apply text-[16px] leading-[21px] font-normal tracking-[-0.32px];
+  }
+  .type-subheadline {
+    @apply text-[15px] leading-[20px] font-normal tracking-[-0.24px];
+  }
+  .type-footnote {
+    @apply text-[13px] leading-[18px] font-normal tracking-[-0.08px];
+  }
+  .type-caption-1 {
+    @apply text-[12px] leading-[16px] font-normal tracking-[0];
+  }
+  .type-caption-2 {
+    @apply text-[11px] leading-[13px] font-normal tracking-[0.07px];
+  }
+}
+
+/* ============================================================
+   Component Utilities
+   ============================================================ */
+
+@layer components {
+  /* Card surface */
+  .dp-card {
+    @apply bg-surface-tertiary rounded-lg shadow;
+  }
+
+  /* Grouped section (rows with dividers) */
+  .dp-group {
+    @apply bg-surface-tertiary rounded-lg overflow-hidden divide-y divide-separator;
+  }
+
+  /* Row within a group */
+  .dp-row {
+    @apply flex items-center justify-between px-4 py-3 min-h-[44px];
+  }
+
+  /* Text input */
+  .dp-input {
+    @apply w-full bg-surface-secondary border border-separator rounded-sm px-3 py-2.5
+           text-label-primary placeholder:text-label-tertiary
+           focus:outline-none focus:ring-2
+           transition-all duration-200 ease-smooth;
+    --tw-ring-color: var(--color-accent);
+    --tw-ring-opacity: 0.4;
+  }
+
+  /* Primary button */
+  .dp-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5
+           bg-accent text-white font-medium rounded-sm
+           hover:opacity-85 active:scale-[0.97] active:opacity-70
+           transition-all duration-200 ease-smooth
+           min-h-[44px];
+  }
+
+  /* Secondary / tinted button */
+  .dp-btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5
+           bg-accent-subtle text-accent font-medium rounded-sm
+           active:scale-[0.97]
+           transition-all duration-200 ease-smooth
+           min-h-[44px];
+  }
+
+  /* Translucent material */
+  .dp-material {
+    @apply backdrop-blur-xl backdrop-saturate-150;
+  }
+}
+
+/* ============================================================
+   Animations
+   ============================================================ */
+
+@layer utilities {
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
+  }
+
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--color-surface-tertiary) 25%,
+      var(--color-surface-secondary) 50%,
+      var(--color-surface-tertiary) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+}
+
+/* ============================================================
+   Reduced Motion
+   ============================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

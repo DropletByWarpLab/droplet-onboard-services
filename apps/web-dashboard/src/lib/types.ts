@@ -34,6 +34,29 @@ export interface DeviceInfo {
   lastSeen: string;
 }
 
+// --- File types ---
+
+export interface FileEntryInfo {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  size: number;
+  mimeType: string | null;
+  modifiedAt: string;
+}
+
+export interface SyncTargetInfo {
+  id: string;
+  path: string;
+  label: string;
+  intervalMin: number;
+  enabled: boolean;
+  lastSync: string | null;
+  fileCount: number;
+}
+
+// --- Health types ---
+
 export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;

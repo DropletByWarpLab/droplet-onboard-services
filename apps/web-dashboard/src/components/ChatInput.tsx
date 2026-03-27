@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
-import { Send } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -37,29 +37,45 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     }
   };
 
+  const hasText = value.trim().length > 0;
+
   return (
-    <div className="flex items-end gap-2 p-4 border-t border-slate-800 bg-slate-900">
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={handleKeyDown}
-        onInput={handleInput}
-        placeholder="Send a message..."
-        disabled={disabled}
-        rows={1}
-        className="flex-1 resize-none bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm
-          text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-droplet-500/50
-          disabled:opacity-50 disabled:cursor-not-allowed"
-      />
-      <button
-        onClick={handleSubmit}
-        disabled={disabled || !value.trim()}
-        className="p-3 rounded-xl bg-droplet-600 text-white hover:bg-droplet-500
-          disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-      >
-        <Send size={18} />
-      </button>
+    <div className="p-3 border-t border-separator bg-[var(--color-toolbar-bg)] dp-material">
+      <div className="flex items-end gap-2">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onInput={handleInput}
+          placeholder="Send a message..."
+          disabled={disabled}
+          rows={1}
+          className="flex-1 resize-none bg-surface-secondary rounded-[22px] px-4 py-2.5
+            type-body text-label-primary placeholder:text-label-tertiary
+            focus:outline-none focus:ring-2 focus:ring-accent/30
+            disabled:opacity-50 disabled:cursor-not-allowed
+            transition-all duration-200 ease-smooth"
+        />
+        <button
+          onClick={handleSubmit}
+          disabled={disabled || !hasText}
+          aria-label="Send message"
+          className={`
+            w-9 h-9 rounded-full flex items-center justify-center
+            transition-all duration-200 ease-smooth
+            ${
+              hasText
+                ? "bg-accent text-white scale-100 opacity-100"
+                : "bg-label-quaternary text-label-tertiary scale-90 opacity-60"
+            }
+            disabled:cursor-not-allowed
+            active:scale-90
+          `}
+        >
+          <ArrowUp size={18} strokeWidth={2.5} />
+        </button>
+      </div>
     </div>
   );
 }

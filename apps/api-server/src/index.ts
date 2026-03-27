@@ -5,6 +5,7 @@ import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
 import { initDeviceService } from "./services/device.service.js";
+import { initFileService } from "./services/file.service.js";
 
 const logger = pino({ name: "api-server" });
 
@@ -14,8 +15,9 @@ async function main() {
   await prisma.$connect();
   logger.info("Connected to PostgreSQL");
 
-  // Initialize device service
+  // Initialize services
   initDeviceService(prisma);
+  initFileService(prisma);
 
   // Connect Redis (non-fatal if unavailable)
   try {

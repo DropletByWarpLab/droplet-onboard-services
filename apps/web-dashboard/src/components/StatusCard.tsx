@@ -6,23 +6,30 @@ interface StatusCardProps {
 }
 
 const statusColors = {
-  ok: "bg-emerald-500",
-  warning: "bg-amber-500",
-  error: "bg-red-500",
-  offline: "bg-slate-600",
+  ok: "bg-system-green",
+  warning: "bg-system-orange",
+  error: "bg-system-red",
+  offline: "bg-label-quaternary",
 };
 
 export function StatusCard({ title, value, subtitle, status }: StatusCardProps) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+    <div className="dp-card p-5 hover:shadow-lg transition-shadow duration-200 ease-smooth">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-medium text-slate-400">{title}</h3>
+        <h3 className="type-footnote text-label-secondary uppercase tracking-wide">
+          {title}
+        </h3>
         {status && (
-          <span className={`w-2.5 h-2.5 rounded-full ${statusColors[status]}`} />
+          <span
+            className={`w-2 h-2 rounded-full ${statusColors[status]}`}
+            aria-label={status}
+          />
         )}
       </div>
-      <p className="text-xl font-semibold text-slate-100">{value}</p>
-      {subtitle && <p className="text-xs text-slate-500 mt-1">{subtitle}</p>}
+      <p className="type-title-3 text-label-primary">{value}</p>
+      {subtitle && (
+        <p className="type-caption-1 text-label-tertiary mt-1">{subtitle}</p>
+      )}
     </div>
   );
 }

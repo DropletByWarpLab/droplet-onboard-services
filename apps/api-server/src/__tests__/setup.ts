@@ -6,19 +6,13 @@
 import { vi } from "vitest";
 
 // --- Mock ioredis ---
+// Disable caching in tests to avoid stale data between test cases
 vi.mock("ioredis", () => {
-  const store = new Map<string, string>();
   const RedisMock = vi.fn().mockImplementation(() => ({
     connect: vi.fn().mockResolvedValue(undefined),
-    get: vi.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
-    set: vi.fn((key: string, val: string) => {
-      store.set(key, val);
-      return Promise.resolve("OK");
-    }),
-    del: vi.fn((key: string) => {
-      store.delete(key);
-      return Promise.resolve(1);
-    }),
+    get: vi.fn().mockResolvedValue(null),    // Always cache miss
+    set: vi.fn().mockResolvedValue("OK"),    // Accept but don't store
+    del: vi.fn().mockResolvedValue(1),
     ping: vi.fn().mockResolvedValue("PONG"),
     disconnect: vi.fn(),
   }));
@@ -49,6 +43,9 @@ vi.mock("mqtt", () => ({
 
 // --- Mock @prisma/client ---
 vi.mock("@prisma/client", () => {
+  // Store for sync targets (in-memory for testing)
+  const syncTargetStore = new Map<string, any>();
+
   const mockPrisma = {
     $connect: vi.fn().mockResolvedValue(undefined),
     $disconnect: vi.fn().mockResolvedValue(undefined),
@@ -68,6 +65,44 @@ vi.mock("@prisma/client", () => {
         },
       ]),
       update: vi.fn().mockResolvedValue({}),
+    },
+    syncTarget: {
+      findMany: vi.fn().mockImplementation(() =>
+        Promise.resolve(Array.from(syncTargetStore.values()))
+      ),
+      findUnique: vi.fn().mockImplementation(({ where }: any) =>
+        Promise.resolve(syncTargetStore.get(where.id) ?? null)
+      ),
+      create: vi.fn().mockImplementation(({ data }: any) => {
+        const id = `sync-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const record = {
+          id,
+          ...data,
+          enabled: data.enabled ?? true,
+          lastSync: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { entries: 0 },
+        };
+        syncTargetStore.set(id, record);
+        return Promise.resolve(record);
+      }),
+      update: vi.fn().mockImplementation(({ where, data }: any) => {
+        const existing = syncTargetStore.get(where.id);
+        if (!existing) return Promise.reject(new Error("Not found"));
+        const updated = { ...existing, ...data, updatedAt: new Date() };
+        syncTargetStore.set(where.id, updated);
+        return Promise.resolve(updated);
+      }),
+      delete: vi.fn().mockImplementation(({ where }: any) => {
+        const existing = syncTargetStore.get(where.id);
+        syncTargetStore.delete(where.id);
+        return Promise.resolve(existing);
+      }),
+    },
+    fileEntry: {
+      findMany: vi.fn().mockResolvedValue([]),
+      count: vi.fn().mockResolvedValue(0),
     },
   };
   return { PrismaClient: vi.fn(() => mockPrisma) };

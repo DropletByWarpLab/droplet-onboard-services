@@ -5,7 +5,7 @@ datasource db {
 
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-arm64-openssl-3.0.x"]
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
 }
 
 model Device {
@@ -35,4 +35,33 @@ model ChatMessage {
   role      String
   content   String
   createdAt DateTime    @default(now())
+}
+
+model SyncTarget {
+  id          String      @id @default(uuid())
+  path        String      @unique
+  label       String
+  intervalMin Int         @default(30)
+  enabled     Boolean     @default(true)
+  lastSync    DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  entries     FileEntry[]
+}
+
+model FileEntry {
+  id          String     @id @default(uuid())
+  targetId    String
+  target      SyncTarget @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  path        String
+  name        String
+  isDirectory Boolean    @default(false)
+  size        BigInt     @default(0)
+  mimeType    String?
+  hash        String?
+  modifiedAt  DateTime
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([targetId, path])
 }

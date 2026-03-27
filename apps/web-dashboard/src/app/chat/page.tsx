@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { RotateCcw } from "lucide-react";
+import { MessageSquare, RotateCcw } from "lucide-react";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -17,7 +17,6 @@ export default function ChatPage() {
   // Auto-select the first available model
   useEffect(() => {
     if (!selectedModel && models.length > 0) {
-      // Prefer local models first
       const local = models.find((m) => m.provider === "ollama");
       setSelectedModel(local?.id ?? models[0].id);
     }
@@ -36,25 +35,27 @@ export default function ChatPage() {
   return (
     <div className="flex flex-col h-screen">
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/50">
+      <header className="flex items-center justify-between px-5 h-14 border-b border-separator bg-[var(--color-toolbar-bg)] dp-material">
         <ModelSelector value={selectedModel} onChange={setSelectedModel} />
         <button
           onClick={clearMessages}
           disabled={messages.length === 0}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-slate-400 hover:text-slate-200
-            disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="flex items-center gap-1.5 type-subheadline text-accent
+            hover:text-accent-hover disabled:text-label-quaternary
+            disabled:cursor-not-allowed transition-colors duration-200 ease-smooth"
         >
           <RotateCcw size={14} />
           New chat
         </button>
-      </div>
+      </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
+      <div className="flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500">
-            <p className="text-lg mb-2">No messages yet</p>
-            <p className="text-sm">
+          <div className="flex flex-col items-center justify-center h-full text-label-tertiary">
+            <MessageSquare size={40} strokeWidth={1} className="mb-3 text-label-quaternary" />
+            <p className="type-title-3 text-label-secondary mb-1">No messages yet</p>
+            <p className="type-subheadline">
               Select a model and start chatting with your Droplet AI.
             </p>
           </div>

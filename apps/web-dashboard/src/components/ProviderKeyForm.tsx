@@ -46,20 +46,21 @@ export function ProviderKeyForm({
   };
 
   return (
-    <div className="bg-slate-800 rounded-xl p-4">
+    <div className="px-4 py-3">
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Key size={16} className="text-slate-400" />
-          <h3 className="text-sm font-medium text-slate-200">{label}</h3>
+        <div className="flex items-center gap-2.5">
+          <Key size={16} className="text-label-secondary" />
+          <h3 className="type-headline text-label-primary">{label}</h3>
         </div>
         {hasKey && (
           <div className="flex items-center gap-2">
-            <span className="flex items-center gap-1 text-xs text-emerald-400">
+            <span className="flex items-center gap-1 type-caption-1 text-system-green">
               <Check size={14} /> Configured
             </span>
             <button
               onClick={handleDelete}
-              className="p-1 text-slate-500 hover:text-red-400 transition-colors"
+              className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
+              aria-label="Delete key"
             >
               <Trash2 size={14} />
             </button>
@@ -73,20 +74,20 @@ export function ProviderKeyForm({
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder={hasKey ? "Replace existing key..." : "Paste your API key..."}
-          className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm
-            text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-droplet-500/50"
+          className="dp-input !rounded-sm"
         />
         <button
           onClick={handleSave}
           disabled={saving || !apiKey.trim()}
-          className="px-4 py-2 bg-droplet-600 text-white text-sm rounded-lg hover:bg-droplet-500
-            disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="dp-btn-primary type-subheadline !min-h-[40px]"
         >
           {saving ? "Saving..." : "Save"}
         </button>
       </div>
 
-      {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
+      {error && (
+        <p className="mt-2 type-footnote text-system-red">{error}</p>
+      )}
     </div>
   );
 }
