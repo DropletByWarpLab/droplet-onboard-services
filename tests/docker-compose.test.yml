@@ -1,0 +1,73 @@
+version: "3.8"
+
+# Integration test compose — spins up infra + services for end-to-end tests.
+# Usage: docker compose -f tests/docker-compose.test.yml up --build --abort-on-container-exit
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=droplet
+      - POSTGRES_PASSWORD=droplet
+      - POSTGRES_DB=droplet_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data  # ephemeral for tests
+
+  cache:
+    image: redis:7-alpine
+
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ../docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  ai-gateway:
+    build:
+      context: ../services/ai-gateway
+      dockerfile: Dockerfile
+    environment:
+      - JETSON_OLLAMA_URL=http://fake-jetson:11434
+      - DEVICE_SECRET=test-integration-secret
+      - KEYS_DIR=/tmp/test-keys
+    depends_on:
+      - cache
+      - broker
+
+  api-server:
+    build:
+      context: ../apps/api-server
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+      broker:
+        condition: service_started
+      ai-gateway:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgresql://droplet:droplet@db:5432/droplet_test
+      - REDIS_URL=redis://cache:6379
+      - MQTT_BROKER=mqtt://broker:1883
+      - AI_GATEWAY_URL=http://ai-gateway:8000
+      - PORT=3000
+
+  # Test runner container
+  integration-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    depends_on:
+      api-server:
+        condition: service_started
+      ai-gateway:
+        condition: service_started
+    environment:
+      - API_URL=http://api-server:3000
+      - AI_GATEWAY_URL=http://ai-gateway:8000

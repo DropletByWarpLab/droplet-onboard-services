@@ -6,12 +6,13 @@ services:
     image: nginx:alpine
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - api-server
-      - web-dashboard
+      api-server:
+        condition: service_started
+      web-dashboard:
+        condition: service_started
     restart: always
 
   # --- Apps ---
@@ -19,20 +20,31 @@ services:
     build:
       context: ../apps/web-dashboard
       dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
     restart: always
 
   api-server:
     build:
       context: ../apps/api-server
       dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
     depends_on:
-      - db
-      - cache
-      - broker
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+      broker:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://droplet:droplet@db:5432/droplet
       - REDIS_URL=redis://cache:6379
       - MQTT_BROKER=mqtt://broker:1883
+      - AI_GATEWAY_URL=http://ai-gateway:8000
+      - PORT=3000
     restart: always
 
   # --- Infrastructure ---
@@ -44,6 +56,11 @@ services:
       - POSTGRES_USER=droplet
       - POSTGRES_PASSWORD=droplet
       - POSTGRES_DB=droplet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: always
 
   cache:
@@ -56,7 +73,26 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     restart: always
 
-  # --- Services ---
+  # --- AI Services ---
+  ai-gateway:
+    build:
+      context: ../services/ai-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - JETSON_OLLAMA_URL=http://jetson-ai.local:11434
+      - REDIS_URL=redis://cache:6379
+      - MQTT_BROKER=mqtt://broker:1883
+      - DEVICE_SECRET=dev-secret-change-in-production
+    volumes:
+      - aikeys:/data/keys
+    depends_on:
+      - cache
+      - broker
+    restart: always
+
+  # --- Services (full profile — not needed for vertical slice) ---
   routing:
     build:
       context: ../services/routing
@@ -64,6 +100,7 @@ services:
     network_mode: host
     cap_add:
       - NET_ADMIN
+    profiles: ["full"]
     restart: always
 
   file-sync:
@@ -72,6 +109,7 @@ services:
       dockerfile: Dockerfile
     volumes:
       - filedata:/data/files
+    profiles: ["full"]
     restart: always
 
   nvr:
@@ -80,20 +118,11 @@ services:
       dockerfile: Dockerfile
     volumes:
       - nvrdata:/data/recordings
-    restart: always
-
-  ai-gateway:
-    build:
-      context: ../services/ai-gateway
-      dockerfile: Dockerfile
-    environment:
-      - JETSON_OLLAMA_URL=http://jetson-ai.local:11434
-    depends_on:
-      - cache
-      - broker
+    profiles: ["full"]
     restart: always
 
 volumes:
   pgdata:
   filedata:
   nvrdata:
+  aikeys:

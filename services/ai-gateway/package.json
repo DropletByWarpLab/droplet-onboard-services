@@ -1,0 +1,9 @@
+{
+  "name": "@droplet/ai-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "if [ -d .venv ]; then .venv/bin/python -m pytest tests/ -v; else python3 -m pytest tests/ -v; fi",
+    "test:coverage": "if [ -d .venv ]; then .venv/bin/python -m pytest tests/ -v --cov=. --cov-report=term-missing; else python3 -m pytest tests/ -v --cov=. --cov-report=term-missing; fi"
+  }
+}

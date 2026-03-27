@@ -7,11 +7,18 @@
     "services/*"
   ],
   "scripts": {
-    "dev": "docker compose up",
+    "dev": "turbo run dev",
+    "dev:docker": "docker compose -f docker/docker-compose.yml up --build",
     "build": "turbo run build",
     "test": "turbo run test",
+    "test:ai-gateway": "cd services/ai-gateway && python -m pytest tests/ -v",
+    "test:api-server": "cd apps/api-server && npx vitest run",
+    "test:dashboard": "cd apps/web-dashboard && npx vitest run",
+    "test:all": "npm run test:ai-gateway && npm run test",
+    "test:integration": "cd tests && npm run test:docker",
     "lint": "turbo run lint"
   },
+  "packageManager": "npm@10.9.2",
   "devDependencies": {
     "turbo": "^2.0.0"
   }
