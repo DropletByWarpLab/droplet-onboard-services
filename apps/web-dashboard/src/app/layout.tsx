@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { ThemeProvider } from "@/lib/theme";
-import { Sidebar } from "@/components/Sidebar";
+import { AuthProvider } from "@/lib/auth";
+import { AuthGate } from "@/components/AuthGate";
 import "./globals.css";
 
 const inter = Inter({
@@ -36,10 +37,9 @@ export default function RootLayout({
       </head>
       <body className="font-[family-name:var(--font-inter)] antialiased">
         <ThemeProvider>
-          <Sidebar />
-          <main className="lg:ml-[260px] pb-[84px] lg:pb-0 min-h-screen">
-            {children}
-          </main>
+          <AuthProvider>
+            <AuthGate>{children}</AuthGate>
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>

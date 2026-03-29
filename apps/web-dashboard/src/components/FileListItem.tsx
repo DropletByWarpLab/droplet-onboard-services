@@ -13,7 +13,9 @@ import type { FileEntryInfo } from "@/lib/types";
 
 interface FileListItemProps {
   file: FileEntryInfo;
+  isSelected?: boolean;
   onNavigate: (path: string) => void;
+  onSelect?: () => void;
   onDownload: (path: string) => void;
   onDelete: (path: string) => void;
 }
@@ -54,7 +56,9 @@ function formatDate(iso: string): string {
 
 export function FileListItem({
   file,
+  isSelected,
   onNavigate,
+  onSelect,
   onDownload,
   onDelete,
 }: FileListItemProps) {
@@ -62,13 +66,17 @@ export function FileListItem({
   const iconColor = file.isDirectory ? "text-system-blue" : "text-label-secondary";
 
   const handleClick = () => {
-    if (file.isDirectory) onNavigate(file.path);
+    if (file.isDirectory) {
+      onNavigate(file.path);
+    } else {
+      onSelect?.();
+    }
   };
 
   return (
     <div
-      className={`dp-row group hover:bg-surface-secondary/60 transition-colors duration-200 ease-smooth
-        ${file.isDirectory ? "cursor-pointer" : ""}`}
+      className={`dp-row group hover:bg-surface-secondary/60 transition-colors duration-200 ease-smooth cursor-pointer
+        ${isSelected ? "bg-accent-subtle" : ""}`}
       onClick={handleClick}
     >
       <div className="flex items-center gap-3 flex-1 min-w-0">

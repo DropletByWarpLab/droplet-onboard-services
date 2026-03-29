@@ -45,9 +45,9 @@ services:
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - FILES_ROOT=/data/files
       - PORT=3000
-      - STORAGE_BACKEND=legacy
+      - STORAGE_BACKEND=nextcloud
       - NEXTCLOUD_URL=http://nextcloud:80
-      - AUTH_ENABLED=false
+      - AUTH_ENABLED=true
     volumes:
       - filedata:/data/files
     restart: always

@@ -1,8 +1,16 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { sendChat } from "../api";
-import type { ChatMessage } from "../types";
+import { useState, useCallback, useRef } from "react";
+import {
+  sendChat,
+  createSession,
+  sendSessionChat,
+  getSession,
+  listSessions,
+  deleteSession as apiDeleteSession,
+  updateSessionTitle,
+} from "../api";
+import type { ChatMessage, SessionInfo } from "../types";
 
 let messageCounter = 0;
 
@@ -13,6 +21,66 @@ function createId(): string {
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const sessionIdRef = useRef<string | null>(null);
+
+  const refreshSessions = useCallback(async () => {
+    try {
+      const data = await listSessions();
+      setSessions(data.sessions);
+    } catch {
+      // Silently fail — sessions are a nice-to-have
+    }
+  }, []);
+
+  const loadSession = useCallback(async (id: string) => {
+    try {
+      const detail = await getSession(id);
+      setSessionId(id);
+      sessionIdRef.current = id;
+      setMessages(
+        detail.messages.map((m) => ({
+          id: createId(),
+          role: m.role as "user" | "assistant" | "system",
+          content: m.content,
+        }))
+      );
+    } catch (err) {
+      console.error("Failed to load session:", err);
+    }
+  }, []);
+
+  const deleteSessionById = useCallback(
+    async (id: string) => {
+      try {
+        await apiDeleteSession(id);
+        setSessions((prev) => prev.filter((s) => s.id !== id));
+        if (sessionIdRef.current === id) {
+          setSessionId(null);
+          sessionIdRef.current = null;
+          setMessages([]);
+        }
+      } catch (err) {
+        console.error("Failed to delete session:", err);
+      }
+    },
+    []
+  );
+
+  const renameSession = useCallback(
+    async (id: string, title: string) => {
+      try {
+        const updated = await updateSessionTitle(id, title);
+        setSessions((prev) =>
+          prev.map((s) => (s.id === id ? { ...s, title: updated.title } : s))
+        );
+      } catch (err) {
+        console.error("Failed to rename session:", err);
+      }
+    },
+    []
+  );
 
   const sendMessage = useCallback(
     async (content: string, model: string) => {
@@ -32,16 +100,31 @@ export function useChat() {
       setIsStreaming(true);
 
       try {
-        const apiMessages = [...messages, userMessage].map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
+        let response: Response;
 
-        const response = await sendChat({
-          model,
-          messages: apiMessages,
-          stream: true,
-        });
+        // If we have a session, use session chat (messages are managed server-side)
+        if (sessionIdRef.current) {
+          response = await sendSessionChat(sessionIdRef.current, {
+            message: content,
+            stream: true,
+          });
+        } else {
+          // No session yet — create one, then use session chat
+          const session = await createSession({
+            model,
+            title: content.slice(0, 80),
+          });
+          setSessionId(session.id);
+          sessionIdRef.current = session.id;
+
+          response = await sendSessionChat(session.id, {
+            message: content,
+            stream: true,
+          });
+
+          // Refresh session list
+          refreshSessions();
+        }
 
         if (!response.body) {
           throw new Error("No response body");
@@ -101,12 +184,27 @@ export function useChat() {
         setIsStreaming(false);
       }
     },
-    [messages]
+    [messages, refreshSessions]
   );
 
   const clearMessages = useCallback(() => {
     setMessages([]);
+    setSessionId(null);
+    sessionIdRef.current = null;
   }, []);
 
-  return { messages, isStreaming, sendMessage, clearMessages };
+  return {
+    messages,
+    setMessages,
+    isStreaming,
+    sendMessage,
+    clearMessages,
+    // Session management
+    sessionId,
+    sessions,
+    refreshSessions,
+    loadSession,
+    deleteSession: deleteSessionById,
+    renameSession,
+  };
 }

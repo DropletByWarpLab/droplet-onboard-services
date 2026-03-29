@@ -22,15 +22,20 @@ function ocsUrl(endpoint: string): string {
 
 function ocsHeaders(token: string): Record<string, string> {
   return {
-    Authorization: `Bearer ${token}`,
+    Authorization: resolveAuthHeader(token),
     "OCS-APIRequest": "true",
     Accept: "application/json",
   };
 }
 
+function resolveAuthHeader(token: string): string {
+  if (token.startsWith("basic:")) return `Basic ${token.slice(6)}`;
+  return `Bearer ${token}`;
+}
+
 function davHeaders(token: string): Record<string, string> {
   return {
-    Authorization: `Bearer ${token}`,
+    Authorization: resolveAuthHeader(token),
   };
 }
 
@@ -79,7 +84,7 @@ export async function ncUploadFile(
   const resp = await fetch(url, {
     method: "PUT",
     headers: { ...davHeaders(token), "Content-Type": "application/octet-stream" },
-    body: buffer,
+    body: new Uint8Array(buffer),
   });
 
   if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
@@ -193,6 +198,258 @@ export async function ncListShares(
     shareType: s.share_type,
     permissions: s.permissions,
   }));
+}
+
+// ── OCS User Provisioning API ──
+
+export async function ncCheckSetupRequired(): Promise<boolean> {
+  // During initial Nextcloud install, the OCS API isn't available yet.
+  // We check if Nextcloud is installed by hitting the status endpoint,
+  // then try to list users with the default admin creds.
+  try {
+    const statusResp = await fetch(`${config.NEXTCLOUD_URL}/status.php`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!statusResp.ok) return true; // Nextcloud not ready
+    const status = await statusResp.json();
+    if (!status.installed) return true; // Not installed yet
+    return false; // Nextcloud is installed — setup was already done
+  } catch {
+    return true; // Nextcloud unreachable — treat as needing setup
+  }
+}
+
+export async function ncInstallAndCreateAdmin(
+  username: string,
+  password: string,
+  displayName?: string
+): Promise<void> {
+  // Nextcloud auto-installs when first accessed with admin credentials set via env vars.
+  // However, since we removed the env vars, we use the Nextcloud CLI via the status check
+  // and the initial POST to create the admin.
+  // For our architecture, the Nextcloud container sets up with a default admin.
+  // We use OCS to create additional users or update the admin display name.
+
+  // First, check if Nextcloud is installed by using the default admin creds
+  const resp = await fetch(
+    ocsUrl("/ocs/v1.php/cloud/users"),
+    {
+      headers: {
+        ...ocsHeaders(""),
+        Authorization: `Basic ${Buffer.from("admin:admin").toString("base64")}`,
+      },
+    }
+  );
+
+  if (!resp.ok) {
+    throw new Error(`Cannot reach Nextcloud OCS API: ${resp.status}`);
+  }
+
+  // Create the actual user
+  if (username !== "admin") {
+    const createResp = await fetch(ocsUrl("/ocs/v1.php/cloud/users"), {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${Buffer.from("admin:admin").toString("base64")}`,
+        "OCS-APIRequest": "true",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        userid: username,
+        password,
+        displayName: displayName || username,
+        groups: JSON.stringify(["admin"]),
+      }),
+    });
+
+    if (!createResp.ok) {
+      const body = await createResp.text();
+      // Check if user already exists (status 102)
+      if (!body.includes("102")) {
+        throw new Error(`Failed to create user: ${createResp.status} ${body}`);
+      }
+    }
+  }
+
+  // Update display name if provided
+  if (displayName) {
+    await fetch(
+      ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`),
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Basic ${Buffer.from("admin:admin").toString("base64")}`,
+          "OCS-APIRequest": "true",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ key: "displayname", value: displayName }),
+      }
+    );
+  }
+}
+
+export async function ncCreateUser(
+  adminToken: string,
+  username: string,
+  password: string,
+  displayName?: string
+): Promise<void> {
+  const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/users"), {
+    method: "POST",
+    headers: {
+      ...ocsHeaders(adminToken),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      userid: username,
+      password,
+      ...(displayName ? { displayName } : {}),
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Failed to create user: ${resp.status} — ${text}`);
+  }
+
+  const data = await resp.json();
+  if (data?.ocs?.meta?.statuscode !== 100) {
+    throw new Error(`OCS error creating user: ${data?.ocs?.meta?.message || "unknown"}`);
+  }
+}
+
+export async function ncDeleteUser(
+  adminToken: string,
+  username: string
+): Promise<void> {
+  const resp = await fetch(
+    ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`),
+    {
+      method: "DELETE",
+      headers: ocsHeaders(adminToken),
+    }
+  );
+
+  if (!resp.ok) {
+    throw new Error(`Failed to delete user: ${resp.status}`);
+  }
+}
+
+export async function ncListUsers(
+  adminToken: string
+): Promise<Array<{ id: string; displayName: string; email: string | null }>> {
+  const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/users/details"), {
+    headers: ocsHeaders(adminToken),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Failed to list users: ${resp.status}`);
+  }
+
+  const data = await resp.json();
+  const users = data?.ocs?.data?.users || {};
+  return Object.entries(users).map(([id, u]: [string, any]) => ({
+    id,
+    displayName: u.displayname || id,
+    email: u.email || null,
+  }));
+}
+
+export async function ncGetCurrentUser(
+  token: string
+): Promise<{ id: string; displayName: string; email: string | null } | null> {
+  try {
+    const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/user"), {
+      headers: ocsHeaders(token),
+    });
+
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    if (data?.ocs?.meta?.status !== "ok") return null;
+
+    return {
+      id: data.ocs.data.id,
+      displayName: data.ocs.data["display-name"] || data.ocs.data.id,
+      email: data.ocs.data.email || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function ncLoginWithCredentials(
+  username: string,
+  password: string
+): Promise<{ token: string; loginName: string } | null> {
+  // Use Nextcloud's direct app password creation via OCS API.
+  // This generates a persistent app-specific token.
+  try {
+    const basicAuth = Buffer.from(`${username}:${password}`).toString("base64");
+
+    // First verify credentials by fetching user info
+    const verifyResp = await fetch(ocsUrl("/ocs/v1.php/cloud/user"), {
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "OCS-APIRequest": "true",
+        Accept: "application/json",
+      },
+    });
+
+    if (!verifyResp.ok) return null;
+
+    const verifyData = await verifyResp.json();
+    if (verifyData?.ocs?.meta?.status !== "ok") return null;
+
+    // Generate an app password
+    const appPwResp = await fetch(
+      ocsUrl("/ocs/v2.php/core/getapppassword"),
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          "OCS-APIRequest": "true",
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (appPwResp.ok) {
+      const appPwData = await appPwResp.json();
+      if (appPwData?.ocs?.data?.apppassword) {
+        return {
+          token: appPwData.ocs.data.apppassword,
+          loginName: username,
+        };
+      }
+    }
+
+    // Fallback: use basic auth token if app password creation fails.
+    // This happens on some Nextcloud configs. We encode basic auth as the token.
+    return {
+      token: `basic:${basicAuth}`,
+      loginName: username,
+    };
+  } catch (err) {
+    logger.warn({ err }, "Login failed");
+    return null;
+  }
+}
+
+export async function ncDeleteAppPassword(token: string): Promise<void> {
+  if (token.startsWith("basic:")) return; // Basic auth tokens can't be revoked
+
+  try {
+    await fetch(ocsUrl("/ocs/v2.php/core/apppassword"), {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "OCS-APIRequest": "true",
+      },
+    });
+  } catch {
+    // Non-fatal — token might already be expired
+  }
 }
 
 // ── XML Parsing (minimal PROPFIND response parser) ──

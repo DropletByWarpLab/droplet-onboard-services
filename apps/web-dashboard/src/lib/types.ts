@@ -24,6 +24,36 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
+// --- Session types ---
+
+export interface SessionInfo {
+  id: string;
+  title: string;
+  model: string;
+  created_at: number;
+  updated_at: number;
+  message_count: number;
+  system_prompt: string | null;
+}
+
+export interface SessionDetail extends SessionInfo {
+  messages: SessionMessageInfo[];
+}
+
+export interface SessionMessageInfo {
+  role: string;
+  content: string;
+  timestamp: number;
+}
+
+export interface SessionChatRequest {
+  message: string;
+  stream?: boolean;
+  temperature?: number;
+  max_tokens?: number;
+  provider?: string;
+}
+
 export interface DeviceInfo {
   id: string;
   deviceId: string;
@@ -53,6 +83,23 @@ export interface SyncTargetInfo {
   enabled: boolean;
   lastSync: string | null;
   fileCount: number;
+}
+
+// --- Auth types ---
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+  email?: string | null;
+}
+
+export interface ShareInfo {
+  id?: number;
+  url: string;
+  token: string;
+  shareType?: number;
+  permissions?: number;
 }
 
 // --- Health types ---

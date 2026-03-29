@@ -1,15 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Droplets,
   FolderOpen,
   LayoutDashboard,
+  LogOut,
   MessageSquare,
   Settings,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
+import { useAuth } from "@/lib/auth";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -20,9 +22,25 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user, logout } = useAuth();
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
+
+  async function handleLogout() {
+    await logout();
+    router.push("/login");
+  }
+
+  const initials = user?.displayName
+    ? user.displayName
+        .split(" ")
+        .map((n) => n[0])
+        .join("")
+        .toUpperCase()
+        .slice(0, 2)
+    : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
   return (
     <>
@@ -69,6 +87,33 @@ export function Sidebar() {
         {/* Footer */}
         <div className="px-4 pb-4 space-y-3">
           <ThemeToggle />
+
+          {/* User info + logout */}
+          {user && (
+            <div className="flex items-center gap-2.5 px-1 py-1">
+              <div className="w-8 h-8 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
+                <span className="type-caption-1 text-accent font-semibold">
+                  {initials}
+                </span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="type-footnote text-label-primary font-medium truncate">
+                  {user.displayName || user.username}
+                </p>
+                <p className="type-caption-2 text-label-tertiary truncate">
+                  {user.username}
+                </p>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="p-1.5 rounded-sm text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
+                title="Sign out"
+              >
+                <LogOut size={14} />
+              </button>
+            </div>
+          )}
+
           <p className="type-caption-2 text-label-quaternary text-center">
             Droplet v0.1.0
           </p>

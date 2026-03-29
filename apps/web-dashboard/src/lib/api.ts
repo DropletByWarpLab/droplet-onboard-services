@@ -4,42 +4,135 @@ import type {
   FileEntryInfo,
   HealthResponse,
   ModelsResponse,
+  SessionChatRequest,
+  SessionDetail,
+  SessionInfo,
   SyncTargetInfo,
+  AuthUser,
+  ShareInfo,
 } from "./types";
+import { getAuthHeaders } from "./auth";
 
 const BASE = "";
 
+function authFetch(url: string, init?: RequestInit): Promise<Response> {
+  const headers = { ...getAuthHeaders(), ...init?.headers };
+  return fetch(url, { ...init, headers });
+}
+
+// --- Auth ---
+
+export async function checkSetupRequired(): Promise<boolean> {
+  const res = await fetch(`${BASE}/api/auth/setup`);
+  if (!res.ok) return true;
+  const data = await res.json();
+  return data.setupRequired;
+}
+
+export async function setupAdmin(
+  username: string,
+  password: string,
+  displayName?: string
+): Promise<void> {
+  const res = await fetch(`${BASE}/api/auth/setup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, displayName }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Setup failed");
+  }
+}
+
+export async function loginUser(
+  username: string,
+  password: string
+): Promise<{ token: string; user: AuthUser }> {
+  const res = await fetch(`${BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Login failed");
+  }
+  return res.json();
+}
+
+export async function fetchMe(): Promise<AuthUser> {
+  const res = await authFetch(`${BASE}/api/auth/me`);
+  if (!res.ok) throw new Error("Not authenticated");
+  return res.json();
+}
+
+export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
+  const res = await authFetch(`${BASE}/api/auth/users`);
+  if (!res.ok) throw new Error(`Failed to fetch users: ${res.status}`);
+  return res.json();
+}
+
+export async function createUser(
+  username: string,
+  password: string,
+  displayName?: string
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, displayName }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Failed to create user");
+  }
+}
+
+export async function deleteUser(username: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/users/${username}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+}
+
+// --- Health ---
+
 export async function fetchHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${BASE}/api/health`);
+  const res = await authFetch(`${BASE}/api/health`);
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchDevices(): Promise<DeviceInfo[]> {
-  const res = await fetch(`${BASE}/api/devices`);
+  const res = await authFetch(`${BASE}/api/devices`);
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
 }
 
+// --- Models ---
+
 export async function fetchModels(): Promise<ModelsResponse> {
-  const res = await fetch(`${BASE}/api/llm/models`);
+  const res = await authFetch(`${BASE}/api/llm/models`);
   if (!res.ok) throw new Error(`Failed to fetch models: ${res.status}`);
   return res.json();
 }
 
 export async function sendChat(request: ChatRequest): Promise<Response> {
-  return fetch(`${BASE}/api/llm/chat`, {
+  return authFetch(`${BASE}/api/llm/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
 }
 
+// --- Provider keys ---
+
 export async function saveProviderKey(
   provider: string,
   apiKey: string
 ): Promise<void> {
-  const res = await fetch(`${BASE}/api/llm/keys/${provider}`, {
+  const res = await authFetch(`${BASE}/api/llm/keys/${provider}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ api_key: apiKey }),
@@ -51,23 +144,87 @@ export async function saveProviderKey(
 }
 
 export async function listProviderKeys(): Promise<string[]> {
-  const res = await fetch(`${BASE}/api/llm/keys`);
+  const res = await authFetch(`${BASE}/api/llm/keys`);
   if (!res.ok) throw new Error(`Failed to list keys: ${res.status}`);
   const data = await res.json();
   return data.providers;
 }
 
 export async function deleteProviderKey(provider: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/llm/keys/${provider}`, {
+  const res = await authFetch(`${BASE}/api/llm/keys/${provider}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete key: ${res.status}`);
 }
 
+// --- Sessions ---
+
+export async function createSession(body: {
+  model: string;
+  title?: string;
+  system_prompt?: string | null;
+}): Promise<SessionInfo> {
+  const res = await authFetch(`${BASE}/api/llm/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
+  return res.json();
+}
+
+export async function listSessions(
+  limit = 50,
+  offset = 0
+): Promise<{ sessions: SessionInfo[] }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/sessions?limit=${limit}&offset=${offset}`
+  );
+  if (!res.ok) throw new Error(`Failed to list sessions: ${res.status}`);
+  return res.json();
+}
+
+export async function getSession(sessionId: string): Promise<SessionDetail> {
+  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`);
+  if (!res.ok) throw new Error(`Failed to get session: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSessionTitle(
+  sessionId: string,
+  title: string
+): Promise<SessionInfo> {
+  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`Failed to update session: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Failed to delete session: ${res.status}`);
+}
+
+export async function sendSessionChat(
+  sessionId: string,
+  request: SessionChatRequest
+): Promise<Response> {
+  return authFetch(`${BASE}/api/llm/sessions/${sessionId}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
 // --- File operations ---
 
 export async function fetchFiles(path: string): Promise<FileEntryInfo[]> {
-  const res = await fetch(`${BASE}/api/files?path=${encodeURIComponent(path)}`);
+  const res = await authFetch(`${BASE}/api/files?path=${encodeURIComponent(path)}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
   return res.json();
 }
@@ -84,7 +241,7 @@ export async function uploadFiles(
   for (const file of files) {
     formData.append("files", file);
   }
-  const res = await fetch(
+  const res = await authFetch(
     `${BASE}/api/files/upload?path=${encodeURIComponent(path)}`,
     { method: "POST", body: formData }
   );
@@ -95,7 +252,7 @@ export async function uploadFiles(
 }
 
 export async function deleteFile(path: string): Promise<void> {
-  const res = await fetch(
+  const res = await authFetch(
     `${BASE}/api/files?path=${encodeURIComponent(path)}`,
     { method: "DELETE" }
   );
@@ -103,7 +260,7 @@ export async function deleteFile(path: string): Promise<void> {
 }
 
 export async function createDirectory(path: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/files/mkdir`, {
+  const res = await authFetch(`${BASE}/api/files/mkdir`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
@@ -111,10 +268,27 @@ export async function createDirectory(path: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to create directory: ${res.status}`);
 }
 
+export async function createShareLink(path: string): Promise<ShareInfo> {
+  const res = await authFetch(`${BASE}/api/files/share`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) throw new Error(`Failed to create share: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchShares(path: string): Promise<ShareInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/shares?path=${encodeURIComponent(path)}`);
+  if (!res.ok) throw new Error(`Failed to fetch shares: ${res.status}`);
+  const data = await res.json();
+  return data.shares;
+}
+
 // --- Sync targets ---
 
 export async function fetchSyncTargets(): Promise<SyncTargetInfo[]> {
-  const res = await fetch(`${BASE}/api/sync/targets`);
+  const res = await authFetch(`${BASE}/api/sync/targets`);
   if (!res.ok) throw new Error(`Failed to fetch sync targets: ${res.status}`);
   return res.json();
 }
@@ -124,7 +298,7 @@ export async function createSyncTarget(data: {
   label: string;
   intervalMin: number;
 }): Promise<SyncTargetInfo> {
-  const res = await fetch(`${BASE}/api/sync/targets`, {
+  const res = await authFetch(`${BASE}/api/sync/targets`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -137,7 +311,7 @@ export async function updateSyncTarget(
   id: string,
   data: Partial<{ label: string; intervalMin: number; enabled: boolean }>
 ): Promise<SyncTargetInfo> {
-  const res = await fetch(`${BASE}/api/sync/targets/${id}`, {
+  const res = await authFetch(`${BASE}/api/sync/targets/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -147,14 +321,14 @@ export async function updateSyncTarget(
 }
 
 export async function deleteSyncTarget(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/sync/targets/${id}`, {
+  const res = await authFetch(`${BASE}/api/sync/targets/${id}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete sync target: ${res.status}`);
 }
 
 export async function triggerSync(targetId: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/sync/trigger`, {
+  const res = await authFetch(`${BASE}/api/sync/trigger`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ targetId }),

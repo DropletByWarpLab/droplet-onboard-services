@@ -34,8 +34,9 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  // Skip auth for health checks
-  if (req.path === "/api/health") {
+  // Skip auth for public endpoints
+  const publicPaths = ["/api/health", "/api/auth/setup", "/api/auth/login"];
+  if (publicPaths.some((p) => req.path === p || req.path.startsWith(p))) {
     next();
     return;
   }
@@ -46,7 +47,9 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  const token = authHeader.slice(7);
+  const rawToken = authHeader.slice(7);
+  // Support basic:xxx fallback tokens from our login flow
+  const token = rawToken.startsWith("basic:") ? rawToken : rawToken;
 
   validateToken(token)
     .then((user) => {
@@ -76,9 +79,12 @@ async function validateToken(token: string): Promise<AuthUser | null> {
   // Validate against Nextcloud OCS API
   try {
     const url = `${config.NEXTCLOUD_URL}/ocs/v1.php/cloud/user`;
+    const authHeaderValue = token.startsWith("basic:")
+      ? `Basic ${token.slice(6)}`
+      : `Bearer ${token}`;
     const resp = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: authHeaderValue,
         "OCS-APIRequest": "true",
         Accept: "application/json",
       },
