@@ -1,6 +1,6 @@
 # Droplet Pi-Platform
 
-Control plane for the Droplet edge AI appliance. Runs on a Raspberry Pi and orchestrates local AI inference (via a Jetson companion), cloud AI providers, file management, and device configuration — all accessible through a web dashboard.
+Control plane for the Droplet edge AI appliance. Runs on the ARM SoC and orchestrates local AI inference (via a Jetson companion), cloud AI providers, file management through Nextcloud, and device configuration — all accessible through a web dashboard.
 
 ## Architecture
 
@@ -12,27 +12,27 @@ Browser / Mobile App
    │  Nginx   │  :80  (reverse proxy)
    └────┬─────┘
         │
-   ┌────┼──────────────────────┐
-   │    │    Docker Compose     │
-   │    ▼                       │
-   │  ┌───────────────┐        │
-   │  │ Web Dashboard  │ :3001  │  Next.js 14
-   │  └───────────────┘        │
-   │  ┌───────────────┐        │
-   │  │  API Server    │ :3000  │  Express + Prisma
-   │  └───────┬───────┘        │
-   │          │                 │
-   │  ┌───────┼───────┐        │
-   │  │ ┌───────────┐ │        │
-   │  │ │AI Gateway │ │ :8000  │  FastAPI + LiteLLM
-   │  │ └───────────┘ │        │
-   │  │ ┌───────────┐ │        │
-   │  │ │ File Sync │ │        │  Python watchdog daemon
-   │  │ └───────────┘ │        │
-   │  └───────────────┘        │
-   │                            │
-   │  PostgreSQL  Redis  MQTT   │
-   └────────────────────────────┘
+   ┌────┼───────────────────────────┐
+   │    │      Docker Compose        │
+   │    ▼                            │
+   │  ┌─────────────────┐           │
+   │  │  Web Dashboard   │  :3001   │  Next.js 14
+   │  └─────────────────┘           │
+   │  ┌─────────────────┐           │
+   │  │  Orchestrator    │  :3000   │  Express + Prisma
+   │  └────────┬────────┘           │
+   │           │                     │
+   │  ┌────────┼──────────┐         │
+   │  │  ┌─────────────┐  │         │
+   │  │  │ AI Gateway   │  │ :8000  │  FastAPI + LiteLLM
+   │  │  └─────────────┘  │         │
+   │  │  ┌─────────────┐  │         │
+   │  │  │ Nextcloud    │  │ :8080  │  Headless file backend
+   │  │  └─────────────┘  │         │
+   │  └────────────────────┘         │
+   │                                 │
+   │  PostgreSQL  Redis  MQTT        │
+   └─────────────────────────────────┘
         │
         ▼  (LAN)
    ┌──────────┐
@@ -45,7 +45,7 @@ Browser / Mobile App
 ```
 pi-platform/
 ├── apps/
-│   ├── api-server/          REST API backend (Express + TypeScript + Prisma)
+│   ├── orchestrator/        REST API backend (Express + TypeScript + Prisma)
 │   └── web-dashboard/       Web UI (Next.js 14 + React + Tailwind)
 ├── services/
 │   ├── ai-gateway/          Unified AI inference router (Python + FastAPI)
@@ -55,9 +55,9 @@ pi-platform/
 └── package.json             Monorepo root
 ```
 
-### API Server (`apps/api-server/`)
+### Orchestrator (`apps/orchestrator/`)
 
-Express + TypeScript backend serving the web dashboard and mobile app.
+Express + TypeScript backend serving the web dashboard and mobile app. Central coordination point for all services.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -67,24 +67,23 @@ Express + TypeScript backend serving the web dashboard and mobile app.
 | `POST /api/llm/chat` | Chat completion with streaming SSE |
 | `POST /api/llm/keys/:provider` | Store a BYOK API key |
 | `GET /api/files?path=/` | Browse directory contents |
-| `GET /api/files/download?path=...` | Download a file |
 | `POST /api/files/upload?path=/` | Upload files (multipart) |
-| `DELETE /api/files?path=...` | Delete a file or directory |
 | `POST /api/files/mkdir` | Create a directory |
 | `GET /api/sync/targets` | List sync targets |
-| `POST /api/sync/targets` | Create a sync target |
 | `POST /api/sync/trigger` | Trigger immediate sync |
 
 **Stack:** Express 4, Prisma ORM (PostgreSQL), ioredis, MQTT.js, Zod, Pino, multer.
+
+**Feature flags:** `STORAGE_BACKEND` (`legacy`|`nextcloud`), `AUTH_ENABLED`, `NEXTCLOUD_URL`.
 
 ### Web Dashboard (`apps/web-dashboard/`)
 
 Next.js 14 app with four pages:
 
 - **Dashboard** — Device status, service health, model availability.
-- **Files** — File browser with upload, download, drag-and-drop. Breadcrumb navigation.
+- **Files** — File browser with upload, download, drag-and-drop, breadcrumb navigation.
 - **Chat** — AI chat with model selector, streaming token rendering.
-- **Settings** — Device info, BYOK key management, sync target configuration.
+- **Settings** — Device info, BYOK key management, sync target configuration, appearance (light/dark mode).
 
 **Stack:** Next.js App Router, React 18, Tailwind CSS, SWR, Lucide icons.
 
@@ -96,34 +95,17 @@ Python FastAPI service unifying local and cloud AI inference.
 - **Local inference** — Jetson Ollama over LAN via httpx.
 - **Cloud inference** — Anthropic and OpenAI via LiteLLM with streaming.
 - **BYOK keys** — Fernet-encrypted filesystem storage.
-- **Model registry** — TTL-cached aggregation from all providers.
-
-### File Sync Daemon (`services/file-sync/`)
-
-Python background service that watches configured folders and keeps file metadata in sync.
-
-- **Scanner** — Walks directories, computes SHA-256 hashes, detects new/modified/deleted files.
-- **Watcher** — Real-time filesystem monitoring via watchdog with 500ms debounce.
-- **Scheduler** — Periodic scans per sync target interval (configurable 5min–24h).
-- **MQTT events** — Publishes `droplet/sync/{targetId}/changed` and `/complete` events.
 
 ### Infrastructure
 
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | **Nginx** | `nginx:alpine` | 80 | Reverse proxy with SSE passthrough |
+| **Nextcloud** | `nextcloud:29-apache` | 8080 | Headless file/auth backend |
 | **PostgreSQL** | `postgres:16-alpine` | 5432 | Application database |
 | **Redis** | `redis:7-alpine` | 6379 | Response caching |
 | **Mosquitto** | `eclipse-mosquitto:2` | 1883 | MQTT message broker |
-
-### Planned Services (scaffolded)
-
-| Service | Purpose |
-|---------|---------|
-| `services/routing/` | Network routing and iptables management |
-| `services/nvr/` | Network video recording and playback |
-| `system/networking/` | Network configuration scripts |
-| `system/provisioning/` | First-boot device registration |
+| **Home Assistant** | `ghcr.io/home-assistant/...` | 8123 | Smart home hub (profile: full) |
 
 ---
 
@@ -143,17 +125,8 @@ npm install
 npm run dev:docker
 ```
 
-Open **http://localhost** in your browser. All 8 containers start behind Nginx.
-
-### Seed the database (first run only)
-
-```bash
-docker compose -f docker/docker-compose.yml exec db \
-  psql -U droplet -d droplet -c "
-    INSERT INTO \"Device\" (id, \"deviceId\", hostname, \"hardwareRev\", \"networkMode\", ip, \"lastSeen\", \"createdAt\", \"updatedAt\")
-    VALUES (gen_random_uuid(), 'droplet-dev-001', 'droplet-pi', 'dev', 'dhcp', '192.168.1.100', NOW(), NOW(), NOW())
-    ON CONFLICT (\"deviceId\") DO NOTHING;"
-```
+Open **http://localhost** in your browser. All containers start behind Nginx.
+Nextcloud is available at **http://localhost:8080** (admin/admin).
 
 ### Run services individually (for development)
 
@@ -166,63 +139,53 @@ docker compose -f docker/docker-compose.yml up db cache broker -d
 Then in separate terminals:
 
 ```bash
-# Terminal 1: API Server
-cd apps/api-server
-npx prisma generate
-npx prisma migrate deploy
-npm run dev
-# → http://localhost:3000
+# Orchestrator
+cd apps/orchestrator && npx prisma generate && npx prisma migrate deploy && npm run dev
 
-# Terminal 2: AI Gateway
-cd services/ai-gateway
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-JETSON_OLLAMA_URL=http://localhost:11434 uvicorn main:app --reload --port 8000
-# → http://localhost:8000
+# AI Gateway
+cd services/ai-gateway && python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && uvicorn main:app --reload --port 8000
 
-# Terminal 3: Web Dashboard
-cd apps/web-dashboard
-npm run dev
-# → http://localhost:3001 (auto-proxies /api to :3000)
-
-# Terminal 4 (optional): File Sync Daemon
-cd services/file-sync
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-DATABASE_URL=postgresql://droplet:droplet@localhost:5432/droplet \
-MQTT_BROKER=mqtt://localhost:1883 \
-FILES_ROOT=/tmp/droplet-files \
-python -m src.main
+# Web Dashboard
+cd apps/web-dashboard && npm run dev
 ```
 
-### Database management
+### Testing
 
 ```bash
-cd apps/api-server
-npx prisma migrate dev --name my-change   # Create a new migration
-npx prisma db seed                         # Seed dev data
-npx prisma studio                          # Browse data in browser
+npm test                     # All tests via Turbo
+npm run test:orchestrator    # Orchestrator unit tests (48 tests)
+npm run test:ai-gateway      # AI Gateway pytest (54 tests)
 ```
 
 ---
 
 ## Environment Variables
 
-| Variable | Default | Used By |
-|----------|---------|---------|
-| `DATABASE_URL` | `postgresql://droplet:droplet@db:5432/droplet` | api-server, file-sync |
-| `REDIS_URL` | `redis://cache:6379` | api-server |
-| `MQTT_BROKER` | `mqtt://broker:1883` | api-server, file-sync |
-| `AI_GATEWAY_URL` | `http://ai-gateway:8000` | api-server |
-| `JETSON_OLLAMA_URL` | `http://jetson-ai.local:11434` | ai-gateway |
-| `FILES_ROOT` | `/data/files` | api-server, file-sync |
-| `DEVICE_SECRET` | `dev-secret-change-in-production` | ai-gateway (BYOK encryption) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | api-server |
-| `PORT` | `3000` / `3001` | api-server / web-dashboard |
-
-Copy `.env.example` and adjust as needed.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `postgresql://droplet:droplet@db:5432/droplet` | PostgreSQL |
+| `REDIS_URL` | `redis://cache:6379` | Redis cache |
+| `MQTT_BROKER` | `mqtt://broker:1883` | MQTT broker |
+| `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway |
+| `JETSON_OLLAMA_URL` | `http://jetson-ai.local:11434` | Jetson Ollama |
+| `FILES_ROOT` | `.data/files` (dev) / `/data/files` (Docker) | File storage root |
+| `STORAGE_BACKEND` | `legacy` | `legacy` or `nextcloud` |
+| `NEXTCLOUD_URL` | `http://localhost:8080` | Nextcloud instance |
+| `AUTH_ENABLED` | `false` | Enable Nextcloud OAuth2 auth |
+| `DEVICE_SECRET` | `dev-secret-change-in-production` | BYOK encryption key |
+| `MAX_UPLOAD_SIZE_MB` | `100` | Upload size limit |
 
 ---
+
+## Related Repos
+
+| Repo | Purpose |
+|------|---------|
+| [`jetson-ai`](https://github.com/Nahast/droplet-jetson-ai) | Jetson GPU services (Ollama, model management, GPU scheduler) |
+| [`mobile-app`](https://github.com/Nahast/droplet-mobile-app) | Mobile client (React Native / Flutter) |
+| [`shared-api`](https://github.com/Nahast/droplet-shared-api) | OpenAPI specs and generated clients |
+| [`releases`](https://github.com/Nahast/droplet-releases) | Factory manifests and OTA configs |
 
 ## License
 

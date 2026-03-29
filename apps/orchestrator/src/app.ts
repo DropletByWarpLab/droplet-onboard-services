@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import { PrismaClient } from "@prisma/client";
 import { requestLogger } from "./middleware/request-logger.js";
+import { authMiddleware } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
@@ -18,6 +19,9 @@ export function createApp(prisma: PrismaClient) {
   app.use(helmet());
   app.use(requestLogger);
   app.use(express.json());
+
+  // Auth middleware (controlled by AUTH_ENABLED env var)
+  app.use(authMiddleware);
 
   // Routes
   app.use("/api", createHealthRouter(prisma));

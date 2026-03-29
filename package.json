@@ -12,7 +12,7 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "test:ai-gateway": "cd services/ai-gateway && python -m pytest tests/ -v",
-    "test:api-server": "cd apps/api-server && npx vitest run",
+    "test:orchestrator": "cd apps/orchestrator && npx vitest run",
     "test:dashboard": "cd apps/web-dashboard && npx vitest run",
     "test:all": "npm run test:ai-gateway && npm run test",
     "test:integration": "cd tests && npm run test:docker",

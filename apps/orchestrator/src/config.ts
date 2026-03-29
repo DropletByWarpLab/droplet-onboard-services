@@ -15,6 +15,11 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   FILES_ROOT: z.string().min(1).default(defaultFilesRoot),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
+
+  // --- Phase 1: Nextcloud integration ---
+  STORAGE_BACKEND: z.enum(["legacy", "nextcloud"]).default("legacy"),
+  NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
+  AUTH_ENABLED: z.coerce.boolean().default(false),
 });
 
 export const config = envSchema.parse(process.env);
