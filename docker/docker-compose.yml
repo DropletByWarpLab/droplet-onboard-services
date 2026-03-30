@@ -111,7 +111,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - JETSON_OLLAMA_URL=http://jetson-ai.local:11434
+      - JETSON_OLLAMA_URL=http://inference-engine.local:11434
       - REDIS_URL=redis://cache:6379
       - MQTT_BROKER=mqtt://broker:1883
       - DEVICE_SECRET=dev-secret-change-in-production

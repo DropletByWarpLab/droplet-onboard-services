@@ -1,9 +1,9 @@
-# Contributing to Droplet Pi-Platform
+# Contributing to Droplet Edge Platform
 
 ## Architecture
 
 ```
-pi-platform/                    Turbo monorepo
+edge-platform/                  Turbo monorepo
 ├── apps/
 │   ├── api-server/             Express + TypeScript (port 3000)
 │   └── web-dashboard/          Next.js + React (port 3001)
@@ -28,7 +28,7 @@ pi-platform/                    Turbo monorepo
 
 ```bash
 # Clone and enter the repo
-cd pi-platform
+cd edge-platform
 
 # Install Node.js dependencies (all workspaces)
 npm install

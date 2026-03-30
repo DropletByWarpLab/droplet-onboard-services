@@ -86,3 +86,49 @@ class ApiKeyRequest(BaseModel):
 
 class KeyStatusResponse(BaseModel):
     providers: list[str]
+
+
+# --- Sessions ---
+
+
+class SessionCreateRequest(BaseModel):
+    model: str
+    title: str = ""
+    system_prompt: str | None = None
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str
+
+
+class SessionMessageOut(BaseModel):
+    role: str
+    content: str
+    timestamp: float
+
+
+class SessionOut(BaseModel):
+    id: str
+    title: str
+    model: str
+    created_at: float
+    updated_at: float
+    message_count: int
+    system_prompt: str | None = None
+
+
+class SessionDetailOut(SessionOut):
+    messages: list[SessionMessageOut]
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionOut]
+
+
+class SessionChatRequest(BaseModel):
+    """Chat within an existing session — messages are auto-appended."""
+    message: str
+    stream: bool = False
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int | None = None
+    provider: str | None = None

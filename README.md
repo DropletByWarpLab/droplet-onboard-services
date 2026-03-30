@@ -1,6 +1,6 @@
-# Droplet Pi-Platform
+# Droplet Edge Platform
 
-Control plane for the Droplet edge AI appliance. Runs on the ARM SoC and orchestrates local AI inference (via a Jetson companion), cloud AI providers, file management through Nextcloud, and device configuration — all accessible through a web dashboard.
+Control plane for the Droplet edge AI appliance. Orchestrates local AI inference (via the inference engine), cloud AI providers, file management through Nextcloud, and device configuration — all accessible through a web dashboard.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ Browser / Mobile App
 ## What's Inside
 
 ```
-pi-platform/
+edge-platform/
 ├── apps/
 │   ├── orchestrator/        REST API backend (Express + TypeScript + Prisma)
 │   └── web-dashboard/       Web UI (Next.js 14 + React + Tailwind)
@@ -120,7 +120,7 @@ Python FastAPI service unifying local and cloud AI inference.
 ### Quick Start (Docker — everything at once)
 
 ```bash
-cd pi-platform
+cd edge-platform
 npm install
 npm run dev:docker
 ```
@@ -168,7 +168,7 @@ npm run test:ai-gateway      # AI Gateway pytest (54 tests)
 | `REDIS_URL` | `redis://cache:6379` | Redis cache |
 | `MQTT_BROKER` | `mqtt://broker:1883` | MQTT broker |
 | `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway |
-| `JETSON_OLLAMA_URL` | `http://jetson-ai.local:11434` | Jetson Ollama |
+| `JETSON_OLLAMA_URL` | `http://inference-engine.local:11434` | Inference engine Ollama endpoint |
 | `FILES_ROOT` | `.data/files` (dev) / `/data/files` (Docker) | File storage root |
 | `STORAGE_BACKEND` | `legacy` | `legacy` or `nextcloud` |
 | `NEXTCLOUD_URL` | `http://localhost:8080` | Nextcloud instance |
@@ -182,7 +182,7 @@ npm run test:ai-gateway      # AI Gateway pytest (54 tests)
 
 | Repo | Purpose |
 |------|---------|
-| [`jetson-ai`](https://github.com/Nahast/droplet-jetson-ai) | Jetson GPU services (Ollama, model management, GPU scheduler) |
+| [`inference-engine`](https://github.com/Nahast/droplet-inference-engine) | GPU inference services (Ollama, model management, GPU scheduler) |
 | [`mobile-app`](https://github.com/Nahast/droplet-mobile-app) | Mobile client (React Native / Flutter) |
 | [`shared-api`](https://github.com/Nahast/droplet-shared-api) | OpenAPI specs and generated clients |
 | [`releases`](https://github.com/Nahast/droplet-releases) | Factory manifests and OTA configs |

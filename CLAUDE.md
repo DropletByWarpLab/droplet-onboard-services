@@ -1,6 +1,6 @@
-# pi-platform
+# edge-platform
 
-ARM SoC control plane for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file sync service, and all supporting Docker infrastructure.
+Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file sync service, and all supporting Docker infrastructure.
 
 > **Note:** "orchestrator" was renamed from "api-server" per design doc alignment. Legacy references may still use the old name.
 
