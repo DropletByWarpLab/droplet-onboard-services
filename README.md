@@ -1,6 +1,33 @@
-# Droplet Edge Platform
+# Droplet — Edge Platform
 
-Control plane for the Droplet edge AI appliance. Orchestrates local AI inference (via the inference engine), cloud AI providers, file management through Nextcloud, and device configuration — all accessible through a web dashboard.
+Control-plane monorepo for the Droplet edge AI appliance. Runs on the ARM SoC and provides the orchestration layer, web dashboard, AI routing, file management, and file sync daemon for the full appliance stack.
+
+![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6?logo=typescript&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-14.2-000000?logo=next.js&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+
+---
+
+## What's in this repo
+
+```
+edge-platform/
+├── apps/
+│   ├── orchestrator/        REST API (Express 4.19 + TypeScript 5.4 + Prisma 5.14)
+│   └── web-dashboard/       Admin UI (Next.js 14.2 + React 18.3 + Tailwind CSS 3.4)
+├── services/
+│   ├── ai-gateway/          AI inference router (FastAPI 0.110 + LiteLLM 1.30 + Python 3.12)
+│   └── file-sync/           File indexing daemon (watchdog 4.0 + paho-mqtt 2.0 + Python 3.12)
+├── docker/                  Docker Compose + Nginx + Mosquitto configs
+├── tests/                   Integration test suite
+├── turbo.json               Turbo 2.0 monorepo build pipeline
+└── package.json             npm 10.9 workspace root
+```
+
+---
 
 ## Architecture
 
@@ -9,183 +36,304 @@ Browser / Mobile App
         │
         ▼
    ┌─────────┐
-   │  Nginx   │  :80  (reverse proxy)
+   │  Nginx   │  :80  — reverse proxy (nginx:alpine)
    └────┬─────┘
         │
-   ┌────┼───────────────────────────┐
-   │    │      Docker Compose        │
-   │    ▼                            │
-   │  ┌─────────────────┐           │
-   │  │  Web Dashboard   │  :3001   │  Next.js 14
-   │  └─────────────────┘           │
-   │  ┌─────────────────┐           │
-   │  │  Orchestrator    │  :3000   │  Express + Prisma
-   │  └────────┬────────┘           │
-   │           │                     │
-   │  ┌────────┼──────────┐         │
-   │  │  ┌─────────────┐  │         │
-   │  │  │ AI Gateway   │  │ :8000  │  FastAPI + LiteLLM
-   │  │  └─────────────┘  │         │
-   │  │  ┌─────────────┐  │         │
-   │  │  │ Nextcloud    │  │ :8080  │  Headless file backend
-   │  │  └─────────────┘  │         │
-   │  └────────────────────┘         │
-   │                                 │
-   │  PostgreSQL  Redis  MQTT        │
-   └─────────────────────────────────┘
+   ┌────┼─────────────────────────────────┐
+   │    │          Docker Compose          │
+   │    ▼                                 │
+   │  ┌──────────────────┐               │
+   │  │  Web Dashboard    │  :3001        │  Next.js 14.2
+   │  └──────────────────┘               │
+   │  ┌──────────────────┐               │
+   │  │  Orchestrator     │  :3000        │  Express 4.19 + Prisma 5.14
+   │  └────────┬─────────┘               │
+   │           │                          │
+   │  ┌────────┼──────────────┐          │
+   │  │  ┌───────────────┐   │           │
+   │  │  │  AI Gateway    │  :8000       │  FastAPI 0.110 + LiteLLM 1.30
+   │  │  └───────────────┘   │           │
+   │  │  ┌───────────────┐   │           │
+   │  │  │  Nextcloud     │  :8080       │  nextcloud:29-apache
+   │  │  └───────────────┘   │           │
+   │  │  ┌───────────────┐   │           │
+   │  │  │  File Sync     │  (daemon)    │  watchdog 4.0 + paho-mqtt 2.0
+   │  │  └───────────────┘   │           │
+   │  └──────────────────────┘           │
+   │                                     │
+   │  PostgreSQL 16  Redis 7  Mosquitto 2 │
+   └─────────────────────────────────────┘
         │
-        ▼  (LAN)
-   ┌──────────┐
-   │  Jetson   │  Ollama :11434
-   └──────────┘
+        ▼  (LAN or PCIe)
+   inference-engine   — Ollama :11434
 ```
-
-## What's Inside
-
-```
-edge-platform/
-├── apps/
-│   ├── orchestrator/        REST API backend (Express + TypeScript + Prisma)
-│   └── web-dashboard/       Web UI (Next.js 14 + React + Tailwind)
-├── services/
-│   ├── ai-gateway/          Unified AI inference router (Python + FastAPI)
-│   └── file-sync/           File indexing daemon (Python + watchdog)
-├── docker/                  Docker Compose, Nginx, Mosquitto configs
-├── turbo.json               Turbo build pipeline
-└── package.json             Monorepo root
-```
-
-### Orchestrator (`apps/orchestrator/`)
-
-Express + TypeScript backend serving the web dashboard and mobile app. Central coordination point for all services.
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/health` | System status, uptime, dependency health |
-| `GET /api/devices` | List registered Droplet devices |
-| `GET /api/llm/models` | Available AI models across all providers |
-| `POST /api/llm/chat` | Chat completion with streaming SSE |
-| `POST /api/llm/keys/:provider` | Store a BYOK API key |
-| `GET /api/files?path=/` | Browse directory contents |
-| `POST /api/files/upload?path=/` | Upload files (multipart) |
-| `POST /api/files/mkdir` | Create a directory |
-| `GET /api/sync/targets` | List sync targets |
-| `POST /api/sync/trigger` | Trigger immediate sync |
-
-**Stack:** Express 4, Prisma ORM (PostgreSQL), ioredis, MQTT.js, Zod, Pino, multer.
-
-**Feature flags:** `STORAGE_BACKEND` (`legacy`|`nextcloud`), `AUTH_ENABLED`, `NEXTCLOUD_URL`.
-
-### Web Dashboard (`apps/web-dashboard/`)
-
-Next.js 14 app with four pages:
-
-- **Dashboard** — Device status, service health, model availability.
-- **Files** — File browser with upload, download, drag-and-drop, breadcrumb navigation.
-- **Chat** — AI chat with model selector, streaming token rendering.
-- **Settings** — Device info, BYOK key management, sync target configuration, appearance (light/dark mode).
-
-**Stack:** Next.js App Router, React 18, Tailwind CSS, SWR, Lucide icons.
-
-### AI Gateway (`services/ai-gateway/`)
-
-Python FastAPI service unifying local and cloud AI inference.
-
-- **Provider routing** — Model name prefix resolves to provider (`llama*`→Ollama, `claude*`→Anthropic, `gpt*`→OpenAI).
-- **Local inference** — Jetson Ollama over LAN via httpx.
-- **Cloud inference** — Anthropic and OpenAI via LiteLLM with streaming.
-- **BYOK keys** — Fernet-encrypted filesystem storage.
-
-### Infrastructure
-
-| Service | Image | Port | Purpose |
-|---------|-------|------|---------|
-| **Nginx** | `nginx:alpine` | 80 | Reverse proxy with SSE passthrough |
-| **Nextcloud** | `nextcloud:29-apache` | 8080 | Headless file/auth backend |
-| **PostgreSQL** | `postgres:16-alpine` | 5432 | Application database |
-| **Redis** | `redis:7-alpine` | 6379 | Response caching |
-| **Mosquitto** | `eclipse-mosquitto:2` | 1883 | MQTT message broker |
-| **Home Assistant** | `ghcr.io/home-assistant/...` | 8123 | Smart home hub (profile: full) |
 
 ---
 
-## Running Locally
+## Services
+
+### Orchestrator (`apps/orchestrator/`)
+
+Express + TypeScript API. The central coordination point — proxies to the AI gateway, manages files, handles auth, and drives the file-sync daemon over MQTT.
+
+**Stack:** Express 4.19 · Prisma 5.14 (PostgreSQL 16) · ioredis 5.4 · MQTT.js 5.5 · Zod 3.23 · Pino 9.1 · multer 2.1 · TypeScript 5.4 · tsx 4.11 · Vitest 1.6
+
+#### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/health` | System status: DB, Redis, AI Gateway + uptime |
+| `GET` | `/api/auth/setup` | Check if first-run setup is required |
+| `POST` | `/api/auth/setup` | Create the first admin user (one-time) |
+| `POST` | `/api/auth/login` | Authenticate and receive an app-password token |
+| `POST` | `/api/auth/logout` | Revoke the current token |
+| `GET` | `/api/auth/me` | Current user profile |
+| `GET` | `/api/auth/users` | List all users (admin) |
+| `POST` | `/api/auth/users` | Create a user (admin) |
+| `DELETE` | `/api/auth/users/:username` | Delete a user (admin) |
+| `GET` | `/api/llm/models` | Available AI models across all providers (cached 30 s) |
+| `POST` | `/api/llm/chat` | Stateless chat completion — streaming SSE or JSON |
+| `POST` | `/api/llm/sessions` | Create a new chat session |
+| `GET` | `/api/llm/sessions` | List sessions (paginated) |
+| `GET` | `/api/llm/sessions/:id` | Get session with full message history |
+| `PATCH` | `/api/llm/sessions/:id` | Rename a session |
+| `DELETE` | `/api/llm/sessions/:id` | Delete a session |
+| `POST` | `/api/llm/sessions/:id/chat` | Continue a session (history auto-managed) |
+| `POST` | `/api/llm/keys/:provider` | Store a BYOK API key (Fernet-encrypted) |
+| `GET` | `/api/llm/keys` | List configured cloud providers |
+| `DELETE` | `/api/llm/keys/:provider` | Remove a provider key |
+| `GET` | `/api/files` | Browse directory — `?path=/` |
+| `GET` | `/api/files/download` | Download a file — `?path=/file.pdf` |
+| `POST` | `/api/files/upload` | Upload files (multipart, up to 20 files, 100 MB each) |
+| `DELETE` | `/api/files` | Delete file or directory |
+| `POST` | `/api/files/mkdir` | Create a directory |
+| `POST` | `/api/files/share` | Create a Nextcloud public share link |
+| `GET` | `/api/files/shares` | List share links for a path |
+| `GET` | `/api/sync/targets` | List all sync targets with file counts |
+| `POST` | `/api/sync/targets` | Add a sync target |
+| `PUT` | `/api/sync/targets/:id` | Update target label / interval / enabled |
+| `DELETE` | `/api/sync/targets/:id` | Remove a sync target |
+| `GET` | `/api/sync/status` | Sync status across all targets |
+| `POST` | `/api/sync/trigger` | Trigger an immediate sync on a target |
+
+#### Key implementation details
+
+- **Auth middleware** validates Bearer tokens against Nextcloud's OCS API, caches results for 5 minutes in Redis (ioredis 5.4). Controlled by `AUTH_ENABLED`. Public paths: `/api/health`, `/api/auth/setup`, `/api/auth/login`.
+- **Storage backend** is configurable: `STORAGE_BACKEND=legacy` uses the local filesystem; `STORAGE_BACKEND=nextcloud` routes all file operations to Nextcloud 29 via WebDAV with per-user Redis cache keys.
+- **File sharing** uses Nextcloud's OCS Share API — share links are created and managed through the orchestrator.
+- **Sync operations** publish MQTT messages (`droplet/sync/config/changed`, `droplet/sync/+/trigger`) that the file-sync daemon subscribes to via MQTT.js 5.5.
+- **Chat sessions** are stored and managed in the AI gateway (not in the orchestrator's DB).
+
+---
+
+### Web Dashboard (`apps/web-dashboard/`)
+
+Next.js 14 App Router admin UI. Requires authentication for all routes; redirects to `/setup` on first run, `/login` otherwise.
+
+**Stack:** Next.js 14.2 · React 18.3 · Tailwind CSS 3.4 · SWR 2.2 · Lucide React 0.378 · TypeScript 5.4 · Vitest 1.6 · Testing Library 15
+
+#### Pages
+
+| Route | Description |
+|-------|-------------|
+| `/setup` | First-run wizard: welcome → create admin account → done |
+| `/login` | Username + password login |
+| `/` | Dashboard: device info, service health cards, model availability |
+| `/files` | File browser: navigate, upload (drag-and-drop), download, delete, share, preview (images + text), file detail panel |
+| `/chat` | AI chat: session sidebar, model selector, streaming token rendering, session create / delete |
+| `/settings` | User management (admin), device info, BYOK key management, sync targets, appearance |
+
+#### Auth flow
+
+1. On load, `AuthGate` checks `/api/auth/setup` — redirects to `/setup` if no users exist yet.
+2. After setup, the user logs in at `/login` — token stored in `localStorage`.
+3. All API calls inject `Authorization: Bearer <token>` via `getAuthHeaders()`.
+4. On logout, the token is revoked server-side and cleared locally.
+
+---
+
+### AI Gateway (`services/ai-gateway/`)
+
+FastAPI service that unifies local and cloud AI inference behind a single API. The orchestrator proxies all LLM requests here.
+
+**Stack:** FastAPI 0.110 · uvicorn 0.29 · LiteLLM 1.30 · Pydantic 2.6 · httpx 0.27 · sse-starlette 2.0 · cryptography 42.0 · redis 5.0 · Python 3.12
+
+#### Routing logic
+
+- Model names are routed to providers by prefix/pattern (e.g. `llama*` → local Ollama on the inference engine, `claude*` → Anthropic via LiteLLM, `gpt*` → OpenAI via LiteLLM).
+- Provider keys are stored Fernet-encrypted on disk (cryptography 42.0); the key store is read at request time.
+
+#### Endpoints (internal, called by orchestrator)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/ai/health` | Gateway health + inference engine reachability |
+| `GET` | `/ai/models` | Aggregate model list from all active providers |
+| `POST` | `/ai/chat` | Stateless chat completion (streaming + non-streaming) |
+| `POST` | `/ai/sessions` | Create session |
+| `GET` | `/ai/sessions` | List sessions |
+| `GET` | `/ai/sessions/{id}` | Session detail with message history |
+| `PATCH` | `/ai/sessions/{id}` | Rename session |
+| `DELETE` | `/ai/sessions/{id}` | Delete session |
+| `POST` | `/ai/sessions/{id}/chat` | Session-aware chat (history injected automatically) |
+| `POST` | `/ai/keys/{provider}` | Store API key |
+| `GET` | `/ai/keys` | List configured providers |
+| `DELETE` | `/ai/keys/{provider}` | Remove key |
+
+For local testing without inference engine hardware, see [`services/ai-gateway/TESTING.md`](services/ai-gateway/TESTING.md) — includes a mock Ollama server.
+
+---
+
+### File Sync Daemon (`services/file-sync/`)
+
+Python background service that keeps sync targets indexed and watched. Communicates with the orchestrator exclusively over MQTT.
+
+**Stack:** watchdog 4.0 · paho-mqtt 2.0 · psycopg2-binary 2.9 · schedule 1.2 · Python 3.12
+
+| Component | What it does |
+|-----------|-------------|
+| `scheduler.py` | Loads targets from DB; triggers scans on configurable intervals (1–1440 min) |
+| `watcher.py` | Real-time file monitoring via watchdog 4.0; triggers DB updates on add / modify / delete |
+| `scanner.py` | Walks a target directory, hashes all files, records results |
+| `mqtt_client.py` | Subscribes to `droplet/sync/config/changed` and `droplet/sync/+/trigger` |
+| `db.py` | Reads `SyncTarget` table, writes to `SyncEntry` table, updates `lastSync` timestamps |
+
+---
+
+## Infrastructure
+
+All services run as Docker Compose containers behind an Nginx reverse proxy.
+
+| Service | Image | Port | Notes |
+|---------|-------|------|-------|
+| **gateway** | `nginx:alpine` | 80 | Routes `/` → web-dashboard, `/api` + `/ai` → orchestrator |
+| **web-dashboard** | local build | 3001 | Next.js 14.2 production build |
+| **orchestrator** | local build | 3000 | Express 4.19 API |
+| **ai-gateway** | local build | 8000 | FastAPI 0.110; connects to inference engine over LAN |
+| **nextcloud** | `nextcloud:29-apache` | 8080 | Headless file + user backend |
+| **db** | `postgres:16-alpine` | 5432 | Shared by orchestrator, nextcloud, file-sync |
+| **cache** | `redis:7-alpine` | 6379 | Token cache + response cache |
+| **broker** | `eclipse-mosquitto:2` | 1883 | MQTT bus for orchestrator ↔ file-sync |
+| **file-sync** | local build | — | Background daemon |
+| **homeassistant** | `ghcr.io/home-assistant/home-assistant:stable` | 8123 | Optional (profile: `full`) |
+
+**Volumes:** `pgdata`, `filedata` (shared files), `nextcloud-data`, `aikeys` (encrypted API keys).
+
+---
+
+## Running locally
 
 ### Prerequisites
 
-- Node.js >= 20
-- Python >= 3.12
-- Docker + Docker Compose
+| Tool | Minimum version |
+|------|----------------|
+| Node.js | 20 |
+| npm | 10.9 |
+| Python | 3.12 |
+| Docker Engine | 25 |
+| Docker Compose | v2 |
 
-### Quick Start (Docker — everything at once)
+### Quick start — full stack via Docker
 
 ```bash
 cd edge-platform
-npm install
-npm run dev:docker
+npm install          # installs Turbo 2.0 and workspace deps
+npm run dev:docker   # docker compose up --build
 ```
 
-Open **http://localhost** in your browser. All containers start behind Nginx.
-Nextcloud is available at **http://localhost:8080** (admin/admin).
+Open **http://localhost** — Nginx serves the dashboard.
+First visit redirects to the setup wizard to create an admin account.
 
-### Run services individually (for development)
+Nextcloud admin UI (optional): **http://localhost:8080**
 
-Start infrastructure only:
+### Development — individual services
+
+Start shared infrastructure:
 
 ```bash
-docker compose -f docker/docker-compose.yml up db cache broker -d
+docker compose -f docker/docker-compose.yml up db cache broker nextcloud -d
 ```
 
 Then in separate terminals:
 
 ```bash
-# Orchestrator
-cd apps/orchestrator && npx prisma generate && npx prisma migrate deploy && npm run dev
+# Orchestrator (tsx 4.11 watch mode, port 3000)
+cd apps/orchestrator
+npx prisma generate && npx prisma migrate deploy
+npm run dev
 
-# AI Gateway
-cd services/ai-gateway && python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt && uvicorn main:app --reload --port 8000
+# AI Gateway (uvicorn 0.29 with --reload, port 8000)
+cd services/ai-gateway
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+JETSON_OLLAMA_URL=http://localhost:11434 uvicorn main:app --reload --port 8000
 
-# Web Dashboard
-cd apps/web-dashboard && npm run dev
-```
-
-### Testing
-
-```bash
-npm test                     # All tests via Turbo
-npm run test:orchestrator    # Orchestrator unit tests (48 tests)
-npm run test:ai-gateway      # AI Gateway pytest (54 tests)
+# Web Dashboard (Next.js 14.2 dev server, port 3001)
+cd apps/web-dashboard
+npm run dev
 ```
 
 ---
 
-## Environment Variables
+## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `postgresql://droplet:droplet@db:5432/droplet` | PostgreSQL |
-| `REDIS_URL` | `redis://cache:6379` | Redis cache |
-| `MQTT_BROKER` | `mqtt://broker:1883` | MQTT broker |
-| `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway |
-| `JETSON_OLLAMA_URL` | `http://inference-engine.local:11434` | Inference engine Ollama endpoint |
-| `FILES_ROOT` | `.data/files` (dev) / `/data/files` (Docker) | File storage root |
-| `STORAGE_BACKEND` | `legacy` | `legacy` or `nextcloud` |
-| `NEXTCLOUD_URL` | `http://localhost:8080` | Nextcloud instance |
-| `AUTH_ENABLED` | `false` | Enable Nextcloud OAuth2 auth |
-| `DEVICE_SECRET` | `dev-secret-change-in-production` | BYOK encryption key |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Upload size limit |
+| `DATABASE_URL` | `postgresql://droplet:droplet@db:5432/droplet` | PostgreSQL 16 connection string |
+| `REDIS_URL` | `redis://cache:6379` | Redis 7 connection string |
+| `MQTT_BROKER` | `mqtt://broker:1883` | Mosquitto 2 broker URL |
+| `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway internal URL |
+| `JETSON_OLLAMA_URL` | `http://inference-engine.local:11434` | Ollama endpoint on the inference engine |
+| `FILES_ROOT` | `/data/files` | File storage root |
+| `STORAGE_BACKEND` | `nextcloud` | `nextcloud` (WebDAV) or `legacy` (local filesystem) |
+| `NEXTCLOUD_URL` | `http://nextcloud:80` | Nextcloud 29 internal URL |
+| `AUTH_ENABLED` | `true` | Enable token auth middleware |
+| `DEVICE_SECRET` | *(required in prod)* | Fernet key for BYOK encryption (cryptography 42.0) |
+| `MAX_UPLOAD_SIZE_MB` | `100` | Per-file upload limit |
 
 ---
 
-## Related Repos
+## Testing
 
-| Repo | Purpose |
-|------|---------|
-| [`inference-engine`](https://github.com/Nahast/droplet-inference-engine) | GPU inference services (Ollama, model management, GPU scheduler) |
-| [`mobile-app`](https://github.com/Nahast/droplet-mobile-app) | Mobile client (React Native / Flutter) |
-| [`shared-api`](https://github.com/Nahast/droplet-shared-api) | OpenAPI specs and generated clients |
-| [`releases`](https://github.com/Nahast/droplet-releases) | Factory manifests and OTA configs |
+```bash
+npm test                       # All workspaces via Turbo 2.0 (parallel)
+npm run test:orchestrator      # Orchestrator unit tests (Vitest 1.6)
+npm run test:ai-gateway        # AI Gateway pytest suite
+npm run test:dashboard         # Dashboard component + API tests (Vitest 1.6)
+npm run test:integration       # Full stack integration (Docker Compose)
+```
+
+### Test coverage
+
+| Scope | Framework | Location |
+|-------|-----------|----------|
+| Orchestrator routes | Vitest 1.6 + Supertest 7.0 | `apps/orchestrator/src/__tests__/` |
+| Dashboard components + API client | Vitest 1.6 + Testing Library 15 | `apps/web-dashboard/src/__tests__/` |
+| AI Gateway endpoints + provider routing | pytest + pytest-asyncio | `services/ai-gateway/tests/` |
+| Full stack | Vitest 1.6 + Docker Compose | `tests/` |
+
+---
+
+## What is not yet implemented
+
+| Feature | Status |
+|---------|--------|
+| Device inventory (`/api/devices`) | Endpoint exists; service logic is a stub — returns empty list |
+| Home Assistant integration | Included in Docker Compose behind `profile: full`; no orchestrator wiring yet |
+| OTA update automation | Release manifests + delta configs exist; no automated update pipeline yet |
+
+---
+
+## Related repos
+
+| Repo | Description | Docs |
+|------|-------------|------|
+| [`inference-engine`](../inference-engine/) | GPU inference services: Ollama management, model lifecycle, GPU telemetry | [`CLAUDE.md`](../inference-engine/CLAUDE.md) |
+| [`shared-api`](../shared-api/) | OpenAPI 3.0 specs for all services + generated TypeScript/Python clients | [`specs/`](../shared-api/specs/) |
+| [`mobile-app`](../mobile-app/) | React Native 0.74 + Expo 51 iOS/Android client | [`package.json`](../mobile-app/package.json) |
+| [`releases`](../releases/) | Version manifests, factory flash scripts, OTA update configs | [`manifests/`](../releases/manifests/) |
+
+---
 
 ## License
 
