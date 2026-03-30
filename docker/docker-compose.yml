@@ -14,12 +14,14 @@ services:
     restart: always
 
   # --- Apps ---
+  # NOTE: No host ports exposed — Nginx routes all traffic internally.
+  # This avoids conflicts with local dev servers (npm run dev on 3000/3001).
   web-dashboard:
     build:
       context: ../apps/web-dashboard
       dockerfile: Dockerfile
-    ports:
-      - "3001:3001"
+    expose:
+      - "3001"
     environment:
       - PORT=3001
       - NODE_ENV=production
@@ -29,8 +31,8 @@ services:
     build:
       context: ../apps/orchestrator
       dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     depends_on:
       db:
         condition: service_healthy
@@ -38,16 +40,21 @@ services:
         condition: service_started
       broker:
         condition: service_started
+    env_file:
+      - path: ../.env
+        required: false
     environment:
-      - DATABASE_URL=postgresql://droplet:droplet@db:5432/droplet
-      - REDIS_URL=redis://cache:6379
-      - MQTT_BROKER=mqtt://broker:1883
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-droplet}@db:5432/${POSTGRES_DB:-droplet}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis-dev-password}@cache:6379
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - FILES_ROOT=/data/files
       - PORT=3000
-      - STORAGE_BACKEND=nextcloud
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-nextcloud}
       - NEXTCLOUD_URL=http://nextcloud:80
-      - AUTH_ENABLED=true
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-admin}
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
     volumes:
       - filedata:/data/files
     restart: always
@@ -65,11 +72,12 @@ services:
     environment:
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
-      - POSTGRES_USER=droplet
-      - POSTGRES_PASSWORD=droplet
-      - NEXTCLOUD_ADMIN_USER=admin
-      - NEXTCLOUD_ADMIN_PASSWORD=admin
+      - POSTGRES_USER=${POSTGRES_USER:-droplet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-droplet}
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-admin}
       - REDIS_HOST=cache
+      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD:-redis-dev-password}
       - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway
       - OVERWRITEPROTOCOL=http
     volumes:
@@ -83,11 +91,11 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
     environment:
-      - POSTGRES_USER=droplet
-      - POSTGRES_PASSWORD=droplet
-      - POSTGRES_DB=droplet
+      - POSTGRES_USER=${POSTGRES_USER:-droplet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-droplet}
+      - POSTGRES_DB=${POSTGRES_DB:-droplet}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-droplet}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -95,12 +103,14 @@ services:
 
   cache:
     image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis-dev-password}
     restart: always
 
   broker:
     image: eclipse-mosquitto:2
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
     restart: always
 
   # --- AI Services ---
@@ -108,13 +118,16 @@ services:
     build:
       context: ../services/ai-gateway
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
+    env_file:
+      - path: ../.env
+        required: false
     environment:
-      - JETSON_OLLAMA_URL=http://inference-engine.local:11434
-      - REDIS_URL=redis://cache:6379
-      - MQTT_BROKER=mqtt://broker:1883
-      - DEVICE_SECRET=dev-secret-change-in-production
+      - JETSON_OLLAMA_URL=${JETSON_OLLAMA_URL:-http://inference-engine.local:11434}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis-dev-password}@cache:6379
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
+      - DEVICE_SECRET=${DEVICE_SECRET:-dev-secret-change-in-production}
     volumes:
       - aikeys:/data/keys
     depends_on:
@@ -142,8 +155,8 @@ services:
     volumes:
       - filedata:/data/files
     environment:
-      - DATABASE_URL=postgresql://droplet:droplet@db:5432/droplet
-      - MQTT_BROKER=mqtt://broker:1883
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-droplet}@db:5432/${POSTGRES_DB:-droplet}
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
       - FILES_ROOT=/data/files
     depends_on:
       db:

@@ -11,6 +11,17 @@ Control-plane monorepo for the Droplet edge AI appliance. Runs on the ARM SoC an
 
 ---
 
+## Quick setup (on device)
+
+```bash
+git clone <repo-url> && cd edge-platform
+./scripts/setup.sh
+```
+
+Installs Docker, generates unique device secrets, builds all containers, starts the stack, and verifies health. Run `./scripts/setup.sh --help` for options. See [scripts/README.md](scripts/README.md) for details and troubleshooting.
+
+---
+
 ## What's in this repo
 
 ```
@@ -204,18 +215,20 @@ Python background service that keeps sync targets indexed and watched. Communica
 
 All services run as Docker Compose containers behind an Nginx reverse proxy.
 
-| Service | Image | Port | Notes |
-|---------|-------|------|-------|
-| **gateway** | `nginx:alpine` | 80 | Routes `/` → web-dashboard, `/api` + `/ai` → orchestrator |
-| **web-dashboard** | local build | 3001 | Next.js 14.2 production build |
-| **orchestrator** | local build | 3000 | Express 4.19 API |
-| **ai-gateway** | local build | 8000 | FastAPI 0.110; connects to inference engine over LAN |
-| **nextcloud** | `nextcloud:29-apache` | 8080 | Headless file + user backend |
-| **db** | `postgres:16-alpine` | 5432 | Shared by orchestrator, nextcloud, file-sync |
-| **cache** | `redis:7-alpine` | 6379 | Token cache + response cache |
-| **broker** | `eclipse-mosquitto:2` | 1883 | MQTT bus for orchestrator ↔ file-sync |
+| Service | Image | Host port | Notes |
+|---------|-------|-----------|-------|
+| **gateway** | `nginx:alpine` | **:80** | Single entry point — routes `/` → dashboard, `/api` → orchestrator, `/ai` → ai-gateway |
+| **web-dashboard** | local build | — | Internal only (via Nginx). Next.js 14.2, listens :3001 |
+| **orchestrator** | local build | — | Internal only (via Nginx). Express 4.19, listens :3000 |
+| **ai-gateway** | local build | — | Internal only (via Nginx). FastAPI 0.110, listens :8000 |
+| **nextcloud** | `nextcloud:29-apache` | :8080 | Headless file + user backend |
+| **db** | `postgres:16-alpine` | — | Internal. Shared by orchestrator, nextcloud, file-sync |
+| **cache** | `redis:7-alpine` | — | Internal. Token cache + response cache (auth required) |
+| **broker** | `eclipse-mosquitto:2` | — | Internal. MQTT bus for orchestrator ↔ file-sync |
 | **file-sync** | local build | — | Background daemon |
-| **homeassistant** | `ghcr.io/home-assistant/home-assistant:stable` | 8123 | Optional (profile: `full`) |
+| **homeassistant** | `ghcr.io/home-assistant/...` | :8123 | Optional (profile: `full`) |
+
+App services (orchestrator, web-dashboard, ai-gateway) are **not exposed to the host** — all traffic goes through Nginx on port 80. This avoids conflicts with local dev servers running on the same ports.
 
 **Volumes:** `pgdata`, `filedata` (shared files), `nextcloud-data`, `aikeys` (encrypted API keys).
 

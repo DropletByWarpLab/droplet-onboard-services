@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Droplet Edge Platform — Device Setup Script
+# =============================================================================
+#
+# Provisions a fresh device (or dev machine) with everything needed to run the
+# Droplet edge platform: Docker, unique per-device secrets, built container
+# images, and a running stack.
+#
+# Usage:
+#   ./scripts/setup.sh [OPTIONS]
+#
+# Options:
+#   --skip-docker      Skip Docker installation (assume already installed)
+#   --skip-build       Skip building container images
+#   --skip-start       Skip starting the Docker Compose stack
+#   --systemd          Install systemd service for auto-start on boot
+#   --regenerate-env   Force-regenerate .env (backs up existing)
+#   --verbose          Show full command output
+#   --dry-run          Show what would be done without executing
+#   -h, --help         Show this help message
+#
+# Idempotent — safe to re-run. Skips steps that are already complete.
+# =============================================================================
+set -euo pipefail
+
+# --- Resolve paths ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export REPO_ROOT
+
+# --- Parse arguments ---
+SKIP_DOCKER=false
+SKIP_BUILD=false
+SKIP_START=false
+INSTALL_SYSTEMD=false
+REGENERATE_ENV=false
+VERBOSE=false
+DRY_RUN=false
+export VERBOSE REGENERATE_ENV
+
+usage() {
+  cat << 'USAGE'
+Usage: ./scripts/setup.sh [OPTIONS]
+
+Options:
+  --skip-docker      Skip Docker installation (assume already installed)
+  --skip-build       Skip building container images
+  --skip-start       Skip starting the Docker Compose stack
+  --systemd          Install systemd service for auto-start on boot
+  --regenerate-env   Force-regenerate .env (backs up existing)
+  --verbose          Show full command output
+  --dry-run          Show what would be done without executing
+  -h, --help         Show this help message
+
+Idempotent — safe to re-run. Skips steps that are already complete.
+USAGE
+  exit 0
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skip-docker)      SKIP_DOCKER=true; shift ;;
+    --skip-build)       SKIP_BUILD=true; shift ;;
+    --skip-start)       SKIP_START=true; shift ;;
+    --systemd)          INSTALL_SYSTEMD=true; shift ;;
+    --regenerate-env)   REGENERATE_ENV=true; shift ;;
+    --verbose)          VERBOSE=true; shift ;;
+    --dry-run)          DRY_RUN=true; VERBOSE=true; shift ;;
+    -h|--help)          usage ;;
+    *)                  echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+# --- Source library modules ---
+# shellcheck source=lib/logging.sh
+source "$SCRIPT_DIR/lib/logging.sh"
+# shellcheck source=lib/preflight.sh
+source "$SCRIPT_DIR/lib/preflight.sh"
+# shellcheck source=lib/docker.sh
+source "$SCRIPT_DIR/lib/docker.sh"
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
+# shellcheck source=lib/compose.sh
+source "$SCRIPT_DIR/lib/compose.sh"
+# shellcheck source=lib/systemd.sh
+source "$SCRIPT_DIR/lib/systemd.sh"
+
+# --- Lockfile ---
+LOCK_FILE="$REPO_ROOT/.data/.setup.lock"
+
+_acquire_lock() {
+  mkdir -p "$(dirname "$LOCK_FILE")"
+  if [ -f "$LOCK_FILE" ]; then
+    local lock_age
+    lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
+    if [ "$lock_age" -gt 3600 ]; then
+      log_warn "Removing stale lock file (${lock_age}s old)"
+      rm -f "$LOCK_FILE"
+    else
+      log_error "Another setup is running (lock: $LOCK_FILE)"
+      log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
+      exit 1
+    fi
+  fi
+  echo $$ > "$LOCK_FILE"
+}
+
+_release_lock() {
+  rm -f "$LOCK_FILE"
+}
+
+# --- Error trap ---
+_on_error() {
+  log_error "Setup failed. See log: $LOG_FILE"
+  _release_lock
+  exit 1
+}
+
+# --- Dry run mode ---
+if [ "$DRY_RUN" = "true" ]; then
+  TOTAL_STEPS=6
+  log_divider
+  printf "\n  Droplet Edge Platform — Setup (DRY RUN)\n\n"
+  log_divider
+
+  log_step 1 $TOTAL_STEPS "Preflight checks"
+  log_info "  Would check: OS, architecture, disk (>= 8 GB), memory (>= 2 GB), internet"
+
+  log_step 2 $TOTAL_STEPS "Docker installation"
+  if [ "$SKIP_DOCKER" = "true" ]; then
+    log_info "  SKIPPED (--skip-docker)"
+  else
+    log_info "  Would install Docker Engine 25+ and Compose v2 if not present"
+    log_info "  Would add user '$USER' to docker group if needed"
+  fi
+
+  log_step 3 $TOTAL_STEPS "Secret generation"
+  if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
+    log_info "  SKIPPED (.env already exists)"
+  else
+    log_info "  Would generate: DEVICE_SECRET, POSTGRES_PASSWORD, REDIS_PASSWORD,"
+    log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD"
+    log_info "  Would write to: $REPO_ROOT/.env (chmod 600)"
+    log_info "  Would generate MQTT password file for Mosquitto"
+  fi
+
+  log_step 4 $TOTAL_STEPS "Build container images"
+  if [ "$SKIP_BUILD" = "true" ]; then
+    log_info "  SKIPPED (--skip-build)"
+  else
+    log_info "  Would pull 7 base images and build 3 app images"
+  fi
+
+  log_step 5 $TOTAL_STEPS "Start stack"
+  if [ "$SKIP_START" = "true" ]; then
+    log_info "  SKIPPED (--skip-start)"
+  else
+    log_info "  Would start: db, cache, broker, gateway, orchestrator, web-dashboard,"
+    log_info "               ai-gateway, nextcloud"
+    log_info "  Would wait for health checks"
+  fi
+
+  log_step 6 $TOTAL_STEPS "Verify"
+  log_info "  Would run ./scripts/verify.sh"
+
+  if [ "$INSTALL_SYSTEMD" = "true" ]; then
+    printf "\n"
+    log_info "  Would install systemd service: droplet.service"
+  fi
+
+  printf "\n"
+  log_divider
+  exit 0
+fi
+
+# =============================================================================
+# Main
+# =============================================================================
+main() {
+  trap _on_error ERR
+
+  _acquire_lock
+
+  local total_steps=6
+  [ "$SKIP_DOCKER" = "true" ] || true
+  [ "$SKIP_BUILD" = "true" ] || true
+  [ "$SKIP_START" = "true" ] || true
+
+  log_divider
+  printf "\n  ${_BOLD}Droplet Edge Platform — Setup${_RESET}\n\n"
+  log_divider
+
+  # --- Phase 1: Preflight ---
+  log_step 1 $total_steps "Preflight checks"
+  preflight_check
+
+  # --- Phase 2: Docker ---
+  log_step 2 $total_steps "Docker"
+  if [ "$SKIP_DOCKER" = "true" ]; then
+    log_info "Skipping Docker installation (--skip-docker)"
+    log_divider
+  else
+    install_docker
+    setup_docker_group
+  fi
+
+  # --- Phase 3: Secrets ---
+  log_step 3 $total_steps "Secrets"
+  generate_env
+
+  # --- Phase 4: Build ---
+  log_step 4 $total_steps "Build"
+  if [ "$SKIP_BUILD" = "true" ]; then
+    log_info "Skipping build (--skip-build)"
+    log_divider
+  else
+    prepare_and_build
+  fi
+
+  # --- Phase 5: Start ---
+  log_step 5 $total_steps "Start"
+  if [ "$SKIP_START" = "true" ]; then
+    log_info "Skipping start (--skip-start)"
+    log_divider
+  else
+    start_stack
+  fi
+
+  # --- Phase 6: Verify ---
+  log_step 6 $total_steps "Verify"
+  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
+    "$SCRIPT_DIR/verify.sh" || log_warn "Some verification checks failed — see output above"
+  else
+    log_info "Skipping verification (stack not started or verify.sh not found)"
+  fi
+
+  # --- Systemd (optional) ---
+  if [ "$INSTALL_SYSTEMD" = "true" ]; then
+    printf "\n"
+    log_info "Installing systemd service..."
+    install_systemd_service
+  fi
+
+  # --- Done ---
+  _release_lock
+
+  log_divider
+  printf "\n"
+  printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
+  printf "\n"
+  printf "  Dashboard:     ${_CYAN}http://localhost${_RESET}\n"
+  printf "  API:           ${_CYAN}http://localhost/api/health${_RESET}\n"
+  printf "  Nextcloud:     ${_CYAN}http://localhost:8080${_RESET}\n"
+  printf "\n"
+  printf "  First visit will redirect to the setup wizard to create\n"
+  printf "  your admin account.\n"
+  printf "\n"
+  printf "  Secrets stored in: ${_DIM}%s/.env${_RESET} (chmod 600)\n" "$REPO_ROOT"
+  printf "  Each secret is unique to this device.\n"
+
+  if [ "$DOCKER_GROUP_ADDED" = "true" ]; then
+    printf "\n"
+    printf "  ${_YELLOW}NOTE${_RESET}: You were added to the 'docker' group.\n"
+    printf "  Log out and back in (or run ${_BOLD}newgrp docker${_RESET}) to use\n"
+    printf "  docker commands without sudo.\n"
+  fi
+
+  printf "\n"
+  log_divider
+  printf "  Log file: ${_DIM}%s${_RESET}\n" "$LOG_FILE"
+  log_divider
+  printf "\n"
+}
+
+main "$@"

@@ -3,12 +3,14 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { setupAdmin } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { Droplets, ArrowRight, Check, User, Lock, Eye, EyeOff } from "lucide-react";
 
 type Step = "welcome" | "account" | "done";
 
 export default function SetupPage() {
   const router = useRouter();
+  const { completeSetup } = useAuth();
   const [step, setStep] = useState<Step>("welcome");
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -45,6 +47,7 @@ export default function SetupPage() {
     setIsSubmitting(true);
     try {
       await setupAdmin(username, password, displayName || undefined);
+      completeSetup();
       setStep("done");
     } catch (err: any) {
       setError(err.message || "Setup failed. Please try again.");

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import { createHash } from "node:crypto";
 import pino from "pino";
 import { config } from "../config.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
@@ -112,10 +113,6 @@ async function validateToken(token: string): Promise<AuthUser | null> {
 }
 
 function hashToken(token: string): string {
-  // Simple hash for cache key — not for security
-  let hash = 0;
-  for (let i = 0; i < token.length; i++) {
-    hash = ((hash << 5) - hash + token.charCodeAt(i)) | 0;
-  }
-  return hash.toString(36);
+  // SHA-256 truncated to 16 hex chars — collision-resistant cache key
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
 }

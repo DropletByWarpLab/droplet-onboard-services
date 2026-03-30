@@ -203,18 +203,56 @@ export async function ncListShares(
 // ── OCS User Provisioning API ──
 
 export async function ncCheckSetupRequired(): Promise<boolean> {
-  // During initial Nextcloud install, the OCS API isn't available yet.
-  // We check if Nextcloud is installed by hitting the status endpoint,
-  // then try to list users with the default admin creds.
+  // Check if Nextcloud is installed AND whether a non-default user exists.
+  // Setup is required until the owner creates their personal admin account
+  // via the setup wizard (POST /api/auth/setup).
   try {
+    // 1. Is Nextcloud reachable and installed?
     const statusResp = await fetch(`${config.NEXTCLOUD_URL}/status.php`, {
       headers: { Accept: "application/json" },
     });
     if (!statusResp.ok) return true; // Nextcloud not ready
     const status = await statusResp.json();
     if (!status.installed) return true; // Not installed yet
-    return false; // Nextcloud is installed — setup was already done
-  } catch {
+
+    // 2. Are there any non-default users? (i.e., has setup been completed?)
+    const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
+    const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+    const basicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
+
+    const usersResp = await fetch(
+      `${config.NEXTCLOUD_URL}/ocs/v1.php/cloud/users?format=json`,
+      {
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          "OCS-APIRequest": "true",
+          Accept: "application/json",
+        },
+        redirect: "error", // Fail on redirects (uninstalled Nextcloud returns 302 → HTML)
+      }
+    );
+
+    if (!usersResp.ok) {
+      logger.warn({ status: usersResp.status }, "Cannot list Nextcloud users during setup check");
+      return true;
+    }
+
+    const body = await usersResp.text();
+    let data: any;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      logger.warn("Nextcloud returned non-JSON response during setup check");
+      return true;
+    }
+
+    const users: string[] = data?.ocs?.data?.users || [];
+
+    // If only the default admin exists (or no users), setup is still required
+    const nonDefaultUsers = users.filter((u: string) => u !== adminUser);
+    return nonDefaultUsers.length === 0;
+  } catch (err) {
+    logger.debug({ err }, "Setup check failed — treating as setup required");
     return true; // Nextcloud unreachable — treat as needing setup
   }
 }
@@ -224,20 +262,38 @@ export async function ncInstallAndCreateAdmin(
   password: string,
   displayName?: string
 ): Promise<void> {
-  // Nextcloud auto-installs when first accessed with admin credentials set via env vars.
-  // However, since we removed the env vars, we use the Nextcloud CLI via the status check
-  // and the initial POST to create the admin.
-  // For our architecture, the Nextcloud container sets up with a default admin.
-  // We use OCS to create additional users or update the admin display name.
+  // Nextcloud must be installed before we can use the OCS API.
+  // The container creates a default admin account (NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD).
+  // We use OCS to create the user's personal admin account.
+  const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
+  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const adminBasicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
 
-  // First, check if Nextcloud is installed by using the default admin creds
+  // First verify Nextcloud is installed — OCS API returns HTML redirects when not installed
+  const statusResp = await fetch(`${config.NEXTCLOUD_URL}/status.php`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!statusResp.ok) {
+    throw new Error(`Nextcloud is not reachable: ${statusResp.status}`);
+  }
+  const status = await statusResp.json();
+  if (!status.installed) {
+    throw new Error(
+      "Nextcloud is not installed yet. Please wait for the initial setup to complete and try again."
+    );
+  }
+
+  // Verify OCS API is reachable with admin credentials
+  // Note: OCS v1 returns XML by default — use ?format=json
   const resp = await fetch(
-    ocsUrl("/ocs/v1.php/cloud/users"),
+    ocsUrl("/ocs/v1.php/cloud/users?format=json"),
     {
       headers: {
-        ...ocsHeaders(""),
-        Authorization: `Basic ${Buffer.from("admin:admin").toString("base64")}`,
+        Authorization: `Basic ${adminBasicAuth}`,
+        "OCS-APIRequest": "true",
+        Accept: "application/json",
       },
+      redirect: "error", // Fail on redirects instead of following to HTML page
     }
   );
 
@@ -245,46 +301,73 @@ export async function ncInstallAndCreateAdmin(
     throw new Error(`Cannot reach Nextcloud OCS API: ${resp.status}`);
   }
 
-  // Create the actual user
-  if (username !== "admin") {
-    const createResp = await fetch(ocsUrl("/ocs/v1.php/cloud/users"), {
+  const contentType = resp.headers.get("content-type") || "";
+  if (!contentType.includes("json") && !contentType.includes("xml")) {
+    // HTML response = Nextcloud not installed / redirect to setup
+    throw new Error(
+      "Nextcloud returned an unexpected response. It may still be initializing."
+    );
+  }
+
+  // Create the actual user (skip if username matches the default admin)
+  if (username !== adminUser) {
+    const createResp = await fetch(ocsUrl("/ocs/v1.php/cloud/users?format=json"), {
       method: "POST",
       headers: {
-        Authorization: `Basic ${Buffer.from("admin:admin").toString("base64")}`,
+        Authorization: `Basic ${adminBasicAuth}`,
         "OCS-APIRequest": "true",
         "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
       },
-      body: new URLSearchParams({
-        userid: username,
-        password,
-        displayName: displayName || username,
-        groups: JSON.stringify(["admin"]),
-      }),
+      redirect: "error",
+      body: new URLSearchParams([
+        ["userid", username],
+        ["password", password],
+        ["displayName", displayName || username],
+        ["groups[]", "admin"],
+      ]),
     });
 
-    if (!createResp.ok) {
-      const body = await createResp.text();
-      // Check if user already exists (status 102)
-      if (!body.includes("102")) {
-        throw new Error(`Failed to create user: ${createResp.status} ${body}`);
-      }
+    const createBody = await createResp.text();
+    let createData: any;
+    try {
+      createData = JSON.parse(createBody);
+    } catch {
+      throw new Error(`Nextcloud returned invalid response: ${createBody.substring(0, 200)}`);
+    }
+
+    const ocsStatus = createData?.ocs?.meta?.statuscode;
+    if (ocsStatus === 102) {
+      // User already exists — not an error
+      logger.info({ username }, "User already exists in Nextcloud");
+    } else if (ocsStatus !== 100) {
+      throw new Error(
+        `OCS error creating user: ${createData?.ocs?.meta?.message || `status ${ocsStatus}`}`
+      );
     }
   }
 
   // Update display name if provided
   if (displayName) {
-    await fetch(
-      ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`),
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Basic ${Buffer.from("admin:admin").toString("base64")}`,
-          "OCS-APIRequest": "true",
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({ key: "displayname", value: displayName }),
-      }
-    );
+    try {
+      await fetch(
+        ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}?format=json`),
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Basic ${adminBasicAuth}`,
+            "OCS-APIRequest": "true",
+            "Content-Type": "application/x-www-form-urlencoded",
+            Accept: "application/json",
+          },
+          redirect: "error",
+          body: new URLSearchParams({ key: "displayname", value: displayName }),
+        }
+      );
+    } catch (err) {
+      // Non-fatal — display name update is optional
+      logger.warn({ err, username }, "Failed to update display name");
+    }
   }
 }
 
