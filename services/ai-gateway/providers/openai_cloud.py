@@ -37,6 +37,11 @@ class OpenAICloudProvider(BaseProvider):
         litellm_messages = [{"role": m.role, "content": m.content} for m in messages]
         litellm_model = f"openai/{model}" if not model.startswith("openai/") else model
 
+        # Build optional params
+        extra = {}
+        if kwargs.get("tools"):
+            extra["tools"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in kwargs["tools"]]
+
         if not stream:
             response = await litellm.acompletion(
                 model=litellm_model,
@@ -44,6 +49,7 @@ class OpenAICloudProvider(BaseProvider):
                 api_key=self.api_key,
                 temperature=kwargs.get("temperature", 0.7),
                 max_tokens=kwargs.get("max_tokens", 4096),
+                **extra,
             )
             return response.model_dump()
 

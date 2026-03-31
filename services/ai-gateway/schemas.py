@@ -11,9 +11,33 @@ from pydantic import BaseModel, Field
 # --- Chat ---
 
 
+class ToolFunction(BaseModel):
+    name: str
+    description: str
+    parameters: dict = Field(default_factory=dict)
+
+
+class ToolDefinition(BaseModel):
+    type: Literal["function"] = "function"
+    function: ToolFunction
+
+
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str  # JSON string
+
+
+class ToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"] = "user"
-    content: str
+    role: Literal["system", "user", "assistant", "tool"] = "user"
+    content: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None  # for role="tool" messages
 
 
 class ChatRequest(BaseModel):
@@ -23,6 +47,7 @@ class ChatRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int | None = None
     provider: str | None = None  # explicit provider override
+    tools: list[ToolDefinition] | None = None
 
 
 class ChatChoice(BaseModel):

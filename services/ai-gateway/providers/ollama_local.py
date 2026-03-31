@@ -49,10 +49,16 @@ class OllamaLocalProvider(BaseProvider):
     ) -> dict | AsyncGenerator[str, None]:
         body = {
             "model": model,
-            "messages": [m.model_dump() for m in messages],
+            "messages": [m.model_dump(exclude_none=True) for m in messages],
             "stream": stream,
-            **{k: v for k, v in kwargs.items() if v is not None},
         }
+        # Pass through supported kwargs
+        for k in ("temperature", "max_tokens"):
+            if kwargs.get(k) is not None:
+                body[k] = kwargs[k]
+        # Pass tools if provided (Ollama supports OpenAI-compatible tool calling)
+        if kwargs.get("tools"):
+            body["tools"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in kwargs["tools"]]
 
         if not stream:
             resp = await self.client.post("/v1/chat/completions", json=body)

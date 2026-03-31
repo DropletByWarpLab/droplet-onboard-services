@@ -128,11 +128,13 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis-dev-password}@cache:6379
       - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
       - DEVICE_SECRET=${DEVICE_SECRET:-dev-secret-change-in-production}
+      - ORCHESTRATOR_URL=http://orchestrator:3000
     volumes:
       - aikeys:/data/keys
     depends_on:
       - cache
       - broker
+      - orchestrator
     restart: always
 
   # --- Home Assistant ---

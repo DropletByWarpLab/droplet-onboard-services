@@ -7,6 +7,7 @@ import type {
   SessionChatRequest,
   SessionDetail,
   SessionInfo,
+  StorageStats,
   SyncTargetInfo,
   AuthUser,
   ShareInfo,
@@ -94,6 +95,14 @@ export async function deleteUser(username: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+}
+
+// --- Storage ---
+
+export async function fetchStorage(): Promise<StorageStats> {
+  const res = await authFetch(`${BASE}/api/storage`);
+  if (!res.ok) throw new Error(`Failed to fetch storage: ${res.status}`);
+  return res.json();
 }
 
 // --- Health ---

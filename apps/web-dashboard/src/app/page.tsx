@@ -3,12 +3,15 @@
 import Link from "next/link";
 import { MessageSquare } from "lucide-react";
 import { StatusCard } from "@/components/StatusCard";
+import { StorageGauge } from "@/components/StorageGauge";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useModels } from "@/lib/hooks/useModels";
+import { useStorage } from "@/lib/hooks/useStorage";
 
 export default function DashboardPage() {
   const { device, health, isLoading } = useDevice();
   const { models } = useModels();
+  const { storage, isLoading: storageLoading } = useStorage();
 
   const localModels = models.filter((m) => m.provider === "ollama");
   const cloudModels = models.filter((m) => m.provider !== "ollama");
@@ -17,6 +20,14 @@ export default function DashboardPage() {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    const value = bytes / Math.pow(1024, i);
+    return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
   }
 
   return (
@@ -56,6 +67,37 @@ export default function DashboardPage() {
                 value={health ? formatUptime(health.uptime) : "—"}
                 subtitle={`v${health?.version ?? "0.1.0"}`}
               />
+            </div>
+          </section>
+
+          {/* Storage */}
+          <section className="mb-10">
+            <h2 className="type-title-3 text-label-primary mb-4">Storage</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <StorageGauge storage={storage} isLoading={storageLoading} />
+              <div className="flex flex-col gap-4">
+                <StatusCard
+                  title="Files Backend"
+                  value={storage ? "Nextcloud" : "Local"}
+                  subtitle="WebDAV storage"
+                  status="ok"
+                />
+                <StatusCard
+                  title="Used Space"
+                  value={storage && storage.total > 0
+                    ? `${Math.round(storage.percentage)}%`
+                    : "---"}
+                  subtitle={storage && storage.total > 0
+                    ? `${formatBytes(storage.available)} free`
+                    : "Checking..."}
+                  status={
+                    !storage ? "offline"
+                    : storage.percentage > 90 ? "error"
+                    : storage.percentage > 75 ? "warning"
+                    : "ok"
+                  }
+                />
+              </div>
             </div>
           </section>
 

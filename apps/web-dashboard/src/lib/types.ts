@@ -102,6 +102,15 @@ export interface ShareInfo {
   permissions?: number;
 }
 
+// --- Storage types ---
+
+export interface StorageStats {
+  used: number;       // bytes
+  total: number;      // bytes
+  available: number;  // bytes
+  percentage: number; // 0-100
+}
+
 // --- Health types ---
 
 export interface HealthResponse {

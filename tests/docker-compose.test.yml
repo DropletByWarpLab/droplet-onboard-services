@@ -31,12 +31,15 @@ services:
       context: ../services/ai-gateway
       dockerfile: Dockerfile
     environment:
-      - JETSON_OLLAMA_URL=http://fake-jetson:11434
+      - JETSON_OLLAMA_URL=http://ollama-mock:11434
       - DEVICE_SECRET=test-integration-secret
       - KEYS_DIR=/tmp/test-keys
     depends_on:
       - cache
       - broker
+    networks:
+      - default
+      - droplet-e2e
 
   api-server:
     build:
@@ -71,3 +74,8 @@ services:
     environment:
       - API_URL=http://api-server:3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
+
+networks:
+  droplet-e2e:
+    name: droplet-e2e
+    external: true

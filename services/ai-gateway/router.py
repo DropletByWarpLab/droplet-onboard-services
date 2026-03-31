@@ -1,8 +1,14 @@
-"""Routes inference requests to the correct provider (local Ollama, Anthropic, OpenAI)."""
+"""Routes inference requests to the correct provider (local Ollama, Anthropic, OpenAI).
+
+Supports tool calling: when the model returns tool_calls, the router executes
+them via the ToolExecutor and re-prompts the model with results, looping until
+the model produces a final text response (max 10 iterations).
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 
@@ -11,7 +17,8 @@ from providers.anthropic_cloud import AnthropicCloudProvider
 from providers.ollama_local import OllamaLocalProvider
 from providers.openai_cloud import OpenAICloudProvider
 from providers.base import BaseProvider
-from schemas import ChatRequest, ModelInfo
+from schemas import ChatMessage, ChatRequest, ModelInfo
+from tools.executor import execute_tool
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +80,89 @@ class ProviderRouter:
         return models
 
     async def chat(self, request: ChatRequest) -> dict | AsyncGenerator[str, None]:
-        """Route a chat request to the appropriate provider."""
+        """Route a chat request to the appropriate provider.
+
+        If tools are provided and the model returns tool_calls, executes them
+        and re-prompts until the model produces a final text response.
+        Tool calling only works in non-streaming mode.
+        """
         await self.refresh_keys()
         provider = self.resolve_provider(request.model, request.provider)
-        return await provider.chat(
-            messages=request.messages,
-            model=request.model,
-            stream=request.stream,
+
+        kwargs = dict(
             temperature=request.temperature,
             max_tokens=request.max_tokens,
         )
+        if request.tools:
+            kwargs["tools"] = request.tools
+
+        # If no tools or streaming, do a simple single call
+        if not request.tools or request.stream:
+            return await provider.chat(
+                messages=request.messages,
+                model=request.model,
+                stream=request.stream,
+                **kwargs,
+            )
+
+        # Tool calling loop (non-streaming only)
+        messages = list(request.messages)
+        max_iterations = 10
+
+        for iteration in range(max_iterations):
+            result = await provider.chat(
+                messages=messages,
+                model=request.model,
+                stream=False,
+                **kwargs,
+            )
+
+            # Check if the model wants to call tools
+            choice = result.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            tool_calls = message.get("tool_calls")
+
+            if not tool_calls:
+                # No tool calls — final response
+                return result
+
+            logger.info(
+                "Tool call iteration %d: %d tool(s) requested",
+                iteration + 1,
+                len(tool_calls),
+            )
+
+            # Append assistant message with tool calls to conversation
+            messages.append(ChatMessage(
+                role="assistant",
+                content=message.get("content"),
+                tool_calls=[
+                    {"id": tc["id"], "type": "function", "function": tc["function"]}
+                    for tc in tool_calls
+                ],
+            ))
+
+            # Execute each tool call and append results
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                try:
+                    tool_args = json.loads(func.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    tool_args = {}
+
+                logger.info("Executing tool: %s(%s)", tool_name, tool_args)
+                tool_result = await execute_tool(tool_name, tool_args)
+
+                messages.append(ChatMessage(
+                    role="tool",
+                    content=tool_result,
+                    tool_call_id=tc["id"],
+                ))
+
+        # Max iterations reached — return last result
+        logger.warning("Tool calling reached max iterations (%d)", max_iterations)
+        return result
 
     async def close(self):
         await self.ollama.close()

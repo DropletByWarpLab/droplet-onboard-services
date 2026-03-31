@@ -31,6 +31,7 @@ from schemas import (
     SessionUpdateRequest,
 )
 from sessions.store import SessionStore, create_session_store
+from tools import executor as tool_executor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
         await provider_router.close()
     if session_store:
         await session_store.close()
+    await tool_executor.close()
     logger.info("AI Gateway shut down")
 
 

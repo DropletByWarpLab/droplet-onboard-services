@@ -10,6 +10,7 @@ import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createSyncRouter } from "./routes/sync.js";
+import { createStorageRouter } from "./routes/storage.js";
 import { createAuthRouter } from "./routes/auth.js";
 
 export function createApp(prisma: PrismaClient) {
@@ -33,6 +34,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createLlmRouter());
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createSyncRouter(prisma));
+  app.use("/api", createStorageRouter());
 
   // Error handling
   app.use(errorHandler);
