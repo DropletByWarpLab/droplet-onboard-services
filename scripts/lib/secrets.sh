@@ -96,28 +96,49 @@ generate_env() {
 _generate_mosquitto_passwd() {
   local mqtt_password="$1"
   local mqtt_user="${MQTT_USER:-droplet}"
-  local passwd_file="$REPO_ROOT/docker/mosquitto_passwd"
+  local passwd_dir="$REPO_ROOT/docker/mosquitto_passwd_dir"
+  local passwd_file="$passwd_dir/mosquitto_passwd"
 
   log_info "Generating MQTT password file..."
 
-  # Use mosquitto_passwd from the Docker image to hash the password
-  # This avoids requiring mosquitto tools on the host
+  # Ensure the target directory exists (this is what docker-compose.yml mounts)
+  mkdir -p "$passwd_dir"
+
+  # Clean up any root-owned file from a previous failed run
+  if [ -f "$passwd_file" ] && [ ! -w "$passwd_file" ]; then
+    sudo rm -f "$passwd_file"
+  fi
+
+  # Write directly to the final mount location — no intermediate copy needed.
+  # Docker containers create files as root in bind mounts, so we fix ownership after.
   if run_docker run --rm \
-    -v "$REPO_ROOT/docker:/tmp/mqtt" \
+    -v "$passwd_dir:/tmp/mqtt" \
     eclipse-mosquitto:2 \
-    sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'" 2>/dev/null; then
+    sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'"; then
+    # Docker creates files as root — fix ownership (mandatory, fail loudly)
+    sudo chown "$(id -u):$(id -g)" "$passwd_file"
     chmod 600 "$passwd_file"
     log_success "MQTT password file generated"
   else
-    # Fallback: create a plaintext file that setup can warn about
+    # Fallback: create a plaintext file (no Docker needed)
     log_warn "Could not generate hashed MQTT password — using plaintext fallback"
     printf "%s:%s\n" "$mqtt_user" "$mqtt_password" > "$passwd_file"
     chmod 600 "$passwd_file"
+  fi
+
+  # Clean up stale intermediate file from old code path
+  if [ -f "$REPO_ROOT/docker/mosquitto_passwd" ]; then
+    rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || sudo rm -f "$REPO_ROOT/docker/mosquitto_passwd"
   fi
 }
 
 _write_mosquitto_conf() {
   local conf_file="$REPO_ROOT/docker/mosquitto.conf"
+
+  # Clean up root-owned file from a previous failed run
+  if [ -f "$conf_file" ] && [ ! -w "$conf_file" ]; then
+    sudo rm -f "$conf_file"
+  fi
 
   cat > "$conf_file" << 'MQTTCONF'
 listener 1883

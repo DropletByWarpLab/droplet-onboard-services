@@ -8,12 +8,8 @@ prepare_and_build() {
   # --- Ensure init scripts are executable ---
   chmod +x "$REPO_ROOT/docker/init-nextcloud-db.sh" 2>/dev/null || true
 
-  # --- Mount mosquitto password file if it exists ---
-  if [ -f "$REPO_ROOT/docker/mosquitto_passwd" ]; then
-    local passwd_dir="$REPO_ROOT/docker/mosquitto_passwd_dir"
-    mkdir -p "$passwd_dir"
-    cp "$REPO_ROOT/docker/mosquitto_passwd" "$passwd_dir/mosquitto_passwd"
-  fi
+  # --- Ensure mosquitto passwd dir exists for compose mount ---
+  mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
 
   # --- Pull base images (sequential for slow Pi connections) ---
   log_info "Pulling base container images..."
@@ -87,14 +83,8 @@ start_stack() {
     set +a
   fi
 
-  # --- Prepare mosquitto password directory mount ---
-  local passwd_dir="$REPO_ROOT/docker/mosquitto_passwd_dir"
-  if [ -f "$REPO_ROOT/docker/mosquitto_passwd" ]; then
-    mkdir -p "$passwd_dir"
-    cp "$REPO_ROOT/docker/mosquitto_passwd" "$passwd_dir/mosquitto_passwd"
-  else
-    mkdir -p "$passwd_dir"
-  fi
+  # --- Ensure mosquitto password directory exists for compose mount ---
+  mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
 
   # --- Start infrastructure first ---
   run_with_spinner "Starting database, cache, and broker" \

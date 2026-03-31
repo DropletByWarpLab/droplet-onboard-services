@@ -47,6 +47,12 @@ install_docker() {
   fi
 
   # --- Check Docker Compose v2 ---
+  if ! docker compose version >/dev/null 2>&1 && ! sudo docker compose version >/dev/null 2>&1; then
+    log_warn "Docker Compose plugin not included — installing separately..."
+    sudo apt-get update -qq >/dev/null 2>&1
+    sudo apt-get install -y -qq docker-compose-plugin >/dev/null 2>&1
+  fi
+
   if docker compose version >/dev/null 2>&1 || sudo docker compose version >/dev/null 2>&1; then
     local compose_version
     compose_version=$(docker compose version 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || \
@@ -72,6 +78,13 @@ install_docker() {
 }
 
 _do_install_docker() {
+  # Ensure curl is available (preflight may have flagged it missing)
+  if ! command -v curl >/dev/null 2>&1; then
+    log_info "Installing curl (required for Docker install)..."
+    sudo apt-get update -qq >/dev/null 2>&1
+    sudo apt-get install -y -qq curl >/dev/null 2>&1
+  fi
+
   local attempts=0
   local max_attempts=3
 
