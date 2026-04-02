@@ -17,6 +17,8 @@ export function useSmartHome() {
     data: grouped,
     error,
     isLoading,
+    isValidating,
+    mutate: mutateDevices,
   } = useSWR<SmartHomeGrouped>(DEVICES_KEY, fetchSmartHomeDevices, {
     refreshInterval: 4000,
   });
@@ -49,13 +51,20 @@ export function useSmartHome() {
       )
     : 0;
 
+  function refresh() {
+    mutateDevices();
+    mutate(DISCOVERED_KEY);
+  }
+
   return {
     grouped: grouped ?? null,
     discovered: discovered ?? [],
     totalDevices,
     isLoading,
+    isRefreshing: isValidating,
     error,
     command,
     accept,
+    refresh,
   };
 }

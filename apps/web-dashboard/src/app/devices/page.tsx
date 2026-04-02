@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Wifi } from "lucide-react";
+import { RefreshCw, Wifi } from "lucide-react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
@@ -10,7 +10,7 @@ import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
 import type { SmartHomeDevice } from "@/lib/types";
 
 export default function DevicesPage() {
-  const { grouped, discovered, totalDevices, isLoading, error, command } =
+  const { grouped, discovered, totalDevices, isLoading, isRefreshing, error, command, refresh } =
     useSmartHome();
   useSmartHomeEvents();
 
@@ -67,13 +67,26 @@ export default function DevicesPage() {
   return (
     <div className="p-6">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="type-large-title text-label-primary">Devices</h1>
-        <p className="type-subheadline text-label-tertiary mt-1">
-          {hasDevices
-            ? `${totalDevices} device${totalDevices !== 1 ? "s" : ""} connected`
-            : "No devices found"}
-        </p>
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="type-large-title text-label-primary">Devices</h1>
+          <p className="type-subheadline text-label-tertiary mt-1">
+            {hasDevices
+              ? `${totalDevices} device${totalDevices !== 1 ? "s" : ""} connected`
+              : "No devices found"}
+          </p>
+        </div>
+        <button
+          onClick={refresh}
+          disabled={isRefreshing}
+          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+        >
+          <RefreshCw
+            size={16}
+            className={isRefreshing ? "animate-spin" : ""}
+          />
+          <span className="type-subheadline">Refresh</span>
+        </button>
       </div>
 
       {/* Discovery banner */}

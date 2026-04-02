@@ -1,13 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { setupAdmin } from "@/lib/api";
+import { setupAdmin, loginUser, fetchSmartHomeDevices } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { ArrowRight, Check, User, Lock, Eye, EyeOff } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  Eye,
+  EyeOff,
+  Lightbulb,
+  Lock,
+  Radar,
+  ThermometerSun,
+  ToggleRight,
+  User,
+  Wifi,
+} from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
+import type { SmartHomeDevice, SmartHomeGrouped } from "@/lib/types";
 
-type Step = "welcome" | "account" | "done";
+type Step = "welcome" | "account" | "discovery" | "done";
+const STEPS: Step[] = ["welcome", "account", "discovery", "done"];
+
+const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
+  light: Lightbulb,
+  switch: ToggleRight,
+  climate: ThermometerSun,
+  sensor: Radar,
+};
 
 export default function SetupPage() {
   const router = useRouter();
@@ -20,6 +41,14 @@ export default function SetupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Discovery state
+  const [discoveredDevices, setDiscoveredDevices] = useState<SmartHomeDevice[]>([]);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanSeconds, setScanSeconds] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval>>();
+  const timerRef = useRef<ReturnType<typeof setInterval>>();
+  const seenIdsRef = useRef<Set<string>>(new Set());
 
   async function handleCreateAccount() {
     setError(null);
@@ -48,8 +77,10 @@ export default function SetupPage() {
     setIsSubmitting(true);
     try {
       await setupAdmin(username, password, displayName || undefined);
+      // Auto-login so we can call authenticated endpoints during discovery
+      await loginUser(username, password);
       completeSetup();
-      setStep("done");
+      setStep("discovery");
     } catch (err: any) {
       setError(err.message || "Setup failed. Please try again.");
     } finally {
@@ -57,18 +88,69 @@ export default function SetupPage() {
     }
   }
 
+  // --- Discovery polling ---
+  const startDiscovery = useCallback(() => {
+    setIsScanning(true);
+    setScanSeconds(0);
+    seenIdsRef.current.clear();
+    setDiscoveredDevices([]);
+
+    // Poll for devices every 3 seconds
+    pollRef.current = setInterval(async () => {
+      try {
+        const grouped = await fetchSmartHomeDevices();
+        const allDevices = flattenGrouped(grouped);
+        // Only add truly new devices (not seen before)
+        const newDevices: SmartHomeDevice[] = [];
+        for (const d of allDevices) {
+          if (!seenIdsRef.current.has(d.entityId)) {
+            seenIdsRef.current.add(d.entityId);
+            newDevices.push(d);
+          }
+        }
+        if (newDevices.length > 0) {
+          setDiscoveredDevices((prev) => [...prev, ...newDevices]);
+        }
+      } catch {
+        // HA may not be ready yet — keep polling
+      }
+    }, 3000);
+
+    // Count seconds for UX
+    timerRef.current = setInterval(() => {
+      setScanSeconds((s) => s + 1);
+    }, 1000);
+  }, []);
+
+  useEffect(() => {
+    if (step === "discovery") {
+      startDiscovery();
+    }
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [step, startDiscovery]);
+
+  function handleFinishDiscovery() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+    setIsScanning(false);
+    setStep("done");
+  }
+
   return (
     <div className="min-h-screen bg-surface-primary flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         {/* Progress indicator */}
         <div className="flex items-center justify-center gap-2 mb-8">
-          {["welcome", "account", "done"].map((s, i) => (
+          {STEPS.map((s, i) => (
             <div
               key={s}
               className={`h-1.5 rounded-full transition-all duration-300 ${
                 s === step
                   ? "w-8 bg-accent"
-                  : ["welcome", "account", "done"].indexOf(step) > i
+                  : STEPS.indexOf(step) > i
                   ? "w-4 bg-accent/40"
                   : "w-4 bg-separator"
               }`}
@@ -205,6 +287,103 @@ export default function SetupPage() {
           </div>
         )}
 
+        {/* Step: Device Discovery */}
+        {step === "discovery" && (
+          <div className="animate-in fade-in duration-300">
+            {/* Scanning header */}
+            <div className="text-center mb-8">
+              <div className="relative w-16 h-16 mx-auto mb-5">
+                <div className="absolute inset-0 rounded-full bg-accent/10 animate-scan-pulse" />
+                <div className="absolute inset-2 rounded-full bg-accent/20 animate-scan-pulse" style={{ animationDelay: "0.3s" }} />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Wifi size={28} className="text-accent" />
+                </div>
+              </div>
+
+              <h1 className="type-title-1 text-label-primary mb-2">
+                Discovering your devices
+              </h1>
+              <p className="type-subheadline text-label-tertiary">
+                {discoveredDevices.length === 0
+                  ? "Scanning your network for smart home devices..."
+                  : `${discoveredDevices.length} device${discoveredDevices.length !== 1 ? "s" : ""} found`}
+              </p>
+            </div>
+
+            {/* Discovered devices grid */}
+            <div className="space-y-2 mb-8 max-h-[320px] overflow-y-auto">
+              {discoveredDevices.map((device, index) => {
+                const Icon = CATEGORY_ICONS[device.category] || Wifi;
+                return (
+                  <div
+                    key={device.entityId}
+                    className="animate-device-appear flex items-center gap-3 dp-card !py-3"
+                    style={{ animationDelay: `${index * 80}ms` }}
+                  >
+                    <div className="w-9 h-9 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
+                      <Icon size={18} className="text-accent" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="type-subheadline text-label-primary truncate">
+                        {device.name}
+                      </p>
+                      <p className="type-caption-1 text-label-tertiary capitalize">
+                        {device.category.replace("_", " ")}
+                      </p>
+                    </div>
+                    <div className="w-2 h-2 rounded-full bg-system-green flex-shrink-0" />
+                  </div>
+                );
+              })}
+
+              {/* Scanning placeholder rows */}
+              {discoveredDevices.length === 0 && (
+                <div className="space-y-2">
+                  {[0, 1, 2].map((i) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-3 dp-card !py-3 opacity-30"
+                      style={{ animationDelay: `${i * 200}ms` }}
+                    >
+                      <div className="w-9 h-9 rounded-lg bg-surface-secondary animate-pulse" />
+                      <div className="flex-1 space-y-1.5">
+                        <div className="h-3 w-32 bg-surface-secondary rounded animate-pulse" />
+                        <div className="h-2.5 w-20 bg-surface-secondary rounded animate-pulse" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Scanning timer */}
+            {isScanning && (
+              <p className="type-caption-1 text-label-quaternary text-center mb-4">
+                Scanning... {scanSeconds}s
+              </p>
+            )}
+
+            {/* Actions */}
+            <div className="space-y-3">
+              <button
+                onClick={handleFinishDiscovery}
+                className={`dp-btn-primary w-full transition-all duration-300 ${
+                  discoveredDevices.length > 0 ? "opacity-100" : "opacity-60"
+                }`}
+              >
+                {discoveredDevices.length > 0 ? "Continue" : "Continue"}
+                <ArrowRight size={16} />
+              </button>
+              <button
+                onClick={handleFinishDiscovery}
+                className="w-full type-subheadline text-label-tertiary hover:text-label-secondary py-2 transition-colors"
+              >
+                Skip for now
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Step: Done */}
         {step === "done" && (
           <div className="text-center animate-in fade-in duration-300">
@@ -215,9 +394,19 @@ export default function SetupPage() {
             <h1 className="type-title-1 text-label-primary mb-3">
               You&apos;re all set!
             </h1>
-            <p className="type-body text-label-secondary mb-8">
-              Your Droplet is ready. Sign in with your new account to get started.
+            <p className="type-body text-label-secondary mb-2">
+              Your Droplet is ready.
             </p>
+            {discoveredDevices.length > 0 && (
+              <p className="type-subheadline text-label-tertiary mb-8">
+                {discoveredDevices.length} device{discoveredDevices.length !== 1 ? "s" : ""} connected and ready to control.
+              </p>
+            )}
+            {discoveredDevices.length === 0 && (
+              <p className="type-subheadline text-label-tertiary mb-8">
+                You can add smart home devices later from the Devices page.
+              </p>
+            )}
 
             <button
               onClick={() => router.push("/login")}
@@ -231,4 +420,18 @@ export default function SetupPage() {
       </div>
     </div>
   );
+}
+
+// --- Helpers ---
+
+function flattenGrouped(grouped: SmartHomeGrouped): SmartHomeDevice[] {
+  return [
+    ...grouped.lights,
+    ...grouped.switches,
+    ...grouped.climate,
+    ...grouped.sensors,
+    ...grouped.media,
+    ...grouped.covers,
+    ...grouped.other,
+  ];
 }
