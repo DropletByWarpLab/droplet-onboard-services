@@ -22,10 +22,10 @@
   /* Separator */
   --color-separator: rgba(60, 60, 67, 0.12);
 
-  /* Accent (brand teal) */
-  --color-accent: #0d9488;
-  --color-accent-hover: #0f766e;
-  --color-accent-subtle: rgba(13, 148, 136, 0.1);
+  /* Accent (indigo) */
+  --color-accent: #6366f1;
+  --color-accent-hover: #4f46e5;
+  --color-accent-subtle: rgba(99, 102, 241, 0.1);
 
   /* System status */
   --color-system-red: #ff3b30;
@@ -55,9 +55,9 @@
   --color-separator: rgba(84, 84, 88, 0.65);
 
   /* Accent (brighter for dark bg) */
-  --color-accent: #2dd4bf;
-  --color-accent-hover: #5eead4;
-  --color-accent-subtle: rgba(45, 212, 191, 0.15);
+  --color-accent: #818cf8;
+  --color-accent-hover: #a5b4fc;
+  --color-accent-subtle: rgba(129, 140, 248, 0.15);
 
   /* System status (dark variants) */
   --color-system-red: #ff453a;
@@ -194,6 +194,21 @@
     }
   }
 
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-slide-up {
+    animation: slide-up 0.2s ease-out;
+  }
+
   .animate-shimmer {
     background: linear-gradient(
       90deg,
@@ -204,6 +219,84 @@
     background-size: 200% 100%;
     animation: shimmer 1.5s ease-in-out infinite;
   }
+}
+
+/* ============================================================
+   Chat Markdown
+   ============================================================ */
+
+.chat-markdown p {
+  margin-bottom: 0.5em;
+}
+.chat-markdown p:last-child {
+  margin-bottom: 0;
+}
+.chat-markdown pre {
+  background: var(--color-surface-primary);
+  border-radius: 8px;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+  font-size: 0.875em;
+  line-height: 1.5;
+}
+.chat-markdown code:not(pre code) {
+  background: var(--color-surface-primary);
+  border-radius: 4px;
+  padding: 0.15em 0.35em;
+  font-size: 0.9em;
+}
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.chat-markdown ul {
+  list-style: disc;
+}
+.chat-markdown ol {
+  list-style: decimal;
+}
+.chat-markdown li {
+  margin-bottom: 0.2em;
+}
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3 {
+  font-weight: 600;
+  margin: 0.6em 0 0.3em;
+}
+.chat-markdown h1 {
+  font-size: 1.25em;
+}
+.chat-markdown h2 {
+  font-size: 1.1em;
+}
+.chat-markdown h3 {
+  font-size: 1em;
+}
+.chat-markdown blockquote {
+  border-left: 3px solid var(--color-separator);
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  opacity: 0.85;
+}
+.chat-markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.9em;
+}
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid var(--color-separator);
+  padding: 0.35em 0.7em;
+}
+.chat-markdown th {
+  font-weight: 600;
+}
+.chat-markdown a {
+  color: var(--color-accent);
+  text-decoration: underline;
 }
 
 /* ============================================================

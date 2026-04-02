@@ -4,7 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { setupAdmin } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { Droplets, ArrowRight, Check, User, Lock, Eye, EyeOff } from "lucide-react";
+import { ArrowRight, Check, User, Lock, Eye, EyeOff } from "lucide-react";
+import { DropletMark } from "@/components/DropletMark";
 
 type Step = "welcome" | "account" | "done";
 
@@ -78,8 +79,8 @@ export default function SetupPage() {
         {/* Step: Welcome */}
         {step === "welcome" && (
           <div className="text-center animate-in fade-in duration-300">
-            <div className="w-20 h-20 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-6">
-              <Droplets size={40} className="text-accent" />
+            <div className="flex items-center justify-center mx-auto mb-6">
+              <DropletMark size={48} className="text-accent" />
             </div>
 
             <h1 className="type-large-title text-label-primary mb-3">

@@ -26,14 +26,16 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
     return () => clearTimeout(timeout);
   }, [percentage]);
 
-  // Arc geometry
-  const size = 260;
+  // Arc geometry — padded viewBox so nothing is clipped
+  const pad = 20;
+  const innerSize = 220;
+  const size = innerSize + pad * 2;
   const cx = size / 2;
   const cy = size / 2;
-  const radius = 95;
+  const radius = 90;
   const strokeWidth = 12;
 
-  // 270-degree arc: 7 o'clock (225°) sweeping clockwise to 5 o'clock (495°/135°)
+  // 270-degree arc: 7 o'clock (225°) → 5 o'clock (135°) going clockwise through 12 o'clock
   const startAngle = 225;
   const sweepAngle = 270;
 
@@ -54,11 +56,14 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
     return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} 1 ${end.x} ${end.y}`;
   }
 
-  // Color zone bands
+  // Full background arc path
+  const fullArcPath = describeArc(radius, startAngle, startAngle + sweepAngle);
+
+  // Color zone bands — rendered as colored arcs behind the fill
   const zones = [
-    { from: 0, to: 75, color: "var(--color-system-green)" },
-    { from: 75, to: 90, color: "var(--color-system-orange)" },
-    { from: 90, to: 100, color: "var(--color-system-red)" },
+    { from: 0, to: 75, color: "#30d158" },   // green
+    { from: 75, to: 90, color: "#ff9f0a" },   // orange
+    { from: 90, to: 100, color: "#ff453a" },   // red
   ];
 
   // Tick marks
@@ -80,20 +85,22 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
 
   // Fill color based on usage
   const fillColor =
-    animatedPct > 90
-      ? "var(--color-system-red)"
-      : animatedPct > 75
-      ? "var(--color-system-orange)"
-      : "var(--color-system-green)";
+    animatedPct > 90 ? "#ff453a" : animatedPct > 75 ? "#ff9f0a" : "#30d158";
 
-  // Compute the fill arc end angle (draw from start to fill%)
-  const fillEndAngle = startAngle + (sweepAngle * Math.min(animatedPct, 100)) / 100;
-  // Need at least a tiny arc to render
+  // Compute the fill arc end angle
+  const fillEndAngle =
+    startAngle + (sweepAngle * Math.min(animatedPct, 100)) / 100;
   const showFill = animatedPct > 0.5;
+
+  // SVG rendered height — crop bottom gap of the arc
+  const svgHeight = size * 0.85;
 
   if (isLoading) {
     return (
-      <div className="dp-card p-8 flex items-center justify-center" style={{ minHeight: 340 }}>
+      <div
+        className="dp-card p-8 flex items-center justify-center"
+        style={{ minHeight: 340 }}
+      >
         <div className="w-[240px] h-[240px] rounded-full animate-shimmer" />
       </div>
     );
@@ -101,21 +108,38 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
 
   return (
     <div className="dp-card p-8">
-      <div className="flex items-center gap-2 mb-6">
-        <HardDrive size={16} className="text-label-secondary" />
-        <h3 className="type-footnote text-label-secondary uppercase tracking-wide">
+      <div className="flex items-center gap-2 mb-4">
+        <HardDrive size={16} style={{ color: "rgba(235,235,245,0.6)" }} />
+        <h3
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: "rgba(235,235,245,0.6)",
+            textTransform: "uppercase",
+            letterSpacing: 1.2,
+          }}
+        >
           Storage
         </h3>
       </div>
 
-      <div className="flex flex-col items-center">
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
         <svg
           width={size}
-          height={size * 0.72}
-          viewBox={`0 ${size * 0.08} ${size} ${size * 0.72}`}
-          className="overflow-visible"
+          height={svgHeight}
+          viewBox={`0 0 ${size} ${svgHeight}`}
+          overflow="visible"
         >
-          {/* Zone bands (green / yellow / red background arcs) */}
+          {/* Subtle background track */}
+          <path
+            d={fullArcPath}
+            fill="none"
+            stroke="rgba(255,255,255,0.08)"
+            strokeWidth={strokeWidth}
+            strokeLinecap="round"
+          />
+
+          {/* Color zone bands */}
           {zones.map((zone, idx) => {
             const zoneStart = startAngle + (sweepAngle * zone.from) / 100;
             const zoneEnd = startAngle + (sweepAngle * zone.to) / 100;
@@ -125,14 +149,14 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
                 d={describeArc(radius, zoneStart, zoneEnd)}
                 fill="none"
                 stroke={zone.color}
-                strokeWidth={3}
+                strokeWidth={5}
                 strokeLinecap="round"
-                opacity={0.2}
+                opacity={0.3}
               />
             );
           })}
 
-          {/* Fill arc — drawn from start angle to the computed fill angle */}
+          {/* Fill arc */}
           {showFill && (
             <path
               d={describeArc(radius, startAngle, fillEndAngle)}
@@ -140,9 +164,6 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
               stroke={fillColor}
               strokeWidth={strokeWidth}
               strokeLinecap="round"
-              style={{
-                transition: "d 1s cubic-bezier(0.34, 1.56, 0.64, 1), stroke 0.5s ease",
-              }}
             />
           )}
 
@@ -154,7 +175,7 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
               y1={t.y1}
               x2={t.x2}
               y2={t.y2}
-              stroke="var(--color-label-quaternary)"
+              stroke={t.isMajor ? "rgba(235,235,245,0.4)" : "rgba(235,235,245,0.2)"}
               strokeWidth={t.isMajor ? 2 : 1}
               strokeLinecap="round"
             />
@@ -166,7 +187,7 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
             y={cy - 2}
             textAnchor="middle"
             dominantBaseline="central"
-            className="fill-label-primary"
+            fill="rgba(255,255,255,0.92)"
             style={{
               fontSize: 44,
               fontWeight: 700,
@@ -181,7 +202,7 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
             y={cy + 28}
             textAnchor="middle"
             dominantBaseline="central"
-            className="fill-label-tertiary"
+            fill="rgba(235,235,245,0.4)"
             style={{
               fontSize: 11,
               fontWeight: 500,
@@ -193,15 +214,23 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
           </text>
         </svg>
 
-        {/* Storage details — with clear separation from the gauge */}
+        {/* Storage details */}
         {storage && storage.total > 0 && (
-          <div className="text-center mt-6 pt-4 border-t border-separator w-full">
+          <div
+            style={{
+              textAlign: "center",
+              marginTop: 20,
+              paddingTop: 16,
+              borderTop: "1px solid rgba(255,255,255,0.08)",
+              width: "100%",
+            }}
+          >
             <p className="type-subheadline text-label-primary">
               {formatBytes(storage.used)}{" "}
               <span className="text-label-tertiary">of</span>{" "}
               {formatBytes(storage.total)}
             </p>
-            <p className="type-caption-1 text-label-tertiary mt-1">
+            <p className="type-caption-1 text-label-tertiary" style={{ marginTop: 4 }}>
               {formatBytes(storage.available)} available
             </p>
           </div>

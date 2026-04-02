@@ -1,0 +1,118 @@
+"use client";
+
+import { useState } from "react";
+import { Wifi } from "lucide-react";
+import { useSmartHome } from "@/lib/hooks/useSmartHome";
+import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
+import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
+import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
+import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
+import type { SmartHomeDevice } from "@/lib/types";
+
+export default function DevicesPage() {
+  const { grouped, discovered, totalDevices, isLoading, error, command } =
+    useSmartHome();
+  useSmartHomeEvents();
+
+  const [selectedDevice, setSelectedDevice] = useState<SmartHomeDevice | null>(
+    null
+  );
+
+  if (isLoading) {
+    return (
+      <div className="p-6 space-y-6">
+        <div className="space-y-2">
+          <div className="h-8 w-48 bg-surface-secondary rounded animate-pulse" />
+          <div className="h-4 w-32 bg-surface-secondary rounded animate-pulse" />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="dp-card h-24 animate-pulse bg-surface-secondary" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-6">
+        <div className="dp-card text-center py-12">
+          <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
+          <h2 className="type-title-3 text-label-primary mb-1">
+            Home Assistant Not Connected
+          </h2>
+          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+            Make sure Home Assistant is running and configured with a long-lived access token in the environment.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const groups = grouped
+    ? [
+        { title: "Lights", devices: grouped.lights },
+        { title: "Switches", devices: grouped.switches },
+        { title: "Climate", devices: grouped.climate },
+        { title: "Sensors", devices: grouped.sensors },
+        { title: "Media", devices: grouped.media },
+        { title: "Covers", devices: grouped.covers },
+        { title: "Other", devices: grouped.other },
+      ]
+    : [];
+
+  const hasDevices = totalDevices > 0;
+
+  return (
+    <div className="p-6">
+      {/* Header */}
+      <div className="mb-6">
+        <h1 className="type-large-title text-label-primary">Devices</h1>
+        <p className="type-subheadline text-label-tertiary mt-1">
+          {hasDevices
+            ? `${totalDevices} device${totalDevices !== 1 ? "s" : ""} connected`
+            : "No devices found"}
+        </p>
+      </div>
+
+      {/* Discovery banner */}
+      <DiscoveryBanner count={discovered.length} />
+
+      {/* Empty state */}
+      {!hasDevices && (
+        <div className="dp-card text-center py-12">
+          <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
+          <h2 className="type-title-3 text-label-primary mb-1">
+            No Devices Yet
+          </h2>
+          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+            Smart home devices on your network will be automatically discovered and appear here. Supports Matter, Zigbee, Z-Wave, and WiFi devices.
+          </p>
+        </div>
+      )}
+
+      {/* Device groups */}
+      <div className="space-y-10">
+        {groups.map((group) => (
+          <DeviceGroup
+            key={group.title}
+            title={group.title}
+            devices={group.devices}
+            onCommand={command}
+            onDeviceClick={setSelectedDevice}
+          />
+        ))}
+      </div>
+
+      {/* Detail panel */}
+      {selectedDevice && (
+        <DeviceDetailPanel
+          device={selectedDevice}
+          onCommand={command}
+          onClose={() => setSelectedDevice(null)}
+        />
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="64" viewBox="0 0 280 64" fill="none">
+  <!-- Faceted polygon drop mark -->
+  <!-- Left face: full indigo -->
+  <polygon points="26,6 44,34 36,54 16,54 8,34" fill="#6366f1"/>
+  <!-- Right highlight face: lighter indigo -->
+  <polygon points="26,6 44,34 26,42" fill="#818cf8"/>
+  <!-- Wordmark -->
+  <text x="60" y="43" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="28" font-weight="700" fill="#1a1a2e" letter-spacing="-0.8">Droplet</text>
+</svg>

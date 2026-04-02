@@ -4,7 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
-import { Droplets } from "lucide-react";
+import { DropletMark } from "@/components/DropletMark";
 
 const PUBLIC_PATHS = ["/setup", "/login"];
 
@@ -42,8 +42,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return (
       <div className="min-h-screen bg-surface-primary flex items-center justify-center">
         <div className="text-center">
-          <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center mx-auto mb-3 animate-pulse">
-            <Droplets size={24} className="text-accent" />
+          <div className="flex items-center justify-center mx-auto mb-3 animate-pulse">
+            <DropletMark size={32} className="text-accent" />
           </div>
           <p className="type-subheadline text-label-tertiary">Loading...</p>
         </div>

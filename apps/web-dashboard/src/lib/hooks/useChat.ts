@@ -3,14 +3,15 @@
 import { useState, useCallback, useRef } from "react";
 import {
   sendChat,
-  createSession,
   sendSessionChat,
+  createSession,
   getSession,
   listSessions,
   deleteSession as apiDeleteSession,
   updateSessionTitle,
 } from "../api";
 import type { ChatMessage, SessionInfo } from "../types";
+
 
 let messageCounter = 0;
 
@@ -83,7 +84,7 @@ export function useChat() {
   );
 
   const sendMessage = useCallback(
-    async (content: string, model: string) => {
+    async (content: string, model: string, systemPrompt?: string) => {
       const userMessage: ChatMessage = {
         id: createId(),
         role: "user",
@@ -113,6 +114,7 @@ export function useChat() {
           const session = await createSession({
             model,
             title: content.slice(0, 80),
+            system_prompt: systemPrompt || null,
           });
           setSessionId(session.id);
           sessionIdRef.current = session.id;
@@ -184,7 +186,7 @@ export function useChat() {
         setIsStreaming(false);
       }
     },
-    [messages, refreshSessions]
+    [refreshSessions]
   );
 
   const clearMessages = useCallback(() => {

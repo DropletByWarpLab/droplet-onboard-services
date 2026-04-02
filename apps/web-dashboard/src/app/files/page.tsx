@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { FolderPlus, Link as LinkIcon, X, Copy, Check, Eye } from "lucide-react";
+import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
 import { FileListItem } from "@/components/FileListItem";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
@@ -13,13 +14,15 @@ import {
   getDownloadUrl,
   createShareLink,
 } from "@/lib/api";
-import { getAuthHeaders } from "@/lib/auth";
+import { authFetch } from "@/lib/auth";
 import type { FileEntryInfo } from "@/lib/types";
 
 export default function FilesPage() {
   const [currentPath, setCurrentPath] = useState("/");
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const { toast } = useToast();
   const [error, setError] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -36,40 +39,39 @@ export default function FilesPage() {
     async (fileList: FileList) => {
       setIsUploading(true);
       setError(null);
-      setUploadProgress(`Uploading ${fileList.length} file${fileList.length > 1 ? "s" : ""}...`);
+      setUploadPercent(0);
+      const count = fileList.length;
+      setUploadProgress(`Uploading ${count} file${count > 1 ? "s" : ""}...`);
       try {
-        await uploadFiles(currentPath, fileList);
+        await uploadFiles(currentPath, fileList, (percent) => {
+          setUploadPercent(percent);
+        });
         await refresh();
         setUploadProgress(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Upload failed");
+        toast(err instanceof Error ? err.message : "Upload failed");
         setUploadProgress(null);
       } finally {
         setIsUploading(false);
+        setUploadPercent(0);
       }
     },
     [currentPath, refresh]
   );
 
   const handleDownload = (filePath: string) => {
-    // For authenticated downloads, we need to include the token
     const url = getDownloadUrl(filePath);
-    const headers = getAuthHeaders();
-    if (headers.Authorization) {
-      // Use fetch + blob for authenticated download
-      fetch(url, { headers })
-        .then((res) => res.blob())
-        .then((blob) => {
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = filePath.split("/").pop() || "download";
-          a.click();
-          URL.revokeObjectURL(a.href);
-        })
-        .catch(() => setError("Download failed"));
-    } else {
-      window.open(url, "_blank");
-    }
+    // Cookie is sent automatically with same-origin credentials
+    authFetch(url)
+      .then((res) => res.blob())
+      .then((blob) => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filePath.split("/").pop() || "download";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      })
+      .catch(() => toast("Download failed"));
   };
 
   const handleDelete = async (filePath: string) => {
@@ -79,7 +81,7 @@ export default function FilesPage() {
       if (selectedFile?.path === filePath) setSelectedFile(null);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed");
+      toast(err instanceof Error ? err.message : "Delete failed");
     }
   };
 
@@ -95,7 +97,7 @@ export default function FilesPage() {
       setShowNewFolder(false);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create folder");
+      toast(err instanceof Error ? err.message : "Failed to create folder");
     }
   };
 
@@ -105,7 +107,7 @@ export default function FilesPage() {
       setShareUrl(share.url);
       setCopied(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create share link");
+      toast(err instanceof Error ? err.message : "Failed to create share link");
     }
   };
 
@@ -133,7 +135,7 @@ export default function FilesPage() {
 
       // Fetch text content
       const url = getDownloadUrl(file.path);
-      fetch(url, { headers: getAuthHeaders() })
+      authFetch(url)
         .then((res) => res.text())
         .then((text) => setPreviewContent(text.slice(0, 10000)))
         .catch(() => setPreviewContent("Failed to load preview"));
@@ -217,17 +219,23 @@ export default function FilesPage() {
 
       {/* Status messages */}
       {uploadProgress && (
-        <div className="mb-4 p-3 bg-accent-subtle border border-accent/20 rounded type-footnote text-accent flex items-center gap-2">
-          <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
-          {uploadProgress}
+        <div className="mb-4 p-3 bg-accent-subtle border border-accent/20 rounded type-footnote text-accent">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+            {uploadProgress} {uploadPercent > 0 && `${uploadPercent}%`}
+          </div>
+          <div className="h-1.5 bg-accent/15 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-accent rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${uploadPercent}%` }}
+            />
+          </div>
         </div>
       )}
       {error && (
         <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
           <span>{error}</span>
-          <button onClick={() => setError(null)} className="ml-2 hover:opacity-70">
-            <X size={14} />
-          </button>
+          <button onClick={() => setError(null)} className="ml-2 hover:opacity-70"><X size={14} /></button>
         </div>
       )}
 
@@ -251,9 +259,9 @@ export default function FilesPage() {
                 </div>
               ) : files.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-48 text-label-tertiary">
-                  <p className="type-subheadline">This folder is empty</p>
-                  <p className="type-caption-1 mt-1">
-                    Upload files or create a new folder to get started
+                  <p className="type-subheadline mb-1">This folder is empty</p>
+                  <p className="type-caption-1 text-label-quaternary">
+                    Drag &amp; drop files here, or click <strong>Upload</strong> above
                   </p>
                 </div>
               ) : (

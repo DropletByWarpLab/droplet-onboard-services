@@ -129,5 +129,15 @@ export interface HealthResponse {
     db: boolean;
     redis: boolean;
     aiGateway: boolean;
+    homeAssistant: boolean;
   };
 }
+
+// --- Smart Home (re-export) ---
+export type {
+  SmartHomeCategory,
+  SmartHomeDevice,
+  SmartHomeGrouped,
+  SmartHomeCommand,
+  DiscoveredDevice,
+} from "./smart-home.js";

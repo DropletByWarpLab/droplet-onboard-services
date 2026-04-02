@@ -1,30 +1,28 @@
 import type {
   ChatRequest,
   DeviceInfo,
+  DiscoveredDevice,
   FileEntryInfo,
   HealthResponse,
   ModelsResponse,
   SessionChatRequest,
   SessionDetail,
   SessionInfo,
+  SmartHomeDevice,
+  SmartHomeGrouped,
   StorageStats,
   SyncTargetInfo,
   AuthUser,
   ShareInfo,
 } from "./types";
-import { getAuthHeaders } from "./auth";
+import { authFetch } from "./auth";
 
 const BASE = "";
-
-function authFetch(url: string, init?: RequestInit): Promise<Response> {
-  const headers = { ...getAuthHeaders(), ...init?.headers };
-  return fetch(url, { ...init, headers });
-}
 
 // --- Auth ---
 
 export async function checkSetupRequired(): Promise<boolean> {
-  const res = await fetch(`${BASE}/api/auth/setup`);
+  const res = await authFetch(`${BASE}/api/auth/setup`);
   if (!res.ok) return true;
   const data = await res.json();
   return data.setupRequired;
@@ -35,7 +33,7 @@ export async function setupAdmin(
   password: string,
   displayName?: string
 ): Promise<void> {
-  const res = await fetch(`${BASE}/api/auth/setup`, {
+  const res = await authFetch(`${BASE}/api/auth/setup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password, displayName }),
@@ -49,8 +47,8 @@ export async function setupAdmin(
 export async function loginUser(
   username: string,
   password: string
-): Promise<{ token: string; user: AuthUser }> {
-  const res = await fetch(`${BASE}/api/auth/login`, {
+): Promise<{ user: AuthUser }> {
+  const res = await authFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -117,6 +115,52 @@ export async function fetchDevices(): Promise<DeviceInfo[]> {
   const res = await authFetch(`${BASE}/api/devices`);
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
+}
+
+// --- Smart Home ---
+
+export async function fetchSmartHomeDevices(): Promise<SmartHomeGrouped> {
+  const res = await authFetch(`${BASE}/api/devices/smart-home`);
+  if (!res.ok) throw new Error(`Failed to fetch smart home devices: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSmartHomeDevice(entityId: string): Promise<SmartHomeDevice> {
+  const res = await authFetch(
+    `${BASE}/api/devices/smart-home/${encodeURIComponent(entityId)}`
+  );
+  if (!res.ok) throw new Error(`Failed to fetch device: ${res.status}`);
+  return res.json();
+}
+
+export async function sendSmartHomeCommand(
+  entityId: string,
+  service: string,
+  data?: Record<string, unknown>
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/devices/smart-home/${encodeURIComponent(entityId)}/command`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service, data }),
+    }
+  );
+  if (!res.ok) throw new Error(`Failed to send command: ${res.status}`);
+}
+
+export async function fetchDiscoveredDevices(): Promise<DiscoveredDevice[]> {
+  const res = await authFetch(`${BASE}/api/devices/smart-home/discovered`);
+  if (!res.ok) throw new Error(`Failed to fetch discovered: ${res.status}`);
+  return res.json();
+}
+
+export async function acceptDiscoveredDevice(flowId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/devices/smart-home/discovered/${flowId}/accept`,
+    { method: "POST" }
+  );
+  if (!res.ok) throw new Error(`Failed to accept device: ${res.status}`);
 }
 
 // --- Models ---
@@ -244,12 +288,40 @@ export function getDownloadUrl(path: string): string {
 
 export async function uploadFiles(
   path: string,
-  files: FileList | File[]
+  files: FileList | File[],
+  onProgress?: (percent: number) => void
 ): Promise<void> {
   const formData = new FormData();
   for (const file of files) {
     formData.append("files", file);
   }
+
+  if (onProgress) {
+    // Use XMLHttpRequest for progress events
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${BASE}/api/files/upload?path=${encodeURIComponent(path)}`);
+      xhr.withCredentials = true;
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          reject(new Error(`Upload failed: ${xhr.responseText}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Upload failed: network error"));
+      xhr.send(formData);
+    });
+  }
+
   const res = await authFetch(
     `${BASE}/api/files/upload?path=${encodeURIComponent(path)}`,
     { method: "POST", body: formData }

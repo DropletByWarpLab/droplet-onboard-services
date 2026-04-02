@@ -90,6 +90,9 @@ generate_env() {
   # --- Write authenticated mosquitto.conf ---
   _write_mosquitto_conf
 
+  # --- Generate TLS certificate for HTTPS ---
+  _generate_tls_cert
+
   log_divider
 }
 
@@ -148,4 +151,58 @@ persistence false
 MQTTCONF
 
   log_success "Mosquitto configured with authentication"
+}
+
+_generate_tls_cert() {
+  local cert_dir="$REPO_ROOT/docker/certs"
+  local cert_file="$cert_dir/droplet.crt"
+  local key_file="$cert_dir/droplet.key"
+
+  # Skip if cert already exists and is still valid
+  if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
+    if openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
+      log_success "TLS certificate already exists and is valid — skipping"
+      return 0
+    fi
+    log_warn "TLS certificate expired or invalid — regenerating"
+  fi
+
+  log_info "Generating self-signed TLS certificate (valid 10 years)..."
+  mkdir -p "$cert_dir"
+
+  # Collect Subject Alternative Names: localhost + all local IPv4 addresses
+  local san="DNS:localhost"
+  # Add the hostname
+  local hn
+  hn=$(hostname 2>/dev/null || echo "droplet")
+  san="$san,DNS:$hn,DNS:${hn}.local"
+
+  # Add all non-loopback IPv4 addresses
+  local ip
+  for ip in $(ip -4 addr show scope global 2>/dev/null \
+              | grep -oP 'inet \K[\d.]+' || \
+              ifconfig 2>/dev/null \
+              | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+              | grep -v '^127\.'); do
+    san="$san,IP:$ip"
+  done
+  # Always include loopback
+  san="$san,IP:127.0.0.1"
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -days 3650 \
+    -keyout "$key_file" \
+    -out "$cert_file" \
+    -subj "/CN=Droplet Edge Device" \
+    -addext "subjectAltName=$san" \
+    2>/dev/null
+
+  chmod 600 "$key_file"
+  chmod 644 "$cert_file"
+
+  log_success "TLS certificate generated:"
+  log_info "  Cert: $cert_file"
+  log_info "  Key:  $key_file"
+  log_info "  SANs: $san"
 }

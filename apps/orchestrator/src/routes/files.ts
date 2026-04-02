@@ -28,6 +28,7 @@ import {
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
+import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import type { FileEntryInfo } from "../types/index.js";
 
 const logger = pino({ name: "files-route" });
@@ -41,8 +42,11 @@ const upload = multer({
   limits: { fileSize: config.MAX_UPLOAD_SIZE_MB * 1024 * 1024 },
 });
 
-/** Extract Bearer token from request. */
+/** Extract session token from cookie (browser) or Authorization header (API). */
 function getToken(req: Request): string {
+  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
+  if (cookieToken) return cookieToken;
+
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) return "";
   return header.slice(7);

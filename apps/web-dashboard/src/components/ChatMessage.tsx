@@ -1,3 +1,6 @@
+import { memo } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Bot, User } from "lucide-react";
 import type { ChatMessage as ChatMessageType } from "@/lib/types";
 
@@ -6,7 +9,10 @@ interface ChatMessageProps {
   isStreaming?: boolean;
 }
 
-export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
+export const ChatMessage = memo(function ChatMessage({
+  message,
+  isStreaming,
+}: ChatMessageProps) {
   const isUser = message.role === "user";
 
   return (
@@ -28,13 +34,19 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
               : "bg-surface-tertiary text-label-primary rounded-[20px] rounded-tl-[6px]"
           }`}
       >
-        <p className="whitespace-pre-wrap">
-          {message.content}
-          {isStreaming && !isUser && (
-            <span className="inline-block w-[2px] h-[18px] ml-0.5 -mb-[3px] bg-accent animate-pulse rounded-full" />
-          )}
-        </p>
+        {isUser ? (
+          <p className="whitespace-pre-wrap">{message.content}</p>
+        ) : (
+          <div className="chat-markdown">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {message.content}
+            </ReactMarkdown>
+            {isStreaming && (
+              <span className="inline-block w-[2px] h-[18px] ml-0.5 -mb-[3px] bg-accent animate-pulse rounded-full" />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
-}
+});

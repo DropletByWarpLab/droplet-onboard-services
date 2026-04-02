@@ -23,8 +23,17 @@ declare global {
 const TOKEN_CACHE_PREFIX = "auth:token:";
 const TOKEN_CACHE_TTL = 300; // 5 minutes
 
+// ── Cookie configuration ──
+export const SESSION_COOKIE_NAME = "droplet_session";
+export const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
 /**
- * Auth middleware that validates Bearer tokens against Nextcloud's OCS API.
+ * Auth middleware that validates tokens against Nextcloud's OCS API.
+ *
+ * Token resolution order:
+ *   1. `droplet_session` HTTP-only cookie  (browser sessions)
+ *   2. `Authorization: Bearer <token>`     (API clients)
+ *
  * Controlled by AUTH_ENABLED env var — when false, all requests pass through.
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
@@ -42,19 +51,24 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
+  // Resolve token: cookie first, then Authorization header
+  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Missing or invalid Authorization header" });
+  const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const token = cookieToken || headerToken;
+
+  if (!token) {
+    res.status(401).json({ error: "Missing or invalid authentication" });
     return;
   }
-
-  const rawToken = authHeader.slice(7);
-  // Support basic:xxx fallback tokens from our login flow
-  const token = rawToken.startsWith("basic:") ? rawToken : rawToken;
 
   validateToken(token)
     .then((user) => {
       if (!user) {
+        // Clear stale cookie if present
+        if (cookieToken) {
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+        }
         res.status(401).json({ error: "Invalid or expired token" });
         return;
       }

@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { Droplets, Lock, User, Eye, EyeOff } from "lucide-react";
+import { Lock, User, Eye, EyeOff } from "lucide-react";
+import { DropletMark } from "@/components/DropletMark";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -37,8 +38,8 @@ export default function LoginPage() {
     <div className="min-h-screen bg-surface-primary flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-4">
-            <Droplets size={32} className="text-accent" />
+          <div className="flex items-center justify-center mx-auto mb-4">
+            <DropletMark size={40} className="text-accent" />
           </div>
           <h1 className="type-title-1 text-label-primary">Sign in</h1>
           <p className="type-subheadline text-label-secondary mt-1">

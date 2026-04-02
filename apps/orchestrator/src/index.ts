@@ -6,6 +6,7 @@ import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initFileService } from "./services/file.service.js";
+import { initSmartHomeService } from "./services/smart-home.service.js";
 
 const logger = pino({ name: "api-server" });
 
@@ -32,6 +33,14 @@ async function main() {
     await connectMqtt();
   } catch (err) {
     logger.warn("MQTT broker unavailable");
+  }
+
+  // Connect Home Assistant (non-fatal if unavailable)
+  try {
+    await initSmartHomeService();
+    logger.info("Connected to Home Assistant");
+  } catch (err) {
+    logger.warn("Home Assistant unavailable, smart home features disabled");
   }
 
   // Start Express

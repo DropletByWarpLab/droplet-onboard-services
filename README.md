@@ -1,6 +1,15 @@
-# Droplet — Edge Platform
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset=".github/logo.svg">
+    <img alt="Droplet" src=".github/logo.svg" height="48">
+  </picture>
+</p>
 
-Control-plane monorepo for the Droplet edge AI appliance. Runs on the ARM SoC and provides the orchestration layer, web dashboard, AI routing, file management, and file sync daemon for the full appliance stack.
+<p align="center">
+  Control-plane monorepo for the Droplet edge AI appliance.<br>
+  Orchestration, web dashboard, AI routing, file management, and file sync — all on-device.
+</p>
 
 ![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)

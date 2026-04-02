@@ -8,28 +8,32 @@ import {
   Trash2,
   PanelLeftClose,
   PanelLeft,
+  Settings2,
+  ChevronDown,
 } from "lucide-react";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
-import {
-  listSessions,
-  createSession,
-  getSession,
-  deleteSession,
-  sendSessionChat,
-} from "@/lib/api";
-import type { SessionInfo, SessionMessageInfo } from "@/lib/types";
 
 export default function ChatPage() {
-  const { messages, isStreaming, sendMessage, clearMessages, setMessages } = useChat();
+  const {
+    messages,
+    isStreaming,
+    sendMessage,
+    clearMessages,
+    sessionId,
+    sessions,
+    refreshSessions,
+    loadSession,
+    deleteSession,
+  } = useChat();
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-select the first available model
@@ -40,19 +44,10 @@ export default function ChatPage() {
     }
   }, [models, selectedModel]);
 
-  // Load sessions
+  // Load sessions on mount
   useEffect(() => {
-    loadSessions();
-  }, []);
-
-  async function loadSessions() {
-    try {
-      const data = await listSessions(20, 0);
-      setSessions(data.sessions || []);
-    } catch {
-      // Non-fatal — sessions API might not be available
-    }
-  }
+    refreshSessions();
+  }, [refreshSessions]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -60,78 +55,23 @@ export default function ChatPage() {
   }, [messages]);
 
   const handleSend = useCallback(
-    async (content: string) => {
+    (content: string) => {
       if (!selectedModel) return;
-
-      if (activeSessionId) {
-        // Send via session API for persistence
-        sendMessage(content, selectedModel);
-        // Also persist to session in background
-        try {
-          await sendSessionChat(activeSessionId, { message: content, stream: false });
-        } catch {
-          // Non-fatal — still sent via direct chat
-        }
-      } else {
-        sendMessage(content, selectedModel);
-      }
+      sendMessage(content, selectedModel, systemPrompt || undefined);
     },
-    [selectedModel, activeSessionId, sendMessage]
+    [selectedModel, sendMessage, systemPrompt]
   );
 
   const handleNewChat = useCallback(() => {
     clearMessages();
-    setActiveSessionId(null);
   }, [clearMessages]);
 
-  const handleCreateSession = useCallback(async () => {
-    if (!selectedModel) return;
-    try {
-      const session = await createSession({ model: selectedModel });
-      setSessions((prev) => [session, ...prev]);
-      setActiveSessionId(session.id);
-      clearMessages();
-    } catch {
-      // Fallback to non-session chat
-      handleNewChat();
-    }
-  }, [selectedModel, clearMessages, handleNewChat]);
-
   const handleSelectSession = useCallback(
-    async (session: SessionInfo) => {
-      setActiveSessionId(session.id);
+    (session: { id: string; model: string }) => {
       setSelectedModel(session.model);
-      try {
-        const detail = await getSession(session.id);
-        const restored = (detail.messages || []).map(
-          (m: SessionMessageInfo, i: number) => ({
-            id: `restored-${i}`,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          })
-        );
-        setMessages(restored);
-      } catch {
-        clearMessages();
-      }
+      loadSession(session.id);
     },
-    [clearMessages, setMessages]
-  );
-
-  const handleDeleteSession = useCallback(
-    async (sessionId: string) => {
-      try {
-        await deleteSession(sessionId);
-        setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-        if (activeSessionId === sessionId) {
-          setActiveSessionId(null);
-          clearMessages();
-        }
-      } catch {
-        // ignore
-      }
-    },
-    [activeSessionId, clearMessages]
+    [loadSession]
   );
 
   return (
@@ -142,9 +82,9 @@ export default function ChatPage() {
           <div className="flex items-center justify-between p-3 border-b border-separator">
             <h2 className="type-headline text-label-primary">Chats</h2>
             <button
-              onClick={handleCreateSession}
+              onClick={handleNewChat}
               className="p-1.5 rounded-sm text-accent hover:bg-accent-subtle transition-colors"
-              title="New session"
+              title="New chat"
             >
               <Plus size={18} />
             </button>
@@ -160,7 +100,7 @@ export default function ChatPage() {
                 <div
                   key={session.id}
                   className={`group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors
-                    ${activeSessionId === session.id ? "bg-accent-subtle" : "hover:bg-surface-tertiary"}`}
+                    ${sessionId === session.id ? "bg-accent-subtle" : "hover:bg-surface-tertiary"}`}
                   onClick={() => handleSelectSession(session)}
                 >
                   <MessageSquare size={14} className="text-label-tertiary flex-shrink-0" />
@@ -175,7 +115,7 @@ export default function ChatPage() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleDeleteSession(session.id);
+                      deleteSession(session.id);
                     }}
                     className="p-1 rounded opacity-0 group-hover:opacity-100 text-label-tertiary hover:text-system-red transition-all"
                   >
@@ -201,27 +141,87 @@ export default function ChatPage() {
             </button>
             <ModelSelector value={selectedModel} onChange={setSelectedModel} />
           </div>
-          <button
-            onClick={handleNewChat}
-            disabled={messages.length === 0}
-            className="flex items-center gap-1.5 type-subheadline text-accent
-              hover:text-accent-hover disabled:text-label-quaternary
-              disabled:cursor-not-allowed transition-colors duration-200 ease-smooth"
-          >
-            <RotateCcw size={14} />
-            New chat
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowSystemPrompt(!showSystemPrompt)}
+              className={`p-1.5 rounded-sm transition-colors ${
+                systemPrompt
+                  ? "text-accent bg-accent-subtle"
+                  : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+              }`}
+              title="System prompt"
+            >
+              <Settings2 size={16} />
+            </button>
+            <button
+              onClick={handleNewChat}
+              disabled={messages.length === 0}
+              className="flex items-center gap-1.5 type-subheadline text-accent
+                hover:text-accent-hover disabled:text-label-quaternary
+                disabled:cursor-not-allowed transition-colors duration-200 ease-smooth"
+            >
+              <RotateCcw size={14} />
+              New chat
+            </button>
+          </div>
         </header>
+
+        {/* System prompt */}
+        {showSystemPrompt && (
+          <div className="px-4 py-3 border-b border-separator bg-surface-secondary">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="type-caption-1 text-label-tertiary uppercase tracking-wider">
+                System Prompt
+              </label>
+              {systemPrompt && (
+                <button
+                  onClick={() => setSystemPrompt("")}
+                  className="type-caption-1 text-accent hover:text-accent-hover"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <textarea
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              placeholder="e.g. You are a helpful cooking assistant..."
+              rows={2}
+              className="dp-input type-footnote resize-none"
+            />
+          </div>
+        )}
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-label-tertiary">
               <MessageSquare size={40} strokeWidth={1} className="mb-3 text-label-quaternary" />
-              <p className="type-title-3 text-label-secondary mb-1">No messages yet</p>
-              <p className="type-subheadline">
-                Select a model and start chatting with your Droplet AI.
+              <p className="type-title-3 text-label-secondary mb-1">Start a conversation</p>
+              <p className="type-subheadline mb-6">
+                {selectedModel
+                  ? "Ask anything — your Droplet AI is ready."
+                  : "Select a model above to get started."}
               </p>
+              {selectedModel && (
+                <div className="flex flex-wrap justify-center gap-2 max-w-md">
+                  {[
+                    "Summarize a document for me",
+                    "Help me write a script",
+                    "Explain how this device works",
+                  ].map((prompt) => (
+                    <button
+                      key={prompt}
+                      onClick={() => handleSend(prompt)}
+                      className="px-3.5 py-2 type-footnote bg-surface-tertiary text-label-secondary
+                        rounded-full border border-separator hover:border-accent/40 hover:text-accent
+                        transition-colors"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {messages.map((msg, idx) => (

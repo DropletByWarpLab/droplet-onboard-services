@@ -12,6 +12,7 @@ import {
   ncListUsers,
 } from "../services/nextcloud.client.js";
 import { cacheDel } from "../services/cache.service.js";
+import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS } from "../middleware/auth.js";
 
 const logger = pino({ name: "auth-route" });
 
@@ -32,7 +33,23 @@ const createUserSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
 });
 
-export function createAuthRouter(): Router {
+/**
+ * Resolve the session token from cookie (browser) or Authorization header (API client).
+ */
+function resolveToken(req: import("express").Request): string | null {
+  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
+  if (cookieToken) return cookieToken;
+
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
+
+  return null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Public auth routes — mounted BEFORE the auth middleware
+// ────────────────────────────────────────────────────────────────
+export function createPublicAuthRouter(): Router {
   const router = Router();
 
   // ── Check if initial setup is required ──
@@ -66,7 +83,7 @@ export function createAuthRouter(): Router {
     }
   });
 
-  // ── Login: get app password token ──
+  // ── Login: validate credentials, set session cookie ──
   router.post("/auth/login", async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
@@ -83,35 +100,43 @@ export function createAuthRouter(): Router {
 
       // Fetch user details with the new token
       const tokenForAuth = result.token.startsWith("basic:")
-        ? result.token // pass through for basic auth
+        ? result.token
         : result.token;
 
       const user = await ncGetCurrentUser(tokenForAuth);
 
+      // Set HTTP-only session cookie.
+      // Secure flag is set when the request arrived over HTTPS (via nginx TLS).
+      const isHttps =
+        req.secure || req.headers["x-forwarded-proto"] === "https";
+
+      res.cookie(SESSION_COOKIE_NAME, result.token, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/",
+        maxAge: SESSION_MAX_AGE_MS,
+      });
+
+      // Only return user info — the token is in the HTTP-only cookie,
+      // never exposed to JavaScript.
       res.json({
-        token: result.token,
-        user: user || { id: result.loginName, displayName: result.loginName, email: null },
+        user: user || { id: result.loginName, username: result.loginName, displayName: result.loginName },
       });
     } catch (err) {
       next(err);
     }
   });
 
-  // ── Logout: revoke app password ──
-  router.post("/auth/logout", async (req, res, next) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (authHeader?.startsWith("Bearer ")) {
-        const token = authHeader.slice(7);
-        await ncDeleteAppPassword(token);
-        // Clear token from cache
-        await cacheDel(`auth:token:*`);
-      }
-      res.json({ status: "ok" });
-    } catch (err) {
-      next(err);
-    }
-  });
+  return router;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Protected auth routes — mounted AFTER the auth middleware
+// so req.user is populated by the middleware.
+// ────────────────────────────────────────────────────────────────
+export function createProtectedAuthRouter(): Router {
+  const router = Router();
 
   // ── Get current user info ──
   router.get("/auth/me", async (req, res, next) => {
@@ -131,16 +156,34 @@ export function createAuthRouter(): Router {
     }
   });
 
+  // ── Logout: revoke token + clear cookie ──
+  router.post("/auth/logout", async (req, res, next) => {
+    try {
+      const token = resolveToken(req);
+
+      if (token) {
+        await ncDeleteAppPassword(token);
+        await cacheDel(`auth:token:*`);
+      }
+
+      // Clear the session cookie
+      res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+
+      res.json({ status: "ok" });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── List users (admin only) ──
   router.get("/auth/users", async (req, res, next) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
+      const token = resolveToken(req);
+      if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
       }
 
-      const token = authHeader.slice(7);
       const users = await ncListUsers(token);
       res.json({ users });
     } catch (err: any) {
@@ -161,13 +204,12 @@ export function createAuthRouter(): Router {
         return;
       }
 
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
+      const token = resolveToken(req);
+      if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
       }
 
-      const token = authHeader.slice(7);
       await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
 
       res.status(201).json({ status: "ok", username: parsed.data.username });
@@ -183,13 +225,12 @@ export function createAuthRouter(): Router {
   // ── Delete user (admin only) ──
   router.delete("/auth/users/:username", async (req, res, next) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
+      const token = resolveToken(req);
+      if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
       }
 
-      const token = authHeader.slice(7);
       await ncDeleteUser(token, req.params.username);
 
       res.json({ status: "deleted", username: req.params.username });
@@ -198,5 +239,16 @@ export function createAuthRouter(): Router {
     }
   });
 
+  return router;
+}
+
+/** @deprecated Use createPublicAuthRouter() + createProtectedAuthRouter() instead */
+export function createAuthRouter(): Router {
+  // Backward-compatible single router for any code still using the old API.
+  // Combines both public and protected routes (but /auth/me will only work
+  // if authMiddleware runs before this router — see app.ts).
+  const router = Router();
+  router.use(createPublicAuthRouter());
+  router.use(createProtectedAuthRouter());
   return router;
 }

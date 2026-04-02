@@ -1,4 +1,10 @@
-# Droplet Edge Platform — Setup Scripts
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../.github/logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="../.github/logo.svg">
+  <img alt="Droplet" src="../.github/logo.svg" height="36">
+</picture>
+
+# Setup Scripts
 
 ## Quick start
 

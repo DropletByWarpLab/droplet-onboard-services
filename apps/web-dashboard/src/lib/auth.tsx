@@ -17,7 +17,6 @@ export interface AuthUser {
 
 interface AuthContextValue {
   user: AuthUser | null;
-  token: string | null;
   isLoading: boolean;
   setupRequired: boolean | null;
   login: (username: string, password: string) => Promise<void>;
@@ -27,23 +26,25 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const TOKEN_KEY = "droplet-auth-token";
 const USER_KEY = "droplet-auth-user";
 
-export function getStoredToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-export function getAuthHeaders(): Record<string, string> {
-  const token = getStoredToken();
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
+/**
+ * Credential-aware fetch wrapper.
+ *
+ * All API requests include `credentials: "same-origin"` so the browser
+ * automatically attaches the `droplet_session` HTTP-only cookie set by
+ * the orchestrator on login.  No token is stored in JavaScript-accessible
+ * storage, eliminating the XSS attack surface for session tokens.
+ */
+export function authFetch(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    credentials: "same-origin",
+  });
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
 
@@ -58,28 +59,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setSetupRequired(data.setupRequired);
         }
 
-        // Restore session from localStorage
-        const storedToken = localStorage.getItem(TOKEN_KEY);
-        const storedUser = localStorage.getItem(USER_KEY);
+        // Try to restore session — the HTTP-only cookie is sent automatically.
+        // We call /api/auth/me; if the cookie is valid the server returns user info.
+        const meRes = await authFetch("/api/auth/me");
 
-        if (storedToken && storedUser) {
-          // Validate the token is still good
-          const meRes = await fetch("/api/auth/me", {
-            headers: { Authorization: `Bearer ${storedToken}` },
-          });
-
-          if (meRes.ok) {
-            const userData = await meRes.json();
-            setToken(storedToken);
-            setUser(userData);
-          } else {
-            // Token expired — clear storage
-            localStorage.removeItem(TOKEN_KEY);
+        if (meRes.ok) {
+          const userData: AuthUser = await meRes.json();
+          setUser(userData);
+          // Cache user profile for fast hydration on next visit
+          localStorage.setItem(USER_KEY, JSON.stringify(userData));
+        } else {
+          // Cookie absent or expired — clear stale local cache
+          localStorage.removeItem(USER_KEY);
+        }
+      } catch {
+        // API unreachable — try local cache for optimistic display
+        const cached = localStorage.getItem(USER_KEY);
+        if (cached) {
+          try {
+            setUser(JSON.parse(cached));
+          } catch {
             localStorage.removeItem(USER_KEY);
           }
         }
-      } catch {
-        // API unreachable — leave state as unauthenticated
       } finally {
         setIsLoading(false);
       }
@@ -92,6 +94,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const res = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ username, password }),
     });
 
@@ -101,28 +104,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const data = await res.json();
-    localStorage.setItem(TOKEN_KEY, data.token);
+    // The server sets the HTTP-only cookie — we only store the user profile
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
-    setToken(data.token);
     setUser(data.user);
     setSetupRequired(false);
   }, []);
 
   const logout = useCallback(async () => {
     try {
-      const storedToken = localStorage.getItem(TOKEN_KEY);
-      if (storedToken) {
-        await fetch("/api/auth/logout", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${storedToken}` },
-        });
-      }
+      await authFetch("/api/auth/logout", { method: "POST" });
     } catch {
-      // ignore
+      // ignore — cookie will be cleared server-side; we clean up locally regardless
     }
-    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
-    setToken(null);
     setUser(null);
   }, []);
 
@@ -132,7 +126,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, token, isLoading, setupRequired, login, logout, completeSetup }}
+      value={{ user, isLoading, setupRequired, login, logout, completeSetup }}
     >
       {children}
     </AuthContext.Provider>
@@ -143,4 +137,16 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
+}
+
+// ── Legacy exports (kept for backward compatibility during migration) ──
+
+/** @deprecated Use authFetch() instead — tokens are now in HTTP-only cookies */
+export function getStoredToken(): string | null {
+  return null;
+}
+
+/** @deprecated Use authFetch() instead — tokens are now in HTTP-only cookies */
+export function getAuthHeaders(): Record<string, string> {
+  return {};
 }

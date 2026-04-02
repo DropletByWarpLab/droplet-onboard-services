@@ -3,18 +3,20 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Droplets,
   FolderOpen,
+  Home,
   LayoutDashboard,
   LogOut,
   MessageSquare,
   Settings,
 } from "lucide-react";
+import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { useAuth } from "@/lib/auth";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/devices", label: "Devices", icon: Home },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/chat", label: "Chat", icon: MessageSquare },
   { href: "/settings", label: "Settings", icon: Settings },
@@ -54,7 +56,7 @@ export function Sidebar() {
       >
         {/* Logo */}
         <div className="flex items-center gap-2.5 px-5 h-14">
-          <Droplets size={22} className="text-accent" />
+          <DropletMark size={22} className="text-accent" />
           <span className="type-headline text-label-primary">Droplet</span>
         </div>
 

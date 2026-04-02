@@ -20,6 +20,10 @@ const envSchema = z.object({
   STORAGE_BACKEND: z.enum(["legacy", "nextcloud"]).default("legacy"),
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
   AUTH_ENABLED: z.coerce.boolean().default(false),
+
+  // --- Home Assistant ---
+  HOMEASSISTANT_URL: z.string().default("http://localhost:8123"),
+  HOMEASSISTANT_TOKEN: z.string().default(""),
 });
 
 export const config = envSchema.parse(process.env);
