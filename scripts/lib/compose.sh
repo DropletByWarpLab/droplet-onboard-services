@@ -3,6 +3,7 @@
 # Source this file; do not execute directly.
 
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+COMPOSE_ENV_FILE="$REPO_ROOT/.env"
 
 prepare_and_build() {
   # --- Ensure init scripts are executable ---
@@ -10,14 +11,6 @@ prepare_and_build() {
 
   # --- Ensure mosquitto passwd dir exists for compose mount ---
   mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
-
-  # --- Source .env for variable substitution during build ---
-  if [ -f "$REPO_ROOT/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$REPO_ROOT/.env"
-    set +a
-  fi
 
   # --- Pull base images (sequential for slow Pi connections) ---
   log_info "Pulling base container images..."
@@ -56,21 +49,21 @@ prepare_and_build() {
   # --- Build application images ---
   log_info "Building application containers..."
   if ! run_with_spinner "Building orchestrator" \
-    run_docker_compose -f "$COMPOSE_FILE" build orchestrator; then
+    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" build orchestrator; then
     log_error "Failed to build orchestrator"
     _suggest_build_fix
     return 1
   fi
 
   if ! run_with_spinner "Building web-dashboard" \
-    run_docker_compose -f "$COMPOSE_FILE" build web-dashboard; then
+    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" build web-dashboard; then
     log_error "Failed to build web-dashboard"
     _suggest_build_fix
     return 1
   fi
 
   if ! run_with_spinner "Building ai-gateway" \
-    run_docker_compose -f "$COMPOSE_FILE" build ai-gateway; then
+    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" build ai-gateway; then
     log_error "Failed to build ai-gateway"
     _suggest_build_fix
     return 1
@@ -96,13 +89,13 @@ start_stack() {
 
   # --- Start infrastructure first ---
   run_with_spinner "Starting database, cache, and broker" \
-    run_docker_compose -f "$COMPOSE_FILE" up -d db cache broker
+    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" up -d db cache broker
 
   # --- Wait for Postgres to be healthy ---
   log_info "Waiting for PostgreSQL to be ready..."
   local retries=30
   while [ $retries -gt 0 ]; do
-    if run_docker_compose -f "$COMPOSE_FILE" exec -T db pg_isready -U "${POSTGRES_USER:-droplet}" >/dev/null 2>&1; then
+    if run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db pg_isready -U "${POSTGRES_USER:-droplet}" >/dev/null 2>&1; then
       log_success "PostgreSQL is ready"
       break
     fi
@@ -117,24 +110,24 @@ start_stack() {
 
   # --- Ensure Nextcloud database exists (init script only runs on fresh volumes) ---
   log_info "Ensuring Nextcloud database exists..."
-  run_docker_compose -f "$COMPOSE_FILE" exec -T db \
+  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db \
     psql -U "${POSTGRES_USER:-droplet}" -tc \
     "SELECT 1 FROM pg_database WHERE datname = 'nextcloud'" 2>/dev/null | grep -q 1 || \
-  run_docker_compose -f "$COMPOSE_FILE" exec -T db \
+  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db \
     psql -U "${POSTGRES_USER:-droplet}" -c \
     "CREATE DATABASE nextcloud OWNER ${POSTGRES_USER:-droplet}" 2>/dev/null
   log_success "Nextcloud database ready"
 
   # --- Start all remaining services ---
   run_with_spinner "Starting all services" \
-    run_docker_compose -f "$COMPOSE_FILE" up -d
+    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" up -d
 
   # --- Wait for services to stabilize ---
   log_info "Waiting for services to start..."
   local wait_retries=60
   while [ $wait_retries -gt 0 ]; do
     local running
-    running=$(run_docker_compose -f "$COMPOSE_FILE" ps --status running --format json 2>/dev/null | wc -l || echo 0)
+    running=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" ps --status running --format json 2>/dev/null | wc -l || echo 0)
     # Expect at least 7 services: db, cache, broker, gateway, orchestrator, web-dashboard, ai-gateway
     if [ "$running" -ge 7 ] 2>/dev/null; then
       break

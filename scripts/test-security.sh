@@ -63,26 +63,34 @@ for var in $SECRET_VARS; do
 done
 
 # =============================================================================
-# Test 3: .env is sourced before docker compose build in compose.sh
+# Test 3: All docker compose calls use --env-file
 # =============================================================================
-# Both prepare_and_build() and start_stack() must source .env before invoking
-# docker compose, so that ${VAR:?} substitutions can resolve.
+# Docker Compose must receive --env-file explicitly because the sudo fallback
+# in run_docker_compose() strips shell environment variables (env_reset).
+# Relying on `set -a; . .env; set +a` alone is insufficient.
 
-# Use awk to extract function bodies (portable across macOS and Linux)
-build_fn=$(awk '/^prepare_and_build\(\)/,/^start_stack\(\)/' "$COMPOSE_SH")
+# Every run_docker_compose call in compose.sh must include --env-file
+compose_calls=$(grep -n 'run_docker_compose' "$COMPOSE_SH" || true)
+missing_env_file=false
 
-if echo "$build_fn" | grep -q 'REPO_ROOT/\.env'; then
-  pass "compose.sh: prepare_and_build() sources .env before build"
-else
-  fail "compose.sh: prepare_and_build() does NOT source .env — docker compose build will fail"
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  if ! echo "$line" | grep -q '\-\-env-file'; then
+    lineno=$(echo "$line" | cut -d: -f1)
+    fail "compose.sh line $lineno: run_docker_compose missing --env-file"
+    missing_env_file=true
+  fi
+done <<< "$compose_calls"
+
+if [ "$missing_env_file" = false ]; then
+  pass "compose.sh: all run_docker_compose calls include --env-file"
 fi
 
-start_fn=$(awk '/^start_stack\(\)/,/^_suggest_build_fix\(\)/' "$COMPOSE_SH")
-
-if echo "$start_fn" | grep -q 'REPO_ROOT/\.env'; then
-  pass "compose.sh: start_stack() sources .env before start"
+# Verify COMPOSE_ENV_FILE is defined pointing to .env
+if grep -q 'COMPOSE_ENV_FILE=.*\.env' "$COMPOSE_SH"; then
+  pass "compose.sh: COMPOSE_ENV_FILE is defined"
 else
-  fail "compose.sh: start_stack() does NOT source .env — docker compose up will fail"
+  fail "compose.sh: COMPOSE_ENV_FILE is not defined"
 fi
 
 # =============================================================================
