@@ -7,6 +7,10 @@ import { connectMqtt } from "./services/mqtt.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initFileService } from "./services/file.service.js";
 import { initSmartHomeService } from "./services/smart-home.service.js";
+import {
+  initDeviceRegistration,
+  shutdownDeviceRegistration,
+} from "./services/device-registration.service.js";
 
 const logger = pino({ name: "api-server" });
 
@@ -19,6 +23,9 @@ async function main() {
   // Initialize services
   initDeviceService(prisma);
   initFileService(prisma);
+
+  // Start periodic device self-registration (detects hostname, IP, hardware)
+  await initDeviceRegistration(prisma);
 
   // Connect Redis (non-fatal if unavailable)
   try {
@@ -52,6 +59,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info("Shutting down...");
+    shutdownDeviceRegistration();
     await prisma.$disconnect();
     process.exit(0);
   };
