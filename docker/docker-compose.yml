@@ -46,9 +46,9 @@ services:
       - path: ../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-droplet}@db:5432/${POSTGRES_DB:-droplet}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis-dev-password}@cache:6379
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@db:5432/${POSTGRES_DB:-droplet}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@cache:6379
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - HOMEASSISTANT_URL=http://homeassistant:8123
       - HOMEASSISTANT_TOKEN=${HOMEASSISTANT_TOKEN:-}
@@ -57,7 +57,7 @@ services:
       - STORAGE_BACKEND=${STORAGE_BACKEND:-nextcloud}
       - NEXTCLOUD_URL=http://nextcloud:80
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
-      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
     volumes:
       - filedata:/data/files
@@ -77,11 +77,11 @@ services:
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
       - POSTGRES_USER=${POSTGRES_USER:-droplet}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-droplet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
-      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - REDIS_HOST=cache
-      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD:-redis-dev-password}
+      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway
       - OVERWRITEPROTOCOL=https
     volumes:
@@ -98,7 +98,7 @@ services:
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-droplet}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-droplet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - POSTGRES_DB=${POSTGRES_DB:-droplet}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-droplet}"]
@@ -109,7 +109,7 @@ services:
 
   cache:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis-dev-password}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
     restart: always
 
   broker:
@@ -131,9 +131,9 @@ services:
         required: false
     environment:
       - JETSON_OLLAMA_URL=${JETSON_OLLAMA_URL:-http://inference-engine.local:11434}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis-dev-password}@cache:6379
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
-      - DEVICE_SECRET=${DEVICE_SECRET:-dev-secret-change-in-production}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@cache:6379
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
+      - DEVICE_SECRET=${DEVICE_SECRET:?Run ./scripts/setup.sh to generate secrets}
       - ORCHESTRATOR_URL=http://orchestrator:3000
     volumes:
       - aikeys:/data/keys
@@ -162,8 +162,8 @@ services:
     volumes:
       - filedata:/data/files
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-droplet}@db:5432/${POSTGRES_DB:-droplet}
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:-mqtt-dev-password}@broker:1883
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@db:5432/${POSTGRES_DB:-droplet}
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
       - FILES_ROOT=/data/files
     depends_on:
       db:

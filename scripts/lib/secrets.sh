@@ -35,6 +35,8 @@ generate_env() {
   # --- Ensure template exists ---
   if [ ! -f "$env_example" ]; then
     log_error ".env.example not found at $env_example"
+    log_error "  This file is required to generate device secrets."
+    log_error "  Try: git pull origin main"
     return 1
   fi
 
