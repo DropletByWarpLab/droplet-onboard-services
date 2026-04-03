@@ -5,6 +5,14 @@
 preflight_check() {
   log_info "Running preflight checks..."
 
+  # --- macOS early return (no sudo, no Linux checks needed) ---
+  if [ "$(uname)" = "Darwin" ]; then
+    log_warn "OS: macOS detected — skipping Linux-specific checks"
+    log_warn "Docker Desktop must be installed separately on macOS"
+    SKIP_DOCKER_INSTALL=true
+    return 0
+  fi
+
   # --- Must not be root ---
   if [ "$EUID" -eq 0 ]; then
     log_error "Do not run this script as root."
@@ -43,11 +51,6 @@ preflight_check() {
         fi
         ;;
     esac
-  elif [ "$(uname)" = "Darwin" ]; then
-    log_warn "OS: macOS detected — skipping Linux-specific checks"
-    log_warn "Docker Desktop must be installed separately on macOS"
-    SKIP_DOCKER_INSTALL=true
-    return 0
   else
     log_error "Cannot detect OS. /etc/os-release not found."
     return 1

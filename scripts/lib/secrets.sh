@@ -111,17 +111,20 @@ _generate_mosquitto_passwd() {
 
   # Clean up any root-owned file from a previous failed run
   if [ -f "$passwd_file" ] && [ ! -w "$passwd_file" ]; then
-    sudo rm -f "$passwd_file"
+    sudo rm -f "$passwd_file" 2>/dev/null || true
   fi
 
   # Write directly to the final mount location — no intermediate copy needed.
-  # Docker containers create files as root in bind mounts, so we fix ownership after.
+  # On Linux, Docker bind-mounts create files as root; on macOS Docker Desktop,
+  # files are created with host-user ownership. Only chown if needed.
   if run_docker run --rm \
     -v "$passwd_dir:/tmp/mqtt" \
     eclipse-mosquitto:2 \
     sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'"; then
-    # Docker creates files as root — fix ownership (mandatory, fail loudly)
-    sudo chown "$(id -u):$(id -g)" "$passwd_file"
+    # Fix ownership only if the file is not already owned by the current user
+    if [ -f "$passwd_file" ] && [ "$(stat -c '%u' "$passwd_file" 2>/dev/null || stat -f '%u' "$passwd_file" 2>/dev/null)" != "$(id -u)" ]; then
+      sudo chown "$(id -u):$(id -g)" "$passwd_file"
+    fi
     chmod 600 "$passwd_file"
     log_success "MQTT password file generated"
   else
@@ -133,7 +136,7 @@ _generate_mosquitto_passwd() {
 
   # Clean up stale intermediate file from old code path
   if [ -f "$REPO_ROOT/docker/mosquitto_passwd" ]; then
-    rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || sudo rm -f "$REPO_ROOT/docker/mosquitto_passwd"
+    rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || sudo rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || true
   fi
 }
 
@@ -142,7 +145,7 @@ _write_mosquitto_conf() {
 
   # Clean up root-owned file from a previous failed run
   if [ -f "$conf_file" ] && [ ! -w "$conf_file" ]; then
-    sudo rm -f "$conf_file"
+    sudo rm -f "$conf_file" 2>/dev/null || true
   fi
 
   cat > "$conf_file" << 'MQTTCONF'
@@ -182,7 +185,7 @@ _generate_tls_cert() {
   # Add all non-loopback IPv4 addresses
   local ip
   for ip in $(ip -4 addr show scope global 2>/dev/null \
-              | grep -oP 'inet \K[\d.]+' || \
+              | grep -oP 'inet \K[\d.]+' 2>/dev/null || \
               ifconfig 2>/dev/null \
               | grep -oE 'inet (addr:)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
               | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \

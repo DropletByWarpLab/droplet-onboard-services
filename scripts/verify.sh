@@ -16,6 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+COMPOSE_ENV_FILE="$REPO_ROOT/.env"
 
 # --- Colors ---
 if [ -t 1 ]; then
@@ -107,28 +108,28 @@ printf "\n${_BOLD}  Droplet Edge Platform — Verification${_RESET}\n\n"
 # --- Containers ---
 check "Containers running" \
   bash -c '
-    running=$(_docker_compose -f "'"$COMPOSE_FILE"'" ps --status running -q 2>/dev/null | wc -l)
+    running=$(docker compose -f "'"$COMPOSE_FILE"'" --env-file "'"$COMPOSE_ENV_FILE"'" ps --status running -q 2>/dev/null | wc -l)
     [ "$running" -ge 7 ]
   ' || true
 
 # --- PostgreSQL ---
 check "PostgreSQL" \
-  _docker_compose -f "$COMPOSE_FILE" exec -T db \
+  _docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db \
     pg_isready -U "${POSTGRES_USER:-droplet}" || true
 
 # --- Nextcloud database ---
 check "Nextcloud database" \
-  _docker_compose -f "$COMPOSE_FILE" exec -T db \
+  _docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db \
     psql -U "${POSTGRES_USER:-droplet}" -d nextcloud -c "SELECT 1" -t || true
 
 # --- Redis ---
 check "Redis" \
-  _docker_compose -f "$COMPOSE_FILE" exec -T cache \
+  _docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T cache \
     redis-cli -a "${REDIS_PASSWORD:-redis-dev-password}" --no-auth-warning ping || true
 
 # --- MQTT broker ---
 check_warn "MQTT broker" \
-  _docker_compose -f "$COMPOSE_FILE" exec -T broker \
+  _docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T broker \
     mosquitto_pub -h localhost \
     ${MQTT_USER:+-u "$MQTT_USER"} \
     ${MQTT_PASSWORD:+-P "$MQTT_PASSWORD"} \

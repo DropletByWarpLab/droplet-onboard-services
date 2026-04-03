@@ -93,6 +93,26 @@ else
   fail "compose.sh: COMPOSE_ENV_FILE is not defined"
 fi
 
+# Every docker compose invocation in verify.sh must also include --env-file.
+# Match lines that call _docker_compose or 'docker compose' as a command
+# (not variable definitions, function definitions, or printf strings).
+VERIFY_SH="$REPO_ROOT/scripts/verify.sh"
+verify_calls=$(grep -nE '(_docker_compose|docker compose) -f' "$VERIFY_SH" | grep -v 'printf' || true)
+missing_verify=false
+
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  if ! echo "$line" | grep -q '\-\-env-file'; then
+    lineno=$(echo "$line" | cut -d: -f1)
+    fail "verify.sh line $lineno: docker compose call missing --env-file"
+    missing_verify=true
+  fi
+done <<< "$verify_calls"
+
+if [ "$missing_verify" = false ]; then
+  pass "verify.sh: all docker compose calls include --env-file"
+fi
+
 # =============================================================================
 # Test 4: .env.example exists and contains only placeholder values
 # =============================================================================
