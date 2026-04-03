@@ -14,7 +14,8 @@
     "test:ai-gateway": "cd services/ai-gateway && python -m pytest tests/ -v",
     "test:orchestrator": "cd apps/orchestrator && npx vitest run",
     "test:dashboard": "cd apps/web-dashboard && npx vitest run",
-    "test:all": "npm run test:ai-gateway && npm run test",
+    "test:security": "./scripts/test-security.sh",
+    "test:all": "npm run test:security && npm run test:ai-gateway && npm run test",
     "test:integration": "cd tests && npm run test:docker",
     "lint": "turbo run lint"
   },

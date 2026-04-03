@@ -11,6 +11,14 @@ prepare_and_build() {
   # --- Ensure mosquitto passwd dir exists for compose mount ---
   mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
 
+  # --- Source .env for variable substitution during build ---
+  if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$REPO_ROOT/.env"
+    set +a
+  fi
+
   # --- Pull base images (sequential for slow Pi connections) ---
   log_info "Pulling base container images..."
   local images=(
