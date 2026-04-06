@@ -27,7 +27,122 @@ git clone <repo-url> && cd edge-platform
 ./scripts/setup.sh
 ```
 
-Installs Docker, generates unique device secrets, builds all containers, starts the stack, and verifies health. Run `./scripts/setup.sh --help` for options. See [scripts/README.md](scripts/README.md) for details and troubleshooting.
+Installs Docker, generates unique device secrets, builds all containers, starts the stack, and verifies health. First visit redirects to the setup wizard to create an admin account.
+
+### Setup phases
+
+| Phase | What happens |
+|-------|-------------|
+| **1. Preflight** | Validates OS, architecture (ARM64/x86_64), disk (>= 8 GB), memory (>= 2 GB), internet |
+| **2. Docker** | Installs Docker Engine 25+ and Compose v2 if not present |
+| **3. Secrets** | Generates unique-per-device passwords and encryption keys, writes `.env` (chmod 600) |
+| **4. Build** | Pulls 7 base images, builds orchestrator, web-dashboard, and ai-gateway |
+| **5. Start** | Starts the Docker Compose stack with health-check waits |
+| **6. Verify** | Runs smoke tests against all services |
+
+### Setup options
+
+```
+./scripts/setup.sh [OPTIONS]
+
+  --skip-docker      Skip Docker installation (assume already installed)
+  --skip-build       Skip building container images
+  --skip-start       Skip starting the Docker Compose stack
+  --systemd          Install systemd service for auto-start on boot
+  --regenerate-env   Force-regenerate .env (backs up existing)
+  --verbose          Show full command output
+  --dry-run          Show what would be done without executing
+  -h, --help         Show help
+```
+
+### Common setup scenarios
+
+```bash
+# Full first-time setup on a fresh device
+./scripts/setup.sh
+
+# Preview what setup would do
+./scripts/setup.sh --dry-run
+
+# Re-provision after Docker is already installed
+./scripts/setup.sh --skip-docker
+
+# Rotate all secrets (backs up old .env)
+./scripts/setup.sh --skip-docker --skip-build --skip-start --regenerate-env
+
+# Production: full setup + auto-start on boot
+./scripts/setup.sh --systemd
+```
+
+### Generated secrets
+
+Each device gets its own random credentials — no two devices share secrets:
+
+| Secret | Used by | Purpose |
+|--------|---------|---------|
+| `DEVICE_SECRET` | ai-gateway | Fernet encryption key for BYOK API keys |
+| `POSTGRES_PASSWORD` | db, orchestrator, nextcloud | PostgreSQL authentication |
+| `REDIS_PASSWORD` | cache, orchestrator, ai-gateway | Redis authentication |
+| `MQTT_PASSWORD` | broker, orchestrator, file-sync | MQTT authentication |
+| `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
+
+Secrets are stored in `.env` (chmod 600) at the repo root.
+
+---
+
+## Factory reset
+
+```bash
+./scripts/factory-reset.sh
+```
+
+Wipes **all** user data, credentials, and configuration — returning the device to a clean out-of-the-box state. Requires typing `RESET` to confirm.
+
+### What gets deleted
+
+| Data | Location |
+|------|----------|
+| PostgreSQL databases | `pgdata` volume — user accounts, chat history, file metadata, sync targets |
+| Uploaded files | `filedata` volume |
+| Nextcloud data | `nextcloud-data` volume — app state + user files |
+| LLM provider API keys | `aikeys` volume — Fernet-encrypted keys + salt |
+| Home Assistant config | `ha-config` volume — automations, devices, history |
+| NVR recordings | `nvrdata` volume |
+| Device secrets | `.env` — all 5 generated passwords/keys |
+| TLS certificates | `docker/certs/` — self-signed cert + key |
+| MQTT credentials | `docker/mosquitto_passwd_dir/` + `docker/mosquitto.conf` |
+| Setup logs | `.data/` — logs and lock files |
+
+Source code, git history, Docker images, and system packages are preserved.
+
+### Reset options
+
+```
+./scripts/factory-reset.sh [OPTIONS]
+
+  --yes            Skip interactive confirmation (for automation)
+  --reinstall      After wiping, auto-run setup.sh to re-provision
+  --purge-images   Also remove built Docker images (slower rebuild)
+  -h, --help       Show help
+```
+
+### Common reset scenarios
+
+```bash
+# Interactive reset (prompts for "RESET" confirmation)
+./scripts/factory-reset.sh
+
+# Wipe and re-provision in one step
+./scripts/factory-reset.sh --reinstall
+
+# Non-interactive for CI/automation
+./scripts/factory-reset.sh --yes
+
+# Full clean including Docker images, then re-provision
+./scripts/factory-reset.sh --purge-images --reinstall
+```
+
+See [scripts/README.md](scripts/README.md) for more details and troubleshooting.
 
 ---
 
