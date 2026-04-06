@@ -9,7 +9,7 @@ from datetime import datetime
 import psycopg2
 import psycopg2.extras
 
-from src.config import DATABASE_URL
+from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 

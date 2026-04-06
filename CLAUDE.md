@@ -39,6 +39,12 @@ cd apps/orchestrator && npm run dev
 npm test                    # all tests
 npm run test:orchestrator   # orchestrator only
 npm run test:ai-gateway     # ai-gateway only
+
+# Factory reset (wipe all data, return to out-of-the-box state)
+./scripts/factory-reset.sh
+
+# Factory reset + re-provision in one step
+./scripts/factory-reset.sh --reinstall
 ```
 
 ## Docker services

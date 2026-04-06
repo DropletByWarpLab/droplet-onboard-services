@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import paho.mqtt.client as mqtt
 
-from src.config import MQTT_BROKER
+from config import MQTT_BROKER
 
 logger = logging.getLogger(__name__)
 

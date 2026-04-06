@@ -146,15 +146,58 @@ docker compose -f docker/docker-compose.yml logs db
 
 ### Need to start fresh
 
+Use the factory reset script to wipe everything and start over:
+
 ```bash
-# Stop everything and delete all data
-docker compose -f docker/docker-compose.yml down -v
+./scripts/factory-reset.sh
+```
 
-# Optionally remove .env to regenerate secrets
-rm .env
+Or reset and re-provision in one step:
 
-# Re-run setup
-./scripts/setup.sh --skip-docker
+```bash
+./scripts/factory-reset.sh --reinstall
+```
+
+---
+
+## Factory reset
+
+```bash
+./scripts/factory-reset.sh
+```
+
+Wipes **all** user data, credentials, and configuration — returning the device to a clean out-of-the-box state. Requires typing `RESET` to confirm (or pass `--yes` for automation).
+
+### What gets deleted
+
+- Docker volumes: database, uploaded files, Nextcloud data, AI keys, Home Assistant config
+- Device secrets (`.env`)
+- TLS certificates and MQTT credentials
+- Setup logs
+
+### Options
+
+```
+  --yes            Skip interactive confirmation
+  --reinstall      After wiping, auto-run setup.sh to re-provision
+  --purge-images   Also remove built Docker images (slower rebuild)
+  -h, --help       Show help
+```
+
+### Examples
+
+```bash
+# Interactive reset (prompts for confirmation)
+./scripts/factory-reset.sh
+
+# Reset and immediately re-provision
+./scripts/factory-reset.sh --reinstall
+
+# Non-interactive for CI/automation
+./scripts/factory-reset.sh --yes
+
+# Full clean including Docker images
+./scripts/factory-reset.sh --purge-images --reinstall
 ```
 
 ---
@@ -184,6 +227,7 @@ docker system prune -a
 ```
 scripts/
 ├── setup.sh               Main entry point
+├── factory-reset.sh       Wipe all data and start fresh
 ├── verify.sh              Standalone smoke test
 ├── README.md              This file
 └── lib/

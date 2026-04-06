@@ -9,7 +9,7 @@ import time
 import schedule
 
 from src import db, mqtt_client
-from src.scanner import scan_target
+from scanner import scan_target
 
 logger = logging.getLogger(__name__)
 

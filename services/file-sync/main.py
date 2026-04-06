@@ -8,9 +8,9 @@ import sys
 import time
 
 from src import db, mqtt_client
-from src.scanner import scan_target
-from src.scheduler import SyncScheduler
-from src.watcher import TargetWatcher
+from scanner import scan_target
+from scheduler import SyncScheduler
+from watcher import TargetWatcher
 
 logging.basicConfig(
     level=logging.INFO,

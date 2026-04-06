@@ -19,7 +19,7 @@ import {
   onStateChanged,
   type HaEntityState,
   type HaStateChangedEvent,
-} from "./homeassistant.client.js";
+} from "./home-assistant.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import type {
   SmartHomeDevice,

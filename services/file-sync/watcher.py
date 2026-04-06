@@ -12,7 +12,7 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
 from src import db, mqtt_client
-from src.scanner import compute_hash, guess_mime_type
+from scanner import compute_hash, guess_mime_type
 
 logger = logging.getLogger(__name__)
 
