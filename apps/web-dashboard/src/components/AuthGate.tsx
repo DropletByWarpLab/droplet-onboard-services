@@ -24,6 +24,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
+    // If setup is already done but user visits /setup, redirect to login
+    if (!setupRequired && pathname === "/setup") {
+      router.replace("/login?from=setup");
+      return;
+    }
+
     // If not authenticated and not on a public page, redirect to login
     if (!user && !isPublicPage && !setupRequired) {
       router.replace("/login");

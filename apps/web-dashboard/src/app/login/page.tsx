@@ -1,14 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { Lock, User, Eye, EyeOff } from "lucide-react";
+import { Check, Lock, User, Eye, EyeOff } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { login } = useAuth();
+  const fromSetup = searchParams.get("from") === "setup";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -46,6 +48,15 @@ export default function LoginPage() {
             Access your Droplet dashboard
           </p>
         </div>
+
+        {fromSetup && (
+          <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
+            <Check size={16} className="flex-shrink-0" />
+            <p className="type-subheadline">
+              Setup already completed. Sign in to access your dashboard.
+            </p>
+          </div>
+        )}
 
         <div className="space-y-4">
           <div>
