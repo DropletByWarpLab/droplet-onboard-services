@@ -110,15 +110,17 @@ start_stack() {
 
   # --- Ensure Nextcloud database exists (init script only runs on fresh volumes) ---
   log_info "Ensuring Nextcloud database exists..."
-  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db \
-    psql -U "${POSTGRES_USER:-droplet}" -tc \
+  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
+    psql -U "${POSTGRES_USER:-droplet}" -w -tc \
     "SELECT 1 FROM pg_database WHERE datname = 'nextcloud'" 2>/dev/null | grep -q 1 || \
-  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db \
-    psql -U "${POSTGRES_USER:-droplet}" -c \
+  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
+    psql -U "${POSTGRES_USER:-droplet}" -w -c \
     "CREATE DATABASE nextcloud OWNER ${POSTGRES_USER:-droplet}" 2>/dev/null
   log_success "Nextcloud database ready"
 
-  # --- Start all remaining services ---
+  # --- Start all remaining services (Nextcloud needs to be up for install check) ---
   run_with_spinner "Starting all services" \
     run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" up -d
 
@@ -137,6 +139,27 @@ start_stack() {
   done
   if [ $wait_retries -eq 0 ]; then
     log_warn "Some services may still be starting — continuing with verification"
+  fi
+
+  # --- Wait for Nextcloud initial setup to complete ---
+  # Nextcloud auto-installs on first boot (empty nextcloud-data volume).
+  # The OCS API and setup wizard won't work until this finishes.
+  log_info "Waiting for Nextcloud to complete initial setup..."
+  local nc_retries=60  # 5 minutes (60 * 5s)
+  while [ $nc_retries -gt 0 ]; do
+    local nc_status
+    nc_status=$(curl -sf http://localhost:8080/status.php 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('installed',False))" 2>/dev/null \
+      || echo "false")
+    if [ "$nc_status" = "True" ]; then
+      log_success "Nextcloud is installed and ready"
+      break
+    fi
+    nc_retries=$((nc_retries - 1))
+    sleep 5
+  done
+  if [ $nc_retries -eq 0 ]; then
+    log_warn "Nextcloud setup may still be in progress — check: docker compose logs nextcloud"
   fi
 
   # --- Wait for orchestrator health (via Nginx on port 80) ---

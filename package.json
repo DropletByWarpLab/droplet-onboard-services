@@ -16,6 +16,7 @@
     "test:dashboard": "cd apps/web-dashboard && npx vitest run",
     "test:security": "./scripts/test-security.sh",
     "test:all": "npm run test:security && npm run test:ai-gateway && npm run test",
+    "test:setup": "bash tests/setup.test.sh",
     "test:integration": "cd tests && npm run test:docker",
     "lint": "turbo run lint"
   },

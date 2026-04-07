@@ -27,6 +27,7 @@ export REPO_ROOT
 SKIP_CONFIRM=false
 REINSTALL=false
 PURGE_IMAGES=false
+FORCE_REMOVE=false
 
 usage() {
   cat << 'USAGE'
@@ -39,6 +40,7 @@ Options:
   --yes            Skip interactive confirmation (for automation)
   --reinstall      After wiping, automatically run setup.sh to re-provision
   --purge-images   Also remove built Docker images (slower rebuild)
+  --force          Restart Docker if volumes cannot be removed (stuck references)
   -h, --help       Show this help message
 
 What gets deleted:
@@ -61,6 +63,7 @@ while [ $# -gt 0 ]; do
     --yes)            SKIP_CONFIRM=true; shift ;;
     --reinstall)      REINSTALL=true; shift ;;
     --purge-images)   PURGE_IMAGES=true; shift ;;
+    --force)          FORCE_REMOVE=true; shift ;;
     -h|--help)        usage ;;
     *)                echo "Unknown option: $1"; usage ;;
   esac
@@ -127,22 +130,21 @@ fi
 
 log_step 1 4 "Stopping all services"
 
-if $DC -f "$COMPOSE_FILE" ps --quiet 2>/dev/null | grep -q .; then
-  if [ "$PURGE_IMAGES" = "true" ]; then
-    run_with_spinner "Stopping stack and removing images" \
-      $DC -f "$COMPOSE_FILE" --env-file "$REPO_ROOT/.env" down --rmi all --remove-orphans 2>/dev/null || \
-    run_with_spinner "Stopping stack and removing images (no env)" \
-      $DC -f "$COMPOSE_FILE" down --rmi all --remove-orphans 2>/dev/null || true
-  else
-    run_with_spinner "Stopping stack" \
-      $DC -f "$COMPOSE_FILE" --env-file "$REPO_ROOT/.env" down --remove-orphans 2>/dev/null || \
-    run_with_spinner "Stopping stack (no env)" \
-      $DC -f "$COMPOSE_FILE" down --remove-orphans 2>/dev/null || true
-  fi
-  log_success "All services stopped"
+# Use "down -v" to atomically stop containers AND remove named volumes.
+# This is critical — "down" without "-v" leaves volumes intact, which causes
+# credential mismatches on re-setup (new .env passwords vs old volume data).
+if [ "$PURGE_IMAGES" = "true" ]; then
+  run_with_spinner "Stopping stack, removing volumes and images" \
+    $DC -f "$COMPOSE_FILE" --env-file "$REPO_ROOT/.env" down -v --rmi all --remove-orphans 2>/dev/null || \
+  run_with_spinner "Stopping stack, removing volumes and images (no env)" \
+    $DC -f "$COMPOSE_FILE" down -v --rmi all --remove-orphans 2>/dev/null || true
 else
-  log_info "No running services found — skipping"
+  run_with_spinner "Stopping stack and removing volumes" \
+    $DC -f "$COMPOSE_FILE" --env-file "$REPO_ROOT/.env" down -v --remove-orphans 2>/dev/null || \
+  run_with_spinner "Stopping stack and removing volumes (no env)" \
+    $DC -f "$COMPOSE_FILE" down -v --remove-orphans 2>/dev/null || true
 fi
+log_success "All services stopped"
 
 log_divider
 
@@ -190,6 +192,55 @@ if [ $removed -gt 0 ]; then
   log_success "$removed volume(s) removed"
 else
   log_info "No volumes found to remove"
+fi
+
+# Final sweep for any orphaned anonymous volumes
+docker volume prune -f >/dev/null 2>&1 || true
+
+# --- Verify all target volumes are truly gone ---
+remaining=0
+for vol in "${VOLUMES[@]}"; do
+  full_name="${COMPOSE_PROJECT}_${vol}"
+  if docker volume inspect "$full_name" >/dev/null 2>&1 || \
+     docker volume inspect "$vol" >/dev/null 2>&1; then
+    log_warn "Volume still exists after removal: $vol"
+    remaining=$((remaining + 1))
+  fi
+done
+
+if [ $remaining -gt 0 ]; then
+  if [ "$FORCE_REMOVE" = "true" ]; then
+    log_warn "Force mode: restarting Docker to release stuck volume references..."
+    if [[ "$(uname)" == "Darwin" ]]; then
+      osascript -e 'quit app "Docker"' 2>/dev/null || true
+      sleep 5
+      open -a Docker
+      local docker_retries=30
+      while [ $docker_retries -gt 0 ]; do
+        docker info >/dev/null 2>&1 && break
+        docker_retries=$((docker_retries - 1))
+        sleep 2
+      done
+      if [ $docker_retries -eq 0 ]; then
+        log_error "Docker did not restart in time"
+        exit 1
+      fi
+    else
+      sudo systemctl restart docker 2>/dev/null || true
+      sleep 3
+    fi
+    # Retry volume removal after Docker restart
+    for vol in "${VOLUMES[@]}"; do
+      full_name="${COMPOSE_PROJECT}_${vol}"
+      docker volume rm "$full_name" 2>/dev/null || docker volume rm "$vol" 2>/dev/null || true
+    done
+    log_success "Volumes force-removed after Docker restart"
+  else
+    log_error "$remaining volume(s) could not be removed."
+    log_error "Try: ./scripts/factory-reset.sh --yes --force"
+    log_error "Or manually: docker volume rm <name>"
+    exit 1
+  fi
 fi
 
 log_divider

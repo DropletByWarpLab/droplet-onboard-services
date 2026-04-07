@@ -251,13 +251,11 @@ main() {
   printf "\n"
   printf "  Dashboard:     ${_CYAN}http://localhost${_RESET}\n"
   printf "  API:           ${_CYAN}http://localhost/api/health${_RESET}\n"
-  printf "  Nextcloud:     ${_CYAN}http://localhost:8080${_RESET}\n"
   printf "\n"
-  printf "  First visit will redirect to the setup wizard to create\n"
-  printf "  your admin account.\n"
+  printf "  Open the dashboard to complete setup — a guided wizard\n"
+  printf "  will walk you through creating your admin account.\n"
   printf "\n"
-  printf "  Secrets stored in: ${_DIM}%s/.env${_RESET} (chmod 600)\n" "$REPO_ROOT"
-  printf "  Each secret is unique to this device.\n"
+  printf "  Device secrets: ${_DIM}%s/.env${_RESET} (chmod 600)\n" "$REPO_ROOT"
 
   if [ "$DOCKER_GROUP_ADDED" = "true" ]; then
     printf "\n"
