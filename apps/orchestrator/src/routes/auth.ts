@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import pino from "pino";
 import {
@@ -10,9 +11,13 @@ import {
   ncCreateUser,
   ncDeleteUser,
   ncListUsers,
+  ncOAuth2AuthorizeUrl,
+  ncOAuth2ExchangeCode,
+  ncOAuth2RefreshToken,
 } from "../services/nextcloud.client.js";
 import { cacheDel } from "../services/cache.service.js";
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS } from "../middleware/auth.js";
+import { config } from "../config.js";
 
 const logger = pino({ name: "auth-route" });
 
@@ -32,6 +37,12 @@ const createUserSchema = z.object({
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
 });
+
+/** Build the OAuth2 callback redirect URI from the current request. */
+function getRedirectUri(req: import("express").Request): string {
+  const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  return `${protocol}://${req.headers.host}/api/auth/callback`;
+}
 
 /**
  * Resolve the session token from cookie (browser) or Authorization header (API client).
@@ -123,6 +134,153 @@ export function createPublicAuthRouter(): Router {
       res.json({
         user: user || { id: result.loginName, username: result.loginName, displayName: result.loginName },
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── OAuth2: Redirect to Nextcloud authorization ──
+  router.get("/auth/authorize", (req, res) => {
+    if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
+      res.status(400).json({ error: "OAuth2 is not configured. Set AUTH_MODE=oauth2 and provide OAUTH2_CLIENT_ID." });
+      return;
+    }
+
+    const state = randomBytes(16).toString("hex");
+    const redirectUri = getRedirectUri(req);
+
+    // Store state in a short-lived cookie for CSRF protection
+    const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+    res.cookie("oauth2_state", state, {
+      httpOnly: true,
+      secure: isHttps,
+      sameSite: "lax",
+      maxAge: 300_000, // 5 minutes
+    });
+
+    const authorizeUrl = ncOAuth2AuthorizeUrl(config.OAUTH2_CLIENT_ID, redirectUri, state);
+    res.redirect(authorizeUrl);
+  });
+
+  // ── OAuth2: Handle callback ──
+  router.get("/auth/callback", async (req, res, next) => {
+    try {
+      if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
+        res.status(400).json({ error: "OAuth2 is not configured" });
+        return;
+      }
+
+      const { code, state } = req.query;
+      const savedState = req.cookies?.oauth2_state;
+
+      // CSRF validation
+      if (!state || !savedState || state !== savedState) {
+        res.status(400).json({ error: "Invalid OAuth2 state parameter" });
+        return;
+      }
+
+      // Clear the state cookie
+      res.clearCookie("oauth2_state");
+
+      if (!code || typeof code !== "string") {
+        res.status(400).json({ error: "Missing authorization code" });
+        return;
+      }
+
+      const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+      const redirectUri = `${protocol}://${req.headers.host}/api/auth/callback`;
+
+      const tokens = await ncOAuth2ExchangeCode(
+        code,
+        config.OAUTH2_CLIENT_ID,
+        config.OAUTH2_CLIENT_SECRET,
+        redirectUri
+      );
+
+      if (!tokens) {
+        res.status(401).json({ error: "Failed to exchange authorization code" });
+        return;
+      }
+
+      // Fetch user details with the new access token
+      const user = await ncGetCurrentUser(tokens.accessToken);
+
+      // Store tokens in HTTP-only cookies
+      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+      res.cookie(SESSION_COOKIE_NAME, tokens.accessToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/",
+        maxAge: tokens.expiresIn * 1000,
+      });
+
+      res.cookie("droplet_refresh", tokens.refreshToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/api/auth",
+        maxAge: SESSION_MAX_AGE_MS,
+      });
+
+      // Redirect to dashboard with user info (or return JSON for API clients)
+      if (req.headers.accept?.includes("text/html")) {
+        res.redirect("/");
+      } else {
+        res.json({
+          user: user || { id: "unknown", username: "unknown", displayName: "Unknown" },
+        });
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── OAuth2: Refresh token ──
+  router.post("/auth/refresh", async (req, res, next) => {
+    try {
+      if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
+        res.status(400).json({ error: "OAuth2 is not configured" });
+        return;
+      }
+
+      const refreshToken = req.cookies?.droplet_refresh;
+      if (!refreshToken) {
+        res.status(401).json({ error: "No refresh token available" });
+        return;
+      }
+
+      const tokens = await ncOAuth2RefreshToken(
+        refreshToken,
+        config.OAUTH2_CLIENT_ID,
+        config.OAUTH2_CLIENT_SECRET
+      );
+
+      if (!tokens) {
+        res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+        res.clearCookie("droplet_refresh", { path: "/api/auth" });
+        res.status(401).json({ error: "Failed to refresh token" });
+        return;
+      }
+
+      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+      res.cookie(SESSION_COOKIE_NAME, tokens.accessToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/",
+        maxAge: tokens.expiresIn * 1000,
+      });
+
+      res.cookie("droplet_refresh", tokens.refreshToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/api/auth",
+        maxAge: SESSION_MAX_AGE_MS,
+      });
+
+      res.json({ status: "ok", expiresIn: tokens.expiresIn });
     } catch (err) {
       next(err);
     }

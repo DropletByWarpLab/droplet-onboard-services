@@ -1,8 +1,14 @@
 /**
  * Smart Home API routes — device listing, control, discovery, and SSE events.
+ *
+ * Commands are evaluated through the three-tier safety framework (design doc Section 13.2):
+ * - Tier 1: Auto-execute (lights, switches, media) with rate limiting + bounds checking
+ * - Tier 2: Requires user confirmation (locks, alarms, extreme temps)
+ * - Tier 3: All commands logged to audit trail
  */
 
 import { Router } from "express";
+import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import {
   getGroupedDevices,
@@ -13,10 +19,15 @@ import {
   subscribeStateChanges,
   isInitialized,
 } from "../services/smart-home.service.js";
+import {
+  evaluateCommand,
+  confirmCommand,
+  getAuditLog,
+} from "../services/safety-tier.service.js";
 
 const logger = pino({ name: "smart-home-routes" });
 
-export function createSmartHomeRouter(): Router {
+export function createSmartHomeRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   // --- List grouped devices ---
@@ -99,7 +110,7 @@ export function createSmartHomeRouter(): Router {
     }
   });
 
-  // --- Send command ---
+  // --- Send command (with safety tier evaluation) ---
   router.post("/devices/smart-home/:entityId/command", async (req, res, next) => {
     try {
       if (!isInitialized()) {
@@ -111,8 +122,81 @@ export function createSmartHomeRouter(): Router {
         return res.status(400).json({ error: "Missing 'service' in request body" });
       }
 
+      const userId = req.user?.id;
+      const result = await evaluateCommand(prisma, req.params.entityId, service, data, userId);
+
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({
+          error: result.reason,
+          tier: result.tier,
+          blocked: true,
+        });
+      }
+
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          entityId: req.params.entityId,
+          service,
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
+
+      // Tier 1: Auto-execute
       await sendCommand(req.params.entityId, service, data);
-      res.json({ status: "ok", entityId: req.params.entityId, service });
+      res.json({ status: "ok", entityId: req.params.entityId, service, tier: result.tier });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Confirm a Tier 2 command ---
+  router.post("/devices/smart-home/:entityId/confirm", async (req, res, next) => {
+    try {
+      if (!isInitialized()) {
+        return res.status(503).json({ error: "Home Assistant not connected" });
+      }
+
+      const { confirmationToken } = req.body;
+      if (!confirmationToken || typeof confirmationToken !== "string") {
+        return res.status(400).json({ error: "Missing 'confirmationToken' in request body" });
+      }
+
+      const userId = req.user?.id;
+      const result = await confirmCommand(prisma, confirmationToken, userId);
+
+      if (!result.confirmed) {
+        return res.status(400).json({ error: result.reason });
+      }
+
+      await sendCommand(result.entityId, result.service, result.data);
+      res.json({
+        status: "ok",
+        entityId: result.entityId,
+        service: result.service,
+        confirmed: true,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Audit log (scoped to current user unless admin) ---
+  router.get("/devices/smart-home/audit", async (req, res, next) => {
+    try {
+      const { entityId, userId, limit, offset } = req.query;
+      // Non-admin users can only see their own audit entries
+      const effectiveUserId = (userId as string | undefined) || req.user?.id;
+      const logs = await getAuditLog(prisma, {
+        entityId: entityId as string | undefined,
+        userId: effectiveUserId,
+        limit: limit ? parseInt(limit as string, 10) : undefined,
+        offset: offset ? parseInt(offset as string, 10) : undefined,
+      });
+      res.json({ logs });
     } catch (err) {
       next(err);
     }

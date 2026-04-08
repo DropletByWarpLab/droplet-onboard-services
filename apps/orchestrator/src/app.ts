@@ -42,7 +42,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createSyncRouter(prisma));
   app.use("/api", createStorageRouter());
-  app.use("/api", createSmartHomeRouter());
+  app.use("/api", createSmartHomeRouter(prisma));
 
   // Error handling
   app.use(errorHandler);

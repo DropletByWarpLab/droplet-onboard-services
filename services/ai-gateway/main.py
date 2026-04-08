@@ -7,7 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -32,6 +32,7 @@ from schemas import (
 )
 from sessions.store import SessionStore, create_session_store
 from tools import executor as tool_executor
+from scheduler import InferenceScheduler, QueueFullError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,16 +41,36 @@ logger = logging.getLogger(__name__)
 provider_router: ProviderRouter | None = None
 model_registry: ModelRegistry | None = None
 session_store: SessionStore | None = None
+inference_scheduler: InferenceScheduler | None = None
+grpc_server = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global provider_router, model_registry, session_store
+    global provider_router, model_registry, session_store, inference_scheduler, grpc_server
     provider_router = ProviderRouter()
     model_registry = ModelRegistry()
     session_store = create_session_store()
-    logger.info("AI Gateway started")
+    inference_scheduler = InferenceScheduler()
+    await inference_scheduler.start()
+    logger.info("AI Gateway started (with scheduler)")
+
+    # Start gRPC server if proto stubs are available
+    try:
+        from grpc_server import start_grpc_server
+        grpc_server = await start_grpc_server(provider_router, inference_scheduler)
+        logger.info("gRPC server started on port 50051")
+    except ImportError:
+        logger.warning("gRPC proto stubs not generated — gRPC server disabled. Run: python -m grpc_tools.protoc ...")
+    except Exception as e:
+        logger.warning("gRPC server failed to start: %s", e)
+
     yield
+
+    if grpc_server:
+        await grpc_server.stop(grace=5)
+    if inference_scheduler:
+        await inference_scheduler.stop()
     if provider_router:
         await provider_router.close()
     if session_store:
@@ -96,10 +117,27 @@ async def list_models():
 
 
 @app.post("/ai/chat")
-async def chat(request: ChatRequest):
-    """Unified chat endpoint — routes to the selected provider."""
-    if not provider_router:
+async def chat(request: ChatRequest, x_request_priority: int = Header(default=0, alias="X-Request-Priority")):
+    """Unified chat endpoint — routes to the selected provider.
+
+    Priority scheduling (via X-Request-Priority header or query param):
+    - 0: user-initiated (default)
+    - 5: automation
+    - 10: background
+    """
+    if not provider_router or not inference_scheduler:
         raise HTTPException(status_code=503, detail="Service not ready")
+
+    # Enqueue with priority
+    try:
+        future = await inference_scheduler.enqueue(x_request_priority, request)
+        await future
+    except QueueFullError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(e.retry_after)},
+        )
 
     try:
         result = await provider_router.chat(request)
@@ -108,6 +146,8 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error("Chat error: %s", e)
         raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+    finally:
+        await inference_scheduler.release()
 
     # Streaming response
     if request.stream:
@@ -123,6 +163,14 @@ async def chat(request: ChatRequest):
 
     # Non-streaming response
     return result
+
+
+@app.get("/ai/metrics")
+async def metrics():
+    """Return scheduler metrics for monitoring."""
+    if not inference_scheduler:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return inference_scheduler.metrics()
 
 
 # --- Sessions ---

@@ -126,6 +126,7 @@ services:
       dockerfile: Dockerfile
     expose:
       - "8000"
+      - "50051"
     env_file:
       - path: ../.env
         required: false
@@ -135,6 +136,7 @@ services:
       - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
       - DEVICE_SECRET=${DEVICE_SECRET:?Run ./scripts/setup.sh to generate secrets}
       - ORCHESTRATOR_URL=http://orchestrator:3000
+      - GRPC_PORT=50051
     volumes:
       - aikeys:/data/keys
     depends_on:

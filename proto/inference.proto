@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package droplet.inference;
+
+service InferenceService {
+  // Unary chat completion
+  rpc Chat(ChatRequest) returns (ChatResponse);
+  // Server-side streaming chat completion
+  rpc StreamChat(ChatRequest) returns (stream ChatChunk);
+  // List available models
+  rpc ListModels(Empty) returns (ModelList);
+}
+
+message ChatRequest {
+  string model = 1;
+  repeated Message messages = 2;
+  float temperature = 3;
+  optional int32 max_tokens = 4;
+  optional string provider = 5;
+  // Priority: 0 = user-initiated, 5 = automation, 10 = background
+  int32 priority = 6;
+}
+
+message Message {
+  string role = 1;
+  string content = 2;
+}
+
+message ChatResponse {
+  string content = 1;
+  string model = 2;
+  Usage usage = 3;
+  string finish_reason = 4;
+}
+
+message ChatChunk {
+  string delta = 1;
+  bool done = 2;
+  optional Usage usage = 3;
+}
+
+message Usage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+}
+
+message Empty {}
+
+message ModelList {
+  repeated ModelInfo models = 1;
+}
+
+message ModelInfo {
+  string id = 1;
+  string provider = 2;
+  string name = 3;
+  optional int32 context_window = 4;
+}

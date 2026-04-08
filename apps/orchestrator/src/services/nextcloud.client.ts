@@ -535,6 +535,145 @@ export async function ncDeleteAppPassword(token: string): Promise<void> {
   }
 }
 
+// ── OAuth2 ──
+
+/**
+ * Register an OAuth2 client with Nextcloud (admin-only, one-time on first boot).
+ * Returns { client_id, client_secret }.
+ */
+export async function ncRegisterOAuth2Client(
+  name: string,
+  redirectUri: string
+): Promise<{ clientId: string; clientSecret: string } | null> {
+  const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
+  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const basicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
+
+  try {
+    const resp = await fetch(
+      ocsUrl("/ocs/v2.php/core/oauth2/clients"),
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          "OCS-APIRequest": "true",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body: new URLSearchParams({ name, redirectUri }),
+      }
+    );
+
+    if (!resp.ok) {
+      logger.error({ status: resp.status }, "Failed to register OAuth2 client");
+      return null;
+    }
+
+    const data = await resp.json();
+    const client = data?.ocs?.data;
+    if (!client) return null;
+
+    return {
+      clientId: client.clientIdentifier || client.client_id,
+      clientSecret: client.secret || client.client_secret,
+    };
+  } catch (err) {
+    logger.error({ err }, "OAuth2 client registration failed");
+    return null;
+  }
+}
+
+/**
+ * Build the Nextcloud OAuth2 authorization URL.
+ */
+export function ncOAuth2AuthorizeUrl(clientId: string, redirectUri: string, state: string): string {
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    state,
+  });
+  return `${config.NEXTCLOUD_URL}/index.php/apps/oauth2/authorize?${params}`;
+}
+
+/**
+ * Exchange an OAuth2 authorization code for tokens.
+ */
+export async function ncOAuth2ExchangeCode(
+  code: string,
+  clientId: string,
+  clientSecret: string,
+  redirectUri: string
+): Promise<{ accessToken: string; refreshToken: string; expiresIn: number } | null> {
+  try {
+    const resp = await fetch(
+      `${config.NEXTCLOUD_URL}/index.php/apps/oauth2/api/v1/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+        }),
+      }
+    );
+
+    if (!resp.ok) {
+      logger.error({ status: resp.status }, "OAuth2 token exchange failed");
+      return null;
+    }
+
+    const data = await resp.json();
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in || 3600,
+    };
+  } catch (err) {
+    logger.error({ err }, "OAuth2 token exchange error");
+    return null;
+  }
+}
+
+/**
+ * Refresh an OAuth2 access token using a refresh token.
+ */
+export async function ncOAuth2RefreshToken(
+  refreshToken: string,
+  clientId: string,
+  clientSecret: string
+): Promise<{ accessToken: string; refreshToken: string; expiresIn: number } | null> {
+  try {
+    const resp = await fetch(
+      `${config.NEXTCLOUD_URL}/index.php/apps/oauth2/api/v1/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          client_id: clientId,
+          client_secret: clientSecret,
+        }),
+      }
+    );
+
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in || 3600,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── XML Parsing (minimal PROPFIND response parser) ──
 
 function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {

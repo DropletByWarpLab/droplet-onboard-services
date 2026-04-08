@@ -45,7 +45,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   }
 
   // Skip auth for public endpoints
-  const publicPaths = ["/api/health", "/api/auth/setup", "/api/auth/login"];
+  const publicPaths = ["/api/health", "/api/auth/setup", "/api/auth/login", "/api/auth/authorize", "/api/auth/callback", "/api/auth/refresh"];
   if (publicPaths.some((p) => req.path === p || req.path.startsWith(p))) {
     next();
     return;

@@ -65,3 +65,20 @@ model FileEntry {
 
   @@unique([targetId, path])
 }
+
+model CommandAuditLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  entityId    String
+  domain      String
+  service     String
+  data        Json?
+  tier        Int
+  confirmed   Boolean  @default(false)
+  blocked     Boolean  @default(false)
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  @@index([entityId, createdAt])
+  @@index([userId, createdAt])
+}

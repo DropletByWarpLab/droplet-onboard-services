@@ -24,6 +24,14 @@ const envSchema = z.object({
   // --- Home Assistant ---
   HOMEASSISTANT_URL: z.string().default("http://localhost:8123"),
   HOMEASSISTANT_TOKEN: z.string().default(""),
+
+  // --- OAuth2 ---
+  AUTH_MODE: z.enum(["oauth2", "legacy"]).default("legacy"),
+  OAUTH2_CLIENT_ID: z.string().default(""),
+  OAUTH2_CLIENT_SECRET: z.string().default(""),
+
+  // --- gRPC ---
+  AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
 });
 
 export const config = envSchema.parse(process.env);

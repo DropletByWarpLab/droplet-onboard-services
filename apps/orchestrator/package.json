@@ -27,7 +27,9 @@
     "pino": "^9.1.0",
     "pino-http": "^10.1.0",
     "ws": "^8.17.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.0"
   },
   "devDependencies": {
     "@types/ws": "^8.5.10",
