@@ -11,8 +11,9 @@ import {
   Lock,
   Camera,
   CircleDot,
+  WifiOff,
 } from "lucide-react";
-import type { SmartHomeDevice, SmartHomeCategory } from "@/lib/types";
+import type { MatterDevice, SmartHomeCategory } from "@/lib/types";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { BrightnessSlider } from "./BrightnessSlider";
 import { SensorReading } from "./SensorReading";
@@ -39,8 +40,8 @@ const TOGGLEABLE = new Set<SmartHomeCategory>([
 ]);
 
 interface DeviceCardProps {
-  device: SmartHomeDevice;
-  onCommand: (entityId: string, service: string, data?: Record<string, unknown>) => void;
+  device: MatterDevice;
+  onCommand: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
   onClick?: () => void;
 }
 
@@ -48,27 +49,30 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
   const Icon = CATEGORY_ICONS[device.category] || CircleDot;
   const isOn = device.state === "on" || device.state === "playing";
   const isToggleable = TOGGLEABLE.has(device.category);
-  const brightness = device.attributes.brightness as number | undefined;
+  const isConnected = device.connectionState === "connected";
+  const brightness = device.attributes.currentLevel as number | undefined;
+  // Matter brightness is 0-254, convert to percentage
+  const brightnessPct = brightness != null ? Math.round((brightness / 254) * 100) : undefined;
 
   function handleToggle() {
-    onCommand(device.entityId, "toggle");
+    onCommand(device.nodeId, "toggle");
   }
 
   function handleBrightness(value: number) {
-    onCommand(device.entityId, "turn_on", { brightness: value });
+    onCommand(device.nodeId, "set_brightness", { brightness: value });
   }
 
   const subtitle = (() => {
-    if (device.category === "light" && brightness != null) {
-      return `${Math.round((brightness / 255) * 100)}%`;
+    if (!isConnected) return device.connectionState;
+    if (device.category === "light" && brightnessPct != null) {
+      return `${brightnessPct}%`;
     }
     if (device.category === "sensor" || device.category === "binary_sensor") {
-      const unit = device.attributes.unit_of_measurement as string | undefined;
-      return unit ? `${device.state} ${unit}` : device.state;
+      return device.state;
     }
     if (device.category === "climate") {
-      const temp = device.attributes.current_temperature as number | undefined;
-      return temp != null ? `${temp}°` : device.state;
+      const temp = device.attributes.localTemperature as number | undefined;
+      return temp != null ? `${(temp / 100).toFixed(1)}°` : device.state;
     }
     return device.state;
   })();
@@ -78,7 +82,8 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
       onClick={onClick}
       className={`
         dp-card cursor-pointer transition-all duration-200
-        ${isOn ? "ring-1 ring-accent/20 bg-accent/[0.03]" : ""}
+        ${isOn && isConnected ? "ring-1 ring-accent/20 bg-accent/[0.03]" : ""}
+        ${!isConnected ? "opacity-60" : ""}
       `}
     >
       <div className="flex items-start gap-3">
@@ -86,10 +91,10 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
         <div
           className={`
             w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0
-            ${isOn ? "bg-accent/15 text-accent" : "bg-surface-secondary text-label-tertiary"}
+            ${isOn && isConnected ? "bg-accent/15 text-accent" : "bg-surface-secondary text-label-tertiary"}
           `}
         >
-          <Icon size={20} />
+          {isConnected ? <Icon size={20} /> : <WifiOff size={20} />}
         </div>
 
         {/* Name + state */}
@@ -103,23 +108,23 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
         </div>
 
         {/* Toggle for binary devices */}
-        {isToggleable && (
+        {isToggleable && isConnected && (
           <ToggleSwitch on={isOn} onToggle={handleToggle} />
         )}
       </div>
 
       {/* Brightness slider for lights that are on */}
-      {device.category === "light" && isOn && brightness != null && (
+      {device.category === "light" && isOn && isConnected && brightnessPct != null && (
         <div className="mt-3 pt-3 border-t border-separator">
           <BrightnessSlider
-            brightness={brightness}
+            brightness={brightnessPct}
             onBrightnessChange={handleBrightness}
           />
         </div>
       )}
 
       {/* Sensor reading inline */}
-      {(device.category === "sensor" || device.category === "binary_sensor") && (
+      {(device.category === "sensor" || device.category === "binary_sensor") && isConnected && (
         <div className="mt-3 pt-3 border-t border-separator">
           <SensorReading device={device} />
         </div>

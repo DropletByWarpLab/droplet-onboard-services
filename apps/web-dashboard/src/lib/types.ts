@@ -121,11 +121,11 @@ export interface HealthResponse {
     db: boolean;
     redis: boolean;
     aiGateway: boolean;
-    homeAssistant: boolean;
+    matter: boolean;
   };
 }
 
-// --- Smart Home types ---
+// --- Matter / Smart Home types ---
 
 export type SmartHomeCategory =
   | "light"
@@ -140,29 +140,45 @@ export type SmartHomeCategory =
   | "camera"
   | "vacuum";
 
-export interface SmartHomeDevice {
-  entityId: string;
+export interface MatterDevice {
+  nodeId: string;
+  name: string;
   category: SmartHomeCategory;
-  name: string;
   state: string;
+  connectionState: "connected" | "disconnected" | "reconnecting" | "waiting";
+  vendorName?: string;
+  vendorId?: number;
+  productName?: string;
+  productId?: number;
+  serialNumber?: string;
+  endpoints: MatterEndpointInfo[];
   attributes: Record<string, unknown>;
-  lastChanged: string;
-  lastUpdated: string;
 }
 
-export interface SmartHomeGrouped {
-  lights: SmartHomeDevice[];
-  switches: SmartHomeDevice[];
-  sensors: SmartHomeDevice[];
-  climate: SmartHomeDevice[];
-  media: SmartHomeDevice[];
-  covers: SmartHomeDevice[];
-  other: SmartHomeDevice[];
+export interface MatterEndpointInfo {
+  endpointId: number;
+  deviceTypes: Array<{ deviceType: number; revision: number }>;
+  clusters: number[];
 }
 
-export interface DiscoveredDevice {
-  flowId: string;
-  handler: string;
-  name: string;
-  description: string;
+export interface MatterGrouped {
+  lights: MatterDevice[];
+  switches: MatterDevice[];
+  sensors: MatterDevice[];
+  climate: MatterDevice[];
+  media: MatterDevice[];
+  covers: MatterDevice[];
+  locks: MatterDevice[];
+  other: MatterDevice[];
+}
+
+export interface MatterDiscoveredDevice {
+  deviceIdentifier: string;
+  discriminator: number;
+  vendorId?: number;
+  productId?: number;
+  deviceName?: string;
+  deviceType?: number;
+  commissioningMode: number;
+  addresses: Array<{ ip: string; port: number; type: string }>;
 }

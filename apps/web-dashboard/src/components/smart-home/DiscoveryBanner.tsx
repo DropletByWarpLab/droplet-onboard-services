@@ -25,10 +25,10 @@ export function DiscoveryBanner({ count }: DiscoveryBannerProps) {
   if (dismissed || count === 0) return null;
 
   return (
-    <div className="flex items-center gap-3 bg-system-green/10 border border-system-green/20 rounded-lg p-3 mb-6">
-      <Wifi size={18} className="text-system-green flex-shrink-0" />
+    <div className="flex items-center gap-3 bg-system-blue/10 border border-system-blue/20 rounded-lg p-3 mb-6">
+      <Wifi size={18} className="text-system-blue flex-shrink-0" />
       <p className="type-subheadline text-label-primary flex-1">
-        {count} new device{count > 1 ? "s" : ""} discovered and added automatically
+        {count} Matter device{count > 1 ? "s" : ""} found on the network. Commission them via chat or pairing code.
       </p>
       <button
         onClick={() => setDismissed(true)}

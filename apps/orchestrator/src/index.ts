@@ -8,6 +8,10 @@ import { initDeviceService } from "./services/device.service.js";
 import { initFileService } from "./services/file.service.js";
 import { initSmartHomeService } from "./services/smart-home.service.js";
 import {
+  initMatterService,
+  shutdownMatterService,
+} from "./services/matter.service.js";
+import {
   initDeviceRegistration,
   shutdownDeviceRegistration,
 } from "./services/device-registration.service.js";
@@ -42,12 +46,20 @@ async function main() {
     logger.warn("MQTT broker unavailable");
   }
 
-  // Connect Home Assistant (non-fatal if unavailable)
+  // Initialize Matter controller (non-fatal if unavailable)
+  try {
+    await initMatterService();
+    logger.info("Matter controller initialized");
+  } catch (err) {
+    logger.warn("Matter controller unavailable: %s", (err as Error).message);
+  }
+
+  // Legacy: Home Assistant integration (kept for non-Matter protocols)
   try {
     await initSmartHomeService();
-    logger.info("Connected to Home Assistant");
-  } catch (err) {
-    logger.warn("Home Assistant unavailable, smart home features disabled");
+    logger.info("Home Assistant connected (legacy fallback)");
+  } catch {
+    // Expected when HA is not deployed — Matter is the primary path
   }
 
   // Start Express
@@ -60,6 +72,7 @@ async function main() {
   const shutdown = async () => {
     logger.info("Shutting down...");
     shutdownDeviceRegistration();
+    await shutdownMatterService();
     await prisma.$disconnect();
     process.exit(0);
   };

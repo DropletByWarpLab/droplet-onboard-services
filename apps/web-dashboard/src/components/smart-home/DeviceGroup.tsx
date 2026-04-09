@@ -1,13 +1,13 @@
 "use client";
 
-import type { SmartHomeDevice } from "@/lib/types";
+import type { MatterDevice } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
 
 interface DeviceGroupProps {
   title: string;
-  devices: SmartHomeDevice[];
-  onCommand: (entityId: string, service: string, data?: Record<string, unknown>) => void;
-  onDeviceClick?: (device: SmartHomeDevice) => void;
+  devices: MatterDevice[];
+  onCommand: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
+  onDeviceClick?: (device: MatterDevice) => void;
 }
 
 export function DeviceGroup({
@@ -30,7 +30,7 @@ export function DeviceGroup({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {devices.map((device) => (
           <DeviceCard
-            key={device.entityId}
+            key={device.nodeId}
             device={device}
             onCommand={onCommand}
             onClick={() => onDeviceClick?.(device)}

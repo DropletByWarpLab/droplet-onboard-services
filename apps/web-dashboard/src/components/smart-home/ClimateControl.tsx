@@ -1,28 +1,27 @@
 "use client";
 
 import { Minus, Plus } from "lucide-react";
-import type { SmartHomeDevice } from "@/lib/types";
+import type { MatterDevice } from "@/lib/types";
 
 interface ClimateControlProps {
-  device: SmartHomeDevice;
-  onCommand: (service: string, data?: Record<string, unknown>) => void;
+  device: MatterDevice;
+  onCommand: (command: string, data?: Record<string, unknown>) => void;
 }
 
 const MODES = ["heat", "cool", "auto", "off"] as const;
 
 export function ClimateControl({ device, onCommand }: ClimateControlProps) {
-  const currentTemp = device.attributes.current_temperature as number | undefined;
-  const targetTemp = device.attributes.temperature as number | undefined;
+  // Matter temperatures are in units of 0.01°C
+  const rawCurrent = device.attributes.localTemperature as number | undefined;
+  const rawHeating = device.attributes.occupiedHeatingSetpoint as number | undefined;
+  const rawCooling = device.attributes.occupiedCoolingSetpoint as number | undefined;
+  const currentTemp = rawCurrent != null ? rawCurrent / 100 : undefined;
+  const targetTemp = rawHeating != null ? rawHeating / 100 : rawCooling != null ? rawCooling / 100 : undefined;
   const hvacMode = device.state;
-  const unit = (device.attributes.temperature_unit as string) || "°C";
 
   function adjustTemp(delta: number) {
     if (targetTemp == null) return;
     onCommand("set_temperature", { temperature: targetTemp + delta });
-  }
-
-  function setMode(mode: string) {
-    onCommand("set_hvac_mode", { hvac_mode: mode });
   }
 
   return (
@@ -32,7 +31,7 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
         <div className="text-center">
           <span className="type-caption-1 text-label-tertiary">Current</span>
           <p className="type-large-title text-label-primary">
-            {currentTemp}{unit}
+            {currentTemp.toFixed(1)}°C
           </p>
         </div>
       )}
@@ -49,7 +48,7 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
           </button>
           <div className="text-center min-w-[80px]">
             <span className="type-caption-1 text-label-tertiary">Target</span>
-            <p className="type-title-1 text-accent">{targetTemp}{unit}</p>
+            <p className="type-title-1 text-accent">{targetTemp.toFixed(1)}°C</p>
           </div>
           <button
             onClick={() => adjustTemp(0.5)}
@@ -61,23 +60,22 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
         </div>
       )}
 
-      {/* Mode selector */}
+      {/* Mode indicator */}
       <div className="flex gap-1 bg-surface-secondary rounded-lg p-1">
         {MODES.map((mode) => (
-          <button
+          <div
             key={mode}
-            onClick={() => setMode(mode)}
             className={`
-              flex-1 py-1.5 px-2 rounded-md type-caption-1 capitalize transition-all
+              flex-1 py-1.5 px-2 rounded-md type-caption-1 capitalize text-center
               ${
                 hvacMode === mode
                   ? "bg-accent text-white font-medium"
-                  : "text-label-secondary hover:text-label-primary"
+                  : "text-label-secondary"
               }
             `}
           >
             {mode}
-          </button>
+          </div>
         ))}
       </div>
     </div>

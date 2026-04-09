@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { setupAdmin, loginUser, fetchSmartHomeDevices } from "@/lib/api";
+import { setupAdmin, loginUser, fetchMatterDevices } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
   ArrowRight,
@@ -18,7 +18,7 @@ import {
   Wifi,
 } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
-import type { SmartHomeDevice, SmartHomeGrouped } from "@/lib/types";
+import type { MatterDevice, MatterGrouped } from "@/lib/types";
 
 type Step = "welcome" | "account" | "discovery" | "done";
 const STEPS: Step[] = ["welcome", "account", "discovery", "done"];
@@ -43,7 +43,7 @@ export default function SetupPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Discovery state
-  const [discoveredDevices, setDiscoveredDevices] = useState<SmartHomeDevice[]>([]);
+  const [discoveredDevices, setDiscoveredDevices] = useState<MatterDevice[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [scanSeconds, setScanSeconds] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval>>();
@@ -98,13 +98,13 @@ export default function SetupPage() {
     // Poll for devices every 3 seconds
     pollRef.current = setInterval(async () => {
       try {
-        const grouped = await fetchSmartHomeDevices();
+        const grouped = await fetchMatterDevices();
         const allDevices = flattenGrouped(grouped);
         // Only add truly new devices (not seen before)
-        const newDevices: SmartHomeDevice[] = [];
+        const newDevices: MatterDevice[] = [];
         for (const d of allDevices) {
-          if (!seenIdsRef.current.has(d.entityId)) {
-            seenIdsRef.current.add(d.entityId);
+          if (!seenIdsRef.current.has(d.nodeId)) {
+            seenIdsRef.current.add(d.nodeId);
             newDevices.push(d);
           }
         }
@@ -316,7 +316,7 @@ export default function SetupPage() {
                 const Icon = CATEGORY_ICONS[device.category] || Wifi;
                 return (
                   <div
-                    key={device.entityId}
+                    key={device.nodeId}
                     className="animate-device-appear flex items-center gap-3 dp-card !py-3"
                     style={{ animationDelay: `${index * 80}ms` }}
                   >
@@ -424,7 +424,7 @@ export default function SetupPage() {
 
 // --- Helpers ---
 
-function flattenGrouped(grouped: SmartHomeGrouped): SmartHomeDevice[] {
+function flattenGrouped(grouped: MatterGrouped): MatterDevice[] {
   return [
     ...grouped.lights,
     ...grouped.switches,
@@ -432,6 +432,7 @@ function flattenGrouped(grouped: SmartHomeGrouped): SmartHomeDevice[] {
     ...grouped.sensors,
     ...grouped.media,
     ...grouped.covers,
+    ...grouped.locks,
     ...grouped.other,
   ];
 }
