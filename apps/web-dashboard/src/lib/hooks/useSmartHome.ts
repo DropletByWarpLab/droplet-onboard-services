@@ -2,15 +2,15 @@
 
 import useSWR, { mutate } from "swr";
 import {
-  fetchSmartHomeDevices,
-  sendSmartHomeCommand,
-  fetchDiscoveredDevices,
-  acceptDiscoveredDevice,
+  fetchMatterDevices,
+  sendMatterCommand,
+  discoverMatterDevices,
+  commissionMatterDevice,
 } from "../api";
-import type { SmartHomeGrouped, DiscoveredDevice } from "../types";
+import type { MatterGrouped, MatterDiscoveredDevice } from "../types";
 
-const DEVICES_KEY = "/api/devices/smart-home";
-const DISCOVERED_KEY = "/api/devices/smart-home/discovered";
+const DEVICES_KEY = "/api/matter/devices";
+const DISCOVERED_KEY = "/api/matter/discover";
 
 export function useSmartHome() {
   const {
@@ -19,29 +19,35 @@ export function useSmartHome() {
     isLoading,
     isValidating,
     mutate: mutateDevices,
-  } = useSWR<SmartHomeGrouped>(DEVICES_KEY, fetchSmartHomeDevices, {
+  } = useSWR<MatterGrouped>(DEVICES_KEY, fetchMatterDevices, {
     refreshInterval: 4000,
   });
 
-  const { data: discovered } = useSWR<DiscoveredDevice[]>(
-    DISCOVERED_KEY,
-    fetchDiscoveredDevices,
-    { refreshInterval: 15000 }
-  );
+  const { data: discoveryResult } = useSWR<{
+    devices: MatterDiscoveredDevice[];
+    count: number;
+  }>(DISCOVERED_KEY, discoverMatterDevices, {
+    refreshInterval: 30000,
+    // Discovery takes ~15s, don't error on slow requests
+    errorRetryCount: 1,
+  });
+
+  const discovered = discoveryResult?.devices ?? [];
 
   async function command(
-    entityId: string,
-    service: string,
+    nodeId: string,
+    cmd: string,
     data?: Record<string, unknown>
   ) {
-    await sendSmartHomeCommand(entityId, service, data);
+    await sendMatterCommand(nodeId, cmd, data);
     mutate(DEVICES_KEY);
   }
 
-  async function accept(flowId: string) {
-    await acceptDiscoveredDevice(flowId);
+  async function commission(pairingCode: string) {
+    const result = await commissionMatterDevice(pairingCode);
     mutate(DEVICES_KEY);
     mutate(DISCOVERED_KEY);
+    return result;
   }
 
   const totalDevices = grouped
@@ -58,13 +64,13 @@ export function useSmartHome() {
 
   return {
     grouped: grouped ?? null,
-    discovered: discovered ?? [],
+    discovered,
     totalDevices,
     isLoading,
     isRefreshing: isValidating,
     error,
     command,
-    accept,
+    commission,
     refresh,
   };
 }

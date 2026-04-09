@@ -6,6 +6,9 @@ import { z } from "zod";
 const defaultFilesRoot =
   process.env.NODE_ENV === "production" ? "/data/files" : path.resolve(".data/files");
 
+const defaultMatterStorage =
+  process.env.NODE_ENV === "production" ? "/data/matter-storage" : path.resolve(".data/matter-storage");
+
 const envSchema = z.object({
   DATABASE_URL: z.string().default("postgresql://droplet:droplet@localhost:5432/droplet"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
@@ -21,9 +24,13 @@ const envSchema = z.object({
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
   AUTH_ENABLED: z.coerce.boolean().default(false),
 
-  // --- Home Assistant ---
+  // --- Home Assistant (legacy, kept for optional fallback) ---
   HOMEASSISTANT_URL: z.string().default("http://localhost:8123"),
   HOMEASSISTANT_TOKEN: z.string().default(""),
+
+  // --- Matter (native controller) ---
+  MATTER_STORAGE_PATH: z.string().default(defaultMatterStorage),
+  MATTER_CONTROLLER_NAME: z.string().default("Droplet"),
 
   // --- OAuth2 ---
   AUTH_MODE: z.enum(["oauth2", "legacy"]).default("legacy"),

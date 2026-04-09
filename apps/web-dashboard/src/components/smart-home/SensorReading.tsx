@@ -8,7 +8,7 @@ import {
   Gauge,
   Activity,
 } from "lucide-react";
-import type { SmartHomeDevice } from "@/lib/types";
+import type { MatterDevice } from "@/lib/types";
 
 const SENSOR_ICONS: Record<string, typeof Thermometer> = {
   temperature: Thermometer,
@@ -20,10 +20,12 @@ const SENSOR_ICONS: Record<string, typeof Thermometer> = {
   energy: Activity,
 };
 
-export function SensorReading({ device }: { device: SmartHomeDevice }) {
-  const deviceClass = device.attributes.device_class as string | undefined;
-  const unit = device.attributes.unit_of_measurement as string | undefined;
-  const Icon = (deviceClass && SENSOR_ICONS[deviceClass]) || Activity;
+export function SensorReading({ device }: { device: MatterDevice }) {
+  // Infer sensor type from category and available attributes
+  const hasTemp = device.attributes.measuredValue !== undefined || device.attributes.localTemperature !== undefined;
+  const sensorType = hasTemp ? "temperature" : undefined;
+  const Icon = (sensorType && SENSOR_ICONS[sensorType]) || Activity;
+  const unit = hasTemp ? "°C" : undefined;
 
   return (
     <div className="flex items-center gap-3">

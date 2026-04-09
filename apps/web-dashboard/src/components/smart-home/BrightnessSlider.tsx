@@ -3,8 +3,9 @@
 import { useCallback, useRef, useState } from "react";
 
 interface BrightnessSliderProps {
-  /** Current brightness 0-255 from HA */
+  /** Current brightness 0-100 percentage */
   brightness: number;
+  /** Called with 0-100 percentage value */
   onBrightnessChange: (brightness: number) => void;
 }
 
@@ -12,8 +13,7 @@ export function BrightnessSlider({
   brightness,
   onBrightnessChange,
 }: BrightnessSliderProps) {
-  const pct = Math.round((brightness / 255) * 100);
-  const [localPct, setLocalPct] = useState(pct);
+  const [localPct, setLocalPct] = useState(brightness);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   const handleChange = useCallback(
@@ -23,7 +23,7 @@ export function BrightnessSlider({
 
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
-        onBrightnessChange(Math.round((newPct / 100) * 255));
+        onBrightnessChange(newPct);
       }, 300);
     },
     [onBrightnessChange]

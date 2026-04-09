@@ -59,8 +59,11 @@ services:
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
       - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - MATTER_STORAGE_PATH=/data/matter-storage
+      - MATTER_CONTROLLER_NAME=${MATTER_CONTROLLER_NAME:-Droplet}
     volumes:
       - filedata:/data/files
+      - matter-data:/data/matter-storage
     restart: always
 
   # --- Nextcloud (headless backend) ---
@@ -202,3 +205,4 @@ volumes:
   aikeys:
   nextcloud-data:
   ha-config:
+  matter-data:

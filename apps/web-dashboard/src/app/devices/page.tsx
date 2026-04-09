@@ -7,14 +7,14 @@ import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
 import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
-import type { SmartHomeDevice } from "@/lib/types";
+import type { MatterDevice } from "@/lib/types";
 
 export default function DevicesPage() {
   const { grouped, discovered, totalDevices, isLoading, isRefreshing, error, command, refresh } =
     useSmartHome();
   useSmartHomeEvents();
 
-  const [selectedDevice, setSelectedDevice] = useState<SmartHomeDevice | null>(
+  const [selectedDevice, setSelectedDevice] = useState<MatterDevice | null>(
     null
   );
 
@@ -40,10 +40,11 @@ export default function DevicesPage() {
         <div className="dp-card text-center py-12">
           <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
           <h2 className="type-title-3 text-label-primary mb-1">
-            Home Assistant Not Connected
+            Matter Controller Not Available
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Make sure Home Assistant is running and configured with a long-lived access token in the environment.
+            The Matter controller could not start. Check that the device has
+            network access for mDNS discovery.
           </p>
         </div>
       </div>
@@ -58,6 +59,7 @@ export default function DevicesPage() {
         { title: "Sensors", devices: grouped.sensors },
         { title: "Media", devices: grouped.media },
         { title: "Covers", devices: grouped.covers },
+        { title: "Locks", devices: grouped.locks },
         { title: "Other", devices: grouped.other },
       ]
     : [];
@@ -100,7 +102,9 @@ export default function DevicesPage() {
             No Devices Yet
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Smart home devices on your network will be automatically discovered and appear here. Supports Matter, Zigbee, Z-Wave, and WiFi devices.
+            Matter-compatible devices on your network will be discovered
+            automatically. Commission new devices through the chat or by entering
+            their pairing code.
           </p>
         </div>
       )}

@@ -1,15 +1,15 @@
 import type {
   ChatRequest,
   DeviceInfo,
-  DiscoveredDevice,
+  MatterDevice,
+  MatterDiscoveredDevice,
+  MatterGrouped,
   FileEntryInfo,
   HealthResponse,
   ModelsResponse,
   SessionChatRequest,
   SessionDetail,
   SessionInfo,
-  SmartHomeDevice,
-  SmartHomeGrouped,
   StorageStats,
   SyncTargetInfo,
   AuthUser,
@@ -117,50 +117,64 @@ export async function fetchDevices(): Promise<DeviceInfo[]> {
   return res.json();
 }
 
-// --- Smart Home ---
+// --- Matter Devices ---
 
-export async function fetchSmartHomeDevices(): Promise<SmartHomeGrouped> {
-  const res = await authFetch(`${BASE}/api/devices/smart-home`);
-  if (!res.ok) throw new Error(`Failed to fetch smart home devices: ${res.status}`);
+export async function fetchMatterDevices(): Promise<MatterGrouped> {
+  const res = await authFetch(`${BASE}/api/matter/devices`);
+  if (!res.ok) throw new Error(`Failed to fetch Matter devices: ${res.status}`);
   return res.json();
 }
 
-export async function fetchSmartHomeDevice(entityId: string): Promise<SmartHomeDevice> {
-  const res = await authFetch(
-    `${BASE}/api/devices/smart-home/${encodeURIComponent(entityId)}`
-  );
+export async function fetchMatterDevice(nodeId: string): Promise<MatterDevice> {
+  const res = await authFetch(`${BASE}/api/matter/devices/${nodeId}`);
   if (!res.ok) throw new Error(`Failed to fetch device: ${res.status}`);
   return res.json();
 }
 
-export async function sendSmartHomeCommand(
-  entityId: string,
-  service: string,
+export async function sendMatterCommand(
+  nodeId: string,
+  command: string,
   data?: Record<string, unknown>
-): Promise<void> {
+): Promise<unknown> {
   const res = await authFetch(
-    `${BASE}/api/devices/smart-home/${encodeURIComponent(entityId)}/command`,
+    `${BASE}/api/matter/devices/${nodeId}/command`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service, data }),
+      body: JSON.stringify({ command, data }),
     }
   );
-  if (!res.ok) throw new Error(`Failed to send command: ${res.status}`);
-}
-
-export async function fetchDiscoveredDevices(): Promise<DiscoveredDevice[]> {
-  const res = await authFetch(`${BASE}/api/devices/smart-home/discovered`);
-  if (!res.ok) throw new Error(`Failed to fetch discovered: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to send command: ${res.status}`);
+  }
   return res.json();
 }
 
-export async function acceptDiscoveredDevice(flowId: string): Promise<void> {
-  const res = await authFetch(
-    `${BASE}/api/devices/smart-home/discovered/${flowId}/accept`,
-    { method: "POST" }
-  );
-  if (!res.ok) throw new Error(`Failed to accept device: ${res.status}`);
+export async function discoverMatterDevices(): Promise<{ devices: MatterDiscoveredDevice[]; count: number }> {
+  const res = await authFetch(`${BASE}/api/matter/discover`);
+  if (!res.ok) throw new Error(`Failed to discover devices: ${res.status}`);
+  return res.json();
+}
+
+export async function commissionMatterDevice(pairingCode: string): Promise<{ nodeId: string }> {
+  const res = await authFetch(`${BASE}/api/matter/commission`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pairing_code: pairingCode }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to commission device: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function decommissionMatterDevice(nodeId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/matter/devices/${nodeId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Failed to decommission device: ${res.status}`);
 }
 
 // --- Models ---

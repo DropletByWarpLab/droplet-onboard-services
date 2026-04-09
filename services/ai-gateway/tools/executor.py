@@ -117,6 +117,68 @@ async def _trigger_sync(args: dict) -> dict:
     return resp.json()
 
 
+# --- Smart Home / Matter tools ---
+
+
+async def _list_smart_home_devices(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/matter/devices")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_smart_home_device(args: dict) -> dict:
+    node_id = args["node_id"]
+    client = _get_client()
+    resp = await client.get(f"/api/matter/devices/{node_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _control_device(args: dict) -> dict:
+    node_id = args["node_id"]
+    command = args["command"]
+    data = args.get("data")
+    client = _get_client()
+    body = {"command": command}
+    if data:
+        body["data"] = data
+    resp = await client.post(f"/api/matter/devices/{node_id}/command", json=body)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _discover_matter_devices(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/matter/discover", timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _commission_device(args: dict) -> dict:
+    pairing_code = args["pairing_code"]
+    client = _get_client()
+    resp = await client.post(
+        "/api/matter/commission",
+        json={"pairing_code": pairing_code},
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_command_history(args: dict) -> dict:
+    client = _get_client()
+    params = {}
+    if "node_id" in args:
+        params["entityId"] = f"matter.{args['node_id']}"
+    if "limit" in args:
+        params["limit"] = str(args["limit"])
+    resp = await client.get("/api/matter/audit", params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+
 TOOL_HANDLERS = {
     "list_files": _list_files,
     "read_file": _read_file,
@@ -125,6 +187,12 @@ TOOL_HANDLERS = {
     "get_system_health": _get_system_health,
     "list_sync_targets": _list_sync_targets,
     "trigger_sync": _trigger_sync,
+    "list_smart_home_devices": _list_smart_home_devices,
+    "get_smart_home_device": _get_smart_home_device,
+    "control_device": _control_device,
+    "discover_matter_devices": _discover_matter_devices,
+    "commission_device": _commission_device,
+    "get_command_history": _get_command_history,
 }
 
 

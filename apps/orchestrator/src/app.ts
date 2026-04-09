@@ -14,6 +14,7 @@ import { createSyncRouter } from "./routes/sync.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createSmartHomeRouter } from "./routes/smart-home.js";
+import { createMatterRouter } from "./routes/matter.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -43,6 +44,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createSyncRouter(prisma));
   app.use("/api", createStorageRouter());
   app.use("/api", createSmartHomeRouter(prisma));
+  app.use("/api", createMatterRouter(prisma));
 
   // Error handling
   app.use(errorHandler);
