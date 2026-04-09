@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageSquare,
+  Network,
   Settings,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
@@ -17,6 +18,7 @@ import { useAuth } from "@/lib/auth";
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/devices", label: "Devices", icon: Home },
+  { href: "/network", label: "Network", icon: Network },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/chat", label: "Chat", icon: MessageSquare },
   { href: "/settings", label: "Settings", icon: Settings },

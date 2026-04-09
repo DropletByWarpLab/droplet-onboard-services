@@ -1,17 +1,22 @@
 import type {
   ChatRequest,
+  ConnectedDevice,
   DeviceInfo,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
   FileEntryInfo,
+  FirewallConfig,
   HealthResponse,
   ModelsResponse,
+  NetworkCommandResult,
+  NetworkOverview,
   SessionChatRequest,
   SessionDetail,
   SessionInfo,
   StorageStats,
   SyncTargetInfo,
+  WirelessScanResult,
   AuthUser,
   ShareInfo,
 } from "./types";
@@ -115,6 +120,122 @@ export async function fetchDevices(): Promise<DeviceInfo[]> {
   const res = await authFetch(`${BASE}/api/devices`);
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
+}
+
+// --- Network / Router ---
+
+export async function fetchNetworkStatus(): Promise<NetworkOverview> {
+  const res = await authFetch(`${BASE}/api/network/status`);
+  if (!res.ok) throw new Error(`Failed to fetch network status: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
+  const res = await authFetch(`${BASE}/api/network/devices`);
+  if (!res.ok) throw new Error(`Failed to fetch connected devices: ${res.status}`);
+  const data = await res.json();
+  return data.devices;
+}
+
+export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
+  const res = await authFetch(`${BASE}/api/network/wifi`);
+  if (!res.ok) throw new Error(`Failed to fetch wifi settings: ${res.status}`);
+  return res.json();
+}
+
+export async function scanWifiNetworks(): Promise<WirelessScanResult[]> {
+  const res = await authFetch(`${BASE}/api/network/wifi/scan`);
+  if (!res.ok) throw new Error(`Failed to scan wifi: ${res.status}`);
+  const data = await res.json();
+  return data.results;
+}
+
+export async function setWifiSsid(ssid: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/ssid`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ssid }),
+  });
+  return res.json();
+}
+
+export async function setWifiPassword(password: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  return res.json();
+}
+
+export async function setWifiChannel(channel: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/channel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel }),
+  });
+  return res.json();
+}
+
+export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
+  if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
+  const data = await res.json();
+  return data.leases;
+}
+
+export async function fetchFirewallConfig(): Promise<FirewallConfig> {
+  const res = await authFetch(`${BASE}/api/network/firewall`);
+  if (!res.ok) throw new Error(`Failed to fetch firewall config: ${res.status}`);
+  return res.json();
+}
+
+export async function blockNetworkDevice(mac: string, name?: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/block`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mac, name }),
+  });
+  return res.json();
+}
+
+export async function unblockNetworkDevice(mac: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/unblock`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mac }),
+  });
+  return res.json();
+}
+
+export async function addNetworkPortForward(
+  name: string,
+  srcPort: string,
+  destIp: string,
+  destPort: string,
+  proto: string = "tcp"
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/port-forward`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, src_port: srcPort, dest_ip: destIp, dest_port: destPort, proto }),
+  });
+  return res.json();
+}
+
+export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> {
+  const res = await authFetch(`${BASE}/api/network/system`);
+  if (!res.ok) throw new Error(`Failed to fetch router system info: ${res.status}`);
+  return res.json();
+}
+
+export async function confirmNetworkCommand(token: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/network/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken: token }),
+  });
+  if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
 }
 
 // --- Matter Devices ---

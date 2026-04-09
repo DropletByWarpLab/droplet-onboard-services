@@ -81,4 +81,16 @@ model CommandAuditLog {
 
   @@index([entityId, createdAt])
   @@index([userId, createdAt])
+  @@index([domain, createdAt])
+}
+
+model NetworkConfigSnapshot {
+  id        String   @id @default(cuid())
+  userId    String?
+  config    String   // "network", "wireless", "firewall", "dhcp"
+  snapshot  Json     // UCI config state before change
+  operation String
+  createdAt DateTime @default(now())
+
+  @@index([config, createdAt])
 }

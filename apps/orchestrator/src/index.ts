@@ -7,6 +7,7 @@ import { connectMqtt } from "./services/mqtt.service.js";
 import { initDeviceService } from "./services/device.service.js";
 import { initFileService } from "./services/file.service.js";
 import { initSmartHomeService } from "./services/smart-home.service.js";
+import { initNetworkService } from "./services/network.service.js";
 import {
   initMatterService,
   shutdownMatterService,
@@ -60,6 +61,14 @@ async function main() {
     logger.info("Home Assistant connected (legacy fallback)");
   } catch {
     // Expected when HA is not deployed — Matter is the primary path
+  }
+
+  // Connect OpenWrt router (non-fatal if unavailable)
+  try {
+    await initNetworkService();
+    logger.info("Connected to OpenWrt router");
+  } catch (err) {
+    logger.warn("OpenWrt router unavailable, network features disabled");
   }
 
   // Start Express

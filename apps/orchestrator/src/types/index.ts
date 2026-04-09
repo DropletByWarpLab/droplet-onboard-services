@@ -130,6 +130,8 @@ export interface HealthResponse {
     redis: boolean;
     aiGateway: boolean;
     matter: boolean;
+    homeAssistant: boolean;
+    router: boolean;
   };
 }
 

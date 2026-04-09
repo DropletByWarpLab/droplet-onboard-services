@@ -223,6 +223,150 @@ AVAILABLE_TOOLS: list[ToolDefinition] = [
             },
         )
     ),
+    # --- Network / Router tools ---
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_network_status",
+            description="Get the current network status including WAN/LAN interfaces, WiFi, connected device count, and router system info.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_connected_devices",
+            description="List all devices currently connected to the network with their IP address, MAC address, hostname, and connection type (wired/wireless).",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_wifi_settings",
+            description="Get current WiFi settings including SSID, channel, encryption, and radio configuration for all bands.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="scan_wifi_networks",
+            description="Scan for nearby WiFi networks and return their SSID, signal strength, channel, and encryption.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="set_wifi_ssid",
+            description="Change the WiFi network name (SSID).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ssid": {
+                        "type": "string",
+                        "description": "The new SSID name (1-32 characters).",
+                    }
+                },
+                "required": ["ssid"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="set_wifi_channel",
+            description="Change the WiFi channel. Use 'auto' for automatic channel selection.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel number (e.g. '6', '36', '149') or 'auto'.",
+                    }
+                },
+                "required": ["channel"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_firewall_rules",
+            description="List current firewall zones, rules, and port forwarding configuration.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="block_network_device",
+            description="Block a device from accessing the internet by its MAC address. Requires user confirmation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "mac": {
+                        "type": "string",
+                        "description": "MAC address of the device to block (format: AA:BB:CC:DD:EE:FF).",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional friendly name for the block rule.",
+                    },
+                },
+                "required": ["mac"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="unblock_network_device",
+            description="Unblock a previously blocked device, restoring its internet access. Requires user confirmation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "mac": {
+                        "type": "string",
+                        "description": "MAC address of the device to unblock.",
+                    }
+                },
+                "required": ["mac"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="add_port_forward",
+            description="Add a port forwarding rule to forward an external port to an internal device. Requires user confirmation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Friendly name for the port forward rule.",
+                    },
+                    "src_port": {
+                        "type": "string",
+                        "description": "External port number to forward.",
+                    },
+                    "dest_ip": {
+                        "type": "string",
+                        "description": "Internal IP address of the destination device.",
+                    },
+                    "dest_port": {
+                        "type": "string",
+                        "description": "Internal port on the destination device.",
+                    },
+                    "proto": {
+                        "type": "string",
+                        "description": "Protocol: 'tcp', 'udp', or 'tcpudp'. Defaults to 'tcp'.",
+                        "default": "tcp",
+                    },
+                },
+                "required": ["name", "src_port", "dest_ip", "dest_port"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_router_system_info",
+            description="Get router hardware info, OpenWrt version, uptime, CPU load, and memory usage.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
 ]
 
 

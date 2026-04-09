@@ -122,6 +122,8 @@ export interface HealthResponse {
     redis: boolean;
     aiGateway: boolean;
     matter: boolean;
+    homeAssistant: boolean;
+    router: boolean;
   };
 }
 
@@ -181,4 +183,61 @@ export interface MatterDiscoveredDevice {
   deviceType?: number;
   commissioningMode: number;
   addresses: Array<{ ip: string; port: number; type: string }>;
+}
+
+// --- Network / Router types ---
+
+export interface NetworkOverview {
+  interfaces: {
+    lan: Record<string, unknown>;
+    wan: Record<string, unknown>;
+  };
+  wireless: Record<string, unknown>;
+  system: {
+    board: Record<string, unknown>;
+    resources: Record<string, unknown>;
+  };
+  connectedDeviceCount: number;
+  routerConnected: boolean;
+}
+
+export interface ConnectedDevice {
+  hostname: string;
+  ipaddr: string;
+  macaddr: string;
+  expire: number;
+  isWireless: boolean;
+  signal?: number;
+  rxRate?: number;
+  txRate?: number;
+}
+
+export interface WirelessScanResult {
+  ssid: string;
+  bssid: string;
+  channel: number;
+  signal: number;
+  quality: number;
+  quality_max: number;
+  encryption: {
+    enabled: boolean;
+    wpa?: number[];
+    authentication?: string[];
+  };
+}
+
+export interface FirewallConfig {
+  zones: Record<string, unknown>;
+  rules: Record<string, unknown>;
+  redirects: Record<string, unknown>;
+}
+
+export interface NetworkCommandResult {
+  status: string;
+  tier?: number;
+  requiresConfirmation?: boolean;
+  confirmationToken?: string;
+  reason?: string;
+  expiresIn?: number;
+  operation?: string;
 }

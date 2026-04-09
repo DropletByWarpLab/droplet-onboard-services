@@ -39,6 +39,9 @@ const envSchema = z.object({
 
   // --- gRPC ---
   AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
+
+  // --- OpenWrt Routing ---
+  ROUTING_SERVICE_URL: z.string().default("http://localhost:8080"),
 });
 
 export const config = envSchema.parse(process.env);
