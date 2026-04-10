@@ -146,7 +146,7 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
 
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
-        prisma, "wireless.password", "set_wifi_password", { iface_section }, userId
+        prisma, "wireless.password", "set_wifi_password", { iface_section, password }, userId
       );
 
       if ("requiresConfirmation" in result && result.requiresConfirmation) {
@@ -439,10 +439,11 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
     try {
       const { entityId, userId, limit, offset } = req.query;
       const effectiveUserId = (userId as string | undefined) || req.user?.id;
+      const effectiveLimit = Math.min(limit ? parseInt(limit as string, 10) : 50, 500);
       const logs = await getNetworkAuditLog(prisma, {
         entityId: entityId as string | undefined,
         userId: effectiveUserId,
-        limit: limit ? parseInt(limit as string, 10) : undefined,
+        limit: effectiveLimit,
         offset: offset ? parseInt(offset as string, 10) : undefined,
       });
       res.json({ logs });

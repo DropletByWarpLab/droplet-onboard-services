@@ -87,9 +87,9 @@ export async function getNetworkOverview(): Promise<NetworkOverview> {
   } catch (err) {
     logger.warn({ err }, "Failed to fetch network overview");
     return {
-      interfaces: { lan: {} as any, wan: {} as any },
+      interfaces: { lan: { up: false }, wan: { up: false } },
       wireless: {},
-      system: { board: {} as any, resources: {} as any },
+      system: { board: {}, resources: {} },
       connectedDeviceCount: 0,
       routerConnected: false,
     };

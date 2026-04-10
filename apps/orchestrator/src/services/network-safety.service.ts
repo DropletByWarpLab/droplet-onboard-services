@@ -209,6 +209,10 @@ export async function confirmNetworkCommand(
     return { confirmed: false, reason: "Confirmation token has expired (60s limit)" };
   }
 
+  if (userId && pending.userId && userId !== pending.userId) {
+    return { confirmed: false, reason: "Confirmation must come from the requesting user" };
+  }
+
   pendingConfirmations.delete(confirmationToken);
 
   await logNetworkCommand(prisma, {
@@ -310,7 +314,7 @@ export async function getNetworkAuditLog(
   });
 }
 
-/** Periodically clean expired confirmation tokens. */
+/** Periodically clean expired confirmation tokens and stale rate-limit entries. */
 export function cleanupExpiredNetworkTokens(): void {
   const now = Date.now();
   for (const [token, pending] of pendingConfirmations) {
@@ -318,4 +322,12 @@ export function cleanupExpiredNetworkTokens(): void {
       pendingConfirmations.delete(token);
     }
   }
+  for (const [key, timestamps] of rateLimitMap) {
+    const recent = timestamps.filter((t) => now - t < NETWORK_RATE_LIMIT_WINDOW_MS);
+    if (recent.length === 0) rateLimitMap.delete(key);
+    else rateLimitMap.set(key, recent);
+  }
 }
+
+// Schedule periodic cleanup
+setInterval(cleanupExpiredNetworkTokens, 60_000);

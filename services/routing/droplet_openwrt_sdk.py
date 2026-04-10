@@ -606,7 +606,9 @@ class VPNApi:
         priv_result = self._r.exec_command("wg", ["genkey"])
         private_key = priv_result.get("stdout", "").strip()
 
-        pub_result = self._r.exec_command("sh", ["-c", f"echo '{private_key}' | wg pubkey"])
+        # Write the private key to a temp file to avoid shell injection
+        self._r.file.write("/tmp/.wg_privkey", private_key)
+        pub_result = self._r.exec_command("sh", ["-c", "wg pubkey < /tmp/.wg_privkey && rm -f /tmp/.wg_privkey"])
         public_key = pub_result.get("stdout", "").strip()
 
         return private_key, public_key

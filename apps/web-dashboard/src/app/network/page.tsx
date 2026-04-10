@@ -20,7 +20,7 @@ import {
   scanWifiNetworks,
   confirmNetworkCommand,
 } from "@/lib/api";
-import type { ConnectedDevice, NetworkCommandResult, WirelessScanResult } from "@/lib/types";
+import type { ConnectedDevice, FirewallConfig, NetworkCommandResult, NetworkOverview, WirelessScanResult } from "@/lib/types";
 
 type Tab = "overview" | "devices" | "wifi" | "firewall" | "system";
 
@@ -181,7 +181,7 @@ export default function NetworkPage() {
 }
 
 // --- Overview Tab ---
-function OverviewTab({ overview }: { overview: any }) {
+function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const lan = overview?.interfaces?.lan;
   const wan = overview?.interfaces?.wan;
   const system = overview?.system;
@@ -420,7 +420,7 @@ function WifiTab() {
 }
 
 // --- Firewall Tab ---
-function FirewallTab({ firewall }: { firewall: any }) {
+function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
   const rules = firewall?.rules?.values ? Object.entries(firewall.rules.values) : [];
   const redirects = firewall?.redirects?.values ? Object.entries(firewall.redirects.values) : [];
 
@@ -495,7 +495,7 @@ function FirewallTab({ firewall }: { firewall: any }) {
 }
 
 // --- System Tab ---
-function SystemTab({ overview }: { overview: any }) {
+function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
   const board = overview?.system?.board;
   const resources = overview?.system?.resources;
 

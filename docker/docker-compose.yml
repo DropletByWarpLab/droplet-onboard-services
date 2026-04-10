@@ -61,7 +61,9 @@ services:
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - MATTER_STORAGE_PATH=/data/matter-storage
       - MATTER_CONTROLLER_NAME=${MATTER_CONTROLLER_NAME:-Droplet}
-      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://routing:8080}
+      # NOTE: Uses localhost because the routing service runs with network_mode: host.
+      # If routing moves to bridge networking, change to http://routing:8080.
+      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
     volumes:
       - filedata:/data/files

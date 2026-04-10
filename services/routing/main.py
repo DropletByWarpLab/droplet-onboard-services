@@ -43,7 +43,9 @@ logging.basicConfig(level=logging.INFO)
 OPENWRT_HOST = os.environ.get("OPENWRT_HOST", "10.0.0.1")
 OPENWRT_PORT = int(os.environ.get("OPENWRT_PORT", "80"))
 OPENWRT_USERNAME = os.environ.get("OPENWRT_USERNAME", "droplet-ai")
-OPENWRT_PASSWORD = os.environ.get("OPENWRT_PASSWORD", "")
+OPENWRT_PASSWORD = os.environ.get("OPENWRT_PASSWORD")
+if not OPENWRT_PASSWORD:
+    raise ValueError("OPENWRT_PASSWORD environment variable is required")
 
 router_instance: Optional[DropletRouter] = None
 
@@ -55,14 +57,14 @@ def get_router() -> DropletRouter:
     return router_instance
 
 
-def handle_router_error(exc: Exception) -> JSONResponse:
-    """Convert SDK exceptions to HTTP responses."""
+def handle_router_error(exc: Exception):
+    """Convert SDK exceptions to HTTPException raises."""
     if isinstance(exc, ConnectionLost):
-        return JSONResponse(status_code=503, content={"error": "Router unreachable", "detail": str(exc)})
+        raise HTTPException(status_code=503, detail=f"Router unreachable: {exc}")
     if isinstance(exc, UbusError):
         status = 400 if exc.code in (1, 2) else 500
-        return JSONResponse(status_code=status, content={"error": f"ubus error: {exc.status}", "detail": str(exc)})
-    return JSONResponse(status_code=500, content={"error": "Internal error", "detail": str(exc)})
+        raise HTTPException(status_code=status, detail=f"ubus error: {exc.status}: {exc}")
+    raise HTTPException(status_code=500, detail=f"Internal error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +128,7 @@ def network_summary():
     try:
         return get_network_summary(get_router())
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/network/summary/text")
@@ -134,7 +136,7 @@ def network_summary_text():
     try:
         return {"text": describe_network_for_llm(get_router())}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/network/interfaces")
@@ -142,7 +144,7 @@ def network_interfaces():
     try:
         return get_router().network.get_all_interface_statuses()
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/network/interfaces/{name}")
@@ -150,7 +152,7 @@ def network_interface_status(name: str):
     try:
         return get_router().network.interface_status(name)
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/network/interfaces/{name}/up")
@@ -159,7 +161,7 @@ def network_interface_up(name: str):
         get_router().network.interface_up(name)
         return {"status": "ok", "interface": name, "action": "up"}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/network/interfaces/{name}/down")
@@ -168,7 +170,7 @@ def network_interface_down(name: str):
         get_router().network.interface_down(name)
         return {"status": "ok", "interface": name, "action": "down"}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +181,7 @@ def wireless_status():
     try:
         return get_router().wireless.status()
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/wireless/scan")
@@ -187,7 +189,7 @@ def wireless_scan(device: str = "wlan0"):
     try:
         return {"results": get_router().wireless.scan(device)}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/wireless/clients")
@@ -195,7 +197,7 @@ def wireless_clients(device: str = "wlan0"):
     try:
         return {"clients": get_router().wireless.connected_clients(device)}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/wireless/radio/{device}")
@@ -203,7 +205,7 @@ def wireless_radio_info(device: str = "wlan0"):
     try:
         return get_router().wireless.radio_info(device)
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/wireless/ssid")
@@ -214,7 +216,7 @@ def set_ssid(req: SetSsidRequest):
         r.apply_changes("wireless")
         return {"status": "ok", "ssid": req.ssid}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/wireless/password")
@@ -225,7 +227,7 @@ def set_password(req: SetPasswordRequest):
         r.apply_changes("wireless")
         return {"status": "ok"}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/wireless/channel")
@@ -236,7 +238,7 @@ def set_channel(req: SetChannelRequest):
         r.apply_changes("wireless")
         return {"status": "ok", "channel": req.channel}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/wireless/guest")
@@ -247,7 +249,7 @@ def create_guest_network(req: CreateGuestNetworkRequest):
         r.apply_changes("wireless")
         return {"status": "ok", "ssid": req.ssid, "network": req.network}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +260,7 @@ def dhcp_leases():
     try:
         return {"leases": get_router().dhcp.active_leases()}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/dhcp/leases/v6")
@@ -266,7 +268,7 @@ def dhcp_leases_v6():
     try:
         return {"leases": get_router().dhcp.active_leases_v6()}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/dhcp/static-lease")
@@ -277,7 +279,7 @@ def add_static_lease(req: StaticLeaseRequest):
         r.exec_service("dnsmasq", "restart")
         return {"status": "ok", "name": req.name, "mac": req.mac, "ip": req.ip}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/dhcp/dns")
@@ -288,7 +290,7 @@ def set_dns(req: SetDnsRequest):
         r.apply_changes("network")
         return {"status": "ok", "servers": req.servers}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +301,7 @@ def firewall_zones():
     try:
         return get_router().firewall.get_zones()
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/firewall/rules")
@@ -307,7 +309,7 @@ def firewall_rules():
     try:
         return get_router().firewall.get_rules()
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.get("/firewall/redirects")
@@ -315,7 +317,7 @@ def firewall_redirects():
     try:
         return get_router().firewall.get_redirects()
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/firewall/block-device")
@@ -324,7 +326,7 @@ def block_device(req: BlockDeviceRequest):
         get_router().firewall.block_device(req.mac, req.name)
         return {"status": "ok", "mac": req.mac, "action": "blocked"}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/firewall/unblock-device")
@@ -333,7 +335,7 @@ def unblock_device(req: UnblockDeviceRequest):
         get_router().firewall.unblock_device(req.mac)
         return {"status": "ok", "mac": req.mac, "action": "unblocked"}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/firewall/port-forward")
@@ -344,7 +346,7 @@ def add_port_forward(req: PortForwardRequest):
         )
         return {"status": "ok", "name": req.name}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +361,7 @@ def system_info():
             "resources": r.system.resource_info(),
         }
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 @app.post("/system/reboot")
@@ -368,7 +370,7 @@ def system_reboot():
         get_router().system.reboot()
         return {"status": "ok", "action": "reboot"}
     except (ConnectionLost, UbusError) as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -393,4 +395,4 @@ def apply_config(req: ApplyConfigRequest):
             },
         )
     except UbusError as exc:
-        return handle_router_error(exc)
+        handle_router_error(exc)
