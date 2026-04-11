@@ -94,3 +94,34 @@ model NetworkConfigSnapshot {
 
   @@index([config, createdAt])
 }
+
+// --- Camera / Frigate NVR ---
+
+model Camera {
+  id             String                   @id @default(uuid())
+  name           String                   @unique
+  displayName    String
+  manufacturer   String?
+  model          String?
+  ipAddress      String
+  macAddress     String?
+  enabled        Boolean                  @default(true)
+  autoDiscovered Boolean                  @default(false)
+  lastSeen       DateTime                 @default(now())
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  notifications  CameraNotificationPref[]
+}
+
+model CameraNotificationPref {
+  id        String  @id @default(uuid())
+  userId    String
+  cameraId  String
+  camera    Camera  @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  onPerson  Boolean @default(true)
+  onVehicle Boolean @default(true)
+  onAnimal  Boolean @default(false)
+  onMotion  Boolean @default(false)
+
+  @@unique([userId, cameraId])
+}

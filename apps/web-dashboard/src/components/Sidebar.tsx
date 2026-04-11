@@ -10,6 +10,7 @@ import {
   MessageSquare,
   Network,
   Settings,
+  Video,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
@@ -18,6 +19,7 @@ import { useAuth } from "@/lib/auth";
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/devices", label: "Devices", icon: Home },
+  { href: "/cameras", label: "Cameras", icon: Video },
   { href: "/network", label: "Network", icon: Network },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/chat", label: "Chat", icon: MessageSquare },

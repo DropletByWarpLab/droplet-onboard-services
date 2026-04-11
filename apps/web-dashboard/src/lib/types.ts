@@ -124,6 +124,7 @@ export interface HealthResponse {
     matter: boolean;
     homeAssistant: boolean;
     router: boolean;
+    frigate: boolean;
   };
 }
 
@@ -183,6 +184,53 @@ export interface MatterDiscoveredDevice {
   deviceType?: number;
   commissioningMode: number;
   addresses: Array<{ ip: string; port: number; type: string }>;
+}
+
+// --- Camera / Frigate types ---
+
+export interface CameraInfo {
+  name: string;
+  displayName: string;
+  manufacturer: string | null;
+  model: string | null;
+  ipAddress: string;
+  macAddress: string | null;
+  enabled: boolean;
+  autoDiscovered: boolean;
+  status: "recording" | "detecting" | "idle" | "offline";
+  lastSeen: string;
+  lastDetection: DetectionEvent | null;
+}
+
+export interface DetectionEvent {
+  id: string;
+  camera: string;
+  label: string;
+  score: number;
+  startTime: number;
+  endTime: number | null;
+  thumbnail: string;
+  hasClip: boolean;
+  hasSnapshot: boolean;
+}
+
+export interface DiscoveredCamera {
+  id: string;
+  name: string;
+  ip: string;
+  mac: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  discoveredAt: string;
+}
+
+export interface CameraSSEEvent {
+  type: "connected" | "detection" | "camera_discovered" | "camera_online" | "camera_offline";
+  camera?: string;
+  label?: string;
+  score?: number;
+  thumbnail?: string;
+  timestamp?: number;
 }
 
 // --- Network / Router types ---

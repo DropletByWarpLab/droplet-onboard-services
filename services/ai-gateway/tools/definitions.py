@@ -367,6 +367,50 @@ AVAILABLE_TOOLS: list[ToolDefinition] = [
             parameters={"type": "object", "properties": {}},
         )
     ),
+    # --- Camera / Frigate tools ---
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_cameras",
+            description="List all security cameras connected to the Droplet NVR (Frigate). Returns camera names, status (recording/detecting/offline), manufacturer, and IP.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_camera_events",
+            description="Get recent AI detection events from security cameras (person, car, animal detections). Returns event type, camera name, confidence score, and timestamp.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "camera": {
+                        "type": "string",
+                        "description": "Camera name to filter events by. If omitted, returns events from all cameras.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of events to return. Defaults to 10.",
+                        "default": 10,
+                    },
+                },
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_camera_snapshot",
+            description="Get a snapshot URL from a specific security camera. Returns a URL that can be viewed in the Droplet dashboard.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "camera": {
+                        "type": "string",
+                        "description": "Name of the camera to capture a snapshot from.",
+                    }
+                },
+                "required": ["camera"],
+            },
+        )
+    ),
 ]
 
 

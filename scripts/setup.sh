@@ -85,6 +85,8 @@ source "$SCRIPT_DIR/lib/secrets.sh"
 source "$SCRIPT_DIR/lib/compose.sh"
 # shellcheck source=lib/systemd.sh
 source "$SCRIPT_DIR/lib/systemd.sh"
+# shellcheck source=lib/camera-drivers.sh
+source "$SCRIPT_DIR/lib/camera-drivers.sh"
 
 # --- Lockfile ---
 LOCK_FILE="$REPO_ROOT/.data/.setup.lock"
@@ -119,7 +121,7 @@ _on_error() {
 
 # --- Dry run mode ---
 if [ "$DRY_RUN" = "true" ]; then
-  TOTAL_STEPS=6
+  TOTAL_STEPS=7
   log_divider
   printf "\n  Droplet Edge Platform — Setup (DRY RUN)\n\n"
   log_divider
@@ -135,7 +137,13 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  Would add user '$USER' to docker group if needed"
   fi
 
-  log_step 3 $TOTAL_STEPS "Secret generation"
+  log_step 3 $TOTAL_STEPS "Camera drivers"
+  log_info "  Would install: v4l-utils, ffmpeg, usbutils"
+  log_info "  Would load kernel modules: uvcvideo, videodev, videobuf2_v4l2"
+  log_info "  Would persist modules for boot, install udev rules"
+  log_info "  Would detect connected USB cameras"
+
+  log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
     log_info "  SKIPPED (.env already exists)"
   else
@@ -145,23 +153,23 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  Would generate MQTT password file for Mosquitto"
   fi
 
-  log_step 4 $TOTAL_STEPS "Build container images"
+  log_step 5 $TOTAL_STEPS "Build container images"
   if [ "$SKIP_BUILD" = "true" ]; then
     log_info "  SKIPPED (--skip-build)"
   else
     log_info "  Would pull 7 base images and build 3 app images"
   fi
 
-  log_step 5 $TOTAL_STEPS "Start stack"
+  log_step 6 $TOTAL_STEPS "Start stack"
   if [ "$SKIP_START" = "true" ]; then
     log_info "  SKIPPED (--skip-start)"
   else
     log_info "  Would start: db, cache, broker, gateway, orchestrator, web-dashboard,"
-    log_info "               ai-gateway, nextcloud"
+    log_info "               ai-gateway, nextcloud, frigate, camera-discovery"
     log_info "  Would wait for health checks"
   fi
 
-  log_step 6 $TOTAL_STEPS "Verify"
+  log_step 7 $TOTAL_STEPS "Verify"
   log_info "  Would run ./scripts/verify.sh"
 
   if [ "$INSTALL_SYSTEMD" = "true" ]; then
@@ -182,7 +190,7 @@ main() {
 
   _acquire_lock
 
-  local total_steps=6
+  local total_steps=7
   [ "$SKIP_DOCKER" = "true" ] || true
   [ "$SKIP_BUILD" = "true" ] || true
   [ "$SKIP_START" = "true" ] || true
@@ -205,12 +213,16 @@ main() {
     setup_docker_group
   fi
 
-  # --- Phase 3: Secrets ---
-  log_step 3 $total_steps "Secrets"
+  # --- Phase 3: Camera Drivers ---
+  log_step 3 $total_steps "Camera Drivers"
+  install_camera_drivers
+
+  # --- Phase 4: Secrets ---
+  log_step 4 $total_steps "Secrets"
   generate_env
 
-  # --- Phase 4: Build ---
-  log_step 4 $total_steps "Build"
+  # --- Phase 5: Build ---
+  log_step 5 $total_steps "Build"
   if [ "$SKIP_BUILD" = "true" ]; then
     log_info "Skipping build (--skip-build)"
     log_divider
@@ -218,8 +230,8 @@ main() {
     prepare_and_build
   fi
 
-  # --- Phase 5: Start ---
-  log_step 5 $total_steps "Start"
+  # --- Phase 6: Start ---
+  log_step 6 $total_steps "Start"
   if [ "$SKIP_START" = "true" ]; then
     log_info "Skipping start (--skip-start)"
     log_divider
@@ -227,8 +239,8 @@ main() {
     start_stack
   fi
 
-  # --- Phase 6: Verify ---
-  log_step 6 $total_steps "Verify"
+  # --- Phase 7: Verify ---
+  log_step 7 $total_steps "Verify"
   if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
     "$SCRIPT_DIR/verify.sh" || log_warn "Some verification checks failed — see output above"
   else

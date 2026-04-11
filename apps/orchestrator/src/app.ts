@@ -16,6 +16,7 @@ import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth
 import { createSmartHomeRouter } from "./routes/smart-home.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createNetworkRouter } from "./routes/network.js";
+import { createCamerasRouter } from "./routes/cameras.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -47,6 +48,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createSmartHomeRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
+  app.use("/api", createCamerasRouter(prisma));
 
   // Error handling
   app.use(errorHandler);

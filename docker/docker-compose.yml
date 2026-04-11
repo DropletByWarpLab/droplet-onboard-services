@@ -191,7 +191,7 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - OPENWRT_HOST=${OPENWRT_HOST:-192.168.50.1}
+      - OPENWRT_HOST=${OPENWRT_HOST:-10.0.0.1}
       - OPENWRT_PORT=${OPENWRT_PORT:-80}
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       - OPENWRT_PASSWORD=${OPENWRT_PASSWORD:-}
@@ -199,12 +199,53 @@ services:
     profiles: ["full"]
     restart: always
 
-  nvr:
-    build:
-      context: ../services/nvr
-      dockerfile: Dockerfile
+  # --- Frigate NVR (camera management + AI detection) ---
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
+    shm_size: "256mb"
+    privileged: true
+    runtime: nvidia
+    expose:
+      - "8971"
+      - "5000"
+      - "8554"
+      - "8555"
+    devices:
+      - /dev/bus/usb:/dev/bus/usb              # USB cameras
+      - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
     volumes:
-      - nvrdata:/data/recordings
+      - frigate-config:/config
+      - nvrdata:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+      - ../docker/frigate/config.yml:/config/config.yml:ro
+    environment:
+      - FRIGATE_MQTT_HOST=broker
+      - FRIGATE_MQTT_PORT=1883
+      - FRIGATE_MQTT_USER=${MQTT_USER:-droplet}
+      - FRIGATE_MQTT_PASSWORD=${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    depends_on:
+      - broker
+    profiles: ["full"]
+    restart: always
+
+  # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
+  camera-discovery:
+    build:
+      context: ../services/camera-discovery
+      dockerfile: Dockerfile
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
+      - FRIGATE_URL=http://localhost:5000
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@localhost:1883
+      - SCAN_INTERVAL=${CAMERA_SCAN_INTERVAL:-30}
+    depends_on:
+      - frigate
+      - broker
     profiles: ["full"]
     restart: always
 
@@ -212,6 +253,7 @@ volumes:
   pgdata:
   filedata:
   nvrdata:
+  frigate-config:
   aikeys:
   nextcloud-data:
   ha-config:

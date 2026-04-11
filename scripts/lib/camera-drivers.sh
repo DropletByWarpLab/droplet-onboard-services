@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+# camera-drivers.sh — Camera driver detection, installation, and kernel module management.
+# Source this file; do not execute directly.
+#
+# Ensures common IP camera and USB camera drivers are loaded and available
+# for the Frigate NVR and camera discovery services.
+
+# --- Required kernel modules for camera support ---
+# UVC:    USB Video Class — most USB webcams and IP camera USB interfaces
+# V4L2:   Video4Linux2 — Linux video capture framework
+# GSPCA:  Generic USB camera driver (older webcams)
+
+CAMERA_KERNEL_MODULES=(
+  "uvcvideo"          # USB Video Class driver (most USB cameras)
+  "videobuf2_vmalloc"  # V4L2 video buffer (memory-mapped)
+  "videobuf2_v4l2"     # V4L2 video buffer integration
+  "videodev"           # Video4Linux core
+)
+
+# Additional modules for specific camera types
+OPTIONAL_CAMERA_MODULES=(
+  "gspca_main"        # Generic USB camera driver
+  "snd_usb_audio"     # USB audio (cameras with microphones)
+  "cdc_ether"         # USB ethernet (some IP cameras use USB tethering)
+)
+
+# Packages needed for camera support
+CAMERA_PACKAGES=(
+  "v4l-utils"         # V4L2 utilities (v4l2-ctl, v4l2-compliance)
+  "ffmpeg"            # Media processing (RTSP stream handling)
+  "usbutils"          # lsusb (USB device listing)
+)
+
+# Optional packages for enhanced camera support
+CAMERA_PACKAGES_OPTIONAL=(
+  "libv4l-0"          # V4L2 userspace library
+  "libavcodec-extra"  # Extended codec support
+  "onvif-tool"        # ONVIF camera control CLI
+)
+
+# --- Detection ---
+
+detect_usb_cameras() {
+  # Detect USB cameras by scanning for known USB video device classes
+  local found=0
+
+  if command -v lsusb &>/dev/null; then
+    # USB Video Class devices (class 0e)
+    local uvc_devices
+    uvc_devices=$(lsusb -t 2>/dev/null | grep -c "Class=Video" || true)
+    if [ "$uvc_devices" -gt 0 ]; then
+      log_info "Found $uvc_devices USB video device(s)"
+      found=$((found + uvc_devices))
+    fi
+
+    # Known camera vendor IDs
+    local camera_vendors=(
+      "046d"  # Logitech
+      "045e"  # Microsoft (LifeCam)
+      "0c45"  # Sonix / generic webcams
+      "05a3"  # ARC International (many IP camera USB)
+      "1871"  # Aveo Technology
+      "1b3f"  # Generalplus (budget cameras)
+      "0ac8"  # Z-Star Microelectronics
+      "1415"  # Nam Tai (Wyze)
+      "0bda"  # Realtek (some webcams)
+    )
+
+    for vid in "${camera_vendors[@]}"; do
+      local count
+      count=$(lsusb 2>/dev/null | grep -ci "$vid" || true)
+      if [ "$count" -gt 0 ]; then
+        found=$((found + count))
+      fi
+    done
+  fi
+
+  # Check for /dev/video* devices
+  local video_devs
+  video_devs=$(ls /dev/video* 2>/dev/null | wc -l || echo 0)
+  if [ "$video_devs" -gt 0 ]; then
+    log_info "Found $video_devs video device(s) in /dev"
+  fi
+
+  echo "$found"
+}
+
+detect_v4l2_devices() {
+  # List all V4L2 capture devices with details
+  if command -v v4l2-ctl &>/dev/null; then
+    v4l2-ctl --list-devices 2>/dev/null || true
+  elif [ -d /sys/class/video4linux ]; then
+    for dev in /sys/class/video4linux/video*; do
+      if [ -f "$dev/name" ]; then
+        local name
+        name=$(cat "$dev/name")
+        log_info "  $(basename "$dev"): $name"
+      fi
+    done
+  fi
+}
+
+check_kernel_module() {
+  # Check if a kernel module is loaded or available
+  local module="$1"
+
+  if lsmod 2>/dev/null | grep -q "^${module}"; then
+    echo "loaded"
+    return 0
+  elif modinfo "$module" &>/dev/null; then
+    echo "available"
+    return 0
+  else
+    echo "missing"
+    return 1
+  fi
+}
+
+# --- Installation ---
+
+load_camera_modules() {
+  # Load required camera kernel modules
+  log_info "Loading camera kernel modules..."
+
+  for module in "${CAMERA_KERNEL_MODULES[@]}"; do
+    local status
+    status=$(check_kernel_module "$module")
+
+    case "$status" in
+      loaded)
+        log_success "  $module: already loaded"
+        ;;
+      available)
+        log_info "  $module: loading..."
+        if sudo modprobe "$module" 2>/dev/null; then
+          log_success "  $module: loaded"
+        else
+          log_warn "  $module: failed to load (may not be needed)"
+        fi
+        ;;
+      missing)
+        log_warn "  $module: not available (kernel may need rebuild or package install)"
+        ;;
+    esac
+  done
+
+  # Try optional modules silently
+  for module in "${OPTIONAL_CAMERA_MODULES[@]}"; do
+    if [ "$(check_kernel_module "$module")" = "available" ]; then
+      sudo modprobe "$module" 2>/dev/null || true
+    fi
+  done
+}
+
+persist_camera_modules() {
+  # Ensure camera modules load on boot via /etc/modules-load.d/
+  local conf="/etc/modules-load.d/droplet-cameras.conf"
+
+  if [ -f "$conf" ]; then
+    log_info "Camera module autoload already configured"
+    return 0
+  fi
+
+  log_info "Persisting camera modules for boot..."
+
+  {
+    echo "# Droplet camera driver modules — auto-generated by setup.sh"
+    echo "# Remove this file to stop auto-loading camera drivers"
+    for module in "${CAMERA_KERNEL_MODULES[@]}"; do
+      if modinfo "$module" &>/dev/null; then
+        echo "$module"
+      fi
+    done
+  } | sudo tee "$conf" > /dev/null
+
+  log_success "Camera modules will load on boot"
+}
+
+install_camera_packages() {
+  # Install userspace camera support packages
+  local missing=()
+
+  for pkg in "${CAMERA_PACKAGES[@]}"; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if [ ${#missing[@]} -eq 0 ]; then
+    log_success "Camera packages already installed"
+    return 0
+  fi
+
+  log_info "Installing camera packages: ${missing[*]}"
+
+  if [ "$DRY_RUN" = "true" ]; then
+    log_info "  (dry run) Would install: ${missing[*]}"
+    return 0
+  fi
+
+  sudo apt-get update -qq 2>/dev/null
+  sudo apt-get install -y --no-install-recommends "${missing[@]}" 2>/dev/null
+
+  # Try optional packages (non-fatal)
+  for pkg in "${CAMERA_PACKAGES_OPTIONAL[@]}"; do
+    sudo apt-get install -y --no-install-recommends "$pkg" 2>/dev/null || true
+  done
+
+  log_success "Camera packages installed"
+}
+
+setup_video_permissions() {
+  # Ensure current user can access /dev/video* devices
+  if groups "$USER" | grep -q "video"; then
+    log_success "User '$USER' already in video group"
+    return 0
+  fi
+
+  log_info "Adding user '$USER' to video group..."
+  sudo usermod -aG video "$USER"
+  log_success "User '$USER' added to video group (re-login may be needed)"
+}
+
+setup_udev_rules() {
+  # Install udev rules for automatic camera device permissions
+  local rules="/etc/udev/rules.d/99-droplet-cameras.rules"
+
+  if [ -f "$rules" ]; then
+    log_info "Camera udev rules already installed"
+    return 0
+  fi
+
+  log_info "Installing camera udev rules..."
+
+  cat << 'RULES' | sudo tee "$rules" > /dev/null
+# Droplet camera udev rules — auto-generated by setup.sh
+# Ensures camera devices are accessible to the docker and video groups
+
+# USB Video Class devices
+SUBSYSTEM=="video4linux", GROUP="video", MODE="0660"
+
+# USB cameras (general)
+ATTR{idProduct}!="", SUBSYSTEM=="usb", ATTRS{bInterfaceClass}=="0e", GROUP="video", MODE="0660"
+
+# Trigger Frigate container when new camera plugged in
+SUBSYSTEM=="video4linux", ACTION=="add", RUN+="/usr/bin/docker restart frigate 2>/dev/null || true"
+RULES
+
+  sudo udevadm control --reload-rules 2>/dev/null || true
+  log_success "Camera udev rules installed"
+}
+
+# --- Main entry point ---
+
+install_camera_drivers() {
+  # Full camera driver setup — called from setup.sh
+  # Idempotent — safe to re-run
+
+  # Skip on macOS (no V4L2 / kernel modules)
+  if [ "$(uname)" = "Darwin" ]; then
+    log_info "macOS detected — skipping camera driver setup"
+    log_info "Camera support via Frigate uses RTSP/ONVIF (no local drivers needed)"
+    return 0
+  fi
+
+  # Skip if not Linux
+  if [ "$(uname)" != "Linux" ]; then
+    log_info "Non-Linux OS — skipping camera driver setup"
+    return 0
+  fi
+
+  log_info "Setting up camera driver support..."
+
+  # 1. Install userspace packages (v4l-utils, ffmpeg, usbutils)
+  install_camera_packages
+
+  # 2. Load kernel modules
+  load_camera_modules
+
+  # 3. Persist modules for boot
+  persist_camera_modules
+
+  # 4. Set up permissions
+  setup_video_permissions
+
+  # 5. Install udev rules (auto-permission + Frigate restart on hotplug)
+  setup_udev_rules
+
+  # 6. Detect any cameras already connected
+  local camera_count
+  camera_count=$(detect_usb_cameras)
+
+  if [ "$camera_count" -gt 0 ]; then
+    log_success "Detected $camera_count USB camera device(s)"
+    detect_v4l2_devices
+  else
+    log_info "No USB cameras detected (IP cameras via RTSP/ONVIF don't need local drivers)"
+  fi
+
+  log_success "Camera driver setup complete"
+}
+
+# --- Standalone driver check tool ---
+
+check_camera_drivers() {
+  # Diagnostic tool — reports current driver status without installing anything
+  # Can be called standalone: source lib/camera-drivers.sh && check_camera_drivers
+
+  printf "\n${_BOLD}Camera Driver Status${_RESET}\n\n"
+
+  # Kernel modules
+  printf "${_CYAN}Kernel Modules:${_RESET}\n"
+  for module in "${CAMERA_KERNEL_MODULES[@]}"; do
+    local status
+    status=$(check_kernel_module "$module")
+    case "$status" in
+      loaded)   printf "  ${_GREEN}[loaded]${_RESET}    %s\n" "$module" ;;
+      available) printf "  ${_YELLOW}[available]${_RESET} %s (not loaded)\n" "$module" ;;
+      missing)   printf "  ${_RED}[missing]${_RESET}   %s\n" "$module" ;;
+    esac
+  done
+
+  # Packages
+  printf "\n${_CYAN}Packages:${_RESET}\n"
+  for pkg in "${CAMERA_PACKAGES[@]}"; do
+    if dpkg -s "$pkg" &>/dev/null; then
+      printf "  ${_GREEN}[installed]${_RESET} %s\n" "$pkg"
+    else
+      printf "  ${_RED}[missing]${_RESET}   %s\n" "$pkg"
+    fi
+  done
+
+  # Video devices
+  printf "\n${_CYAN}Video Devices:${_RESET}\n"
+  if ls /dev/video* &>/dev/null; then
+    for dev in /dev/video*; do
+      if [ -c "$dev" ]; then
+        local name=""
+        local sysdev="/sys/class/video4linux/$(basename "$dev")/name"
+        [ -f "$sysdev" ] && name=$(cat "$sysdev")
+        printf "  ${_GREEN}%s${_RESET}  %s\n" "$dev" "$name"
+      fi
+    done
+  else
+    printf "  ${_DIM}(none found)${_RESET}\n"
+  fi
+
+  # USB cameras
+  printf "\n${_CYAN}USB Cameras:${_RESET}\n"
+  if command -v lsusb &>/dev/null; then
+    local found=false
+    while IFS= read -r line; do
+      if echo "$line" | grep -qi "cam\|video\|webcam\|046d\|045e"; then
+        printf "  %s\n" "$line"
+        found=true
+      fi
+    done < <(lsusb 2>/dev/null)
+    [ "$found" = "false" ] && printf "  ${_DIM}(none detected)${_RESET}\n"
+  else
+    printf "  ${_DIM}(lsusb not available)${_RESET}\n"
+  fi
+
+  # Permissions
+  printf "\n${_CYAN}Permissions:${_RESET}\n"
+  if groups "$USER" 2>/dev/null | grep -q "video"; then
+    printf "  ${_GREEN}User in video group${_RESET}\n"
+  else
+    printf "  ${_YELLOW}User NOT in video group${_RESET}\n"
+  fi
+  if [ -f "/etc/udev/rules.d/99-droplet-cameras.rules" ]; then
+    printf "  ${_GREEN}Udev rules installed${_RESET}\n"
+  else
+    printf "  ${_YELLOW}Udev rules not installed${_RESET}\n"
+  fi
+  if [ -f "/etc/modules-load.d/droplet-cameras.conf" ]; then
+    printf "  ${_GREEN}Boot modules configured${_RESET}\n"
+  else
+    printf "  ${_YELLOW}Boot modules not configured${_RESET}\n"
+  fi
+
+  printf "\n"
+}

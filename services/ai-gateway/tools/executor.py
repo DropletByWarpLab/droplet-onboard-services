@@ -291,6 +291,40 @@ async def _get_router_system_info(args: dict) -> dict:
     return resp.json()
 
 
+# --- Camera / Frigate tool handlers ---
+
+
+async def _get_cameras(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/cameras")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_camera_events(args: dict) -> dict:
+    limit = args.get("limit", 10)
+    camera = args.get("camera")
+    params = {"limit": limit}
+    if camera:
+        url = f"/api/cameras/{camera}/events"
+    else:
+        url = "/api/cameras/events/recent"
+    client = _get_client()
+    resp = await client.get(url, params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_camera_snapshot(args: dict) -> dict:
+    camera = args["camera"]
+    # We can't send images directly — return the snapshot URL for the user
+    return {
+        "camera": camera,
+        "snapshot_url": f"/api/cameras/{camera}/snapshot",
+        "note": "Snapshot URL is accessible through the Droplet dashboard.",
+    }
+
+
 TOOL_HANDLERS = {
     "list_files": _list_files,
     "read_file": _read_file,
@@ -318,6 +352,10 @@ TOOL_HANDLERS = {
     "unblock_network_device": _unblock_network_device,
     "add_port_forward": _add_port_forward,
     "get_router_system_info": _get_router_system_info,
+    # Camera / Frigate tools
+    "get_cameras": _get_cameras,
+    "get_camera_events": _get_camera_events,
+    "get_camera_snapshot": _get_camera_snapshot,
 }
 
 

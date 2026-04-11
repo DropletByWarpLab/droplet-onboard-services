@@ -8,6 +8,7 @@ import { initDeviceService } from "./services/device.service.js";
 import { initFileService } from "./services/file.service.js";
 import { initSmartHomeService } from "./services/smart-home.service.js";
 import { initNetworkService } from "./services/network.service.js";
+import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
 import {
   initMatterService,
   shutdownMatterService,
@@ -71,6 +72,14 @@ async function main() {
     logger.warn("OpenWrt router unavailable, network features disabled");
   }
 
+  // Connect Frigate NVR (non-fatal if unavailable)
+  try {
+    await initCameraService(prisma);
+    logger.info("Connected to Frigate NVR");
+  } catch (err) {
+    logger.warn("Frigate NVR unavailable, camera features disabled");
+  }
+
   // Start Express
   const app = createApp(prisma);
   app.listen(config.PORT, () => {
@@ -82,6 +91,7 @@ async function main() {
     logger.info("Shutting down...");
     shutdownDeviceRegistration();
     await shutdownMatterService();
+    await shutdownCameraService();
     await prisma.$disconnect();
     process.exit(0);
   };

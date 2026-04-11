@@ -1,7 +1,11 @@
 import type {
+  CameraInfo,
   ChatRequest,
   ConnectedDevice,
+  DetectionEvent,
   DeviceInfo,
+  DiscoveredCamera,
+  DiscoveredDevice,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
@@ -248,6 +252,68 @@ export async function confirmNetworkCommand(token: string): Promise<void> {
     body: JSON.stringify({ confirmationToken: token }),
   });
   if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
+}
+
+// --- Cameras / Frigate ---
+
+export async function fetchCameras(): Promise<CameraInfo[]> {
+  const res = await authFetch(`${BASE}/api/cameras`);
+  if (!res.ok) throw new Error(`Failed to fetch cameras: ${res.status}`);
+  const data = await res.json();
+  return data.cameras ?? [];
+}
+
+export async function fetchCameraDetail(name: string): Promise<CameraInfo & { recentEvents: DetectionEvent[] }> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`);
+  if (!res.ok) throw new Error(`Failed to fetch camera: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCameraEvents(limit = 20, camera?: string): Promise<DetectionEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (camera) params.set("camera", camera);
+  const url = camera
+    ? `${BASE}/api/cameras/${encodeURIComponent(camera)}/events?${params}`
+    : `${BASE}/api/cameras/events/recent?${params}`;
+  const res = await authFetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch camera events: ${res.status}`);
+  const data = await res.json();
+  return data.events ?? [];
+}
+
+export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {
+  const res = await authFetch(`${BASE}/api/cameras/discovered`);
+  if (!res.ok) throw new Error(`Failed to fetch discovered cameras: ${res.status}`);
+  return res.json();
+}
+
+export async function acceptDiscoveredCamera(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/accept`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to accept camera: ${res.status}`);
+}
+
+export async function rejectDiscoveredCamera(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/reject`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to reject camera: ${res.status}`);
+}
+
+export async function enableCamera(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/enable`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
+}
+
+export async function disableCamera(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+}
+
+export async function removeCamera(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to remove camera: ${res.status}`);
+}
+
+export function getCameraSnapshotUrl(name: string): string {
+  return `${BASE}/api/cameras/${encodeURIComponent(name)}/snapshot`;
 }
 
 // --- Matter Devices ---

@@ -42,6 +42,9 @@ const envSchema = z.object({
 
   // --- OpenWrt Routing ---
   ROUTING_SERVICE_URL: z.string().default("http://localhost:8080"),
+
+  // --- Frigate NVR ---
+  FRIGATE_URL: z.string().default("http://localhost:5000"),
 });
 
 export const config = envSchema.parse(process.env);
