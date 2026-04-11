@@ -427,6 +427,32 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
     }
   }
 
+  /**
+   * Run an async operation over a list of inputs with bounded concurrency.
+   *
+   * Why not Promise.all? Nextcloud's WebDAV has a known race when concurrent
+   * DELETE/MOVE requests hit the trashbin: one of the requests can 500 while
+   * the file ends up half-moved (trash entry created but source not unlinked).
+   * Keeping concurrency small (default 1) serializes against that race while
+   * still letting the route handle large batches responsively.
+   */
+  async function runBulk<T, R>(
+    items: T[],
+    op: (item: T) => Promise<R>,
+    concurrency: number = 1
+  ): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        results[idx] = await op(items[idx]);
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
   // ── Rename (POST /api/files/rename) ──
   router.post("/files/rename", async (req, res, next) => {
     try {
@@ -526,16 +552,14 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const user = getUser(req);
       const token = getToken(req);
 
-      const results: BulkOperationResult[] = await Promise.all(
-        paths.map(async (p) => {
-          try {
-            await doDelete(token, user, p);
-            return { path: p, ok: true };
-          } catch (err: any) {
-            return { path: p, ok: false, error: err?.message ?? "unknown error" };
-          }
-        })
-      );
+      const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
+        try {
+          await doDelete(token, user, p);
+          return { path: p, ok: true };
+        } catch (err: any) {
+          return { path: p, ok: false, error: err?.message ?? "unknown error" };
+        }
+      });
 
       await invalidateParents(user, ...paths);
       const okCount = results.filter((r) => r.ok).length;
@@ -569,18 +593,16 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const token = getToken(req);
       const normalizedDir = toDir.replace(/\/+$/, "") || "/";
 
-      const results: BulkOperationResult[] = await Promise.all(
-        paths.map(async (p) => {
-          try {
-            const base = path.posix.basename(p);
-            const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
-            await doMove(token, user, p, dest, overwrite);
-            return { path: p, ok: true };
-          } catch (err: any) {
-            return { path: p, ok: false, error: err?.message ?? "unknown error" };
-          }
-        })
-      );
+      const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
+        try {
+          const base = path.posix.basename(p);
+          const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
+          await doMove(token, user, p, dest, overwrite);
+          return { path: p, ok: true };
+        } catch (err: any) {
+          return { path: p, ok: false, error: err?.message ?? "unknown error" };
+        }
+      });
 
       await invalidateParents(user, ...paths, normalizedDir + "/_");
       const okCount = results.filter((r) => r.ok).length;
@@ -615,18 +637,16 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const token = getToken(req);
       const normalizedDir = toDir.replace(/\/+$/, "") || "/";
 
-      const results: BulkOperationResult[] = await Promise.all(
-        paths.map(async (p) => {
-          try {
-            const base = path.posix.basename(p);
-            const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
-            await doCopy(token, user, p, dest, overwrite);
-            return { path: p, ok: true };
-          } catch (err: any) {
-            return { path: p, ok: false, error: err?.message ?? "unknown error" };
-          }
-        })
-      );
+      const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
+        try {
+          const base = path.posix.basename(p);
+          const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
+          await doCopy(token, user, p, dest, overwrite);
+          return { path: p, ok: true };
+        } catch (err: any) {
+          return { path: p, ok: false, error: err?.message ?? "unknown error" };
+        }
+      });
 
       await invalidateParents(user, normalizedDir + "/_");
       const okCount = results.filter((r) => r.ok).length;
