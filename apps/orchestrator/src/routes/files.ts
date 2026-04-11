@@ -12,6 +12,8 @@ import {
   saveUploadedFile,
   deleteFile,
   createDirectory,
+  moveFile as fsMoveFile,
+  copyFile as fsCopyFile,
   getFileSize,
   PathTraversalError,
   FileServiceError,
@@ -24,7 +26,17 @@ import {
   ncCreateDirectory,
   ncCreateShare,
   ncListShares,
+  ncMoveFile,
+  ncCopyFile,
+  ncGetFileId,
+  ncListTrash,
+  ncRestoreTrashItem,
+  ncDeleteTrashItem,
+  ncEmptyTrash,
+  ncListVersions,
+  ncRestoreVersion,
 } from "../services/nextcloud.client.js";
+import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
@@ -349,6 +361,417 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
 
       const shares = await ncListShares(getToken(req), filePath);
       res.json({ shares });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────
+  //  Phase 1 — Rename / Move / Copy (single + bulk) + Trash + Versions
+  // ────────────────────────────────────────────────────────────
+
+  /** Dispatch a single move across backends. Pure helper, no HTTP side effects. */
+  async function doMove(
+    token: string,
+    user: string,
+    from: string,
+    to: string,
+    overwrite: boolean
+  ): Promise<void> {
+    if (isNextcloud) {
+      await ncMoveFile(token, user, from, to, overwrite);
+    } else {
+      const absFrom = await resolveAndValidatePath(from);
+      const absTo = await resolveAndValidatePath(to);
+      await fsMoveFile(absFrom, absTo, overwrite);
+    }
+  }
+
+  async function doCopy(
+    token: string,
+    user: string,
+    from: string,
+    to: string,
+    overwrite: boolean
+  ): Promise<void> {
+    if (isNextcloud) {
+      await ncCopyFile(token, user, from, to, overwrite);
+    } else {
+      const absFrom = await resolveAndValidatePath(from);
+      const absTo = await resolveAndValidatePath(to);
+      await fsCopyFile(absFrom, absTo, overwrite);
+    }
+  }
+
+  async function doDelete(
+    token: string,
+    user: string,
+    filePath: string
+  ): Promise<void> {
+    if (isNextcloud) {
+      await ncDeleteFile(token, user, filePath);
+    } else {
+      const abs = await resolveAndValidatePath(filePath);
+      await deleteFile(abs);
+    }
+  }
+
+  /** Invalidate listing caches for the given parent paths (source + destination). */
+  async function invalidateParents(user: string, ...paths: string[]): Promise<void> {
+    const parents = new Set<string>();
+    for (const p of paths) {
+      parents.add(path.posix.dirname(p) || "/");
+    }
+    for (const parent of parents) {
+      await cacheDel(CACHE_PREFIX + user + ":" + parent);
+    }
+  }
+
+  // ── Rename (POST /api/files/rename) ──
+  router.post("/files/rename", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        path: z.string().min(1),
+        newName: z
+          .string()
+          .min(1)
+          .max(255)
+          .regex(/^[^/\\]+$/, "newName cannot contain path separators"),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Invalid rename request",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const { path: filePath, newName } = parsed.data;
+      const parentDir = path.posix.dirname(filePath) || "/";
+      const newPath = parentDir === "/" ? `/${newName}` : `${parentDir}/${newName}`;
+
+      const user = getUser(req);
+      await doMove(getToken(req), user, filePath, newPath, false);
+
+      await invalidateParents(user, filePath);
+      safePublish(`droplet/files/${user}/renamed`, { from: filePath, to: newPath });
+      res.json({ renamed: { from: filePath, to: newPath } });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Move (POST /api/files/move) ──
+  router.post("/files/move", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+        overwrite: z.boolean().optional().default(false),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid move request", details: parsed.error.flatten() });
+        return;
+      }
+      const { from, to, overwrite } = parsed.data;
+
+      const user = getUser(req);
+      await doMove(getToken(req), user, from, to, overwrite);
+
+      await invalidateParents(user, from, to);
+      safePublish(`droplet/files/${user}/moved`, { from, to });
+      res.json({ moved: { from, to } });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Copy (POST /api/files/copy) ──
+  router.post("/files/copy", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+        overwrite: z.boolean().optional().default(false),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid copy request", details: parsed.error.flatten() });
+        return;
+      }
+      const { from, to, overwrite } = parsed.data;
+
+      const user = getUser(req);
+      await doCopy(getToken(req), user, from, to, overwrite);
+
+      await invalidateParents(user, to);
+      safePublish(`droplet/files/${user}/copied`, { from, to });
+      res.json({ copied: { from, to } });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Bulk delete (POST /api/files/bulk-delete) ──
+  router.post("/files/bulk-delete", async (req, res, next) => {
+    try {
+      const schema = z.object({ paths: z.array(z.string().min(1)).min(1).max(200) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid bulk-delete request" });
+        return;
+      }
+      const { paths } = parsed.data;
+      const user = getUser(req);
+      const token = getToken(req);
+
+      const results: BulkOperationResult[] = await Promise.all(
+        paths.map(async (p) => {
+          try {
+            await doDelete(token, user, p);
+            return { path: p, ok: true };
+          } catch (err: any) {
+            return { path: p, ok: false, error: err?.message ?? "unknown error" };
+          }
+        })
+      );
+
+      await invalidateParents(user, ...paths);
+      const okCount = results.filter((r) => r.ok).length;
+      safePublish(`droplet/files/${user}/bulk-deleted`, {
+        count: okCount,
+        total: paths.length,
+      });
+
+      const allOk = okCount === paths.length;
+      res.status(allOk ? 200 : 207).json({ results });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Bulk move (POST /api/files/bulk-move) ──
+  router.post("/files/bulk-move", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        paths: z.array(z.string().min(1)).min(1).max(200),
+        toDir: z.string().min(1),
+        overwrite: z.boolean().optional().default(false),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid bulk-move request" });
+        return;
+      }
+      const { paths, toDir, overwrite } = parsed.data;
+      const user = getUser(req);
+      const token = getToken(req);
+      const normalizedDir = toDir.replace(/\/+$/, "") || "/";
+
+      const results: BulkOperationResult[] = await Promise.all(
+        paths.map(async (p) => {
+          try {
+            const base = path.posix.basename(p);
+            const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
+            await doMove(token, user, p, dest, overwrite);
+            return { path: p, ok: true };
+          } catch (err: any) {
+            return { path: p, ok: false, error: err?.message ?? "unknown error" };
+          }
+        })
+      );
+
+      await invalidateParents(user, ...paths, normalizedDir + "/_");
+      const okCount = results.filter((r) => r.ok).length;
+      safePublish(`droplet/files/${user}/bulk-moved`, {
+        toDir: normalizedDir,
+        count: okCount,
+        total: paths.length,
+      });
+
+      const allOk = okCount === paths.length;
+      res.status(allOk ? 200 : 207).json({ results });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Bulk copy (POST /api/files/bulk-copy) ──
+  router.post("/files/bulk-copy", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        paths: z.array(z.string().min(1)).min(1).max(200),
+        toDir: z.string().min(1),
+        overwrite: z.boolean().optional().default(false),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid bulk-copy request" });
+        return;
+      }
+      const { paths, toDir, overwrite } = parsed.data;
+      const user = getUser(req);
+      const token = getToken(req);
+      const normalizedDir = toDir.replace(/\/+$/, "") || "/";
+
+      const results: BulkOperationResult[] = await Promise.all(
+        paths.map(async (p) => {
+          try {
+            const base = path.posix.basename(p);
+            const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
+            await doCopy(token, user, p, dest, overwrite);
+            return { path: p, ok: true };
+          } catch (err: any) {
+            return { path: p, ok: false, error: err?.message ?? "unknown error" };
+          }
+        })
+      );
+
+      await invalidateParents(user, normalizedDir + "/_");
+      const okCount = results.filter((r) => r.ok).length;
+      safePublish(`droplet/files/${user}/bulk-copied`, {
+        toDir: normalizedDir,
+        count: okCount,
+        total: paths.length,
+      });
+
+      const allOk = okCount === paths.length;
+      res.status(allOk ? 200 : 207).json({ results });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Trash: list (GET /api/files/trash) ──
+  router.get("/files/trash", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Trash requires Nextcloud backend" });
+        return;
+      }
+      const items = await ncListTrash(getToken(req), getUser(req));
+      res.json({ items });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Trash: restore (POST /api/files/trash/restore) ──
+  router.post("/files/trash/restore", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Trash requires Nextcloud backend" });
+        return;
+      }
+      const schema = z.object({ name: z.string().min(1) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "name is required" });
+        return;
+      }
+      const user = getUser(req);
+      await ncRestoreTrashItem(getToken(req), user, parsed.data.name);
+      safePublish(`droplet/files/${user}/trash-restored`, { name: parsed.data.name });
+      res.json({ restored: parsed.data.name });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Trash: delete single item permanently (DELETE /api/files/trash/item) ──
+  router.delete("/files/trash/item", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Trash requires Nextcloud backend" });
+        return;
+      }
+      const name = req.query.name as string;
+      if (!name) {
+        res.status(400).json({ error: "name query parameter is required" });
+        return;
+      }
+      const user = getUser(req);
+      await ncDeleteTrashItem(getToken(req), user, name);
+      safePublish(`droplet/files/${user}/trash-purged`, { name });
+      res.json({ deleted: name });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Trash: empty (DELETE /api/files/trash) ──
+  router.delete("/files/trash", async (_req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Trash requires Nextcloud backend" });
+        return;
+      }
+      const user = getUser(_req);
+      await ncEmptyTrash(getToken(_req), user);
+      safePublish(`droplet/files/${user}/trash-emptied`, {});
+      res.json({ emptied: true });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Versions: list (GET /api/files/versions?path=...) ──
+  router.get("/files/versions", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Versions require Nextcloud backend" });
+        return;
+      }
+      const filePath = req.query.path as string;
+      if (!filePath) {
+        res.status(400).json({ error: "path query parameter is required" });
+        return;
+      }
+      const user = getUser(req);
+      const token = getToken(req);
+      const fileId = await ncGetFileId(token, user, filePath);
+      if (fileId === null) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+      const versions = await ncListVersions(token, user, fileId);
+      res.json({ fileId, versions });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Versions: restore (POST /api/files/versions/restore) ──
+  router.post("/files/versions/restore", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Versions require Nextcloud backend" });
+        return;
+      }
+      const schema = z.object({
+        path: z.string().min(1),
+        versionId: z.string().min(1),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid restore request" });
+        return;
+      }
+      const { path: filePath, versionId } = parsed.data;
+      const user = getUser(req);
+      const token = getToken(req);
+
+      const fileId = await ncGetFileId(token, user, filePath);
+      if (fileId === null) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+      await ncRestoreVersion(token, user, fileId, versionId);
+
+      await invalidateParents(user, filePath);
+      safePublish(`droplet/files/${user}/version-restored`, { path: filePath, versionId });
+      res.json({ restored: { path: filePath, versionId } });
     } catch (err) {
       handleFileError(err, res, next);
     }

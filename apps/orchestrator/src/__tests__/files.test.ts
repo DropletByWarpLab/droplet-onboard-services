@@ -291,6 +291,230 @@ describe("File Operations", () => {
     });
   });
 
+  // ── POST /api/files/rename ──
+
+  describe("POST /api/files/rename", () => {
+    it("renames a file in place", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "old.txt"), "content");
+
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/old.txt", newName: "new.txt" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.renamed.from).toBe("/old.txt");
+      expect(res.body.renamed.to).toBe("/new.txt");
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "new.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "old.txt"))).toBe(false);
+    });
+
+    it("renames a file inside a subdirectory", async () => {
+      await fsp.mkdir(path.join(TEST_FILES_ROOT, "sub"), { recursive: true });
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "sub/a.txt"), "content");
+
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/sub/a.txt", newName: "b.txt" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.renamed.to).toBe("/sub/b.txt");
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "sub/b.txt"))).toBe(true);
+    });
+
+    it("rejects path separators in newName", async () => {
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/a.txt", newName: "b/c.txt" });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects empty newName", async () => {
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/a.txt", newName: "" });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── POST /api/files/move ──
+
+  describe("POST /api/files/move", () => {
+    it("moves a file to a new directory", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "movable.txt"), "content");
+      await fsp.mkdir(path.join(TEST_FILES_ROOT, "target"), { recursive: true });
+
+      const res = await request(app)
+        .post("/api/files/move")
+        .send({ from: "/movable.txt", to: "/target/movable.txt" });
+
+      expect(res.status).toBe(200);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "target/movable.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "movable.txt"))).toBe(false);
+    });
+
+    it("fails when destination exists and overwrite is false", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "src.txt"), "a");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "dst.txt"), "b");
+
+      const res = await request(app)
+        .post("/api/files/move")
+        .send({ from: "/src.txt", to: "/dst.txt" });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+    });
+
+    it("overwrites when overwrite=true", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "src.txt"), "new");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "dst.txt"), "old");
+
+      const res = await request(app)
+        .post("/api/files/move")
+        .send({ from: "/src.txt", to: "/dst.txt", overwrite: true });
+
+      expect(res.status).toBe(200);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "src.txt"))).toBe(false);
+      const content = await fsp.readFile(path.join(TEST_FILES_ROOT, "dst.txt"), "utf-8");
+      expect(content).toBe("new");
+    });
+  });
+
+  // ── POST /api/files/copy ──
+
+  describe("POST /api/files/copy", () => {
+    it("copies a file leaving source intact", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "orig.txt"), "hi");
+
+      const res = await request(app)
+        .post("/api/files/copy")
+        .send({ from: "/orig.txt", to: "/copy.txt" });
+
+      expect(res.status).toBe(200);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "orig.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "copy.txt"))).toBe(true);
+    });
+
+    it("copies a directory recursively", async () => {
+      await fsp.mkdir(path.join(TEST_FILES_ROOT, "src-dir"), { recursive: true });
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "src-dir/a.txt"), "a");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "src-dir/b.txt"), "b");
+
+      const res = await request(app)
+        .post("/api/files/copy")
+        .send({ from: "/src-dir", to: "/dst-dir" });
+
+      expect(res.status).toBe(200);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "dst-dir/a.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "dst-dir/b.txt"))).toBe(true);
+      // Source should still exist
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "src-dir/a.txt"))).toBe(true);
+    });
+  });
+
+  // ── POST /api/files/bulk-delete ──
+
+  describe("POST /api/files/bulk-delete", () => {
+    it("deletes multiple files and returns per-item status", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "a.txt"), "a");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "b.txt"), "b");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "c.txt"), "c");
+
+      const res = await request(app)
+        .post("/api/files/bulk-delete")
+        .send({ paths: ["/a.txt", "/b.txt", "/c.txt"] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(3);
+      expect(res.body.results.every((r: any) => r.ok)).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "a.txt"))).toBe(false);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "b.txt"))).toBe(false);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "c.txt"))).toBe(false);
+    });
+
+    it("returns 207 on partial failure with per-item error details", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "real.txt"), "x");
+
+      const res = await request(app)
+        .post("/api/files/bulk-delete")
+        .send({ paths: ["/real.txt", "/ghost.txt"] });
+
+      expect(res.status).toBe(207);
+      const ok = res.body.results.find((r: any) => r.path === "/real.txt");
+      const fail = res.body.results.find((r: any) => r.path === "/ghost.txt");
+      expect(ok.ok).toBe(true);
+      expect(fail.ok).toBe(false);
+      expect(fail.error).toBeDefined();
+    });
+
+    it("rejects empty paths array", async () => {
+      const res = await request(app).post("/api/files/bulk-delete").send({ paths: [] });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── POST /api/files/bulk-move ──
+
+  describe("POST /api/files/bulk-move", () => {
+    it("moves multiple files to a target directory", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "a.txt"), "a");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "b.txt"), "b");
+      await fsp.mkdir(path.join(TEST_FILES_ROOT, "archive"), { recursive: true });
+
+      const res = await request(app)
+        .post("/api/files/bulk-move")
+        .send({ paths: ["/a.txt", "/b.txt"], toDir: "/archive" });
+
+      expect(res.status).toBe(200);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "archive/a.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "archive/b.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "a.txt"))).toBe(false);
+    });
+  });
+
+  // ── POST /api/files/bulk-copy ──
+
+  describe("POST /api/files/bulk-copy", () => {
+    it("copies multiple files to a target directory leaving sources intact", async () => {
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "a.txt"), "a");
+      await fsp.writeFile(path.join(TEST_FILES_ROOT, "b.txt"), "b");
+      await fsp.mkdir(path.join(TEST_FILES_ROOT, "backup"), { recursive: true });
+
+      const res = await request(app)
+        .post("/api/files/bulk-copy")
+        .send({ paths: ["/a.txt", "/b.txt"], toDir: "/backup" });
+
+      expect(res.status).toBe(200);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "backup/a.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "backup/b.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "a.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "b.txt"))).toBe(true);
+    });
+  });
+
+  // ── Trash / Versions (legacy backend 501) ──
+
+  describe("Trash endpoints (legacy backend)", () => {
+    it("GET /api/files/trash returns 501 on legacy backend", async () => {
+      const res = await request(app).get("/api/files/trash");
+      expect(res.status).toBe(501);
+    });
+
+    it("POST /api/files/trash/restore returns 501 on legacy backend", async () => {
+      const res = await request(app)
+        .post("/api/files/trash/restore")
+        .send({ name: "x" });
+      expect(res.status).toBe(501);
+    });
+
+    it("DELETE /api/files/trash returns 501 on legacy backend", async () => {
+      const res = await request(app).delete("/api/files/trash");
+      expect(res.status).toBe(501);
+    });
+
+    it("GET /api/files/versions returns 501 on legacy backend", async () => {
+      const res = await request(app).get("/api/files/versions?path=/a.txt");
+      expect(res.status).toBe(501);
+    });
+  });
+
   // ── Integration: full lifecycle ──
 
   describe("Full lifecycle", () => {

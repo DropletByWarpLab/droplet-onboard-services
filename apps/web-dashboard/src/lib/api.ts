@@ -10,6 +10,9 @@ import type {
   MatterDiscoveredDevice,
   MatterGrouped,
   FileEntryInfo,
+  FileVersionInfo,
+  TrashItemInfo,
+  BulkOperationResult,
   FirewallConfig,
   HealthResponse,
   ModelsResponse,
@@ -577,6 +580,168 @@ export async function fetchShares(path: string): Promise<ShareInfo[]> {
   if (!res.ok) throw new Error(`Failed to fetch shares: ${res.status}`);
   const data = await res.json();
   return data.shares;
+}
+
+// --- File management (Phase 1) — rename / move / copy / bulk / trash / versions ---
+
+export async function renameFile(
+  path: string,
+  newName: string
+): Promise<{ from: string; to: string }> {
+  const res = await authFetch(`${BASE}/api/files/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, newName }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to rename: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.renamed;
+}
+
+export async function moveFile(
+  from: string,
+  to: string,
+  overwrite = false
+): Promise<{ from: string; to: string }> {
+  const res = await authFetch(`${BASE}/api/files/move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, overwrite }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to move: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.moved;
+}
+
+export async function copyFile(
+  from: string,
+  to: string,
+  overwrite = false
+): Promise<{ from: string; to: string }> {
+  const res = await authFetch(`${BASE}/api/files/copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, overwrite }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to copy: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.copied;
+}
+
+export async function bulkDeleteFiles(
+  paths: string[]
+): Promise<BulkOperationResult[]> {
+  const res = await authFetch(`${BASE}/api/files/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths }),
+  });
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Bulk delete failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results;
+}
+
+export async function bulkMoveFiles(
+  paths: string[],
+  toDir: string,
+  overwrite = false
+): Promise<BulkOperationResult[]> {
+  const res = await authFetch(`${BASE}/api/files/bulk-move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths, toDir, overwrite }),
+  });
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Bulk move failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results;
+}
+
+export async function bulkCopyFiles(
+  paths: string[],
+  toDir: string,
+  overwrite = false
+): Promise<BulkOperationResult[]> {
+  const res = await authFetch(`${BASE}/api/files/bulk-copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths, toDir, overwrite }),
+  });
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Bulk copy failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results;
+}
+
+export async function fetchTrash(): Promise<TrashItemInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/trash`);
+  if (!res.ok) {
+    if (res.status === 501) return [];
+    throw new Error(`Failed to fetch trash: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+export async function restoreTrashItem(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/trash/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(`Failed to restore: ${res.status}`);
+}
+
+export async function deleteTrashItem(name: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/files/trash/item?name=${encodeURIComponent(name)}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) throw new Error(`Failed to purge trash item: ${res.status}`);
+}
+
+export async function emptyTrash(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/trash`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to empty trash: ${res.status}`);
+}
+
+export async function fetchVersions(
+  path: string
+): Promise<{ fileId: number; versions: FileVersionInfo[] }> {
+  const res = await authFetch(
+    `${BASE}/api/files/versions?path=${encodeURIComponent(path)}`
+  );
+  if (!res.ok) {
+    if (res.status === 501) return { fileId: 0, versions: [] };
+    if (res.status === 404) return { fileId: 0, versions: [] };
+    throw new Error(`Failed to fetch versions: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function restoreVersion(path: string, versionId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/versions/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, versionId }),
+  });
+  if (!res.ok) throw new Error(`Failed to restore version: ${res.status}`);
 }
 
 // --- Sync targets ---

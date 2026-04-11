@@ -1,6 +1,10 @@
 import pino from "pino";
 import { config } from "../config.js";
-import type { FileEntryInfo } from "../types/index.js";
+import type {
+  FileEntryInfo,
+  FileVersionInfo,
+  TrashItemInfo,
+} from "../types/index.js";
 
 const logger = pino({ name: "nextcloud-client" });
 
@@ -674,6 +678,233 @@ export async function ncOAuth2RefreshToken(
   }
 }
 
+// ── WebDAV Move / Copy / Rename ──
+
+/**
+ * Move a file or directory within the user's namespace.
+ * Uses WebDAV MOVE verb with Destination header.
+ * Pass overwrite=true to replace an existing file at the destination.
+ */
+export async function ncMoveFile(
+  token: string,
+  user: string,
+  fromPath: string,
+  toPath: string,
+  overwrite: boolean = false
+): Promise<void> {
+  const url = webdavUrl(user, fromPath);
+  const destination = webdavUrl(user, toPath);
+  const resp = await fetch(url, {
+    method: "MOVE",
+    headers: {
+      ...davHeaders(token),
+      Destination: destination,
+      Overwrite: overwrite ? "T" : "F",
+    },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`WebDAV MOVE failed: ${resp.status}`);
+  }
+}
+
+/**
+ * Copy a file or directory within the user's namespace.
+ * Uses WebDAV COPY verb; recursive for collections.
+ */
+export async function ncCopyFile(
+  token: string,
+  user: string,
+  fromPath: string,
+  toPath: string,
+  overwrite: boolean = false
+): Promise<void> {
+  const url = webdavUrl(user, fromPath);
+  const destination = webdavUrl(user, toPath);
+  const resp = await fetch(url, {
+    method: "COPY",
+    headers: {
+      ...davHeaders(token),
+      Destination: destination,
+      Overwrite: overwrite ? "T" : "F",
+    },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`WebDAV COPY failed: ${resp.status}`);
+  }
+}
+
+// ── File ID resolution (needed for versions, favorites, etc.) ──
+
+/**
+ * Resolve a file path to its Nextcloud numeric fileId (oc:fileid).
+ * Returns null if the file doesn't exist.
+ */
+export async function ncGetFileId(
+  token: string,
+  user: string,
+  path: string
+): Promise<number | null> {
+  const url = webdavUrl(user, path);
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:prop><oc:fileid/></d:prop>
+</d:propfind>`;
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "0" },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return null;
+    logger.warn({ status: resp.status, path }, "ncGetFileId PROPFIND failed");
+    return null;
+  }
+  const xml = await resp.text();
+  const m = xml.match(/<oc:fileid>(\d+)<\/oc:fileid>/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// ── Trash ──
+
+function trashUrl(user: string, sub: string): string {
+  return `${config.NEXTCLOUD_URL}/remote.php/dav/trashbin/${user}/${sub}`;
+}
+
+/**
+ * List items currently in the user's trashbin.
+ * Returns the full list with original location and deletion time.
+ */
+export async function ncListTrash(
+  token: string,
+  user: string
+): Promise<TrashItemInfo[]> {
+  const url = trashUrl(user, "trash");
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+    <d:resourcetype/>
+    <nc:trashbin-filename/>
+    <nc:trashbin-original-location/>
+    <nc:trashbin-deletion-time/>
+  </d:prop>
+</d:propfind>`;
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "1" },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV PROPFIND trashbin failed: ${resp.status}`);
+  }
+  const xml = await resp.text();
+  return parseTrashMultiStatus(xml);
+}
+
+/**
+ * Restore a single trashed item to its original location.
+ * `trashFilename` is the Nextcloud-assigned name (e.g. "photo.jpg.d1712860391").
+ */
+export async function ncRestoreTrashItem(
+  token: string,
+  user: string,
+  trashFilename: string
+): Promise<void> {
+  const url = trashUrl(user, `trash/${encodeURIComponent(trashFilename)}`);
+  const destination = trashUrl(user, `restore/${encodeURIComponent(trashFilename)}`);
+  const resp = await fetch(url, {
+    method: "MOVE",
+    headers: { ...davHeaders(token), Destination: destination },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`Trash restore failed: ${resp.status}`);
+  }
+}
+
+/**
+ * Permanently delete a single trashed item (skip Restore, go straight to /dev/null).
+ */
+export async function ncDeleteTrashItem(
+  token: string,
+  user: string,
+  trashFilename: string
+): Promise<void> {
+  const url = trashUrl(user, `trash/${encodeURIComponent(trashFilename)}`);
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: davHeaders(token),
+  });
+  if (!resp.ok && resp.status !== 204) {
+    throw new Error(`Trash delete failed: ${resp.status}`);
+  }
+}
+
+/**
+ * Empty the entire trashbin. Irreversible.
+ */
+export async function ncEmptyTrash(token: string, user: string): Promise<void> {
+  const url = trashUrl(user, "trash");
+  const resp = await fetch(url, { method: "DELETE", headers: davHeaders(token) });
+  if (!resp.ok && resp.status !== 204) {
+    throw new Error(`Empty trash failed: ${resp.status}`);
+  }
+}
+
+// ── Versions ──
+
+/**
+ * List version history for a file by its fileId.
+ * Returns entries sorted with most recent first.
+ */
+export async function ncListVersions(
+  token: string,
+  user: string,
+  fileId: number
+): Promise<FileVersionInfo[]> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/versions/${fileId}`;
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+  </d:prop>
+</d:propfind>`;
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "1" },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`Versions PROPFIND failed: ${resp.status}`);
+  }
+  const xml = await resp.text();
+  return parseVersionsXml(xml, fileId);
+}
+
+/**
+ * Restore a specific version of a file. The version becomes the new current content.
+ * The pre-restore current content becomes the most-recent version automatically.
+ */
+export async function ncRestoreVersion(
+  token: string,
+  user: string,
+  fileId: number,
+  versionId: string
+): Promise<void> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/versions/${fileId}/${encodeURIComponent(versionId)}`;
+  const destination = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/restore/target`;
+  const resp = await fetch(url, {
+    method: "MOVE",
+    headers: { ...davHeaders(token), Destination: destination },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`Version restore failed: ${resp.status}`);
+  }
+}
+
 // ── XML Parsing (minimal PROPFIND response parser) ──
 
 function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
@@ -721,4 +952,100 @@ function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
   });
 
   return entries;
+}
+
+/**
+ * Parse a WebDAV PROPFIND response from the trashbin endpoint.
+ * Each entry carries the Nextcloud trash filename, original location, and deletion time.
+ */
+function parseTrashMultiStatus(xml: string): TrashItemInfo[] {
+  const items: TrashItemInfo[] = [];
+  const responseBlocks = xml.split(/<d:response>/i).slice(1);
+
+  for (const block of responseBlocks) {
+    const hrefMatch = block.match(/<d:href>([^<]+)<\/d:href>/i);
+    if (!hrefMatch) continue;
+    const href = decodeURIComponent(hrefMatch[1]);
+
+    // Skip the base trashbin path itself (the first PROPFIND response)
+    if (/\/remote\.php\/dav\/trashbin\/[^/]+\/trash\/?$/.test(href)) continue;
+
+    // Trash entries live directly under /trash/, even when they were originally
+    // nested inside subdirectories. Extract the trailing filename segment.
+    const trashPathMatch = href.match(/\/trashbin\/[^/]+\/trash\/([^/]+)\/?$/);
+    const name = trashPathMatch ? decodeURIComponent(trashPathMatch[1]) : "";
+    if (!name) continue;
+
+    const isCollection = /<d:collection\s*\/?>/.test(block);
+    const sizeMatch = block.match(/<d:getcontentlength>(\d+)<\/d:getcontentlength>/i);
+    const origLocMatch = block.match(
+      /<nc:trashbin-original-location>([^<]*)<\/nc:trashbin-original-location>/i
+    );
+    const origNameMatch = block.match(
+      /<nc:trashbin-filename>([^<]*)<\/nc:trashbin-filename>/i
+    );
+    const deletedAtMatch = block.match(
+      /<nc:trashbin-deletion-time>(\d+)<\/nc:trashbin-deletion-time>/i
+    );
+
+    const rawOrigLoc = origLocMatch ? decodeURIComponent(origLocMatch[1]) : "";
+    // Original location in Nextcloud is "folder/file.ext" — split off the filename
+    // to leave just the parent directory.
+    const origLocDir = rawOrigLoc ? "/" + rawOrigLoc.replace(/\/?[^/]+$/, "").replace(/^\/+/, "") : "/";
+    const originalName = origNameMatch ? decodeURIComponent(origNameMatch[1]) : name;
+    const deletedAt = deletedAtMatch
+      ? new Date(parseInt(deletedAtMatch[1], 10) * 1000).toISOString()
+      : new Date().toISOString();
+
+    items.push({
+      name,
+      originalName,
+      originalLocation: origLocDir || "/",
+      size: sizeMatch ? parseInt(sizeMatch[1], 10) : 0,
+      deletedAt,
+      isDirectory: isCollection,
+    });
+  }
+
+  // Sort most-recently-deleted first
+  items.sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1));
+  return items;
+}
+
+/**
+ * Parse a WebDAV PROPFIND response from the versions endpoint.
+ * Returns a list of versions keyed by versionId (the trailing URL segment).
+ */
+function parseVersionsXml(xml: string, fileId: number): FileVersionInfo[] {
+  const versions: FileVersionInfo[] = [];
+  const responseBlocks = xml.split(/<d:response>/i).slice(1);
+
+  for (const block of responseBlocks) {
+    const hrefMatch = block.match(/<d:href>([^<]+)<\/d:href>/i);
+    if (!hrefMatch) continue;
+    const href = decodeURIComponent(hrefMatch[1]);
+
+    // Skip the parent /versions/{fileId}/ directory itself
+    const parentRe = new RegExp(`/versions/${fileId}/?$`);
+    if (parentRe.test(href)) continue;
+
+    const versionIdMatch = href.match(/\/versions\/\d+\/([^/]+)\/?$/);
+    if (!versionIdMatch) continue;
+    const versionId = decodeURIComponent(versionIdMatch[1]);
+
+    const sizeMatch = block.match(/<d:getcontentlength>(\d+)<\/d:getcontentlength>/i);
+    const mtimeMatch = block.match(/<d:getlastmodified>([^<]+)<\/d:getlastmodified>/i);
+
+    versions.push({
+      versionId,
+      size: sizeMatch ? parseInt(sizeMatch[1], 10) : 0,
+      modifiedAt: mtimeMatch
+        ? new Date(mtimeMatch[1]).toISOString()
+        : new Date().toISOString(),
+    });
+  }
+
+  // Sort most-recent first
+  versions.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1));
+  return versions;
 }

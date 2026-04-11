@@ -75,6 +75,34 @@ export interface FileEntryInfo {
   modifiedAt: string;
 }
 
+export interface TrashItemInfo {
+  /** Nextcloud-assigned name used as restore key (e.g. "photo.jpg.d1712860391") */
+  name: string;
+  /** Original filename before deletion */
+  originalName: string;
+  /** Original parent directory (e.g. "/Photos") */
+  originalLocation: string;
+  size: number;
+  /** ISO timestamp of when the item was trashed */
+  deletedAt: string;
+  isDirectory: boolean;
+}
+
+export interface FileVersionInfo {
+  versionId: string;
+  size: number;
+  modifiedAt: string;
+}
+
+export interface BulkOperationResult {
+  path: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** View mode for the file manager — list or grid */
+export type FileViewMode = "list" | "grid";
+
 export interface SyncTargetInfo {
   id: string;
   path: string;

@@ -194,6 +194,69 @@ export async function deleteFile(absolutePath: string): Promise<void> {
   }
 }
 
+/**
+ * Move a file or directory. Overwrites the destination if `overwrite` is true,
+ * otherwise throws with code `EEXIST`.
+ */
+export async function moveFile(
+  absoluteFrom: string,
+  absoluteTo: string,
+  overwrite: boolean = false
+): Promise<void> {
+  if (!overwrite) {
+    try {
+      await fsp.access(absoluteTo);
+      throw new FileServiceError(
+        `Destination already exists: "${absoluteTo}"`,
+        "EEXIST"
+      );
+    } catch (err: any) {
+      if (err?.code !== "ENOENT" && !(err instanceof FileServiceError && err.code === "EEXIST")) {
+        // Unexpected — rethrow
+        if (err instanceof FileServiceError) throw err;
+      }
+      if (err instanceof FileServiceError) throw err;
+    }
+  }
+  // Ensure destination parent exists
+  await fsp.mkdir(path.dirname(absoluteTo), { recursive: true });
+  await fsp.rename(absoluteFrom, absoluteTo);
+}
+
+/**
+ * Copy a file or directory recursively. Overwrites existing files at the destination
+ * only when `overwrite` is true.
+ */
+export async function copyFile(
+  absoluteFrom: string,
+  absoluteTo: string,
+  overwrite: boolean = false
+): Promise<void> {
+  if (!overwrite) {
+    try {
+      await fsp.access(absoluteTo);
+      throw new FileServiceError(
+        `Destination already exists: "${absoluteTo}"`,
+        "EEXIST"
+      );
+    } catch (err: any) {
+      if (err instanceof FileServiceError) throw err;
+      if (err?.code !== "ENOENT") throw err;
+    }
+  }
+  await fsp.mkdir(path.dirname(absoluteTo), { recursive: true });
+  const stat = await fsp.stat(absoluteFrom);
+  if (stat.isDirectory()) {
+    await fsp.cp(absoluteFrom, absoluteTo, { recursive: true, force: overwrite });
+  } else {
+    await fsp.copyFile(
+      absoluteFrom,
+      absoluteTo,
+      overwrite ? 0 : fs.constants.COPYFILE_EXCL
+    );
+  }
+}
+
 export async function createDirectory(absolutePath: string): Promise<void> {
   try {
     await fsp.mkdir(absolutePath, { recursive: true });

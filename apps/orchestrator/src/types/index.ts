@@ -100,6 +100,32 @@ export interface FileEntryInfo {
   modifiedAt: string;
 }
 
+export interface TrashItemInfo {
+  /** Nextcloud trashbin filename, e.g. "photo.jpg.d1712860391" (unique key for restore/delete) */
+  name: string;
+  /** Original name before deletion, e.g. "photo.jpg" */
+  originalName: string;
+  /** Original parent path, e.g. "/Photos" */
+  originalLocation: string;
+  size: number;
+  /** ISO timestamp of when the item was trashed */
+  deletedAt: string;
+  isDirectory: boolean;
+}
+
+export interface FileVersionInfo {
+  /** Opaque identifier used for restore (trailing segment of Nextcloud versions URL) */
+  versionId: string;
+  size: number;
+  modifiedAt: string;
+}
+
+export interface BulkOperationResult {
+  path: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface SyncTargetInfo {
   id: string;
   path: string;

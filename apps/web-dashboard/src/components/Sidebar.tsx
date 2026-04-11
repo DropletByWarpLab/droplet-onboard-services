@@ -10,6 +10,7 @@ import {
   MessageSquare,
   Network,
   Settings,
+  Trash2,
   Video,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
@@ -26,6 +27,12 @@ const navItems = [
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
+// Sub-navigation rendered under Files when we're on a /files/* route.
+const filesSubNav = [
+  { href: "/files", label: "All files", icon: FolderOpen, exact: true },
+  { href: "/files/trash", label: "Trash", icon: Trash2, exact: false },
+];
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -33,6 +40,8 @@ export function Sidebar() {
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
+
+  const showFilesSubNav = pathname.startsWith("/files");
 
   async function handleLogout() {
     await logout();
@@ -70,22 +79,53 @@ export function Sidebar() {
             const Icon = item.icon;
             const active = isActive(item.href);
             return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`
-                  flex items-center gap-3 px-3 h-9 rounded-sm
-                  type-subheadline transition-all duration-200 ease-smooth
-                  ${
-                    active
-                      ? "bg-accent-subtle text-accent font-medium"
-                      : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-                  }
-                `}
-              >
-                <Icon size={18} strokeWidth={active ? 2 : 1.5} />
-                {item.label}
-              </Link>
+              <div key={item.href}>
+                <Link
+                  href={item.href}
+                  className={`
+                    flex items-center gap-3 px-3 h-9 rounded-sm
+                    type-subheadline transition-all duration-200 ease-smooth
+                    ${
+                      active
+                        ? "bg-accent-subtle text-accent font-medium"
+                        : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+                    }
+                  `}
+                >
+                  <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+                  {item.label}
+                </Link>
+
+                {/* Files sub-nav (expands inline when on any /files route) */}
+                {item.href === "/files" && showFilesSubNav && (
+                  <div className="ml-7 mt-1 space-y-0.5">
+                    {filesSubNav.map((sub) => {
+                      const SubIcon = sub.icon;
+                      const subActive = sub.exact
+                        ? pathname === sub.href
+                        : pathname.startsWith(sub.href);
+                      return (
+                        <Link
+                          key={sub.href}
+                          href={sub.href}
+                          className={`
+                            flex items-center gap-2 px-2 h-8 rounded-sm
+                            type-footnote transition-all duration-200 ease-smooth
+                            ${
+                              subActive
+                                ? "text-accent font-medium"
+                                : "text-label-tertiary hover:text-label-primary"
+                            }
+                          `}
+                        >
+                          <SubIcon size={14} strokeWidth={subActive ? 2 : 1.5} />
+                          {sub.label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>
