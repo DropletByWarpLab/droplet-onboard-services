@@ -252,11 +252,12 @@ def main():
             print(" Droplet Router Connectivity Report")
             print("=" * 60)
             for check_name, check_result in checks.items():
-                status = check_result.pop("status")
+                status = check_result["status"]
                 icon = "+" if status == "OK" else "x"
                 print(f"\n  {icon} {check_name}: {status}")
                 for k, v in check_result.items():
-                    print(f"    {k}: {v}")
+                    if k != "status":
+                        print(f"    {k}: {v}")
             print("\n" + "=" * 60)
 
             failed = [k for k, v in checks.items() if v.get("status") != "OK"]

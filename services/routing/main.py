@@ -96,6 +96,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Droplet Routing Service", version="1.0.0", lifespan=lifespan)
 
 
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    """Catch unhandled exceptions and return a clean 500 without leaking internals."""
+    logger.error("Unhandled exception: %s", exc)
+    return JSONResponse(status_code=500, content={"error": "Internal server error"})
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------

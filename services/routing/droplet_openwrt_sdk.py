@@ -128,10 +128,13 @@ class UbusClient:
         Returns: list of response data dicts (same order)
         """
         payloads = []
+        request_ids = []
         for obj, method, args in calls:
+            req_id = self._next_id()
+            request_ids.append(req_id)
             payloads.append({
                 "jsonrpc": "2.0",
-                "id": self._next_id(),
+                "id": req_id,
                 "method": "call",
                 "params": [session, obj, method, args or {}],
             })
@@ -144,8 +147,13 @@ class UbusClient:
         except URLError as exc:
             raise ConnectionLost(f"Batch call failed: {exc}") from exc
 
+        # Match responses by ID (JSON-RPC batch responses may arrive in any order)
+        response_by_id = {r["id"]: r for r in responses}
         results = []
-        for r in responses:
+        for req_id in request_ids:
+            r = response_by_id.get(req_id)
+            if r is None:
+                raise UbusError(-1, f"Missing response for request {req_id}")
             res = r.get("result", [])
             code = res[0] if res else -1
             if code != 0:
@@ -708,7 +716,7 @@ class DropletRouter:
     the ubus JSON-RPC interface.
     """
 
-    def __init__(self, host: str = "10.0.0.1", port: int = 80,
+    def __init__(self, host: str = "192.168.50.1", port: int = 80,
                  username: str = "droplet-ai", password: str = "",
                  scheme: str = "http", timeout: int = 10,
                  auto_login: bool = True):

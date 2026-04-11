@@ -29,6 +29,11 @@ AI_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)
 echo "${AI_PASS}" > /etc/droplet/droplet-ai-password
 chmod 600 /etc/droplet/droplet-ai-password
 
+# Create the droplet-ai system user so rpcd's $p$ PAM auth can verify
+echo "droplet-ai:x:900:900:Droplet AI Agent:/var/empty:/bin/false" >> /etc/passwd
+echo "droplet-ai:x:900:" >> /etc/group
+echo "droplet-ai:${AI_PASS}" | chpasswd
+
 # rpcd uses $p$ prefix for password verification via PAM-like mechanism
 uci set rpcd.@login[0].password="\$p\$droplet-ai"
 uci commit rpcd
@@ -57,7 +62,7 @@ cat > /etc/umdns/droplet.json << 'MDNS_EOF'
 {
   "droplet-router": {
     "service": "_droplet._tcp",
-    "port": 443,
+    "port": 80,
     "txt": [
       "version=1.0",
       "type=openwrt-router"

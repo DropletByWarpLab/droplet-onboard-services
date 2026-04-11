@@ -156,7 +156,9 @@ export async function setWifiSsid(ssid: string): Promise<NetworkCommandResult> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ssid }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Failed to set SSID: ${res.status}`);
+  return data;
 }
 
 export async function setWifiPassword(password: string): Promise<NetworkCommandResult> {
@@ -165,7 +167,9 @@ export async function setWifiPassword(password: string): Promise<NetworkCommandR
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Failed to set password: ${res.status}`);
+  return data;
 }
 
 export async function setWifiChannel(channel: string): Promise<NetworkCommandResult> {
@@ -174,7 +178,9 @@ export async function setWifiChannel(channel: string): Promise<NetworkCommandRes
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channel }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Failed to set channel: ${res.status}`);
+  return data;
 }
 
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
@@ -196,7 +202,9 @@ export async function blockNetworkDevice(mac: string, name?: string): Promise<Ne
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mac, name }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to block device: ${res.status}`);
+  return data;
 }
 
 export async function unblockNetworkDevice(mac: string): Promise<NetworkCommandResult> {
@@ -205,7 +213,9 @@ export async function unblockNetworkDevice(mac: string): Promise<NetworkCommandR
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mac }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to unblock device: ${res.status}`);
+  return data;
 }
 
 export async function addNetworkPortForward(
@@ -220,7 +230,9 @@ export async function addNetworkPortForward(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, src_port: srcPort, dest_ip: destIp, dest_port: destPort, proto }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to add port forward: ${res.status}`);
+  return data;
 }
 
 export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> {

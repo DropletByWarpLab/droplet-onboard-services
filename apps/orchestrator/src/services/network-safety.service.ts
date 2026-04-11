@@ -38,6 +38,7 @@ const rateLimitMap = new Map<string, number[]>();
 
 /** In-memory pending confirmations: token -> PendingConfirmation */
 const pendingConfirmations = new Map<string, PendingConfirmation>();
+const MAX_PENDING_CONFIRMATIONS = 1000;
 
 /**
  * Evaluate a network command through the safety tier system.
@@ -79,6 +80,9 @@ export async function evaluateNetworkCommand(
       };
     }
     // Web UI: treat as Tier 2 (needs confirmation)
+    if (pendingConfirmations.size >= MAX_PENDING_CONFIRMATIONS) {
+      return { allowed: false, blocked: true, reason: "Too many pending confirmations", tier: 3 };
+    }
     const confirmationToken = randomBytes(32).toString("hex");
     pendingConfirmations.set(confirmationToken, {
       token: confirmationToken,
@@ -150,6 +154,9 @@ export async function evaluateNetworkCommand(
   }
 
   // Tier 2: Requires confirmation
+  if (pendingConfirmations.size >= MAX_PENDING_CONFIRMATIONS) {
+    return { allowed: false, blocked: true, reason: "Too many pending confirmations", tier: classification.tier };
+  }
   const confirmationToken = randomBytes(32).toString("hex");
   pendingConfirmations.set(confirmationToken, {
     token: confirmationToken,
