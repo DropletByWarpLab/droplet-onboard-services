@@ -80,12 +80,12 @@ PACKAGES+=" opkg luci luci-ssl luci-app-firewall luci-app-opkg"
 PACKAGES+=" luci-theme-openwrt-2020"
 
 # --- ubus JSON-RPC API (Jetson ↔ OpenWrt control plane) ---
-PACKAGES+=" uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file rpcd-mod-iwinfo"
+PACKAGES+=" uhttpd uhttpd-mod-ubus rpcd rpcd-mod-iwinfo"
 PACKAGES+=" luci-mod-rpc"
 
 # --- System utilities ---
 PACKAGES+=" htop nano curl wget-ssl ca-bundle"
-PACKAGES+=" openssh-sftp-server"
+# openssh-sftp-server removed — unnecessary attack surface
 PACKAGES+=" usbutils pciutils lsblk"
 PACKAGES+=" diffutils coreutils-stat"
 PACKAGES+=" bash"

@@ -3,26 +3,37 @@
 # Droplet First-Boot Setup Script
 # =============================================================================
 # This script runs once on first boot and then deletes itself.
-# It configures the droplet-ai RPC user, sets passwords, enables services,
-# and advertises the router via mDNS for Jetson discovery.
+# It generates unique per-device credentials, configures the droplet-ai RPC
+# user, enables services, and advertises the router via mDNS.
 # =============================================================================
 
 echo "Droplet: Running first-boot setup..."
 
 # ---------------------------------------------------------------------------
-# 1. Set root password (change this in production!)
+# 1. Generate unique per-device root password
 # ---------------------------------------------------------------------------
-echo "root:DropletAdmin2024!" | chpasswd
+# Generate a random 16-char alphanumeric password for this device
+ROOT_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
+echo "root:${ROOT_PASS}" | chpasswd
+
+# Store the generated root password for initial access
+echo "${ROOT_PASS}" > /etc/droplet/root-password
+chmod 600 /etc/droplet/root-password
+
+echo "Droplet: Root password generated. Retrieve from /etc/droplet/root-password"
 
 # ---------------------------------------------------------------------------
-# 2. Configure droplet-ai RPC user password
+# 2. Generate unique per-device droplet-ai RPC password
 # ---------------------------------------------------------------------------
-AI_PASS=$(cat /etc/droplet/droplet-ai-password 2>/dev/null || echo "DropletAI2024!")
+AI_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)
+echo "${AI_PASS}" > /etc/droplet/droplet-ai-password
+chmod 600 /etc/droplet/droplet-ai-password
 
 # rpcd uses $p$ prefix for password verification via PAM-like mechanism
-# The actual password is set via uci and rpcd handles the hashing
 uci set rpcd.@login[0].password="\$p\$droplet-ai"
 uci commit rpcd
+
+echo "Droplet: AI agent password generated. Retrieve from /etc/droplet/droplet-ai-password"
 
 # ---------------------------------------------------------------------------
 # 3. Ensure uhttpd has ubus endpoint configured
@@ -32,7 +43,7 @@ uci set uhttpd.main.ubus_socket='/var/run/ubus/ubus.sock'
 uci commit uhttpd
 
 # ---------------------------------------------------------------------------
-# 4. Configure mDNS so Jetson can discover router as droplet-router.local
+# 4. Configure mDNS so Jetson can discover router as Droplet.local
 # ---------------------------------------------------------------------------
 if [ -f /etc/config/umdns ]; then
     uci set umdns.@umdns[0]=umdns
@@ -40,17 +51,16 @@ if [ -f /etc/config/umdns ]; then
     uci commit umdns
 fi
 
-# Create mDNS service file for Droplet
+# mDNS service advertisement (no API path exposed)
 mkdir -p /etc/umdns
 cat > /etc/umdns/droplet.json << 'MDNS_EOF'
 {
   "droplet-router": {
     "service": "_droplet._tcp",
-    "port": 80,
+    "port": 443,
     "txt": [
       "version=1.0",
-      "type=openwrt-router",
-      "api=/ubus"
+      "type=openwrt-router"
     ]
   }
 }
@@ -66,7 +76,6 @@ done
 # ---------------------------------------------------------------------------
 # 6. Set up WiFi — ensure radios are enabled
 # ---------------------------------------------------------------------------
-# On first boot, radios may be disabled by default
 uci set wireless.radio0.disabled='0'
 uci set wireless.radio1.disabled='0'
 uci set wireless.radio2.disabled='0'
@@ -75,7 +84,6 @@ uci commit wireless
 # ---------------------------------------------------------------------------
 # 7. Verify USB NIC (eth1) will be detected
 # ---------------------------------------------------------------------------
-# Log available network interfaces for debugging
 echo "Droplet: Detected network interfaces:" > /tmp/droplet-firstboot.log
 ip link show >> /tmp/droplet-firstboot.log 2>&1
 echo "---" >> /tmp/droplet-firstboot.log
@@ -93,6 +101,7 @@ echo "Droplet: First-boot setup complete. Restarting services..."
 /etc/init.d/network restart
 /etc/init.d/umdns restart 2>/dev/null || true
 
-echo "Droplet: Router ready. LAN at 192.168.50.1, API at http://192.168.50.1/ubus"
+echo "Droplet: Router ready at 192.168.50.1"
+echo "Droplet: Credentials stored in /etc/droplet/ — retrieve during Jetson provisioning"
 
 exit 0

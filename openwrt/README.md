@@ -88,10 +88,13 @@ sudo systemctl enable --now droplet-router-monitor
 
 | Account | Username | Password | Purpose |
 |---------|----------|----------|---------|
-| Root (SSH/LuCI) | `root` | `DropletAdmin2024!` | Full system access |
-| AI Agent (ubus) | `droplet-ai` | `DropletAI2024!` | Jetson -> OpenWrt control |
+| Root (SSH/LuCI) | `root` | *Generated at first boot* | Full system access |
+| AI Agent (ubus) | `droplet-ai` | *Generated at first boot* | Jetson -> OpenWrt control |
 
-**Change these before production deployment.** Edit `files/etc/droplet/droplet-ai-password` and `files/etc/uci-defaults/99-droplet-setup`.
+Credentials are **unique per device** — generated randomly during first boot and stored in `/etc/droplet/`. Retrieve the AI agent password during Jetson provisioning:
+```bash
+ssh root@192.168.50.1 cat /etc/droplet/droplet-ai-password
+```
 
 ## File Structure
 

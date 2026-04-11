@@ -30,7 +30,7 @@ config device 'br-lan'
     option type 'bridge'
     option name 'br-lan'
     list ports 'eth1'
-    option stp '0'
+    option stp '1'
 
 config interface 'lan'
     option device 'br-lan'
