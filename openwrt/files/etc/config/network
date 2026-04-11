@@ -1,0 +1,46 @@
+# =============================================================================
+# Droplet Network Configuration
+# =============================================================================
+# ETH0 (onboard BCM54213PE) → WAN — picks up address via DHCP from upstream
+# ETH1 (TP-Link UE306 / RTL8153B USB NIC) → LAN bridge with WiFi
+# LAN subnet: 192.168.50.1/24
+# =============================================================================
+
+config interface 'loopback'
+    option device 'lo'
+    option proto 'static'
+    option ipaddr '127.0.0.1'
+    option netmask '255.0.0.0'
+
+# --- WAN: onboard Ethernet (eth0) --- DHCP from upstream router/ISP
+config interface 'wan'
+    option device 'eth0'
+    option proto 'dhcp'
+    option peerdns '1'
+    option delegate '0'
+
+config interface 'wan6'
+    option device 'eth0'
+    option proto 'dhcpv6'
+    option reqaddress 'try'
+    option reqprefix 'auto'
+
+# --- LAN bridge: USB NIC (eth1) + WiFi radios ---
+config device 'br-lan'
+    option type 'bridge'
+    option name 'br-lan'
+    list ports 'eth1'
+    option stp '0'
+
+config interface 'lan'
+    option device 'br-lan'
+    option proto 'static'
+    option ipaddr '192.168.50.1'
+    option netmask '255.255.255.0'
+    option ip6assign '60'
+    option delegate '0'
+
+# --- Globals ---
+config globals 'globals'
+    option ula_prefix 'fdb2:c4a0:de07::/48'
+    option packet_steering '1'

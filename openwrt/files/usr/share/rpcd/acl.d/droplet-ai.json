@@ -1,0 +1,37 @@
+{
+  "droplet-ai": {
+    "description": "Full network management access for Droplet AI agent (Jetson)",
+    "read": {
+      "ubus": {
+        "system": ["board", "info", "signal"],
+        "network.interface.*": ["status", "dump"],
+        "network.device": ["status"],
+        "network.wireless": ["status"],
+        "iwinfo": ["info", "scan", "assoclist", "freqlist", "countrylist", "phyname"],
+        "dhcp": ["ipv4leases", "ipv6leases"],
+        "uci": ["get", "state", "configs"],
+        "file": ["read", "list", "stat", "md5"],
+        "service": ["list"],
+        "session": ["access", "list"],
+        "hostapd.*": ["get_clients", "get_status"],
+        "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices"]
+      },
+      "uci": ["*"]
+    },
+    "write": {
+      "ubus": {
+        "network": ["restart"],
+        "network.interface.*": ["up", "down", "add_device", "remove_device", "set_data", "notify_proto"],
+        "network.wireless": ["up", "down", "reconf", "notify"],
+        "uci": ["set", "add", "delete", "rename", "reorder", "commit", "apply", "rollback", "changes", "revert"],
+        "file": ["write", "exec"],
+        "system": ["reboot", "signal", "sysupgrade"],
+        "service": ["set", "delete", "signal", "update_start", "update_complete"],
+        "session": ["login", "destroy"],
+        "hostapd.*": ["del_client", "config_set", "config_add"],
+        "wireguard": ["*"]
+      },
+      "uci": ["*"]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+# ImageBuilder download
+openwrt-imagebuilder-*/
+
+# Build artifacts
+output/
+build.log
+imagebuilder.tar.zst

@@ -40,7 +40,7 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 # Router singleton
 # ---------------------------------------------------------------------------
-OPENWRT_HOST = os.environ.get("OPENWRT_HOST", "10.0.0.1")
+OPENWRT_HOST = os.environ.get("OPENWRT_HOST", "192.168.50.1")
 OPENWRT_PORT = int(os.environ.get("OPENWRT_PORT", "80"))
 OPENWRT_USERNAME = os.environ.get("OPENWRT_USERNAME", "droplet-ai")
 OPENWRT_PASSWORD = os.environ.get("OPENWRT_PASSWORD")

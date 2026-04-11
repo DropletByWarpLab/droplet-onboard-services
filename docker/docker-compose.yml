@@ -191,7 +191,7 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - OPENWRT_HOST=${OPENWRT_HOST:-10.0.0.1}
+      - OPENWRT_HOST=${OPENWRT_HOST:-192.168.50.1}
       - OPENWRT_PORT=${OPENWRT_PORT:-80}
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       - OPENWRT_PASSWORD=${OPENWRT_PASSWORD:-}

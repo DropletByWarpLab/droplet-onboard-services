@@ -12,6 +12,7 @@ apps/web-dashboard/     Next.js 14 — admin UI
 services/ai-gateway/    FastAPI + LiteLLM — model routing proxy
 services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-sync/     Python watchdog — file sync daemon
+openwrt/                OpenWrt image builder + config overlay for Pi 5 router
 docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home Assistant
 ```
 
@@ -80,6 +81,6 @@ npm run test:ai-gateway     # ai-gateway only
 | `DEVICE_SECRET`      | Device authentication secret                         |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit in MB                              |
 | `ROUTING_SERVICE_URL`| Routing service endpoint (default `http://localhost:8080`) |
-| `OPENWRT_HOST`       | OpenWrt router IP (default `10.0.0.1`)               |
+| `OPENWRT_HOST`       | OpenWrt router IP (default `192.168.50.1`)           |
 | `OPENWRT_USERNAME`   | OpenWrt rpcd user (default `droplet-ai`)             |
 | `OPENWRT_PASSWORD`   | OpenWrt rpcd password                                |

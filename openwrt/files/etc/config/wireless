@@ -1,0 +1,73 @@
+# =============================================================================
+# Droplet Wireless Configuration — Intel BE200 Tri-Band
+# =============================================================================
+# The BE200 exposes up to 3 radios in OpenWrt:
+#   radio0 → 2.4 GHz (802.11ax, HE20/HE40) — legacy IoT devices
+#   radio1 → 5 GHz   (802.11ax, HE80/HE160) — backward compatibility
+#   radio2 → 6 GHz   (802.11be, EHT320) — WiFi 7 high performance
+#
+# All radios are bridged into br-lan (192.168.50.0/24)
+# =============================================================================
+
+# --- 2.4 GHz Radio ---
+config wifi-device 'radio0'
+    option type 'mac80211'
+    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0'
+    option band '2g'
+    option channel 'auto'
+    option htmode 'HE40'
+    option cell_density '0'
+    option country 'US'
+    option disabled '0'
+
+config wifi-iface 'default_radio0'
+    option device 'radio0'
+    option network 'lan'
+    option mode 'ap'
+    option ssid 'Droplet'
+    option encryption 'sae-mixed'
+    option key 'ChangeMe!2024'
+    option ieee80211w '1'
+    option disabled '0'
+
+# --- 5 GHz Radio ---
+config wifi-device 'radio1'
+    option type 'mac80211'
+    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0+1'
+    option band '5g'
+    option channel 'auto'
+    option htmode 'HE160'
+    option cell_density '0'
+    option country 'US'
+    option disabled '0'
+
+config wifi-iface 'default_radio1'
+    option device 'radio1'
+    option network 'lan'
+    option mode 'ap'
+    option ssid 'Droplet'
+    option encryption 'sae-mixed'
+    option key 'ChangeMe!2024'
+    option ieee80211w '1'
+    option disabled '0'
+
+# --- 6 GHz Radio (WiFi 7) ---
+config wifi-device 'radio2'
+    option type 'mac80211'
+    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0+2'
+    option band '6g'
+    option channel 'auto'
+    option htmode 'EHT320'
+    option cell_density '0'
+    option country 'US'
+    option disabled '0'
+
+config wifi-iface 'default_radio2'
+    option device 'radio2'
+    option network 'lan'
+    option mode 'ap'
+    option ssid 'Droplet-6G'
+    option encryption 'sae'
+    option key 'ChangeMe!2024'
+    option ieee80211w '2'
+    option disabled '0'

@@ -1,0 +1,22 @@
+# =============================================================================
+# Droplet rpcd Configuration
+# =============================================================================
+# Defines the droplet-ai RPC user with dedicated ACL permissions
+# The Jetson authenticates as this user to manage the router
+# =============================================================================
+
+config rpcd
+    option socket '/var/run/ubus/ubus.sock'
+    option timeout '30'
+
+config login
+    option username 'droplet-ai'
+    option password '$p$droplet-ai'
+    list read 'droplet-ai'
+    list write 'droplet-ai'
+
+config login
+    option username 'root'
+    option password '$p$root'
+    list read '*'
+    list write '*'
