@@ -244,6 +244,7 @@ services:
       - FRIGATE_URL=http://localhost:5000
       - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@localhost:1883
       - SCAN_INTERVAL=${CAMERA_SCAN_INTERVAL:-30}
+      - CAMERA_SUBNET=${CAMERA_SUBNET:-192.168.100.0/24}
       - DEVICE_SECRET=${DEVICE_SECRET:?Run ./scripts/setup.sh to generate secrets}
     depends_on:
       - frigate

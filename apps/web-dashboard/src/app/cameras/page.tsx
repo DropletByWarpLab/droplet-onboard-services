@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import useSWR from "swr";
 import { RefreshCw, Video, ExternalLink } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
@@ -9,6 +10,8 @@ import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { CameraDiscoveryBanner } from "@/components/cameras/CameraDiscoveryBanner";
 import { CameraDetailPanel } from "@/components/cameras/CameraDetailPanel";
 import { CameraNotificationToast } from "@/components/cameras/CameraNotificationToast";
+import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
+import { authFetch } from "@/lib/auth";
 import type { CameraInfo } from "@/lib/types";
 
 export default function CamerasPage() {
@@ -29,6 +32,16 @@ export default function CamerasPage() {
   } = useCameras();
 
   const { notifications, dismissNotification } = useCameraEvents();
+
+  const { data: subnetConfig, mutate: mutateSubnet } = useSWR(
+    "/api/cameras/subnet",
+    async (url: string) => {
+      const res = await authFetch(url);
+      if (!res.ok) return null;
+      return res.json();
+    },
+    { refreshInterval: 30_000 }
+  );
 
   const [selectedCamera, setSelectedCamera] = useState<CameraInfo | null>(null);
 
@@ -106,6 +119,9 @@ export default function CamerasPage() {
           </button>
         </div>
       </div>
+
+      {/* Network isolation */}
+      <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />
 
       {/* Discovery banner */}
       <CameraDiscoveryBanner

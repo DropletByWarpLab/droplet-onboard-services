@@ -219,6 +219,63 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // --- Camera subnet isolation ---
+  router.get("/cameras/subnet", async (_req, res) => {
+    try {
+      const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) {
+        return res.json({ enabled: false, error: "Router not reachable" });
+      }
+      res.json(await resp.json());
+    } catch {
+      res.json({ enabled: false, error: "Routing service not reachable" });
+    }
+  });
+
+  router.post("/cameras/subnet/setup", async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vlan_id: body.vlanId || 100,
+          subnet: body.subnet || "192.168.100.1",
+          netmask: body.netmask || "255.255.255.0",
+          dhcp_start: body.dhcpStart || 100,
+          dhcp_limit: body.dhcpLimit || 150,
+          leasetime: body.leasetime || "12h",
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        return res.status(resp.status).json(data);
+      }
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/cameras/subnet", async (_req, res, next) => {
+    try {
+      const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+        method: "DELETE",
+        signal: AbortSignal.timeout(30000),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        return res.status(resp.status).json(data);
+      }
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ==========================================================================
   // PARAMETERIZED ROUTES (/cameras/:name) — must come AFTER all fixed paths
   // ==========================================================================

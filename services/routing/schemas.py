@@ -63,6 +63,24 @@ class ApplyConfigRequest(BaseModel):
     timeout: int = Field(default=30, ge=10, le=120, description="Rollback timeout in seconds")
 
 
+class CreateVlanRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=15, pattern=r"^[a-z0-9_]+$", description="Interface name")
+    vid: int = Field(..., ge=2, le=4094, description="VLAN ID (2-4094)")
+    parent_device: str = Field(default="br-lan", description="Parent bridge device")
+    ipaddr: str = Field(default=None, description="Gateway IP for the VLAN (e.g. 192.168.100.1)")
+    netmask: str = Field(default="255.255.255.0", description="Subnet mask")
+
+
+class CameraSubnetSetupRequest(BaseModel):
+    """All-in-one camera subnet setup: VLAN + firewall zone + DHCP + rules."""
+    vlan_id: int = Field(default=100, ge=2, le=4094, description="VLAN ID for camera subnet")
+    subnet: str = Field(default="192.168.100.1", description="Gateway IP for camera subnet")
+    netmask: str = Field(default="255.255.255.0", description="Subnet mask")
+    dhcp_start: int = Field(default=100, ge=2, le=254, description="DHCP pool start")
+    dhcp_limit: int = Field(default=150, ge=1, le=253, description="DHCP pool size")
+    leasetime: str = Field(default="12h", description="DHCP lease duration")
+
+
 # --- Response models ---
 
 class HealthResponse(BaseModel):

@@ -101,6 +101,49 @@ config rule
     option family 'ipv6'
     option target 'ACCEPT'
 
+# --- Camera zone (isolated — cameras can't reach LAN or each other) ---
+config zone 'cameras_zone'
+    option name 'cameras'
+    list network 'cameras'
+    option input 'REJECT'
+    option output 'ACCEPT'
+    option forward 'REJECT'
+
+# Allow Droplet (LAN side) to access cameras (RTSP, ONVIF, HTTP)
+config forwarding 'lan_to_cameras'
+    option src 'lan'
+    option dest 'cameras'
+
+# Allow cameras to reach WAN (NTP, DNS, firmware updates)
+config forwarding 'cameras_to_wan'
+    option src 'cameras'
+    option dest 'wan'
+
+# Allow cameras to get DHCP from the router
+config rule 'cameras_dhcp'
+    option name 'Allow-Camera-DHCP'
+    option src 'cameras'
+    option proto 'udp'
+    option dest_port '67-68'
+    option target 'ACCEPT'
+
+# Allow cameras to resolve DNS via the router
+config rule 'cameras_dns'
+    option name 'Allow-Camera-DNS'
+    option src 'cameras'
+    option proto 'tcpudp'
+    option dest_port '53'
+    option target 'ACCEPT'
+
+# Allow cameras to ping the router (health checks)
+config rule 'cameras_ping'
+    option name 'Allow-Camera-Ping'
+    option src 'cameras'
+    option proto 'icmp'
+    option icmp_type 'echo-request'
+    option target 'ACCEPT'
+    option limit '5/sec'
+
 # --- Block WAN access to ubus API (IPv4) ---
 config rule
     option name 'Block-ubus-WAN-v4'

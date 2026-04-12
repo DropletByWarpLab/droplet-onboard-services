@@ -32,6 +32,8 @@ from schemas import (
     UnblockDeviceRequest,
     PortForwardRequest,
     ApplyConfigRequest,
+    CreateVlanRequest,
+    CameraSubnetSetupRequest,
 )
 
 logger = logging.getLogger("droplet.routing")
@@ -353,6 +355,246 @@ def add_port_forward(req: PortForwardRequest):
         )
         return {"status": "ok", "name": req.name}
     except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# VLANs / Camera Subnet
+# ---------------------------------------------------------------------------
+@app.get("/network/vlans")
+def list_vlans():
+    """List all configured VLANs by scanning UCI network config for VLAN interfaces."""
+    try:
+        r = get_router()
+        # Get all network interfaces and filter for VLAN devices (contain '.')
+        config = r.uci.get("network")
+        vlans = []
+        if isinstance(config, dict):
+            for name, section in config.items():
+                if isinstance(section, dict):
+                    device = section.get("device", "")
+                    if "." in str(device) and section.get("proto") == "static":
+                        vlans.append({
+                            "name": name,
+                            "device": device,
+                            "ipaddr": section.get("ipaddr"),
+                            "netmask": section.get("netmask"),
+                            "proto": section.get("proto"),
+                        })
+        return {"vlans": vlans}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/network/vlans")
+def create_vlan(req: CreateVlanRequest):
+    """Create a new VLAN interface."""
+    try:
+        r = get_router()
+        r.network.add_vlan(
+            name=req.name,
+            vid=req.vid,
+            parent_device=req.parent_device,
+            ipaddr=req.ipaddr,
+            netmask=req.netmask,
+        )
+        r.apply_changes("network")
+        return {"status": "ok", "name": req.name, "vid": req.vid, "ipaddr": req.ipaddr}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/network/subnets/cameras")
+def get_camera_subnet():
+    """Get camera subnet configuration status."""
+    try:
+        r = get_router()
+        # Check if the cameras interface exists
+        try:
+            iface = r.uci.get("network", "cameras")
+            zone = None
+            # Find the cameras firewall zone
+            fw_config = r.uci.get("firewall")
+            if isinstance(fw_config, dict):
+                for name, section in fw_config.items():
+                    if isinstance(section, dict) and section.get("name") == "cameras":
+                        zone = section
+                        break
+            # Check DHCP pool
+            dhcp_pool = None
+            try:
+                dhcp_pool = r.uci.get("dhcp", "cameras")
+            except Exception:
+                pass
+
+            return {
+                "enabled": True,
+                "interface": iface if isinstance(iface, dict) else {},
+                "firewall_zone": zone,
+                "dhcp_pool": dhcp_pool if isinstance(dhcp_pool, dict) else None,
+                "subnet": iface.get("ipaddr", "192.168.100.1") if isinstance(iface, dict) else None,
+                "netmask": iface.get("netmask", "255.255.255.0") if isinstance(iface, dict) else None,
+            }
+        except Exception:
+            return {"enabled": False}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/network/subnets/cameras/setup")
+def setup_camera_subnet(req: CameraSubnetSetupRequest):
+    """One-click camera subnet setup: VLAN + firewall zone + DHCP + isolation rules.
+
+    Uses safe-apply with automatic rollback on connectivity loss.
+    Future: This endpoint abstracts the implementation so it can switch
+    from software VLANs to ASIC hardware VLANs without API changes.
+    """
+    try:
+        r = get_router()
+
+        with r.safe_apply(timeout=30):
+            # 1. Create VLAN interface
+            device_name = f"br-lan.{req.vlan_id}"
+            r.uci.set("network", "cameras", {
+                "proto": "static",
+                "device": device_name,
+                "ipaddr": req.subnet,
+                "netmask": req.netmask,
+            })
+
+            # 2. Create bridge-vlan entry
+            r.uci.add("network", "bridge-vlan", {
+                "device": "br-lan",
+                "vlan": str(req.vlan_id),
+                "ports": "eth1:t",
+            })
+            r.uci.commit("network")
+
+            # 3. Create firewall zone (isolated: REJECT input, REJECT forward)
+            r.uci.add("firewall", "zone", {
+                "name": "cameras",
+                "network": "cameras",
+                "input": "REJECT",
+                "output": "ACCEPT",
+                "forward": "REJECT",
+            })
+
+            # 4. Allow LAN (Droplet) → cameras (for RTSP/ONVIF access)
+            r.uci.add("firewall", "forwarding", {
+                "src": "lan",
+                "dest": "cameras",
+            })
+
+            # 5. Allow cameras → WAN (NTP, DNS, firmware updates)
+            r.uci.add("firewall", "forwarding", {
+                "src": "cameras",
+                "dest": "wan",
+            })
+
+            # 6. Allow camera DHCP and DNS to router
+            r.uci.add("firewall", "rule", {
+                "name": "Allow-Camera-DHCP",
+                "src": "cameras",
+                "proto": "udp",
+                "dest_port": "67-68",
+                "target": "ACCEPT",
+            })
+            r.uci.add("firewall", "rule", {
+                "name": "Allow-Camera-DNS",
+                "src": "cameras",
+                "proto": "tcpudp",
+                "dest_port": "53",
+                "target": "ACCEPT",
+            })
+            r.uci.commit("firewall")
+
+            # 7. Create DHCP pool for camera subnet
+            r.uci.set("dhcp", "cameras", {
+                "interface": "cameras",
+                "start": str(req.dhcp_start),
+                "limit": str(req.dhcp_limit),
+                "leasetime": req.leasetime,
+            })
+            r.uci.commit("dhcp")
+
+        return {
+            "status": "ok",
+            "vlan_id": req.vlan_id,
+            "subnet": req.subnet,
+            "netmask": req.netmask,
+            "dhcp_range": f"{req.subnet.rsplit('.', 1)[0]}.{req.dhcp_start} - .{req.dhcp_start + req.dhcp_limit - 1}",
+            "firewall": "cameras zone created with LAN→cameras and cameras→WAN forwarding",
+        }
+
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost during camera subnet setup — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except (UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.delete("/network/subnets/cameras")
+def teardown_camera_subnet():
+    """Remove the camera subnet (VLAN, firewall zone, DHCP pool)."""
+    try:
+        r = get_router()
+
+        with r.safe_apply(timeout=30):
+            # Remove network interface
+            try:
+                r.uci.delete("network", "cameras")
+                r.uci.commit("network")
+            except Exception:
+                pass
+
+            # Remove firewall zone and rules related to cameras
+            fw_config = r.uci.get("firewall")
+            if isinstance(fw_config, dict):
+                to_delete = []
+                for name, section in fw_config.items():
+                    if not isinstance(section, dict):
+                        continue
+                    # Delete cameras zone
+                    if section.get("name") == "cameras" and section.get(".type") == "zone":
+                        to_delete.append(name)
+                    # Delete forwarding rules involving cameras
+                    if section.get(".type") == "forwarding":
+                        if section.get("src") == "cameras" or section.get("dest") == "cameras":
+                            to_delete.append(name)
+                    # Delete camera-specific rules
+                    if section.get(".type") == "rule":
+                        rule_name = section.get("name", "")
+                        if "Camera" in rule_name and section.get("src") == "cameras":
+                            to_delete.append(name)
+
+                for name in to_delete:
+                    try:
+                        r.uci.delete("firewall", name)
+                    except Exception:
+                        pass
+                r.uci.commit("firewall")
+
+            # Remove DHCP pool
+            try:
+                r.uci.delete("dhcp", "cameras")
+                r.uci.commit("dhcp")
+            except Exception:
+                pass
+
+        return {"status": "ok", "action": "camera_subnet_removed"}
+
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Connectivity lost during teardown", "detail": str(exc)},
+        )
+    except (UbusError) as exc:
         handle_router_error(exc)
 
 

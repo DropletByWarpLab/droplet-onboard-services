@@ -91,3 +91,4 @@ npm run test:ai-gateway     # ai-gateway only
 | `OPENWRT_PASSWORD`   | OpenWrt rpcd password                                |
 | `FRIGATE_URL`        | Frigate NVR API endpoint (default `http://frigate:5000`) |
 | `CAMERA_SCAN_INTERVAL` | Camera discovery scan interval in seconds (default `30`) |
+| `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`) |

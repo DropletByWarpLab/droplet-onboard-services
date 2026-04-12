@@ -36,6 +36,17 @@ FRIGATE_URL = os.getenv("FRIGATE_URL", "http://localhost:5000")
 MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt://localhost:1883")
 DEVICE_SECRET = os.getenv("DEVICE_SECRET", "")  # Shared secret for auth
 
+# Camera subnet: when set, only scan this subnet for cameras.
+# Default 192.168.100.0/24 matches the OpenWrt VLAN 100 config.
+# Set to empty string to scan all private subnets (no isolation).
+CAMERA_SUBNET = os.getenv("CAMERA_SUBNET", "192.168.100.0/24")
+_camera_network: ipaddress.IPv4Network | None = None
+if CAMERA_SUBNET:
+    try:
+        _camera_network = ipaddress.ip_network(CAMERA_SUBNET, strict=False)
+    except ValueError:
+        logger.warning("Invalid CAMERA_SUBNET '%s', scanning all subnets", CAMERA_SUBNET)
+
 try:
     SCAN_INTERVAL = max(int(os.getenv("SCAN_INTERVAL", "30")), 5)
 except ValueError:
@@ -58,6 +69,16 @@ def is_safe_ip(ip_str: str) -> bool:
         if addr.is_loopback or addr.is_link_local or addr.is_multicast:
             return False
         return any(addr in net for net in _ALLOWED_NETWORKS)
+    except ValueError:
+        return False
+
+
+def is_camera_subnet_ip(ip_str: str) -> bool:
+    """Check if an IP is on the camera subnet (when isolation is active)."""
+    if not _camera_network:
+        return True  # No subnet filtering — scan all private IPs
+    try:
+        return ipaddress.ip_address(ip_str) in _camera_network
     except ValueError:
         return False
 
@@ -203,6 +224,8 @@ async def scan_and_discover() -> None:
             continue
         if not is_safe_ip(ip):
             continue  # Skip non-LAN IPs (loopback, link-local, public)
+        if not is_camera_subnet_ip(ip):
+            continue  # Skip IPs outside camera subnet when isolation is active
         if mac in known_cameras or mac in rejected_macs:
             continue
 
@@ -436,6 +459,19 @@ async def trigger_scan():
         "status": "scan_complete",
         "known": len(known_cameras),
         "pending": len(pending_cameras),
+    }
+
+
+# --- Subnet status ---
+
+
+@app.get("/subnet/status")
+async def subnet_status():
+    """Report which subnet is being scanned for cameras."""
+    return {
+        "camera_subnet": CAMERA_SUBNET or "all_private",
+        "isolation_active": _camera_network is not None,
+        "network": str(_camera_network) if _camera_network else None,
     }
 
 
