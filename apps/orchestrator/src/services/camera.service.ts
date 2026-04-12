@@ -96,50 +96,64 @@ function handleMqttMessage(
   payload: Buffer,
   prisma: PrismaClient
 ): void {
+  const raw = payload.toString();
+
+  // Frigate status topics send raw "ON"/"OFF" strings (not JSON)
+  const statusMatch = topic.match(/^frigate\/([^/]+)\/status$/);
+  if (statusMatch) {
+    const cameraName = statusMatch[1];
+    const isOnline = raw.trim().toUpperCase() === "ON";
+    broadcastSSE({
+      type: isOnline ? "camera_online" : "camera_offline",
+      camera: cameraName,
+      timestamp: Date.now(),
+    });
+    return;
+  }
+
+  // All other topics use JSON payloads
+  let data: Record<string, unknown>;
   try {
-    const data = JSON.parse(payload.toString());
-
-    if (topic === "frigate/events") {
-      // Frigate detection event
-      const event: CameraSSEEvent = {
-        type: "detection",
-        camera: data.after?.camera || data.before?.camera,
-        label: data.after?.label || data.before?.label,
-        score: data.after?.top_score || data.before?.top_score,
-        thumbnail: data.after?.id
-          ? `/api/cameras/events/${data.after.id}/thumbnail`
-          : undefined,
-        timestamp: Date.now(),
-      };
-      broadcastSSE(event);
-      cacheDel(CACHE_KEY_EVENTS);
-    } else if (topic === "droplet/cameras/discovered") {
-      // Camera discovery event from camera-discovery service
-      const event: CameraSSEEvent = {
-        type: "camera_discovered",
-        camera: data.camera?.name,
-        data: data.camera,
-        timestamp: Date.now(),
-      };
-      broadcastSSE(event);
-
-      // Upsert camera record in database
-      if (data.camera?.ip) {
-        upsertCameraRecord(prisma, data.camera).catch((err) =>
-          logger.error({ err }, "Failed to upsert camera record")
-        );
-      }
-    } else if (topic.match(/^frigate\/(.+)\/status$/)) {
-      const cameraName = topic.split("/")[1];
-      const status = data === "ON" || data === true ? "camera_online" : "camera_offline";
-      broadcastSSE({
-        type: status as "camera_online" | "camera_offline",
-        camera: cameraName,
-        timestamp: Date.now(),
-      });
-    }
+    data = JSON.parse(raw);
   } catch {
-    // Non-JSON messages are ignored
+    return; // Non-JSON messages are ignored
+  }
+
+  if (topic === "frigate/events") {
+    const after = data.after as Record<string, unknown> | undefined;
+    const before = data.before as Record<string, unknown> | undefined;
+
+    // Validate thumbnail ID is safe before constructing URL
+    const eventId = String(after?.id || "");
+    const thumbnailUrl = /^[a-zA-Z0-9._-]+$/.test(eventId)
+      ? `/api/cameras/events/${eventId}/thumbnail`
+      : undefined;
+
+    const event: CameraSSEEvent = {
+      type: "detection",
+      camera: String(after?.camera || before?.camera || ""),
+      label: String(after?.label || before?.label || ""),
+      score: Number(after?.top_score || before?.top_score || 0),
+      thumbnail: thumbnailUrl,
+      timestamp: Date.now(),
+    };
+    broadcastSSE(event);
+    cacheDel(CACHE_KEY_EVENTS);
+  } else if (topic === "droplet/cameras/discovered") {
+    const camData = data.camera as Record<string, unknown> | undefined;
+    const event: CameraSSEEvent = {
+      type: "camera_discovered",
+      camera: String(camData?.name || ""),
+      data: camData,
+      timestamp: Date.now(),
+    };
+    broadcastSSE(event);
+
+    if (camData?.ip) {
+      upsertCameraRecord(prisma, camData).catch((err) =>
+        logger.error({ err }, "Failed to upsert camera record")
+      );
+    }
   }
 }
 

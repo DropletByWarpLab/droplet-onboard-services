@@ -31,7 +31,7 @@ export function CameraNotificationToast({
               className="dp-card bg-[var(--color-surface-primary)] shadow-lg border border-separator animate-in slide-in-from-right"
             >
               <div className="flex items-start gap-3 p-3">
-                {notif.thumbnail ? (
+                {notif.thumbnail && notif.thumbnail.startsWith("/api/") ? (
                   <img
                     src={notif.thumbnail}
                     alt={notif.label || "Detection"}

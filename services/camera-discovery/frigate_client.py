@@ -26,7 +26,7 @@ class FrigateClient:
         try:
             resp = await self._client.get("/api/version")
             return resp.status_code == 200
-        except httpx.ConnectError:
+        except (httpx.HTTPError, OSError):
             return False
 
     async def get_config(self) -> dict:

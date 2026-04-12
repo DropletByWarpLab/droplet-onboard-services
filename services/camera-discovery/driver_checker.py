@@ -61,11 +61,20 @@ def _run(cmd: list[str], timeout: float = 5.0) -> tuple[int, str]:
         return -1, ""
 
 
+def _validate_module_name(module: str) -> bool:
+    """Validate that a module name contains only safe characters."""
+    return bool(re.match(r"^[a-z0-9_]+$", module))
+
+
 def check_kernel_module(module: str) -> str:
     """Check if a kernel module is loaded, available, or missing."""
-    # Check if loaded
+    if not _validate_module_name(module):
+        logger.warning("Invalid module name rejected: %s", module)
+        return "missing"
+
+    # Check if loaded — use re.escape to prevent regex injection
     rc, output = _run(["lsmod"])
-    if rc == 0 and re.search(rf"^{module}\s", output, re.MULTILINE):
+    if rc == 0 and re.search(rf"^{re.escape(module)}\s", output, re.MULTILINE):
         return "loaded"
 
     # Check if available (can be loaded)
@@ -207,6 +216,9 @@ def check_required_tools() -> list[dict]:
 
 async def try_load_module(module: str) -> bool:
     """Attempt to load a kernel module via modprobe."""
+    if not _validate_module_name(module):
+        logger.warning("Refusing to load invalid module name: %s", module)
+        return False
     try:
         proc = await asyncio.create_subprocess_exec(
             "modprobe", module,

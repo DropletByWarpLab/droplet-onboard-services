@@ -8,15 +8,18 @@ Discovery events are published to MQTT for the orchestrator to relay to clients.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import re
 import time
+from urllib.parse import urlparse
 
 import httpx
 import paho.mqtt.client as mqtt
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
@@ -31,7 +34,58 @@ logger = logging.getLogger(__name__)
 ROUTING_SERVICE_URL = os.getenv("ROUTING_SERVICE_URL", "http://localhost:8080")
 FRIGATE_URL = os.getenv("FRIGATE_URL", "http://localhost:5000")
 MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt://localhost:1883")
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
+DEVICE_SECRET = os.getenv("DEVICE_SECRET", "")  # Shared secret for auth
+
+try:
+    SCAN_INTERVAL = max(int(os.getenv("SCAN_INTERVAL", "30")), 5)
+except ValueError:
+    SCAN_INTERVAL = 30
+
+# --- Security helpers ---
+
+# Allowed private network ranges for camera probing (no loopback, no link-local, no cloud metadata)
+_ALLOWED_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
+
+def is_safe_ip(ip_str: str) -> bool:
+    """Validate that an IP is a safe LAN address to probe (no loopback, link-local, or public)."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        if addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            return False
+        return any(addr in net for net in _ALLOWED_NETWORKS)
+    except ValueError:
+        return False
+
+
+def is_safe_rtsp_url(url: str) -> bool:
+    """Validate that an RTSP URL points to a safe LAN address."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("rtsp", "rtsps"):
+            return False
+        if not parsed.hostname:
+            return False
+        return is_safe_ip(parsed.hostname)
+    except Exception:
+        return False
+
+
+def _require_auth(request: Request) -> None:
+    """Verify request carries valid DEVICE_SECRET for privileged operations."""
+    if not DEVICE_SECRET:
+        return  # Auth disabled when no secret configured
+    auth = request.headers.get("Authorization", "")
+    token = auth.removeprefix("Bearer ").strip()
+    if token != DEVICE_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized — invalid device secret")
+
+
+MAX_REJECTED_MACS = 1000  # Cap rejected set to prevent unbounded growth
 
 # --- State ---
 
@@ -147,6 +201,8 @@ async def scan_and_discover() -> None:
 
         if not mac or not ip:
             continue
+        if not is_safe_ip(ip):
+            continue  # Skip non-LAN IPs (loopback, link-local, public)
         if mac in known_cameras or mac in rejected_macs:
             continue
 
@@ -160,6 +216,8 @@ async def scan_and_discover() -> None:
     # Add ONVIF-discovered devices
     for device in onvif_devices:
         ip = device.get("ip", "")
+        if not is_safe_ip(ip):
+            continue  # Skip non-LAN IPs
         # Find matching DHCP lease for MAC
         mac = next(
             (c["mac"] for c in candidates.values() if c["ip"] == ip),
@@ -217,8 +275,15 @@ async def scan_and_discover() -> None:
         camera_info["name"] = camera_name
         camera_info["discovered_at"] = time.time()
 
-        # If we have an RTSP URL, auto-add to Frigate
-        if camera_info.get("rtsp_url"):
+        # Validate RTSP URL before sending to Frigate
+        rtsp_url = camera_info.get("rtsp_url")
+        if rtsp_url and not is_safe_rtsp_url(rtsp_url):
+            logger.warning("Rejecting unsafe RTSP URL from %s: %s", ip, rtsp_url)
+            rtsp_url = None
+            camera_info["rtsp_url"] = None
+
+        # If we have a valid RTSP URL, auto-add to Frigate
+        if rtsp_url:
             success = await frigate.add_camera(camera_name, camera_info["rtsp_url"])
             if success:
                 camera_info["status"] = "active"
@@ -332,11 +397,12 @@ async def accept_camera(mac: str):
     """Accept a pending camera — add it to Frigate."""
     camera = pending_cameras.pop(mac, None)
     if not camera:
-        return {"error": "Camera not found in pending list"}, 404
+        raise HTTPException(status_code=404, detail="Camera not found in pending list")
 
     rtsp_url = camera.get("rtsp_url")
     if not rtsp_url:
-        return {"error": "No RTSP URL available for this camera"}, 400
+        pending_cameras[mac] = camera  # Put back
+        raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
 
     name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
     success = await frigate.add_camera(name, rtsp_url)
@@ -348,17 +414,18 @@ async def accept_camera(mac: str):
 
     # Put back in pending
     pending_cameras[mac] = camera
-    return {"error": "Failed to add camera to Frigate"}, 500
+    raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
 
 
 @app.post("/cameras/discovered/{mac}/reject")
 async def reject_camera(mac: str):
     """Reject a discovered camera — won't be discovered again."""
     camera = pending_cameras.pop(mac, None)
-    if camera:
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if len(rejected_macs) < MAX_REJECTED_MACS:
         rejected_macs.add(mac)
-        return {"status": "rejected", "mac": mac}
-    return {"error": "Camera not found"}, 404
+    return {"status": "rejected", "mac": mac}
 
 
 @app.post("/scan")
@@ -382,9 +449,9 @@ async def get_driver_status():
 
 
 @app.post("/drivers/fix")
-async def fix_drivers():
-    """Attempt to auto-fix camera driver issues."""
+async def fix_drivers(request: Request):
+    """Attempt to auto-fix camera driver issues. Requires DEVICE_SECRET auth."""
+    _require_auth(request)
     report = await auto_fix_drivers()
-    # Re-check status after fix
     status = full_driver_report()
     return {"fix_report": report, "current_status": status}

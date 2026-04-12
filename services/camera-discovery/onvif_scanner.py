@@ -25,37 +25,37 @@ async def ws_discovery_scan(timeout: float = 5.0) -> list[dict]:
 
         wsd = WSDiscovery()
         wsd.start()
+        try:
+            # Search for ONVIF network video transmitter devices
+            services = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: wsd.searchServices(
+                    timeout=int(timeout),
+                    scopes=[],
+                    types=[
+                        "dn:NetworkVideoTransmitter",
+                        "tds:Device",
+                    ],
+                ),
+            )
 
-        # Search for ONVIF network video transmitter devices
-        services = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: wsd.searchServices(
-                timeout=int(timeout),
-                scopes=[],
-                types=[
-                    "dn:NetworkVideoTransmitter",
-                    "tds:Device",
-                ],
-            ),
-        )
+            for service in services:
+                xaddrs = service.getXAddrs()
+                scopes = [str(s) for s in service.getScopes()]
 
-        for service in services:
-            xaddrs = service.getXAddrs()
-            scopes = [str(s) for s in service.getScopes()]
-
-            # Extract IP from xaddr
-            for xaddr in xaddrs:
-                parsed = urlparse(xaddr)
-                ip = parsed.hostname
-                if ip:
-                    devices.append({
-                        "ip": ip,
-                        "xaddr": xaddr,
-                        "scopes": scopes,
-                        "detection_method": "ws_discovery",
-                    })
-
-        wsd.stop()
+                # Extract IP from xaddr
+                for xaddr in xaddrs:
+                    parsed = urlparse(xaddr)
+                    ip = parsed.hostname
+                    if ip:
+                        devices.append({
+                            "ip": ip,
+                            "xaddr": xaddr,
+                            "scopes": scopes,
+                            "detection_method": "ws_discovery",
+                        })
+        finally:
+            wsd.stop()
     except ImportError:
         logger.warning("wsdiscovery not available — skipping WS-Discovery scan")
     except Exception as e:

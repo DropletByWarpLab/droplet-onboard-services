@@ -32,9 +32,9 @@ export function CameraEvents({ events }: CameraEventsProps) {
           const Icon = LABEL_ICONS[event.label] || Clock;
           return (
             <div key={event.id} className="flex items-center gap-3 p-3">
-              {/* Thumbnail */}
+              {/* Thumbnail — only render if URL starts with our safe API prefix */}
               <div className="w-16 h-12 rounded bg-surface-secondary overflow-hidden flex-shrink-0">
-                {event.thumbnail ? (
+                {event.thumbnail && event.thumbnail.startsWith("/api/") ? (
                   <img
                     src={event.thumbnail}
                     alt={event.label}
