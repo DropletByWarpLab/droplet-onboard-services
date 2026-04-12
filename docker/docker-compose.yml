@@ -186,6 +186,7 @@ services:
         condition: service_started
       broker:
         condition: service_started
+    profiles: ["full"]
     restart: always
 
   # --- Routing (OpenWrt control) ---

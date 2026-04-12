@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Search, X, Loader2, Sparkles } from "lucide-react";
 import { useFileSearch } from "@/lib/hooks/useFileSearch";
 import { searchFileContent, type SemanticSearchResult } from "@/lib/api";
@@ -76,15 +76,17 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
     };
   }, [query, semantic]);
 
-  // Unified results for display
-  const items = semantic ? [] : filenameItems;
+  // Unified result count for keyboard nav and popover visibility.
+  // In semantic mode we navigate semanticItems; otherwise filenameItems.
+  const items = filenameItems;
+  const resultCount = semantic ? semanticItems.length : items.length;
   const isLoading = semantic ? semanticLoading : filenameLoading;
   const error = semantic ? semanticError : filenameError;
   const showPopover = open && query.trim().length >= 2;
 
   useEffect(() => {
     setActiveIdx(0);
-  }, [items]);
+  }, [items, semanticItems]);
 
   useEffect(() => {
     if (!showPopover) return;
@@ -98,7 +100,7 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
   }, [showPopover]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!showPopover || items.length === 0) {
+    if (!showPopover || resultCount === 0) {
       if (e.key === "Escape") {
         setQuery("");
         setOpen(false);
@@ -108,14 +110,19 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
     }
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIdx((i) => Math.min(i + 1, items.length - 1));
+      setActiveIdx((i) => Math.min(i + 1, resultCount - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const picked = items[activeIdx];
-      if (picked) pickResult(picked);
+      if (semantic) {
+        const result = semanticItems[activeIdx];
+        if (result) pickSemanticResult(result);
+      } else {
+        const picked = items[activeIdx];
+        if (picked) pickResult(picked);
+      }
     } else if (e.key === "Escape") {
       setOpen(false);
     }
@@ -123,6 +130,21 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
 
   const pickResult = (file: FileEntryInfo) => {
     onPickResult(file);
+    setQuery("");
+    setOpen(false);
+    inputRef.current?.blur();
+  };
+
+  const pickSemanticResult = (result: SemanticSearchResult) => {
+    const fileName = result.path.split("/").pop() || result.path;
+    onPickResult({
+      name: fileName,
+      path: result.path,
+      isDirectory: false,
+      size: 0,
+      mimeType: null,
+      modifiedAt: new Date().toISOString(),
+    });
     setQuery("");
     setOpen(false);
     inputRef.current?.blur();
@@ -189,7 +211,7 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
           {error && (
             <div className="px-3 py-2 type-footnote text-system-red">{error}</div>
           )}
-          {!error && items.length === 0 && !isLoading && (
+          {!error && resultCount === 0 && !isLoading && !semantic && (
             <div className="px-3 py-6 text-center type-footnote text-label-tertiary">
               No results for &ldquo;{query.trim()}&rdquo;
             </div>
@@ -235,19 +257,7 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
               <button
                 key={`${result.path}-${idx}`}
                 onMouseEnter={() => setActiveIdx(idx)}
-                onClick={() => {
-                  // Construct a minimal FileEntryInfo so onPickResult can navigate
-                  onPickResult({
-                    name: fileName,
-                    path: result.path,
-                    isDirectory: false,
-                    size: 0,
-                    mimeType: null,
-                    modifiedAt: new Date().toISOString(),
-                  });
-                  setQuery("");
-                  setOpen(false);
-                }}
+                onClick={() => pickSemanticResult(result)}
                 className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors ${
                   idx === activeIdx
                     ? "bg-accent-subtle"

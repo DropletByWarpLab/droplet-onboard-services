@@ -947,8 +947,12 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
           res.status(503).json({ error: "AI gateway not available for semantic search" });
           return;
         }
-        const [vec] = await grpcEmbedText([q]);
-        embedVec = vec;
+        const vectors = await grpcEmbedText([q]);
+        if (!vectors || vectors.length === 0 || !Array.isArray(vectors[0])) {
+          res.status(502).json({ error: "Embedding service returned no vectors" });
+          return;
+        }
+        embedVec = vectors[0];
       } catch (err) {
         logger.warn({ err }, "Semantic search: embedding failed");
         res.status(503).json({ error: "Embedding service unavailable" });
@@ -956,17 +960,22 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
 
       // pgvector cosine similarity — Prisma can't express <=> so we use raw SQL.
+      // Two-step query: inner DISTINCT ON deduplicates per file (keeping the
+      // best chunk), outer query sorts by score and applies the limit.
       const vecLiteral = `[${embedVec.join(",")}]`;
       const rows: Array<{ path: string; score: number; text: string }> =
         await _prisma.$queryRawUnsafe(
           `
-          SELECT DISTINCT ON ("ncFileId")
-            "path",
-            1 - ("embedding" <=> $1::vector) AS score,
-            "text"
-          FROM "FileContentChunk"
-          WHERE "userId" = $2
-          ORDER BY "ncFileId", "embedding" <=> $1::vector
+          SELECT path, score, text FROM (
+            SELECT DISTINCT ON ("ncFileId")
+              "path",
+              1 - ("embedding" <=> $1::vector) AS score,
+              "text"
+            FROM "FileContentChunk"
+            WHERE "userId" = $2
+            ORDER BY "ncFileId", "embedding" <=> $1::vector
+          ) ranked
+          ORDER BY score DESC
           LIMIT $3
           `,
           vecLiteral,

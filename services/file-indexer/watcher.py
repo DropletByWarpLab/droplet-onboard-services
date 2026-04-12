@@ -59,6 +59,7 @@ def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
     # Nextcloud stores the cache path as "files/{relpath}" (no leading /).
     cache_path = f"files/{relpath}"
 
+    conn = None
     try:
         conn = psycopg2.connect(
             DATABASE_URL.replace("/droplet", "/nextcloud")
@@ -84,6 +85,12 @@ def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
     except Exception as e:
         logger.debug("Failed to resolve fileId for %s/%s: %s", user, relpath, e)
         return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 class IndexHandler(FileSystemEventHandler):
