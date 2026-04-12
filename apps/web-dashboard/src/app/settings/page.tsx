@@ -4,10 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2, Users, X } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
-import { SyncTargetCard } from "@/components/SyncTargetCard";
-import { SyncTargetForm } from "@/components/SyncTargetForm";
 import { useDevice } from "@/lib/hooks/useDevice";
-import { useSyncTargets } from "@/lib/hooks/useSyncTargets";
 import { useAuth } from "@/lib/auth";
 import {
   listProviderKeys,
@@ -19,7 +16,6 @@ import type { AuthUser } from "@/lib/types";
 
 export default function SettingsPage() {
   const { device, health } = useDevice();
-  const { targets, refresh: refreshTargets } = useSyncTargets();
   const { user: currentUser } = useAuth();
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
@@ -275,26 +271,6 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* File Sync */}
-      <section className="mb-10">
-        <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
-          File Sync
-        </h2>
-        <p className="type-subheadline text-label-tertiary mb-4 px-1">
-          Configure folders to watch and automatically index. Files in these
-          folders will be accessible from the Files browser and kept in sync.
-        </p>
-        <div className="space-y-3">
-          {targets.map((target) => (
-            <SyncTargetCard
-              key={target.id}
-              target={target}
-              onUpdate={refreshTargets}
-            />
-          ))}
-          <SyncTargetForm onCreated={refreshTargets} />
-        </div>
-      </section>
     </div>
   );
 }

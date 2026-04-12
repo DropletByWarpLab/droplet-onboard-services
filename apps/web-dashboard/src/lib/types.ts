@@ -103,16 +103,6 @@ export interface BulkOperationResult {
 /** View mode for the file manager — list or grid */
 export type FileViewMode = "list" | "grid";
 
-export interface SyncTargetInfo {
-  id: string;
-  path: string;
-  label: string;
-  intervalMin: number;
-  enabled: boolean;
-  lastSync: string | null;
-  fileCount: number;
-}
-
 // --- Auth types ---
 
 export interface AuthUser {

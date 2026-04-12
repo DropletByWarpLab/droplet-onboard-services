@@ -10,7 +10,7 @@ const logger = pino({ name: "nextcloud-client" });
 
 /**
  * Nextcloud WebDAV + OCS API client.
- * Used when STORAGE_BACKEND=nextcloud to proxy file operations through Nextcloud.
+ * All file operations in the orchestrator flow through this module.
  */
 
 const WEBDAV_BASE = "/remote.php/dav/files";
@@ -459,6 +459,42 @@ export async function ncGetCurrentUser(
       id: data.ocs.data.id,
       displayName: data.ocs.data["display-name"] || data.ocs.data.id,
       email: data.ocs.data.email || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the current user's storage quota from Nextcloud.
+ * Returns { used, free, total, quota } in bytes. `quota` is -3 when unlimited.
+ */
+export async function ncGetUserQuota(token: string): Promise<{
+  used: number;
+  free: number | null;
+  total: number | null;
+  quota: number | null;
+} | null> {
+  try {
+    const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/user?format=json"), {
+      headers: ocsHeaders(token),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.ocs?.meta?.status !== "ok") return null;
+    const q = data?.ocs?.data?.quota ?? {};
+    // Nextcloud returns -3 for unlimited quota; surface that as null.
+    const parseNum = (v: unknown): number | null => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n) || n < 0) return null;
+      return n;
+    };
+    return {
+      used: parseNum(q.used) ?? 0,
+      free: parseNum(q.free),
+      total: parseNum(q.total),
+      quota: parseNum(q.quota),
     };
   } catch {
     return null;

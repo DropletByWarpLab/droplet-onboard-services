@@ -126,16 +126,6 @@ export interface BulkOperationResult {
   error?: string;
 }
 
-export interface SyncTargetInfo {
-  id: string;
-  path: string;
-  label: string;
-  intervalMin: number;
-  enabled: boolean;
-  lastSync: string | null;
-  fileCount: number;
-}
-
 // --- Storage types ---
 
 export interface StorageStats {

@@ -6,25 +6,11 @@ import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import {
-  resolveAndValidatePath,
-  listDirectory,
-  streamFile,
-  saveUploadedFile,
-  deleteFile,
-  createDirectory,
-  moveFile as fsMoveFile,
-  copyFile as fsCopyFile,
-  getFileSize,
-  PathTraversalError,
-  FileServiceError,
-} from "../services/file.service.js";
-import {
   ncListFiles,
   ncUploadFile,
   ncDownloadFile,
   ncDeleteFile,
   ncCreateDirectory,
-  ncCreateShare,
   ncListShares,
   ncMoveFile,
   ncCopyFile,
@@ -57,7 +43,6 @@ const logger = pino({ name: "files-route" });
 
 const CACHE_PREFIX = "files:list:";
 const CACHE_TTL = 10;
-const isNextcloud = config.STORAGE_BACKEND === "nextcloud";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -88,32 +73,24 @@ function safePublish(topic: string, payload: Record<string, unknown>): void {
   }
 }
 
-/** Handle FileServiceError / PathTraversalError with proper HTTP codes. */
+/**
+ * Map errors from the Nextcloud client + generic fallthroughs to HTTP responses.
+ * OCS errors preserve their upstream status (400 for validation, 403 forbidden,
+ * 404 not found, 997 not allowed) so the frontend can render the real message.
+ */
 function handleFileError(
   err: unknown,
   res: Response,
   next: NextFunction
 ): void {
-  if (err instanceof PathTraversalError) {
-    res.status(400).json({ error: err.message });
-    return;
-  }
   if (err instanceof NextcloudOcsError) {
-    // Nextcloud's OCS status is the authoritative HTTP status to return.
-    // Common mappings: 400 = validation (password policy, invalid path),
-    // 403 = forbidden, 404 = not found, 997 = not allowed.
     const status =
       err.ocsStatus >= 400 && err.ocsStatus < 600 ? err.ocsStatus : 400;
     res.status(status).json({ error: err.message });
     return;
   }
-  if (err instanceof FileServiceError) {
-    const status = err.code === "EACCES" || err.code === "ENOSPC" ? 503 : 500;
-    res.status(status).json({ error: err.message });
-    return;
-  }
   const anyErr = err as any;
-  if (anyErr?.code === "ENOENT" || anyErr?.message?.includes("404")) {
+  if (anyErr?.message?.includes("404")) {
     res.status(404).json({ error: "File not found" });
     return;
   }
@@ -158,13 +135,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      let entries: FileEntryInfo[];
-      if (isNextcloud) {
-        entries = await ncListFiles(getToken(req), user, filePath);
-      } else {
-        entries = await listDirectory(filePath);
-      }
-
+      const entries = await ncListFiles(getToken(req), user, filePath);
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
@@ -184,34 +155,20 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const filename = path.basename(filePath);
       const ext = path.extname(filename).toLowerCase();
 
-      if (isNextcloud) {
-        const stream = await ncDownloadFile(getToken(req), getUser(req), filePath);
-        if (!stream) {
-          res.status(404).json({ error: "File not found" });
-          return;
-        }
-
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-        res.setHeader(
-          "Content-Type",
-          ext === ".pdf" ? "application/pdf" : "application/octet-stream"
-        );
-
-        const nodeStream = Readable.fromWeb(stream as any);
-        nodeStream.pipe(res);
-      } else {
-        const absolutePath = await resolveAndValidatePath(filePath);
-        const size = await getFileSize(absolutePath);
-
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-        res.setHeader("Content-Length", size);
-        res.setHeader(
-          "Content-Type",
-          ext === ".pdf" ? "application/pdf" : "application/octet-stream"
-        );
-
-        streamFile(absolutePath).pipe(res);
+      const stream = await ncDownloadFile(getToken(req), getUser(req), filePath);
+      if (!stream) {
+        res.status(404).json({ error: "File not found" });
+        return;
       }
+
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader(
+        "Content-Type",
+        ext === ".pdf" ? "application/pdf" : "application/octet-stream"
+      );
+
+      const nodeStream = Readable.fromWeb(stream as any);
+      nodeStream.pipe(res);
     } catch (err) {
       handleFileError(err, res, next);
     }
@@ -228,44 +185,24 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      const results = [];
+      const token = getToken(req);
+      const user = getUser(req);
+      const results: { name: string; path: string; size: number }[] = [];
 
-      if (isNextcloud) {
-        const token = getToken(req);
-        const user = getUser(req);
-
-        for (const file of files) {
-          await ncUploadFile(token, user, targetPath, file.originalname, file.buffer);
-          results.push({
-            name: file.originalname,
-            path: targetPath === "/" ? `/${file.originalname}` : `${targetPath}/${file.originalname}`,
-            size: file.size,
-          });
-        }
-      } else {
-        const targetDir = await resolveAndValidatePath(targetPath);
-
-        for (const file of files) {
-          const { absolutePath, size, hash } = await saveUploadedFile(
-            targetDir,
-            file.originalname,
-            file.buffer
-          );
-
-          results.push({
-            name: file.originalname,
-            path: "/" + path.relative(config.FILES_ROOT, absolutePath),
-            size,
-            hash,
-          });
-        }
+      for (const file of files) {
+        await ncUploadFile(token, user, targetPath, file.originalname, file.buffer);
+        results.push({
+          name: file.originalname,
+          path:
+            targetPath === "/"
+              ? `/${file.originalname}`
+              : `${targetPath}/${file.originalname}`,
+          size: file.size,
+        });
       }
 
-      // Invalidate directory cache
-      const user = getUser(req);
       await cacheDel(CACHE_PREFIX + user + ":" + targetPath);
-
-      safePublish("droplet/files/uploaded", {
+      safePublish(`droplet/files/${user}/uploaded`, {
         path: targetPath,
         files: results.map((r) => r.name),
         count: results.length,
@@ -286,18 +223,13 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      if (isNextcloud) {
-        await ncDeleteFile(getToken(req), getUser(req), filePath);
-      } else {
-        const absolutePath = await resolveAndValidatePath(filePath);
-        await deleteFile(absolutePath);
-      }
-
       const user = getUser(req);
-      const parentPath = path.dirname(filePath);
+      await ncDeleteFile(getToken(req), user, filePath);
+
+      const parentPath = path.posix.dirname(filePath) || "/";
       await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
 
-      safePublish("droplet/files/deleted", { path: filePath });
+      safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });
     } catch (err) {
       handleFileError(err, res, next);
@@ -316,15 +248,10 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      if (isNextcloud) {
-        await ncCreateDirectory(getToken(req), getUser(req), parsed.data.path);
-      } else {
-        const absolutePath = await resolveAndValidatePath(parsed.data.path);
-        await createDirectory(absolutePath);
-      }
-
       const user = getUser(req);
-      const parentPath = path.dirname(parsed.data.path);
+      await ncCreateDirectory(getToken(req), user, parsed.data.path);
+
+      const parentPath = path.posix.dirname(parsed.data.path) || "/";
       await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
 
       res.json({ created: parsed.data.path });
@@ -333,18 +260,13 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
     }
   });
 
-  // ── Create a share link (Nextcloud only) ──
+  // ── Create a share link ──
   //
-  // Phase 2: accepts the full ShareCreateOptions surface (shareType / permissions /
-  // expireDate / password / note / shareWith). Backwards-compatible with Phase 1
-  // callers that pass only `path` — the defaults produce a public read-only link.
+  // Accepts the full ShareCreateOptions surface (shareType / permissions /
+  // expireDate / password / note / shareWith). Callers that pass only `path`
+  // get a public read-only link from the defaults.
   router.post("/files/share", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Sharing requires Nextcloud backend" });
-        return;
-      }
-
       const schema = z.object({
         path: z.string().min(1),
         shareType: z.number().int().min(0).max(6).optional().default(3), // public link
@@ -381,20 +303,14 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
     }
   });
 
-  // ── List shares for a path (Nextcloud only) ──
+  // ── List shares for a path ──
   router.get("/files/shares", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.json({ shares: [] });
-        return;
-      }
-
       const filePath = req.query.path as string;
       if (!filePath) {
         res.status(400).json({ error: "path query parameter is required" });
         return;
       }
-
       const shares = await ncListShares(getToken(req), filePath);
       res.json({ shares });
     } catch (err) {
@@ -405,52 +321,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ────────────────────────────────────────────────────────────
   //  Phase 1 — Rename / Move / Copy (single + bulk) + Trash + Versions
   // ────────────────────────────────────────────────────────────
-
-  /** Dispatch a single move across backends. Pure helper, no HTTP side effects. */
-  async function doMove(
-    token: string,
-    user: string,
-    from: string,
-    to: string,
-    overwrite: boolean
-  ): Promise<void> {
-    if (isNextcloud) {
-      await ncMoveFile(token, user, from, to, overwrite);
-    } else {
-      const absFrom = await resolveAndValidatePath(from);
-      const absTo = await resolveAndValidatePath(to);
-      await fsMoveFile(absFrom, absTo, overwrite);
-    }
-  }
-
-  async function doCopy(
-    token: string,
-    user: string,
-    from: string,
-    to: string,
-    overwrite: boolean
-  ): Promise<void> {
-    if (isNextcloud) {
-      await ncCopyFile(token, user, from, to, overwrite);
-    } else {
-      const absFrom = await resolveAndValidatePath(from);
-      const absTo = await resolveAndValidatePath(to);
-      await fsCopyFile(absFrom, absTo, overwrite);
-    }
-  }
-
-  async function doDelete(
-    token: string,
-    user: string,
-    filePath: string
-  ): Promise<void> {
-    if (isNextcloud) {
-      await ncDeleteFile(token, user, filePath);
-    } else {
-      const abs = await resolveAndValidatePath(filePath);
-      await deleteFile(abs);
-    }
-  }
 
   /** Invalidate listing caches for the given parent paths (source + destination). */
   async function invalidateParents(user: string, ...paths: string[]): Promise<void> {
@@ -513,7 +383,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const newPath = parentDir === "/" ? `/${newName}` : `${parentDir}/${newName}`;
 
       const user = getUser(req);
-      await doMove(getToken(req), user, filePath, newPath, false);
+      await ncMoveFile(getToken(req), user, filePath, newPath, false);
 
       await invalidateParents(user, filePath);
       safePublish(`droplet/files/${user}/renamed`, { from: filePath, to: newPath });
@@ -539,7 +409,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const { from, to, overwrite } = parsed.data;
 
       const user = getUser(req);
-      await doMove(getToken(req), user, from, to, overwrite);
+      await ncMoveFile(getToken(req), user, from, to, overwrite);
 
       await invalidateParents(user, from, to);
       safePublish(`droplet/files/${user}/moved`, { from, to });
@@ -565,7 +435,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const { from, to, overwrite } = parsed.data;
 
       const user = getUser(req);
-      await doCopy(getToken(req), user, from, to, overwrite);
+      await ncCopyFile(getToken(req), user, from, to, overwrite);
 
       await invalidateParents(user, to);
       safePublish(`droplet/files/${user}/copied`, { from, to });
@@ -590,7 +460,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
         try {
-          await doDelete(token, user, p);
+          await ncDeleteFile(token, user, p);
           return { path: p, ok: true };
         } catch (err: any) {
           return { path: p, ok: false, error: err?.message ?? "unknown error" };
@@ -633,7 +503,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         try {
           const base = path.posix.basename(p);
           const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
-          await doMove(token, user, p, dest, overwrite);
+          await ncMoveFile(token, user, p, dest, overwrite);
           return { path: p, ok: true };
         } catch (err: any) {
           return { path: p, ok: false, error: err?.message ?? "unknown error" };
@@ -677,7 +547,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         try {
           const base = path.posix.basename(p);
           const dest = normalizedDir === "/" ? `/${base}` : `${normalizedDir}/${base}`;
-          await doCopy(token, user, p, dest, overwrite);
+          await ncCopyFile(token, user, p, dest, overwrite);
           return { path: p, ok: true };
         } catch (err: any) {
           return { path: p, ok: false, error: err?.message ?? "unknown error" };
@@ -702,10 +572,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Trash: list (GET /api/files/trash) ──
   router.get("/files/trash", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Trash requires Nextcloud backend" });
-        return;
-      }
       const items = await ncListTrash(getToken(req), getUser(req));
       res.json({ items });
     } catch (err) {
@@ -716,10 +582,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Trash: restore (POST /api/files/trash/restore) ──
   router.post("/files/trash/restore", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Trash requires Nextcloud backend" });
-        return;
-      }
       const schema = z.object({ name: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) {
@@ -738,10 +600,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Trash: delete single item permanently (DELETE /api/files/trash/item) ──
   router.delete("/files/trash/item", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Trash requires Nextcloud backend" });
-        return;
-      }
       const name = req.query.name as string;
       if (!name) {
         res.status(400).json({ error: "name query parameter is required" });
@@ -759,10 +617,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Trash: empty (DELETE /api/files/trash) ──
   router.delete("/files/trash", async (_req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Trash requires Nextcloud backend" });
-        return;
-      }
       const user = getUser(_req);
       await ncEmptyTrash(getToken(_req), user);
       safePublish(`droplet/files/${user}/trash-emptied`, {});
@@ -775,10 +629,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Versions: list (GET /api/files/versions?path=...) ──
   router.get("/files/versions", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Versions require Nextcloud backend" });
-        return;
-      }
       const filePath = req.query.path as string;
       if (!filePath) {
         res.status(400).json({ error: "path query parameter is required" });
@@ -801,10 +651,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Versions: restore (POST /api/files/versions/restore) ──
   router.post("/files/versions/restore", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Versions require Nextcloud backend" });
-        return;
-      }
       const schema = z.object({
         path: z.string().min(1),
         versionId: z.string().min(1),
@@ -848,10 +694,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Favorite toggle (POST /api/files/favorite) ──
   router.post("/files/favorite", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Favorites require Nextcloud backend" });
-        return;
-      }
       const schema = z.object({
         path: z.string().min(1),
         favorite: z.boolean(),
@@ -875,10 +717,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Favorites list (GET /api/files/favorites) ──
   router.get("/files/favorites", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.json({ items: [] });
-        return;
-      }
       const user = getUser(req);
       const cacheKey = FAVORITES_CACHE_PREFIX + user;
       const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
@@ -897,10 +735,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Recents (GET /api/files/recents) ──
   router.get("/files/recents", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.json({ items: [] });
-        return;
-      }
       const limit = Math.max(
         1,
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
@@ -923,10 +757,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Search (GET /api/files/search?q=...&mime=...) ──
   router.get("/files/search", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.json({ items: [] });
-        return;
-      }
       const q = (req.query.q as string | undefined)?.trim() ?? "";
       if (!q) {
         res.status(400).json({ error: "q query parameter is required" });
@@ -963,10 +793,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Thumbnail proxy (GET /api/files/thumbnail?path=...&x=...&y=...) ──
   router.get("/files/thumbnail", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Thumbnails require Nextcloud backend" });
-        return;
-      }
       const filePath = req.query.path as string;
       if (!filePath) {
         res.status(400).json({ error: "path query parameter is required" });
@@ -1004,10 +830,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Update existing share (PUT /api/files/share/:id) ──
   router.put("/files/share/:id", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Sharing requires Nextcloud backend" });
-        return;
-      }
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
         res.status(400).json({ error: "Invalid share id" });
@@ -1060,10 +882,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Revoke a share (DELETE /api/files/share/:id) ──
   router.delete("/files/share/:id", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.status(501).json({ error: "Sharing requires Nextcloud backend" });
-        return;
-      }
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
         res.status(400).json({ error: "Invalid share id" });
@@ -1079,10 +897,6 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Shared-with-me inbox (GET /api/files/shared-with-me) ──
   router.get("/files/shared-with-me", async (req, res, next) => {
     try {
-      if (!isNextcloud) {
-        res.json({ shares: [] });
-        return;
-      }
       const shares = await ncListSharedWithMe(getToken(req));
       res.json({ shares });
     } catch (err) {

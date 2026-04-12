@@ -5,7 +5,6 @@ import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
 import { initDeviceService } from "./services/device.service.js";
-import { initFileService } from "./services/file.service.js";
 import { initSmartHomeService } from "./services/smart-home.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
@@ -28,7 +27,6 @@ async function main() {
 
   // Initialize services
   initDeviceService(prisma);
-  initFileService(prisma);
 
   // Start periodic device self-registration (detects hostname, IP, hardware)
   await initDeviceRegistration(prisma);

@@ -22,7 +22,6 @@ import type {
   SessionDetail,
   SessionInfo,
   StorageStats,
-  SyncTargetInfo,
   WirelessScanResult,
   AuthUser,
   ShareInfo,
@@ -841,53 +840,3 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   return data.shares ?? [];
 }
 
-// --- Sync targets ---
-
-export async function fetchSyncTargets(): Promise<SyncTargetInfo[]> {
-  const res = await authFetch(`${BASE}/api/sync/targets`);
-  if (!res.ok) throw new Error(`Failed to fetch sync targets: ${res.status}`);
-  return res.json();
-}
-
-export async function createSyncTarget(data: {
-  path: string;
-  label: string;
-  intervalMin: number;
-}): Promise<SyncTargetInfo> {
-  const res = await authFetch(`${BASE}/api/sync/targets`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw new Error(`Failed to create sync target: ${res.status}`);
-  return res.json();
-}
-
-export async function updateSyncTarget(
-  id: string,
-  data: Partial<{ label: string; intervalMin: number; enabled: boolean }>
-): Promise<SyncTargetInfo> {
-  const res = await authFetch(`${BASE}/api/sync/targets/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw new Error(`Failed to update sync target: ${res.status}`);
-  return res.json();
-}
-
-export async function deleteSyncTarget(id: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/sync/targets/${id}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) throw new Error(`Failed to delete sync target: ${res.status}`);
-}
-
-export async function triggerSync(targetId: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/sync/trigger`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ targetId }),
-  });
-  if (!res.ok) throw new Error(`Failed to trigger sync: ${res.status}`);
-}
