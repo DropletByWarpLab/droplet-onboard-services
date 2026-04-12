@@ -14,8 +14,9 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from drivers import create_driver
 from drivers.base import (
@@ -40,6 +41,29 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Service-to-service authentication
+# ---------------------------------------------------------------------------
+SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
+
+
+class ServiceAuthMiddleware(BaseHTTPMiddleware):
+    """Reject requests without a valid SERVICE_SECRET Bearer token."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        if SERVICE_SECRET:
+            auth = request.headers.get("Authorization", "")
+            token = auth.removeprefix("Bearer ").strip()
+            if token != SERVICE_SECRET:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "Invalid or missing service token"},
+                )
+        return await call_next(request)
+
+
 SWITCH_HOST = os.environ.get("SWITCH_HOST", "192.168.1.77")
 SWITCH_PORT = int(os.environ.get("SWITCH_PORT", "443"))
 SWITCH_DRIVER = os.environ.get("SWITCH_DRIVER", "lantronix")
@@ -103,6 +127,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.add_middleware(ServiceAuthMiddleware)
 
 
 # ---------------------------------------------------------------------------

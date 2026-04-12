@@ -298,7 +298,13 @@ async def _get_cameras(args: dict) -> dict:
     client = _get_client()
     resp = await client.get("/api/cameras")
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    # Redact internal network addresses — the LLM has no legitimate need for IPs/MACs
+    if isinstance(data, dict) and "cameras" in data:
+        for cam in data["cameras"]:
+            cam.pop("ipAddress", None)
+            cam.pop("macAddress", None)
+    return data
 
 
 async def _get_camera_events(args: dict) -> dict:

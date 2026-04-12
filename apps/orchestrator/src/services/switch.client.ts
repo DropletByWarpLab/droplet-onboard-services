@@ -15,6 +15,15 @@ function timeout(ms = DEFAULT_TIMEOUT): AbortSignal {
   return AbortSignal.timeout(ms);
 }
 
+/** Service-to-service auth headers. */
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (config.SERVICE_SECRET) {
+    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  }
+  return headers;
+}
+
 // --- Health ---
 
 export async function healthCheck(): Promise<boolean> {
@@ -33,14 +42,14 @@ export async function healthCheck(): Promise<boolean> {
 // --- Ports ---
 
 export async function fetchPorts(): Promise<unknown[]> {
-  const resp = await fetch(`${SWITCH_URL}/ports`, { signal: timeout() });
+  const resp = await fetch(`${SWITCH_URL}/ports`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch ports: ${resp.status}`);
   const data = await resp.json();
   return data.ports ?? [];
 }
 
 export async function fetchPort(port: number): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/ports/${port}`, { signal: timeout() });
+  const resp = await fetch(`${SWITCH_URL}/ports/${port}`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch port ${port}: ${resp.status}`);
   return resp.json();
 }
@@ -48,6 +57,7 @@ export async function fetchPort(port: number): Promise<unknown> {
 export async function enablePort(port: number): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/ports/${port}/enable`, {
     method: "POST",
+    headers: authHeaders(),
     signal: timeout(),
   });
   if (!resp.ok) throw new Error(`Enable port: ${resp.status}`);
@@ -56,6 +66,7 @@ export async function enablePort(port: number): Promise<void> {
 export async function disablePort(port: number): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/ports/${port}/disable`, {
     method: "POST",
+    headers: authHeaders(),
     signal: timeout(),
   });
   if (!resp.ok) throw new Error(`Disable port: ${resp.status}`);
@@ -64,7 +75,7 @@ export async function disablePort(port: number): Promise<void> {
 // --- VLANs ---
 
 export async function fetchVlans(): Promise<unknown[]> {
-  const resp = await fetch(`${SWITCH_URL}/vlans`, { signal: timeout() });
+  const resp = await fetch(`${SWITCH_URL}/vlans`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch VLANs: ${resp.status}`);
   const data = await resp.json();
   return data.vlans ?? [];
@@ -76,7 +87,7 @@ export async function createVlan(
 ): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/vlans`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ vlan_id: vlanId, name }),
     signal: timeout(),
   });
@@ -86,6 +97,7 @@ export async function createVlan(
 export async function deleteVlan(vlanId: number): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/vlans/${vlanId}`, {
     method: "DELETE",
+    headers: authHeaders(),
     signal: timeout(),
   });
   if (!resp.ok) throw new Error(`Delete VLAN: ${resp.status}`);
@@ -105,7 +117,7 @@ export async function setVlanMembership(
 ): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ ports }),
     signal: timeout(),
   });
@@ -115,14 +127,14 @@ export async function setVlanMembership(
 // --- PoE ---
 
 export async function fetchPoeStatus(): Promise<unknown[]> {
-  const resp = await fetch(`${SWITCH_URL}/poe`, { signal: timeout() });
+  const resp = await fetch(`${SWITCH_URL}/poe`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch PoE: ${resp.status}`);
   const data = await resp.json();
   return data.ports ?? [];
 }
 
 export async function fetchPortPoe(port: number): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/poe/${port}`, { signal: timeout() });
+  const resp = await fetch(`${SWITCH_URL}/poe/${port}`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Port PoE: ${resp.status}`);
   return resp.json();
 }
@@ -130,6 +142,7 @@ export async function fetchPortPoe(port: number): Promise<unknown> {
 export async function enablePortPoe(port: number): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/poe/${port}/enable`, {
     method: "POST",
+    headers: authHeaders(),
     signal: timeout(),
   });
   if (!resp.ok) throw new Error(`Enable PoE: ${resp.status}`);
@@ -138,6 +151,7 @@ export async function enablePortPoe(port: number): Promise<void> {
 export async function disablePortPoe(port: number): Promise<void> {
   const resp = await fetch(`${SWITCH_URL}/poe/${port}/disable`, {
     method: "POST",
+    headers: authHeaders(),
     signal: timeout(),
   });
   if (!resp.ok) throw new Error(`Disable PoE: ${resp.status}`);
@@ -146,7 +160,7 @@ export async function disablePortPoe(port: number): Promise<void> {
 // --- System ---
 
 export async function fetchSystemInfo(): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/system/info`, { signal: timeout() });
+  const resp = await fetch(`${SWITCH_URL}/system/info`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch system info: ${resp.status}`);
   return resp.json();
 }
@@ -156,6 +170,7 @@ export async function fetchSystemInfo(): Promise<unknown> {
 export async function detectWanPort(): Promise<unknown> {
   const resp = await fetch(`${SWITCH_URL}/wan/detect`, {
     method: "POST",
+    headers: authHeaders(),
     signal: timeout(15_000),
   });
   if (!resp.ok) throw new Error(`WAN detection: ${resp.status}`);
@@ -171,7 +186,7 @@ export async function setupCameraPorts(
 ): Promise<unknown> {
   const resp = await fetch(`${SWITCH_URL}/setup/cameras`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({
       vlan_id: vlanId,
       camera_ports: cameraPorts,

@@ -66,6 +66,9 @@ const envSchema = z.object({
 
   // --- Managed Switch ---
   SWITCH_SERVICE_URL: z.string().default("http://localhost:8081"),
+
+  // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
+  SERVICE_SECRET: z.string().default(""),
 });
 
 export const config = envSchema.parse(process.env);

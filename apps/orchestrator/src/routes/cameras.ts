@@ -28,6 +28,7 @@ import {
   deleteCamera,
 } from "../services/frigate.client.js";
 import { config } from "../config.js";
+import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 
 const logger = pino({ name: "cameras-routes" });
 
@@ -205,8 +206,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.post("/cameras/drivers/fix", async (_req, res, next) => {
     try {
+      // Forward DEVICE_SECRET for authentication (the discovery service
+      // requires it for kernel module operations like modprobe)
+      const headers: Record<string, string> = {};
+      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
+      if (deviceSecret) {
+        headers["Authorization"] = `Bearer ${deviceSecret}`;
+      }
+
       const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/drivers/fix`, {
         method: "POST",
+        headers,
         signal: AbortSignal.timeout(15000),
       });
       if (!resp.ok) {
@@ -236,6 +246,23 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.post("/cameras/subnet/setup", async (req, res, next) => {
     try {
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, "camera.subnet", "camera_subnet_setup", req.body || {}, userId
+      );
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      }
+
       const body = req.body || {};
       const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
         method: "POST",
@@ -260,8 +287,25 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/subnet", async (_req, res, next) => {
+  router.delete("/cameras/subnet", async (req, res, next) => {
     try {
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, "camera.subnet", "camera_subnet_teardown", {}, userId
+      );
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      }
+
       const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
         method: "DELETE",
         signal: AbortSignal.timeout(30000),
@@ -348,12 +392,29 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // --- Disable camera ---
+  // --- Disable camera (Tier 2 — requires confirmation) ---
   router.post("/cameras/:name/disable", async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
       }
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, `camera.${req.params.name}`, "disable_camera", { name: req.params.name }, userId
+      );
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      }
+
       await disableDetection(req.params.name);
       await prisma.camera.updateMany({
         where: { name: req.params.name },
@@ -365,12 +426,29 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // --- Delete camera ---
+  // --- Delete camera (Tier 2 — requires confirmation) ---
   router.delete("/cameras/:name", async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
       }
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, `camera.${req.params.name}`, "delete_camera", { name: req.params.name }, userId
+      );
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      }
+
       await deleteCamera(req.params.name);
       await prisma.camera.deleteMany({ where: { name: req.params.name } });
       res.json({ status: "deleted", camera: req.params.name });

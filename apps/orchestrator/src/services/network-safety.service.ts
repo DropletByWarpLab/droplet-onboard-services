@@ -353,7 +353,7 @@ export async function getNetworkAuditLog(
 ) {
   const { entityId, userId, limit = 50, offset = 0 } = options;
   const where: Record<string, unknown> = {
-    domain: { in: ["network", "wireless", "firewall", "dhcp", "system"] },
+    domain: { in: ["network", "wireless", "firewall", "dhcp", "system", "switch", "camera"] },
   };
   if (entityId) where.entityId = entityId;
   if (userId) where.userId = userId;
