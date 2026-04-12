@@ -68,6 +68,8 @@ services:
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
+      # NOTE: Uses localhost because the oled-display service runs with network_mode: host.
+      - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://localhost:8082}
     volumes:
       - matter-data:/data/matter-storage
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
@@ -336,7 +338,8 @@ services:
       context: ../services/oled-display
       dockerfile: Dockerfile
     network_mode: host
-    privileged: true
+    cap_add:
+      - SYS_RAWIO
     environment:
       - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
       - PORT=8082

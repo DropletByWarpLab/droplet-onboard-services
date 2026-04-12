@@ -150,6 +150,7 @@ export interface HealthResponse {
     router: boolean;
     frigate: boolean;
     switch: boolean;
+    display: boolean;
   };
 }
 

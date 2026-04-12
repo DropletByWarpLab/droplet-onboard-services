@@ -123,15 +123,22 @@ async def show_message(req: MessageRequest):
 
 
 @app.post("/display/custom")
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
 async def show_custom(file: UploadFile = File(...)):
-    """Upload a custom image to display (resized to 128x128)."""
+    """Upload a custom image to display (resized to 128x128, max 2MB)."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     try:
-        data = await file.read()
+        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "Image too large (max 2MB)")
         image = Image.open(io.BytesIO(data))
         display.show_custom_image(image)
         return {"ok": True, "mode": "custom"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, f"Invalid image: {e}")
 

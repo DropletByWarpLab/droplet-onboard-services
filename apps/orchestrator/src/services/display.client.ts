@@ -2,8 +2,6 @@
  * HTTP client for the OLED Display Service.
  */
 
-import { config } from "../config.js";
-
 const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://localhost:8082";
 const SERVICE_SECRET = process.env.DEVICE_SECRET_KEY || "";
 
