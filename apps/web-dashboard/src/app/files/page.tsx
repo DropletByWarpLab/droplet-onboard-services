@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { FolderPlus, Link as LinkIcon, X, Copy, Check, Eye } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
@@ -14,14 +15,19 @@ import {
 import { SelectionToolbar } from "@/components/FileManager/SelectionToolbar";
 import { MoveCopyDialog } from "@/components/FileManager/MoveCopyDialog";
 import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPanel";
+import { SearchBar } from "@/components/FileManager/SearchBar";
+import { PreviewPane } from "@/components/FileManager/PreviewPane";
+import { ShareDialog } from "@/components/FileManager/ShareDialog";
+import { StarButton } from "@/components/FileManager/StarButton";
+import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { useFiles } from "@/lib/hooks/useFiles";
 import { useFileManager } from "@/lib/hooks/useFileManager";
+import { useFavorites } from "@/lib/hooks/useFavorites";
 import {
   uploadFiles,
   deleteFile,
   createDirectory,
   getDownloadUrl,
-  createShareLink,
   renameFile,
   bulkDeleteFiles,
   bulkMoveFiles,
@@ -29,12 +35,6 @@ import {
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import type { FileEntryInfo } from "@/lib/types";
-
-const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"]);
-const TEXT_EXTS = new Set([
-  "txt", "md", "json", "yaml", "yml", "toml", "csv", "log",
-  "xml", "html", "css", "js", "ts", "py", "sh",
-]);
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -45,7 +45,9 @@ function formatBytes(bytes: number): string {
 }
 
 export default function FilesPage() {
-  const [currentPath, setCurrentPath] = useState("/");
+  const searchParams = useSearchParams();
+  const initialPath = searchParams?.get("path") ?? "/";
+  const [currentPath, setCurrentPath] = useState(initialPath);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
@@ -54,10 +56,8 @@ export default function FilesPage() {
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedFile, setSelectedFile] = useState<FileEntryInfo | null>(null);
-  const [shareUrl, setShareUrl] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [previewContent, setPreviewContent] = useState<string | null>(null);
-  const [previewType, setPreviewType] = useState<"text" | "image" | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileEntryInfo | null>(null);
+  const [shareFile, setShareFile] = useState<FileEntryInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -69,8 +69,22 @@ export default function FilesPage() {
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // React to ?path= changes after mount (e.g. Recents page deep-links back in)
+  useEffect(() => {
+    const p = searchParams?.get("path");
+    if (p && p !== currentPath) {
+      setCurrentPath(p);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   const { files, isLoading, refresh } = useFiles(currentPath);
   const fm = useFileManager(currentPath);
+  const { items: favoriteItems, refresh: refreshFavorites } = useFavorites();
+  const favoritedPaths = useMemo(
+    () => new Set(favoriteItems.map((f) => f.path)),
+    [favoriteItems]
+  );
 
   // ── Upload ──
   const handleUpload = useCallback(
@@ -174,46 +188,15 @@ export default function FilesPage() {
     }
   }, [currentPath, newFolderName, refresh, toast]);
 
-  // ── Share ──
-  const handleShare = useCallback(
-    async (filePath: string) => {
-      try {
-        const share = await createShareLink(filePath);
-        setShareUrl(share.url);
-        setCopied(false);
-      } catch (err) {
-        toast(err instanceof Error ? err.message : "Failed to create share link");
-      }
-    },
-    [toast]
-  );
+  // ── Share (opens full dialog) ──
+  const handleShare = useCallback((file: FileEntryInfo) => {
+    setShareFile(file);
+  }, []);
 
-  const handleCopyShare = () => {
-    if (shareUrl) {
-      navigator.clipboard.writeText(shareUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
-  // ── Preview ──
+  // ── Preview (opens rich preview modal) ──
   const handlePreview = useCallback((file: FileEntryInfo) => {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-
-    if (IMAGE_EXTS.has(ext)) {
-      setPreviewType("image");
-      setPreviewContent(getDownloadUrl(file.path));
-      setSelectedFile(file);
-    } else if (TEXT_EXTS.has(ext)) {
-      setPreviewType("text");
-      setPreviewContent(null);
-      setSelectedFile(file);
-
-      authFetch(getDownloadUrl(file.path))
-        .then((res) => res.text())
-        .then((text) => setPreviewContent(text.slice(0, 10_000)))
-        .catch(() => setPreviewContent("Failed to load preview"));
-    }
+    if (file.isDirectory) return;
+    setPreviewFile(file);
   }, []);
 
   // ── Rename ──
@@ -371,7 +354,7 @@ export default function FilesPage() {
         label: "Share link",
         icon: contextMenuIcons.Share,
         disabled: !isSingle,
-        onClick: () => handleShare(file.path),
+        onClick: () => handleShare(file),
       },
       {
         label: "Delete",
@@ -411,15 +394,15 @@ export default function FilesPage() {
   return (
     <div className="p-6 lg:p-8 max-w-7xl">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="type-large-title text-label-primary">Files</h1>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between mb-4 gap-4">
+        <h1 className="type-large-title text-label-primary flex-shrink-0">Files</h1>
+        <div className="flex items-center gap-2 flex-shrink-0">
           <button
             onClick={() => setShowNewFolder(true)}
             className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
           >
             <FolderPlus size={14} />
-            New Folder
+            <span className="hidden sm:inline">New Folder</span>
           </button>
           <UploadButton onClick={() => fileInputRef.current?.click()} />
           <input
@@ -433,6 +416,22 @@ export default function FilesPage() {
             }}
           />
         </div>
+      </div>
+
+      {/* Search bar */}
+      <div className="mb-4">
+        <SearchBar
+          onPickResult={(file) => {
+            if (file.isDirectory) {
+              setCurrentPath(file.path);
+            } else {
+              // Jump to parent dir and mark the file selected
+              const parent = file.path.replace(/\/[^/]*$/, "") || "/";
+              setCurrentPath(parent);
+              setSelectedFile(file);
+            }
+          }}
+        />
       </div>
 
       {/* Breadcrumbs */}
@@ -539,6 +538,7 @@ export default function FilesPage() {
                     file={file}
                     isSelected={fm.isSelected(file.path)}
                     isRenaming={fm.renamingPath === file.path}
+                    favoritedPaths={favoritedPaths}
                     onSelect={(e) => handleRowSelect(file, e)}
                     onOpen={() => handleRowOpen(file)}
                     onDownload={() => handleDownload(file.path)}
@@ -546,6 +546,7 @@ export default function FilesPage() {
                     onRename={(name) => handleRenameCommit(file, name)}
                     onCancelRename={fm.endRename}
                     onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
+                    onFavoriteChanged={refreshFavorites}
                   />
                 ))
               )}
@@ -557,16 +558,29 @@ export default function FilesPage() {
         {selectedFile && !selectedFile.isDirectory && (
           <div className="hidden lg:block w-72 flex-shrink-0">
             <div className="dp-card p-4 sticky top-6 space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <h3 className="type-headline text-label-primary truncate flex-1">
                   {selectedFile.name}
                 </h3>
+                <StarButton
+                  path={selectedFile.path}
+                  favorited={favoritedPaths.has(selectedFile.path)}
+                  onToggle={() => {
+                    void refreshFavorites();
+                  }}
+                  size={16}
+                />
                 <button
                   onClick={() => setSelectedFile(null)}
                   className="p-1 text-label-tertiary hover:text-label-primary"
                 >
                   <X size={16} />
                 </button>
+              </div>
+
+              {/* Thumbnail preview (if previewable) */}
+              <div className="flex justify-center">
+                <Thumbnail file={selectedFile} size={140} />
               </div>
 
               <div className="space-y-2">
@@ -595,32 +609,13 @@ export default function FilesPage() {
                   Preview
                 </button>
                 <button
-                  onClick={() => handleShare(selectedFile.path)}
+                  onClick={() => handleShare(selectedFile)}
                   className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
                 >
                   <LinkIcon size={14} />
-                  Share Link
+                  Share…
                 </button>
               </div>
-
-              {shareUrl && (
-                <div className="p-2 bg-surface-secondary rounded-sm">
-                  <p className="type-caption-1 text-label-tertiary mb-1.5">Share link</p>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      readOnly
-                      value={shareUrl}
-                      className="dp-input type-caption-1 flex-1 !py-1.5"
-                    />
-                    <button
-                      onClick={handleCopyShare}
-                      className="p-1.5 rounded-sm bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
-                    >
-                      {copied ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
-                  </div>
-                </div>
-              )}
 
               {/* Version history */}
               <VersionHistoryPanel
@@ -632,45 +627,22 @@ export default function FilesPage() {
         )}
       </div>
 
-      {/* Preview modal */}
-      {previewContent && previewType && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
-          onClick={() => {
-            setPreviewContent(null);
-            setPreviewType(null);
-          }}
-        >
-          <div
-            className="bg-surface-primary rounded-lg max-w-3xl max-h-[80vh] w-full overflow-hidden shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 className="type-headline text-label-primary truncate">
-                {selectedFile?.name}
-              </h3>
-              <button
-                onClick={() => {
-                  setPreviewContent(null);
-                  setPreviewType(null);
-                }}
-                className="p-1 text-label-tertiary hover:text-label-primary"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="overflow-auto max-h-[calc(80vh-56px)] p-4">
-              {previewType === "image" ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={previewContent} alt={selectedFile?.name} className="max-w-full mx-auto" />
-              ) : (
-                <pre className="type-footnote text-label-primary whitespace-pre-wrap font-mono">
-                  {previewContent}
-                </pre>
-              )}
-            </div>
-          </div>
-        </div>
+      {/* Rich preview modal */}
+      {previewFile && (
+        <PreviewPane
+          file={previewFile}
+          onClose={() => setPreviewFile(null)}
+          onDownload={() => handleDownload(previewFile.path)}
+        />
+      )}
+
+      {/* Share dialog */}
+      {shareFile && (
+        <ShareDialog
+          filePath={shareFile.path}
+          fileName={shareFile.name}
+          onClose={() => setShareFile(null)}
+        />
       )}
 
       {/* Context menu */}

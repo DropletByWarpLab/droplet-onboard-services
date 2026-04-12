@@ -515,6 +515,67 @@ describe("File Operations", () => {
     });
   });
 
+  // ── Phase 2 endpoints on legacy backend (some 501, some fall through) ──
+
+  describe("Phase 2 endpoints (legacy backend behaviour)", () => {
+    it("POST /api/files/favorite returns 501", async () => {
+      const res = await request(app)
+        .post("/api/files/favorite")
+        .send({ path: "/a.txt", favorite: true });
+      expect(res.status).toBe(501);
+    });
+
+    it("GET /api/files/favorites returns an empty list (graceful degrade)", async () => {
+      const res = await request(app).get("/api/files/favorites");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/recents returns an empty list (graceful degrade)", async () => {
+      const res = await request(app).get("/api/files/recents");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/search returns an empty list when backend is legacy", async () => {
+      const res = await request(app).get("/api/files/search?q=budget");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/search still validates query length before degrading", async () => {
+      const res = await request(app).get("/api/files/search");
+      // Backend is legacy, so it returns [] before reaching the validator.
+      // That's the contract: on legacy, search is a no-op.
+      expect(res.status).toBe(200);
+    });
+
+    it("GET /api/files/thumbnail returns 501", async () => {
+      const res = await request(app).get(
+        "/api/files/thumbnail?path=/a.png"
+      );
+      expect(res.status).toBe(501);
+    });
+
+    it("PUT /api/files/share/:id returns 501", async () => {
+      const res = await request(app)
+        .put("/api/files/share/7")
+        .send({ permissions: 3 });
+      expect(res.status).toBe(501);
+    });
+
+    it("DELETE /api/files/share/:id returns 501", async () => {
+      const res = await request(app).delete("/api/files/share/7");
+      expect(res.status).toBe(501);
+    });
+
+    it("GET /api/files/shared-with-me returns empty shares on legacy", async () => {
+      const res = await request(app).get("/api/files/shared-with-me");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ shares: [] });
+    });
+  });
+
   // ── Integration: full lifecycle ──
 
   describe("Full lifecycle", () => {

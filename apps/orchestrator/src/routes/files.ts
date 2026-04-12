@@ -35,6 +35,16 @@ import {
   ncEmptyTrash,
   ncListVersions,
   ncRestoreVersion,
+  ncSetFavorite,
+  ncListFavorites,
+  ncSearchFiles,
+  ncListRecents,
+  ncFetchThumbnail,
+  ncCreateShareV2,
+  ncUpdateShare,
+  ncDeleteShare,
+  ncListSharedWithMe,
+  NextcloudOcsError,
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
@@ -86,6 +96,15 @@ function handleFileError(
 ): void {
   if (err instanceof PathTraversalError) {
     res.status(400).json({ error: err.message });
+    return;
+  }
+  if (err instanceof NextcloudOcsError) {
+    // Nextcloud's OCS status is the authoritative HTTP status to return.
+    // Common mappings: 400 = validation (password policy, invalid path),
+    // 403 = forbidden, 404 = not found, 997 = not allowed.
+    const status =
+      err.ocsStatus >= 400 && err.ocsStatus < 600 ? err.ocsStatus : 400;
+    res.status(status).json({ error: err.message });
     return;
   }
   if (err instanceof FileServiceError) {
@@ -315,6 +334,10 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Create a share link (Nextcloud only) ──
+  //
+  // Phase 2: accepts the full ShareCreateOptions surface (shareType / permissions /
+  // expireDate / password / note / shareWith). Backwards-compatible with Phase 1
+  // callers that pass only `path` — the defaults produce a public read-only link.
   router.post("/files/share", async (req, res, next) => {
     try {
       if (!isNextcloud) {
@@ -324,20 +347,33 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
 
       const schema = z.object({
         path: z.string().min(1),
+        shareType: z.number().int().min(0).max(6).optional().default(3), // public link
         permissions: z.number().int().min(1).max(31).optional().default(1),
+        expireDate: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "expireDate must be YYYY-MM-DD")
+          .optional(),
+        password: z.string().min(1).optional(),
+        note: z.string().max(500).optional(),
+        shareWith: z.string().min(1).optional(),
       });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "path is required" });
+        res.status(400).json({
+          error: "Invalid share request",
+          details: parsed.error.flatten(),
+        });
         return;
       }
 
-      const share = await ncCreateShare(
-        getToken(req),
-        parsed.data.path,
-        3, // public link
-        parsed.data.permissions
-      );
+      const share = await ncCreateShareV2(getToken(req), parsed.data.path, {
+        shareType: parsed.data.shareType,
+        permissions: parsed.data.permissions,
+        expireDate: parsed.data.expireDate,
+        password: parsed.data.password,
+        note: parsed.data.note,
+        shareWith: parsed.data.shareWith,
+      });
 
       res.json(share);
     } catch (err) {
@@ -792,6 +828,263 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       await invalidateParents(user, filePath);
       safePublish(`droplet/files/${user}/version-restored`, { path: filePath, versionId });
       res.json({ restored: { path: filePath, versionId } });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────
+  //  Phase 2 — Favorites / Recents / Search / Thumbnails / Shares V2
+  // ────────────────────────────────────────────────────────────
+
+  // Redis cache prefixes — let callers invalidate one feature independently.
+  const FAVORITES_CACHE_PREFIX = "files:favorites:";
+  const RECENTS_CACHE_PREFIX = "files:recents:";
+  const SEARCH_CACHE_PREFIX = "files:search:";
+  const FAVORITES_TTL = 15;
+  const RECENTS_TTL = 15;
+  const SEARCH_TTL = 5;
+
+  // ── Favorite toggle (POST /api/files/favorite) ──
+  router.post("/files/favorite", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Favorites require Nextcloud backend" });
+        return;
+      }
+      const schema = z.object({
+        path: z.string().min(1),
+        favorite: z.boolean(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid favorite request" });
+        return;
+      }
+      const { path: filePath, favorite } = parsed.data;
+      const user = getUser(req);
+      await ncSetFavorite(getToken(req), user, filePath, favorite);
+      await cacheDel(FAVORITES_CACHE_PREFIX + user);
+      safePublish(`droplet/files/${user}/favorited`, { path: filePath, favorite });
+      res.json({ path: filePath, favorite });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Favorites list (GET /api/files/favorites) ──
+  router.get("/files/favorites", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.json({ items: [] });
+        return;
+      }
+      const user = getUser(req);
+      const cacheKey = FAVORITES_CACHE_PREFIX + user;
+      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+      if (cached) {
+        res.json({ items: cached });
+        return;
+      }
+      const items = await ncListFavorites(getToken(req), user);
+      await cacheSet(cacheKey, items, FAVORITES_TTL);
+      res.json({ items });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Recents (GET /api/files/recents) ──
+  router.get("/files/recents", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.json({ items: [] });
+        return;
+      }
+      const limit = Math.max(
+        1,
+        Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
+      );
+      const user = getUser(req);
+      const cacheKey = `${RECENTS_CACHE_PREFIX}${user}:${limit}`;
+      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+      if (cached) {
+        res.json({ items: cached });
+        return;
+      }
+      const items = await ncListRecents(getToken(req), user, limit);
+      await cacheSet(cacheKey, items, RECENTS_TTL);
+      res.json({ items });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Search (GET /api/files/search?q=...&mime=...) ──
+  router.get("/files/search", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.json({ items: [] });
+        return;
+      }
+      const q = (req.query.q as string | undefined)?.trim() ?? "";
+      if (!q) {
+        res.status(400).json({ error: "q query parameter is required" });
+        return;
+      }
+      if (q.length < 2) {
+        res.json({ items: [] });
+        return;
+      }
+      const mime = (req.query.mime as string | undefined)?.trim() || undefined;
+      const limit = Math.max(
+        1,
+        Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
+      );
+      const user = getUser(req);
+      const cacheKey = `${SEARCH_CACHE_PREFIX}${user}:${q}:${mime ?? ""}:${limit}`;
+      const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
+      if (cached) {
+        res.json({ items: cached });
+        return;
+      }
+      const items = await ncSearchFiles(getToken(req), user, {
+        query: q,
+        mime,
+        limit,
+      });
+      await cacheSet(cacheKey, items, SEARCH_TTL);
+      res.json({ items });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Thumbnail proxy (GET /api/files/thumbnail?path=...&x=...&y=...) ──
+  router.get("/files/thumbnail", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Thumbnails require Nextcloud backend" });
+        return;
+      }
+      const filePath = req.query.path as string;
+      if (!filePath) {
+        res.status(400).json({ error: "path query parameter is required" });
+        return;
+      }
+      const x = Math.max(
+        16,
+        Math.min(1024, parseInt((req.query.x as string) || "256", 10) || 256)
+      );
+      const y = Math.max(
+        16,
+        Math.min(1024, parseInt((req.query.y as string) || "256", 10) || 256)
+      );
+      const user = getUser(req);
+      const token = getToken(req);
+
+      const fileId = await ncGetFileId(token, user, filePath);
+      if (fileId === null) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+      const preview = await ncFetchThumbnail(token, fileId, x, y);
+      if (!preview) {
+        res.status(404).json({ error: "Preview unavailable" });
+        return;
+      }
+      res.setHeader("Content-Type", preview.contentType);
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.send(Buffer.from(preview.body));
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Update existing share (PUT /api/files/share/:id) ──
+  router.put("/files/share/:id", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Sharing requires Nextcloud backend" });
+        return;
+      }
+      const shareId = parseInt(req.params.id, 10);
+      if (Number.isNaN(shareId)) {
+        res.status(400).json({ error: "Invalid share id" });
+        return;
+      }
+      const schema = z
+        .object({
+          permissions: z.number().int().min(1).max(31).optional(),
+          password: z.string().optional(),
+          expireDate: z.string().optional(),
+          note: z.string().optional(),
+        })
+        .refine(
+          (d) =>
+            d.permissions !== undefined ||
+            d.password !== undefined ||
+            d.expireDate !== undefined ||
+            d.note !== undefined,
+          { message: "At least one field is required" }
+        );
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Invalid share update",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const token = getToken(req);
+
+      // OCS accepts one field per PUT — apply them sequentially.
+      if (parsed.data.permissions !== undefined) {
+        await ncUpdateShare(token, shareId, "permissions", String(parsed.data.permissions));
+      }
+      if (parsed.data.password !== undefined) {
+        await ncUpdateShare(token, shareId, "password", parsed.data.password);
+      }
+      if (parsed.data.expireDate !== undefined) {
+        await ncUpdateShare(token, shareId, "expireDate", parsed.data.expireDate);
+      }
+      if (parsed.data.note !== undefined) {
+        await ncUpdateShare(token, shareId, "note", parsed.data.note);
+      }
+      res.json({ updated: shareId });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Revoke a share (DELETE /api/files/share/:id) ──
+  router.delete("/files/share/:id", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.status(501).json({ error: "Sharing requires Nextcloud backend" });
+        return;
+      }
+      const shareId = parseInt(req.params.id, 10);
+      if (Number.isNaN(shareId)) {
+        res.status(400).json({ error: "Invalid share id" });
+        return;
+      }
+      await ncDeleteShare(getToken(req), shareId);
+      res.json({ deleted: shareId });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  // ── Shared-with-me inbox (GET /api/files/shared-with-me) ──
+  router.get("/files/shared-with-me", async (req, res, next) => {
+    try {
+      if (!isNextcloud) {
+        res.json({ shares: [] });
+        return;
+      }
+      const shares = await ncListSharedWithMe(getToken(req));
+      res.json({ shares });
     } catch (err) {
       handleFileError(err, res, next);
     }

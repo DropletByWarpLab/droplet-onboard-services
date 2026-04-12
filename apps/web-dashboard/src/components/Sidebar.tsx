@@ -11,6 +11,9 @@ import {
   Network,
   Settings,
   Trash2,
+  Star,
+  Clock,
+  Share2,
   Video,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
@@ -30,6 +33,9 @@ const navItems = [
 // Sub-navigation rendered under Files when we're on a /files/* route.
 const filesSubNav = [
   { href: "/files", label: "All files", icon: FolderOpen, exact: true },
+  { href: "/files/recents", label: "Recents", icon: Clock, exact: false },
+  { href: "/files/favorites", label: "Favorites", icon: Star, exact: false },
+  { href: "/files/shared", label: "Shared", icon: Share2, exact: false },
   { href: "/files/trash", label: "Trash", icon: Trash2, exact: false },
 ];
 

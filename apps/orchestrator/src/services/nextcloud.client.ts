@@ -678,6 +678,452 @@ export async function ncOAuth2RefreshToken(
   }
 }
 
+// ── Favorites / Search / Recents / Thumbnails (Phase 2) ──
+
+/** Escape untrusted text for embedding in an XML body (search literals etc.) */
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Toggle the favorite flag on a file or directory.
+ * Uses PROPPATCH to set oc:favorite to 1 or 0.
+ */
+export async function ncSetFavorite(
+  token: string,
+  user: string,
+  path: string,
+  favorite: boolean
+): Promise<void> {
+  const url = webdavUrl(user, path);
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set>
+    <d:prop><oc:favorite>${favorite ? 1 : 0}</oc:favorite></d:prop>
+  </d:set>
+</d:propertyupdate>`;
+  const resp = await fetch(url, {
+    method: "PROPPATCH",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok && resp.status !== 207) {
+    throw new Error(`WebDAV PROPPATCH favorite failed: ${resp.status}`);
+  }
+}
+
+/**
+ * List files/directories the user has favorited anywhere in their namespace.
+ * Uses a WebDAV REPORT with the oc:filter-files rule on favorites=1.
+ */
+export async function ncListFavorites(
+  token: string,
+  user: string
+): Promise<FileEntryInfo[]> {
+  const url = webdavUrl(user, "/");
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<oc:filter-files xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <oc:filter-rules>
+    <oc:favorite>1</oc:favorite>
+  </oc:filter-rules>
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+    <d:getcontenttype/>
+    <d:resourcetype/>
+    <oc:fileid/>
+    <oc:favorite/>
+  </d:prop>
+</oc:filter-files>`;
+  const resp = await fetch(url, {
+    method: "REPORT",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV REPORT favorites failed: ${resp.status}`);
+  }
+  return parseMultiStatus(await resp.text(), "/");
+}
+
+export interface NcSearchOptions {
+  query: string;
+  mime?: string;
+  limit?: number;
+}
+
+/**
+ * Search file names within the user's namespace using WebDAV SEARCH + basicsearch.
+ * Nextcloud's SEARCH supports d:like against displayname for a LIKE-%query%-match.
+ */
+export async function ncSearchFiles(
+  token: string,
+  user: string,
+  opts: NcSearchOptions
+): Promise<FileEntryInfo[]> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/`;
+  const limit = opts.limit ?? 50;
+  const pattern = `%${opts.query}%`;
+  const mimeWhere = opts.mime
+    ? `<d:and>
+          <d:like>
+            <d:prop><d:displayname/></d:prop>
+            <d:literal>${escapeXml(pattern)}</d:literal>
+          </d:like>
+          <d:eq>
+            <d:prop><d:getcontenttype/></d:prop>
+            <d:literal>${escapeXml(opts.mime)}</d:literal>
+          </d:eq>
+        </d:and>`
+    : `<d:like>
+          <d:prop><d:displayname/></d:prop>
+          <d:literal>${escapeXml(pattern)}</d:literal>
+        </d:like>`;
+
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select>
+      <d:prop>
+        <d:getlastmodified/>
+        <d:getcontentlength/>
+        <d:getcontenttype/>
+        <d:resourcetype/>
+        <oc:fileid/>
+      </d:prop>
+    </d:select>
+    <d:from>
+      <d:scope>
+        <d:href>/files/${user}</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>${mimeWhere}</d:where>
+    <d:orderby/>
+    <d:limit><d:nresults>${limit}</d:nresults></d:limit>
+  </d:basicsearch>
+</d:searchrequest>`;
+  const resp = await fetch(url, {
+    method: "SEARCH",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV SEARCH failed: ${resp.status}`);
+  }
+  return parseMultiStatus(await resp.text(), "/");
+}
+
+/**
+ * Return the user's most recently-modified files across their whole namespace.
+ * Implemented as a SEARCH with an order-by on lastmodified DESC.
+ */
+export async function ncListRecents(
+  token: string,
+  user: string,
+  limit: number = 50
+): Promise<FileEntryInfo[]> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/`;
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select>
+      <d:prop>
+        <d:getlastmodified/>
+        <d:getcontentlength/>
+        <d:getcontenttype/>
+        <d:resourcetype/>
+        <oc:fileid/>
+      </d:prop>
+    </d:select>
+    <d:from>
+      <d:scope>
+        <d:href>/files/${user}</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>
+      <d:gt>
+        <d:prop><d:getlastmodified/></d:prop>
+        <d:literal>1970-01-01T00:00:00Z</d:literal>
+      </d:gt>
+    </d:where>
+    <d:orderby>
+      <d:order>
+        <d:prop><d:getlastmodified/></d:prop>
+        <d:descending/>
+      </d:order>
+    </d:orderby>
+    <d:limit><d:nresults>${limit}</d:nresults></d:limit>
+  </d:basicsearch>
+</d:searchrequest>`;
+  const resp = await fetch(url, {
+    method: "SEARCH",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV SEARCH recents failed: ${resp.status}`);
+  }
+  // Preserve the order returned by Nextcloud (already sorted by lastmodified DESC).
+  // parseMultiStatus re-sorts alphabetically, so call its parser then sort again.
+  const entries = parseMultiStatus(await resp.text(), "/");
+  entries.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1));
+  return entries;
+}
+
+/**
+ * Fetch a preview thumbnail for a file via Nextcloud's core/preview endpoint.
+ * Returns raw bytes + content-type so the orchestrator can stream them through.
+ */
+export async function ncFetchThumbnail(
+  token: string,
+  fileId: number,
+  x: number = 256,
+  y: number = 256
+): Promise<{ body: ArrayBuffer; contentType: string } | null> {
+  const url = `${config.NEXTCLOUD_URL}/index.php/core/preview?fileId=${fileId}&x=${x}&y=${y}&a=1&forceIcon=0`;
+  const resp = await fetch(url, { headers: davHeaders(token) });
+  if (!resp.ok) {
+    if (resp.status === 404) return null;
+    return null;
+  }
+  return {
+    body: await resp.arrayBuffer(),
+    contentType: resp.headers.get("content-type") || "image/png",
+  };
+}
+
+// ── Share V2 (full options + update / delete / shared-with-me) ──
+
+/**
+ * OCS responses use HTTP status codes that mirror ocs.meta.statuscode. The
+ * body always contains a JSON error message that's far more useful than the
+ * raw status ("Password is present in compromised password list" vs "400").
+ * Parse the body when the content-type is JSON; fall back to the status
+ * otherwise.
+ */
+async function readOcsErrorMessage(resp: Response, fallback: string): Promise<string> {
+  const ct = resp.headers.get("content-type") ?? "";
+  if (!ct.includes("json")) {
+    return `${fallback}: ${resp.status}`;
+  }
+  try {
+    const data = await resp.json();
+    const msg = data?.ocs?.meta?.message as string | undefined;
+    const code = data?.ocs?.meta?.statuscode as number | undefined;
+    if (msg) return `${fallback}: ${msg}${code ? ` (${code})` : ""}`;
+    return `${fallback}: ${resp.status}`;
+  } catch {
+    return `${fallback}: ${resp.status}`;
+  }
+}
+
+/**
+ * Error type preserved through the orchestrator error handler so routes can
+ * map OCS failures (400 with useful body) to a 400 HTTP response rather than
+ * a generic 500. Message is the OCS message verbatim.
+ */
+export class NextcloudOcsError extends Error {
+  public readonly ocsStatus: number;
+  constructor(message: string, ocsStatus: number) {
+    super(message);
+    this.name = "NextcloudOcsError";
+    this.ocsStatus = ocsStatus;
+  }
+}
+
+
+export interface ShareCreateOptions {
+  /** 0 = user, 1 = group, 3 = public link */
+  shareType: number;
+  /**
+   * Nextcloud permission bitmask: 1=read, 2=update, 4=create, 8=delete, 16=share.
+   * Defaults to 1 (read) when omitted.
+   */
+  permissions?: number;
+  /** ISO date string "YYYY-MM-DD" */
+  expireDate?: string;
+  /** Password for public links (stored hashed by Nextcloud) */
+  password?: string;
+  /** Note attached to the share (shown in the share dialog) */
+  note?: string;
+  /** Username (shareType=0) or group id (shareType=1). Ignored for public links. */
+  shareWith?: string;
+}
+
+export interface ShareDetail {
+  id: number;
+  url: string | null;
+  token: string | null;
+  shareType: number;
+  permissions: number;
+  path: string;
+  expireDate: string | null;
+  hasPassword: boolean;
+  note: string | null;
+  shareWith: string | null;
+  /** Who the item is shared with (display name, for shared-with-me views) */
+  shareWithDisplayName: string | null;
+  /** Owner of the underlying file */
+  uidOwner: string | null;
+  ownerDisplayName: string | null;
+  stime: number | null;
+}
+
+function mapShareRecord(record: any): ShareDetail {
+  return {
+    id: Number(record.id),
+    url: record.url ?? null,
+    token: record.token ?? null,
+    shareType: Number(record.share_type ?? record.shareType ?? 0),
+    permissions: Number(record.permissions ?? 1),
+    path: record.path ?? record.file_target ?? "",
+    expireDate: record.expiration ?? record.expireDate ?? null,
+    hasPassword: Boolean(
+      record.share_with && record.share_type === 3 && record.password !== undefined
+        ? record.password !== null
+        : record.password !== undefined && record.password !== null
+    ),
+    note: record.note ?? null,
+    shareWith: record.share_with ?? null,
+    shareWithDisplayName: record.share_with_displayname ?? null,
+    uidOwner: record.uid_owner ?? null,
+    ownerDisplayName: record.displayname_owner ?? null,
+    stime: record.stime ? Number(record.stime) : null,
+  };
+}
+
+/**
+ * Create a share with the full OCS option set (permissions, expiry, password, note, shareWith).
+ * Supersedes the simple ncCreateShare from Phase 1.
+ */
+export async function ncCreateShareV2(
+  token: string,
+  path: string,
+  opts: ShareCreateOptions
+): Promise<ShareDetail> {
+  const url = ocsUrl("/ocs/v2.php/apps/files_sharing/api/v1/shares");
+  const params = new URLSearchParams({
+    path,
+    shareType: String(opts.shareType),
+    permissions: String(opts.permissions ?? 1),
+  });
+  if (opts.expireDate) params.set("expireDate", opts.expireDate);
+  if (opts.password) params.set("password", opts.password);
+  if (opts.note) params.set("note", opts.note);
+  if (opts.shareWith) params.set("shareWith", opts.shareWith);
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...ocsHeaders(token),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params,
+  });
+  if (!resp.ok) {
+    // Nextcloud uses HTTP status == OCS statuscode for OCS v2, and the body
+    // contains the real error message (e.g. password policy violation).
+    const message = await readOcsErrorMessage(resp, "OCS share create");
+    throw new NextcloudOcsError(message, resp.status);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new NextcloudOcsError(
+      `OCS share create: ${data?.ocs?.meta?.message ?? "unknown error"}`,
+      data?.ocs?.meta?.statuscode ?? 500
+    );
+  }
+  return mapShareRecord(data.ocs.data);
+}
+
+/**
+ * Update a single field on an existing share (permissions, password, expiry, note).
+ */
+export async function ncUpdateShare(
+  token: string,
+  shareId: number,
+  field: "permissions" | "password" | "expireDate" | "note",
+  value: string
+): Promise<void> {
+  const url = ocsUrl(
+    `/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}`
+  );
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...ocsHeaders(token),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ [field]: value }),
+  });
+  if (!resp.ok) {
+    const message = await readOcsErrorMessage(resp, "OCS share update");
+    throw new NextcloudOcsError(message, resp.status);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new NextcloudOcsError(
+      `OCS share update: ${data?.ocs?.meta?.message ?? "unknown error"}`,
+      data?.ocs?.meta?.statuscode ?? 500
+    );
+  }
+}
+
+/** Revoke a share by id. */
+export async function ncDeleteShare(token: string, shareId: number): Promise<void> {
+  const url = ocsUrl(
+    `/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}`
+  );
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: ocsHeaders(token),
+  });
+  if (!resp.ok && resp.status !== 200) {
+    throw new Error(`OCS share delete failed: ${resp.status}`);
+  }
+}
+
+/**
+ * List shares the current user has received from other users/groups.
+ * Used by the "Shared with me" tab.
+ */
+export async function ncListSharedWithMe(
+  token: string
+): Promise<ShareDetail[]> {
+  const url = ocsUrl(
+    "/ocs/v2.php/apps/files_sharing/api/v1/shares?shared_with_me=true"
+  );
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (!resp.ok) {
+    throw new Error(`OCS shared-with-me failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  const records = data?.ocs?.data ?? [];
+  return Array.isArray(records) ? records.map(mapShareRecord) : [];
+}
+
 // ── WebDAV Move / Copy / Rename ──
 
 /**

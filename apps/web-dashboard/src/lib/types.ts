@@ -130,6 +130,43 @@ export interface ShareInfo {
   permissions?: number;
 }
 
+// --- Phase 2 share types ---
+
+/** Nextcloud OCS share record as returned by /api/files/share and friends. */
+export interface ShareDetail {
+  id: number;
+  url: string | null;
+  token: string | null;
+  shareType: number;          // 0=user, 1=group, 3=public link
+  permissions: number;        // bitmask: 1=read, 2=update, 4=create, 8=delete, 16=share
+  path: string;
+  expireDate: string | null;  // "YYYY-MM-DD"
+  hasPassword: boolean;
+  note: string | null;
+  shareWith: string | null;
+  shareWithDisplayName: string | null;
+  uidOwner: string | null;
+  ownerDisplayName: string | null;
+  stime: number | null;
+}
+
+export interface ShareCreateOptions {
+  /** 0=user, 1=group, 3=public link */
+  shareType: number;
+  permissions?: number;
+  expireDate?: string;
+  password?: string;
+  note?: string;
+  shareWith?: string;
+}
+
+export interface ShareUpdateOptions {
+  permissions?: number;
+  password?: string;
+  expireDate?: string;
+  note?: string;
+}
+
 // --- Storage types ---
 
 export interface StorageStats {

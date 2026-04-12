@@ -13,12 +13,15 @@ import {
   Trash2,
   Check,
 } from "lucide-react";
+import { StarButton } from "./StarButton";
 import type { FileEntryInfo } from "@/lib/types";
 
 interface FileRowProps {
   file: FileEntryInfo;
   isSelected: boolean;
   isRenaming: boolean;
+  /** Set of paths currently marked as favorites (so the row can show the star filled). */
+  favoritedPaths?: Set<string>;
   onSelect: (e: React.MouseEvent) => void;
   onOpen: () => void;
   onDownload: () => void;
@@ -26,6 +29,8 @@ interface FileRowProps {
   onRename: (newName: string) => void | Promise<void>;
   onCancelRename: () => void;
   onContextMenu: (x: number, y: number) => void;
+  /** Called after a favorite toggle succeeds so the parent can refresh state. */
+  onFavoriteChanged?: () => void;
 }
 
 function getFileIcon(file: FileEntryInfo) {
@@ -73,6 +78,7 @@ export function FileRow({
   file,
   isSelected,
   isRenaming,
+  favoritedPaths,
   onSelect,
   onOpen,
   onDownload,
@@ -80,7 +86,9 @@ export function FileRow({
   onRename,
   onCancelRename,
   onContextMenu,
+  onFavoriteChanged,
 }: FileRowProps) {
+  const isFavorited = favoritedPaths?.has(file.path) ?? false;
   const Icon = getFileIcon(file);
   const iconColor = file.isDirectory ? "text-system-blue" : "text-label-secondary";
   const [renameValue, setRenameValue] = useState(file.name);
@@ -184,6 +192,20 @@ export function FileRow({
       <span className="type-caption-1 text-label-tertiary w-32 text-right hidden md:block flex-shrink-0">
         {formatDate(file.modifiedAt)}
       </span>
+
+      {/* Star is visible when favorited, shown on hover otherwise */}
+      <div
+        className={`flex items-center gap-0.5 justify-end flex-shrink-0 transition-opacity duration-200 ${
+          isFavorited ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <StarButton
+          path={file.path}
+          favorited={isFavorited}
+          onToggle={() => onFavoriteChanged?.()}
+        />
+      </div>
 
       <div className="flex items-center gap-0.5 w-16 justify-end flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
         {!file.isDirectory && (

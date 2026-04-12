@@ -26,6 +26,9 @@ import type {
   WirelessScanResult,
   AuthUser,
   ShareInfo,
+  ShareDetail,
+  ShareCreateOptions,
+  ShareUpdateOptions,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -742,6 +745,100 @@ export async function restoreVersion(path: string, versionId: string): Promise<v
     body: JSON.stringify({ path, versionId }),
   });
   if (!res.ok) throw new Error(`Failed to restore version: ${res.status}`);
+}
+
+// --- Phase 2: favorites / recents / search / thumbnails / shares v2 ---
+
+export async function toggleFavorite(path: string, favorite: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/favorite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, favorite }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update favorite: ${res.status}`);
+  }
+}
+
+export async function fetchFavorites(): Promise<FileEntryInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/favorites`);
+  if (!res.ok) throw new Error(`Failed to fetch favorites: ${res.status}`);
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+export async function fetchRecents(limit = 50): Promise<FileEntryInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/recents?limit=${limit}`);
+  if (!res.ok) throw new Error(`Failed to fetch recents: ${res.status}`);
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+export async function searchFiles(
+  query: string,
+  opts: { mime?: string; limit?: number } = {}
+): Promise<FileEntryInfo[]> {
+  const params = new URLSearchParams({ q: query });
+  if (opts.mime) params.set("mime", opts.mime);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const res = await authFetch(`${BASE}/api/files/search?${params.toString()}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Search failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+/** Build a thumbnail URL for <img src=...>. The orchestrator streams bytes + caches. */
+export function getThumbnailUrl(path: string, x = 256, y = 256): string {
+  return `${BASE}/api/files/thumbnail?path=${encodeURIComponent(path)}&x=${x}&y=${y}`;
+}
+
+export async function createShare(
+  path: string,
+  opts: ShareCreateOptions = { shareType: 3 }
+): Promise<ShareDetail> {
+  const res = await authFetch(`${BASE}/api/files/share`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, ...opts }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Share failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateShare(
+  shareId: number,
+  opts: ShareUpdateOptions
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Share update failed: ${res.status}`);
+  }
+}
+
+export async function deleteShare(shareId: number): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Share delete failed: ${res.status}`);
+}
+
+export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
+  const res = await authFetch(`${BASE}/api/files/shared-with-me`);
+  if (!res.ok) throw new Error(`Failed to fetch shared-with-me: ${res.status}`);
+  const data = await res.json();
+  return data.shares ?? [];
 }
 
 // --- Sync targets ---

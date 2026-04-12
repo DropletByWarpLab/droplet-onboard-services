@@ -26,6 +26,15 @@ import {
   ncEmptyTrash,
   ncListVersions,
   ncRestoreVersion,
+  ncSetFavorite,
+  ncListFavorites,
+  ncSearchFiles,
+  ncListRecents,
+  ncFetchThumbnail,
+  ncCreateShareV2,
+  ncUpdateShare,
+  ncDeleteShare,
+  ncListSharedWithMe,
 } from "../services/nextcloud.client.js";
 
 /**
@@ -377,6 +386,450 @@ describe("nextcloud.client — versions", () => {
         .fn()
         .mockResolvedValue(mockResponse({ ok: false, status: 500 })) as unknown as typeof fetch;
       await expect(ncRestoreVersion("t", "u", 1, "v")).rejects.toThrow(/Version restore failed/);
+    });
+  });
+});
+
+// ── Phase 2 ──
+
+describe("nextcloud.client — favorites", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  describe("ncSetFavorite", () => {
+    it("PROPPATCHes oc:favorite=1 when favoriting", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncSetFavorite("token", "alice", "/doc.pdf", true);
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://nextcloud.test/remote.php/dav/files/alice/doc.pdf");
+      expect(init.method).toBe("PROPPATCH");
+      expect(init.body).toContain("<oc:favorite>1</oc:favorite>");
+      expect(init.headers["Content-Type"]).toBe("application/xml");
+    });
+
+    it("PROPPATCHes oc:favorite=0 when unfavoriting", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncSetFavorite("token", "alice", "/doc.pdf", false);
+      expect(fetchMock.mock.calls[0][1].body).toContain("<oc:favorite>0</oc:favorite>");
+    });
+
+    it("throws on non-207 status", async () => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: false, status: 500 })) as unknown as typeof fetch;
+      await expect(ncSetFavorite("t", "u", "/x", true)).rejects.toThrow(/PROPPATCH favorite failed/);
+    });
+  });
+
+  describe("ncListFavorites", () => {
+    it("issues REPORT with filter-files favorite=1 and parses results", async () => {
+      const xml = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/files/alice/reports/q1.pdf</d:href>
+    <d:propstat><d:prop>
+      <d:getlastmodified>Mon, 01 Apr 2024 10:00:00 GMT</d:getlastmodified>
+      <d:getcontentlength>1024</d:getcontentlength>
+      <d:getcontenttype>application/pdf</d:getcontenttype>
+      <d:resourcetype/>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: xml }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const items = await ncListFavorites("token", "alice");
+
+      expect(items).toHaveLength(1);
+      expect(items[0].path).toBe("/reports/q1.pdf");
+      expect(items[0].size).toBe(1024);
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://nextcloud.test/remote.php/dav/files/alice/");
+      expect(init.method).toBe("REPORT");
+      expect(init.body).toContain("<oc:filter-rules>");
+      expect(init.body).toContain("<oc:favorite>1</oc:favorite>");
+    });
+
+    it("returns [] on 404", async () => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: false, status: 404 })) as unknown as typeof fetch;
+      expect(await ncListFavorites("t", "u")).toEqual([]);
+    });
+  });
+});
+
+describe("nextcloud.client — search and recents", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  const searchXml = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/files/alice/budget-2024.xlsx</d:href>
+    <d:propstat><d:prop>
+      <d:getlastmodified>Mon, 01 Apr 2024 10:00:00 GMT</d:getlastmodified>
+      <d:getcontentlength>5000</d:getcontentlength>
+      <d:getcontenttype>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</d:getcontenttype>
+      <d:resourcetype/>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+
+  describe("ncSearchFiles", () => {
+    it("issues SEARCH with basicsearch wrapping a LIKE pattern", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: searchXml }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const items = await ncSearchFiles("token", "alice", { query: "budget" });
+
+      expect(items).toHaveLength(1);
+      expect(items[0].name).toBe("budget-2024.xlsx");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://nextcloud.test/remote.php/dav/");
+      expect(init.method).toBe("SEARCH");
+      expect(init.body).toContain("<d:basicsearch>");
+      expect(init.body).toContain("<d:literal>%budget%</d:literal>");
+      expect(init.body).toContain("<d:href>/files/alice</d:href>");
+      expect(init.body).toContain("<d:nresults>50</d:nresults>");
+    });
+
+    it("escapes XML metacharacters in the query", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncSearchFiles("token", "alice", { query: "a<b>&c" });
+
+      const body = fetchMock.mock.calls[0][1].body as string;
+      expect(body).toContain("%a&lt;b&gt;&amp;c%");
+      expect(body).not.toContain("<b>&c");
+    });
+
+    it("adds a mime filter when provided", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncSearchFiles("token", "alice", { query: "q", mime: "application/pdf" });
+
+      const body = fetchMock.mock.calls[0][1].body as string;
+      expect(body).toContain("<d:and>");
+      expect(body).toContain("application/pdf");
+    });
+
+    it("honours custom limits", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncSearchFiles("token", "alice", { query: "q", limit: 5 });
+
+      expect(fetchMock.mock.calls[0][1].body).toContain("<d:nresults>5</d:nresults>");
+    });
+  });
+
+  describe("ncListRecents", () => {
+    it("issues SEARCH with orderby lastmodified DESC", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: "<d:multistatus/>" }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncListRecents("token", "alice", 30);
+
+      const init = fetchMock.mock.calls[0][1];
+      expect(init.method).toBe("SEARCH");
+      expect(init.body).toContain("<d:descending/>");
+      expect(init.body).toContain("<d:nresults>30</d:nresults>");
+    });
+
+    it("sorts returned entries most-recent first regardless of parseMultiStatus ordering", async () => {
+      const mixedXml = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/files/alice/older.txt</d:href>
+    <d:propstat><d:prop>
+      <d:getlastmodified>Mon, 01 Apr 2024 10:00:00 GMT</d:getlastmodified>
+      <d:getcontentlength>10</d:getcontentlength>
+      <d:getcontenttype>text/plain</d:getcontenttype>
+      <d:resourcetype/>
+    </d:prop></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/files/alice/newer.txt</d:href>
+    <d:propstat><d:prop>
+      <d:getlastmodified>Fri, 05 Apr 2024 10:00:00 GMT</d:getlastmodified>
+      <d:getcontentlength>10</d:getcontentlength>
+      <d:getcontenttype>text/plain</d:getcontenttype>
+      <d:resourcetype/>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+      global.fetch = vi
+        .fn()
+        .mockResolvedValue(mockResponse({ ok: true, status: 207, text: mixedXml })) as unknown as typeof fetch;
+
+      const items = await ncListRecents("token", "alice", 10);
+
+      expect(items[0].name).toBe("newer.txt");
+      expect(items[1].name).toBe("older.txt");
+    });
+  });
+});
+
+describe("nextcloud.client — thumbnails", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  describe("ncFetchThumbnail", () => {
+    it("GETs core/preview with the given dimensions and returns body + content type", async () => {
+      const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer;
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        arrayBuffer: vi.fn().mockResolvedValue(pngBytes),
+        headers: new Headers({ "content-type": "image/png" }),
+      } as unknown as Response);
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await ncFetchThumbnail("token", 42, 512, 512);
+
+      expect(result).not.toBeNull();
+      expect(result!.contentType).toBe("image/png");
+      expect(result!.body.byteLength).toBe(4);
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        "http://nextcloud.test/index.php/core/preview?fileId=42&x=512&y=512&a=1&forceIcon=0"
+      );
+    });
+
+    it("returns null on 404", async () => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValue({
+          ok: false,
+          status: 404,
+          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+          headers: new Headers(),
+        } as unknown as Response) as unknown as typeof fetch;
+      expect(await ncFetchThumbnail("t", 1)).toBeNull();
+    });
+  });
+});
+
+describe("nextcloud.client — shares v2", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  const shareRecord = {
+    id: "7",
+    share_type: 3,
+    permissions: 1,
+    path: "/report.pdf",
+    file_target: "/report.pdf",
+    url: "http://nextcloud.test/s/abc",
+    token: "abc",
+    expiration: "2026-12-31",
+    password: "hashed",
+    note: "please review",
+    share_with: null,
+    uid_owner: "alice",
+    displayname_owner: "Alice",
+    stime: 1712860391,
+  };
+
+  describe("ncCreateShareV2", () => {
+    it("POSTs to OCS shares with the full option set", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { status: "ok" }, data: shareRecord } },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const share = await ncCreateShareV2("token", "/report.pdf", {
+        shareType: 3,
+        permissions: 1,
+        expireDate: "2026-12-31",
+        password: "s3cret",
+        note: "please review",
+      });
+
+      expect(share.id).toBe(7);
+      expect(share.url).toBe("http://nextcloud.test/s/abc");
+      expect(share.expireDate).toBe("2026-12-31");
+      expect(share.hasPassword).toBe(true);
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares");
+      expect(init.method).toBe("POST");
+      const body = (init.body as URLSearchParams).toString();
+      expect(body).toContain("path=%2Freport.pdf");
+      expect(body).toContain("shareType=3");
+      expect(body).toContain("permissions=1");
+      expect(body).toContain("expireDate=2026-12-31");
+      expect(body).toContain("password=s3cret");
+    });
+
+    it("throws NextcloudOcsError on OCS failure in body (2xx HTTP but failure meta)", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { status: "failure", statuscode: 404, message: "Nope" }, data: [] } },
+        })
+      ) as unknown as typeof fetch;
+
+      await expect(
+        ncCreateShareV2("t", "/x", { shareType: 3 })
+      ).rejects.toThrow(/OCS share create: Nope/);
+    });
+
+    it("surfaces the OCS message when HTTP 400 is returned (password policy)", async () => {
+      // Mimics Nextcloud rejecting a password that's in the compromised list.
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: new Headers({ "content-type": "application/json; charset=utf-8" }),
+        text: vi.fn().mockResolvedValue(""),
+        json: vi.fn().mockResolvedValue({
+          ocs: {
+            meta: {
+              status: "failure",
+              statuscode: 400,
+              message: "Password is present in compromised password list. Please choose a different password.",
+            },
+            data: [],
+          },
+        }),
+      } as unknown as Response);
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        ncCreateShareV2("t", "/report.pdf", { shareType: 3, password: "pwned" })
+      ).rejects.toThrow(/compromised password list/);
+    });
+  });
+
+  describe("ncUpdateShare", () => {
+    it("PUTs a single field via OCS and parses ok status", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { status: "ok" }, data: shareRecord } },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncUpdateShare("token", 7, "password", "new-pwd");
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares/7");
+      expect(init.method).toBe("PUT");
+      expect((init.body as URLSearchParams).toString()).toBe("password=new-pwd");
+    });
+
+    it("throws on OCS non-ok with the server's error message", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { status: "failure", statuscode: 400, message: "Bad" }, data: [] } },
+        })
+      ) as unknown as typeof fetch;
+
+      await expect(
+        ncUpdateShare("t", 1, "permissions", "3")
+      ).rejects.toThrow(/OCS share update/);
+    });
+  });
+
+  describe("ncDeleteShare", () => {
+    it("DELETEs the share id", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 200 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await ncDeleteShare("token", 7);
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares/7");
+      expect(init.method).toBe("DELETE");
+    });
+  });
+
+  describe("ncListSharedWithMe", () => {
+    it("GETs the shared_with_me endpoint and maps records", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: {
+            ocs: {
+              meta: { status: "ok" },
+              data: [
+                { ...shareRecord, id: "10", uid_owner: "bob", displayname_owner: "Bob" },
+                { ...shareRecord, id: "11", uid_owner: "carol", displayname_owner: "Carol" },
+              ],
+            },
+          },
+        })
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const shares = await ncListSharedWithMe("token");
+
+      expect(shares).toHaveLength(2);
+      expect(shares[0].uidOwner).toBe("bob");
+      expect(shares[0].ownerDisplayName).toBe("Bob");
+      expect(shares[1].uidOwner).toBe("carol");
+
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        "http://nextcloud.test/ocs/v2.php/apps/files_sharing/api/v1/shares?shared_with_me=true"
+      );
+    });
+
+    it("returns [] when OCS returns empty array", async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: true,
+          status: 200,
+          json: { ocs: { meta: { status: "ok" }, data: [] } },
+        })
+      ) as unknown as typeof fetch;
+
+      expect(await ncListSharedWithMe("t")).toEqual([]);
     });
   });
 });
