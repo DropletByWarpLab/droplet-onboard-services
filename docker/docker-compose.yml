@@ -234,6 +234,8 @@ services:
     restart: always
 
   # --- Frigate NVR (camera management + AI detection) ---
+  # Always runs — even with zero cameras. Ready to accept cameras later
+  # via auto-discovery or manual add in the dashboard.
   frigate:
     image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
     shm_size: "256mb"
@@ -264,7 +266,6 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
     depends_on:
       - broker
-    profiles: ["full"]
     restart: always
 
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---

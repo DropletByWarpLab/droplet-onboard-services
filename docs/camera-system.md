@@ -59,9 +59,17 @@ End-to-end camera management for the Droplet edge platform — auto-discovery, N
 7. **MQTT event** published → orchestrator → dashboard shows toast notification
 8. **Recording + AI detection** starts immediately (person, car, animal, package)
 
-### Manual Flow
+### Manual Flow (Dashboard)
 
-Add a camera directly through the Frigate config:
+1. Go to **Cameras** page in the dashboard
+2. Click **Add Camera** button
+3. Enter camera name and RTSP URL (e.g., `rtsp://192.168.100.101:554/stream1`)
+4. Optionally add manufacturer and model
+5. Click **Add Camera** — it's immediately configured in Frigate
+
+### Manual Flow (Frigate Config)
+
+Add a camera directly to the Frigate config file:
 
 ```yaml
 # docker/frigate/config.yml
@@ -72,6 +80,10 @@ cameras:
         - path: rtsp://user:pass@192.168.100.101:554/stream1
           roles: ["detect", "record"]
 ```
+
+### Scan Network
+
+Click **Scan** in the dashboard to trigger immediate ONVIF/RTSP discovery. This runs the same scan that auto-discovery performs every 30 seconds, but on demand. Requires the camera-discovery service to be running (`--profile full`).
 
 ## Network Isolation
 
@@ -191,7 +203,7 @@ The AI assistant can interact with cameras via natural language:
 
 | Service | Port | Profile | Purpose |
 |---------|------|---------|---------|
-| `frigate` | 8971 (internal) | full | NVR + AI detection |
+| `frigate` | 8971 (internal) | *(always on)* | NVR + AI detection |
 | `camera-discovery` | 8085 (host) | full | ONVIF/RTSP auto-detection |
 
 Both are internal-only — no ports exposed to host. All access through Nginx.

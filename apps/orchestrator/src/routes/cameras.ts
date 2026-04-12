@@ -26,6 +26,7 @@ import {
   enableDetection,
   disableDetection,
   deleteCamera,
+  addCamera,
 } from "../services/frigate.client.js";
 import { config } from "../config.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
@@ -65,6 +66,75 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       res.json({ cameras });
     } catch (err) {
       next(err);
+    }
+  });
+
+  // --- Manually add a camera (name + RTSP URL) ---
+  router.post("/cameras", async (req, res, next) => {
+    try {
+      const { name, rtspUrl, manufacturer, model } = req.body;
+      if (!name || typeof name !== "string" || !isValidCameraName(name)) {
+        return res.status(400).json({ error: "Invalid camera name (alphanumeric + underscores/hyphens, 1-64 chars)" });
+      }
+      if (!rtspUrl || typeof rtspUrl !== "string") {
+        return res.status(400).json({ error: "Missing rtspUrl" });
+      }
+      if (!/^rtsps?:\/\/.+/.test(rtspUrl)) {
+        return res.status(400).json({ error: "rtspUrl must start with rtsp:// or rtsps://" });
+      }
+
+      // Add to Frigate
+      const success = await addCamera(name, rtspUrl);
+      if (!success) {
+        return res.status(500).json({ error: "Failed to add camera to Frigate" });
+      }
+
+      // Upsert DB record
+      const displayName = name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      await prisma.camera.upsert({
+        where: { name },
+        create: {
+          name,
+          displayName,
+          manufacturer: manufacturer || null,
+          model: model || null,
+          ipAddress: new URL(rtspUrl.replace("rtsp://", "http://").replace("rtsps://", "https://")).hostname || "",
+          enabled: true,
+          autoDiscovered: false,
+          lastSeen: new Date(),
+        },
+        update: {
+          displayName,
+          manufacturer: manufacturer || undefined,
+          model: model || undefined,
+          enabled: true,
+          lastSeen: new Date(),
+        },
+      });
+
+      res.json({ status: "ok", camera: name });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Trigger a discovery scan ---
+  router.post("/cameras/scan", async (_req, res) => {
+    try {
+      const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/scan`, {
+        method: "POST",
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!resp.ok) {
+        return res.status(resp.status).json({ error: "Scan failed" });
+      }
+      res.json(await resp.json());
+    } catch {
+      // Camera-discovery service may not be running (it's in full profile)
+      res.json({
+        status: "scan_unavailable",
+        message: "Camera discovery service is not running. Start it with: docker compose --profile full up camera-discovery",
+      });
     }
   });
 

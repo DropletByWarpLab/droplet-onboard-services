@@ -330,6 +330,29 @@ export function getCameraSnapshotUrl(name: string): string {
   return `${BASE}/api/cameras/${encodeURIComponent(name)}/snapshot`;
 }
 
+export async function addCameraManual(
+  name: string,
+  rtspUrl: string,
+  manufacturer?: string,
+  model?: string
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, rtspUrl, manufacturer, model }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to add camera: ${res.status}`);
+  }
+}
+
+export async function triggerCameraScan(): Promise<{ status: string; known?: number; pending?: number; message?: string }> {
+  const res = await authFetch(`${BASE}/api/cameras/scan`, { method: "POST" });
+  if (!res.ok) throw new Error(`Scan failed: ${res.status}`);
+  return res.json();
+}
+
 // --- Matter Devices ---
 
 export async function fetchMatterDevices(): Promise<MatterGrouped> {
