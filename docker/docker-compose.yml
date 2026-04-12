@@ -330,6 +330,25 @@ services:
     profiles: ["full"]
     restart: always
 
+  # --- OLED Display (128x128 SSD1351 via SPI) ---
+  oled-display:
+    build:
+      context: ../services/oled-display
+      dockerfile: Dockerfile
+    network_mode: host
+    privileged: true
+    environment:
+      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      - PORT=8082
+      - SPI_DEVICE=/dev/spidev0.0
+      - DC_PIN=18
+      - RST_PIN=22
+    devices:
+      - /dev/spidev0.0:/dev/spidev0.0
+      - /dev/gpiochip0:/dev/gpiochip0
+    profiles: ["full"]
+    restart: always
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.

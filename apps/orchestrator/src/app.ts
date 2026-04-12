@@ -18,6 +18,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createCamerasRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
+import { createDisplayRouter } from "./routes/display.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -51,6 +52,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createNetworkRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
+  app.use("/api", createDisplayRouter(prisma));
 
   // Error handling
   app.use(errorHandler);
