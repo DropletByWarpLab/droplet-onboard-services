@@ -212,6 +212,10 @@ main() {
     install_docker
     setup_docker_group
   fi
+  # Decide once whether subsequent docker calls need sudo. Fails fast with a
+  # clear error if docker is unreachable, instead of leaking a password prompt
+  # from inside a later spinner or polling loop.
+  detect_docker_sudo || exit 1
 
   # --- Phase 3: Camera Drivers ---
   log_step 3 $total_steps "Camera Drivers"

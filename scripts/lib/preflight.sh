@@ -21,14 +21,21 @@ preflight_check() {
   fi
 
   # --- sudo access ---
-  if ! sudo -v 2>/dev/null; then
-    log_info "sudo access required. Please enter your password."
-    if ! sudo -v; then
-      log_error "Could not obtain sudo access."
-      return 1
+  # Only probe sudo when we actually need it (Docker install, usermod, apt).
+  # Factory reset re-runs setup.sh with --skip-docker, which must work
+  # unattended — prompting for a password there would hang the device.
+  if [ "${SKIP_DOCKER:-false}" != "true" ]; then
+    if ! sudo -v 2>/dev/null; then
+      log_info "sudo access required. Please enter your password."
+      if ! sudo -v; then
+        log_error "Could not obtain sudo access."
+        return 1
+      fi
     fi
+    log_success "sudo access confirmed"
+  else
+    log_info "sudo check skipped (--skip-docker, unattended path)"
   fi
-  log_success "sudo access confirmed"
 
   # --- OS detection ---
   if [ -f /etc/os-release ]; then

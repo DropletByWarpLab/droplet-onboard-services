@@ -35,13 +35,18 @@ if [ -f "$REPO_ROOT/.env" ]; then
 fi
 
 # --- Docker wrapper ---
-_docker() {
-  docker "$@" 2>/dev/null || sudo docker "$@"
-}
+# Share the run_docker / run_docker_compose wrappers with setup.sh so the
+# sudo-detection logic lives in one place. The old inline wrappers here had
+# the same bug as scripts/lib/docker.sh: they fell back to `sudo docker …`
+# whenever the wrapped command returned non-zero, causing a hidden password
+# prompt on /dev/tty during polling checks.
+# shellcheck source=lib/logging.sh
+source "$SCRIPT_DIR/lib/logging.sh"
+# shellcheck source=lib/docker.sh
+source "$SCRIPT_DIR/lib/docker.sh"
 
-_docker_compose() {
-  docker compose "$@" 2>/dev/null || sudo docker compose "$@"
-}
+_docker() { run_docker "$@"; }
+_docker_compose() { run_docker_compose "$@"; }
 
 # --- Check runner ---
 PASS_COUNT=0

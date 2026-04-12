@@ -5,20 +5,71 @@
 # Flag set if user was just added to docker group (needs re-login)
 DOCKER_GROUP_ADDED=false
 
-# Wrapper: tries docker directly, falls back to sudo docker.
-# Handles the case where user was just added to docker group but hasn't re-logged.
-run_docker() {
-  if docker "$@" 2>/dev/null; then
+# Decide ONCE whether docker needs sudo, and cache the answer.
+#
+# The previous wrappers tried `docker …` first and fell back to `sudo docker …`
+# on any non-zero exit code. That conflated two very different failures:
+#   (a) docker daemon not reachable → sudo is the right escalation
+#   (b) the command wrapped by `docker … exec` returned non-zero → sudo is wrong
+# Polling loops (pg_isready, health probes) legitimately return non-zero until a
+# service is ready; the old wrapper interpreted each attempt as (a) and invoked
+# sudo, which prints a password prompt to /dev/tty that the caller's stderr
+# redirection cannot suppress. That's the "Password:" prompt surfacing under
+# "Waiting for PostgreSQL to be ready…".
+#
+# This version probes `docker info` exactly once and remembers the result, and
+# NEVER prompts interactively. Interactive sudo, when it is actually needed
+# (initial attended Linux install), is handled by preflight_check before we get
+# here; by that point sudo credentials are cached and `sudo -n` succeeds.
+# Cached detection: "", "false", "true"
+_DOCKER_SUDO=""
+
+detect_docker_sudo() {
+  [ -n "$_DOCKER_SUDO" ] && return 0
+
+  # macOS Docker Desktop never needs sudo.
+  if [ "$(uname)" = "Darwin" ]; then
+    _DOCKER_SUDO=false
     return 0
   fi
-  sudo docker "$@"
+
+  # Reachable as the current user? Typical unattended factory-reset path.
+  if docker info >/dev/null 2>&1; then
+    _DOCKER_SUDO=false
+    return 0
+  fi
+
+  # Sudo cached from preflight (initial attended install)?
+  if sudo -n docker info >/dev/null 2>&1; then
+    _DOCKER_SUDO=true
+    return 0
+  fi
+
+  # Never prompt here — the callers run inside spinners and polling loops
+  # where a hidden password prompt is a footgun. Fail loudly instead.
+  log_error "Docker daemon is not reachable as '$USER'."
+  log_error "  - On the device: user must be in the 'docker' group."
+  log_error "  - Check with:    id -nG \"\$USER\" | grep -qw docker"
+  log_error "  - On initial install, preflight_check should have warmed sudo credentials."
+  return 1
+}
+
+run_docker() {
+  detect_docker_sudo || return 1
+  if [ "$_DOCKER_SUDO" = "true" ]; then
+    sudo -n docker "$@"
+  else
+    docker "$@"
+  fi
 }
 
 run_docker_compose() {
-  if docker compose "$@" 2>/dev/null; then
-    return 0
+  detect_docker_sudo || return 1
+  if [ "$_DOCKER_SUDO" = "true" ]; then
+    sudo -n docker compose "$@"
+  else
+    docker compose "$@"
   fi
-  sudo docker compose "$@"
 }
 
 install_docker() {

@@ -274,9 +274,10 @@ if [ -d "$REPO_ROOT/docker/mosquitto_passwd_dir" ]; then
   log_success "Removed docker/mosquitto_passwd_dir/ (MQTT credentials)"
 fi
 
-# Generated mosquitto.conf (not git-tracked)
-if [ -f "$REPO_ROOT/docker/mosquitto.conf" ]; then
-  rm -f "$REPO_ROOT/docker/mosquitto.conf"
+# Generated mosquitto.conf (not git-tracked; may be a directory if Docker
+# created the bind-mount target before the file existed)
+if [ -f "$REPO_ROOT/docker/mosquitto.conf" ] || [ -d "$REPO_ROOT/docker/mosquitto.conf" ]; then
+  rm -rf "$REPO_ROOT/docker/mosquitto.conf"
   log_success "Removed docker/mosquitto.conf"
 fi
 
