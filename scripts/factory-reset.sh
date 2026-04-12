@@ -133,16 +133,20 @@ log_step 1 4 "Stopping all services"
 # Use "down -v" to atomically stop containers AND remove named volumes.
 # This is critical — "down" without "-v" leaves volumes intact, which causes
 # credential mismatches on re-setup (new .env passwords vs old volume data).
+#
+# The compose file has no ${VAR:?error} patterns, so this always works
+# regardless of .env state. Pass --env-file only when .env exists.
+local env_flag=""
+if [ -f "$REPO_ROOT/.env" ]; then
+  env_flag="--env-file $REPO_ROOT/.env"
+fi
+
 if [ "$PURGE_IMAGES" = "true" ]; then
   run_with_spinner "Stopping stack, removing volumes and images" \
-    $DC -f "$COMPOSE_FILE" --env-file "$REPO_ROOT/.env" down -v --rmi all --remove-orphans 2>/dev/null || \
-  run_with_spinner "Stopping stack, removing volumes and images (no env)" \
-    $DC -f "$COMPOSE_FILE" down -v --rmi all --remove-orphans 2>/dev/null || true
+    $DC -f "$COMPOSE_FILE" $env_flag down -v --rmi all --remove-orphans 2>/dev/null || true
 else
   run_with_spinner "Stopping stack and removing volumes" \
-    $DC -f "$COMPOSE_FILE" --env-file "$REPO_ROOT/.env" down -v --remove-orphans 2>/dev/null || \
-  run_with_spinner "Stopping stack and removing volumes (no env)" \
-    $DC -f "$COMPOSE_FILE" down -v --remove-orphans 2>/dev/null || true
+    $DC -f "$COMPOSE_FILE" $env_flag down -v --remove-orphans 2>/dev/null || true
 fi
 log_success "All services stopped"
 

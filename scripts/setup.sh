@@ -147,10 +147,11 @@ if [ "$DRY_RUN" = "true" ]; then
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
     log_info "  SKIPPED (.env already exists)"
   else
-    log_info "  Would generate: DEVICE_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD,"
-    log_info "                  REDIS_PASSWORD, MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD"
-    log_info "  Would write to: $REPO_ROOT/.env (chmod 600)"
-    log_info "  Would generate MQTT password file for Mosquitto"
+    log_info "  Would generate secrets: POSTGRES_PASSWORD, REDIS_PASSWORD,"
+    log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
+    log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY"
+    log_info "  Would write .env via heredoc (no .env.example dependency)"
+    log_info "  Would generate MQTT password file and TLS certificate"
   fi
 
   log_step 5 $TOTAL_STEPS "Build container images"

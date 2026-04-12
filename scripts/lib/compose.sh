@@ -5,7 +5,65 @@
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 COMPOSE_ENV_FILE="$REPO_ROOT/.env"
 
+# =============================================================================
+# Env validation — single source of truth for required secrets
+# =============================================================================
+# Update this list when adding a new secret to the .env heredoc in secrets.sh.
+REQUIRED_ENV_VARS=(
+  POSTGRES_PASSWORD
+  REDIS_PASSWORD
+  MQTT_PASSWORD
+  NEXTCLOUD_ADMIN_PASSWORD
+  DEVICE_SECRET
+  DEVICE_SECRET_KEY
+)
+
+_validate_env() {
+  local env_file="$COMPOSE_ENV_FILE"
+
+  if [ ! -f "$env_file" ]; then
+    log_error ".env not found at $env_file"
+    log_error "Run ./scripts/setup.sh to generate device secrets."
+    return 1
+  fi
+
+  local missing=()
+  local var val
+
+  for var in "${REQUIRED_ENV_VARS[@]}"; do
+    val=$(grep -E "^${var}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -z "$val" ] || [ "$val" = "change-me" ]; then
+      missing+=("$var")
+    fi
+  done
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    log_error "Missing or placeholder secrets in .env:"
+    for var in "${missing[@]}"; do
+      log_error "  - $var"
+    done
+    log_error ""
+    log_error "Run: ./scripts/setup.sh --regenerate-env"
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
+# Build
+# =============================================================================
 prepare_and_build() {
+  # Validate all required secrets before touching Docker
+  _validate_env || return 1
+
+  # --- Always start from clean state ---
+  # Stop any running containers so builds don't conflict with stale state.
+  # Compose file has no :? patterns, so this always works even with partial .env.
+  log_info "Stopping any existing containers..."
+  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    down --remove-orphans 2>/dev/null || true
+
   # --- Ensure init scripts are executable ---
   chmod +x "$REPO_ROOT/docker/init-nextcloud-db.sh" 2>/dev/null || true
 
@@ -73,8 +131,14 @@ prepare_and_build() {
   log_divider
 }
 
+# =============================================================================
+# Start
+# =============================================================================
 start_stack() {
   log_info "Starting the Droplet stack..."
+
+  # Validate all required secrets before starting
+  _validate_env || return 1
 
   # --- Source .env for variable substitution ---
   if [ -f "$REPO_ROOT/.env" ]; then

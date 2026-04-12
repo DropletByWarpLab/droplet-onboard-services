@@ -1,3 +1,8 @@
+# IMPORTANT: Run ./scripts/setup.sh before starting services.
+# This file contains NO secret interpolation — all secrets flow through .env
+# via env_file. This means compose commands (down, ps, logs) always work,
+# even without .env. The setup script validates secrets before starting.
+
 services:
   # --- Ingress ---
   gateway:
@@ -46,18 +51,11 @@ services:
       - path: ../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@db:5432/${POSTGRES_DB:-droplet}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@cache:6379
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
+      # Static config only — all secrets come from .env via env_file
+      - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - HOMEASSISTANT_URL=http://homeassistant:8123
-      - HOMEASSISTANT_TOKEN=${HOMEASSISTANT_TOKEN:-}
-      - PORT=3000
       - NEXTCLOUD_URL=http://nextcloud:80
-      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
-      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
-      - AUTH_ENABLED=${AUTH_ENABLED:-true}
-      - DEVICE_SECRET_KEY=${DEVICE_SECRET_KEY:?Run ./scripts/setup.sh to generate secrets}
       - MATTER_STORAGE_PATH=/data/matter-storage
       - MATTER_CONTROLLER_NAME=${MATTER_CONTROLLER_NAME:-Droplet}
       # NOTE: Uses localhost because the routing service runs with network_mode: host.
@@ -78,15 +76,14 @@ services:
         condition: service_healthy
       cache:
         condition: service_started
+    env_file:
+      - path: ../.env
+        required: false
     environment:
+      # Static Nextcloud config — passwords come from .env via env_file
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
-      - POSTGRES_USER=${POSTGRES_USER:-droplet}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
-      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
-      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - REDIS_HOST=cache
-      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway
       - OVERWRITEPROTOCOL=https
     volumes:
@@ -101,12 +98,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
+    env_file:
+      - path: ../.env
+        required: false
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-droplet}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
-      - POSTGRES_DB=${POSTGRES_DB:-droplet}
+      - POSTGRES_USER=droplet
+      - POSTGRES_DB=droplet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-droplet}"]
+      test: ["CMD-SHELL", "pg_isready -U droplet"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -114,7 +113,10 @@ services:
 
   cache:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
+    env_file:
+      - path: ../.env
+        required: false
+    command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
     restart: always
 
   broker:
@@ -136,10 +138,7 @@ services:
       - path: ../.env
         required: false
     environment:
-      - JETSON_OLLAMA_URL=${JETSON_OLLAMA_URL:-http://inference-engine.local:11434}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@cache:6379
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
-      - DEVICE_SECRET=${DEVICE_SECRET:?Run ./scripts/setup.sh to generate secrets}
+      # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
     volumes:
@@ -198,11 +197,13 @@ services:
       - nvrdata:/media/frigate
       - /etc/localtime:/etc/localtime:ro
       - ../docker/frigate/config.yml:/config/config.yml:ro
+    env_file:
+      - path: ../.env
+        required: false
     environment:
+      # Static config — FRIGATE_MQTT_USER and FRIGATE_MQTT_PASSWORD from .env
       - FRIGATE_MQTT_HOST=broker
       - FRIGATE_MQTT_PORT=1883
-      - FRIGATE_MQTT_USER=${MQTT_USER:-droplet}
-      - FRIGATE_MQTT_PASSWORD=${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
     depends_on:
@@ -218,13 +219,16 @@ services:
     network_mode: host
     cap_add:
       - NET_ADMIN
+    env_file:
+      - path: ../.env
+        required: false
     environment:
+      # Host-mode service — uses MQTT_BROKER_LOCAL from .env (localhost, not broker)
+      - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtt://localhost:1883}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - FRIGATE_URL=http://localhost:5000
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@localhost:1883
       - SCAN_INTERVAL=${CAMERA_SCAN_INTERVAL:-30}
       - CAMERA_SUBNET=${CAMERA_SUBNET:-192.168.100.0/24}
-      - DEVICE_SECRET=${DEVICE_SECRET:?Run ./scripts/setup.sh to generate secrets}
     depends_on:
       - frigate
       - broker

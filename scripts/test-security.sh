@@ -32,44 +32,62 @@ FAIL=0
 pass() { printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; PASS=$((PASS + 1)); }
 fail() { printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"; FAIL=$((FAIL + 1)); }
 
-# =============================================================================
-# Test 1: No hardcoded fallback passwords in docker-compose.yml
-# =============================================================================
-# Secret variables MUST use ${VAR:?error} (fail if unset), NOT ${VAR:-default}
-# (which silently falls back to an insecure value).
-# Non-secret defaults like POSTGRES_USER, POSTGRES_DB are fine with :- syntax.
-
 SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
 
+# =============================================================================
+# Test 1: Compose file contains NO :? patterns (always parseable)
+# =============================================================================
+# The compose file must NEVER use ${VAR:?error} syntax, which makes it
+# unparseable when .env is missing. All validation is in _validate_env().
+
+if grep -qE '\$\{[A-Z_]+:\?' "$COMPOSE_FILE"; then
+  fail "docker-compose.yml: contains :? patterns — must use :- or env_file only"
+else
+  pass "docker-compose.yml: no :? patterns (always parseable)"
+fi
+
+# =============================================================================
+# Test 2: No non-empty secret defaults in compose
+# =============================================================================
+# Secret variables must NOT have non-empty fallback defaults in compose.
+# ${POSTGRES_PASSWORD:-} (empty) is OK. ${POSTGRES_PASSWORD:-secret} is NOT.
+# The only safe patterns are: env_file delivery, or ${VAR:-} (empty default).
+
 for var in $SECRET_VARS; do
-  # Check for insecure fallback pattern: ${VAR:-anything}
-  if grep -qE "\\\$\{${var}:-" "$COMPOSE_FILE"; then
-    fail "docker-compose.yml: ${var} has insecure fallback default (uses :- instead of :?)"
+  # Match ${VAR:-X} where X is at least one non-} character (a real default)
+  if grep -qE "\\\$\{${var}:-[^}]+" "$COMPOSE_FILE"; then
+    fail "docker-compose.yml: ${var} has non-empty fallback (insecure)"
   else
-    pass "docker-compose.yml: ${var} has no fallback default"
+    pass "docker-compose.yml: ${var} has no hardcoded fallback"
   fi
 done
 
 # =============================================================================
-# Test 2: Secret variables use :? (required) syntax
+# Test 3: Validation function covers all secrets
 # =============================================================================
+# compose.sh must define REQUIRED_ENV_VARS containing all secret variable names.
+# This is the single source of truth for env validation.
+
+if grep -q '_validate_env()' "$COMPOSE_SH"; then
+  pass "compose.sh: _validate_env() function exists"
+else
+  fail "compose.sh: _validate_env() function is missing"
+fi
 
 for var in $SECRET_VARS; do
-  if grep -qE "\\\$\{${var}:\?" "$COMPOSE_FILE"; then
-    pass "docker-compose.yml: ${var} uses required-variable syntax (:?)"
+  if grep -q "$var" "$COMPOSE_SH"; then
+    pass "compose.sh: ${var} is in REQUIRED_ENV_VARS"
   else
-    fail "docker-compose.yml: ${var} missing required-variable syntax (:?)"
+    fail "compose.sh: ${var} is NOT in REQUIRED_ENV_VARS"
   fi
 done
 
 # =============================================================================
-# Test 3: All docker compose calls use --env-file
+# Test 4: All docker compose calls use --env-file
 # =============================================================================
 # Docker Compose must receive --env-file explicitly because the sudo fallback
 # in run_docker_compose() strips shell environment variables (env_reset).
-# Relying on `set -a; . .env; set +a` alone is insufficient.
 
-# Every run_docker_compose call in compose.sh must include --env-file
 compose_calls=$(grep -n 'run_docker_compose' "$COMPOSE_SH" || true)
 missing_env_file=false
 
@@ -94,8 +112,6 @@ else
 fi
 
 # Every docker compose invocation in verify.sh must also include --env-file.
-# Match lines that call _docker_compose or 'docker compose' as a command
-# (not variable definitions, function definitions, or printf strings).
 VERIFY_SH="$REPO_ROOT/scripts/verify.sh"
 verify_calls=$(grep -nE '(_docker_compose|docker compose) -f' "$VERIFY_SH" | grep -v 'printf' || true)
 missing_verify=false
@@ -114,7 +130,7 @@ if [ "$missing_verify" = false ]; then
 fi
 
 # =============================================================================
-# Test 4: .env.example exists and contains only placeholder values
+# Test 5: .env.example exists with placeholder values
 # =============================================================================
 
 ENV_EXAMPLE="$REPO_ROOT/.env.example"
@@ -125,9 +141,7 @@ else
   fail ".env.example is missing from repo"
 fi
 
-# Ensure no real secrets leaked into the template (should only contain 'change-me')
 if [ -f "$ENV_EXAMPLE" ]; then
-  # Check that password fields only contain 'change-me'
   PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" | grep -v 'change-me' | grep -v '^#' || true)
   if [ -z "$PASSWORD_LINES" ]; then
     pass ".env.example: all secrets use 'change-me' placeholder"
@@ -137,7 +151,7 @@ if [ -f "$ENV_EXAMPLE" ]; then
 fi
 
 # =============================================================================
-# Test 5: .env is excluded from git
+# Test 6: .env is excluded from git
 # =============================================================================
 
 GITIGNORE="$REPO_ROOT/.gitignore"
