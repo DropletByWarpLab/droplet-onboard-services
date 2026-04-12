@@ -23,6 +23,7 @@ import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { useFiles } from "@/lib/hooks/useFiles";
 import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
+import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import {
   uploadFiles,
   deleteFile,
@@ -77,6 +78,10 @@ export default function FilesPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+
+  // Subscribe to live file events so uploads/renames/etc. from other tabs,
+  // the CLI, or native clients show up immediately — no polling.
+  useFileRealtime();
 
   const { files, isLoading, refresh } = useFiles(currentPath);
   const fm = useFileManager(currentPath);

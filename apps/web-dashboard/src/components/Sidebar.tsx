@@ -14,6 +14,7 @@ import {
   Star,
   Clock,
   Share2,
+  Users,
   Video,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
@@ -27,6 +28,7 @@ const navItems = [
   { href: "/network", label: "Network", icon: Network },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/chat", label: "Chat", icon: MessageSquare },
+  { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

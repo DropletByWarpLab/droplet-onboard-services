@@ -103,6 +103,34 @@ export interface BulkOperationResult {
 /** View mode for the file manager — list or grid */
 export type FileViewMode = "list" | "grid";
 
+// --- Phase 3: device clients + pairing ---
+
+export interface DeviceClientInfo {
+  id: string;
+  deviceName: string;
+  deviceType: "desktop" | "mobile";
+  platform: "macos" | "windows" | "linux" | "ios" | "android" | "other";
+  appVersion: string | null;
+  lastSeen: string;
+  status: "active" | "revoked";
+  createdAt: string;
+}
+
+export interface PairingCodeInfo {
+  code: string;
+  expiresAt: string;
+  /** `droplet://pair?server=...&code=...` URL the dashboard encodes as a QR */
+  pairUrl: string;
+}
+
+export interface PairingCodeStatus {
+  code: string;
+  used: boolean;
+  expired: boolean;
+  expiresAt: string;
+  claimedBy: string | null;
+}
+
 // --- Auth types ---
 
 export interface AuthUser {

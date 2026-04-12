@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { config } from "./config.js";
@@ -8,6 +9,7 @@ import { initDeviceService } from "./services/device.service.js";
 import { initSmartHomeService } from "./services/smart-home.service.js";
 import { initNetworkService } from "./services/network.service.js";
 import { initCameraService, shutdownCameraService } from "./services/camera.service.js";
+import { attachWsBridge } from "./services/ws-bridge.service.js";
 import {
   initMatterService,
   shutdownMatterService,
@@ -78,9 +80,12 @@ async function main() {
     logger.warn("Frigate NVR unavailable, camera features disabled");
   }
 
-  // Start Express
+  // Start Express on top of a raw http.Server so we can attach the
+  // WebSocket bridge (MQTT → browser) to the same listen socket.
   const app = createApp(prisma);
-  app.listen(config.PORT, () => {
+  const server = createServer(app);
+  attachWsBridge(server);
+  server.listen(config.PORT, () => {
     logger.info("API server listening on port %d", config.PORT);
   });
 

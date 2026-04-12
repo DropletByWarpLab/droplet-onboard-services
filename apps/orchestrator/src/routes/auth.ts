@@ -11,6 +11,8 @@ import {
   ncCreateUser,
   ncDeleteUser,
   ncListUsers,
+  ncUpdateUser,
+  ncSetUserEnabled,
   ncOAuth2AuthorizeUrl,
   ncOAuth2ExchangeCode,
   ncOAuth2RefreshToken,
@@ -37,6 +39,23 @@ const createUserSchema = z.object({
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
 });
+
+const updateUserSchema = z
+  .object({
+    displayName: z.string().min(1).max(128).optional(),
+    email: z.string().email().max(200).optional(),
+    // Accept either a byte count (1073741824) or a human string ("5 GB", "none").
+    quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
+    password: z.string().min(8).max(128).optional(),
+  })
+  .refine(
+    (d) =>
+      d.displayName !== undefined ||
+      d.email !== undefined ||
+      d.quota !== undefined ||
+      d.password !== undefined,
+    { message: "At least one field is required" }
+  );
 
 /** Build the OAuth2 callback redirect URI from the current request. */
 function getRedirectUri(req: import("express").Request): string {
@@ -374,6 +393,86 @@ export function createProtectedAuthRouter(): Router {
     } catch (err: any) {
       if (err.message?.includes("102")) {
         res.status(409).json({ error: "User already exists" });
+        return;
+      }
+      next(err);
+    }
+  });
+
+  // ── Update user (admin only) ──
+  // Accepts any combination of displayName / email / quota / password and
+  // applies them one OCS PUT at a time. Each field is independent so a
+  // partial failure leaves the previously-applied fields in place.
+  router.put("/auth/users/:username", async (req, res, next) => {
+    try {
+      const token = resolveToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Authentication required" });
+        return;
+      }
+      const parsed = updateUserSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Invalid user update",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const { username } = req.params;
+      if (parsed.data.displayName !== undefined) {
+        await ncUpdateUser(token, username, "displayname", parsed.data.displayName);
+      }
+      if (parsed.data.email !== undefined) {
+        await ncUpdateUser(token, username, "email", parsed.data.email);
+      }
+      if (parsed.data.quota !== undefined) {
+        await ncUpdateUser(token, username, "quota", String(parsed.data.quota));
+      }
+      if (parsed.data.password !== undefined) {
+        await ncUpdateUser(token, username, "password", parsed.data.password);
+      }
+      res.json({ status: "ok", username });
+    } catch (err: any) {
+      if (err.message?.includes("403") || err.message?.includes("997")) {
+        res.status(403).json({ error: "Admin access required" });
+        return;
+      }
+      next(err);
+    }
+  });
+
+  // ── Disable / enable user (admin only) ──
+  router.post("/auth/users/:username/disable", async (req, res, next) => {
+    try {
+      const token = resolveToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Authentication required" });
+        return;
+      }
+      await ncSetUserEnabled(token, req.params.username, false);
+      res.json({ status: "disabled", username: req.params.username });
+    } catch (err: any) {
+      if (err.message?.includes("403") || err.message?.includes("997")) {
+        res.status(403).json({ error: "Admin access required" });
+        return;
+      }
+      next(err);
+    }
+  });
+
+  router.post("/auth/users/:username/enable", async (req, res, next) => {
+    try {
+      const token = resolveToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Authentication required" });
+        return;
+      }
+      await ncSetUserEnabled(token, req.params.username, true);
+      res.json({ status: "enabled", username: req.params.username });
+    } catch (err: any) {
+      if (err.message?.includes("403") || err.message?.includes("997")) {
+        res.status(403).json({ error: "Admin access required" });
         return;
       }
       next(err);

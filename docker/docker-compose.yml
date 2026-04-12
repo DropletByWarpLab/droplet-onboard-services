@@ -57,6 +57,7 @@ services:
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
       - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - DEVICE_SECRET_KEY=${DEVICE_SECRET_KEY:?Run ./scripts/setup.sh to generate secrets}
       - MATTER_STORAGE_PATH=/data/matter-storage
       - MATTER_CONTROLLER_NAME=${MATTER_CONTROLLER_NAME:-Droplet}
       # NOTE: Uses localhost because the routing service runs with network_mode: host.

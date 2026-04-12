@@ -405,6 +405,70 @@ export async function ncCreateUser(
   }
 }
 
+/**
+ * Update a single field on a Nextcloud user via OCS `PUT /cloud/users/{id}`.
+ *
+ * Field names mirror Nextcloud's OCS contract: `displayname`, `email`,
+ * `quota` (e.g. "5 GB" or `"none"` for unlimited), `password`. The OCS
+ * endpoint only accepts one field per request, so callers that need to
+ * update multiple fields should chain calls.
+ */
+export async function ncUpdateUser(
+  adminToken: string,
+  username: string,
+  field: "displayname" | "email" | "quota" | "password",
+  value: string
+): Promise<void> {
+  const resp = await fetch(
+    ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`),
+    {
+      method: "PUT",
+      headers: {
+        ...ocsHeaders(adminToken),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ key: field, value }),
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to update user ${username}: ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new Error(
+      `OCS update user: ${data?.ocs?.meta?.message ?? "unknown error"}`
+    );
+  }
+}
+
+/**
+ * Enable or disable a user account. Disabled users can't log in but their
+ * files are preserved — flip the flag back to re-enable.
+ */
+export async function ncSetUserEnabled(
+  adminToken: string,
+  username: string,
+  enabled: boolean
+): Promise<void> {
+  const action = enabled ? "enable" : "disable";
+  const resp = await fetch(
+    ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}/${action}`),
+    {
+      method: "PUT",
+      headers: ocsHeaders(adminToken),
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to ${action} user ${username}: ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new Error(
+      `OCS ${action} user: ${data?.ocs?.meta?.message ?? "unknown error"}`
+    );
+  }
+}
+
 export async function ncDeleteUser(
   adminToken: string,
   username: string
@@ -572,6 +636,37 @@ export async function ncDeleteAppPassword(token: string): Promise<void> {
     });
   } catch {
     // Non-fatal — token might already be expired
+  }
+}
+
+/**
+ * Mint a fresh Nextcloud app password for the authenticated user.
+ *
+ * The device pairing flow uses this to give each laptop/phone its own
+ * revocable token, distinct from the user's dashboard session. Every call
+ * returns a brand new token; the old one stays valid until explicitly
+ * revoked via ncDeleteAppPassword.
+ *
+ * Returns `null` when Nextcloud refuses (most commonly: the caller is
+ * already using a basic:-prefixed token, which some NC configs reject).
+ */
+export async function ncGenerateAppPassword(sourceToken: string): Promise<string | null> {
+  try {
+    const authHeader = resolveAuthHeader(sourceToken);
+    const resp = await fetch(ocsUrl("/ocs/v2.php/core/getapppassword"), {
+      headers: {
+        Authorization: authHeader,
+        "OCS-APIRequest": "true",
+        Accept: "application/json",
+      },
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const appPassword = data?.ocs?.data?.apppassword;
+    return typeof appPassword === "string" && appPassword.length > 0 ? appPassword : null;
+  } catch (err) {
+    logger.warn({ err }, "ncGenerateAppPassword failed");
+    return null;
   }
 }
 

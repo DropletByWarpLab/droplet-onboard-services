@@ -28,6 +28,9 @@ import type {
   ShareDetail,
   ShareCreateOptions,
   ShareUpdateOptions,
+  DeviceClientInfo,
+  PairingCodeInfo,
+  PairingCodeStatus,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -838,5 +841,81 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   if (!res.ok) throw new Error(`Failed to fetch shared-with-me: ${res.status}`);
   const data = await res.json();
   return data.shares ?? [];
+}
+
+// --- Phase 3: device clients + pairing + user admin ---
+
+export async function createPairingCode(data: {
+  deviceName: string;
+  deviceType: "desktop" | "mobile";
+  platform: "macos" | "windows" | "linux" | "ios" | "android" | "other";
+}): Promise<PairingCodeInfo> {
+  const res = await authFetch(`${BASE}/api/devices/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to generate pairing code: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getPairingCodeStatus(code: string): Promise<PairingCodeStatus> {
+  const res = await authFetch(`${BASE}/api/devices/pair/${code}/status`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Status lookup failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchDeviceClients(): Promise<DeviceClientInfo[]> {
+  const res = await authFetch(`${BASE}/api/devices/clients`);
+  if (!res.ok) throw new Error(`Failed to fetch device clients: ${res.status}`);
+  const data = await res.json();
+  return data.clients ?? [];
+}
+
+export async function revokeDeviceClient(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/devices/clients/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to revoke device: ${res.status}`);
+  }
+}
+
+export async function updateUser(
+  username: string,
+  data: {
+    displayName?: string;
+    email?: string;
+    quota?: string;
+    password?: string;
+  }
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/users/${username}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update user: ${res.status}`);
+  }
+}
+
+export async function setUserEnabled(username: string, enabled: boolean): Promise<void> {
+  const action = enabled ? "enable" : "disable";
+  const res = await authFetch(`${BASE}/api/auth/users/${username}/${action}`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to ${action} user: ${res.status}`);
+  }
 }
 
