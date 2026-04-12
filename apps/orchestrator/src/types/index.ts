@@ -149,6 +149,7 @@ export interface HealthResponse {
     homeAssistant: boolean;
     router: boolean;
     frigate: boolean;
+    switch: boolean;
   };
 }
 
@@ -170,3 +171,13 @@ export type {
   CameraNotificationPrefs,
   CameraSSEEvent,
 } from "./camera.js";
+
+// --- Managed Switch (re-export) ---
+export type {
+  SwitchPortStatus,
+  SwitchPoEPortStatus,
+  SwitchVlanInfo,
+  SwitchSystemInfo,
+  WanDetectionResult,
+  CameraSetupResult,
+} from "./switch.js";

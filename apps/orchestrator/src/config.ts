@@ -63,6 +63,9 @@ const envSchema = z.object({
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
+
+  // --- Managed Switch ---
+  SWITCH_SERVICE_URL: z.string().default("http://localhost:8081"),
 });
 
 export const config = envSchema.parse(process.env);

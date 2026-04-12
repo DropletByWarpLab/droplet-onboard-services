@@ -356,7 +356,101 @@ TOOL_HANDLERS = {
     "get_cameras": _get_cameras,
     "get_camera_events": _get_camera_events,
     "get_camera_snapshot": _get_camera_snapshot,
+    # Managed Switch tools
+    "get_switch_ports": _get_switch_ports,
+    "get_switch_vlans": _get_switch_vlans,
+    "set_port_vlan": _set_port_vlan,
+    "get_switch_poe": _get_switch_poe,
+    "set_port_poe": _set_port_poe,
+    "detect_wan_port": _detect_wan_port,
+    "setup_camera_ports": _setup_camera_ports,
 }
+
+
+# --- Managed Switch tool handlers ---
+
+
+async def _get_switch_ports(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/switch/ports")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_switch_vlans(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/switch/vlans")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _set_port_vlan(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.post(
+        f"/api/switch/vlans/{args['vlan_id']}/membership",
+        json={"ports": args["ports"]},
+    )
+    data = resp.json()
+    if resp.status_code == 202:
+        return {
+            "status": "confirmation_required",
+            "message": data.get("reason", "This action requires user confirmation."),
+            "note": "Please ask the user to confirm this action in the Droplet dashboard.",
+        }
+    resp.raise_for_status()
+    return data
+
+
+async def _get_switch_poe(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/switch/poe")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _set_port_poe(args: dict) -> dict:
+    port = args["port"]
+    enabled = args["enabled"]
+    client = _get_client()
+    endpoint = f"/api/switch/poe/{port}/{'enable' if enabled else 'disable'}"
+    resp = await client.post(endpoint)
+    data = resp.json()
+    if resp.status_code == 202:
+        return {
+            "status": "confirmation_required",
+            "message": data.get("reason", "This action requires user confirmation."),
+            "note": "Please ask the user to confirm this action in the Droplet dashboard.",
+        }
+    resp.raise_for_status()
+    return data
+
+
+async def _detect_wan_port(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.post("/api/switch/wan/detect")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _setup_camera_ports(args: dict) -> dict:
+    client = _get_client()
+    body = {}
+    if "vlan_id" in args:
+        body["vlan_id"] = args["vlan_id"]
+    if "camera_ports" in args:
+        body["camera_ports"] = args["camera_ports"]
+    if "uplink_ports" in args:
+        body["uplink_ports"] = args["uplink_ports"]
+    resp = await client.post("/api/switch/setup/cameras", json=body)
+    data = resp.json()
+    if resp.status_code == 202:
+        return {
+            "status": "confirmation_required",
+            "message": data.get("reason", "This action requires user confirmation."),
+            "note": "Please ask the user to confirm this action in the Droplet dashboard.",
+        }
+    resp.raise_for_status()
+    return data
 
 
 async def close():
