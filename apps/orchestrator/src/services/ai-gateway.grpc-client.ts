@@ -175,6 +175,39 @@ export function grpcListModels(): Promise<Array<{ id: string; provider: string; 
   });
 }
 
+/**
+ * Embed a batch of texts via gRPC. Returns one float[] per input text.
+ * Uses the ai-gateway's EmbedText RPC (sentence-transformers on CPU).
+ */
+export function grpcEmbedText(
+  texts: string[],
+  model?: string
+): Promise<number[][]> {
+  if (!client || !_available) {
+    return Promise.reject(new Error("gRPC client not available"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const req: Record<string, unknown> = { texts };
+    if (model) req.model = model;
+
+    client.EmbedText(
+      req,
+      { deadline: Date.now() + 60_000 }, // 60s timeout for large batches
+      (err: any, response: any) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        const embeddings: number[][] = (response.embeddings || []).map(
+          (arr: any) => arr.values || []
+        );
+        resolve(embeddings);
+      }
+    );
+  });
+}
+
 export class QueueFullError extends Error {
   constructor(message: string) {
     super(message);

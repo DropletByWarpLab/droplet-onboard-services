@@ -131,3 +131,22 @@ model CameraNotificationPref {
 
   @@unique([userId, cameraId])
 }
+
+// ── Phase 4: AI file content indexing (pgvector) ──
+// Stores chunked text + embeddings for semantic file search.
+// Requires CREATE EXTENSION IF NOT EXISTS vector; in the db.
+model FileContentChunk {
+  id        BigInt   @id @default(autoincrement())
+  userId    String                                     // Nextcloud username
+  ncFileId  Int                                        // Nextcloud numeric file ID
+  path      String                                     // Human-readable path for display
+  chunkIdx  Int                                        // 0-based chunk index within the file
+  text      String                                     // Raw text of this chunk
+  // pgvector column — 384 dims for all-MiniLM-L6-v2.
+  // Prisma doesn't support vector natively; use Unsupported + raw SQL.
+  embedding Unsupported("vector(384)")
+  indexedAt DateTime @default(now())
+
+  @@unique([ncFileId, chunkIdx])
+  @@index([userId])
+}

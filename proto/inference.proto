@@ -9,6 +9,8 @@ service InferenceService {
   rpc StreamChat(ChatRequest) returns (stream ChatChunk);
   // List available models
   rpc ListModels(Empty) returns (ModelList);
+  // Text embedding — used by the file-indexer for semantic search (Phase 4)
+  rpc EmbedText(EmbedRequest) returns (EmbedResponse);
 }
 
 message ChatRequest {
@@ -55,4 +57,21 @@ message ModelInfo {
   string provider = 2;
   string name = 3;
   optional int32 context_window = 4;
+}
+
+// ── Embedding (Phase 4 — file-indexer) ──
+
+message EmbedRequest {
+  // Texts to embed. Max batch size is model-dependent (typically 256).
+  repeated string texts = 1;
+  // Model override. Default: "all-MiniLM-L6-v2" (384-dim, CPU-friendly).
+  optional string model = 2;
+}
+
+message EmbedResponse {
+  repeated FloatArray embeddings = 1;
+}
+
+message FloatArray {
+  repeated float values = 1;
 }

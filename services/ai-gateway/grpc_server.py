@@ -161,6 +161,42 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_details(str(e))
             return inference_pb2.ModelList()
 
+    async def EmbedText(self, request, context):
+        """Compute embeddings for a batch of texts.
+
+        Uses sentence-transformers locally on CPU. The model is loaded lazily
+        on first call (~2s cold start, ~80 MB download). Subsequent calls are
+        instant. Blocks the event loop for the encode step — acceptable for the
+        file-indexer's batch workload; a threadpool offload can be added later
+        if interactive latency matters.
+        """
+        try:
+            from providers.embeddings import embed_texts
+
+            texts = list(request.texts)
+            if not texts:
+                return inference_pb2.EmbedResponse()
+
+            model_name = request.model if request.HasField("model") else None
+
+            # Run the synchronous encode in a thread to keep the event loop responsive.
+            loop = asyncio.get_running_loop()
+            vectors = await loop.run_in_executor(
+                None, embed_texts, texts, model_name
+            )
+
+            return inference_pb2.EmbedResponse(
+                embeddings=[
+                    inference_pb2.FloatArray(values=vec)
+                    for vec in vectors
+                ]
+            )
+        except Exception as e:
+            logger.error("gRPC EmbedText error: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Embedding error: {str(e)}")
+            return inference_pb2.EmbedResponse()
+
 
 async def start_grpc_server(
     provider_router: ProviderRouter,

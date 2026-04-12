@@ -842,6 +842,29 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   return data.shares ?? [];
 }
 
+// --- Phase 4: Semantic content search ---
+
+export interface SemanticSearchResult {
+  path: string;
+  score: number;
+  text: string;
+}
+
+export async function searchFileContent(
+  query: string,
+  limit = 20
+): Promise<SemanticSearchResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const res = await authFetch(`${BASE}/api/files/search/content?${params}`);
+  if (!res.ok) {
+    if (res.status === 503) return []; // AI gateway down — graceful degrade
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Semantic search failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results ?? [];
+}
+
 // --- Phase 3: device clients + pairing + user admin ---
 
 export async function createPairingCode(data: {
