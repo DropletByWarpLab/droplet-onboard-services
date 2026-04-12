@@ -192,10 +192,19 @@ echo ""
 echo "[4/4] Collecting output images..."
 
 mkdir -p "${OUTPUT_DIR}"
+
+# Collect SD card image (.img.gz)
 cp -v bin/targets/${OWRT_TARGET}/${OWRT_SUBTARGET}/*-droplet-*.img.gz "${OUTPUT_DIR}/" 2>/dev/null || \
 cp -v bin/targets/${OWRT_TARGET}/${OWRT_SUBTARGET}/*.img.gz "${OUTPUT_DIR}/" 2>/dev/null || true
 
+# Collect sysupgrade image (.img.gz with "sysupgrade" in name) for in-place updates
+cp -v bin/targets/${OWRT_TARGET}/${OWRT_SUBTARGET}/*sysupgrade*.img.gz "${OUTPUT_DIR}/" 2>/dev/null || true
+# Also copy .itb format if produced (some targets use this)
+cp -v bin/targets/${OWRT_TARGET}/${OWRT_SUBTARGET}/*sysupgrade*.itb "${OUTPUT_DIR}/" 2>/dev/null || true
+
 cd "${BUILD_DIR}"
+
+SYSUPGRADE_FILE=$(ls "${OUTPUT_DIR}"/*sysupgrade* 2>/dev/null | head -1 || true)
 
 echo ""
 echo "============================================="
@@ -204,11 +213,21 @@ echo "============================================="
 echo ""
 echo " Output images:"
 ls -lh "${OUTPUT_DIR}"/*.img.gz 2>/dev/null || echo "  (no .img.gz found — check build.log)"
+ls -lh "${OUTPUT_DIR}"/*sysupgrade* 2>/dev/null || true
 echo ""
-echo " Next steps:"
-echo "   1. Flash to SD card:  gunzip -k output/*.img.gz && sudo dd if=output/*.img of=/dev/sdX bs=4M status=progress"
+echo " Fresh install (new SD card):"
+echo "   1. Flash:  gunzip -k output/*.img.gz && sudo dd if=output/*.img of=/dev/sdX bs=4M status=progress"
 echo "   2. Or use balenaEtcher / Raspberry Pi Imager (supports .img.gz directly)"
-echo "   3. Insert SD card into Pi 5, boot, and connect WAN to ETH0 (onboard port)"
-echo "   4. Connect TP-Link UE306 USB NIC for LAN distribution"
-echo "   5. Pi will be reachable at 192.168.50.1 on the LAN"
+echo "   3. Insert SD card into Pi 5, boot, connect WAN to ETH0, LAN via USB NIC"
+echo "   4. Pi will be reachable at 192.168.50.1 on the LAN"
+echo ""
+if [ -n "${SYSUPGRADE_FILE}" ]; then
+echo " In-place upgrade (existing OpenWrt):"
+echo "   1. From LAN:  ./scripts/upgrade-router.sh ${SYSUPGRADE_FILE}"
+echo "   2. Or manual:  scp ${SYSUPGRADE_FILE} root@10.0.0.1:/tmp/"
+echo "                  ssh root@10.0.0.1 'sysupgrade -v /tmp/$(basename "${SYSUPGRADE_FILE}")'"
+echo "   3. UCI configs (/etc/config/*) are preserved across upgrades"
+echo "   4. New defaults (camera VLAN, etc.) apply via /etc/uci-defaults/ on next boot"
+echo ""
+fi
 echo ""
