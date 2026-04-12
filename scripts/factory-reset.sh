@@ -136,7 +136,7 @@ log_step 1 4 "Stopping all services"
 #
 # The compose file has no ${VAR:?error} patterns, so this always works
 # regardless of .env state. Pass --env-file only when .env exists.
-local env_flag=""
+env_flag=""
 if [ -f "$REPO_ROOT/.env" ]; then
   env_flag="--env-file $REPO_ROOT/.env"
 fi

@@ -23,6 +23,10 @@ _ensure_log_dir() {
   local log_dir
   log_dir="$(dirname "$LOG_FILE")"
   mkdir -p "$log_dir" 2>/dev/null || true
+  # Reclaim a root-owned log file from a previous Docker/sudo run
+  if [ -f "$LOG_FILE" ] && [ ! -w "$LOG_FILE" ]; then
+    sudo rm -f "$LOG_FILE" 2>/dev/null || rm -f "$LOG_FILE" 2>/dev/null || true
+  fi
 }
 
 _log_to_file() {
