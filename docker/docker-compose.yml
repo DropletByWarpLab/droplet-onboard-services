@@ -255,6 +255,22 @@ services:
     profiles: ["full"]
     restart: always
 
+  # --- Managed Switch (PoE + VLAN control) ---
+  switch:
+    build:
+      context: ../services/switch
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
+      - SWITCH_PORT=${SWITCH_PORT:-443}
+      - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
+      - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
+      - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
+      - PORT=8081
+    profiles: ["full"]
+    restart: always
+
   # --- Frigate NVR (camera management + AI detection) ---
   # Always runs — even with zero cameras. Ready to accept cameras later
   # via auto-discovery or manual add in the dashboard.
