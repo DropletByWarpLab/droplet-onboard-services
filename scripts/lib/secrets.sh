@@ -43,12 +43,13 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
   nc_password=$(_gen_password 24)
   device_secret=$(_gen_fernet_key)
+  device_secret_key=$(openssl rand -base64 32)
 
   # --- Write .env from template ---
   cp "$env_example" "$env_file"
@@ -72,6 +73,9 @@ generate_env() {
   # BYOK encryption key
   sed -i.tmp "s|DEVICE_SECRET=change-me|DEVICE_SECRET=$device_secret|g" "$env_file"
 
+  # 32-byte AES key for orchestrator encryption at rest
+  sed -i.tmp "s|DEVICE_SECRET_KEY=change-me|DEVICE_SECRET_KEY=$device_secret_key|g" "$env_file"
+
   # Clean up sed backup files
   rm -f "$env_file.tmp"
 
@@ -84,6 +88,7 @@ generate_env() {
   log_info "  MQTT_PASSWORD     : ${mqtt_password:0:4}****"
   log_info "  NEXTCLOUD_ADMIN   : ${nc_password:0:4}****"
   log_info "  DEVICE_SECRET     : ${device_secret:0:8}****"
+  log_info "  DEVICE_SECRET_KEY : ${device_secret_key:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # --- Generate Mosquitto password file ---

@@ -39,7 +39,7 @@ fail() { printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"; FAIL=$((FAIL + 1)); }
 # (which silently falls back to an insecure value).
 # Non-secret defaults like POSTGRES_USER, POSTGRES_DB are fine with :- syntax.
 
-SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET"
+SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
 
 for var in $SECRET_VARS; do
   # Check for insecure fallback pattern: ${VAR:-anything}
