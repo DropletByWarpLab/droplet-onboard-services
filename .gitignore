@@ -13,6 +13,7 @@ __pycache__/
 .next/
 .data/
 .claude/
+*.tsbuildinfo
 
 # Generated MQTT credentials (device-specific, created by setup.sh)
 docker/mosquitto_passwd_dir/mosquitto_passwd

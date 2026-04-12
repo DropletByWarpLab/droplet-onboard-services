@@ -106,25 +106,21 @@ _generate_mosquitto_passwd() {
 
   log_info "Generating MQTT password file..."
 
-  # Ensure the target directory exists (this is what docker-compose.yml mounts)
+  # Ensure the target directory exists (this is what docker-compose.yml mounts).
+  # The parent directory is owned by the current user, so we can unlink any
+  # stale file inside it without sudo even if the file itself is root-owned.
   mkdir -p "$passwd_dir"
+  rm -f "$passwd_file" 2>/dev/null || true
 
-  # Clean up any root-owned file from a previous failed run
-  if [ -f "$passwd_file" ] && [ ! -w "$passwd_file" ]; then
-    sudo rm -f "$passwd_file" 2>/dev/null || true
-  fi
-
-  # Write directly to the final mount location — no intermediate copy needed.
-  # On Linux, Docker bind-mounts create files as root; on macOS Docker Desktop,
-  # files are created with host-user ownership. Only chown if needed.
+  # Write directly to the final mount location. Pass --user so the container
+  # runs as the host user and the generated file is already correctly owned —
+  # no follow-up `sudo chown` needed. This is required for unattended factory
+  # reset on the device, where nothing should prompt for a sudo password.
   if run_docker run --rm \
+    --user "$(id -u):$(id -g)" \
     -v "$passwd_dir:/tmp/mqtt" \
     eclipse-mosquitto:2 \
     sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'"; then
-    # Fix ownership only if the file is not already owned by the current user
-    if [ -f "$passwd_file" ] && [ "$(stat -c '%u' "$passwd_file" 2>/dev/null || stat -f '%u' "$passwd_file" 2>/dev/null)" != "$(id -u)" ]; then
-      sudo chown "$(id -u):$(id -g)" "$passwd_file"
-    fi
     chmod 600 "$passwd_file"
     log_success "MQTT password file generated"
   else
@@ -134,19 +130,18 @@ _generate_mosquitto_passwd() {
     chmod 600 "$passwd_file"
   fi
 
-  # Clean up stale intermediate file from old code path
-  if [ -f "$REPO_ROOT/docker/mosquitto_passwd" ]; then
-    rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || sudo rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || true
-  fi
+  # Clean up stale intermediate file from old code path. The parent directory
+  # (docker/) is user-owned, so plain rm can unlink even a root-owned file.
+  rm -f "$REPO_ROOT/docker/mosquitto_passwd" 2>/dev/null || true
 }
 
 _write_mosquitto_conf() {
   local conf_file="$REPO_ROOT/docker/mosquitto.conf"
 
-  # Clean up root-owned file from a previous failed run
-  if [ -f "$conf_file" ] && [ ! -w "$conf_file" ]; then
-    sudo rm -f "$conf_file" 2>/dev/null || true
-  fi
+  # Clean up stale file or directory from a previous failed run. Docker creates
+  # a directory if the bind-mount target doesn't exist as a file yet, so we
+  # need rm -rf to handle both cases.
+  rm -rf "$conf_file" 2>/dev/null || true
 
   cat > "$conf_file" << 'MQTTCONF'
 listener 1883
