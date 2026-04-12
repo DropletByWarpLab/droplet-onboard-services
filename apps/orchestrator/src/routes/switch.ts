@@ -177,6 +177,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
           await switchClient.enablePort(p.port as number);
           break;
         case "switch_port_disable":
+        case "switch_disable_protected_port":
           await switchClient.disablePort(p.port as number);
           break;
         case "switch_create_vlan":

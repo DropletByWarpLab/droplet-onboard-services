@@ -331,48 +331,6 @@ async def _get_camera_snapshot(args: dict) -> dict:
     }
 
 
-TOOL_HANDLERS = {
-    "list_files": _list_files,
-    "read_file": _read_file,
-    "search_files": _search_files,
-    "list_devices": _list_devices,
-    "get_system_health": _get_system_health,
-    "list_sync_targets": _list_sync_targets,
-    "trigger_sync": _trigger_sync,
-    # Smart Home / Matter tools
-    "list_smart_home_devices": _list_smart_home_devices,
-    "get_smart_home_device": _get_smart_home_device,
-    "control_device": _control_device,
-    "discover_matter_devices": _discover_matter_devices,
-    "commission_device": _commission_device,
-    "get_command_history": _get_command_history,
-    # Network / Router tools
-    "get_network_status": _get_network_status,
-    "get_connected_devices": _get_connected_devices,
-    "get_wifi_settings": _get_wifi_settings,
-    "scan_wifi_networks": _scan_wifi_networks,
-    "set_wifi_ssid": _set_wifi_ssid,
-    "set_wifi_channel": _set_wifi_channel,
-    "get_firewall_rules": _get_firewall_rules,
-    "block_network_device": _block_network_device,
-    "unblock_network_device": _unblock_network_device,
-    "add_port_forward": _add_port_forward,
-    "get_router_system_info": _get_router_system_info,
-    # Camera / Frigate tools
-    "get_cameras": _get_cameras,
-    "get_camera_events": _get_camera_events,
-    "get_camera_snapshot": _get_camera_snapshot,
-    # Managed Switch tools
-    "get_switch_ports": _get_switch_ports,
-    "get_switch_vlans": _get_switch_vlans,
-    "set_port_vlan": _set_port_vlan,
-    "get_switch_poe": _get_switch_poe,
-    "set_port_poe": _set_port_poe,
-    "detect_wan_port": _detect_wan_port,
-    "setup_camera_ports": _setup_camera_ports,
-}
-
-
 # --- Managed Switch tool handlers ---
 
 
@@ -457,6 +415,48 @@ async def _setup_camera_ports(args: dict) -> dict:
         }
     resp.raise_for_status()
     return data
+
+
+TOOL_HANDLERS = {
+    "list_files": _list_files,
+    "read_file": _read_file,
+    "search_files": _search_files,
+    "list_devices": _list_devices,
+    "get_system_health": _get_system_health,
+    "list_sync_targets": _list_sync_targets,
+    "trigger_sync": _trigger_sync,
+    # Smart Home / Matter tools
+    "list_smart_home_devices": _list_smart_home_devices,
+    "get_smart_home_device": _get_smart_home_device,
+    "control_device": _control_device,
+    "discover_matter_devices": _discover_matter_devices,
+    "commission_device": _commission_device,
+    "get_command_history": _get_command_history,
+    # Network / Router tools
+    "get_network_status": _get_network_status,
+    "get_connected_devices": _get_connected_devices,
+    "get_wifi_settings": _get_wifi_settings,
+    "scan_wifi_networks": _scan_wifi_networks,
+    "set_wifi_ssid": _set_wifi_ssid,
+    "set_wifi_channel": _set_wifi_channel,
+    "get_firewall_rules": _get_firewall_rules,
+    "block_network_device": _block_network_device,
+    "unblock_network_device": _unblock_network_device,
+    "add_port_forward": _add_port_forward,
+    "get_router_system_info": _get_router_system_info,
+    # Camera / Frigate tools
+    "get_cameras": _get_cameras,
+    "get_camera_events": _get_camera_events,
+    "get_camera_snapshot": _get_camera_snapshot,
+    # Managed Switch tools
+    "get_switch_ports": _get_switch_ports,
+    "get_switch_vlans": _get_switch_vlans,
+    "set_port_vlan": _set_port_vlan,
+    "get_switch_poe": _get_switch_poe,
+    "set_port_poe": _set_port_poe,
+    "detect_wan_port": _detect_wan_port,
+    "setup_camera_ports": _setup_camera_ports,
+}
 
 
 async def close():

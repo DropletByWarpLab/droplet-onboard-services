@@ -105,6 +105,7 @@ export async function deleteVlan(vlanId: number): Promise<void> {
 
 export async function fetchVlanMembership(vlanId: number): Promise<unknown> {
   const resp = await fetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
+    headers: authHeaders(),
     signal: timeout(),
   });
   if (!resp.ok) throw new Error(`VLAN membership: ${resp.status}`);

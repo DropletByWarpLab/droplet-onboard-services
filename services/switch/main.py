@@ -45,18 +45,22 @@ logging.basicConfig(level=logging.INFO)
 # Service-to-service authentication
 # ---------------------------------------------------------------------------
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
+if not SERVICE_SECRET:
+    logger.warning("SERVICE_SECRET not set — all endpoints are unauthenticated. "
+                    "Set SERVICE_SECRET to enable service-to-service auth.")
 
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):
     """Reject requests without a valid SERVICE_SECRET Bearer token."""
 
     async def dispatch(self, request: Request, call_next):
+        import hmac
         if request.url.path == "/health":
             return await call_next(request)
         if SERVICE_SECRET:
             auth = request.headers.get("Authorization", "")
             token = auth.removeprefix("Bearer ").strip()
-            if token != SERVICE_SECRET:
+            if not hmac.compare_digest(token, SERVICE_SECRET):
                 return JSONResponse(
                     status_code=403,
                     content={"error": "Invalid or missing service token"},

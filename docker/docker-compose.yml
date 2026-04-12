@@ -236,12 +236,11 @@ services:
   # --- Frigate NVR (camera management + AI detection) ---
   # Always runs — even with zero cameras. Ready to accept cameras later
   # via auto-discovery or manual add in the dashboard.
+  # Override FRIGATE_IMAGE in .env for GPU-accelerated variant:
+  #   FRIGATE_IMAGE=ghcr.io/blakeblackshear/frigate:stable-tensorrt
   frigate:
-    image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
     shm_size: "256mb"
-    runtime: nvidia
-    cap_add:
-      - SYS_RAWIO      # GPU access for TensorRT
     expose:
       - "8971"
       - "5000"

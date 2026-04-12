@@ -33,6 +33,15 @@ import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 
 const logger = pino({ name: "cameras-routes" });
 
+/** Service-to-service auth headers for routing/discovery services. */
+function serviceAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (config.SERVICE_SECRET) {
+    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  }
+  return headers;
+}
+
 // --- Input validation helpers ---
 
 /** Camera names: alphanumeric, underscores, hyphens only (Frigate convention) */
@@ -303,6 +312,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   router.get("/cameras/subnet", async (_req, res) => {
     try {
       const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+        headers: serviceAuthHeaders(),
         signal: AbortSignal.timeout(5000),
       });
       if (!resp.ok) {
@@ -336,7 +346,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const body = req.body || {};
       const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
         body: JSON.stringify({
           vlan_id: body.vlanId || 100,
           subnet: body.subnet || "192.168.100.1",
@@ -378,6 +388,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
         method: "DELETE",
+        headers: serviceAuthHeaders(),
         signal: AbortSignal.timeout(30000),
       });
       const data = await resp.json();

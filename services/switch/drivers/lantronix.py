@@ -52,9 +52,14 @@ class LantronixDriver(SwitchDriver):
     # --- Lifecycle ---
 
     async def connect(self) -> None:
+        logger.warning(
+            "TLS certificate verification disabled for switch at %s:%d "
+            "(self-signed cert expected). Set SWITCH_CA_CERT to enable verification.",
+            self._host, self._port,
+        )
         self._client = httpx.AsyncClient(
             base_url=f"https://{self._host}:{self._port}",
-            verify=False,
+            verify=False,  # Self-signed cert on embedded switch
             timeout=15.0,
             follow_redirects=False,
         )
@@ -122,7 +127,17 @@ class LantronixDriver(SwitchDriver):
 
         try:
             resp = await self._client.request(method, path, **kwargs)
-            data = resp.json()
+
+            # Guard against non-JSON responses (e.g., HTML error pages)
+            content_type = resp.headers.get("content-type", "")
+            if "json" not in content_type and "javascript" not in content_type:
+                if resp.status_code >= 400:
+                    raise SwitchAPIError(resp.status_code, f"Non-JSON response: {resp.text[:200]}")
+                # Try parsing anyway — some firmware sends JSON without the header
+            try:
+                data = resp.json()
+            except Exception:
+                raise SwitchAPIError(resp.status_code, f"Invalid JSON from switch: {resp.text[:200]}")
 
             # Check for session expiry (switch redirects to login)
             if isinstance(data, dict) and "redirect_url" in data:
