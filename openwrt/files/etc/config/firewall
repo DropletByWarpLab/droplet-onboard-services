@@ -1,0 +1,163 @@
+# =============================================================================
+# Droplet Firewall Configuration
+# =============================================================================
+# Standard WAN→LAN NAT with masquerading
+# LAN is fully trusted, WAN is untrusted
+# ubus API accessible only from LAN (port 80/443)
+# =============================================================================
+
+config defaults
+    option syn_flood '1'
+    option input 'ACCEPT'
+    option output 'ACCEPT'
+    option forward 'REJECT'
+    option flow_offloading '1'
+    option flow_offloading_hw '1'
+
+# --- LAN zone (trusted) ---
+config zone 'lan_zone'
+    option name 'lan'
+    list network 'lan'
+    option input 'ACCEPT'
+    option output 'ACCEPT'
+    option forward 'ACCEPT'
+
+# --- WAN zone (untrusted) ---
+config zone 'wan_zone'
+    option name 'wan'
+    list network 'wan'
+    list network 'wan6'
+    option input 'REJECT'
+    option output 'ACCEPT'
+    option forward 'REJECT'
+    option masq '1'
+    option mtu_fix '1'
+
+# --- LAN → WAN forwarding (NAT) ---
+config forwarding
+    option src 'lan'
+    option dest 'wan'
+
+# --- Allow DHCP/DNS on LAN ---
+config rule
+    option name 'Allow-DHCP-LAN'
+    option src 'lan'
+    option proto 'udp'
+    option dest_port '67-68'
+    option target 'ACCEPT'
+
+config rule
+    option name 'Allow-DNS-LAN'
+    option src 'lan'
+    option proto 'tcpudp'
+    option dest_port '53'
+    option target 'ACCEPT'
+
+# --- Allow DHCP renew on WAN ---
+config rule
+    option name 'Allow-DHCP-Renew'
+    option src 'wan'
+    option proto 'udp'
+    option dest_port '68'
+    option target 'ACCEPT'
+    option family 'ipv4'
+
+# --- Allow ICMPv4 ping on WAN (rate limited) ---
+config rule
+    option name 'Allow-Ping'
+    option src 'wan'
+    option proto 'icmp'
+    option icmp_type 'echo-request'
+    option family 'ipv4'
+    option target 'ACCEPT'
+    option limit '1/sec'
+
+# --- Allow ICMPv6 essentials on WAN ---
+config rule
+    option name 'Allow-ICMPv6-Input'
+    option src 'wan'
+    option proto 'icmp'
+    list icmp_type 'echo-request'
+    list icmp_type 'echo-reply'
+    list icmp_type 'destination-unreachable'
+    list icmp_type 'packet-too-big'
+    list icmp_type 'time-exceeded'
+    list icmp_type 'bad-header'
+    list icmp_type 'unknown-header-type'
+    list icmp_type 'router-solicitation'
+    list icmp_type 'neighbour-solicitation'
+    list icmp_type 'router-advertisement'
+    list icmp_type 'neighbour-advertisement'
+    option family 'ipv6'
+    option target 'ACCEPT'
+    option limit '1000/sec'
+
+# --- Allow DHCPv6 on WAN ---
+config rule
+    option name 'Allow-DHCPv6'
+    option src 'wan'
+    option proto 'udp'
+    option dest_port '546'
+    option family 'ipv6'
+    option target 'ACCEPT'
+
+# --- Camera zone (isolated — cameras can't reach LAN or each other) ---
+config zone 'cameras_zone'
+    option name 'cameras'
+    list network 'cameras'
+    option input 'REJECT'
+    option output 'ACCEPT'
+    option forward 'REJECT'
+
+# Allow Droplet (LAN side) to access cameras (RTSP, ONVIF, HTTP)
+config forwarding 'lan_to_cameras'
+    option src 'lan'
+    option dest 'cameras'
+
+# Allow cameras to reach WAN (NTP, DNS, firmware updates)
+config forwarding 'cameras_to_wan'
+    option src 'cameras'
+    option dest 'wan'
+
+# Allow cameras to get DHCP from the router
+config rule 'cameras_dhcp'
+    option name 'Allow-Camera-DHCP'
+    option src 'cameras'
+    option proto 'udp'
+    option dest_port '67-68'
+    option target 'ACCEPT'
+
+# Allow cameras to resolve DNS via the router
+config rule 'cameras_dns'
+    option name 'Allow-Camera-DNS'
+    option src 'cameras'
+    option proto 'tcpudp'
+    option dest_port '53'
+    option target 'ACCEPT'
+
+# Allow cameras to ping the router (health checks)
+config rule 'cameras_ping'
+    option name 'Allow-Camera-Ping'
+    option src 'cameras'
+    option proto 'icmp'
+    option icmp_type 'echo-request'
+    option target 'ACCEPT'
+    option limit '5/sec'
+
+# --- Block WAN access to ubus API (IPv4) ---
+config rule
+    option name 'Block-ubus-WAN-v4'
+    option src 'wan'
+    option proto 'tcp'
+    option dest_port '80 443'
+    option family 'ipv4'
+    option target 'REJECT'
+
+# --- Block WAN access to ubus API (IPv6) ---
+config rule
+    option name 'Block-ubus-WAN-v6'
+    option src 'wan'
+    option proto 'tcp'
+    option dest_port '80 443'
+    option family 'ipv6'
+    option target 'REJECT'

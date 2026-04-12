@@ -1,0 +1,78 @@
+/**
+ * Network Safety Tier classification rules.
+ *
+ * Tier 1 (auto-execute): Read-only + low-risk writes (SSID, channel, DNS, static lease).
+ * Tier 2 (requires confirmation): Firewall changes, WiFi password, WAN config, VLANs.
+ * Tier 3 (blocked for AI, web UI only): Reboot, VPN, factory reset.
+ *
+ * Follows the same pattern as safety-rules.ts for smart home.
+ */
+
+import type { SafetyTier, TierClassification } from "./safety-rules.js";
+
+/** Operations that always require confirmation. */
+const TIER_2_OPERATIONS = new Set([
+  "block_device",
+  "unblock_device",
+  "add_port_forward",
+  "remove_port_forward",
+  "set_wifi_password",
+  "set_wan_protocol",
+  "set_lan_ip",
+  "create_vlan",
+  "create_guest_network",
+  "create_firewall_zone",
+  "add_firewall_rule",
+  "delete_firewall_rule",
+  "add_forwarding",
+  "interface_down",
+]);
+
+/** Operations blocked for AI — require manual web UI interaction. */
+const TIER_3_OPERATIONS = new Set([
+  "reboot",
+  "factory_reset",
+  "create_vpn_interface",
+  "add_vpn_peer",
+  "setup_vpn_firewall",
+  "network_restart",
+]);
+
+/** Rate limit for network commands: max per entity per minute. */
+export const NETWORK_RATE_LIMIT_PER_ENTITY = 5;
+export const NETWORK_RATE_LIMIT_WINDOW_MS = 60_000;
+
+/** Confirmation token expiry. */
+export const NETWORK_CONFIRMATION_TOKEN_EXPIRY_MS = 60_000;
+
+/**
+ * Classify a network operation into a safety tier.
+ */
+export function classifyNetworkCommand(
+  operation: string,
+  _params?: Record<string, unknown>
+): TierClassification {
+  // Tier 3: Blocked for AI
+  if (TIER_3_OPERATIONS.has(operation)) {
+    return {
+      tier: 3 as SafetyTier,
+      requiresConfirmation: true,
+      reason: `Operation '${operation}' is restricted to the web UI for safety`,
+    };
+  }
+
+  // Tier 2: Requires confirmation
+  if (TIER_2_OPERATIONS.has(operation)) {
+    return {
+      tier: 2 as SafetyTier,
+      requiresConfirmation: true,
+      reason: `Network operation '${operation}' requires confirmation`,
+    };
+  }
+
+  // Tier 1: Auto-execute
+  return {
+    tier: 1 as SafetyTier,
+    requiresConfirmation: false,
+  };
+}

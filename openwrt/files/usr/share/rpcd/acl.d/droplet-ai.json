@@ -1,0 +1,36 @@
+{
+  "droplet-ai": {
+    "description": "Network management access for Droplet AI agent (Jetson)",
+    "read": {
+      "ubus": {
+        "system": ["board", "info"],
+        "network.interface.*": ["status", "dump"],
+        "network.device": ["status"],
+        "network.wireless": ["status"],
+        "iwinfo": ["info", "scan", "assoclist", "freqlist", "countrylist", "phyname"],
+        "dhcp": ["ipv4leases", "ipv6leases"],
+        "uci": ["get", "state", "configs"],
+        "file": ["read", "list", "stat"],
+        "service": ["list"],
+        "session": ["access", "list"],
+        "hostapd.*": ["get_clients", "get_status"],
+        "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices"]
+      },
+      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
+    },
+    "write": {
+      "ubus": {
+        "network": ["restart"],
+        "network.interface.*": ["up", "down"],
+        "network.wireless": ["up", "down", "reconf", "notify"],
+        "uci": ["set", "add", "delete", "rename", "reorder", "commit", "apply", "rollback", "changes", "revert"],
+        "system": ["reboot"],
+        "service": ["set", "delete", "signal"],
+        "session": ["login", "destroy"],
+        "hostapd.*": ["del_client"],
+        "wireguard": ["*"]
+      },
+      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
+    }
+  }
+}

@@ -130,6 +130,9 @@ export interface HealthResponse {
     redis: boolean;
     aiGateway: boolean;
     matter: boolean;
+    homeAssistant: boolean;
+    router: boolean;
+    frigate: boolean;
   };
 }
 
@@ -141,3 +144,13 @@ export type {
   SmartHomeCommand,
   DiscoveredDevice,
 } from "./smart-home.js";
+
+// --- Camera / Frigate (re-export) ---
+export type {
+  CameraInfo,
+  DetectionEvent,
+  DiscoveredCamera,
+  FrigateStats,
+  CameraNotificationPrefs,
+  CameraSSEEvent,
+} from "./camera.js";

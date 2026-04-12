@@ -10,8 +10,11 @@ Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains
 apps/orchestrator/      Express + Prisma — central API and device control
 apps/web-dashboard/     Next.js 14 — admin UI
 services/ai-gateway/    FastAPI + LiteLLM — model routing proxy
+services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-sync/     Python watchdog — file sync daemon
-docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home Assistant
+services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
+openwrt/                OpenWrt image builder + config overlay for Pi 5 router
+docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home Assistant, Frigate NVR
 ```
 
 ## Tech stack
@@ -19,8 +22,11 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home 
 - **Orchestrator:** Node.js, Express, Prisma ORM, PostgreSQL
 - **Web dashboard:** Next.js 14, React
 - **AI gateway:** Python, FastAPI, LiteLLM
+- **Routing service:** Python, FastAPI, OpenWrt ubus JSON-RPC SDK
 - **File sync:** Python, watchdog
-- **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Home Assistant
+- **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
+- **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
+- **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Home Assistant, Frigate
 
 ## Device setup
 
@@ -60,6 +66,9 @@ npm run test:ai-gateway     # ai-gateway only
 | broker         | :1883 | MQTT                       |
 | ai-gateway     | :8000 | FastAPI + LiteLLM          |
 | homeassistant  | :8123 | Profile: `full`            |
+| frigate        | :8971 | NVR + AI detection, `full` |
+| camera-discovery | —   | ONVIF/RTSP scanner, `full` |
+| routing        | :8080 | OpenWrt control, `full`    |
 
 ## Environment variables
 
@@ -76,3 +85,10 @@ npm run test:ai-gateway     # ai-gateway only
 | `PORT`               | Server listen port                                   |
 | `DEVICE_SECRET`      | Device authentication secret                         |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit in MB                              |
+| `ROUTING_SERVICE_URL`| Routing service endpoint (default `http://localhost:8080`) |
+| `OPENWRT_HOST`       | OpenWrt router IP (default `192.168.50.1`)           |
+| `OPENWRT_USERNAME`   | OpenWrt rpcd user (default `droplet-ai`)             |
+| `OPENWRT_PASSWORD`   | OpenWrt rpcd password                                |
+| `FRIGATE_URL`        | Frigate NVR API endpoint (default `http://frigate:5000`) |
+| `CAMERA_SCAN_INTERVAL` | Camera discovery scan interval in seconds (default `30`) |
+| `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`) |

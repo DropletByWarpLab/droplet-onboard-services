@@ -1,17 +1,26 @@
 import type {
+  CameraInfo,
   ChatRequest,
+  ConnectedDevice,
+  DetectionEvent,
   DeviceInfo,
+  DiscoveredCamera,
+  DiscoveredDevice,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
   FileEntryInfo,
+  FirewallConfig,
   HealthResponse,
   ModelsResponse,
+  NetworkCommandResult,
+  NetworkOverview,
   SessionChatRequest,
   SessionDetail,
   SessionInfo,
   StorageStats,
   SyncTargetInfo,
+  WirelessScanResult,
   AuthUser,
   ShareInfo,
 } from "./types";
@@ -115,6 +124,196 @@ export async function fetchDevices(): Promise<DeviceInfo[]> {
   const res = await authFetch(`${BASE}/api/devices`);
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
+}
+
+// --- Network / Router ---
+
+export async function fetchNetworkStatus(): Promise<NetworkOverview> {
+  const res = await authFetch(`${BASE}/api/network/status`);
+  if (!res.ok) throw new Error(`Failed to fetch network status: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
+  const res = await authFetch(`${BASE}/api/network/devices`);
+  if (!res.ok) throw new Error(`Failed to fetch connected devices: ${res.status}`);
+  const data = await res.json();
+  return data.devices;
+}
+
+export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
+  const res = await authFetch(`${BASE}/api/network/wifi`);
+  if (!res.ok) throw new Error(`Failed to fetch wifi settings: ${res.status}`);
+  return res.json();
+}
+
+export async function scanWifiNetworks(): Promise<WirelessScanResult[]> {
+  const res = await authFetch(`${BASE}/api/network/wifi/scan`);
+  if (!res.ok) throw new Error(`Failed to scan wifi: ${res.status}`);
+  const data = await res.json();
+  return data.results;
+}
+
+export async function setWifiSsid(ssid: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/ssid`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ssid }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Failed to set SSID: ${res.status}`);
+  return data;
+}
+
+export async function setWifiPassword(password: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Failed to set password: ${res.status}`);
+  return data;
+}
+
+export async function setWifiChannel(channel: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/channel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Failed to set channel: ${res.status}`);
+  return data;
+}
+
+export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
+  if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
+  const data = await res.json();
+  return data.leases;
+}
+
+export async function fetchFirewallConfig(): Promise<FirewallConfig> {
+  const res = await authFetch(`${BASE}/api/network/firewall`);
+  if (!res.ok) throw new Error(`Failed to fetch firewall config: ${res.status}`);
+  return res.json();
+}
+
+export async function blockNetworkDevice(mac: string, name?: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/block`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mac, name }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to block device: ${res.status}`);
+  return data;
+}
+
+export async function unblockNetworkDevice(mac: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/unblock`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mac }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to unblock device: ${res.status}`);
+  return data;
+}
+
+export async function addNetworkPortForward(
+  name: string,
+  srcPort: string,
+  destIp: string,
+  destPort: string,
+  proto: string = "tcp"
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/port-forward`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, src_port: srcPort, dest_ip: destIp, dest_port: destPort, proto }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to add port forward: ${res.status}`);
+  return data;
+}
+
+export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> {
+  const res = await authFetch(`${BASE}/api/network/system`);
+  if (!res.ok) throw new Error(`Failed to fetch router system info: ${res.status}`);
+  return res.json();
+}
+
+export async function confirmNetworkCommand(token: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/network/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken: token }),
+  });
+  if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
+}
+
+// --- Cameras / Frigate ---
+
+export async function fetchCameras(): Promise<CameraInfo[]> {
+  const res = await authFetch(`${BASE}/api/cameras`);
+  if (!res.ok) throw new Error(`Failed to fetch cameras: ${res.status}`);
+  const data = await res.json();
+  return data.cameras ?? [];
+}
+
+export async function fetchCameraDetail(name: string): Promise<CameraInfo & { recentEvents: DetectionEvent[] }> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`);
+  if (!res.ok) throw new Error(`Failed to fetch camera: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCameraEvents(limit = 20, camera?: string): Promise<DetectionEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (camera) params.set("camera", camera);
+  const url = camera
+    ? `${BASE}/api/cameras/${encodeURIComponent(camera)}/events?${params}`
+    : `${BASE}/api/cameras/events/recent?${params}`;
+  const res = await authFetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch camera events: ${res.status}`);
+  const data = await res.json();
+  return data.events ?? [];
+}
+
+export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {
+  const res = await authFetch(`${BASE}/api/cameras/discovered`);
+  if (!res.ok) throw new Error(`Failed to fetch discovered cameras: ${res.status}`);
+  return res.json();
+}
+
+export async function acceptDiscoveredCamera(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/accept`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to accept camera: ${res.status}`);
+}
+
+export async function rejectDiscoveredCamera(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/discovered/${id}/reject`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to reject camera: ${res.status}`);
+}
+
+export async function enableCamera(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/enable`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
+}
+
+export async function disableCamera(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+}
+
+export async function removeCamera(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to remove camera: ${res.status}`);
+}
+
+export function getCameraSnapshotUrl(name: string): string {
+  return `${BASE}/api/cameras/${encodeURIComponent(name)}/snapshot`;
 }
 
 // --- Matter Devices ---

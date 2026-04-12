@@ -1,0 +1,49 @@
+mqtt:
+  enabled: true
+  host: broker
+  port: 1883
+  user: "{FRIGATE_MQTT_USER}"
+  password: "{FRIGATE_MQTT_PASSWORD}"
+
+detectors:
+  tensorrt:
+    type: tensorrt
+    device: 0
+
+record:
+  enabled: true
+  retain:
+    days: 7
+    mode: motion
+  events:
+    retain:
+      default: 14
+
+snapshots:
+  enabled: true
+  retain:
+    default: 14
+
+detect:
+  enabled: true
+  width: 1280
+  height: 720
+  fps: 5
+
+objects:
+  track:
+    - person
+    - car
+    - dog
+    - cat
+    - package
+
+# Cameras are added dynamically by the camera-discovery service.
+# You can also add cameras manually here using the Frigate camera config format:
+# cameras:
+#   front_door:
+#     ffmpeg:
+#       inputs:
+#         - path: rtsp://user:pass@camera-ip:554/stream
+#           roles: ["detect", "record"]
+cameras: {}

@@ -179,6 +179,152 @@ async def _get_command_history(args: dict) -> dict:
     return resp.json()
 
 
+# --- Network / Router tool handlers ---
+
+
+async def _get_network_status(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/network/status")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_connected_devices(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/network/devices")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_wifi_settings(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/network/wifi")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _scan_wifi_networks(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/network/wifi/scan")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _set_wifi_ssid(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.post("/api/network/wifi/ssid", json={"ssid": args["ssid"]})
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _set_wifi_channel(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.post("/api/network/wifi/channel", json={"channel": args["channel"]})
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_firewall_rules(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/network/firewall")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _block_network_device(args: dict) -> dict:
+    client = _get_client()
+    body = {"mac": args["mac"]}
+    if "name" in args:
+        body["name"] = args["name"]
+    resp = await client.post("/api/network/firewall/block", json=body)
+    data = resp.json()
+    # Handle Tier 2 confirmation required
+    if resp.status_code == 202:
+        return {
+            "status": "confirmation_required",
+            "message": data.get("reason", "This action requires user confirmation."),
+            "note": "Please ask the user to confirm this action in the Droplet dashboard.",
+        }
+    resp.raise_for_status()
+    return data
+
+
+async def _unblock_network_device(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.post("/api/network/firewall/unblock", json={"mac": args["mac"]})
+    data = resp.json()
+    if resp.status_code == 202:
+        return {
+            "status": "confirmation_required",
+            "message": data.get("reason", "This action requires user confirmation."),
+            "note": "Please ask the user to confirm this action in the Droplet dashboard.",
+        }
+    resp.raise_for_status()
+    return data
+
+
+async def _add_port_forward(args: dict) -> dict:
+    client = _get_client()
+    body = {
+        "name": args["name"],
+        "src_port": args["src_port"],
+        "dest_ip": args["dest_ip"],
+        "dest_port": args["dest_port"],
+        "proto": args.get("proto", "tcp"),
+    }
+    resp = await client.post("/api/network/firewall/port-forward", json=body)
+    data = resp.json()
+    if resp.status_code == 202:
+        return {
+            "status": "confirmation_required",
+            "message": data.get("reason", "This action requires user confirmation."),
+            "note": "Please ask the user to confirm this action in the Droplet dashboard.",
+        }
+    resp.raise_for_status()
+    return data
+
+
+async def _get_router_system_info(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/network/system")
+    resp.raise_for_status()
+    return resp.json()
+
+
+# --- Camera / Frigate tool handlers ---
+
+
+async def _get_cameras(args: dict) -> dict:
+    client = _get_client()
+    resp = await client.get("/api/cameras")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_camera_events(args: dict) -> dict:
+    limit = args.get("limit", 10)
+    camera = args.get("camera")
+    params = {"limit": limit}
+    if camera:
+        url = f"/api/cameras/{camera}/events"
+    else:
+        url = "/api/cameras/events/recent"
+    client = _get_client()
+    resp = await client.get(url, params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_camera_snapshot(args: dict) -> dict:
+    camera = args["camera"]
+    # We can't send images directly — return the snapshot URL for the user
+    return {
+        "camera": camera,
+        "snapshot_url": f"/api/cameras/{camera}/snapshot",
+        "note": "Snapshot URL is accessible through the Droplet dashboard.",
+    }
+
+
 TOOL_HANDLERS = {
     "list_files": _list_files,
     "read_file": _read_file,
@@ -187,12 +333,29 @@ TOOL_HANDLERS = {
     "get_system_health": _get_system_health,
     "list_sync_targets": _list_sync_targets,
     "trigger_sync": _trigger_sync,
+    # Smart Home / Matter tools
     "list_smart_home_devices": _list_smart_home_devices,
     "get_smart_home_device": _get_smart_home_device,
     "control_device": _control_device,
     "discover_matter_devices": _discover_matter_devices,
     "commission_device": _commission_device,
     "get_command_history": _get_command_history,
+    # Network / Router tools
+    "get_network_status": _get_network_status,
+    "get_connected_devices": _get_connected_devices,
+    "get_wifi_settings": _get_wifi_settings,
+    "scan_wifi_networks": _scan_wifi_networks,
+    "set_wifi_ssid": _set_wifi_ssid,
+    "set_wifi_channel": _set_wifi_channel,
+    "get_firewall_rules": _get_firewall_rules,
+    "block_network_device": _block_network_device,
+    "unblock_network_device": _unblock_network_device,
+    "add_port_forward": _add_port_forward,
+    "get_router_system_info": _get_router_system_info,
+    # Camera / Frigate tools
+    "get_cameras": _get_cameras,
+    "get_camera_events": _get_camera_events,
+    "get_camera_snapshot": _get_camera_snapshot,
 }
 
 
