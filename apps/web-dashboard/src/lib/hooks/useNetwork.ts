@@ -57,9 +57,9 @@ export function useNetwork() {
   }
 
   return {
-    overview: overview ?? null,
+    overview,
     devices: devices ?? [],
-    firewall: firewall ?? null,
+    firewall,
     isLoading: statusLoading || devicesLoading,
     isRefreshing: statusValidating,
     error: statusError || devicesError,

@@ -318,15 +318,44 @@ export interface CameraSSEEvent {
 
 // --- Network / Router types ---
 
+export interface InterfaceStatus {
+  up: boolean;
+  pending?: boolean;
+  available?: boolean;
+  autostart?: boolean;
+  device?: string;
+  proto?: string;
+  uptime?: number;
+  l3_device?: string;
+  "ipv4-address"?: { address: string; mask: number }[];
+  "ipv6-address"?: { address: string; mask: number }[];
+  route?: unknown[];
+  "dns-server"?: string[];
+  data?: Record<string, unknown>;
+}
+
 export interface NetworkOverview {
   interfaces: {
-    lan: Record<string, unknown>;
-    wan: Record<string, unknown>;
+    lan: InterfaceStatus;
+    wan: InterfaceStatus;
   };
   wireless: Record<string, unknown>;
   system: {
-    board: Record<string, unknown>;
-    resources: Record<string, unknown>;
+    board: {
+      kernel?: string;
+      hostname?: string;
+      system?: string;
+      model?: string;
+      board_name?: string;
+      release?: { distribution?: string; version?: string; target?: string };
+    };
+    resources: {
+      uptime?: number;
+      localtime?: number;
+      load?: number[];
+      memory?: { total: number; free: number; shared: number; buffered: number };
+      swap?: { total: number; free: number };
+    };
   };
   connectedDeviceCount: number;
   routerConnected: boolean;

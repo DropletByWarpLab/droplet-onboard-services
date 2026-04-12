@@ -5,7 +5,6 @@ import type {
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
-  DiscoveredDevice,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
