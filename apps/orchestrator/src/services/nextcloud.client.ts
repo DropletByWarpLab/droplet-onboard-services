@@ -1,12 +1,16 @@
 import pino from "pino";
 import { config } from "../config.js";
-import type { FileEntryInfo } from "../types/index.js";
+import type {
+  FileEntryInfo,
+  FileVersionInfo,
+  TrashItemInfo,
+} from "../types/index.js";
 
 const logger = pino({ name: "nextcloud-client" });
 
 /**
  * Nextcloud WebDAV + OCS API client.
- * Used when STORAGE_BACKEND=nextcloud to proxy file operations through Nextcloud.
+ * All file operations in the orchestrator flow through this module.
  */
 
 const WEBDAV_BASE = "/remote.php/dav/files";
@@ -401,6 +405,70 @@ export async function ncCreateUser(
   }
 }
 
+/**
+ * Update a single field on a Nextcloud user via OCS `PUT /cloud/users/{id}`.
+ *
+ * Field names mirror Nextcloud's OCS contract: `displayname`, `email`,
+ * `quota` (e.g. "5 GB" or `"none"` for unlimited), `password`. The OCS
+ * endpoint only accepts one field per request, so callers that need to
+ * update multiple fields should chain calls.
+ */
+export async function ncUpdateUser(
+  adminToken: string,
+  username: string,
+  field: "displayname" | "email" | "quota" | "password",
+  value: string
+): Promise<void> {
+  const resp = await fetch(
+    ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}`),
+    {
+      method: "PUT",
+      headers: {
+        ...ocsHeaders(adminToken),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ key: field, value }),
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to update user ${username}: ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new Error(
+      `OCS update user: ${data?.ocs?.meta?.message ?? "unknown error"}`
+    );
+  }
+}
+
+/**
+ * Enable or disable a user account. Disabled users can't log in but their
+ * files are preserved — flip the flag back to re-enable.
+ */
+export async function ncSetUserEnabled(
+  adminToken: string,
+  username: string,
+  enabled: boolean
+): Promise<void> {
+  const action = enabled ? "enable" : "disable";
+  const resp = await fetch(
+    ocsUrl(`/ocs/v1.php/cloud/users/${encodeURIComponent(username)}/${action}`),
+    {
+      method: "PUT",
+      headers: ocsHeaders(adminToken),
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to ${action} user ${username}: ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new Error(
+      `OCS ${action} user: ${data?.ocs?.meta?.message ?? "unknown error"}`
+    );
+  }
+}
+
 export async function ncDeleteUser(
   adminToken: string,
   username: string
@@ -455,6 +523,42 @@ export async function ncGetCurrentUser(
       id: data.ocs.data.id,
       displayName: data.ocs.data["display-name"] || data.ocs.data.id,
       email: data.ocs.data.email || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the current user's storage quota from Nextcloud.
+ * Returns { used, free, total, quota } in bytes. `quota` is -3 when unlimited.
+ */
+export async function ncGetUserQuota(token: string): Promise<{
+  used: number;
+  free: number | null;
+  total: number | null;
+  quota: number | null;
+} | null> {
+  try {
+    const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/user?format=json"), {
+      headers: ocsHeaders(token),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data?.ocs?.meta?.status !== "ok") return null;
+    const q = data?.ocs?.data?.quota ?? {};
+    // Nextcloud returns -3 for unlimited quota; surface that as null.
+    const parseNum = (v: unknown): number | null => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n) || n < 0) return null;
+      return n;
+    };
+    return {
+      used: parseNum(q.used) ?? 0,
+      free: parseNum(q.free),
+      total: parseNum(q.total),
+      quota: parseNum(q.quota),
     };
   } catch {
     return null;
@@ -532,6 +636,37 @@ export async function ncDeleteAppPassword(token: string): Promise<void> {
     });
   } catch {
     // Non-fatal — token might already be expired
+  }
+}
+
+/**
+ * Mint a fresh Nextcloud app password for the authenticated user.
+ *
+ * The device pairing flow uses this to give each laptop/phone its own
+ * revocable token, distinct from the user's dashboard session. Every call
+ * returns a brand new token; the old one stays valid until explicitly
+ * revoked via ncDeleteAppPassword.
+ *
+ * Returns `null` when Nextcloud refuses (most commonly: the caller is
+ * already using a basic:-prefixed token, which some NC configs reject).
+ */
+export async function ncGenerateAppPassword(sourceToken: string): Promise<string | null> {
+  try {
+    const authHeader = resolveAuthHeader(sourceToken);
+    const resp = await fetch(ocsUrl("/ocs/v2.php/core/getapppassword"), {
+      headers: {
+        Authorization: authHeader,
+        "OCS-APIRequest": "true",
+        Accept: "application/json",
+      },
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const appPassword = data?.ocs?.data?.apppassword;
+    return typeof appPassword === "string" && appPassword.length > 0 ? appPassword : null;
+  } catch (err) {
+    logger.warn({ err }, "ncGenerateAppPassword failed");
+    return null;
   }
 }
 
@@ -674,6 +809,679 @@ export async function ncOAuth2RefreshToken(
   }
 }
 
+// ── Favorites / Search / Recents / Thumbnails (Phase 2) ──
+
+/** Escape untrusted text for embedding in an XML body (search literals etc.) */
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Toggle the favorite flag on a file or directory.
+ * Uses PROPPATCH to set oc:favorite to 1 or 0.
+ */
+export async function ncSetFavorite(
+  token: string,
+  user: string,
+  path: string,
+  favorite: boolean
+): Promise<void> {
+  const url = webdavUrl(user, path);
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set>
+    <d:prop><oc:favorite>${favorite ? 1 : 0}</oc:favorite></d:prop>
+  </d:set>
+</d:propertyupdate>`;
+  const resp = await fetch(url, {
+    method: "PROPPATCH",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok && resp.status !== 207) {
+    throw new Error(`WebDAV PROPPATCH favorite failed: ${resp.status}`);
+  }
+}
+
+/**
+ * List files/directories the user has favorited anywhere in their namespace.
+ * Uses a WebDAV REPORT with the oc:filter-files rule on favorites=1.
+ */
+export async function ncListFavorites(
+  token: string,
+  user: string
+): Promise<FileEntryInfo[]> {
+  const url = webdavUrl(user, "/");
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<oc:filter-files xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <oc:filter-rules>
+    <oc:favorite>1</oc:favorite>
+  </oc:filter-rules>
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+    <d:getcontenttype/>
+    <d:resourcetype/>
+    <oc:fileid/>
+    <oc:favorite/>
+  </d:prop>
+</oc:filter-files>`;
+  const resp = await fetch(url, {
+    method: "REPORT",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV REPORT favorites failed: ${resp.status}`);
+  }
+  return parseMultiStatus(await resp.text(), "/");
+}
+
+export interface NcSearchOptions {
+  query: string;
+  mime?: string;
+  limit?: number;
+}
+
+/**
+ * Search file names within the user's namespace using WebDAV SEARCH + basicsearch.
+ * Nextcloud's SEARCH supports d:like against displayname for a LIKE-%query%-match.
+ */
+export async function ncSearchFiles(
+  token: string,
+  user: string,
+  opts: NcSearchOptions
+): Promise<FileEntryInfo[]> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/`;
+  const limit = opts.limit ?? 50;
+  const pattern = `%${opts.query}%`;
+  const mimeWhere = opts.mime
+    ? `<d:and>
+          <d:like>
+            <d:prop><d:displayname/></d:prop>
+            <d:literal>${escapeXml(pattern)}</d:literal>
+          </d:like>
+          <d:eq>
+            <d:prop><d:getcontenttype/></d:prop>
+            <d:literal>${escapeXml(opts.mime)}</d:literal>
+          </d:eq>
+        </d:and>`
+    : `<d:like>
+          <d:prop><d:displayname/></d:prop>
+          <d:literal>${escapeXml(pattern)}</d:literal>
+        </d:like>`;
+
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select>
+      <d:prop>
+        <d:getlastmodified/>
+        <d:getcontentlength/>
+        <d:getcontenttype/>
+        <d:resourcetype/>
+        <oc:fileid/>
+      </d:prop>
+    </d:select>
+    <d:from>
+      <d:scope>
+        <d:href>/files/${user}</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>${mimeWhere}</d:where>
+    <d:orderby/>
+    <d:limit><d:nresults>${limit}</d:nresults></d:limit>
+  </d:basicsearch>
+</d:searchrequest>`;
+  const resp = await fetch(url, {
+    method: "SEARCH",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV SEARCH failed: ${resp.status}`);
+  }
+  return parseMultiStatus(await resp.text(), "/");
+}
+
+/**
+ * Return the user's most recently-modified files across their whole namespace.
+ * Implemented as a SEARCH with an order-by on lastmodified DESC.
+ */
+export async function ncListRecents(
+  token: string,
+  user: string,
+  limit: number = 50
+): Promise<FileEntryInfo[]> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/`;
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select>
+      <d:prop>
+        <d:getlastmodified/>
+        <d:getcontentlength/>
+        <d:getcontenttype/>
+        <d:resourcetype/>
+        <oc:fileid/>
+      </d:prop>
+    </d:select>
+    <d:from>
+      <d:scope>
+        <d:href>/files/${user}</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>
+      <d:gt>
+        <d:prop><d:getlastmodified/></d:prop>
+        <d:literal>1970-01-01T00:00:00Z</d:literal>
+      </d:gt>
+    </d:where>
+    <d:orderby>
+      <d:order>
+        <d:prop><d:getlastmodified/></d:prop>
+        <d:descending/>
+      </d:order>
+    </d:orderby>
+    <d:limit><d:nresults>${limit}</d:nresults></d:limit>
+  </d:basicsearch>
+</d:searchrequest>`;
+  const resp = await fetch(url, {
+    method: "SEARCH",
+    headers: {
+      ...davHeaders(token),
+      "Content-Type": "application/xml",
+    },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV SEARCH recents failed: ${resp.status}`);
+  }
+  // Preserve the order returned by Nextcloud (already sorted by lastmodified DESC).
+  // parseMultiStatus re-sorts alphabetically, so call its parser then sort again.
+  const entries = parseMultiStatus(await resp.text(), "/");
+  entries.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1));
+  return entries;
+}
+
+/**
+ * Fetch a preview thumbnail for a file via Nextcloud's core/preview endpoint.
+ * Returns raw bytes + content-type so the orchestrator can stream them through.
+ */
+export async function ncFetchThumbnail(
+  token: string,
+  fileId: number,
+  x: number = 256,
+  y: number = 256
+): Promise<{ body: ArrayBuffer; contentType: string } | null> {
+  const url = `${config.NEXTCLOUD_URL}/index.php/core/preview?fileId=${fileId}&x=${x}&y=${y}&a=1&forceIcon=0`;
+  const resp = await fetch(url, { headers: davHeaders(token) });
+  if (!resp.ok) {
+    if (resp.status === 404) return null;
+    return null;
+  }
+  return {
+    body: await resp.arrayBuffer(),
+    contentType: resp.headers.get("content-type") || "image/png",
+  };
+}
+
+// ── Share V2 (full options + update / delete / shared-with-me) ──
+
+/**
+ * OCS responses use HTTP status codes that mirror ocs.meta.statuscode. The
+ * body always contains a JSON error message that's far more useful than the
+ * raw status ("Password is present in compromised password list" vs "400").
+ * Parse the body when the content-type is JSON; fall back to the status
+ * otherwise.
+ */
+async function readOcsErrorMessage(resp: Response, fallback: string): Promise<string> {
+  const ct = resp.headers.get("content-type") ?? "";
+  if (!ct.includes("json")) {
+    return `${fallback}: ${resp.status}`;
+  }
+  try {
+    const data = await resp.json();
+    const msg = data?.ocs?.meta?.message as string | undefined;
+    const code = data?.ocs?.meta?.statuscode as number | undefined;
+    if (msg) return `${fallback}: ${msg}${code ? ` (${code})` : ""}`;
+    return `${fallback}: ${resp.status}`;
+  } catch {
+    return `${fallback}: ${resp.status}`;
+  }
+}
+
+/**
+ * Error type preserved through the orchestrator error handler so routes can
+ * map OCS failures (400 with useful body) to a 400 HTTP response rather than
+ * a generic 500. Message is the OCS message verbatim.
+ */
+export class NextcloudOcsError extends Error {
+  public readonly ocsStatus: number;
+  constructor(message: string, ocsStatus: number) {
+    super(message);
+    this.name = "NextcloudOcsError";
+    this.ocsStatus = ocsStatus;
+  }
+}
+
+
+export interface ShareCreateOptions {
+  /** 0 = user, 1 = group, 3 = public link */
+  shareType: number;
+  /**
+   * Nextcloud permission bitmask: 1=read, 2=update, 4=create, 8=delete, 16=share.
+   * Defaults to 1 (read) when omitted.
+   */
+  permissions?: number;
+  /** ISO date string "YYYY-MM-DD" */
+  expireDate?: string;
+  /** Password for public links (stored hashed by Nextcloud) */
+  password?: string;
+  /** Note attached to the share (shown in the share dialog) */
+  note?: string;
+  /** Username (shareType=0) or group id (shareType=1). Ignored for public links. */
+  shareWith?: string;
+}
+
+export interface ShareDetail {
+  id: number;
+  url: string | null;
+  token: string | null;
+  shareType: number;
+  permissions: number;
+  path: string;
+  expireDate: string | null;
+  hasPassword: boolean;
+  note: string | null;
+  shareWith: string | null;
+  /** Who the item is shared with (display name, for shared-with-me views) */
+  shareWithDisplayName: string | null;
+  /** Owner of the underlying file */
+  uidOwner: string | null;
+  ownerDisplayName: string | null;
+  stime: number | null;
+}
+
+function mapShareRecord(record: any): ShareDetail {
+  return {
+    id: Number(record.id),
+    url: record.url ?? null,
+    token: record.token ?? null,
+    shareType: Number(record.share_type ?? record.shareType ?? 0),
+    permissions: Number(record.permissions ?? 1),
+    path: record.path ?? record.file_target ?? "",
+    expireDate: record.expiration ?? record.expireDate ?? null,
+    hasPassword: Boolean(
+      record.share_with && record.share_type === 3 && record.password !== undefined
+        ? record.password !== null
+        : record.password !== undefined && record.password !== null
+    ),
+    note: record.note ?? null,
+    shareWith: record.share_with ?? null,
+    shareWithDisplayName: record.share_with_displayname ?? null,
+    uidOwner: record.uid_owner ?? null,
+    ownerDisplayName: record.displayname_owner ?? null,
+    stime: record.stime ? Number(record.stime) : null,
+  };
+}
+
+/**
+ * Create a share with the full OCS option set (permissions, expiry, password, note, shareWith).
+ * Supersedes the simple ncCreateShare from Phase 1.
+ */
+export async function ncCreateShareV2(
+  token: string,
+  path: string,
+  opts: ShareCreateOptions
+): Promise<ShareDetail> {
+  const url = ocsUrl("/ocs/v2.php/apps/files_sharing/api/v1/shares");
+  const params = new URLSearchParams({
+    path,
+    shareType: String(opts.shareType),
+    permissions: String(opts.permissions ?? 1),
+  });
+  if (opts.expireDate) params.set("expireDate", opts.expireDate);
+  if (opts.password) params.set("password", opts.password);
+  if (opts.note) params.set("note", opts.note);
+  if (opts.shareWith) params.set("shareWith", opts.shareWith);
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...ocsHeaders(token),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params,
+  });
+  if (!resp.ok) {
+    // Nextcloud uses HTTP status == OCS statuscode for OCS v2, and the body
+    // contains the real error message (e.g. password policy violation).
+    const message = await readOcsErrorMessage(resp, "OCS share create");
+    throw new NextcloudOcsError(message, resp.status);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new NextcloudOcsError(
+      `OCS share create: ${data?.ocs?.meta?.message ?? "unknown error"}`,
+      data?.ocs?.meta?.statuscode ?? 500
+    );
+  }
+  return mapShareRecord(data.ocs.data);
+}
+
+/**
+ * Update a single field on an existing share (permissions, password, expiry, note).
+ */
+export async function ncUpdateShare(
+  token: string,
+  shareId: number,
+  field: "permissions" | "password" | "expireDate" | "note",
+  value: string
+): Promise<void> {
+  const url = ocsUrl(
+    `/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}`
+  );
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...ocsHeaders(token),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ [field]: value }),
+  });
+  if (!resp.ok) {
+    const message = await readOcsErrorMessage(resp, "OCS share update");
+    throw new NextcloudOcsError(message, resp.status);
+  }
+  const data = await resp.json();
+  if (data?.ocs?.meta?.status !== "ok") {
+    throw new NextcloudOcsError(
+      `OCS share update: ${data?.ocs?.meta?.message ?? "unknown error"}`,
+      data?.ocs?.meta?.statuscode ?? 500
+    );
+  }
+}
+
+/** Revoke a share by id. */
+export async function ncDeleteShare(token: string, shareId: number): Promise<void> {
+  const url = ocsUrl(
+    `/ocs/v2.php/apps/files_sharing/api/v1/shares/${shareId}`
+  );
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: ocsHeaders(token),
+  });
+  if (!resp.ok && resp.status !== 200) {
+    throw new Error(`OCS share delete failed: ${resp.status}`);
+  }
+}
+
+/**
+ * List shares the current user has received from other users/groups.
+ * Used by the "Shared with me" tab.
+ */
+export async function ncListSharedWithMe(
+  token: string
+): Promise<ShareDetail[]> {
+  const url = ocsUrl(
+    "/ocs/v2.php/apps/files_sharing/api/v1/shares?shared_with_me=true"
+  );
+  const resp = await fetch(url, { headers: ocsHeaders(token) });
+  if (!resp.ok) {
+    throw new Error(`OCS shared-with-me failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  const records = data?.ocs?.data ?? [];
+  return Array.isArray(records) ? records.map(mapShareRecord) : [];
+}
+
+// ── WebDAV Move / Copy / Rename ──
+
+/**
+ * Move a file or directory within the user's namespace.
+ * Uses WebDAV MOVE verb with Destination header.
+ * Pass overwrite=true to replace an existing file at the destination.
+ */
+export async function ncMoveFile(
+  token: string,
+  user: string,
+  fromPath: string,
+  toPath: string,
+  overwrite: boolean = false
+): Promise<void> {
+  const url = webdavUrl(user, fromPath);
+  const destination = webdavUrl(user, toPath);
+  const resp = await fetch(url, {
+    method: "MOVE",
+    headers: {
+      ...davHeaders(token),
+      Destination: destination,
+      Overwrite: overwrite ? "T" : "F",
+    },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`WebDAV MOVE failed: ${resp.status}`);
+  }
+}
+
+/**
+ * Copy a file or directory within the user's namespace.
+ * Uses WebDAV COPY verb; recursive for collections.
+ */
+export async function ncCopyFile(
+  token: string,
+  user: string,
+  fromPath: string,
+  toPath: string,
+  overwrite: boolean = false
+): Promise<void> {
+  const url = webdavUrl(user, fromPath);
+  const destination = webdavUrl(user, toPath);
+  const resp = await fetch(url, {
+    method: "COPY",
+    headers: {
+      ...davHeaders(token),
+      Destination: destination,
+      Overwrite: overwrite ? "T" : "F",
+    },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`WebDAV COPY failed: ${resp.status}`);
+  }
+}
+
+// ── File ID resolution (needed for versions, favorites, etc.) ──
+
+/**
+ * Resolve a file path to its Nextcloud numeric fileId (oc:fileid).
+ * Returns null if the file doesn't exist.
+ */
+export async function ncGetFileId(
+  token: string,
+  user: string,
+  path: string
+): Promise<number | null> {
+  const url = webdavUrl(user, path);
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:prop><oc:fileid/></d:prop>
+</d:propfind>`;
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "0" },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return null;
+    logger.warn({ status: resp.status, path }, "ncGetFileId PROPFIND failed");
+    return null;
+  }
+  const xml = await resp.text();
+  const m = xml.match(/<oc:fileid>(\d+)<\/oc:fileid>/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// ── Trash ──
+
+function trashUrl(user: string, sub: string): string {
+  return `${config.NEXTCLOUD_URL}/remote.php/dav/trashbin/${user}/${sub}`;
+}
+
+/**
+ * List items currently in the user's trashbin.
+ * Returns the full list with original location and deletion time.
+ */
+export async function ncListTrash(
+  token: string,
+  user: string
+): Promise<TrashItemInfo[]> {
+  const url = trashUrl(user, "trash");
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+    <d:resourcetype/>
+    <nc:trashbin-filename/>
+    <nc:trashbin-original-location/>
+    <nc:trashbin-deletion-time/>
+  </d:prop>
+</d:propfind>`;
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "1" },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`WebDAV PROPFIND trashbin failed: ${resp.status}`);
+  }
+  const xml = await resp.text();
+  return parseTrashMultiStatus(xml);
+}
+
+/**
+ * Restore a single trashed item to its original location.
+ * `trashFilename` is the Nextcloud-assigned name (e.g. "photo.jpg.d1712860391").
+ */
+export async function ncRestoreTrashItem(
+  token: string,
+  user: string,
+  trashFilename: string
+): Promise<void> {
+  const url = trashUrl(user, `trash/${encodeURIComponent(trashFilename)}`);
+  const destination = trashUrl(user, `restore/${encodeURIComponent(trashFilename)}`);
+  const resp = await fetch(url, {
+    method: "MOVE",
+    headers: { ...davHeaders(token), Destination: destination },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`Trash restore failed: ${resp.status}`);
+  }
+}
+
+/**
+ * Permanently delete a single trashed item (skip Restore, go straight to /dev/null).
+ */
+export async function ncDeleteTrashItem(
+  token: string,
+  user: string,
+  trashFilename: string
+): Promise<void> {
+  const url = trashUrl(user, `trash/${encodeURIComponent(trashFilename)}`);
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: davHeaders(token),
+  });
+  if (!resp.ok && resp.status !== 204) {
+    throw new Error(`Trash delete failed: ${resp.status}`);
+  }
+}
+
+/**
+ * Empty the entire trashbin. Irreversible.
+ */
+export async function ncEmptyTrash(token: string, user: string): Promise<void> {
+  const url = trashUrl(user, "trash");
+  const resp = await fetch(url, { method: "DELETE", headers: davHeaders(token) });
+  if (!resp.ok && resp.status !== 204) {
+    throw new Error(`Empty trash failed: ${resp.status}`);
+  }
+}
+
+// ── Versions ──
+
+/**
+ * List version history for a file by its fileId.
+ * Returns entries sorted with most recent first.
+ */
+export async function ncListVersions(
+  token: string,
+  user: string,
+  fileId: number
+): Promise<FileVersionInfo[]> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/versions/${fileId}`;
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:getlastmodified/>
+    <d:getcontentlength/>
+  </d:prop>
+</d:propfind>`;
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "1" },
+    body,
+  });
+  if (!resp.ok) {
+    if (resp.status === 404) return [];
+    throw new Error(`Versions PROPFIND failed: ${resp.status}`);
+  }
+  const xml = await resp.text();
+  return parseVersionsXml(xml, fileId);
+}
+
+/**
+ * Restore a specific version of a file. The version becomes the new current content.
+ * The pre-restore current content becomes the most-recent version automatically.
+ */
+export async function ncRestoreVersion(
+  token: string,
+  user: string,
+  fileId: number,
+  versionId: string
+): Promise<void> {
+  const url = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/versions/${fileId}/${encodeURIComponent(versionId)}`;
+  const destination = `${config.NEXTCLOUD_URL}/remote.php/dav/versions/${user}/restore/target`;
+  const resp = await fetch(url, {
+    method: "MOVE",
+    headers: { ...davHeaders(token), Destination: destination },
+  });
+  if (!resp.ok && resp.status !== 201 && resp.status !== 204) {
+    throw new Error(`Version restore failed: ${resp.status}`);
+  }
+}
+
 // ── XML Parsing (minimal PROPFIND response parser) ──
 
 function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
@@ -721,4 +1529,100 @@ function parseMultiStatus(xml: string, basePath: string): FileEntryInfo[] {
   });
 
   return entries;
+}
+
+/**
+ * Parse a WebDAV PROPFIND response from the trashbin endpoint.
+ * Each entry carries the Nextcloud trash filename, original location, and deletion time.
+ */
+function parseTrashMultiStatus(xml: string): TrashItemInfo[] {
+  const items: TrashItemInfo[] = [];
+  const responseBlocks = xml.split(/<d:response>/i).slice(1);
+
+  for (const block of responseBlocks) {
+    const hrefMatch = block.match(/<d:href>([^<]+)<\/d:href>/i);
+    if (!hrefMatch) continue;
+    const href = decodeURIComponent(hrefMatch[1]);
+
+    // Skip the base trashbin path itself (the first PROPFIND response)
+    if (/\/remote\.php\/dav\/trashbin\/[^/]+\/trash\/?$/.test(href)) continue;
+
+    // Trash entries live directly under /trash/, even when they were originally
+    // nested inside subdirectories. Extract the trailing filename segment.
+    const trashPathMatch = href.match(/\/trashbin\/[^/]+\/trash\/([^/]+)\/?$/);
+    const name = trashPathMatch ? decodeURIComponent(trashPathMatch[1]) : "";
+    if (!name) continue;
+
+    const isCollection = /<d:collection\s*\/?>/.test(block);
+    const sizeMatch = block.match(/<d:getcontentlength>(\d+)<\/d:getcontentlength>/i);
+    const origLocMatch = block.match(
+      /<nc:trashbin-original-location>([^<]*)<\/nc:trashbin-original-location>/i
+    );
+    const origNameMatch = block.match(
+      /<nc:trashbin-filename>([^<]*)<\/nc:trashbin-filename>/i
+    );
+    const deletedAtMatch = block.match(
+      /<nc:trashbin-deletion-time>(\d+)<\/nc:trashbin-deletion-time>/i
+    );
+
+    const rawOrigLoc = origLocMatch ? decodeURIComponent(origLocMatch[1]) : "";
+    // Original location in Nextcloud is "folder/file.ext" — split off the filename
+    // to leave just the parent directory.
+    const origLocDir = rawOrigLoc ? "/" + rawOrigLoc.replace(/\/?[^/]+$/, "").replace(/^\/+/, "") : "/";
+    const originalName = origNameMatch ? decodeURIComponent(origNameMatch[1]) : name;
+    const deletedAt = deletedAtMatch
+      ? new Date(parseInt(deletedAtMatch[1], 10) * 1000).toISOString()
+      : new Date().toISOString();
+
+    items.push({
+      name,
+      originalName,
+      originalLocation: origLocDir || "/",
+      size: sizeMatch ? parseInt(sizeMatch[1], 10) : 0,
+      deletedAt,
+      isDirectory: isCollection,
+    });
+  }
+
+  // Sort most-recently-deleted first
+  items.sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1));
+  return items;
+}
+
+/**
+ * Parse a WebDAV PROPFIND response from the versions endpoint.
+ * Returns a list of versions keyed by versionId (the trailing URL segment).
+ */
+function parseVersionsXml(xml: string, fileId: number): FileVersionInfo[] {
+  const versions: FileVersionInfo[] = [];
+  const responseBlocks = xml.split(/<d:response>/i).slice(1);
+
+  for (const block of responseBlocks) {
+    const hrefMatch = block.match(/<d:href>([^<]+)<\/d:href>/i);
+    if (!hrefMatch) continue;
+    const href = decodeURIComponent(hrefMatch[1]);
+
+    // Skip the parent /versions/{fileId}/ directory itself
+    const parentRe = new RegExp(`/versions/${fileId}/?$`);
+    if (parentRe.test(href)) continue;
+
+    const versionIdMatch = href.match(/\/versions\/\d+\/([^/]+)\/?$/);
+    if (!versionIdMatch) continue;
+    const versionId = decodeURIComponent(versionIdMatch[1]);
+
+    const sizeMatch = block.match(/<d:getcontentlength>(\d+)<\/d:getcontentlength>/i);
+    const mtimeMatch = block.match(/<d:getlastmodified>([^<]+)<\/d:getlastmodified>/i);
+
+    versions.push({
+      versionId,
+      size: sizeMatch ? parseInt(sizeMatch[1], 10) : 0,
+      modifiedAt: mtimeMatch
+        ? new Date(mtimeMatch[1]).toISOString()
+        : new Date().toISOString(),
+    });
+  }
+
+  // Sort most-recent first
+  versions.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1));
+  return versions;
 }

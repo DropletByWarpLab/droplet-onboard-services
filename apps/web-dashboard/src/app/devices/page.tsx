@@ -7,6 +7,7 @@ import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
 import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
+import { DeviceClientsSection } from "@/components/DeviceClientsSection";
 import type { MatterDevice } from "@/lib/types";
 
 export default function DevicesPage() {
@@ -18,38 +19,8 @@ export default function DevicesPage() {
     null
   );
 
-  if (isLoading) {
-    return (
-      <div className="p-6 space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-48 bg-surface-secondary rounded animate-pulse" />
-          <div className="h-4 w-32 bg-surface-secondary rounded animate-pulse" />
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="dp-card h-24 animate-pulse bg-surface-secondary" />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="p-6">
-        <div className="dp-card text-center py-12">
-          <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            Matter Controller Not Available
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            The Matter controller could not start. Check that the device has
-            network access for mDNS discovery.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  // Early returns removed — the paired-clients section should render even when
+  // Matter is loading or unavailable, since the two subsystems are independent.
 
   const groups = grouped
     ? [
@@ -91,36 +62,60 @@ export default function DevicesPage() {
         </button>
       </div>
 
-      {/* Discovery banner */}
-      <DiscoveryBanner count={discovered.length} />
+      {/* Paired client devices (laptops + phones) */}
+      <DeviceClientsSection />
 
-      {/* Empty state */}
-      {!hasDevices && (
+      {/* Matter loading / error / empty / groups — the Matter stack is
+          independent of the paired client section above, so we isolate
+          its state transitions here instead of early-returning the whole page. */}
+      {isLoading ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="dp-card h-24 animate-pulse bg-surface-secondary" />
+          ))}
+        </div>
+      ) : error ? (
         <div className="dp-card text-center py-12">
           <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
           <h2 className="type-title-3 text-label-primary mb-1">
-            No Devices Yet
+            Matter Controller Not Available
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Matter-compatible devices on your network will be discovered
-            automatically. Commission new devices through the chat or by entering
-            their pairing code.
+            The Matter controller could not start. Check that the device has
+            network access for mDNS discovery.
           </p>
         </div>
-      )}
+      ) : (
+        <>
+          <DiscoveryBanner count={discovered.length} />
 
-      {/* Device groups */}
-      <div className="space-y-10">
-        {groups.map((group) => (
-          <DeviceGroup
-            key={group.title}
-            title={group.title}
-            devices={group.devices}
-            onCommand={command}
-            onDeviceClick={setSelectedDevice}
-          />
-        ))}
-      </div>
+          {!hasDevices && (
+            <div className="dp-card text-center py-12">
+              <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
+              <h2 className="type-title-3 text-label-primary mb-1">
+                No Matter devices yet
+              </h2>
+              <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+                Matter-compatible devices on your network will be discovered
+                automatically. Commission new devices through the chat or by
+                entering their pairing code.
+              </p>
+            </div>
+          )}
+
+          <div className="space-y-10">
+            {groups.map((group) => (
+              <DeviceGroup
+                key={group.title}
+                title={group.title}
+                devices={group.devices}
+                onCommand={command}
+                onDeviceClick={setSelectedDevice}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
       {/* Detail panel */}
       {selectedDevice && (

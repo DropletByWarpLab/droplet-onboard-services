@@ -52,13 +52,12 @@ services:
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - HOMEASSISTANT_URL=http://homeassistant:8123
       - HOMEASSISTANT_TOKEN=${HOMEASSISTANT_TOKEN:-}
-      - FILES_ROOT=/data/files
       - PORT=3000
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-nextcloud}
       - NEXTCLOUD_URL=http://nextcloud:80
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
       - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:?Run ./scripts/setup.sh to generate secrets}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - DEVICE_SECRET_KEY=${DEVICE_SECRET_KEY:?Run ./scripts/setup.sh to generate secrets}
       - MATTER_STORAGE_PATH=/data/matter-storage
       - MATTER_CONTROLLER_NAME=${MATTER_CONTROLLER_NAME:-Droplet}
       # NOTE: Uses localhost because the routing service runs with network_mode: host.
@@ -66,7 +65,6 @@ services:
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
     volumes:
-      - filedata:/data/files
       - matter-data:/data/matter-storage
     restart: always
 
@@ -163,25 +161,6 @@ services:
       - TZ=UTC
     restart: always
 
-  # --- Background Services ---
-  file-sync:
-    build:
-      context: ../services/file-sync
-      dockerfile: Dockerfile
-    volumes:
-      - filedata:/data/files
-    environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@db:5432/${POSTGRES_DB:-droplet}
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD:?Run ./scripts/setup.sh to generate secrets}@broker:1883
-      - FILES_ROOT=/data/files
-    depends_on:
-      db:
-        condition: service_healthy
-      broker:
-        condition: service_started
-    profiles: ["legacy"]
-    restart: always
-
   # --- Routing (OpenWrt control) ---
   routing:
     build:
@@ -254,7 +233,6 @@ services:
 
 volumes:
   pgdata:
-  filedata:
   nvrdata:
   frigate-config:
   aikeys:

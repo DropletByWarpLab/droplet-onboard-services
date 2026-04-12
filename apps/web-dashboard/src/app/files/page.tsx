@@ -1,24 +1,54 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
-import { FolderPlus, Link as LinkIcon, X, Copy, Check, Eye } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
-import { FileListItem } from "@/components/FileListItem";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
+import { FileRow } from "@/components/FileManager/FileRow";
+import {
+  ContextMenu,
+  contextMenuIcons,
+  type ContextMenuItem,
+} from "@/components/FileManager/ContextMenu";
+import { SelectionToolbar } from "@/components/FileManager/SelectionToolbar";
+import { MoveCopyDialog } from "@/components/FileManager/MoveCopyDialog";
+import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPanel";
+import { SearchBar } from "@/components/FileManager/SearchBar";
+import { PreviewPane } from "@/components/FileManager/PreviewPane";
+import { ShareDialog } from "@/components/FileManager/ShareDialog";
+import { StarButton } from "@/components/FileManager/StarButton";
+import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { useFiles } from "@/lib/hooks/useFiles";
+import { useFileManager } from "@/lib/hooks/useFileManager";
+import { useFavorites } from "@/lib/hooks/useFavorites";
+import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import {
   uploadFiles,
   deleteFile,
   createDirectory,
   getDownloadUrl,
-  createShareLink,
+  renameFile,
+  bulkDeleteFiles,
+  bulkMoveFiles,
+  bulkCopyFiles,
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import type { FileEntryInfo } from "@/lib/types";
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
 export default function FilesPage() {
-  const [currentPath, setCurrentPath] = useState("/");
+  const searchParams = useSearchParams();
+  const initialPath = searchParams?.get("path") ?? "/";
+  const [currentPath, setCurrentPath] = useState(initialPath);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
@@ -27,14 +57,41 @@ export default function FilesPage() {
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedFile, setSelectedFile] = useState<FileEntryInfo | null>(null);
-  const [shareUrl, setShareUrl] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [previewContent, setPreviewContent] = useState<string | null>(null);
-  const [previewType, setPreviewType] = useState<"text" | "image" | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileEntryInfo | null>(null);
+  const [shareFile, setShareFile] = useState<FileEntryInfo | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    file: FileEntryInfo;
+  } | null>(null);
+  const [moveDialog, setMoveDialog] = useState<{
+    mode: "move" | "copy";
+    paths: string[];
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { files, isLoading, refresh } = useFiles(currentPath);
+  // React to ?path= changes after mount (e.g. Recents page deep-links back in)
+  useEffect(() => {
+    const p = searchParams?.get("path");
+    if (p && p !== currentPath) {
+      setCurrentPath(p);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
+  // Subscribe to live file events so uploads/renames/etc. from other tabs,
+  // the CLI, or native clients show up immediately — no polling.
+  useFileRealtime();
+
+  const { files, isLoading, refresh } = useFiles(currentPath);
+  const fm = useFileManager(currentPath);
+  const { items: favoriteItems, refresh: refreshFavorites } = useFavorites();
+  const favoritedPaths = useMemo(
+    () => new Set(favoriteItems.map((f) => f.path)),
+    [favoriteItems]
+  );
+
+  // ── Upload ──
   const handleUpload = useCallback(
     async (fileList: FileList) => {
       setIsUploading(true);
@@ -56,36 +113,71 @@ export default function FilesPage() {
         setUploadPercent(0);
       }
     },
-    [currentPath, refresh]
+    [currentPath, refresh, toast]
   );
 
-  const handleDownload = (filePath: string) => {
-    const url = getDownloadUrl(filePath);
-    // Cookie is sent automatically with same-origin credentials
-    authFetch(url)
-      .then((res) => res.blob())
-      .then((blob) => {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = filePath.split("/").pop() || "download";
-        a.click();
-        URL.revokeObjectURL(a.href);
-      })
-      .catch(() => toast("Download failed"));
-  };
+  // ── Download ──
+  const handleDownload = useCallback(
+    (filePath: string) => {
+      const url = getDownloadUrl(filePath);
+      authFetch(url)
+        .then((res) => res.blob())
+        .then((blob) => {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = filePath.split("/").pop() || "download";
+          a.click();
+          URL.revokeObjectURL(a.href);
+        })
+        .catch(() => toast("Download failed"));
+    },
+    [toast]
+  );
 
-  const handleDelete = async (filePath: string) => {
-    if (!confirm(`Delete "${filePath.split("/").pop()}"?`)) return;
+  const handleBulkDownload = useCallback(() => {
+    for (const p of fm.selectedPaths) {
+      const file = files.find((f) => f.path === p);
+      if (file && !file.isDirectory) handleDownload(p);
+    }
+  }, [fm.selectedPaths, files, handleDownload]);
+
+  // ── Delete / bulk delete ──
+  const handleDelete = useCallback(
+    async (filePath: string) => {
+      if (!confirm(`Delete "${filePath.split("/").pop()}"?`)) return;
+      try {
+        await deleteFile(filePath);
+        if (selectedFile?.path === filePath) setSelectedFile(null);
+        fm.clearSelection();
+        await refresh();
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Delete failed");
+      }
+    },
+    [selectedFile, refresh, toast, fm]
+  );
+
+  const handleBulkDelete = useCallback(async () => {
+    if (fm.selectedCount === 0) return;
+    if (!confirm(`Move ${fm.selectedCount} item${fm.selectedCount > 1 ? "s" : ""} to trash?`)) {
+      return;
+    }
     try {
-      await deleteFile(filePath);
-      if (selectedFile?.path === filePath) setSelectedFile(null);
+      const results = await bulkDeleteFiles(fm.selectedPaths);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        toast(`${failed.length} item(s) failed to delete`);
+      }
+      fm.clearSelection();
+      setSelectedFile(null);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed");
+      toast(err instanceof Error ? err.message : "Bulk delete failed");
     }
-  };
+  }, [fm, refresh, toast]);
 
-  const handleCreateFolder = async () => {
+  // ── New folder ──
+  const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     const folderPath =
       currentPath === "/"
@@ -99,78 +191,223 @@ export default function FilesPage() {
     } catch (err) {
       toast(err instanceof Error ? err.message : "Failed to create folder");
     }
-  };
+  }, [currentPath, newFolderName, refresh, toast]);
 
-  const handleShare = async (filePath: string) => {
+  // ── Share (opens full dialog) ──
+  const handleShare = useCallback((file: FileEntryInfo) => {
+    setShareFile(file);
+  }, []);
+
+  // ── Preview (opens rich preview modal) ──
+  const handlePreview = useCallback((file: FileEntryInfo) => {
+    if (file.isDirectory) return;
+    setPreviewFile(file);
+  }, []);
+
+  // ── Rename ──
+  const handleRenameCommit = useCallback(
+    async (file: FileEntryInfo, newName: string) => {
+      try {
+        await renameFile(file.path, newName);
+        fm.endRename();
+        if (selectedFile?.path === file.path) setSelectedFile(null);
+        await refresh();
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Rename failed");
+        fm.endRename();
+      }
+    },
+    [fm, selectedFile, refresh, toast]
+  );
+
+  // ── Move / copy (bulk via dialog) ──
+  const handleMoveCopyConfirm = useCallback(
+    async (targetDir: string) => {
+      if (!moveDialog) return;
+      try {
+        if (moveDialog.mode === "move") {
+          const results = await bulkMoveFiles(moveDialog.paths, targetDir);
+          const failed = results.filter((r) => !r.ok);
+          if (failed.length > 0) toast(`${failed.length} move(s) failed`);
+        } else {
+          const results = await bulkCopyFiles(moveDialog.paths, targetDir);
+          const failed = results.filter((r) => !r.ok);
+          if (failed.length > 0) toast(`${failed.length} copy(s) failed`);
+        }
+        fm.clearSelection();
+        setMoveDialog(null);
+        await refresh();
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "Operation failed");
+      }
+    },
+    [moveDialog, fm, refresh, toast]
+  );
+
+  const handlePasteClipboard = useCallback(async () => {
+    if (!fm.clipboard) return;
     try {
-      const share = await createShareLink(filePath);
-      setShareUrl(share.url);
-      setCopied(false);
+      if (fm.clipboard.mode === "cut") {
+        const results = await bulkMoveFiles(fm.clipboard.paths, currentPath);
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length > 0) toast(`${failed.length} move(s) failed`);
+      } else {
+        const results = await bulkCopyFiles(fm.clipboard.paths, currentPath);
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length > 0) toast(`${failed.length} copy(s) failed`);
+      }
+      fm.clearClipboard();
+      fm.clearSelection();
+      await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to create share link");
+      toast(err instanceof Error ? err.message : "Paste failed");
     }
-  };
+  }, [fm, currentPath, refresh, toast]);
 
-  const handleCopyShare = () => {
-    if (shareUrl) {
-      navigator.clipboard.writeText(shareUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
+  // ── Row click / open ──
+  const handleRowSelect = useCallback(
+    (file: FileEntryInfo, e: React.MouseEvent) => {
+      const isCtrlOrMeta = e.ctrlKey || e.metaKey;
+      const isShift = e.shiftKey;
+      const mode = isShift ? "range" : isCtrlOrMeta ? "toggle" : "replace";
+      fm.toggleSelection(file.path, mode, files);
 
-  const handlePreview = (file: FileEntryInfo) => {
-    const ext = file.name.split(".").pop()?.toLowerCase();
-    const imageExts = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"];
-    const textExts = ["txt", "md", "json", "yaml", "yml", "toml", "csv", "log", "xml", "html", "css", "js", "ts", "py", "sh"];
+      if (!isCtrlOrMeta && !isShift && !file.isDirectory) {
+        setSelectedFile(file);
+      }
+    },
+    [fm, files]
+  );
 
-    if (imageExts.includes(ext || "")) {
-      setPreviewType("image");
-      setPreviewContent(getDownloadUrl(file.path));
-      setSelectedFile(file);
-    } else if (textExts.includes(ext || "")) {
-      setPreviewType("text");
-      setPreviewContent(null);
-      setSelectedFile(file);
-
-      // Fetch text content
-      const url = getDownloadUrl(file.path);
-      authFetch(url)
-        .then((res) => res.text())
-        .then((text) => setPreviewContent(text.slice(0, 10000)))
-        .catch(() => setPreviewContent("Failed to load preview"));
-    }
-  };
-
-  const handleFileClick = (file: FileEntryInfo) => {
+  const handleRowOpen = useCallback((file: FileEntryInfo) => {
     if (file.isDirectory) {
       setCurrentPath(file.path);
+      fm.clearSelection();
     } else {
       setSelectedFile(file);
-      setShareUrl(null);
     }
-  };
+  }, [fm]);
 
-  function formatBytes(bytes: number): string {
-    if (bytes === 0) return "0 B";
-    const k = 1024;
-    const sizes = ["B", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
-  }
+  // ── Context menu ──
+  const handleRowContextMenu = useCallback(
+    (file: FileEntryInfo, x: number, y: number) => {
+      // If the row isn't already part of selection, make it the only selected item
+      if (!fm.isSelected(file.path)) {
+        fm.selectOnly(file.path);
+      }
+      setContextMenu({ x, y, file });
+    },
+    [fm]
+  );
+
+  const contextMenuItems: ContextMenuItem[] = useMemo(() => {
+    if (!contextMenu) return [];
+    const file = contextMenu.file;
+    const selectedCount = Math.max(fm.selectedCount, 1);
+    const isSingle = selectedCount === 1;
+
+    return [
+      {
+        label: file.isDirectory ? "Open" : "Preview",
+        icon: contextMenuIcons.Open,
+        disabled: !isSingle,
+        onClick: () => (file.isDirectory ? handleRowOpen(file) : handlePreview(file)),
+      },
+      {
+        label: "Download",
+        icon: contextMenuIcons.Download,
+        disabled: file.isDirectory,
+        onClick: () => handleDownload(file.path),
+      },
+      { separator: true },
+      {
+        label: "Rename",
+        icon: contextMenuIcons.Rename,
+        disabled: !isSingle,
+        onClick: () => fm.beginRename(file.path),
+      },
+      {
+        label: `Cut${isSingle ? "" : ` (${selectedCount})`}`,
+        icon: contextMenuIcons.Cut,
+        onClick: () => fm.cut(),
+      },
+      {
+        label: `Copy${isSingle ? "" : ` (${selectedCount})`}`,
+        icon: contextMenuIcons.Copy,
+        onClick: () => fm.copy(),
+      },
+      {
+        label: `Move to…`,
+        icon: contextMenuIcons.Cut,
+        onClick: () =>
+          setMoveDialog({
+            mode: "move",
+            paths: fm.selectedCount > 0 ? fm.selectedPaths : [file.path],
+          }),
+      },
+      {
+        label: `Copy to…`,
+        icon: contextMenuIcons.Copy,
+        onClick: () =>
+          setMoveDialog({
+            mode: "copy",
+            paths: fm.selectedCount > 0 ? fm.selectedPaths : [file.path],
+          }),
+      },
+      { separator: true },
+      {
+        label: "Share link",
+        icon: contextMenuIcons.Share,
+        disabled: !isSingle,
+        onClick: () => handleShare(file),
+      },
+      {
+        label: "Delete",
+        icon: contextMenuIcons.Delete,
+        destructive: true,
+        onClick: () => {
+          if (fm.selectedCount > 1) {
+            void handleBulkDelete();
+          } else {
+            void handleDelete(file.path);
+          }
+        },
+      },
+    ];
+  }, [
+    contextMenu,
+    fm,
+    handleRowOpen,
+    handlePreview,
+    handleDownload,
+    handleShare,
+    handleDelete,
+    handleBulkDelete,
+  ]);
+
+  // ── Selection toolbar actions ──
+  const forbiddenPrefixes = useMemo(
+    () => (moveDialog ? moveDialog.paths : []),
+    [moveDialog]
+  );
+
+  const selectionLabels = useMemo(() => {
+    if (!moveDialog) return [];
+    return moveDialog.paths.map((p) => p.split("/").pop() || p);
+  }, [moveDialog]);
 
   return (
     <div className="p-6 lg:p-8 max-w-7xl">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="type-large-title text-label-primary">Files</h1>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between mb-4 gap-4">
+        <h1 className="type-large-title text-label-primary flex-shrink-0">Files</h1>
+        <div className="flex items-center gap-2 flex-shrink-0">
           <button
             onClick={() => setShowNewFolder(true)}
             className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
           >
             <FolderPlus size={14} />
-            New Folder
+            <span className="hidden sm:inline">New Folder</span>
           </button>
           <UploadButton onClick={() => fileInputRef.current?.click()} />
           <input
@@ -184,6 +421,22 @@ export default function FilesPage() {
             }}
           />
         </div>
+      </div>
+
+      {/* Search bar */}
+      <div className="mb-4">
+        <SearchBar
+          onPickResult={(file) => {
+            if (file.isDirectory) {
+              setCurrentPath(file.path);
+            } else {
+              // Jump to parent dir and mark the file selected
+              const parent = file.path.replace(/\/[^/]*$/, "") || "/";
+              setCurrentPath(parent);
+              setSelectedFile(file);
+            }
+          }}
+        />
       </div>
 
       {/* Breadcrumbs */}
@@ -217,6 +470,25 @@ export default function FilesPage() {
         </div>
       )}
 
+      {/* Selection toolbar */}
+      <SelectionToolbar
+        count={fm.selectedCount}
+        canRename={fm.selectedCount === 1}
+        hasClipboard={!!fm.clipboard}
+        onClear={fm.clearSelection}
+        onRename={() => {
+          const first = fm.selectedPaths[0];
+          if (first) fm.beginRename(first);
+        }}
+        onCut={fm.cut}
+        onCopy={fm.copy}
+        onPaste={handlePasteClipboard}
+        onMove={() => setMoveDialog({ mode: "move", paths: fm.selectedPaths })}
+        onCopyTo={() => setMoveDialog({ mode: "copy", paths: fm.selectedPaths })}
+        onDelete={handleBulkDelete}
+        onDownload={handleBulkDownload}
+      />
+
       {/* Status messages */}
       {uploadProgress && (
         <div className="mb-4 p-3 bg-accent-subtle border border-accent/20 rounded type-footnote text-accent">
@@ -235,7 +507,9 @@ export default function FilesPage() {
       {error && (
         <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
           <span>{error}</span>
-          <button onClick={() => setError(null)} className="ml-2 hover:opacity-70"><X size={14} /></button>
+          <button onClick={() => setError(null)} className="ml-2 hover:opacity-70">
+            <X size={14} />
+          </button>
         </div>
       )}
 
@@ -244,7 +518,6 @@ export default function FilesPage() {
         <div className="flex-1 min-w-0">
           <UploadZone onUpload={handleUpload}>
             <div className="dp-group min-h-[300px]">
-              {/* Column header */}
               <div className="flex items-center gap-3 px-4 py-2 type-caption-1 text-label-tertiary uppercase tracking-wider">
                 <span className="flex-1">Name</span>
                 <span className="w-20 text-right hidden sm:block">Size</span>
@@ -252,7 +525,6 @@ export default function FilesPage() {
                 <span className="w-16" />
               </div>
 
-              {/* Content */}
               {isLoading ? (
                 <div className="flex items-center justify-center h-48 text-label-tertiary type-subheadline">
                   Loading...
@@ -266,14 +538,20 @@ export default function FilesPage() {
                 </div>
               ) : (
                 files.map((file) => (
-                  <FileListItem
+                  <FileRow
                     key={file.path}
                     file={file}
-                    isSelected={selectedFile?.path === file.path}
-                    onNavigate={setCurrentPath}
-                    onSelect={() => handleFileClick(file)}
-                    onDownload={handleDownload}
-                    onDelete={handleDelete}
+                    isSelected={fm.isSelected(file.path)}
+                    isRenaming={fm.renamingPath === file.path}
+                    favoritedPaths={favoritedPaths}
+                    onSelect={(e) => handleRowSelect(file, e)}
+                    onOpen={() => handleRowOpen(file)}
+                    onDownload={() => handleDownload(file.path)}
+                    onDelete={() => handleDelete(file.path)}
+                    onRename={(name) => handleRenameCommit(file, name)}
+                    onCancelRename={fm.endRename}
+                    onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
+                    onFavoriteChanged={refreshFavorites}
                   />
                 ))
               )}
@@ -285,10 +563,18 @@ export default function FilesPage() {
         {selectedFile && !selectedFile.isDirectory && (
           <div className="hidden lg:block w-72 flex-shrink-0">
             <div className="dp-card p-4 sticky top-6 space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <h3 className="type-headline text-label-primary truncate flex-1">
                   {selectedFile.name}
                 </h3>
+                <StarButton
+                  path={selectedFile.path}
+                  favorited={favoritedPaths.has(selectedFile.path)}
+                  onToggle={() => {
+                    void refreshFavorites();
+                  }}
+                  size={16}
+                />
                 <button
                   onClick={() => setSelectedFile(null)}
                   className="p-1 text-label-tertiary hover:text-label-primary"
@@ -297,7 +583,11 @@ export default function FilesPage() {
                 </button>
               </div>
 
-              {/* File info */}
+              {/* Thumbnail preview (if previewable) */}
+              <div className="flex justify-center">
+                <Thumbnail file={selectedFile} size={140} />
+              </div>
+
               <div className="space-y-2">
                 <div className="flex justify-between type-footnote">
                   <span className="text-label-tertiary">Size</span>
@@ -315,7 +605,6 @@ export default function FilesPage() {
                 </div>
               </div>
 
-              {/* Actions */}
               <div className="flex flex-col gap-2 pt-2">
                 <button
                   onClick={() => handlePreview(selectedFile)}
@@ -325,71 +614,62 @@ export default function FilesPage() {
                   Preview
                 </button>
                 <button
-                  onClick={() => handleShare(selectedFile.path)}
+                  onClick={() => handleShare(selectedFile)}
                   className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
                 >
                   <LinkIcon size={14} />
-                  Share Link
+                  Share…
                 </button>
               </div>
 
-              {/* Share URL */}
-              {shareUrl && (
-                <div className="p-2 bg-surface-secondary rounded-sm">
-                  <p className="type-caption-1 text-label-tertiary mb-1.5">Share link</p>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      readOnly
-                      value={shareUrl}
-                      className="dp-input type-caption-1 flex-1 !py-1.5"
-                    />
-                    <button
-                      onClick={handleCopyShare}
-                      className="p-1.5 rounded-sm bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
-                    >
-                      {copied ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
-                  </div>
-                </div>
-              )}
+              {/* Version history */}
+              <VersionHistoryPanel
+                filePath={selectedFile.path}
+                onRestored={() => refresh()}
+              />
             </div>
           </div>
         )}
       </div>
 
-      {/* Preview modal */}
-      {previewContent && previewType && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
-          onClick={() => { setPreviewContent(null); setPreviewType(null); }}
-        >
-          <div
-            className="bg-surface-primary rounded-lg max-w-3xl max-h-[80vh] w-full overflow-hidden shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 className="type-headline text-label-primary truncate">
-                {selectedFile?.name}
-              </h3>
-              <button
-                onClick={() => { setPreviewContent(null); setPreviewType(null); }}
-                className="p-1 text-label-tertiary hover:text-label-primary"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="overflow-auto max-h-[calc(80vh-56px)] p-4">
-              {previewType === "image" ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={previewContent} alt={selectedFile?.name} className="max-w-full mx-auto" />
-              ) : (
-                <pre className="type-footnote text-label-primary whitespace-pre-wrap font-mono">
-                  {previewContent}
-                </pre>
-              )}
-            </div>
-          </div>
-        </div>
+      {/* Rich preview modal */}
+      {previewFile && (
+        <PreviewPane
+          file={previewFile}
+          onClose={() => setPreviewFile(null)}
+          onDownload={() => handleDownload(previewFile.path)}
+        />
+      )}
+
+      {/* Share dialog */}
+      {shareFile && (
+        <ShareDialog
+          filePath={shareFile.path}
+          fileName={shareFile.name}
+          onClose={() => setShareFile(null)}
+        />
+      )}
+
+      {/* Context menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenuItems}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Move / Copy dialog */}
+      {moveDialog && (
+        <MoveCopyDialog
+          mode={moveDialog.mode}
+          selectionLabels={selectionLabels}
+          currentDir={currentPath}
+          forbiddenPrefixes={forbiddenPrefixes}
+          onCancel={() => setMoveDialog(null)}
+          onConfirm={handleMoveCopyConfirm}
+        />
       )}
     </div>
   );

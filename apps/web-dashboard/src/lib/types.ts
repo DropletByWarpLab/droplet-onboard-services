@@ -75,14 +75,60 @@ export interface FileEntryInfo {
   modifiedAt: string;
 }
 
-export interface SyncTargetInfo {
-  id: string;
+export interface TrashItemInfo {
+  /** Nextcloud-assigned name used as restore key (e.g. "photo.jpg.d1712860391") */
+  name: string;
+  /** Original filename before deletion */
+  originalName: string;
+  /** Original parent directory (e.g. "/Photos") */
+  originalLocation: string;
+  size: number;
+  /** ISO timestamp of when the item was trashed */
+  deletedAt: string;
+  isDirectory: boolean;
+}
+
+export interface FileVersionInfo {
+  versionId: string;
+  size: number;
+  modifiedAt: string;
+}
+
+export interface BulkOperationResult {
   path: string;
-  label: string;
-  intervalMin: number;
-  enabled: boolean;
-  lastSync: string | null;
-  fileCount: number;
+  ok: boolean;
+  error?: string;
+}
+
+/** View mode for the file manager — list or grid */
+export type FileViewMode = "list" | "grid";
+
+// --- Phase 3: device clients + pairing ---
+
+export interface DeviceClientInfo {
+  id: string;
+  deviceName: string;
+  deviceType: "desktop" | "mobile";
+  platform: "macos" | "windows" | "linux" | "ios" | "android" | "other";
+  appVersion: string | null;
+  lastSeen: string;
+  status: "active" | "revoked";
+  createdAt: string;
+}
+
+export interface PairingCodeInfo {
+  code: string;
+  expiresAt: string;
+  /** `droplet://pair?server=...&code=...` URL the dashboard encodes as a QR */
+  pairUrl: string;
+}
+
+export interface PairingCodeStatus {
+  code: string;
+  used: boolean;
+  expired: boolean;
+  expiresAt: string;
+  claimedBy: string | null;
 }
 
 // --- Auth types ---
@@ -100,6 +146,43 @@ export interface ShareInfo {
   token: string;
   shareType?: number;
   permissions?: number;
+}
+
+// --- Phase 2 share types ---
+
+/** Nextcloud OCS share record as returned by /api/files/share and friends. */
+export interface ShareDetail {
+  id: number;
+  url: string | null;
+  token: string | null;
+  shareType: number;          // 0=user, 1=group, 3=public link
+  permissions: number;        // bitmask: 1=read, 2=update, 4=create, 8=delete, 16=share
+  path: string;
+  expireDate: string | null;  // "YYYY-MM-DD"
+  hasPassword: boolean;
+  note: string | null;
+  shareWith: string | null;
+  shareWithDisplayName: string | null;
+  uidOwner: string | null;
+  ownerDisplayName: string | null;
+  stime: number | null;
+}
+
+export interface ShareCreateOptions {
+  /** 0=user, 1=group, 3=public link */
+  shareType: number;
+  permissions?: number;
+  expireDate?: string;
+  password?: string;
+  note?: string;
+  shareWith?: string;
+}
+
+export interface ShareUpdateOptions {
+  permissions?: number;
+  password?: string;
+  expireDate?: string;
+  note?: string;
 }
 
 // --- Storage types ---

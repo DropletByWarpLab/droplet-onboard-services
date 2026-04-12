@@ -1,15 +1,8 @@
-import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import request from "supertest";
-import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
-import * as path from "node:path";
-import * as os from "node:os";
 import { PrismaClient } from "@prisma/client";
-import { createApp } from "../app.js";
-import { initFileService } from "../services/file.service.js";
-import { initDeviceService } from "../services/device.service.js";
 
-// Mock the ai-gateway client
+// Mock the ai-gateway client.
 vi.mock("../services/ai-gateway.client.js", () => ({
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: vi.fn().mockResolvedValue({ models: [] }),
@@ -19,9 +12,6 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   deleteKey: vi.fn(),
 }));
 
-// Use a deterministic temp directory for testing
-const TEST_FILES_ROOT = path.join(os.tmpdir(), "droplet-files-test");
-
 vi.mock("../config.js", () => ({
   config: {
     DATABASE_URL: "postgresql://test:test@localhost:5432/test",
@@ -30,187 +20,190 @@ vi.mock("../config.js", () => ({
     AI_GATEWAY_URL: "http://localhost:8000",
     PORT: 3000,
     NODE_ENV: "test",
-    FILES_ROOT: path.join(os.tmpdir(), "droplet-files-test"),
     MAX_UPLOAD_SIZE_MB: 10,
+    NEXTCLOUD_URL: "http://nextcloud.test",
+    AUTH_ENABLED: false,
   },
 }));
 
-describe("File Operations", () => {
+// Mock the Nextcloud client at the module level. Every route in files.ts
+// now calls a function from this module, so stubbing it gives us full
+// control over response shapes + lets us assert per-call arguments.
+vi.mock("../services/nextcloud.client.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/nextcloud.client.js")>(
+    "../services/nextcloud.client.js"
+  );
+  return {
+    // Re-export the real error class so handleFileError's instanceof check works
+    NextcloudOcsError: actual.NextcloudOcsError,
+    // File CRUD
+    ncListFiles: vi.fn(),
+    ncUploadFile: vi.fn(),
+    ncDownloadFile: vi.fn(),
+    ncDeleteFile: vi.fn(),
+    ncCreateDirectory: vi.fn(),
+    ncCreateShare: vi.fn(),
+    ncListShares: vi.fn(),
+    // Phase 1
+    ncMoveFile: vi.fn(),
+    ncCopyFile: vi.fn(),
+    ncGetFileId: vi.fn(),
+    ncListTrash: vi.fn(),
+    ncRestoreTrashItem: vi.fn(),
+    ncDeleteTrashItem: vi.fn(),
+    ncEmptyTrash: vi.fn(),
+    ncListVersions: vi.fn(),
+    ncRestoreVersion: vi.fn(),
+    // Phase 2
+    ncSetFavorite: vi.fn(),
+    ncListFavorites: vi.fn(),
+    ncSearchFiles: vi.fn(),
+    ncListRecents: vi.fn(),
+    ncFetchThumbnail: vi.fn(),
+    ncCreateShareV2: vi.fn(),
+    ncUpdateShare: vi.fn(),
+    ncDeleteShare: vi.fn(),
+    ncListSharedWithMe: vi.fn(),
+    ncGetUserQuota: vi.fn(),
+  };
+});
+
+import { createApp } from "../app.js";
+import * as nc from "../services/nextcloud.client.js";
+import { initDeviceService } from "../services/device.service.js";
+
+type Mocked<T extends (...a: any[]) => any> = T & ReturnType<typeof vi.fn>;
+
+// Cast so TypeScript lets us call .mockReturnValue etc. on each stub.
+const ncMock = nc as unknown as {
+  [K in keyof typeof nc]: Mocked<any>;
+};
+
+describe("File Operations (Nextcloud-backed routes)", () => {
   let app: ReturnType<typeof createApp>;
 
   beforeAll(() => {
     const prisma = new PrismaClient();
     initDeviceService(prisma);
-    initFileService(prisma);
     app = createApp(prisma);
   });
 
-  beforeEach(async () => {
-    // Clean and recreate the test directory before each test
-    try {
-      await fsp.rm(TEST_FILES_ROOT, { recursive: true, force: true });
-    } catch {
-      // Ignore if doesn't exist
+  beforeEach(() => {
+    // Reset all nc mocks between tests.
+    for (const key of Object.keys(ncMock)) {
+      const fn = (ncMock as any)[key];
+      if (typeof fn?.mockReset === "function") fn.mockReset();
     }
-    await fsp.mkdir(TEST_FILES_ROOT, { recursive: true });
-  });
+    // Default each mutation to succeed so tests only have to override failures.
+    ncMock.ncCreateDirectory.mockResolvedValue(undefined);
+    ncMock.ncUploadFile.mockResolvedValue(undefined);
+    ncMock.ncDeleteFile.mockResolvedValue(undefined);
+    ncMock.ncMoveFile.mockResolvedValue(undefined);
+    ncMock.ncCopyFile.mockResolvedValue(undefined);
+    ncMock.ncSetFavorite.mockResolvedValue(undefined);
+    ncMock.ncEmptyTrash.mockResolvedValue(undefined);
+    ncMock.ncRestoreTrashItem.mockResolvedValue(undefined);
+    ncMock.ncDeleteTrashItem.mockResolvedValue(undefined);
+    ncMock.ncRestoreVersion.mockResolvedValue(undefined);
+    ncMock.ncUpdateShare.mockResolvedValue(undefined);
+    ncMock.ncDeleteShare.mockResolvedValue(undefined);
 
-  afterAll(async () => {
-    try {
-      await fsp.rm(TEST_FILES_ROOT, { recursive: true, force: true });
-    } catch {
-      // Ignore
-    }
+    ncMock.ncListFiles.mockResolvedValue([]);
+    ncMock.ncListTrash.mockResolvedValue([]);
+    ncMock.ncListVersions.mockResolvedValue([]);
+    ncMock.ncListFavorites.mockResolvedValue([]);
+    ncMock.ncListRecents.mockResolvedValue([]);
+    ncMock.ncSearchFiles.mockResolvedValue([]);
+    ncMock.ncListSharedWithMe.mockResolvedValue([]);
+    ncMock.ncListShares.mockResolvedValue([]);
+
+    ncMock.ncGetFileId.mockResolvedValue(42);
   });
 
   // ── GET /api/files ──
 
   describe("GET /api/files", () => {
-    it("returns empty array for empty directory", async () => {
-      const res = await request(app).get("/api/files?path=/");
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual([]);
-    });
-
-    it("returns files after creating them", async () => {
-      await fsp.writeFile(path.join(TEST_FILES_ROOT, "hello.txt"), "Hello World");
+    it("returns the Nextcloud listing for a directory", async () => {
+      ncMock.ncListFiles.mockResolvedValue([
+        { name: "a.txt", path: "/a.txt", isDirectory: false, size: 5, mimeType: "text/plain", modifiedAt: "2026-04-01T00:00:00.000Z" },
+      ]);
 
       const res = await request(app).get("/api/files?path=/");
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(1);
-      expect(res.body[0].name).toBe("hello.txt");
-      expect(res.body[0].isDirectory).toBe(false);
-      expect(res.body[0].size).toBeGreaterThan(0);
+      expect(res.body[0].name).toBe("a.txt");
+      expect(ncMock.ncListFiles).toHaveBeenCalledWith(expect.any(String), "dev", "/");
     });
 
-    it("sorts directories before files", async () => {
-      await fsp.mkdir(path.join(TEST_FILES_ROOT, "zFolder"), { recursive: true });
-      await fsp.writeFile(path.join(TEST_FILES_ROOT, "aFile.txt"), "data");
-
-      const res = await request(app).get("/api/files?path=/");
+    it("defaults to root when path is omitted", async () => {
+      const res = await request(app).get("/api/files");
       expect(res.status).toBe(200);
-      expect(res.body).toHaveLength(2);
-      expect(res.body[0].name).toBe("zFolder");
-      expect(res.body[0].isDirectory).toBe(true);
-      expect(res.body[1].name).toBe("aFile.txt");
-    });
-
-    it("returns 400 for path traversal attempt", async () => {
-      const res = await request(app).get(
-        `/api/files?path=${encodeURIComponent("../../etc/passwd")}`
-      );
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("outside allowed root");
+      expect(ncMock.ncListFiles).toHaveBeenCalledWith(expect.any(String), "dev", "/");
     });
   });
 
   // ── POST /api/files/mkdir ──
 
   describe("POST /api/files/mkdir", () => {
-    it("creates a directory and returns 200", async () => {
-      const res = await request(app)
-        .post("/api/files/mkdir")
-        .send({ path: "/testdir" });
-
+    it("creates a directory via Nextcloud", async () => {
+      const res = await request(app).post("/api/files/mkdir").send({ path: "/new-dir" });
       expect(res.status).toBe(200);
-      expect(res.body.created).toBe("/testdir");
-
-      const stat = await fsp.stat(path.join(TEST_FILES_ROOT, "testdir"));
-      expect(stat.isDirectory()).toBe(true);
+      expect(res.body.created).toBe("/new-dir");
+      expect(ncMock.ncCreateDirectory).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/new-dir"
+      );
     });
 
-    it("creates nested directories", async () => {
-      const res = await request(app)
-        .post("/api/files/mkdir")
-        .send({ path: "/a/b/c" });
-
-      expect(res.status).toBe(200);
-      const stat = await fsp.stat(path.join(TEST_FILES_ROOT, "a/b/c"));
-      expect(stat.isDirectory()).toBe(true);
-    });
-
-    it("returns 400 for missing path", async () => {
+    it("returns 400 when path is missing", async () => {
       const res = await request(app).post("/api/files/mkdir").send({});
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain("path is required");
+      expect(ncMock.ncCreateDirectory).not.toHaveBeenCalled();
     });
 
-    it("returns 400 for empty path", async () => {
-      const res = await request(app)
-        .post("/api/files/mkdir")
-        .send({ path: "" });
+    it("returns 400 when path is empty", async () => {
+      const res = await request(app).post("/api/files/mkdir").send({ path: "" });
       expect(res.status).toBe(400);
-    });
-
-    it("returns 400 for path traversal", async () => {
-      const res = await request(app)
-        .post("/api/files/mkdir")
-        .send({ path: "/../../../tmp/evil" });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("outside allowed root");
-    });
-
-    it("succeeds silently if directory already exists", async () => {
-      await fsp.mkdir(path.join(TEST_FILES_ROOT, "existing"), { recursive: true });
-
-      const res = await request(app)
-        .post("/api/files/mkdir")
-        .send({ path: "/existing" });
-      expect(res.status).toBe(200);
     });
   });
 
   // ── POST /api/files/upload ──
 
   describe("POST /api/files/upload", () => {
-    it("uploads a file and returns metadata", async () => {
+    it("uploads a file and publishes MQTT event", async () => {
       const res = await request(app)
         .post("/api/files/upload?path=/")
-        .attach("files", Buffer.from("test content"), "test.txt");
+        .attach("files", Buffer.from("hello"), "hello.txt");
 
       expect(res.status).toBe(200);
       expect(res.body.uploaded).toHaveLength(1);
-      expect(res.body.uploaded[0].name).toBe("test.txt");
-      expect(res.body.uploaded[0].size).toBe(12);
-      expect(res.body.uploaded[0].hash).toBeDefined();
-
-      const content = await fsp.readFile(
-        path.join(TEST_FILES_ROOT, "test.txt"),
-        "utf-8"
+      expect(res.body.uploaded[0].name).toBe("hello.txt");
+      expect(res.body.uploaded[0].path).toBe("/hello.txt");
+      expect(ncMock.ncUploadFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/",
+        "hello.txt",
+        expect.any(Buffer)
       );
-      expect(content).toBe("test content");
     });
 
     it("uploads multiple files", async () => {
       const res = await request(app)
-        .post("/api/files/upload?path=/")
-        .attach("files", Buffer.from("file1"), "a.txt")
-        .attach("files", Buffer.from("file2"), "b.txt");
+        .post("/api/files/upload?path=/docs")
+        .attach("files", Buffer.from("a"), "a.txt")
+        .attach("files", Buffer.from("b"), "b.txt");
 
       expect(res.status).toBe(200);
       expect(res.body.uploaded).toHaveLength(2);
+      expect(res.body.uploaded[0].path).toBe("/docs/a.txt");
+      expect(res.body.uploaded[1].path).toBe("/docs/b.txt");
+      expect(ncMock.ncUploadFile).toHaveBeenCalledTimes(2);
     });
 
-    it("uploads to a subdirectory", async () => {
-      await fsp.mkdir(path.join(TEST_FILES_ROOT, "docs"), { recursive: true });
-
-      const res = await request(app)
-        .post(`/api/files/upload?path=${encodeURIComponent("/docs")}`)
-        .attach("files", Buffer.from("content"), "readme.md");
-
-      expect(res.status).toBe(200);
-      expect(fs.existsSync(path.join(TEST_FILES_ROOT, "docs", "readme.md"))).toBe(true);
-    });
-
-    it("returns 400 for no files attached", async () => {
+    it("returns 400 when no files are attached", async () => {
       const res = await request(app).post("/api/files/upload?path=/");
-      expect(res.status).toBe(400);
-    });
-
-    it("returns 400 for path traversal", async () => {
-      const res = await request(app)
-        .post(`/api/files/upload?path=${encodeURIComponent("../../etc")}`)
-        .attach("files", Buffer.from("evil"), "payload.txt");
       expect(res.status).toBe(400);
     });
   });
@@ -218,35 +211,28 @@ describe("File Operations", () => {
   // ── GET /api/files/download ──
 
   describe("GET /api/files/download", () => {
-    it("downloads a file that exists", async () => {
-      await fsp.writeFile(
-        path.join(TEST_FILES_ROOT, "download-me.txt"),
-        "hello download"
-      );
+    it("streams the file when Nextcloud returns a body", async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("hello"));
+          controller.close();
+        },
+      });
+      ncMock.ncDownloadFile.mockResolvedValue(stream);
 
-      const res = await request(app)
-        .get(`/api/files/download?path=${encodeURIComponent("/download-me.txt")}`)
-        .buffer(true)
-        .parse((res, cb) => {
-          let data = "";
-          res.setEncoding("utf-8");
-          res.on("data", (chunk: string) => { data += chunk; });
-          res.on("end", () => cb(null, data));
-        });
+      const res = await request(app).get("/api/files/download?path=/hello.txt");
       expect(res.status).toBe(200);
-      expect(res.body).toBe("hello download");
-      expect(res.headers["content-disposition"]).toContain("download-me.txt");
+      expect(res.headers["content-disposition"]).toContain("hello.txt");
     });
 
-    it("returns 400 for missing path parameter", async () => {
+    it("returns 400 when path is missing", async () => {
       const res = await request(app).get("/api/files/download");
       expect(res.status).toBe(400);
     });
 
-    it("returns 404 for non-existent file", async () => {
-      const res = await request(app).get(
-        `/api/files/download?path=${encodeURIComponent("/no-such-file.txt")}`
-      );
+    it("returns 404 when the file doesn't exist", async () => {
+      ncMock.ncDownloadFile.mockResolvedValue(null);
+      const res = await request(app).get("/api/files/download?path=/ghost.txt");
       expect(res.status).toBe(404);
     });
   });
@@ -254,92 +240,550 @@ describe("File Operations", () => {
   // ── DELETE /api/files ──
 
   describe("DELETE /api/files", () => {
-    it("deletes a file", async () => {
-      const fp = path.join(TEST_FILES_ROOT, "to-delete.txt");
-      await fsp.writeFile(fp, "bye");
-
-      const res = await request(app).delete(
-        `/api/files?path=${encodeURIComponent("/to-delete.txt")}`
-      );
+    it("deletes via Nextcloud", async () => {
+      const res = await request(app).delete("/api/files?path=/old.txt");
       expect(res.status).toBe(200);
-      expect(res.body.deleted).toBe("/to-delete.txt");
-      expect(fs.existsSync(fp)).toBe(false);
+      expect(res.body.deleted).toBe("/old.txt");
+      expect(ncMock.ncDeleteFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/old.txt"
+      );
     });
 
-    it("deletes a directory recursively", async () => {
-      const dir = path.join(TEST_FILES_ROOT, "dir-to-delete");
-      await fsp.mkdir(dir, { recursive: true });
-      await fsp.writeFile(path.join(dir, "child.txt"), "data");
-
-      const res = await request(app).delete(
-        `/api/files?path=${encodeURIComponent("/dir-to-delete")}`
-      );
-      expect(res.status).toBe(200);
-      expect(fs.existsSync(dir)).toBe(false);
-    });
-
-    it("returns 400 for missing path parameter", async () => {
+    it("returns 400 when path is missing", async () => {
       const res = await request(app).delete("/api/files");
       expect(res.status).toBe(400);
     });
+  });
 
-    it("returns 404 for non-existent file", async () => {
-      const res = await request(app).delete(
-        `/api/files?path=${encodeURIComponent("/ghost.txt")}`
+  // ── POST /api/files/rename ──
+
+  describe("POST /api/files/rename", () => {
+    it("calls ncMoveFile with the computed new path", async () => {
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/docs/old.txt", newName: "new.txt" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.renamed).toEqual({ from: "/docs/old.txt", to: "/docs/new.txt" });
+      expect(ncMock.ncMoveFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/docs/old.txt",
+        "/docs/new.txt",
+        false
       );
+    });
+
+    it("preserves root-level files", async () => {
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/a.txt", newName: "b.txt" });
+      expect(res.status).toBe(200);
+      expect(res.body.renamed.to).toBe("/b.txt");
+    });
+
+    it("rejects path separators in newName", async () => {
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/a.txt", newName: "b/c.txt" });
+      expect(res.status).toBe(400);
+      expect(ncMock.ncMoveFile).not.toHaveBeenCalled();
+    });
+
+    it("rejects empty newName", async () => {
+      const res = await request(app)
+        .post("/api/files/rename")
+        .send({ path: "/a.txt", newName: "" });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── POST /api/files/move ──
+
+  describe("POST /api/files/move", () => {
+    it("moves a file to a new directory", async () => {
+      const res = await request(app)
+        .post("/api/files/move")
+        .send({ from: "/a.txt", to: "/archive/a.txt" });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncMoveFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/a.txt",
+        "/archive/a.txt",
+        false
+      );
+    });
+
+    it("passes overwrite=true when requested", async () => {
+      const res = await request(app)
+        .post("/api/files/move")
+        .send({ from: "/a.txt", to: "/b.txt", overwrite: true });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncMoveFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/a.txt",
+        "/b.txt",
+        true
+      );
+    });
+
+    it("bubbles up NextcloudOcsError as the OCS status", async () => {
+      const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+      ncMock.ncMoveFile.mockRejectedValue(
+        new NextcloudOcsError("OCS move: Destination exists (412)", 412)
+      );
+      const res = await request(app)
+        .post("/api/files/move")
+        .send({ from: "/a.txt", to: "/b.txt" });
+      expect(res.status).toBe(412);
+      expect(res.body.error).toContain("Destination exists");
+    });
+  });
+
+  // ── POST /api/files/copy ──
+
+  describe("POST /api/files/copy", () => {
+    it("copies via Nextcloud", async () => {
+      const res = await request(app)
+        .post("/api/files/copy")
+        .send({ from: "/a.txt", to: "/b.txt" });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncCopyFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/a.txt",
+        "/b.txt",
+        false
+      );
+    });
+  });
+
+  // ── POST /api/files/bulk-delete ──
+
+  describe("POST /api/files/bulk-delete", () => {
+    it("returns per-item success for all-ok bulk", async () => {
+      const res = await request(app)
+        .post("/api/files/bulk-delete")
+        .send({ paths: ["/a.txt", "/b.txt", "/c.txt"] });
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(3);
+      expect(res.body.results.every((r: any) => r.ok)).toBe(true);
+      expect(ncMock.ncDeleteFile).toHaveBeenCalledTimes(3);
+    });
+
+    it("returns 207 on partial failure and per-item errors", async () => {
+      ncMock.ncDeleteFile.mockImplementation(
+        async (_t: string, _u: string, p: string) => {
+          if (p === "/bad.txt") throw new Error("WebDAV DELETE failed: 403");
+        }
+      );
+
+      const res = await request(app)
+        .post("/api/files/bulk-delete")
+        .send({ paths: ["/good.txt", "/bad.txt"] });
+
+      expect(res.status).toBe(207);
+      const good = res.body.results.find((r: any) => r.path === "/good.txt");
+      const bad = res.body.results.find((r: any) => r.path === "/bad.txt");
+      expect(good.ok).toBe(true);
+      expect(bad.ok).toBe(false);
+      expect(bad.error).toContain("403");
+    });
+
+    it("rejects empty paths array", async () => {
+      const res = await request(app).post("/api/files/bulk-delete").send({ paths: [] });
+      expect(res.status).toBe(400);
+      expect(ncMock.ncDeleteFile).not.toHaveBeenCalled();
+    });
+
+    it("serializes delete calls (no concurrent Promise.all fan-out)", async () => {
+      // Track concurrency — nc.ncDeleteFile should never be in-flight twice.
+      let inflight = 0;
+      let maxInflight = 0;
+      ncMock.ncDeleteFile.mockImplementation(async () => {
+        inflight++;
+        maxInflight = Math.max(maxInflight, inflight);
+        await new Promise((r) => setTimeout(r, 5));
+        inflight--;
+      });
+
+      await request(app)
+        .post("/api/files/bulk-delete")
+        .send({ paths: ["/a.txt", "/b.txt", "/c.txt", "/d.txt"] });
+
+      expect(maxInflight).toBe(1);
+    });
+  });
+
+  // ── POST /api/files/bulk-move ──
+
+  describe("POST /api/files/bulk-move", () => {
+    it("moves multiple files to a target directory", async () => {
+      const res = await request(app)
+        .post("/api/files/bulk-move")
+        .send({ paths: ["/a.txt", "/b.txt"], toDir: "/archive" });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncMoveFile).toHaveBeenCalledTimes(2);
+      expect(ncMock.ncMoveFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/a.txt",
+        "/archive/a.txt",
+        false
+      );
+    });
+  });
+
+  // ── POST /api/files/bulk-copy ──
+
+  describe("POST /api/files/bulk-copy", () => {
+    it("copies multiple files to a target directory", async () => {
+      const res = await request(app)
+        .post("/api/files/bulk-copy")
+        .send({ paths: ["/a.txt", "/b.txt"], toDir: "/backup" });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncCopyFile).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ── Trash ──
+
+  describe("Trash endpoints", () => {
+    it("GET /api/files/trash returns the parsed trash list", async () => {
+      ncMock.ncListTrash.mockResolvedValue([
+        {
+          name: "a.txt.d123",
+          originalName: "a.txt",
+          originalLocation: "/",
+          size: 8,
+          deletedAt: "2026-04-01T00:00:00.000Z",
+          isDirectory: false,
+        },
+      ]);
+      const res = await request(app).get("/api/files/trash");
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(1);
+      expect(res.body.items[0].originalName).toBe("a.txt");
+    });
+
+    it("POST /api/files/trash/restore calls ncRestoreTrashItem", async () => {
+      const res = await request(app)
+        .post("/api/files/trash/restore")
+        .send({ name: "a.txt.d123" });
+      expect(res.status).toBe(200);
+      expect(res.body.restored).toBe("a.txt.d123");
+      expect(ncMock.ncRestoreTrashItem).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "a.txt.d123"
+      );
+    });
+
+    it("DELETE /api/files/trash empties trash", async () => {
+      const res = await request(app).delete("/api/files/trash");
+      expect(res.status).toBe(200);
+      expect(res.body.emptied).toBe(true);
+      expect(ncMock.ncEmptyTrash).toHaveBeenCalled();
+    });
+
+    it("DELETE /api/files/trash/item permanently removes one item", async () => {
+      const res = await request(app).delete("/api/files/trash/item?name=a.txt.d123");
+      expect(res.status).toBe(200);
+      expect(ncMock.ncDeleteTrashItem).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "a.txt.d123"
+      );
+    });
+  });
+
+  // ── Versions ──
+
+  describe("Versions endpoints", () => {
+    it("GET /api/files/versions resolves fileId then lists versions", async () => {
+      ncMock.ncListVersions.mockResolvedValue([
+        { versionId: "v1", size: 10, modifiedAt: "2026-04-01T00:00:00.000Z" },
+      ]);
+      const res = await request(app).get("/api/files/versions?path=/a.txt");
+      expect(res.status).toBe(200);
+      expect(res.body.fileId).toBe(42);
+      expect(res.body.versions).toHaveLength(1);
+      expect(ncMock.ncGetFileId).toHaveBeenCalled();
+      expect(ncMock.ncListVersions).toHaveBeenCalledWith(expect.any(String), "dev", 42);
+    });
+
+    it("GET /api/files/versions returns 404 when fileId is null", async () => {
+      ncMock.ncGetFileId.mockResolvedValue(null);
+      const res = await request(app).get("/api/files/versions?path=/missing.txt");
+      expect(res.status).toBe(404);
+    });
+
+    it("POST /api/files/versions/restore restores a version by id", async () => {
+      const res = await request(app)
+        .post("/api/files/versions/restore")
+        .send({ path: "/a.txt", versionId: "v1" });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncRestoreVersion).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        42,
+        "v1"
+      );
+    });
+  });
+
+  // ── Phase 2: favorites / recents / search / thumbnail / shares ──
+
+  describe("Favorites", () => {
+    it("POST /api/files/favorite toggles the flag via ncSetFavorite", async () => {
+      const res = await request(app)
+        .post("/api/files/favorite")
+        .send({ path: "/a.txt", favorite: true });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ path: "/a.txt", favorite: true });
+      expect(ncMock.ncSetFavorite).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/a.txt",
+        true
+      );
+    });
+
+    it("GET /api/files/favorites returns the list", async () => {
+      ncMock.ncListFavorites.mockResolvedValue([
+        { name: "a.txt", path: "/a.txt", isDirectory: false, size: 5, mimeType: "text/plain", modifiedAt: "2026-04-01T00:00:00.000Z" },
+      ]);
+      const res = await request(app).get("/api/files/favorites");
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(1);
+    });
+  });
+
+  describe("Search & recents", () => {
+    it("GET /api/files/search passes the query through", async () => {
+      ncMock.ncSearchFiles.mockResolvedValue([
+        { name: "budget-2024.xlsx", path: "/budget-2024.xlsx", isDirectory: false, size: 100, mimeType: "application/vnd.ms-excel", modifiedAt: "2026-04-01T00:00:00.000Z" },
+      ]);
+      const res = await request(app).get("/api/files/search?q=budget");
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(1);
+      expect(ncMock.ncSearchFiles).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        { query: "budget", mime: undefined, limit: 50 }
+      );
+    });
+
+    it("GET /api/files/search returns 400 when q is missing", async () => {
+      const res = await request(app).get("/api/files/search");
+      expect(res.status).toBe(400);
+    });
+
+    it("GET /api/files/search returns [] for q<2 chars (no backend call)", async () => {
+      const res = await request(app).get("/api/files/search?q=a");
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([]);
+      expect(ncMock.ncSearchFiles).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/files/recents calls ncListRecents with the limit", async () => {
+      const res = await request(app).get("/api/files/recents?limit=20");
+      expect(res.status).toBe(200);
+      expect(ncMock.ncListRecents).toHaveBeenCalledWith(expect.any(String), "dev", 20);
+    });
+  });
+
+  describe("Thumbnail", () => {
+    it("GET /api/files/thumbnail streams bytes with Cache-Control", async () => {
+      const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      ncMock.ncFetchThumbnail.mockResolvedValue({
+        body: body.buffer,
+        contentType: "image/png",
+      });
+
+      const res = await request(app).get("/api/files/thumbnail?path=/pixel.png");
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("image/png");
+      expect(res.headers["cache-control"]).toContain("max-age=3600");
+    });
+
+    it("GET /api/files/thumbnail returns 404 when preview is unavailable", async () => {
+      ncMock.ncFetchThumbnail.mockResolvedValue(null);
+      const res = await request(app).get("/api/files/thumbnail?path=/big.xlsx");
+      expect(res.status).toBe(404);
+    });
+
+    it("GET /api/files/thumbnail returns 404 when fileId can't be resolved", async () => {
+      ncMock.ncGetFileId.mockResolvedValue(null);
+      const res = await request(app).get("/api/files/thumbnail?path=/missing.png");
       expect(res.status).toBe(404);
     });
   });
 
-  // ── Integration: full lifecycle ──
+  describe("Shares v2", () => {
+    it("POST /api/files/share creates with full options", async () => {
+      ncMock.ncCreateShareV2.mockResolvedValue({
+        id: 7,
+        url: "https://nextcloud/s/abc",
+        token: "abc",
+        shareType: 3,
+        permissions: 1,
+        path: "/a.txt",
+        expireDate: "2027-12-31",
+        hasPassword: true,
+        note: "please review",
+        shareWith: null,
+        shareWithDisplayName: null,
+        uidOwner: "dev",
+        ownerDisplayName: "Admin",
+        stime: 1712860391,
+      });
+
+      const res = await request(app)
+        .post("/api/files/share")
+        .send({
+          path: "/a.txt",
+          shareType: 3,
+          permissions: 1,
+          expireDate: "2027-12-31",
+          password: "s3cret",
+          note: "please review",
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe(7);
+      expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
+        expect.any(String),
+        "/a.txt",
+        expect.objectContaining({
+          shareType: 3,
+          permissions: 1,
+          expireDate: "2027-12-31",
+          password: "s3cret",
+          note: "please review",
+        })
+      );
+    });
+
+    it("POST /api/files/share surfaces NextcloudOcsError as the upstream status", async () => {
+      const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+      ncMock.ncCreateShareV2.mockRejectedValue(
+        new NextcloudOcsError(
+          "OCS share create: Password is present in compromised password list. (400)",
+          400
+        )
+      );
+
+      const res = await request(app)
+        .post("/api/files/share")
+        .send({ path: "/a.txt", shareType: 3, password: "OpenSesame123!" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("compromised password list");
+    });
+
+    it("POST /api/files/share rejects an invalid expireDate format", async () => {
+      const res = await request(app)
+        .post("/api/files/share")
+        .send({ path: "/a.txt", expireDate: "tomorrow" });
+      expect(res.status).toBe(400);
+      expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+    });
+
+    it("PUT /api/files/share/:id applies each provided field sequentially", async () => {
+      const res = await request(app)
+        .put("/api/files/share/7")
+        .send({ permissions: 3, password: "new-pwd" });
+      expect(res.status).toBe(200);
+      expect(res.body.updated).toBe(7);
+      expect(ncMock.ncUpdateShare).toHaveBeenCalledTimes(2);
+      expect(ncMock.ncUpdateShare).toHaveBeenCalledWith(expect.any(String), 7, "permissions", "3");
+      expect(ncMock.ncUpdateShare).toHaveBeenCalledWith(expect.any(String), 7, "password", "new-pwd");
+    });
+
+    it("PUT /api/files/share/:id rejects an empty body", async () => {
+      const res = await request(app).put("/api/files/share/7").send({});
+      expect(res.status).toBe(400);
+      expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+    });
+
+    it("DELETE /api/files/share/:id revokes the share", async () => {
+      const res = await request(app).delete("/api/files/share/7");
+      expect(res.status).toBe(200);
+      expect(ncMock.ncDeleteShare).toHaveBeenCalledWith(expect.any(String), 7);
+    });
+
+    it("GET /api/files/shared-with-me returns the shares array", async () => {
+      ncMock.ncListSharedWithMe.mockResolvedValue([
+        {
+          id: 10,
+          url: null,
+          token: null,
+          shareType: 0,
+          permissions: 17,
+          path: "/shared/hello.txt",
+          expireDate: null,
+          hasPassword: false,
+          note: null,
+          shareWith: "me",
+          shareWithDisplayName: null,
+          uidOwner: "bob",
+          ownerDisplayName: "Bob",
+          stime: 1712860391,
+        },
+      ]);
+      const res = await request(app).get("/api/files/shared-with-me");
+      expect(res.status).toBe(200);
+      expect(res.body.shares).toHaveLength(1);
+      expect(res.body.shares[0].uidOwner).toBe("bob");
+    });
+  });
+
+  // ── Full lifecycle ──
 
   describe("Full lifecycle", () => {
     it("mkdir → upload → list → download → delete → list", async () => {
-      // 1. Create directory
-      let res = await request(app)
-        .post("/api/files/mkdir")
-        .send({ path: "/docs" });
+      // mkdir
+      let res = await request(app).post("/api/files/mkdir").send({ path: "/docs" });
       expect(res.status).toBe(200);
 
-      // 2. Upload a file into it
+      // upload
       res = await request(app)
-        .post(`/api/files/upload?path=${encodeURIComponent("/docs")}`)
+        .post("/api/files/upload?path=/docs")
         .attach("files", Buffer.from("# Hello"), "readme.md");
       expect(res.status).toBe(200);
 
-      // 3. List the directory
-      res = await request(app).get(
-        `/api/files?path=${encodeURIComponent("/docs")}`
-      );
+      // list — now populated
+      ncMock.ncListFiles.mockResolvedValueOnce([
+        { name: "readme.md", path: "/docs/readme.md", isDirectory: false, size: 7, mimeType: "text/markdown", modifiedAt: "2026-04-01T00:00:00.000Z" },
+      ]);
+      res = await request(app).get("/api/files?path=/docs");
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(1);
       expect(res.body[0].name).toBe("readme.md");
 
-      // 4. Download the file
-      res = await request(app)
-        .get(`/api/files/download?path=${encodeURIComponent("/docs/readme.md")}`)
-        .buffer(true)
-        .parse((res, cb) => {
-          let data = "";
-          res.setEncoding("utf-8");
-          res.on("data", (chunk: string) => { data += chunk; });
-          res.on("end", () => cb(null, data));
-        });
-      expect(res.status).toBe(200);
-      expect(res.body).toBe("# Hello");
-
-      // 5. Delete the file
-      res = await request(app).delete(
-        `/api/files?path=${encodeURIComponent("/docs/readme.md")}`
-      );
+      // download
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode("# Hello"));
+          c.close();
+        },
+      });
+      ncMock.ncDownloadFile.mockResolvedValueOnce(stream);
+      res = await request(app).get("/api/files/download?path=/docs/readme.md");
       expect(res.status).toBe(200);
 
-      // 6. Verify it's gone
-      res = await request(app).get(
-        `/api/files?path=${encodeURIComponent("/docs")}`
-      );
+      // delete
+      res = await request(app).delete("/api/files?path=/docs/readme.md");
       expect(res.status).toBe(200);
-      expect(res.body).toHaveLength(0);
+      expect(ncMock.ncDeleteFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/docs/readme.md"
+      );
     });
   });
 });

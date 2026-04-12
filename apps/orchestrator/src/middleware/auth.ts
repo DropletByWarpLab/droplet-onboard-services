@@ -82,6 +82,21 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 /**
+ * Validate a session cookie / bearer token outside the Express pipeline.
+ *
+ * Used by the WebSocket upgrade handler, which gets a raw IncomingMessage
+ * rather than a Request. Returns the authenticated user, or the dev user
+ * when `AUTH_ENABLED=false`.
+ */
+export async function validateTokenForWs(token: string | null): Promise<AuthUser | null> {
+  if (!config.AUTH_ENABLED) {
+    return { id: "dev", username: "dev", displayName: "Developer" };
+  }
+  if (!token) return null;
+  return validateToken(token);
+}
+
+/**
  * Validate a token by checking Redis cache first, then querying Nextcloud.
  */
 async function validateToken(token: string): Promise<AuthUser | null> {

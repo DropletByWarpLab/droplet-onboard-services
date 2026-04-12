@@ -10,6 +10,9 @@ import type {
   MatterDiscoveredDevice,
   MatterGrouped,
   FileEntryInfo,
+  FileVersionInfo,
+  TrashItemInfo,
+  BulkOperationResult,
   FirewallConfig,
   HealthResponse,
   ModelsResponse,
@@ -19,10 +22,15 @@ import type {
   SessionDetail,
   SessionInfo,
   StorageStats,
-  SyncTargetInfo,
   WirelessScanResult,
   AuthUser,
   ShareInfo,
+  ShareDetail,
+  ShareCreateOptions,
+  ShareUpdateOptions,
+  DeviceClientInfo,
+  PairingCodeInfo,
+  PairingCodeStatus,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -579,53 +587,335 @@ export async function fetchShares(path: string): Promise<ShareInfo[]> {
   return data.shares;
 }
 
-// --- Sync targets ---
+// --- File management (Phase 1) — rename / move / copy / bulk / trash / versions ---
 
-export async function fetchSyncTargets(): Promise<SyncTargetInfo[]> {
-  const res = await authFetch(`${BASE}/api/sync/targets`);
-  if (!res.ok) throw new Error(`Failed to fetch sync targets: ${res.status}`);
+export async function renameFile(
+  path: string,
+  newName: string
+): Promise<{ from: string; to: string }> {
+  const res = await authFetch(`${BASE}/api/files/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, newName }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to rename: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.renamed;
+}
+
+export async function moveFile(
+  from: string,
+  to: string,
+  overwrite = false
+): Promise<{ from: string; to: string }> {
+  const res = await authFetch(`${BASE}/api/files/move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, overwrite }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to move: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.moved;
+}
+
+export async function copyFile(
+  from: string,
+  to: string,
+  overwrite = false
+): Promise<{ from: string; to: string }> {
+  const res = await authFetch(`${BASE}/api/files/copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, overwrite }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to copy: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.copied;
+}
+
+export async function bulkDeleteFiles(
+  paths: string[]
+): Promise<BulkOperationResult[]> {
+  const res = await authFetch(`${BASE}/api/files/bulk-delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths }),
+  });
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Bulk delete failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results;
+}
+
+export async function bulkMoveFiles(
+  paths: string[],
+  toDir: string,
+  overwrite = false
+): Promise<BulkOperationResult[]> {
+  const res = await authFetch(`${BASE}/api/files/bulk-move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths, toDir, overwrite }),
+  });
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Bulk move failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results;
+}
+
+export async function bulkCopyFiles(
+  paths: string[],
+  toDir: string,
+  overwrite = false
+): Promise<BulkOperationResult[]> {
+  const res = await authFetch(`${BASE}/api/files/bulk-copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths, toDir, overwrite }),
+  });
+  if (!res.ok && res.status !== 207) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Bulk copy failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results;
+}
+
+export async function fetchTrash(): Promise<TrashItemInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/trash`);
+  if (!res.ok) {
+    if (res.status === 501) return [];
+    throw new Error(`Failed to fetch trash: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+export async function restoreTrashItem(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/trash/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(`Failed to restore: ${res.status}`);
+}
+
+export async function deleteTrashItem(name: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/files/trash/item?name=${encodeURIComponent(name)}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) throw new Error(`Failed to purge trash item: ${res.status}`);
+}
+
+export async function emptyTrash(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/trash`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to empty trash: ${res.status}`);
+}
+
+export async function fetchVersions(
+  path: string
+): Promise<{ fileId: number; versions: FileVersionInfo[] }> {
+  const res = await authFetch(
+    `${BASE}/api/files/versions?path=${encodeURIComponent(path)}`
+  );
+  if (!res.ok) {
+    if (res.status === 501) return { fileId: 0, versions: [] };
+    if (res.status === 404) return { fileId: 0, versions: [] };
+    throw new Error(`Failed to fetch versions: ${res.status}`);
+  }
   return res.json();
 }
 
-export async function createSyncTarget(data: {
-  path: string;
-  label: string;
-  intervalMin: number;
-}): Promise<SyncTargetInfo> {
-  const res = await authFetch(`${BASE}/api/sync/targets`, {
+export async function restoreVersion(path: string, versionId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/versions/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, versionId }),
+  });
+  if (!res.ok) throw new Error(`Failed to restore version: ${res.status}`);
+}
+
+// --- Phase 2: favorites / recents / search / thumbnails / shares v2 ---
+
+export async function toggleFavorite(path: string, favorite: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/favorite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, favorite }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update favorite: ${res.status}`);
+  }
+}
+
+export async function fetchFavorites(): Promise<FileEntryInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/favorites`);
+  if (!res.ok) throw new Error(`Failed to fetch favorites: ${res.status}`);
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+export async function fetchRecents(limit = 50): Promise<FileEntryInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/recents?limit=${limit}`);
+  if (!res.ok) throw new Error(`Failed to fetch recents: ${res.status}`);
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+export async function searchFiles(
+  query: string,
+  opts: { mime?: string; limit?: number } = {}
+): Promise<FileEntryInfo[]> {
+  const params = new URLSearchParams({ q: query });
+  if (opts.mime) params.set("mime", opts.mime);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const res = await authFetch(`${BASE}/api/files/search?${params.toString()}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Search failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.items ?? [];
+}
+
+/** Build a thumbnail URL for <img src=...>. The orchestrator streams bytes + caches. */
+export function getThumbnailUrl(path: string, x = 256, y = 256): string {
+  return `${BASE}/api/files/thumbnail?path=${encodeURIComponent(path)}&x=${x}&y=${y}`;
+}
+
+export async function createShare(
+  path: string,
+  opts: ShareCreateOptions = { shareType: 3 }
+): Promise<ShareDetail> {
+  const res = await authFetch(`${BASE}/api/files/share`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, ...opts }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Share failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateShare(
+  shareId: number,
+  opts: ShareUpdateOptions
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Share update failed: ${res.status}`);
+  }
+}
+
+export async function deleteShare(shareId: number): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/share/${shareId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Share delete failed: ${res.status}`);
+}
+
+export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
+  const res = await authFetch(`${BASE}/api/files/shared-with-me`);
+  if (!res.ok) throw new Error(`Failed to fetch shared-with-me: ${res.status}`);
+  const data = await res.json();
+  return data.shares ?? [];
+}
+
+// --- Phase 3: device clients + pairing + user admin ---
+
+export async function createPairingCode(data: {
+  deviceName: string;
+  deviceType: "desktop" | "mobile";
+  platform: "macos" | "windows" | "linux" | "ios" | "android" | "other";
+}): Promise<PairingCodeInfo> {
+  const res = await authFetch(`${BASE}/api/devices/pair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(`Failed to create sync target: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to generate pairing code: ${res.status}`);
+  }
   return res.json();
 }
 
-export async function updateSyncTarget(
-  id: string,
-  data: Partial<{ label: string; intervalMin: number; enabled: boolean }>
-): Promise<SyncTargetInfo> {
-  const res = await authFetch(`${BASE}/api/sync/targets/${id}`, {
+export async function getPairingCodeStatus(code: string): Promise<PairingCodeStatus> {
+  const res = await authFetch(`${BASE}/api/devices/pair/${code}/status`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Status lookup failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchDeviceClients(): Promise<DeviceClientInfo[]> {
+  const res = await authFetch(`${BASE}/api/devices/clients`);
+  if (!res.ok) throw new Error(`Failed to fetch device clients: ${res.status}`);
+  const data = await res.json();
+  return data.clients ?? [];
+}
+
+export async function revokeDeviceClient(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/devices/clients/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to revoke device: ${res.status}`);
+  }
+}
+
+export async function updateUser(
+  username: string,
+  data: {
+    displayName?: string;
+    email?: string;
+    quota?: string;
+    password?: string;
+  }
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/users/${username}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(`Failed to update sync target: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update user: ${res.status}`);
+  }
 }
 
-export async function deleteSyncTarget(id: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/sync/targets/${id}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) throw new Error(`Failed to delete sync target: ${res.status}`);
-}
-
-export async function triggerSync(targetId: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/sync/trigger`, {
+export async function setUserEnabled(username: string, enabled: boolean): Promise<void> {
+  const action = enabled ? "enable" : "disable";
+  const res = await authFetch(`${BASE}/api/auth/users/${username}/${action}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ targetId }),
   });
-  if (!res.ok) throw new Error(`Failed to trigger sync: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to ${action} user: ${res.status}`);
+  }
 }
+
