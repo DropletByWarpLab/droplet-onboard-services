@@ -19,6 +19,9 @@ import type {
   ConnectedDevice,
   FirewallConfig,
   RouterSystemInfo,
+  InterfaceStatus,
+  RouterBoardInfo,
+  RouterResources,
 } from "../types/network.js";
 
 const logger = pino({ name: "network-service" });
@@ -87,9 +90,9 @@ export async function getNetworkOverview(): Promise<NetworkOverview> {
   } catch (err) {
     logger.warn({ err }, "Failed to fetch network overview");
     return {
-      interfaces: { lan: { up: false }, wan: { up: false } },
+      interfaces: { lan: { up: false } as InterfaceStatus, wan: { up: false } as InterfaceStatus },
       wireless: {},
-      system: { board: {}, resources: {} },
+      system: { board: {} as RouterBoardInfo, resources: {} as RouterResources },
       connectedDeviceCount: 0,
       routerConnected: false,
     };
