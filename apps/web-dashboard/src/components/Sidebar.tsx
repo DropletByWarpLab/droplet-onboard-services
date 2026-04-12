@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   FolderOpen,
   Home,
+  Laptop,
   LayoutDashboard,
   LogOut,
   MessageSquare,
@@ -39,6 +40,7 @@ const filesSubNav = [
   { href: "/files/favorites", label: "Favorites", icon: Star, exact: false },
   { href: "/files/shared", label: "Shared", icon: Share2, exact: false },
   { href: "/files/trash", label: "Trash", icon: Trash2, exact: false },
+  { href: "/files/devices", label: "Sync Devices", icon: Laptop, exact: false },
 ];
 
 export function Sidebar() {
