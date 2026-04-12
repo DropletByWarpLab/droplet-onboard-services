@@ -25,10 +25,11 @@ The script runs six phases, each idempotent (safe to re-run):
 |-------|-------------|
 | **1. Preflight** | Checks OS (Debian/Raspbian/Ubuntu), architecture (ARM64 or x86_64), disk (≥ 8 GB), memory (≥ 2 GB), internet |
 | **2. Docker** | Installs Docker Engine 25+ and Compose v2 if not present. Adds user to `docker` group |
-| **3. Secrets** | Generates unique-per-device passwords and encryption keys. Writes `.env` (chmod 600) |
-| **4. Build** | Pulls 7 base images, builds orchestrator, web-dashboard, and ai-gateway containers |
-| **5. Start** | Starts the full Docker Compose stack with health-check waits |
-| **6. Verify** | Runs `verify.sh` smoke tests against all services |
+| **3. Camera Drivers** | Installs UVC/V4L2 kernel modules, v4l-utils, ffmpeg, udev rules for USB cameras |
+| **4. Secrets** | Generates unique-per-device passwords and encryption keys. Writes `.env` (chmod 600) |
+| **5. Build** | Pulls 7 base images, builds orchestrator, web-dashboard, and ai-gateway containers |
+| **6. Start** | Starts the full Docker Compose stack with health-check waits |
+| **7. Verify** | Runs `verify.sh` smoke tests against all services |
 
 ### Secrets generated
 
@@ -226,13 +227,37 @@ docker system prune -a
 
 ---
 
+## Camera driver tool
+
+Standalone tool for managing camera drivers (can be run independently of `setup.sh`):
+
+```bash
+./scripts/camera-drivers.sh check    # Show kernel modules, packages, devices
+./scripts/camera-drivers.sh install  # Install everything (UVC, V4L2, ffmpeg, udev)
+./scripts/camera-drivers.sh scan     # Detect USB + network cameras
+./scripts/camera-drivers.sh fix      # Auto-fix permissions, load modules, restart Frigate
+```
+
+### What gets installed
+
+| Component | Details |
+|-----------|---------|
+| **Kernel modules** | uvcvideo, videodev, videobuf2_v4l2, videobuf2_vmalloc |
+| **Packages** | v4l-utils, ffmpeg, usbutils |
+| **Udev rules** | Auto-permission `/dev/video*`, restart Frigate on USB hotplug |
+| **Boot persistence** | Modules auto-load via `/etc/modules-load.d/droplet-cameras.conf` |
+| **Permissions** | User added to `video` group |
+
+---
+
 ## File layout
 
 ```
 scripts/
-├── setup.sh               Main entry point
+├── setup.sh               Main entry point (7 phases)
 ├── factory-reset.sh       Wipe all data and start fresh
 ├── verify.sh              Standalone smoke test
+├── camera-drivers.sh      Camera driver check/install/scan/fix tool
 ├── README.md              This file
 └── lib/
     ├── logging.sh         Colored output, log file, spinner
@@ -240,5 +265,6 @@ scripts/
     ├── docker.sh          Docker install + group handling
     ├── secrets.sh         .env generation with openssl rand
     ├── compose.sh         Image pull, build, start, health wait
-    └── systemd.sh         Optional boot service
+    ├── systemd.sh         Optional boot service
+    └── camera-drivers.sh  Camera driver library (sourced by setup.sh)
 ```

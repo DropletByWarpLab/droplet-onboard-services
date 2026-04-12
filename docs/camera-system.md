@@ -1,0 +1,206 @@
+# Camera System
+
+End-to-end camera management for the Droplet edge platform — auto-discovery, NVR recording with AI detection, network isolation, and remote viewing.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     Droplet Camera System                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌──────────────┐ │
+│  │ Camera Discovery │───→│   Frigate NVR   │───→│    MQTT      │ │
+│  │ ONVIF + RTSP    │    │ TensorRT GPU AI │    │   Broker     │ │
+│  │ Port probing    │    │ Record + Detect  │    │              │ │
+│  └────────┬────────┘    └────────┬────────┘    └──────┬───────┘ │
+│           │                      │                     │         │
+│  ┌────────┴──────────────────────┴─────────────────────┴───────┐ │
+│  │                    Orchestrator API                          │ │
+│  │  /api/cameras/* — auth-gated, snapshot proxy, SSE events    │ │
+│  └─────────────────────────────┬───────────────────────────────┘ │
+│                                │                                 │
+│  ┌─────────────────────────────┴───────────────────────────────┐ │
+│  │                    Web Dashboard                             │ │
+│  │  Camera grid, events timeline, discovery banner, toasts     │ │
+│  │  Works on-LAN and off-LAN (all streams proxied via auth)   │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌──────────────────┐    ┌──────────────────┐                   │
+│  │  OpenWrt Router   │    │  Managed Switch  │                   │
+│  │  VLAN 100 L3     │    │  VLAN 100 L2     │                   │
+│  │  Firewall zones  │    │  Port tagging    │                   │
+│  └──────────────────┘    └──────────────────┘                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Frigate NVR** | `docker/frigate/` | Recording, AI object detection (TensorRT), snapshots, RTSP restream |
+| **Camera Discovery** | `services/camera-discovery/` | Auto-detect cameras via ONVIF/RTSP, configure in Frigate |
+| **Camera API** | `apps/orchestrator/src/routes/cameras.ts` | Auth-gated REST API for cameras, snapshots, events, SSE |
+| **Camera Dashboard** | `apps/web-dashboard/src/app/cameras/` | Camera grid, events, discovery banner, notification toasts |
+| **Camera Subnet** | `openwrt/files/etc/config/` | VLAN 100 isolation (router firewall + switch port tagging) |
+| **Camera Drivers** | `scripts/lib/camera-drivers.sh` | Kernel modules, udev rules, host-level driver setup |
+| **LLM Tools** | `services/ai-gateway/tools/` | `get_cameras`, `get_camera_events`, `get_camera_snapshot` |
+
+## How Cameras Get Connected
+
+### Automatic Flow (Plug and Play)
+
+1. **Plug camera into switch port** (or connect via WiFi)
+2. **Switch** tags the port as VLAN 100 (if camera setup was run)
+3. **Router** serves DHCP on the camera subnet (192.168.100.100-249)
+4. **Camera Discovery** detects the new DHCP lease within 30 seconds
+5. **ONVIF probe** queries camera for manufacturer, model, stream URI
+6. **Frigate** gets the camera auto-configured with RTSP stream
+7. **MQTT event** published → orchestrator → dashboard shows toast notification
+8. **Recording + AI detection** starts immediately (person, car, animal, package)
+
+### Manual Flow
+
+Add a camera directly through the Frigate config:
+
+```yaml
+# docker/frigate/config.yml
+cameras:
+  front_door:
+    ffmpeg:
+      inputs:
+        - path: rtsp://user:pass@192.168.100.101:554/stream1
+          roles: ["detect", "record"]
+```
+
+## Network Isolation
+
+Cameras are on a separate VLAN (100) so users on the main LAN can't browse feeds directly.
+
+```
+Main LAN (192.168.50.0/24)          Camera Subnet (192.168.100.0/24)
+  Users, phones, laptops              Cameras only
+       │                                    │
+       └──── BLOCKED (firewall) ────────────┘
+                     │
+              Droplet appliance ← Only device on both subnets
+              (Frigate, Discovery)
+```
+
+### Firewall Rules
+
+| From | To | Action | Why |
+|------|----|--------|-----|
+| LAN → cameras | ACCEPT | Droplet needs RTSP/ONVIF access |
+| cameras → LAN | REJECT | Cameras can't reach user devices |
+| cameras → cameras | REJECT | No lateral movement between cameras |
+| cameras → WAN | ACCEPT | NTP, DNS, firmware updates |
+| cameras → router | ACCEPT (DHCP/DNS/ping only) | Basic network services |
+
+### Setup
+
+**One-click via API:**
+```bash
+# Router side (VLAN + firewall + DHCP)
+curl -X POST http://localhost:3000/api/cameras/subnet/setup
+
+# Switch side (port tagging)
+curl -X POST http://localhost:3000/api/switch/setup/cameras
+```
+
+**Manual on existing OpenWrt:**
+```bash
+scp openwrt/scripts/setup-camera-subnet.sh root@10.0.0.1:/tmp/
+ssh root@10.0.0.1 'sh /tmp/setup-camera-subnet.sh'
+```
+
+## Remote Access
+
+All camera access works through the authenticated Nginx HTTPS gateway. The same URLs work on-LAN and off-LAN:
+
+| What | URL | Auth |
+|------|-----|------|
+| Camera list | `GET /api/cameras` | Session cookie or Bearer token |
+| Live snapshot | `GET /api/cameras/{name}/snapshot` | Session cookie or Bearer token |
+| Detection events | `GET /api/cameras/events/recent` | Session cookie or Bearer token |
+| Real-time alerts | `GET /api/cameras/events/sse` | Session cookie or Bearer token |
+| Frigate UI | `/frigate/` | Nginx auth_request validation |
+
+**Security:** Camera IPs and RTSP URLs are never exposed to clients. The orchestrator proxies all snapshots and streams through authenticated endpoints.
+
+## Frigate Configuration
+
+Base config at `docker/frigate/config.yml`:
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| Detector | TensorRT (Jetson GPU) | Hardware-accelerated AI detection |
+| Record retention | 7 days (motion), 14 days (events) | Configurable |
+| Snapshot retention | 14 days | |
+| Detection FPS | 5 | Per camera |
+| Detection resolution | 1280x720 | |
+| Objects tracked | person, car, dog, cat, package | |
+| MQTT | Connected to broker | Events published for orchestrator |
+
+## Dashboard Features
+
+### Camera Page (`/cameras`)
+
+1. **Network Isolation card** — enable/disable camera VLAN with one click
+2. **Discovery banner** — "3 new cameras detected" with Accept All / Review
+3. **Camera grid** — snapshot thumbnails (auto-refresh 10s), status badges, last detection
+4. **Events timeline** — recent detections with thumbnails, confidence, time
+5. **Detail panel** — larger live view, enable/disable/remove controls, Frigate UI link
+
+### Notifications
+
+Real-time SSE toast notifications for:
+- Person/vehicle/animal detected (with snapshot thumbnail)
+- New camera discovered on network
+- Camera online/offline status changes
+
+## LLM Integration
+
+The AI assistant can interact with cameras via natural language:
+
+| Tool | Example Prompt |
+|------|---------------|
+| `get_cameras` | "What cameras are connected?" |
+| `get_camera_events` | "Were there any detections in the last hour?" |
+| `get_camera_snapshot` | "Show me the front door camera" |
+
+## Camera Driver Management
+
+### Setup Script (`scripts/camera-drivers.sh`)
+
+```bash
+./scripts/camera-drivers.sh check    # Show driver status
+./scripts/camera-drivers.sh install  # Install UVC/V4L2 drivers + packages
+./scripts/camera-drivers.sh scan     # Detect USB + network cameras
+./scripts/camera-drivers.sh fix      # Auto-fix permissions + load modules
+```
+
+### What Gets Installed
+
+- **Kernel modules:** uvcvideo, videodev, videobuf2_v4l2, videobuf2_vmalloc
+- **Packages:** v4l-utils, ffmpeg, usbutils
+- **Udev rules:** Auto-permission on USB camera hotplug, Frigate restart on new device
+- **Boot persistence:** Modules auto-load via `/etc/modules-load.d/droplet-cameras.conf`
+
+## Docker Services
+
+| Service | Port | Profile | Purpose |
+|---------|------|---------|---------|
+| `frigate` | 8971 (internal) | full | NVR + AI detection |
+| `camera-discovery` | 8085 (host) | full | ONVIF/RTSP auto-detection |
+
+Both are internal-only — no ports exposed to host. All access through Nginx.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FRIGATE_URL` | `http://frigate:5000` | Frigate API endpoint |
+| `CAMERA_SCAN_INTERVAL` | `30` | Discovery scan interval (seconds) |
+| `CAMERA_SUBNET` | `192.168.100.0/24` | Camera isolation subnet |
+| `CAMERA_DISCOVERY_URL` | `http://localhost:8085` | Discovery service endpoint |
