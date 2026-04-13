@@ -23,8 +23,20 @@ import { config } from "../config.js";
 
 const logger = pino({ name: "auth-route" });
 
+const RESERVED_USERNAMES = ["admin", "root"];
+
+const usernameField = z
+  .string()
+  .min(2)
+  .max(64)
+  .regex(/^[a-zA-Z0-9._-]+$/, "Username must be alphanumeric")
+  .refine(
+    (val) => !RESERVED_USERNAMES.includes(val.toLowerCase()),
+    "This username is reserved and cannot be used",
+  );
+
 const setupSchema = z.object({
-  username: z.string().min(2).max(64).regex(/^[a-zA-Z0-9._-]+$/, "Username must be alphanumeric"),
+  username: usernameField,
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
 });
@@ -35,7 +47,7 @@ const loginSchema = z.object({
 });
 
 const createUserSchema = z.object({
-  username: z.string().min(2).max(64).regex(/^[a-zA-Z0-9._-]+$/, "Username must be alphanumeric"),
+  username: usernameField,
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
 });

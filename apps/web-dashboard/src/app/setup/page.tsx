@@ -22,6 +22,7 @@ import type { MatterDevice, MatterGrouped } from "@/lib/types";
 
 type Step = "welcome" | "account" | "discovery" | "done";
 const STEPS: Step[] = ["welcome", "account", "discovery", "done"];
+const RESERVED_USERNAMES = ["admin", "root"];
 
 const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
   light: Lightbulb,
@@ -63,6 +64,10 @@ export default function SetupPage() {
     }
     if (!/^[a-zA-Z0-9._-]+$/.test(username)) {
       setError("Username can only contain letters, numbers, dots, hyphens, and underscores");
+      return;
+    }
+    if (RESERVED_USERNAMES.includes(username.toLowerCase())) {
+      setError("This username is reserved and cannot be used");
       return;
     }
     if (password.length < 8) {
@@ -207,7 +212,7 @@ export default function SetupPage() {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value.toLowerCase())}
-                    placeholder="admin"
+                    placeholder="your-username"
                     autoComplete="username"
                     className="dp-input pl-10"
                     autoFocus
@@ -250,6 +255,9 @@ export default function SetupPage() {
                     {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
+                <p className="type-caption-1 text-label-quaternary mt-1.5">
+                  Must be at least 8 characters
+                </p>
               </div>
 
               <div>

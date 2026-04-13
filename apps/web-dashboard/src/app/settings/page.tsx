@@ -14,6 +14,8 @@ import {
 } from "@/lib/api";
 import type { AuthUser } from "@/lib/types";
 
+const RESERVED_USERNAMES = ["admin", "root"];
+
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
@@ -52,6 +54,10 @@ export default function SettingsPage() {
     setUserError(null);
     if (!newUsername.trim() || !newPassword.trim()) {
       setUserError("Username and password are required");
+      return;
+    }
+    if (RESERVED_USERNAMES.includes(newUsername.trim().toLowerCase())) {
+      setUserError("This username is reserved and cannot be used");
       return;
     }
     if (newPassword.length < 8) {
