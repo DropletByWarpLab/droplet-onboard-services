@@ -1,0 +1,52 @@
+name: Build Droplet Desktop
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # macOS
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install qt@6 cmake openssl
+
+      # Linux
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake qt6-base-dev qt6-tools-dev \
+            libqt6keychain1 libqt6svg6-dev libsqlite3-dev libssl-dev
+
+      # Windows
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install cmake qt6-base --yes
+
+      - name: Copy brand overlay
+        run: cp -r overlay/* .
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j$(nproc 2>/dev/null || echo 4)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: droplet-desktop-${{ matrix.os }}
+          path: build/bin/

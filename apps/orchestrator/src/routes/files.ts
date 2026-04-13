@@ -904,5 +904,110 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
     }
   });
 
+  // ────────────────────────────────────────────────────────────
+  //  Phase 4 — Semantic content search (pgvector)
+  // ────────────────────────────────────────────────────────────
+
+  // ── GET /api/files/search/content?q=...&limit=20 ──
+  //
+  // Embeds the query string via the ai-gateway gRPC, then does a
+  // cosine-similarity search against the FileContentChunk table using
+  // pgvector. Each result carries the matched file path + a text snippet
+  // so the frontend can render results without a second fetch.
+  router.get("/files/search/content", async (req, res, next) => {
+    try {
+      const q = (req.query.q as string | undefined)?.trim() ?? "";
+      if (!q || q.length < 2) {
+        res.status(400).json({ error: "q must be at least 2 characters" });
+        return;
+      }
+      const limit = Math.max(
+        1,
+        Math.min(100, parseInt((req.query.limit as string) || "20", 10) || 20)
+      );
+      const user = getUser(req);
+
+      // Check Redis cache first (60s TTL on identical queries)
+      const cacheKey = `semantic:${user}:${q}:${limit}`;
+      const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
+      if (cached) {
+        res.json({ results: cached });
+        return;
+      }
+
+      // Lazy-import the gRPC embedding function. It's optional — if gRPC
+      // isn't available (e.g. ai-gateway down), we return a helpful error
+      // rather than a generic 500.
+      let embedVec: number[];
+      try {
+        const { grpcEmbedText, isGrpcAvailable } = await import(
+          "../services/ai-gateway.grpc-client.js"
+        );
+        if (!isGrpcAvailable()) {
+          res.status(503).json({ error: "AI gateway not available for semantic search" });
+          return;
+        }
+        const vectors = await grpcEmbedText([q]);
+        if (!vectors || vectors.length === 0 || !Array.isArray(vectors[0])) {
+          res.status(502).json({ error: "Embedding service returned no vectors" });
+          return;
+        }
+        embedVec = vectors[0];
+        // Validate every element is a finite number — a buggy/compromised gRPC
+        // response with NaN/Infinity/strings would cause a Postgres cast error.
+        if (!embedVec.every((v) => typeof v === "number" && Number.isFinite(v))) {
+          res.status(502).json({ error: "Embedding service returned invalid vector" });
+          return;
+        }
+      } catch (err) {
+        logger.warn({ err }, "Semantic search: embedding failed");
+        res.status(503).json({ error: "Embedding service unavailable" });
+        return;
+      }
+
+      // pgvector cosine similarity — Prisma can't express <=> so we use raw SQL.
+      // Two-step query: inner DISTINCT ON deduplicates per file (keeping the
+      // best chunk), outer query sorts by score and applies the limit.
+      const vecLiteral = `[${embedVec.join(",")}]`;
+      const rows: Array<{ path: string; score: number; text: string }> =
+        await _prisma.$queryRawUnsafe(
+          `
+          SELECT path, score, text FROM (
+            SELECT DISTINCT ON ("ncFileId")
+              "path",
+              1 - ("embedding" <=> $1::vector) AS score,
+              "text"
+            FROM "FileContentChunk"
+            WHERE "userId" = $2
+            ORDER BY "ncFileId", "embedding" <=> $1::vector
+          ) ranked
+          ORDER BY score DESC
+          LIMIT $3
+          `,
+          vecLiteral,
+          user,
+          limit
+        );
+
+      await cacheSet(cacheKey, rows, 60);
+      res.json({ results: rows });
+    } catch (err: any) {
+      // Catch Prisma/pgvector-specific errors (e.g. vector extension missing,
+      // invalid vector cast) and return 503 instead of leaking raw SQL in a 500.
+      if (
+        err?.code === "P2010" ||
+        err?.message?.includes("vector") ||
+        err?.message?.includes("does not exist")
+      ) {
+        logger.warn({ err }, "Semantic search: database error (pgvector?)");
+        res.status(503).json({
+          error: "Semantic search is not available. The pgvector extension may not be installed.",
+        });
+        return;
+      }
+      handleFileError(err, res, next);
+    }
+  });
+
   return router;
 }

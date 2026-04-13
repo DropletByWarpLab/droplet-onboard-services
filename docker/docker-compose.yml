@@ -160,6 +160,35 @@ services:
       - TZ=UTC
     restart: always
 
+  # --- File indexer (Phase 4: AI content search) ---
+  # Watches the Nextcloud data volume for file changes, extracts text,
+  # computes embeddings via the ai-gateway gRPC, and stores them in
+  # pgvector for semantic search. Read-only access to Nextcloud data.
+  file-indexer:
+    build:
+      context: ../services/file-indexer
+      dockerfile: Dockerfile
+    volumes:
+      - nextcloud-data:/data/nextcloud:ro
+      - ../proto:/app/proto:ro
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet
+      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD}@broker:1883
+      - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
+      - AI_GATEWAY_GRPC_URL=ai-gateway:50051
+    depends_on:
+      db:
+        condition: service_healthy
+      ai-gateway:
+        condition: service_started
+      broker:
+        condition: service_started
+    profiles: ["full"]
+    restart: always
+
   # --- Routing (OpenWrt control) ---
   routing:
     build:
