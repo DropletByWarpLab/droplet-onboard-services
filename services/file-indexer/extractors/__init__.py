@@ -58,18 +58,20 @@ def _extract_docx(path: str) -> str:
 def _extract_xlsx(path: str) -> str:
     from openpyxl import load_workbook
     wb = load_workbook(path, read_only=True, data_only=True)
-    parts = []
-    for sheet in wb.sheetnames:
-        ws = wb[sheet]
-        rows = []
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) if c is not None else "" for c in row]
-            if any(cells):
-                rows.append("\t".join(cells))
-        if rows:
-            parts.append(f"=== Sheet: {sheet} ===\n" + "\n".join(rows))
-    wb.close()
-    return "\n\n".join(parts)
+    try:
+        parts = []
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    rows.append("\t".join(cells))
+            if rows:
+                parts.append(f"=== Sheet: {sheet} ===\n" + "\n".join(rows))
+        return "\n\n".join(parts)
+    finally:
+        wb.close()
 
 
 def _extract_html(path: str) -> str:

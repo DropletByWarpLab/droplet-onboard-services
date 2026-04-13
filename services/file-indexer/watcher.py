@@ -2,7 +2,7 @@
 
 Uses watchdog to receive real-time events when files are created, modified,
 or deleted under /data/nextcloud/data/{user}/files/. On each event, the
-pipeline extracts text → chunks → embeds → upserts into pgvector.
+pipeline extracts text -> chunks -> embeds -> upserts into pgvector.
 """
 
 from __future__ import annotations
@@ -10,9 +10,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+import time
 from pathlib import Path
+from typing import Optional
 
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreatedEvent, FileDeletedEvent
+from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from config import NEXTCLOUD_DATA_ROOT
@@ -29,13 +32,17 @@ USER_FILES_PATTERN = re.compile(
     r"^(?P<user>[^/]+)/files/(?P<relpath>.+)$"
 )
 
+# ── Debounce ──
+# Nextcloud uploads generate create + modify events in rapid succession.
+# We debounce per-path: delay indexing by DEBOUNCE_SECONDS and reset the
+# timer on each new event for the same path.
+DEBOUNCE_SECONDS = 2.0
+_debounce_timers: dict[str, threading.Timer] = {}
+_debounce_lock = threading.Lock()
+
 
 def _parse_nc_path(absolute_path: str) -> tuple[str, str] | None:
-    """Parse a Nextcloud data path into (username, relative_path).
-
-    Returns None if the path isn't inside a user's files/ directory
-    (e.g. appdata, cache, or trashbin).
-    """
+    """Parse a Nextcloud data path into (username, relative_path)."""
     try:
         rel = os.path.relpath(absolute_path, NEXTCLOUD_DATA_ROOT)
     except ValueError:
@@ -46,27 +53,45 @@ def _parse_nc_path(absolute_path: str) -> tuple[str, str] | None:
     return m.group("user"), m.group("relpath")
 
 
-def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
-    """Resolve a Nextcloud file ID from the oc_filecache table.
+# ── Nextcloud file ID resolution (shared connection) ──
 
-    The file-indexer reads from Nextcloud's Postgres database (shared db)
-    to get the numeric fileId that the versions/favorites/trash endpoints
-    reference. This avoids an HTTP round-trip to the orchestrator.
-    """
+_nc_conn = None
+_nc_conn_lock = threading.Lock()
+
+
+def _get_nc_conn():
+    """Get or create a connection to the Nextcloud DB (shared Postgres)."""
+    global _nc_conn
     import psycopg2
     from config import DATABASE_URL
 
-    # Nextcloud stores the cache path as "files/{relpath}" (no leading /).
+    with _nc_conn_lock:
+        if _nc_conn is not None:
+            try:
+                # Quick liveness check
+                with _nc_conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return _nc_conn
+            except Exception:
+                try:
+                    _nc_conn.close()
+                except Exception:
+                    pass
+                _nc_conn = None
+
+        nc_url = DATABASE_URL.replace("/droplet", "/nextcloud")
+        _nc_conn = psycopg2.connect(nc_url)
+        _nc_conn.autocommit = True
+        return _nc_conn
+
+
+def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
+    """Resolve a Nextcloud file ID from the oc_filecache table."""
     cache_path = f"files/{relpath}"
 
-    conn = None
     try:
-        conn = psycopg2.connect(
-            DATABASE_URL.replace("/droplet", "/nextcloud")
-        )
-        conn.autocommit = True
+        conn = _get_nc_conn()
         with conn.cursor() as cur:
-            # oc_storages maps each user to a numeric storage id.
             cur.execute(
                 "SELECT numeric_id FROM oc_storages WHERE id = %s",
                 (f"home::{user}",),
@@ -85,13 +110,9 @@ def _resolve_nc_file_id(user: str, relpath: str) -> int | None:
     except Exception as e:
         logger.debug("Failed to resolve fileId for %s/%s: %s", user, relpath, e)
         return None
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
+
+# ── Event handler ──
 
 class IndexHandler(FileSystemEventHandler):
     """Handle file events and trigger the indexing pipeline."""
@@ -99,25 +120,49 @@ class IndexHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
-        self._index(event.src_path)
+        self._schedule(event.src_path)
 
     def on_modified(self, event):
         if event.is_directory:
             return
-        self._index(event.src_path)
+        self._schedule(event.src_path)
 
     def on_deleted(self, event):
         if event.is_directory:
             return
-        parsed = _parse_nc_path(event.src_path)
-        if not parsed:
-            return
-        user, relpath = parsed
-        file_id = _resolve_nc_file_id(user, relpath)
-        if file_id:
-            delete_chunks_for_file(file_id)
-            publish(f"droplet/index/{user}/deleted", {"path": relpath, "ncFileId": file_id})
-            logger.info("Deleted index for %s/%s (fileId=%d)", user, relpath, file_id)
+        # For deletes we don't debounce — act immediately.
+        try:
+            parsed = _parse_nc_path(event.src_path)
+            if not parsed:
+                return
+            user, relpath = parsed
+            file_id = _resolve_nc_file_id(user, relpath)
+            if file_id:
+                delete_chunks_for_file(file_id)
+                publish(f"droplet/index/{user}/deleted", {"path": relpath, "ncFileId": file_id})
+                logger.info("Deleted index for %s/%s (fileId=%d)", user, relpath, file_id)
+        except Exception as e:
+            logger.warning("on_deleted error for %s: %s", event.src_path, e)
+
+    def _schedule(self, path: str) -> None:
+        """Debounce: delay indexing by DEBOUNCE_SECONDS, resetting on repeat events."""
+        with _debounce_lock:
+            existing = _debounce_timers.get(path)
+            if existing:
+                existing.cancel()
+            timer = threading.Timer(DEBOUNCE_SECONDS, self._run_index, args=(path,))
+            timer.daemon = True
+            _debounce_timers[path] = timer
+            timer.start()
+
+    def _run_index(self, path: str) -> None:
+        """Run the indexing pipeline, called after debounce expires."""
+        with _debounce_lock:
+            _debounce_timers.pop(path, None)
+        try:
+            self._index(path)
+        except Exception as e:
+            logger.error("Indexing failed for %s: %s", path, e, exc_info=True)
 
     def _index(self, path: str) -> None:
         parsed = _parse_nc_path(path)
@@ -154,12 +199,7 @@ class IndexHandler(FileSystemEventHandler):
             return
 
         # Embed
-        try:
-            vectors = embed_texts(chunks)
-        except Exception as e:
-            logger.warning("Embedding failed for %s/%s: %s", user, relpath, e)
-            return
-
+        vectors = embed_texts(chunks)
         if len(vectors) != len(chunks):
             logger.warning("Embedding count mismatch for %s/%s", user, relpath)
             return
@@ -176,7 +216,7 @@ class IndexHandler(FileSystemEventHandler):
             "ncFileId": file_id,
             "chunks": len(chunks),
         })
-        logger.info("Indexed %s/%s → %d chunks", user, relpath, len(chunks))
+        logger.info("Indexed %s/%s -> %d chunks", user, relpath, len(chunks))
 
 
 def start_watcher() -> Observer:

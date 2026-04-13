@@ -59,20 +59,25 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
     }
     setSemanticLoading(true);
     setSemanticError(null);
+    let cancelled = false;
     if (semanticTimerRef.current) clearTimeout(semanticTimerRef.current);
     semanticTimerRef.current = setTimeout(async () => {
       try {
         const results = await searchFileContent(query.trim());
-        setSemanticItems(results);
+        if (!cancelled) setSemanticItems(results);
       } catch (err) {
-        setSemanticError(err instanceof Error ? err.message : "Search failed");
-        setSemanticItems([]);
+        if (!cancelled) {
+          setSemanticError(err instanceof Error ? err.message : "Search failed");
+          setSemanticItems([]);
+        }
       } finally {
-        setSemanticLoading(false);
+        if (!cancelled) setSemanticLoading(false);
       }
-    }, 500); // longer debounce for semantic (more expensive)
+    }, 500);
     return () => {
+      cancelled = true;
       if (semanticTimerRef.current) clearTimeout(semanticTimerRef.current);
+      setSemanticLoading(false);
     };
   }, [query, semantic]);
 

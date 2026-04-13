@@ -953,6 +953,12 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
           return;
         }
         embedVec = vectors[0];
+        // Validate every element is a finite number — a buggy/compromised gRPC
+        // response with NaN/Infinity/strings would cause a Postgres cast error.
+        if (!embedVec.every((v) => typeof v === "number" && Number.isFinite(v))) {
+          res.status(502).json({ error: "Embedding service returned invalid vector" });
+          return;
+        }
       } catch (err) {
         logger.warn({ err }, "Semantic search: embedding failed");
         res.status(503).json({ error: "Embedding service unavailable" });
@@ -985,7 +991,20 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
 
       await cacheSet(cacheKey, rows, 60);
       res.json({ results: rows });
-    } catch (err) {
+    } catch (err: any) {
+      // Catch Prisma/pgvector-specific errors (e.g. vector extension missing,
+      // invalid vector cast) and return 503 instead of leaking raw SQL in a 500.
+      if (
+        err?.code === "P2010" ||
+        err?.message?.includes("vector") ||
+        err?.message?.includes("does not exist")
+      ) {
+        logger.warn({ err }, "Semantic search: database error (pgvector?)");
+        res.status(503).json({
+          error: "Semantic search is not available. The pgvector extension may not be installed.",
+        });
+        return;
+      }
       handleFileError(err, res, next);
     }
   });

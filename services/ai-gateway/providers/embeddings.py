@@ -5,45 +5,57 @@ once and cached in HuggingFace's default cache dir. Subsequent loads are
 instant from disk.
 
 Default model: all-MiniLM-L6-v2 (384 dimensions, CPU-friendly, ~22M params).
-Override via the `model` field in EmbedRequest for experiments, but keep in
-mind the orchestrator's pgvector column is typed to `vector(384)` — switching
-models mid-deployment requires re-indexing.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
+MAX_BATCH_SIZE = 256  # Cap to prevent OOM on constrained devices
 
-# Lazy singleton — avoids importing torch at module import time (which
-# takes several seconds and blocks the gRPC startup if done eagerly).
 _model_cache: dict[str, object] = {}
+_model_lock = threading.Lock()
 
 
 def _get_model(model_name: str | None = None):
-    """Return the SentenceTransformer model, loading it on first call."""
+    """Return the SentenceTransformer model, loading it on first call.
+
+    Thread-safe: concurrent cold-start requests block on the lock rather
+    than loading the model twice (which would double memory usage on a
+    Jetson/Pi with limited RAM).
+    """
     name = model_name or DEFAULT_MODEL
     if name in _model_cache:
         return _model_cache[name]
 
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError as e:
-        logger.error(
-            "sentence-transformers is not installed. "
-            "Add it to requirements.txt and rebuild the ai-gateway image."
-        )
-        raise RuntimeError("sentence-transformers not available") from e
+    with _model_lock:
+        # Double-check after acquiring the lock — another thread may have loaded it.
+        if name in _model_cache:
+            return _model_cache[name]
 
-    logger.info("Loading embedding model: %s", name)
-    model = SentenceTransformer(name)
-    _model_cache[name] = model
-    logger.info("Embedding model loaded: %s (dim=%d)", name, model.get_sentence_embedding_dimension())
-    return model
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            logger.error(
+                "sentence-transformers is not installed. "
+                "Add it to requirements.txt and rebuild the ai-gateway image."
+            )
+            raise RuntimeError("sentence-transformers not available") from e
+
+        logger.info("Loading embedding model: %s", name)
+        model = SentenceTransformer(name)
+        _model_cache[name] = model
+        logger.info(
+            "Embedding model loaded: %s (dim=%d)",
+            name,
+            model.get_sentence_embedding_dimension(),
+        )
+        return model
 
 
 def embed_texts(
@@ -52,14 +64,24 @@ def embed_texts(
 ) -> list[list[float]]:
     """Embed a batch of texts and return a list of float vectors.
 
-    Each inner list has `dim` floats where `dim` depends on the model
-    (384 for the default MiniLM).
+    Enforces MAX_BATCH_SIZE to prevent OOM on constrained hardware.
+    Larger batches are rejected — the caller should chunk them.
     """
     if not texts:
         return []
+    if len(texts) > MAX_BATCH_SIZE:
+        raise ValueError(
+            f"Batch size {len(texts)} exceeds maximum {MAX_BATCH_SIZE}. "
+            "Split into smaller batches."
+        )
     m = _get_model(model)
-    # show_progress_bar=False avoids tqdm noise in Docker logs
-    embeddings = m.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+    # batch_size=32 caps peak memory per forward pass even within a single call.
+    embeddings = m.encode(
+        texts,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        batch_size=32,
+    )
     return embeddings.tolist()
 
 
