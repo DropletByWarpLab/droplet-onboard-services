@@ -21,6 +21,8 @@ import {
 } from "@/lib/api";
 import type { AuthUser } from "@/lib/types";
 
+const RESERVED_USERNAMES = ["admin", "root"];
+
 /**
  * Admin-only user management page. Non-admin callers get a 403 from the
  * orchestrator on fetchUsers; we detect that and show a friendly notice
@@ -70,6 +72,10 @@ export default function UsersPage() {
     setError(null);
     if (!inviteName.trim() || !invitePassword.trim()) {
       setError("Username and password are required");
+      return;
+    }
+    if (RESERVED_USERNAMES.includes(inviteName.trim().toLowerCase())) {
+      setError("This username is reserved and cannot be used");
       return;
     }
     if (invitePassword.length < 8) {
