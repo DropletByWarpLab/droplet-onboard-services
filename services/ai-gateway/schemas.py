@@ -35,17 +35,17 @@ class ToolCall(BaseModel):
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"] = "user"
-    content: str | None = None
+    content: str | None = Field(default=None, max_length=32_000)
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None  # for role="tool" messages
 
 
 class ChatRequest(BaseModel):
     model: str
-    messages: list[ChatMessage]
+    messages: list[ChatMessage] = Field(..., min_length=1, max_length=100)
     stream: bool = False
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1, le=4096)
     provider: str | None = None  # explicit provider override
     tools: list[ToolDefinition] | None = None
 
@@ -152,8 +152,8 @@ class SessionListResponse(BaseModel):
 
 class SessionChatRequest(BaseModel):
     """Chat within an existing session — messages are auto-appended."""
-    message: str
+    message: str = Field(..., min_length=1, max_length=32_000)
     stream: bool = False
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1, le=4096)
     provider: str | None = None

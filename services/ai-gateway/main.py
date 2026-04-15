@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
@@ -13,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
+from middleware.rate_limit import RateLimitMiddleware, close_rate_limiter
 from models.registry import ModelRegistry
 from router import ProviderRouter
 from schemas import (
@@ -76,18 +78,26 @@ async def lifespan(app: FastAPI):
     if session_store:
         await session_store.close()
     await tool_executor.close()
+    await close_rate_limiter()
     logger.info("AI Gateway shut down")
 
 
-app = FastAPI(title="Droplet AI Gateway", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Droplet AI Gateway", version="0.3.0", lifespan=lifespan)
+
+# --- CORS ---
+_cors_origins_raw = os.getenv("CORS_ORIGINS", "http://localhost:3001,https://localhost:3001")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-Priority"],
 )
+
+# --- Rate limiting ---
+app.add_middleware(RateLimitMiddleware)
 
 
 # --- Health ---

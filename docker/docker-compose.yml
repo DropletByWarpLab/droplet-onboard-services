@@ -141,6 +141,7 @@ services:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
+      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001
     volumes:
       - aikeys:/data/keys
     depends_on:

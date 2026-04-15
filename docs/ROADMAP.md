@@ -138,12 +138,13 @@ Status legend:
 
 ### M2.7 Prompt-injection hardening
 - **GTM scope:** Input sanitization, output schema validation, rate limiting on sensitive tools.
-- **This repo's slice:** ai-gateway is the entry point; `services/ai-gateway/middleware/` and `tools/` directories exist but hardening coverage is unknown from docs alone.
-- **Files involved:** `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py`, `services/ai-gateway/tools/`
+- **This repo's slice:** ai-gateway is the entry point; `services/ai-gateway/middleware/` and `tools/` directories exist. Rate limiting and input validation are now implemented.
+- **Files involved:** `services/ai-gateway/middleware/rate_limit.py`, `services/ai-gateway/schemas.py`, `services/ai-gateway/tools/`
 - **Cross-ref:** Depth-defence in `inference-engine` (OpenClaw guardrails + sandbox). This repo's ai-gateway is the outer input layer.
-- **Status:** `[~]` Partial — verify coverage.
+- **Status:** `[~]` Partial — rate limiting, input bounds, and CORS restriction are done. Output schema validation for tool-call responses remains.
 - **Blockers:** None.
-- **Next action:** Audit ai-gateway input validators; add Redis-backed rate limits on `/ai/chat`; add output schema validation for tool-call responses.
+- **What was done:** Sliding-window rate limiter (Redis/in-memory) on chat endpoints; `max_tokens` capped at 4096; message list capped at 100; content length capped at 32k; CORS restricted from `*` to explicit origins.
+- **Next action:** Add output schema validation for tool-call responses; audit for remaining prompt-injection vectors.
 
 ### M2.8 SD card image
 - **GTM scope:** Downloadable `.img` file with Ubuntu + Docker + Droplet pre-installed.
