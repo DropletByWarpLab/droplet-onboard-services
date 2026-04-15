@@ -361,7 +361,11 @@ export function createProtectedAuthRouter(): Router {
         return;
       }
 
-      const users = await ncListUsers(token);
+      const allUsers = await ncListUsers(token);
+      // Hide the Nextcloud system/database admin account — it exists for
+      // internal orchestrator use only and must never appear in the UI.
+      const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+      const users = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
       res.json({ users });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
