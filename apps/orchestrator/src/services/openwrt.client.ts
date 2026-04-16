@@ -7,6 +7,11 @@
 
 import pino from "pino";
 import { config } from "../config.js";
+import {
+  RouterError,
+  routerErrorFromResponse,
+  routerErrorFromThrown,
+} from "../types/router-error.js";
 import type {
   NetworkSummary,
   NetworkInterfaces,
@@ -17,6 +22,9 @@ import type {
   DhcpLease,
   RouterSystemInfo,
 } from "../types/network.js";
+
+export { RouterError } from "../types/router-error.js";
+export type { RouterErrorCode } from "../types/router-error.js";
 
 const logger = pino({ name: "openwrt-client" });
 
@@ -69,8 +77,8 @@ function jittered(baseMs: number, random: () => number): number {
 
 type AttemptOutcome =
   | { kind: "success"; res: Response }
-  | { kind: "abort"; err: Error }
-  | { kind: "retry"; err: Error; status?: number };
+  | { kind: "abort"; err: RouterError }
+  | { kind: "retry"; err: RouterError };
 
 async function singleAttempt(
   url: string,
@@ -82,27 +90,23 @@ async function singleAttempt(
     if (res.ok) {
       return { kind: "success", res };
     }
-    // 4xx: client error — no point retrying, caller made an incorrect request.
-    if (res.status >= 400 && res.status < 500) {
-      return {
-        kind: "abort",
-        err: new Error(`${label}: ${res.status} ${res.statusText}`),
-      };
+    const err = routerErrorFromResponse(res, label);
+    // WARP-39 classification:
+    //  - AUTH (401/403) → abort; retrying won't change the token outcome
+    //  - 4xx → abort; caller error
+    //  - 5xx → retry; transient
+    if (err.code === "AUTH" || (res.status >= 400 && res.status < 500)) {
+      return { kind: "abort", err };
     }
-    // 5xx or other non-ok: transient, retryable.
-    return {
-      kind: "retry",
-      err: new Error(`${label}: ${res.status} ${res.statusText}`),
-      status: res.status,
-    };
-  } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    // AbortError is deliberate (caller cancelled or hit a timeout) — never retry.
-    if (error.name === "AbortError") {
-      return { kind: "abort", err: error };
+    return { kind: "retry", err };
+  } catch (thrown) {
+    const err = routerErrorFromThrown(thrown, label);
+    // TIMEOUT (AbortError) is deliberate — never retry.
+    if (err.code === "TIMEOUT") {
+      return { kind: "abort", err };
     }
     // Network errors (DNS, connection refused, reset) land here — retryable.
-    return { kind: "retry", err: error };
+    return { kind: "retry", err };
   }
 }
 
@@ -145,7 +149,8 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
         path,
         attempt,
         maxAttempts: policy.attempts,
-        status: outcome.status,
+        code: outcome.err.code,
+        status: outcome.err.status,
         err: outcome.err.message,
         waitMs,
       },
@@ -155,7 +160,9 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   }
 
   // Unreachable — the loop always exits via return or throw.
-  throw new Error(`${displayLabel}: retry loop exited without outcome`);
+  throw RouterError.unknown(`${displayLabel}: retry loop exited without outcome`, {
+    label: displayLabel,
+  });
 }
 
 async function routingFetchJson<T>(path: string, init?: RoutingFetchInit): Promise<T> {

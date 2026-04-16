@@ -134,17 +134,19 @@ describe("openwrt.client routingFetch", () => {
     expect(noSleep).not.toHaveBeenCalled();
   });
 
-  it("throws immediately on AbortError without retrying", async () => {
+  it("throws immediately on AbortError without retrying (TIMEOUT code)", async () => {
     const abortErr = new Error("aborted");
     abortErr.name = "AbortError";
     const fetchMock = vi.fn().mockRejectedValue(abortErr);
     global.fetch = fetchMock as unknown as typeof fetch;
 
+    // WARP-39: abort surfaces as RouterError(code=TIMEOUT).
+    const { RouterError } = await import("../types/router-error.js");
     await expect(
       routingFetch("/network/summary", {
         retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
       }),
-    ).rejects.toThrow("aborted");
+    ).rejects.toSatisfy((thrown) => thrown instanceof RouterError && thrown.code === "TIMEOUT");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(noSleep).not.toHaveBeenCalled();
@@ -162,6 +164,90 @@ describe("openwrt.client routingFetch", () => {
     expect(url).toBe("http://routing.test/network/summary");
     const headers = opts.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer test-token");
+  });
+
+  // WARP-39: error classification tests — every failure goes through
+  // routerErrorFromResponse / routerErrorFromThrown and surfaces a typed code.
+  describe("RouterError classification (WARP-39)", () => {
+    it("401 → AUTH, no retry", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 401 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        routingFetch("/network/summary", {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy((e) => e instanceof RouterError && e.code === "AUTH" && e.status === 401);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1); // auth is terminal
+      expect(noSleep).not.toHaveBeenCalled();
+    });
+
+    it("403 → AUTH, no retry", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 403 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        routingFetch("/network/summary", {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy((e) => e instanceof RouterError && e.code === "AUTH");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("persistent 5xx → UNREACHABLE after retry exhaustion", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 502 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        routingFetch("/network/summary", {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy((e) => e instanceof RouterError && e.code === "UNREACHABLE");
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("network error (fetch throws) → UNREACHABLE after retry exhaustion", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        routingFetch("/network/summary", {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy((e) => e instanceof RouterError && e.code === "UNREACHABLE");
+
+      expect(fetchMock).toHaveBeenCalledTimes(3); // network errors are retried
+    });
+
+    it("5xx with X-Operation-Id header → ROLLED_BACK (not retried past classification)", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          mockResponse({
+            ok: false,
+            status: 503,
+            headers: { "X-Operation-Id": "abc123" },
+          }),
+        );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        routingFetch("/wireless/ssid", {
+          method: "POST",
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy(
+        (e) => e instanceof RouterError && e.code === "ROLLED_BACK" && e.status === 503,
+      );
+    });
   });
 
   it("applies jitter — ±20% of base delay, bounded", async () => {

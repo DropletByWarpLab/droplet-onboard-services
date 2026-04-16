@@ -6,6 +6,8 @@ import {
   fetchConnectedDevices,
   fetchFirewallConfig,
   confirmNetworkCommand,
+  RouterStatusError,
+  type RouterErrorCode,
 } from "../api";
 import type {
   NetworkOverview,
@@ -58,6 +60,12 @@ export function useNetwork() {
     mutateFirewall();
   }
 
+  // WARP-39: derive a typed error code from whatever SWR surfaced so the UI
+  // can render per-cause messaging ("Router slow to respond" vs "Credentials
+  // rejected — re-run setup") instead of a single "Router Not Connected" state.
+  const routerErrorCode: RouterErrorCode | null =
+    statusError instanceof RouterStatusError ? statusError.code : null;
+
   return {
     overview,
     devices: devices ?? [],
@@ -65,6 +73,9 @@ export function useNetwork() {
     isLoading: statusLoading || devicesLoading,
     isRefreshing: statusValidating,
     error: statusError || devicesError,
+    routerErrorCode,
+    routerErrorMessage:
+      statusError instanceof RouterStatusError ? statusError.message : null,
     routerConnected: overview?.routerConnected ?? false,
     confirm,
     refresh: refreshAll,

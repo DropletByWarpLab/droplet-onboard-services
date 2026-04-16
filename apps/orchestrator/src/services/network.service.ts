@@ -8,6 +8,7 @@
 import pino from "pino";
 import * as openwrt from "./openwrt.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
+import { RouterError } from "../types/router-error.js";
 import type {
   NetworkSummary,
   NetworkInterfaces,
@@ -23,6 +24,25 @@ import type {
   RouterBoardInfo,
   RouterResources,
 } from "../types/network.js";
+
+/**
+ * Result envelope (WARP-39). Avoids exceptions crossing the service boundary
+ * so callers are forced to handle both arms.
+ */
+export type Result<T, E> =
+  | { ok: true; value: T }
+  | { ok: false; error: E };
+
+export const ok = <T>(value: T): Result<T, never> => ({ ok: true, value });
+export const err = <E>(error: E): Result<never, E> => ({ ok: false, error });
+
+function toRouterError(thrown: unknown, label: string): RouterError {
+  if (thrown instanceof RouterError) return thrown;
+  return RouterError.unknown(
+    thrown instanceof Error ? thrown.message : String(thrown),
+    { label, cause: thrown },
+  );
+}
 
 const logger = pino({ name: "network-service" });
 
@@ -65,9 +85,13 @@ export async function isRouterHealthy(): Promise<boolean> {
 
 // --- Network overview ---
 
-export async function getNetworkOverview(): Promise<NetworkOverview> {
+/**
+ * WARP-39: returns a typed Result. Callers MUST handle both arms — no more
+ * silent empty defaults masking real failures.
+ */
+export async function getNetworkOverview(): Promise<Result<NetworkOverview, RouterError>> {
   const cached = await cacheGet<NetworkOverview>(CACHE_KEYS.overview);
-  if (cached) return cached;
+  if (cached) return ok(cached);
 
   try {
     const [interfaces, wireless, systemInfo, leases] = await Promise.all([
@@ -86,16 +110,14 @@ export async function getNetworkOverview(): Promise<NetworkOverview> {
     };
 
     await cacheSet(CACHE_KEYS.overview, overview, CACHE_TTL_SHORT);
-    return overview;
-  } catch (err) {
-    logger.warn({ err }, "Failed to fetch network overview");
-    return {
-      interfaces: { lan: { up: false } as InterfaceStatus, wan: { up: false } as InterfaceStatus },
-      wireless: {},
-      system: { board: {} as RouterBoardInfo, resources: {} as RouterResources },
-      connectedDeviceCount: 0,
-      routerConnected: false,
-    };
+    return ok(overview);
+  } catch (thrown) {
+    const error = toRouterError(thrown, "Network overview");
+    logger.warn(
+      { code: error.code, message: error.message },
+      "Failed to fetch network overview",
+    );
+    return err(error);
   }
 }
 

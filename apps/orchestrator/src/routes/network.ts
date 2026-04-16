@@ -43,8 +43,15 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   // --- Network overview ---
   router.get("/network/status", async (_req, res, next) => {
     try {
-      const overview = await getNetworkOverview();
-      res.json(overview);
+      // WARP-39: typed Result — on error, surface the RouterError code to the
+      // dashboard so it can render per-code messaging instead of a generic
+      // "Router Not Connected".
+      const result = await getNetworkOverview();
+      if (result.ok) {
+        res.json(result.value);
+      } else {
+        res.status(503).json({ error: result.error.toJSON() });
+      }
     } catch (err) {
       next(err);
     }

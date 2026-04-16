@@ -135,10 +135,41 @@ export async function fetchDevices(): Promise<DeviceInfo[]> {
 
 // --- Network / Router ---
 
+export type RouterErrorCode =
+  | "UNREACHABLE"
+  | "TIMEOUT"
+  | "AUTH"
+  | "ROLLED_BACK"
+  | "UNKNOWN";
+
+export class RouterStatusError extends Error {
+  readonly code: RouterErrorCode;
+  readonly status?: number;
+  constructor(code: RouterErrorCode, message: string, status?: number) {
+    super(message);
+    this.name = "RouterStatusError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
 export async function fetchNetworkStatus(): Promise<NetworkOverview> {
   const res = await authFetch(`${BASE}/api/network/status`);
-  if (!res.ok) throw new Error(`Failed to fetch network status: ${res.status}`);
-  return res.json();
+  if (res.ok) return res.json();
+  // WARP-39: orchestrator returns 503 with a typed `{ error: { code, message, ... } }`
+  // body. Surface it as a RouterStatusError so SWR's error channel can carry
+  // the code up to the UI.
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* non-JSON fallthrough */
+  }
+  const typed = (body as { error?: { code?: RouterErrorCode; message?: string } } | null)?.error;
+  if (typed?.code) {
+    throw new RouterStatusError(typed.code, typed.message ?? "Router error", res.status);
+  }
+  throw new RouterStatusError("UNKNOWN", `Failed to fetch network status: ${res.status}`, res.status);
 }
 
 export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
