@@ -101,6 +101,7 @@ npm run test:ai-gateway     # ai-gateway only
 | `SWITCH_PASSWORD`    | Switch admin password                                  |
 | `SWITCH_DRIVER`      | Switch driver: `lantronix` (default) or `asic` (future) |
 | `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://localhost:8081`) |
+| `ROUTING_MODE`       | `real` (default) / `mock` (fixture-driven, no OpenWrt needed) / `disabled` (orchestrator skips router calls). See WARP-44. |
 
 ## GTM Alignment (April 2026)
 

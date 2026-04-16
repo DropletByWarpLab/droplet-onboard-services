@@ -62,6 +62,12 @@ const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
     title: "Last change rolled back",
     body: "The router reverted to the previous configuration to protect connectivity.",
   },
+  // WARP-44: ROUTING_MODE=disabled — the orchestrator isn't calling the
+  // router. Copy is informational, not alarming.
+  DISABLED: {
+    title: "Router supervision disabled",
+    body: "This deployment runs without router control. Set ROUTING_MODE=real in .env and restart to re-enable.",
+  },
   UNKNOWN: {
     title: "Router unavailable",
     body: "Something unexpected happened talking to the router. Check the orchestrator and routing service logs.",
@@ -145,26 +151,34 @@ export default function NetworkPage() {
     // specific cause. Falls back to UNKNOWN text when the error didn't come
     // from the typed Result path (older SDK, unrelated failure, etc.).
     const copy = ROUTER_ERROR_COPY[routerErrorCode ?? "UNKNOWN"];
+    // WARP-44: DISABLED is informational (explicit config), not a failure.
+    // Don't use role="alert" or a retry button in that state.
+    const isDisabled = routerErrorCode === "DISABLED";
     return (
       <div className="p-6">
-        <div className="dp-card text-center py-12" role="alert">
+        <div
+          className="dp-card text-center py-12"
+          role={isDisabled ? "status" : "alert"}
+        >
           <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
           <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
             {copy.body}
           </p>
-          {routerErrorMessage && (
+          {routerErrorMessage && !isDisabled && (
             <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
               {routerErrorMessage}
             </p>
           )}
-          <button
-            onClick={refresh}
-            className="dp-button-secondary text-sm mt-4"
-            disabled={isRefreshing}
-          >
-            {isRefreshing ? "Retrying…" : "Retry now"}
-          </button>
+          {!isDisabled && (
+            <button
+              onClick={refresh}
+              className="dp-button-secondary text-sm mt-4"
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? "Retrying…" : "Retry now"}
+            </button>
+          )}
         </div>
       </div>
     );

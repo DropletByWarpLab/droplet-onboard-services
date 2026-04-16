@@ -62,6 +62,11 @@ services:
       # If routing moves to bridge networking, change to http://routing:8080.
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
+      # WARP-44: `real` (default) / `mock` / `disabled`. When disabled the
+      # orchestrator short-circuits router calls and the dashboard surfaces a
+      # "Router supervision disabled" banner. `mock` is handled on the routing
+      # side — orchestrator still calls the endpoints as normal.
+      - ROUTING_MODE=${ROUTING_MODE:-real}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
     volumes:
       - matter-data:/data/matter-storage
@@ -204,6 +209,8 @@ services:
     restart: always
 
   # --- Routing (OpenWrt control) ---
+  # WARP-44: default dependency — starts on every `docker compose up`. Set
+  # ROUTING_MODE=mock in .env to run without a real router (fixtures).
   routing:
     build:
       context: ../services/routing
@@ -219,10 +226,13 @@ services:
       # No longer exposed via `docker inspect`.
       # ROUTING_SERVICE_TOKEN (WARP-36) replaces PR#5's SERVICE_SECRET for this service.
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
+      # WARP-44: `real` (default) = connect to OpenWrt. `mock` = serve fixtures
+      # so dev laptops without a router get a realistic UI. `disabled` is an
+      # orchestrator-side concern; this service still runs fine with it.
+      - ROUTING_MODE=${ROUTING_MODE:-real}
       - PORT=8080
     secrets:
       - openwrt_password
-    profiles: ["full"]
     restart: always
 
   # --- Managed Switch (PoE + VLAN control) ---

@@ -83,6 +83,10 @@ Each device gets its own random secrets — no two devices share credentials:
 ./scripts/setup.sh --systemd
 ```
 
+### Running without a real router (WARP-44)
+
+Dev laptops don't need OpenWrt hardware. Add `ROUTING_MODE=mock` to `.env` and the routing service serves realistic fixtures instead of calling into OpenWrt. Use `ROUTING_MODE=disabled` to turn off router supervision entirely — the orchestrator short-circuits calls and the dashboard shows a "Router supervision disabled" banner.
+
 ---
 
 ## Standalone verification
