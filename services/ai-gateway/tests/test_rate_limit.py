@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from middleware.rate_limit import _InMemoryBackend
+import pytest
+
+from middleware.rate_limit import _InMemoryBackend, _client_ip
 
 
 class TestInMemoryRateLimiter:
@@ -53,6 +54,70 @@ class TestInMemoryRateLimiter:
 
         allowed, _, _ = await backend.check_and_increment("ip2")
         assert allowed is True
+
+
+class TestClientIpExtraction:
+    """Test X-Forwarded-For parsing — must not be spoofable."""
+
+    def _make_request(
+        self,
+        xff: str | None = None,
+        real_ip: str | None = None,
+        peer: str = "10.0.0.1",
+    ):
+        req = MagicMock()
+        headers_map = {}
+        if xff is not None:
+            headers_map["x-forwarded-for"] = xff
+        if real_ip is not None:
+            headers_map["x-real-ip"] = real_ip
+        headers = MagicMock()
+        headers.get = lambda k, default=None: headers_map.get(k, default)
+        req.headers = headers
+        req.client = MagicMock()
+        req.client.host = peer
+        return req
+
+    def test_prefers_x_real_ip_over_xff(self):
+        """nginx sets X-Real-IP from $remote_addr (cannot be spoofed). Trust it first."""
+        req = self._make_request(xff="spoofed-1, spoofed-2", real_ip="192.168.1.100")
+        assert _client_ip(req) == "192.168.1.100"
+
+    def test_uses_x_real_ip_only(self):
+        req = self._make_request(real_ip="10.1.2.3")
+        assert _client_ip(req) == "10.1.2.3"
+
+    def test_uses_rightmost_xff_entry(self):
+        """Right-most entry is the one appended by our trusted nginx — not spoofable."""
+        req = self._make_request("spoofed-client-value, 192.168.1.100")
+        assert _client_ip(req) == "192.168.1.100"
+
+    def test_ignores_leftmost_spoofed_value(self):
+        """A client sending X-Forwarded-For: attacker-ip must not be taken as the IP."""
+        req = self._make_request("1.1.1.1, 2.2.2.2, 192.168.1.100")
+        assert _client_ip(req) == "192.168.1.100"
+
+    def test_falls_back_to_peer_when_no_xff(self):
+        req = self._make_request(None, peer="10.0.0.5")
+        assert _client_ip(req) == "10.0.0.5"
+
+    def test_handles_whitespace(self):
+        req = self._make_request("  1.2.3.4  ,  5.6.7.8  ")
+        assert _client_ip(req) == "5.6.7.8"
+
+    def test_rate_limit_bypass_resistant(self):
+        """
+        Regression test: if we take split[0] we'd credit "attacker-rotated-ip"
+        and allow unlimited requests. Taking split[-1] pins all requests to
+        the real nginx-appended IP.
+        """
+        shared_real_ip = "192.168.1.100"
+        req1 = self._make_request(f"attacker-ip-1, {shared_real_ip}")
+        req2 = self._make_request(f"attacker-ip-2, {shared_real_ip}")
+        req3 = self._make_request(f"attacker-ip-3, {shared_real_ip}")
+        assert _client_ip(req1) == shared_real_ip
+        assert _client_ip(req2) == shared_real_ip
+        assert _client_ip(req3) == shared_real_ip
 
 
 class TestRateLimitEndpoint:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # --- Chat ---
@@ -40,6 +40,12 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None  # for role="tool" messages
 
 
+# Total content size across all messages in a request. Prevents a client from
+# sending 100 messages × 32k chars (= 3.2MB). The per-message cap is 32k; the
+# sum across messages is capped here at 128k which is enough for long chats.
+_MAX_TOTAL_CONTENT_CHARS = 128_000
+
+
 class ChatRequest(BaseModel):
     model: str
     messages: list[ChatMessage] = Field(..., min_length=1, max_length=100)
@@ -48,6 +54,15 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=4096)
     provider: str | None = None  # explicit provider override
     tools: list[ToolDefinition] | None = None
+
+    @model_validator(mode="after")
+    def _validate_total_content(self) -> "ChatRequest":
+        total = sum(len(m.content or "") for m in self.messages)
+        if total > _MAX_TOTAL_CONTENT_CHARS:
+            raise ValueError(
+                f"Total message content exceeds {_MAX_TOTAL_CONTENT_CHARS} characters"
+            )
+        return self
 
 
 class ChatChoice(BaseModel):

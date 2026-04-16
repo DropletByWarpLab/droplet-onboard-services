@@ -85,8 +85,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Droplet AI Gateway", version="0.3.0", lifespan=lifespan)
 
 # --- CORS ---
+# Starlette silently drops credentials when `allow_origins=["*"]` and
+# `allow_credentials=True`. Reject the misconfiguration at boot so ops notices.
 _cors_origins_raw = os.getenv("CORS_ORIGINS", "http://localhost:3001,https://localhost:3001")
 _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+if "*" in _cors_origins:
+    raise RuntimeError(
+        "CORS_ORIGINS=* is not allowed with allow_credentials=True. "
+        "Set an explicit origin list."
+    )
 
 app.add_middleware(
     CORSMiddleware,
