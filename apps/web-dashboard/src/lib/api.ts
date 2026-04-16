@@ -252,20 +252,49 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+export type NetworkOperation = {
+  id: string;
+  state: "pending" | "applied" | "rolled_back";
+  startedAt: number;
+  finishedAt: number | null;
+  reason: string | null;
+};
+
 export async function confirmNetworkCommand(
   token: string,
   operation: string,
   entityId?: string,
-): Promise<void> {
+): Promise<{ operationId: string | null }> {
   // WARP-41: echo the operation (and optionally the entity) from the 202
   // response so the orchestrator can reject a token that was issued for a
   // different pending op.
+  // WARP-40: return operationId so the caller can poll for apply-vs-rollback.
   const res = await authFetch(`${BASE}/api/network/command/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirmationToken: token, operation, entityId }),
   });
   if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
+  const body = await res.json();
+  return { operationId: body?.operationId ?? null };
+}
+
+export async function fetchNetworkOperation(id: string): Promise<NetworkOperation> {
+  const res = await authFetch(`${BASE}/api/network/operations/${encodeURIComponent(id)}`);
+  if (res.status === 404) {
+    // Orchestrator surfaces 404 for unknown / expired ops. Treat as applied so
+    // the UI isn't stuck in pending — a terminal record is either too old to
+    // track or the dashboard lost the flow (e.g. after refresh).
+    return {
+      id,
+      state: "applied",
+      startedAt: 0,
+      finishedAt: null,
+      reason: "Operation record expired",
+    };
+  }
+  if (!res.ok) throw new Error(`Failed to fetch operation: ${res.status}`);
+  return res.json();
 }
 
 // --- Cameras / Frigate ---

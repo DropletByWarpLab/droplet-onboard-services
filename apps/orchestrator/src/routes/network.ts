@@ -26,6 +26,7 @@ import {
   unblockDevice,
   addPortForward,
   rebootRouter,
+  getRouterOperation,
   isNetworkInitialized,
 } from "../services/network.service.js";
 import {
@@ -164,8 +165,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await setWifiPassword(iface_section, password);
-      res.json({ status: "ok", tier: result.tier });
+      const op = await setWifiPassword(iface_section, password);
+      res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -187,8 +188,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await setWifiChannel(radio_section, String(channel));
-      res.json({ status: "ok", channel, tier: result.tier });
+      const op = await setWifiChannel(radio_section, String(channel));
+      res.json({ status: "ok", channel, tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -220,8 +221,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await addStaticDhcpLease(name, mac, ip);
-      res.json({ status: "ok", name, mac, ip, tier: result.tier });
+      const op = await addStaticDhcpLease(name, mac, ip);
+      res.json({ status: "ok", name, mac, ip, tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -265,8 +266,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await blockDevice(mac, name);
-      res.json({ status: "ok", mac, action: "blocked", tier: result.tier });
+      const op = await blockDevice(mac, name);
+      res.json({ status: "ok", mac, action: "blocked", tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -300,8 +301,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await unblockDevice(mac);
-      res.json({ status: "ok", mac, action: "unblocked", tier: result.tier });
+      const op = await unblockDevice(mac);
+      res.json({ status: "ok", mac, action: "unblocked", tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -336,8 +337,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await addPortForward(name, src_port, dest_ip, dest_port, proto);
-      res.json({ status: "ok", name, tier: result.tier });
+      const op = await addPortForward(name, src_port, dest_ip, dest_port, proto);
+      res.json({ status: "ok", name, tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -375,8 +376,8 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
         return res.status(403).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await rebootRouter();
-      res.json({ status: "ok", action: "reboot" });
+      const op = await rebootRouter();
+      res.json({ status: "ok", action: "reboot", operationId: op.operationId });
     } catch (err) {
       next(err);
     }
@@ -413,15 +414,16 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
       // Execute the confirmed command — use the confirmed operation from the
       // pending record, which we already validated matches the caller's echo.
       const { operation: confirmedOp, params } = result;
+      let writeResult: { operationId: string | null };
       switch (confirmedOp) {
         case "block_device":
-          await blockDevice(params?.mac as string, params?.name as string | undefined);
+          writeResult = await blockDevice(params?.mac as string, params?.name as string | undefined);
           break;
         case "unblock_device":
-          await unblockDevice(params?.mac as string);
+          writeResult = await unblockDevice(params?.mac as string);
           break;
         case "add_port_forward":
-          await addPortForward(
+          writeResult = await addPortForward(
             params?.name as string,
             params?.src_port as string,
             params?.dest_ip as string,
@@ -430,19 +432,51 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
           );
           break;
         case "set_wifi_password":
-          await setWifiPassword(
+          writeResult = await setWifiPassword(
             (params?.iface_section as string) || "default_radio0",
             params?.password as string
           );
           break;
         case "reboot":
-          await rebootRouter();
+          writeResult = await rebootRouter();
           break;
         default:
           return res.status(400).json({ error: `Unknown operation: ${confirmedOp}` });
       }
 
-      res.json({ status: "ok", operation: confirmedOp, confirmed: true });
+      // WARP-40: surface the Operation-Id so the dashboard can poll for
+      // apply-vs-rollback outcome without re-reading the target resource.
+      res.json({
+        status: "ok",
+        operation: confirmedOp,
+        confirmed: true,
+        operationId: writeResult.operationId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Operation status (WARP-40) ---
+  // Dashboard polls this after any Tier 2 confirm or direct write to learn
+  // whether the router accepted the change or rolled it back.
+  router.get("/network/operations/:id", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      if (!id || id.length > 64) {
+        return res.status(400).json({ error: "Invalid operation id" });
+      }
+      try {
+        const op = await getRouterOperation(id);
+        res.json(op);
+      } catch (err) {
+        // fetchOperation throws "Operation lookup: 404 ..." when the id is
+        // unknown or expired. Surface as 404 to the dashboard.
+        if (err instanceof Error && /:\s*404/.test(err.message)) {
+          return res.status(404).json({ error: "Operation not found or expired" });
+        }
+        throw err;
+      }
     } catch (err) {
       next(err);
     }

@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  CheckCircle2,
   Globe,
+  Loader2,
   Monitor,
   RefreshCw,
   Router,
@@ -10,6 +12,7 @@ import {
   Signal,
   Wifi,
   WifiOff,
+  XCircle,
 } from "lucide-react";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import {
@@ -19,8 +22,17 @@ import {
   setWifiChannel,
   scanWifiNetworks,
   confirmNetworkCommand,
+  fetchNetworkOperation,
+  type NetworkOperation,
 } from "@/lib/api";
 import type { ConnectedDevice, FirewallConfig, NetworkCommandResult, NetworkOverview, WirelessScanResult } from "@/lib/types";
+
+// WARP-40: poll /network/operations/:id every second until terminal.
+type OperationStatus =
+  | { state: "idle" }
+  | { state: "pending"; id: string }
+  | { state: "applied"; id: string; finishedAt: number | null }
+  | { state: "rolled_back"; id: string; reason: string | null };
 
 type Tab = "overview" | "devices" | "wifi" | "firewall" | "system";
 
@@ -29,6 +41,46 @@ export default function NetworkPage() {
     useNetwork();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [pendingConfirm, setPendingConfirm] = useState<NetworkCommandResult | null>(null);
+  const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
+
+  // WARP-40: poll the operation record until it reaches a terminal state.
+  // Capped at 70s (safe-apply's 60s timeout + a little slack) so a lost
+  // operation never keeps the banner spinning forever.
+  useEffect(() => {
+    if (opStatus.state !== "pending") return;
+    const startedAt = Date.now();
+    let cancelled = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const op: NetworkOperation = await fetchNetworkOperation(opStatus.id);
+        if (cancelled) return;
+        if (op.state === "applied") {
+          setOpStatus({ state: "applied", id: op.id, finishedAt: op.finishedAt });
+          refresh();
+        } else if (op.state === "rolled_back") {
+          setOpStatus({ state: "rolled_back", id: op.id, reason: op.reason });
+          refresh();
+        } else if (Date.now() - startedAt > 70_000) {
+          // Router or operation record is gone. Present as rolled back so the
+          // user doesn't trust a change we can't confirm.
+          setOpStatus({ state: "rolled_back", id: opStatus.id, reason: "Timed out waiting for router" });
+        }
+      } catch {
+        if (!cancelled) {
+          setOpStatus({ state: "rolled_back", id: opStatus.id, reason: "Could not reach router" });
+        }
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, 1_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [opStatus, refresh]);
 
   if (isLoading) {
     return (
@@ -112,12 +164,17 @@ export default function NetworkPage() {
             <button
               onClick={async () => {
                 if (pendingConfirm.confirmationToken && pendingConfirm.operation) {
-                  await confirmNetworkCommand(
+                  const { operationId } = await confirmNetworkCommand(
                     pendingConfirm.confirmationToken,
                     pendingConfirm.operation,
                   );
                   setPendingConfirm(null);
-                  refresh();
+                  // WARP-40: start polling the apply/rollback status.
+                  if (operationId) {
+                    setOpStatus({ state: "pending", id: operationId });
+                  } else {
+                    refresh();
+                  }
                 }
               }}
               className="dp-button-primary text-sm"
@@ -125,6 +182,63 @@ export default function NetworkPage() {
               Confirm
             </button>
           </div>
+        </div>
+      )}
+
+      {/* WARP-40: Operation-status banner — visible while a write is in flight
+          or just after it completed. Auto-dismissed when the user clicks × or
+          starts a new operation. */}
+      {opStatus.state === "pending" && (
+        <div
+          role="status"
+          className="dp-card mb-4 border-system-blue bg-system-blue/5 flex items-center gap-3"
+        >
+          <Loader2 size={18} className="animate-spin text-system-blue" />
+          <div className="flex-1">
+            <p className="type-subheadline text-label-primary font-medium">Applying change…</p>
+            <p className="type-footnote text-label-tertiary">
+              Waiting for the router to confirm the new configuration.
+            </p>
+          </div>
+        </div>
+      )}
+      {opStatus.state === "applied" && (
+        <div
+          role="status"
+          className="dp-card mb-4 border-system-green bg-system-green/5 flex items-center gap-3"
+        >
+          <CheckCircle2 size={18} className="text-system-green" />
+          <p className="type-subheadline text-label-primary flex-1">Change applied.</p>
+          <button
+            onClick={() => setOpStatus({ state: "idle" })}
+            className="dp-button-secondary text-sm"
+            aria-label="Dismiss"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {opStatus.state === "rolled_back" && (
+        <div
+          role="alert"
+          className="dp-card mb-4 border-system-red bg-system-red/5 flex items-center gap-3"
+        >
+          <XCircle size={18} className="text-system-red" />
+          <div className="flex-1">
+            <p className="type-subheadline text-label-primary font-medium">
+              Change rolled back
+            </p>
+            <p className="type-footnote text-label-tertiary">
+              {opStatus.reason ?? "The router reverted to the previous configuration."}
+            </p>
+          </div>
+          <button
+            onClick={() => setOpStatus({ state: "idle" })}
+            className="dp-button-secondary text-sm"
+            aria-label="Dismiss"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 

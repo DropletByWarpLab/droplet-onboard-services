@@ -15,16 +15,26 @@ vi.mock("../config.js", () => ({
   },
 }));
 
-import { routingFetch, fetchNetworkSummary } from "../services/openwrt.client.js";
+import {
+  routingFetch,
+  fetchNetworkSummary,
+  fetchOperation,
+  blockDevice,
+} from "../services/openwrt.client.js";
 
-function mockResponse(init: { ok: boolean; status: number; json?: unknown }): Response {
+function mockResponse(init: {
+  ok: boolean;
+  status: number;
+  json?: unknown;
+  headers?: Record<string, string>;
+}): Response {
   return {
     ok: init.ok,
     status: init.status,
     statusText: init.ok ? "OK" : "Error",
     json: vi.fn().mockResolvedValue(init.json ?? {}),
     text: vi.fn().mockResolvedValue(""),
-    headers: new Headers(),
+    headers: new Headers(init.headers ?? {}),
   } as unknown as Response;
 }
 
@@ -185,6 +195,69 @@ describe("openwrt.client public wrappers", () => {
   afterEach(() => {
     global.fetch = realFetch;
     vi.restoreAllMocks();
+  });
+
+  // WARP-40: write helpers surface X-Operation-Id so the dashboard can poll.
+  it("write helpers return the X-Operation-Id header when present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        headers: { "X-Operation-Id": "abc123" },
+      }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await blockDevice("aa:bb:cc:dd:ee:ff", "Test");
+
+    expect(result.operationId).toBe("abc123");
+  });
+
+  it("write helpers return null operationId when the header is missing", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: true, status: 200 })); // no X-Operation-Id
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await blockDevice("aa:bb:cc:dd:ee:ff");
+
+    expect(result.operationId).toBeNull();
+  });
+
+  it("fetchOperation parses the operation payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        json: {
+          id: "abc123",
+          state: "applied",
+          startedAt: 100,
+          finishedAt: 101,
+          reason: null,
+        },
+      }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const op = await fetchOperation("abc123");
+
+    expect(op.id).toBe("abc123");
+    expect(op.state).toBe("applied");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe("http://routing.test/operations/abc123");
+  });
+
+  it("fetchOperation bubbles 404 errors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 404 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(fetchOperation("missing")).rejects.toThrow(/404/);
+    // 404 is a 4xx — retry policy must NOT retry.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("fetchNetworkSummary uses real retry path (retry once on 5xx)", async () => {

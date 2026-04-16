@@ -13,7 +13,9 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
+import operations
 from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
@@ -162,12 +164,57 @@ async def lifespan(app: FastAPI):
         logger.info("Disconnected from OpenWrt router")
 
 
+class OperationTrackingMiddleware(BaseHTTPMiddleware):
+    """Assign an operation id to every write (POST/PUT/DELETE) and surface it
+    via `X-Operation-Id`. The dashboard polls `GET /operations/{id}` to track
+    apply vs. rollback. See WARP-40.
+
+    Skipped for:
+      - GETs (reads don't change router state)
+      - /operations/* (polling the tracker itself shouldn't create new records)
+      - /health (exempt from auth + tracking for Docker healthchecks)
+    """
+
+    _TRACKED_METHODS = frozenset({"POST", "PUT", "DELETE"})
+    _SKIP_PATH_PREFIXES = ("/operations", "/health")
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method not in self._TRACKED_METHODS or any(
+            request.url.path.startswith(p) for p in self._SKIP_PATH_PREFIXES
+        ):
+            return await call_next(request)
+
+        op_id = operations.register()
+        request.state.operation_id = op_id
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            operations.mark_rolled_back(op_id, f"handler raised: {exc.__class__.__name__}")
+            raise
+
+        # 2xx = router accepted the change.
+        # 5xx = upstream failure, conservatively mark as rolled back so the
+        #       dashboard warns the user.
+        # 4xx = caller error (bad input, auth, etc.) — no router state change,
+        #       treat as applied so the dashboard doesn't scare the user.
+        if 200 <= response.status_code < 400:
+            operations.mark_applied(op_id)
+        elif response.status_code >= 500:
+            operations.mark_rolled_back(op_id, f"HTTP {response.status_code}")
+        else:
+            operations.mark_applied(op_id)
+
+        response.headers["X-Operation-Id"] = op_id
+        return response
+
+
 app = FastAPI(
     title="Droplet Routing Service",
     version="1.0.0",
     lifespan=lifespan,
     dependencies=[Depends(require_bearer)],
 )
+app.add_middleware(OperationTrackingMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -199,6 +246,29 @@ def health():
             router_host=OPENWRT_HOST,
             error=str(exc),
         )
+
+
+# ---------------------------------------------------------------------------
+# Operations (WARP-40)
+# ---------------------------------------------------------------------------
+@app.get("/operations/{op_id}")
+def get_operation(op_id: str):
+    """Look up an in-flight or recently-finished operation.
+
+    Records live for 5 minutes. After the TTL, returns 404 — the dashboard
+    interprets this as "operation is too old to track" and falls back to
+    polling the target resource directly.
+    """
+    op = operations.get(op_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Operation not found or expired")
+    return {
+        "id": op.id,
+        "state": op.state,
+        "startedAt": op.started_at,
+        "finishedAt": op.finished_at,
+        "reason": op.reason,
+    }
 
 
 # ---------------------------------------------------------------------------

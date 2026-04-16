@@ -172,6 +172,17 @@ function postJson(path: string, body: unknown, label?: string): Promise<Response
   });
 }
 
+/**
+ * WARP-40: result of a routing-service write. `operationId` is null when the
+ * routing service didn't emit the header (old build, GET fallback, etc.); the
+ * dashboard then falls back to polling the target resource directly.
+ */
+export type WriteResult = { operationId: string | null };
+
+function opFrom(res: Response): WriteResult {
+  return { operationId: res.headers.get("X-Operation-Id") };
+}
+
 // --- Network ---
 
 export async function fetchNetworkSummary(): Promise<NetworkSummary> {
@@ -189,18 +200,20 @@ export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatu
   );
 }
 
-export async function setInterfaceUp(name: string): Promise<void> {
-  await routingFetch(`/network/interfaces/${encodeURIComponent(name)}/up`, {
+export async function setInterfaceUp(name: string): Promise<WriteResult> {
+  const res = await routingFetch(`/network/interfaces/${encodeURIComponent(name)}/up`, {
     method: "POST",
     label: `Interface up ${name}`,
   });
+  return opFrom(res);
 }
 
-export async function setInterfaceDown(name: string): Promise<void> {
-  await routingFetch(`/network/interfaces/${encodeURIComponent(name)}/down`, {
+export async function setInterfaceDown(name: string): Promise<WriteResult> {
+  const res = await routingFetch(`/network/interfaces/${encodeURIComponent(name)}/down`, {
     method: "POST",
     label: `Interface down ${name}`,
   });
+  return opFrom(res);
 }
 
 // --- Wireless ---
@@ -229,35 +242,38 @@ export async function setWirelessSsid(
   radio: string,
   ifaceSection: string,
   ssid: string
-): Promise<void> {
-  await postJson(
+): Promise<WriteResult> {
+  const res = await postJson(
     "/wireless/ssid",
     { radio, iface_section: ifaceSection, ssid },
     "Set SSID",
   );
+  return opFrom(res);
 }
 
 export async function setWirelessPassword(
   ifaceSection: string,
   password: string,
   encryption: string = "sae-mixed"
-): Promise<void> {
-  await postJson(
+): Promise<WriteResult> {
+  const res = await postJson(
     "/wireless/password",
     { iface_section: ifaceSection, password, encryption },
     "Set password",
   );
+  return opFrom(res);
 }
 
 export async function setWirelessChannel(
   radioSection: string,
   channel: string
-): Promise<void> {
-  await postJson(
+): Promise<WriteResult> {
+  const res = await postJson(
     "/wireless/channel",
     { radio_section: radioSection, channel },
     "Set channel",
   );
+  return opFrom(res);
 }
 
 // --- DHCP ---
@@ -274,16 +290,18 @@ export async function addStaticLease(
   mac: string,
   ip: string,
   leasetime: string = "infinite"
-): Promise<void> {
-  await postJson(
+): Promise<WriteResult> {
+  const res = await postJson(
     "/dhcp/static-lease",
     { name, mac, ip, leasetime },
     "Add static lease",
   );
+  return opFrom(res);
 }
 
-export async function setDnsServers(servers: string[]): Promise<void> {
-  await postJson("/dhcp/dns", { servers }, "Set DNS");
+export async function setDnsServers(servers: string[]): Promise<WriteResult> {
+  const res = await postJson("/dhcp/dns", { servers }, "Set DNS");
+  return opFrom(res);
 }
 
 // --- Firewall ---
@@ -306,12 +324,14 @@ export async function fetchFirewallRedirects(): Promise<Record<string, unknown>>
   });
 }
 
-export async function blockDevice(mac: string, name?: string): Promise<void> {
-  await postJson("/firewall/block-device", { mac, name }, "Block device");
+export async function blockDevice(mac: string, name?: string): Promise<WriteResult> {
+  const res = await postJson("/firewall/block-device", { mac, name }, "Block device");
+  return opFrom(res);
 }
 
-export async function unblockDevice(mac: string): Promise<void> {
-  await postJson("/firewall/unblock-device", { mac }, "Unblock device");
+export async function unblockDevice(mac: string): Promise<WriteResult> {
+  const res = await postJson("/firewall/unblock-device", { mac }, "Unblock device");
+  return opFrom(res);
 }
 
 export async function addPortForward(
@@ -320,12 +340,13 @@ export async function addPortForward(
   destIp: string,
   destPort: string,
   proto: string = "tcp"
-): Promise<void> {
-  await postJson(
+): Promise<WriteResult> {
+  const res = await postJson(
     "/firewall/port-forward",
     { name, src_port: srcPort, dest_ip: destIp, dest_port: destPort, proto },
     "Add port forward",
   );
+  return opFrom(res);
 }
 
 // --- System ---
@@ -334,8 +355,24 @@ export async function fetchSystemInfo(): Promise<RouterSystemInfo> {
   return routingFetchJson<RouterSystemInfo>("/system/info", { label: "System info" });
 }
 
-export async function rebootRouter(): Promise<void> {
-  await routingFetch("/system/reboot", { method: "POST", label: "Reboot" });
+export async function rebootRouter(): Promise<WriteResult> {
+  const res = await routingFetch("/system/reboot", { method: "POST", label: "Reboot" });
+  return opFrom(res);
+}
+
+/** Fetch the state of a previously-started operation (WARP-40). */
+export async function fetchOperation(opId: string): Promise<{
+  id: string;
+  state: "pending" | "applied" | "rolled_back";
+  startedAt: number;
+  finishedAt: number | null;
+  reason: string | null;
+}> {
+  return routingFetchJson(`/operations/${encodeURIComponent(opId)}`, {
+    label: "Operation lookup",
+    // Polling every 1s — skip retries so rolled_back reads don't get retry-delayed.
+    retry: { attempts: 1 },
+  });
 }
 
 // --- Health ---
