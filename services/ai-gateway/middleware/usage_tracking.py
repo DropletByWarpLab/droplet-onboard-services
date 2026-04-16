@@ -1,1 +1,1 @@
-"""Token usage logging for monitoring and billing."""
+"""Request observability — placeholder for future monitoring needs."""

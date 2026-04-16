@@ -17,7 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["KEYS_DIR"] = tempfile.mkdtemp(prefix="droplet-test-keys-")
 os.environ["DEVICE_SECRET"] = "test-secret-for-unit-tests"
 os.environ["JETSON_OLLAMA_URL"] = "http://fake-jetson:11434"
-# No REDIS_URL — forces InMemorySessionStore for tests
+# No REDIS_URL — forces InMemorySessionStore and in-memory middleware backends
+# High rate limit so tests don't trip over each other
+os.environ["RATE_LIMIT_RPM"] = "10000"
+os.environ["RATE_LIMIT_BURST"] = "10000"
 
 
 @pytest.fixture

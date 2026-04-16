@@ -76,10 +76,44 @@ class TestChatRequest:
                 temperature=-0.1,
             )
 
-    def test_empty_messages_allowed(self):
-        # Pydantic allows empty list; the endpoint should validate further
-        req = ChatRequest(model="test", messages=[])
-        assert req.messages == []
+    def test_empty_messages_rejected(self):
+        with pytest.raises(ValidationError):
+            ChatRequest(model="test", messages=[])
+
+    def test_too_many_messages_rejected(self):
+        msgs = [ChatMessage(content=f"msg {i}") for i in range(101)]
+        with pytest.raises(ValidationError):
+            ChatRequest(model="test", messages=msgs)
+
+    def test_max_tokens_upper_bound(self):
+        with pytest.raises(ValidationError):
+            ChatRequest(
+                model="test",
+                messages=[ChatMessage(content="hi")],
+                max_tokens=5000,
+            )
+        # Valid at boundary
+        req = ChatRequest(
+            model="test",
+            messages=[ChatMessage(content="hi")],
+            max_tokens=4096,
+        )
+        assert req.max_tokens == 4096
+
+    def test_total_content_size_cap(self):
+        # 100 messages × 32k chars would be 3.2MB — reject before Pydantic even
+        # hits the per-message cap, via the model validator.
+        huge = "x" * 32_000
+        msgs = [ChatMessage(content=huge) for _ in range(5)]  # 160k total > 128k cap
+        with pytest.raises(ValidationError):
+            ChatRequest(model="test", messages=msgs)
+
+    def test_total_content_size_under_cap(self):
+        # 3 × 32k = 96k < 128k — allowed
+        huge = "x" * 32_000
+        msgs = [ChatMessage(content=huge) for _ in range(3)]
+        req = ChatRequest(model="test", messages=msgs)
+        assert len(req.messages) == 3
 
 
 class TestChatResponse:
