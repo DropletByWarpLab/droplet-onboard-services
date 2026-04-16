@@ -46,9 +46,50 @@ logging.basicConfig(level=logging.INFO)
 OPENWRT_HOST = os.environ.get("OPENWRT_HOST", "192.168.50.1")
 OPENWRT_PORT = int(os.environ.get("OPENWRT_PORT", "80"))
 OPENWRT_USERNAME = os.environ.get("OPENWRT_USERNAME", "droplet-ai")
-OPENWRT_PASSWORD = os.environ.get("OPENWRT_PASSWORD")
+
+
+def _load_openwrt_password() -> str:
+    """Load the rpcd password, preferring the Docker secret file (WARP-37).
+
+    Resolution order:
+      1. /run/secrets/openwrt_password — Docker Compose file-based secret (preferred).
+      2. $OPENWRT_PASSWORD env var — deprecated, kept for dev / legacy bring-up.
+
+    Returns an empty string when nothing is configured; the service still starts
+    but logs a warning and every authenticated ubus call will fail at login —
+    which is how the service has always behaved when the router is unreachable.
+    """
+    secret_path = os.environ.get("OPENWRT_PASSWORD_FILE", "/run/secrets/openwrt_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            value = fh.read().strip()
+        if value:
+            return value
+        logger.warning(
+            "OpenWrt password secret file %s is empty — set OPENWRT_PASSWORD in .env "
+            "and re-run ./scripts/setup.sh --sync-secrets",
+            secret_path,
+        )
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not read OpenWrt password from %s: %s", secret_path, exc)
+
+    env_value = os.environ.get("OPENWRT_PASSWORD", "")
+    if env_value:
+        logger.warning(
+            "OPENWRT_PASSWORD env var is deprecated — migrate to the Docker secret "
+            "at /run/secrets/openwrt_password (WARP-37). Falling back to env for now."
+        )
+    return env_value
+
+
+OPENWRT_PASSWORD = _load_openwrt_password()
 if not OPENWRT_PASSWORD:
-    raise ValueError("OPENWRT_PASSWORD environment variable is required")
+    logger.warning(
+        "OpenWrt password is not configured — router control will be unavailable "
+        "until /run/secrets/openwrt_password (or OPENWRT_PASSWORD) is set."
+    )
 
 # Shared bearer for orchestrator / camera-discovery → routing (WARP-36).
 # When unset the service runs open — intended for local dev only; production

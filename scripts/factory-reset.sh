@@ -272,6 +272,12 @@ if [ -d "$REPO_ROOT/docker/certs" ]; then
   log_success "Removed docker/certs/ (TLS certificates)"
 fi
 
+# Docker secret files (WARP-37)
+if [ -d "$REPO_ROOT/docker/secrets" ]; then
+  rm -rf "$REPO_ROOT/docker/secrets"
+  log_success "Removed docker/secrets/ (Docker secret mounts)"
+fi
+
 # MQTT password file
 if [ -d "$REPO_ROOT/docker/mosquitto_passwd_dir" ]; then
   rm -rf "$REPO_ROOT/docker/mosquitto_passwd_dir"
