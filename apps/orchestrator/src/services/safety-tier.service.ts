@@ -162,26 +162,61 @@ export async function evaluateCommand(
   };
 }
 
+/** Structured error codes returned by `confirmCommand` (WARP-41). */
+export type ConfirmCommandError =
+  | "TOKEN_MISSING"
+  | "TOKEN_EXPIRED"
+  | "TOKEN_OPERATION_MISMATCH";
+
 /**
  * Confirm a Tier 2 command and return the original command details.
+ *
+ * Callers MUST echo the `expected.service` (and optionally `expected.entityId`)
+ * from the original 202 response. If the server's pending record doesn't match,
+ * the request is rejected with `TOKEN_OPERATION_MISMATCH`. See WARP-41.
  */
 export async function confirmCommand(
   prisma: PrismaClient,
   confirmationToken: string,
-  userId?: string
+  userId?: string,
+  expected?: { service?: string; entityId?: string }
 ): Promise<
   | { confirmed: true; entityId: string; domain: string; service: string; data?: Record<string, unknown> }
-  | { confirmed: false; reason: string }
+  | { confirmed: false; code: ConfirmCommandError; reason: string }
 > {
   const pending = pendingConfirmations.get(confirmationToken);
   if (!pending) {
-    return { confirmed: false, reason: "Invalid or expired confirmation token" };
+    return {
+      confirmed: false,
+      code: "TOKEN_MISSING",
+      reason: "Invalid or expired confirmation token",
+    };
   }
 
   // Check expiry
   if (Date.now() > pending.expiresAt) {
     pendingConfirmations.delete(confirmationToken);
-    return { confirmed: false, reason: "Confirmation token has expired (60s limit)" };
+    return {
+      confirmed: false,
+      code: "TOKEN_EXPIRED",
+      reason: "Confirmation token has expired (60s limit)",
+    };
+  }
+
+  // WARP-41: reject mismatched echo so a caller can't confirm the wrong op.
+  if (expected?.service && expected.service !== pending.service) {
+    return {
+      confirmed: false,
+      code: "TOKEN_OPERATION_MISMATCH",
+      reason: `Confirmation service mismatch: expected '${pending.service}', got '${expected.service}'`,
+    };
+  }
+  if (expected?.entityId && expected.entityId !== pending.entityId) {
+    return {
+      confirmed: false,
+      code: "TOKEN_OPERATION_MISMATCH",
+      reason: `Confirmation entityId mismatch: expected '${pending.entityId}', got '${expected.entityId}'`,
+    };
   }
 
   // Remove from pending (single-use)

@@ -326,6 +326,135 @@ describe("Confirmation flow (Tier 2)", () => {
     const second = await confirmCommand(prisma, token, "user-1");
     expect(second.confirmed).toBe(false);
   });
+
+  // WARP-41: token binding to operation
+  describe("token bound to expected operation (WARP-41)", () => {
+    it("accepts matching service + entityId echo", async () => {
+      const evalResult = await evaluateCommand(
+        prisma,
+        "lock.front_door",
+        "lock",
+        undefined,
+        "user-1",
+      );
+      const token = (evalResult as any).confirmationToken as string;
+
+      const confirm = await confirmCommand(prisma, token, "user-1", {
+        service: "lock",
+        entityId: "lock.front_door",
+      });
+      expect(confirm.confirmed).toBe(true);
+    });
+
+    it("rejects mismatched service with TOKEN_OPERATION_MISMATCH", async () => {
+      const evalResult = await evaluateCommand(
+        prisma,
+        "lock.front_door",
+        "lock",
+        undefined,
+        "user-1",
+      );
+      const token = (evalResult as any).confirmationToken as string;
+
+      const confirm = await confirmCommand(prisma, token, "user-1", {
+        service: "unlock", // caller thinks they're unlocking, token was for lock
+      });
+      expect(confirm.confirmed).toBe(false);
+      if (!confirm.confirmed) {
+        expect(confirm.code).toBe("TOKEN_OPERATION_MISMATCH");
+      }
+    });
+
+    it("rejects mismatched entityId with TOKEN_OPERATION_MISMATCH", async () => {
+      const evalResult = await evaluateCommand(
+        prisma,
+        "lock.front_door",
+        "lock",
+        undefined,
+        "user-1",
+      );
+      const token = (evalResult as any).confirmationToken as string;
+
+      const confirm = await confirmCommand(prisma, token, "user-1", {
+        service: "lock",
+        entityId: "lock.back_door", // confused-deputy: token was for front_door
+      });
+      expect(confirm.confirmed).toBe(false);
+      if (!confirm.confirmed) {
+        expect(confirm.code).toBe("TOKEN_OPERATION_MISMATCH");
+      }
+    });
+
+    it("returns TOKEN_MISSING for unknown tokens", async () => {
+      const result = await confirmCommand(prisma, "not-a-real-token", "user-1", {
+        service: "lock",
+      });
+      expect(result.confirmed).toBe(false);
+      if (!result.confirmed) {
+        expect(result.code).toBe("TOKEN_MISSING");
+      }
+    });
+
+    it("returns TOKEN_EXPIRED with structured code past 60s", async () => {
+      const evalResult = await evaluateCommand(
+        prisma,
+        "lock.garage",
+        "lock",
+        undefined,
+        "user-1",
+      );
+      const token = (evalResult as any).confirmationToken as string;
+
+      const realDateNow = Date.now;
+      Date.now = vi.fn(() => realDateNow() + 61_000);
+
+      try {
+        const result = await confirmCommand(prisma, token, "user-1", { service: "lock" });
+        expect(result.confirmed).toBe(false);
+        if (!result.confirmed) {
+          expect(result.code).toBe("TOKEN_EXPIRED");
+        }
+      } finally {
+        Date.now = realDateNow;
+      }
+    });
+
+    it("replay-after-success: first confirm wins, second returns TOKEN_MISSING", async () => {
+      const evalResult = await evaluateCommand(
+        prisma,
+        "lock.side_door",
+        "lock",
+        undefined,
+        "user-1",
+      );
+      const token = (evalResult as any).confirmationToken as string;
+
+      const first = await confirmCommand(prisma, token, "user-1", { service: "lock" });
+      expect(first.confirmed).toBe(true);
+
+      const replay = await confirmCommand(prisma, token, "user-1", { service: "lock" });
+      expect(replay.confirmed).toBe(false);
+      if (!replay.confirmed) {
+        expect(replay.code).toBe("TOKEN_MISSING");
+      }
+    });
+
+    it("no-echo call still succeeds (backwards compat for the transition)", async () => {
+      const evalResult = await evaluateCommand(
+        prisma,
+        "lock.patio",
+        "lock",
+        undefined,
+        "user-1",
+      );
+      const token = (evalResult as any).confirmationToken as string;
+
+      // Route layers will require the echo — service-layer tolerates its
+      // absence so legacy callers during the rollout don't crash.
+      const confirm = await confirmCommand(prisma, token, "user-1");
+      expect(confirm.confirmed).toBe(true);
+    });
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────

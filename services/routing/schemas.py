@@ -60,7 +60,9 @@ class PortForwardRequest(BaseModel):
 
 class ApplyConfigRequest(BaseModel):
     configs: list[str] = Field(..., min_length=1, description="Config names to apply (e.g. ['network', 'wireless'])")
-    timeout: int = Field(default=30, ge=10, le=120, description="Rollback timeout in seconds")
+    # WARP-41: 60s matches the orchestrator's confirmation token TTL so a Tier 2
+    # token can never outlive the apply window on the router side.
+    timeout: int = Field(default=60, ge=10, le=120, description="Rollback timeout in seconds")
 
 
 class CreateVlanRequest(BaseModel):

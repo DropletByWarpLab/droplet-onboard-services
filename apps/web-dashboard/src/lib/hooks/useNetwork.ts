@@ -45,8 +45,10 @@ export function useNetwork() {
     refreshInterval: 30_000,
   });
 
-  async function confirm(token: string) {
-    await confirmNetworkCommand(token);
+  async function confirm(token: string, operation: string, entityId?: string) {
+    // WARP-41: callers must echo the original operation so the orchestrator
+    // can reject a token issued for a different pending op.
+    await confirmNetworkCommand(token, operation, entityId);
     refreshAll();
   }
 
