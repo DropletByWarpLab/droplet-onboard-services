@@ -1,0 +1,206 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// Mock config BEFORE importing the SUT so it picks up a stable BASE_URL and token.
+vi.mock("../config.js", () => ({
+  config: {
+    ROUTING_SERVICE_URL: "http://routing.test",
+    ROUTING_SERVICE_TOKEN: "test-token",
+    DATABASE_URL: "postgresql://test:test@localhost:5432/test",
+    REDIS_URL: "redis://localhost:6379",
+    MQTT_BROKER: "mqtt://localhost:1883",
+    AI_GATEWAY_URL: "http://localhost:8000",
+    NEXTCLOUD_URL: "http://nextcloud.test",
+    PORT: 3000,
+    NODE_ENV: "test",
+  },
+}));
+
+import { routingFetch, fetchNetworkSummary } from "../services/openwrt.client.js";
+
+function mockResponse(init: { ok: boolean; status: number; json?: unknown }): Response {
+  return {
+    ok: init.ok,
+    status: init.status,
+    statusText: init.ok ? "OK" : "Error",
+    json: vi.fn().mockResolvedValue(init.json ?? {}),
+    text: vi.fn().mockResolvedValue(""),
+    headers: new Headers(),
+  } as unknown as Response;
+}
+
+// Sleep is swapped for a synchronous no-op via the retry.sleep override so tests
+// don't burn wall-clock time. Random is pinned to 0.5 so jittered delays are stable.
+const noSleep = vi.fn().mockResolvedValue(undefined);
+const stableRandom = () => 0.5;
+
+describe("openwrt.client routingFetch", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    noSleep.mockClear();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("returns immediately on 2xx — no retry", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 200, json: { hello: "world" } }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await routingFetch("/network/summary", {
+      retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("retries on 5xx then succeeds on second attempt", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(mockResponse({ ok: false, status: 503 }))
+      .mockResolvedValueOnce(mockResponse({ ok: true, status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await routingFetch("/network/summary", {
+      retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(noSleep).toHaveBeenCalledTimes(1);
+    // stableRandom returns 0.5 → jitter = base * 0.2 * (2*0.5 - 1) = 0 → delay unchanged
+    expect(noSleep).toHaveBeenCalledWith(100);
+  });
+
+  it("retries on thrown network error then succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(mockResponse({ ok: true, status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await routingFetch("/network/summary", {
+      retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(noSleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws after exhausting all attempts on persistent 5xx", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 502 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      routingFetch("/network/summary", {
+        retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+      }),
+    ).rejects.toThrow(/502/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Delays fire between attempts: 1→2 and 2→3, so 2 sleeps total.
+    expect(noSleep).toHaveBeenCalledTimes(2);
+    expect(noSleep).toHaveBeenNthCalledWith(1, 100);
+    expect(noSleep).toHaveBeenNthCalledWith(2, 250);
+  });
+
+  it("throws immediately on 4xx — no retry, no sleep", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 401 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      routingFetch("/network/summary", {
+        label: "summary",
+        retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+      }),
+    ).rejects.toThrow(/summary: 401/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("throws immediately on AbortError without retrying", async () => {
+    const abortErr = new Error("aborted");
+    abortErr.name = "AbortError";
+    const fetchMock = vi.fn().mockRejectedValue(abortErr);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      routingFetch("/network/summary", {
+        retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+      }),
+    ).rejects.toThrow("aborted");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it("attaches Authorization: Bearer header when token is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await routingFetch("/network/summary", {
+      retry: { attempts: 1, delaysMs: [], sleep: noSleep, random: stableRandom },
+    });
+
+    const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://routing.test/network/summary");
+    const headers = opts.headers as Record<string, string>;
+    expect(headers["Authorization"]).toBe("Bearer test-token");
+  });
+
+  it("applies jitter — ±20% of base delay, bounded", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(mockResponse({ ok: false, status: 503 }))
+      .mockResolvedValueOnce(mockResponse({ ok: true, status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    // random=0 → jitter = 100 * 0.2 * (0 - 1) = -20 → delay = 80
+    await routingFetch("/network/summary", {
+      retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: () => 0 },
+    });
+    expect(noSleep).toHaveBeenLastCalledWith(80);
+
+    noSleep.mockClear();
+    fetchMock.mockResolvedValueOnce(mockResponse({ ok: false, status: 503 }));
+    fetchMock.mockResolvedValueOnce(mockResponse({ ok: true, status: 200 }));
+
+    // random=1 → jitter = 100 * 0.2 * (2 - 1) = +20 → delay = 120
+    await routingFetch("/network/summary", {
+      retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: () => 1 },
+    });
+    expect(noSleep).toHaveBeenLastCalledWith(120);
+  });
+});
+
+describe("openwrt.client public wrappers", () => {
+  const realFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("fetchNetworkSummary uses real retry path (retry once on 5xx)", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(mockResponse({ ok: false, status: 503 }))
+      .mockResolvedValueOnce(mockResponse({ ok: true, status: 200, json: { router_host: "x" } }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = fetchNetworkSummary();
+    // Let the retry path advance through its 100ms default backoff.
+    await vi.advanceTimersByTimeAsync(200);
+    await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+});
