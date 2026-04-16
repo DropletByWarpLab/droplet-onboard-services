@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Star } from "lucide-react";
 import { toggleFavorite } from "@/lib/api";
 
@@ -21,6 +21,14 @@ interface StarButtonProps {
 export function StarButton({ path, favorited, onToggle, size = 14 }: StarButtonProps) {
   const [current, setCurrent] = useState(favorited);
   const [pending, setPending] = useState(false);
+
+  // Re-sync with the parent when the favorited prop changes (e.g. after the
+  // parent's useFavorites SWR cache revalidates, or after an MQTT-driven
+  // cross-tab change). Without this, useState(favorited) only samples the
+  // prop on mount and the star can stay visually stale after an "add".
+  useEffect(() => {
+    setCurrent(favorited);
+  }, [favorited]);
 
   const handleClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
