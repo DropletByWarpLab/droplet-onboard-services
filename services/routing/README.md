@@ -45,6 +45,18 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
+## Tests (WARP-45)
+
+```bash
+cd services/routing
+pip install -r requirements-dev.txt
+pytest
+```
+
+Fixtures in `tests/conftest.py` mock `DropletRouter`, so no live OpenWrt is needed. Add new tests in `tests/test_*.py`; shared fixtures (`connected_client`, `disconnected_client`, `mock_router`, `set_token`) stay reusable across future tickets.
+
+CI runs this suite on every PR that touches `services/routing/` — see `.github/workflows/routing-tests.yml`.
+
 ## Endpoints
 
 - `GET /health` -- Router connectivity check
