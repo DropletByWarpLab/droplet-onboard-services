@@ -1,18 +1,10 @@
-import { Router, Request } from "express";
+import { Router } from "express";
 import pino from "pino";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
-import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
 
 const logger = pino({ name: "storage-route" });
-
-function getToken(req: Request): string {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
-  const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return "";
-  return header.slice(7);
-}
 
 /**
  * GET /api/storage — return the authenticated user's Nextcloud storage quota.
@@ -26,7 +18,15 @@ export function createStorageRouter(): Router {
 
   router.get("/storage", async (req, res, next) => {
     try {
-      const quota = await ncGetUserQuota(getToken(req));
+      const token = await resolveNcToken(req);
+      if (!token) {
+        // No resolvable Nextcloud credential — most likely an orphan session
+        // that pre-dates the NC-session store. Fall back to empty stats so
+        // the dashboard renders cleanly rather than 500-ing.
+        res.json({ used: 0, total: 0, available: 0, percentage: 0 } as StorageStats);
+        return;
+      }
+      const quota = await ncGetUserQuota(token);
       if (!quota) {
         res.json({ used: 0, total: 0, available: 0, percentage: 0 } as StorageStats);
         return;
