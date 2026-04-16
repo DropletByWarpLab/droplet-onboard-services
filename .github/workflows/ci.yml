@@ -1,0 +1,197 @@
+name: ci
+
+# Regression suite: every test the repo knows how to run, plus a build-only
+# pass over the entire docker-compose stack so we catch broken Dockerfiles
+# before they reach a device. Mirrors what `./scripts/setup.sh` does up to
+# (but excluding) "docker compose up".
+#
+# `services/routing/` keeps its own focused workflow at routing-tests.yml so
+# that routing-only PRs don't pay the cost of the full matrix here.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a PR cancels in-flight runs of the same workflow on the
+# same ref — no point spending CI minutes on stale commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Node + TypeScript: orchestrator and web-dashboard.
+  # The repo uses npm workspaces with a single root package-lock.json, so we
+  # install once at the root and let turbo dispatch `npm test` to each
+  # workspace.
+  # ---------------------------------------------------------------------------
+  node-tests:
+    name: node-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces)
+        run: npm ci
+
+      # Orchestrator's vitest config imports the generated Prisma client;
+      # tests crash with "Cannot find module .prisma/client" without this.
+      - name: Generate Prisma client
+        run: npm run -w @droplet/orchestrator db:generate
+
+      # `npm test` at the root runs `turbo run test`, which fans out to the
+      # `test` script in each workspace (orchestrator + web-dashboard).
+      - name: Run vitest across all workspaces
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Python: ai-gateway. (services/routing/ has its own workflow.)
+  # ---------------------------------------------------------------------------
+  ai-gateway-tests:
+    name: ai-gateway-tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ai-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/ai-gateway/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v
+
+  # ---------------------------------------------------------------------------
+  # Static security regression checks (no Docker needed).
+  # Catches things like hardcoded fallback passwords sneaking back into
+  # docker-compose (the regression that produced WARP-50 / commit 3d7306b).
+  # ---------------------------------------------------------------------------
+  security-tests:
+    name: security-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run security regression suite
+        run: ./scripts/test-security.sh
+
+  # ---------------------------------------------------------------------------
+  # Setup-script unit tests — secret generation, .env permissions, idempotency,
+  # compose.sh psql wiring. Fast (< 5s), no Docker required.
+  # ---------------------------------------------------------------------------
+  setup-unit-tests:
+    name: setup-unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run setup unit tests
+        run: bash tests/setup.test.sh
+
+  # ---------------------------------------------------------------------------
+  # Build every Docker image in docker/docker-compose.yml, including services
+  # gated behind `profiles: ["full"]` (camera-discovery, frigate, switch).
+  # Fails the PR if any Dockerfile is broken.
+  #
+  # We don't `up` the stack — only validate buildability. Faster signal than
+  # the full setup-script job and isolates Dockerfile breakage from setup
+  # script logic breakage.
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: docker-build (all images, all profiles)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Validate the YAML before paying the build cost — surfaces parse
+      # errors and bad references in seconds.
+      - name: Validate compose file
+        run: docker compose -f docker/docker-compose.yml --profile full config --quiet
+
+      - name: Build all images (default + full profile)
+        run: docker compose -f docker/docker-compose.yml --profile full build --pull
+
+  # ---------------------------------------------------------------------------
+  # Setup-script smoke test — runs the actual scripts/setup.sh up to (but not
+  # including) `docker compose up`. Verifies that:
+  #   - preflight passes on a fresh Ubuntu machine
+  #   - secret generation produces a valid 0600 .env with all required vars
+  #   - all build contexts referenced by docker-compose actually build
+  # If this passes, a fresh device provisioned with `./scripts/setup.sh` will
+  # at minimum reach the "ready to start" state. Catches regressions to the
+  # setup flow itself, not just individual Dockerfiles.
+  # ---------------------------------------------------------------------------
+  setup-script:
+    name: setup-script (--skip-docker --skip-start)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --skip-docker  → CI runner already has Docker installed; also tells
+      #                  preflight to skip the sudo prompt (unattended path).
+      # --skip-start   → don't try to bring services up — no real router,
+      #                  no Nextcloud account, no host networking on GHA.
+      # No --regenerate-env so we exercise the "fresh device" path.
+      # No --skip-build — the whole point of this job is to confirm `setup.sh`
+      # successfully builds every image when run end-to-end.
+      - name: Run setup.sh (preflight + secrets + build)
+        run: ./scripts/setup.sh --skip-docker --skip-start --verbose
+
+      - name: Verify .env was generated correctly
+        run: |
+          test -f .env || { echo "::error::.env not produced by setup.sh"; exit 1; }
+          for var in POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD \
+                     NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY; do
+            grep -q "^${var}=" .env || { echo "::error::missing $var in .env"; exit 1; }
+          done
+          # .env must be 0600 — leaking these secrets is a recurring failure
+          # mode (see commit 3d7306b for the prior incident).
+          perms=$(stat -c "%a" .env)
+          [ "$perms" = "600" ] || { echo "::error::.env perms are $perms, expected 600"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # Aggregate gate — one required check that fans in all the jobs above.
+  # Set this as the only required status check in branch protection so adding
+  # or removing jobs here doesn't break the merge rules.
+  # ---------------------------------------------------------------------------
+  ci-success:
+    name: ci-success
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - node-tests
+      - ai-gateway-tests
+      - security-tests
+      - setup-unit-tests
+      - docker-build
+      - setup-script
+    steps:
+      - name: Verify all upstream jobs succeeded
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::One or more required jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All checks passed."
