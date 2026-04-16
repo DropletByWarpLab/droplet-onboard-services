@@ -36,9 +36,43 @@ type OperationStatus =
 
 type Tab = "overview" | "devices" | "wifi" | "firewall" | "system";
 
+// WARP-39: user-facing strings keyed by the RouterError.code coming off the hook.
+const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
+  UNREACHABLE: {
+    title: "Router offline",
+    body: "We can't reach the router. We'll keep retrying — check the routing service and the router LAN connection.",
+  },
+  TIMEOUT: {
+    title: "Router slow to respond",
+    body: "The router took too long to answer. This usually clears up on its own in a few seconds.",
+  },
+  AUTH: {
+    title: "Credentials rejected",
+    body: "The shared bearer token or OpenWrt password is wrong. Re-run ./scripts/setup.sh --sync-secrets and restart the routing container.",
+  },
+  ROLLED_BACK: {
+    title: "Last change rolled back",
+    body: "The router reverted to the previous configuration to protect connectivity.",
+  },
+  UNKNOWN: {
+    title: "Router unavailable",
+    body: "Something unexpected happened talking to the router. Check the orchestrator and routing service logs.",
+  },
+};
+
 export default function NetworkPage() {
-  const { overview, devices, firewall, isLoading, isRefreshing, error, routerConnected, refresh } =
-    useNetwork();
+  const {
+    overview,
+    devices,
+    firewall,
+    isLoading,
+    isRefreshing,
+    error,
+    routerConnected,
+    routerErrorCode,
+    routerErrorMessage,
+    refresh,
+  } = useNetwork();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [pendingConfirm, setPendingConfirm] = useState<NetworkCommandResult | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
@@ -99,17 +133,30 @@ export default function NetworkPage() {
   }
 
   if (error || !routerConnected) {
+    // WARP-39: render per-code copy when available so the user can act on the
+    // specific cause. Falls back to UNKNOWN text when the error didn't come
+    // from the typed Result path (older SDK, unrelated failure, etc.).
+    const copy = ROUTER_ERROR_COPY[routerErrorCode ?? "UNKNOWN"];
     return (
       <div className="p-6">
-        <div className="dp-card text-center py-12">
+        <div className="dp-card text-center py-12" role="alert">
           <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            Router Not Connected
-          </h2>
+          <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            The OpenWrt routing service is unreachable. Make sure the routing
-            service is running and the router is accessible at the configured IP.
+            {copy.body}
           </p>
+          {routerErrorMessage && (
+            <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
+              {routerErrorMessage}
+            </p>
+          )}
+          <button
+            onClick={refresh}
+            className="dp-button-secondary text-sm mt-4"
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? "Retrying…" : "Retry now"}
+          </button>
         </div>
       </div>
     );
