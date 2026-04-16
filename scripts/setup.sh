@@ -149,7 +149,8 @@ if [ "$DRY_RUN" = "true" ]; then
   else
     log_info "  Would generate secrets: POSTGRES_PASSWORD, REDIS_PASSWORD,"
     log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
-    log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY"
+    log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY,"
+    log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN"
     log_info "  Would write .env via heredoc (no .env.example dependency)"
     log_info "  Would generate MQTT password file and TLS certificate"
   fi

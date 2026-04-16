@@ -3,8 +3,6 @@
  *
  * Talks to the routing microservice (FastAPI) which proxies
  * requests to the OpenWrt ubus JSON-RPC API.
- *
- * Follows the same pattern as home-assistant.client.ts.
  */
 
 import pino from "pino";
@@ -23,61 +21,97 @@ import type {
 const logger = pino({ name: "openwrt-client" });
 
 const BASE_URL = config.ROUTING_SERVICE_URL;
+const TOKEN = config.ROUTING_SERVICE_TOKEN;
+
+if (!TOKEN && process.env.NODE_ENV === "production") {
+  logger.warn(
+    "ROUTING_SERVICE_TOKEN is empty in production — routing service may reject requests",
+  );
+}
+
+type RoutingFetchInit = Omit<RequestInit, "headers"> & {
+  headers?: Record<string, string>;
+  label?: string;
+};
+
+async function routingFetch(path: string, init: RoutingFetchInit = {}): Promise<Response> {
+  const { headers = {}, label, ...rest } = init;
+  const merged: Record<string, string> = { ...headers };
+  if (TOKEN) {
+    merged["Authorization"] = `Bearer ${TOKEN}`;
+  }
+  const res = await fetch(`${BASE_URL}${path}`, { ...rest, headers: merged });
+  if (!res.ok) {
+    throw new Error(`${label ?? path}: ${res.status} ${res.statusText}`);
+  }
+  return res;
+}
+
+async function routingFetchJson<T>(path: string, init?: RoutingFetchInit): Promise<T> {
+  const res = await routingFetch(path, init);
+  return res.json() as Promise<T>;
+}
+
+function postJson(path: string, body: unknown, label?: string): Promise<Response> {
+  return routingFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    label,
+  });
+}
 
 // --- Network ---
 
 export async function fetchNetworkSummary(): Promise<NetworkSummary> {
-  const res = await fetch(`${BASE_URL}/network/summary`);
-  if (!res.ok) throw new Error(`Router summary: ${res.status} ${res.statusText}`);
-  return res.json() as Promise<NetworkSummary>;
+  return routingFetchJson<NetworkSummary>("/network/summary", { label: "Router summary" });
 }
 
 export async function fetchInterfaces(): Promise<NetworkInterfaces> {
-  const res = await fetch(`${BASE_URL}/network/interfaces`);
-  if (!res.ok) throw new Error(`Router interfaces: ${res.status}`);
-  return res.json() as Promise<NetworkInterfaces>;
+  return routingFetchJson<NetworkInterfaces>("/network/interfaces", { label: "Router interfaces" });
 }
 
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {
-  const res = await fetch(`${BASE_URL}/network/interfaces/${encodeURIComponent(name)}`);
-  if (!res.ok) throw new Error(`Router interface ${name}: ${res.status}`);
-  return res.json() as Promise<InterfaceStatus>;
+  return routingFetchJson<InterfaceStatus>(
+    `/network/interfaces/${encodeURIComponent(name)}`,
+    { label: `Router interface ${name}` },
+  );
 }
 
 export async function setInterfaceUp(name: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/network/interfaces/${encodeURIComponent(name)}/up`, {
+  await routingFetch(`/network/interfaces/${encodeURIComponent(name)}/up`, {
     method: "POST",
+    label: `Interface up ${name}`,
   });
-  if (!res.ok) throw new Error(`Interface up ${name}: ${res.status}`);
 }
 
 export async function setInterfaceDown(name: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/network/interfaces/${encodeURIComponent(name)}/down`, {
+  await routingFetch(`/network/interfaces/${encodeURIComponent(name)}/down`, {
     method: "POST",
+    label: `Interface down ${name}`,
   });
-  if (!res.ok) throw new Error(`Interface down ${name}: ${res.status}`);
 }
 
 // --- Wireless ---
 
 export async function fetchWirelessStatus(): Promise<WirelessStatus> {
-  const res = await fetch(`${BASE_URL}/wireless/status`);
-  if (!res.ok) throw new Error(`Wireless status: ${res.status}`);
-  return res.json() as Promise<WirelessStatus>;
+  return routingFetchJson<WirelessStatus>("/wireless/status", { label: "Wireless status" });
 }
 
 export async function scanWireless(device: string = "wlan0"): Promise<WirelessScanResult[]> {
-  const res = await fetch(`${BASE_URL}/wireless/scan?device=${encodeURIComponent(device)}`);
-  if (!res.ok) throw new Error(`Wireless scan: ${res.status}`);
-  const data = await res.json();
-  return data.results as WirelessScanResult[];
+  const data = await routingFetchJson<{ results: WirelessScanResult[] }>(
+    `/wireless/scan?device=${encodeURIComponent(device)}`,
+    { label: "Wireless scan" },
+  );
+  return data.results;
 }
 
 export async function fetchWirelessClients(device: string = "wlan0"): Promise<WirelessClient[]> {
-  const res = await fetch(`${BASE_URL}/wireless/clients?device=${encodeURIComponent(device)}`);
-  if (!res.ok) throw new Error(`Wireless clients: ${res.status}`);
-  const data = await res.json();
-  return data.clients as WirelessClient[];
+  const data = await routingFetchJson<{ clients: WirelessClient[] }>(
+    `/wireless/clients?device=${encodeURIComponent(device)}`,
+    { label: "Wireless clients" },
+  );
+  return data.clients;
 }
 
 export async function setWirelessSsid(
@@ -85,12 +119,11 @@ export async function setWirelessSsid(
   ifaceSection: string,
   ssid: string
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/wireless/ssid`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ radio, iface_section: ifaceSection, ssid }),
-  });
-  if (!res.ok) throw new Error(`Set SSID: ${res.status}`);
+  await postJson(
+    "/wireless/ssid",
+    { radio, iface_section: ifaceSection, ssid },
+    "Set SSID",
+  );
 }
 
 export async function setWirelessPassword(
@@ -98,33 +131,31 @@ export async function setWirelessPassword(
   password: string,
   encryption: string = "sae-mixed"
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/wireless/password`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ iface_section: ifaceSection, password, encryption }),
-  });
-  if (!res.ok) throw new Error(`Set password: ${res.status}`);
+  await postJson(
+    "/wireless/password",
+    { iface_section: ifaceSection, password, encryption },
+    "Set password",
+  );
 }
 
 export async function setWirelessChannel(
   radioSection: string,
   channel: string
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/wireless/channel`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ radio_section: radioSection, channel }),
-  });
-  if (!res.ok) throw new Error(`Set channel: ${res.status}`);
+  await postJson(
+    "/wireless/channel",
+    { radio_section: radioSection, channel },
+    "Set channel",
+  );
 }
 
 // --- DHCP ---
 
 export async function fetchDhcpLeases(): Promise<DhcpLease[]> {
-  const res = await fetch(`${BASE_URL}/dhcp/leases`);
-  if (!res.ok) throw new Error(`DHCP leases: ${res.status}`);
-  const data = await res.json();
-  return data.leases as DhcpLease[];
+  const data = await routingFetchJson<{ leases: DhcpLease[] }>("/dhcp/leases", {
+    label: "DHCP leases",
+  });
+  return data.leases;
 }
 
 export async function addStaticLease(
@@ -133,59 +164,43 @@ export async function addStaticLease(
   ip: string,
   leasetime: string = "infinite"
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/dhcp/static-lease`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, mac, ip, leasetime }),
-  });
-  if (!res.ok) throw new Error(`Add static lease: ${res.status}`);
+  await postJson(
+    "/dhcp/static-lease",
+    { name, mac, ip, leasetime },
+    "Add static lease",
+  );
 }
 
 export async function setDnsServers(servers: string[]): Promise<void> {
-  const res = await fetch(`${BASE_URL}/dhcp/dns`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ servers }),
-  });
-  if (!res.ok) throw new Error(`Set DNS: ${res.status}`);
+  await postJson("/dhcp/dns", { servers }, "Set DNS");
 }
 
 // --- Firewall ---
 
 export async function fetchFirewallZones(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE_URL}/firewall/zones`);
-  if (!res.ok) throw new Error(`Firewall zones: ${res.status}`);
-  return res.json();
+  return routingFetchJson<Record<string, unknown>>("/firewall/zones", {
+    label: "Firewall zones",
+  });
 }
 
 export async function fetchFirewallRules(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE_URL}/firewall/rules`);
-  if (!res.ok) throw new Error(`Firewall rules: ${res.status}`);
-  return res.json();
+  return routingFetchJson<Record<string, unknown>>("/firewall/rules", {
+    label: "Firewall rules",
+  });
 }
 
 export async function fetchFirewallRedirects(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE_URL}/firewall/redirects`);
-  if (!res.ok) throw new Error(`Firewall redirects: ${res.status}`);
-  return res.json();
+  return routingFetchJson<Record<string, unknown>>("/firewall/redirects", {
+    label: "Firewall redirects",
+  });
 }
 
 export async function blockDevice(mac: string, name?: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/firewall/block-device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mac, name }),
-  });
-  if (!res.ok) throw new Error(`Block device: ${res.status}`);
+  await postJson("/firewall/block-device", { mac, name }, "Block device");
 }
 
 export async function unblockDevice(mac: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/firewall/unblock-device`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mac }),
-  });
-  if (!res.ok) throw new Error(`Unblock device: ${res.status}`);
+  await postJson("/firewall/unblock-device", { mac }, "Unblock device");
 }
 
 export async function addPortForward(
@@ -195,31 +210,21 @@ export async function addPortForward(
   destPort: string,
   proto: string = "tcp"
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/firewall/port-forward`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name,
-      src_port: srcPort,
-      dest_ip: destIp,
-      dest_port: destPort,
-      proto,
-    }),
-  });
-  if (!res.ok) throw new Error(`Add port forward: ${res.status}`);
+  await postJson(
+    "/firewall/port-forward",
+    { name, src_port: srcPort, dest_ip: destIp, dest_port: destPort, proto },
+    "Add port forward",
+  );
 }
 
 // --- System ---
 
 export async function fetchSystemInfo(): Promise<RouterSystemInfo> {
-  const res = await fetch(`${BASE_URL}/system/info`);
-  if (!res.ok) throw new Error(`System info: ${res.status}`);
-  return res.json() as Promise<RouterSystemInfo>;
+  return routingFetchJson<RouterSystemInfo>("/system/info", { label: "System info" });
 }
 
 export async function rebootRouter(): Promise<void> {
-  const res = await fetch(`${BASE_URL}/system/reboot`, { method: "POST" });
-  if (!res.ok) throw new Error(`Reboot: ${res.status}`);
+  await routingFetch("/system/reboot", { method: "POST", label: "Reboot" });
 }
 
 // --- Health ---
@@ -228,9 +233,10 @@ export async function healthCheck(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${BASE_URL}/health`, { signal: controller.signal });
+    // /health is exempt from auth on the routing side (Docker healthcheck); send the
+    // token anyway to keep the code path uniform.
+    const res = await routingFetch("/health", { signal: controller.signal, label: "Health" });
     clearTimeout(timeout);
-    if (!res.ok) return false;
     const data = await res.json();
     return data.connected === true;
   } catch {

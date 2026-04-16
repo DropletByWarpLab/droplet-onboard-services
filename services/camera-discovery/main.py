@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 ROUTING_SERVICE_URL = os.getenv("ROUTING_SERVICE_URL", "http://localhost:8080")
+ROUTING_SERVICE_TOKEN = os.getenv("ROUTING_SERVICE_TOKEN", "").strip()
 FRIGATE_URL = os.getenv("FRIGATE_URL", "http://localhost:5000")
 MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt://localhost:1883")
 DEVICE_SECRET = os.getenv("DEVICE_SECRET", "")  # Shared secret for auth
@@ -159,7 +160,14 @@ frigate = FrigateClient(FRIGATE_URL)
 
 # --- HTTP client for routing service ---
 
-routing_client = httpx.AsyncClient(base_url=ROUTING_SERVICE_URL, timeout=10.0)
+_routing_headers = (
+    {"Authorization": f"Bearer {ROUTING_SERVICE_TOKEN}"} if ROUTING_SERVICE_TOKEN else {}
+)
+routing_client = httpx.AsyncClient(
+    base_url=ROUTING_SERVICE_URL,
+    timeout=10.0,
+    headers=_routing_headers,
+)
 
 
 async def fetch_dhcp_leases() -> list[dict]:
