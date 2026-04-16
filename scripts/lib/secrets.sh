@@ -34,7 +34,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -42,6 +42,8 @@ generate_env() {
   device_secret=$(_gen_fernet_key)
   device_secret_key=$(openssl rand -base64 32)
   jwt_secret=$(openssl rand -hex 64)
+  # Shared bearer for orchestrator and camera-discovery → routing service (WARP-36).
+  routing_service_token=$(openssl rand -hex 32)
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -83,6 +85,9 @@ DEVICE_SECRET_KEY=$device_secret_key
 # --- JWT ---
 JWT_SECRET=$jwt_secret
 
+# --- Routing service bearer (orchestrator, camera-discovery → routing) ---
+ROUTING_SERVICE_TOKEN=$routing_service_token
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -104,6 +109,7 @@ EOF
   log_info "  DEVICE_SECRET     : ${device_secret:0:8}****"
   log_info "  DEVICE_SECRET_KEY : ${device_secret_key:0:8}****"
   log_info "  JWT_SECRET        : ${jwt_secret:0:8}****"
+  log_info "  ROUTING_TOKEN     : ${routing_service_token:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # --- Generate Mosquitto password file ---

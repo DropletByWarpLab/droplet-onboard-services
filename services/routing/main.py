@@ -5,12 +5,13 @@ FastAPI wrapper around the OpenWrt SDK, exposing router management
 as a REST API for the orchestrator and AI gateway to consume.
 """
 
+import hmac
 import os
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from droplet_openwrt_sdk import (
@@ -48,6 +49,31 @@ OPENWRT_USERNAME = os.environ.get("OPENWRT_USERNAME", "droplet-ai")
 OPENWRT_PASSWORD = os.environ.get("OPENWRT_PASSWORD")
 if not OPENWRT_PASSWORD:
     raise ValueError("OPENWRT_PASSWORD environment variable is required")
+
+# Shared bearer for orchestrator / camera-discovery → routing (WARP-36).
+# When unset the service runs open — intended for local dev only; production
+# bring-up via scripts/setup.sh always generates a token.
+ROUTING_SERVICE_TOKEN = os.environ.get("ROUTING_SERVICE_TOKEN", "").strip()
+if not ROUTING_SERVICE_TOKEN:
+    logger.warning(
+        "ROUTING_SERVICE_TOKEN is empty — auth disabled. Set it in production."
+    )
+
+# Paths exempt from bearer auth (used by Docker healthcheck / orchestrator health roll-up).
+AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
+
+def require_bearer(request: Request) -> None:
+    """Reject requests without a matching `Authorization: Bearer <token>` header."""
+    if not ROUTING_SERVICE_TOKEN:
+        return
+    if request.url.path in AUTH_EXEMPT_PATHS:
+        return
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), ROUTING_SERVICE_TOKEN):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 router_instance: Optional[DropletRouter] = None
 
@@ -95,7 +121,12 @@ async def lifespan(app: FastAPI):
         logger.info("Disconnected from OpenWrt router")
 
 
-app = FastAPI(title="Droplet Routing Service", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Droplet Routing Service",
+    version="1.0.0",
+    lifespan=lifespan,
+    dependencies=[Depends(require_bearer)],
+)
 
 
 @app.exception_handler(Exception)
