@@ -129,6 +129,13 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   const sleep = policy.sleep ?? defaultSleep;
   const random = policy.random ?? Math.random;
 
+  // WARP-44: when ROUTING_MODE=disabled we never hit the network. Every call
+  // short-circuits with a typed DISABLED error the dashboard renders as its
+  // own banner — avoids spamming retries at a non-existent service.
+  if (config.ROUTING_MODE === "disabled") {
+    throw RouterError.disabled(label ?? path);
+  }
+
   const merged: Record<string, string> = { ...headers };
   if (TOKEN) {
     merged["Authorization"] = `Bearer ${TOKEN}`;

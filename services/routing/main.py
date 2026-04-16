@@ -52,6 +52,17 @@ OPENWRT_HOST = os.environ.get("OPENWRT_HOST", "192.168.50.1")
 OPENWRT_PORT = int(os.environ.get("OPENWRT_PORT", "80"))
 OPENWRT_USERNAME = os.environ.get("OPENWRT_USERNAME", "droplet-ai")
 
+# WARP-44: `real` connects to OpenWrt; `mock` swaps in a fixture-returning
+# stub so dev laptops without a router get a realistic UI; `disabled` is an
+# orchestrator-side flag — routing still runs for consistency.
+ROUTING_MODE = os.environ.get("ROUTING_MODE", "real").strip().lower()
+if ROUTING_MODE not in ("real", "mock", "disabled"):
+    logger.warning(
+        "Unknown ROUTING_MODE=%r — falling back to 'real'. Valid values: real / mock / disabled.",
+        ROUTING_MODE,
+    )
+    ROUTING_MODE = "real"
+
 
 def _load_openwrt_password() -> str:
     """Load the rpcd password, preferring the Docker secret file (WARP-37).
@@ -147,6 +158,15 @@ def handle_router_error(exc: Exception):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global router_instance
+    if ROUTING_MODE == "mock":
+        # WARP-44: fixture-driven router — dev laptops, CI, demos.
+        from mock_router import MockRouter
+
+        router_instance = MockRouter()
+        logger.info("Started in ROUTING_MODE=mock — serving fixtures, no real OpenWrt connection.")
+        yield
+        return
+
     try:
         router_instance = DropletRouter(
             host=OPENWRT_HOST,

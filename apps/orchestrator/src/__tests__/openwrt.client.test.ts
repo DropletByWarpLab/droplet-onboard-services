@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock config BEFORE importing the SUT so it picks up a stable BASE_URL and token.
-vi.mock("../config.js", () => ({
-  config: {
+// WARP-44: mutable config stub so a single test can flip ROUTING_MODE without
+// reloading the module. `vi.hoisted` is required because `vi.mock` runs before
+// regular top-level `const` initializers.
+const { mockConfig } = vi.hoisted(() => ({
+  mockConfig: {
     ROUTING_SERVICE_URL: "http://routing.test",
     ROUTING_SERVICE_TOKEN: "test-token",
+    ROUTING_MODE: "real" as "real" | "mock" | "disabled",
     DATABASE_URL: "postgresql://test:test@localhost:5432/test",
     REDIS_URL: "redis://localhost:6379",
     MQTT_BROKER: "mqtt://localhost:1883",
@@ -13,6 +17,10 @@ vi.mock("../config.js", () => ({
     PORT: 3000,
     NODE_ENV: "test",
   },
+}));
+
+vi.mock("../config.js", () => ({
+  config: mockConfig,
 }));
 
 import {
@@ -247,6 +255,39 @@ describe("openwrt.client routingFetch", () => {
       ).rejects.toSatisfy(
         (e) => e instanceof RouterError && e.code === "ROLLED_BACK" && e.status === 503,
       );
+    });
+
+    // WARP-44: ROUTING_MODE=disabled → short-circuit with DISABLED before any fetch.
+    it("ROUTING_MODE=disabled throws DISABLED without hitting the network", async () => {
+      const { RouterError } = await import("../types/router-error.js");
+      const fetchMock = vi.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      mockConfig.ROUTING_MODE = "disabled";
+      try {
+        await expect(
+          routingFetch("/network/summary", {
+            retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+          }),
+        ).rejects.toSatisfy((e) => e instanceof RouterError && e.code === "DISABLED");
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(noSleep).not.toHaveBeenCalled();
+      } finally {
+        mockConfig.ROUTING_MODE = "real";
+      }
+    });
+
+    it("ROUTING_MODE=real allows calls through", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 200 }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      mockConfig.ROUTING_MODE = "real";
+      const res = await routingFetch("/network/summary", {
+        retry: { attempts: 1, delaysMs: [], sleep: noSleep, random: stableRandom },
+      });
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 

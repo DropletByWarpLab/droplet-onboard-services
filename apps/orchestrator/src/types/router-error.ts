@@ -23,6 +23,7 @@ export type RouterErrorCode =
   | "TIMEOUT"
   | "AUTH"
   | "ROLLED_BACK"
+  | "DISABLED"
   | "UNKNOWN";
 
 export class RouterError extends Error {
@@ -57,6 +58,14 @@ export class RouterError extends Error {
   }
   static unknown(message: string, opts?: { label?: string; status?: number; cause?: unknown }): RouterError {
     return new RouterError("UNKNOWN", message, opts);
+  }
+  /**
+   * WARP-44: produced when `ROUTING_MODE=disabled`. The orchestrator
+   * short-circuits every routing call without hitting the network — the
+   * dashboard renders a "Router supervision disabled" banner.
+   */
+  static disabled(label = "router"): RouterError {
+    return new RouterError("DISABLED", "Router supervision is disabled", { label });
   }
 
   /** Shape sent over the wire to the dashboard. */

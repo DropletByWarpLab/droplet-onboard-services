@@ -172,6 +172,7 @@ export type RouterErrorCode =
   | "TIMEOUT"
   | "AUTH"
   | "ROLLED_BACK"
+  | "DISABLED"
   | "UNKNOWN";
 
 export class RouterStatusError extends Error {

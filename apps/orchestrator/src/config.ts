@@ -59,6 +59,13 @@ const envSchema = z.object({
   // Empty default lets tests and dev laptops run without setup; routing service
   // rejects empty tokens when its own value is set.
   ROUTING_SERVICE_TOKEN: z.string().default(""),
+  // WARP-44: `real` (default) talks to the routing service normally.
+  // `mock` is equivalent on the orchestrator side — routing itself is
+  // configured to serve fixtures.
+  // `disabled` short-circuits every openwrt.client call with
+  // RouterError.disabled() so the dashboard renders a "Router supervision
+  // disabled" banner instead of spamming retries at a non-existent service.
+  ROUTING_MODE: z.enum(["real", "mock", "disabled"]).default("real"),
 
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
