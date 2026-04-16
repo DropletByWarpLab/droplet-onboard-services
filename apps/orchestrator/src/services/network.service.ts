@@ -183,49 +183,59 @@ export async function getSystemInfo(): Promise<RouterSystemInfo> {
 }
 
 // --- Write operations (invalidate cache) ---
+//
+// WARP-40: every write returns `WriteResult = { operationId: string | null }`.
+// Routes surface this to the dashboard so it can poll /operations/:id for the
+// apply-vs-rollback outcome.
 
 export async function setWifiSsid(
   radio: string,
   ifaceSection: string,
   ssid: string
-): Promise<void> {
-  await openwrt.setWirelessSsid(radio, ifaceSection, ssid);
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setWirelessSsid(radio, ifaceSection, ssid);
   await invalidateNetworkCache();
+  return result;
 }
 
 export async function setWifiPassword(
   ifaceSection: string,
   password: string
-): Promise<void> {
-  await openwrt.setWirelessPassword(ifaceSection, password);
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setWirelessPassword(ifaceSection, password);
   await invalidateNetworkCache();
+  return result;
 }
 
 export async function setWifiChannel(
   radioSection: string,
   channel: string
-): Promise<void> {
-  await openwrt.setWirelessChannel(radioSection, channel);
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setWirelessChannel(radioSection, channel);
   await invalidateNetworkCache();
+  return result;
 }
 
 export async function addStaticDhcpLease(
   name: string,
   mac: string,
   ip: string
-): Promise<void> {
-  await openwrt.addStaticLease(name, mac, ip);
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.addStaticLease(name, mac, ip);
   await invalidateNetworkCache();
+  return result;
 }
 
-export async function blockDevice(mac: string, name?: string): Promise<void> {
-  await openwrt.blockDevice(mac, name);
+export async function blockDevice(mac: string, name?: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.blockDevice(mac, name);
   await invalidateNetworkCache();
+  return result;
 }
 
-export async function unblockDevice(mac: string): Promise<void> {
-  await openwrt.unblockDevice(mac);
+export async function unblockDevice(mac: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.unblockDevice(mac);
   await invalidateNetworkCache();
+  return result;
 }
 
 export async function addPortForward(
@@ -234,13 +244,18 @@ export async function addPortForward(
   destIp: string,
   destPort: string,
   proto: string = "tcp"
-): Promise<void> {
-  await openwrt.addPortForward(name, srcPort, destIp, destPort, proto);
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.addPortForward(name, srcPort, destIp, destPort, proto);
   await invalidateNetworkCache();
+  return result;
 }
 
-export async function rebootRouter(): Promise<void> {
-  await openwrt.rebootRouter();
+export async function rebootRouter(): Promise<openwrt.WriteResult> {
+  return openwrt.rebootRouter();
+}
+
+export async function getRouterOperation(opId: string) {
+  return openwrt.fetchOperation(opId);
 }
 
 // --- Cache helpers ---
