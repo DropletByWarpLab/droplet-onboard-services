@@ -65,6 +65,15 @@ services:
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
     volumes:
       - matter-data:/data/matter-storage
+    # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
+    # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
+    # container when a HARD dependency (postgres) is lost.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/orchestrator/health >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     restart: always
 
   # --- Nextcloud (headless backend) ---

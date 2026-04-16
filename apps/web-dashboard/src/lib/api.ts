@@ -133,6 +133,38 @@ export async function fetchDevices(): Promise<DeviceInfo[]> {
   return res.json();
 }
 
+// --- Rolled-up system health (WARP-43) ---
+
+export type SystemHealthStatus = "ok" | "degraded" | "down";
+export type SystemComponentStatus = "ok" | "down";
+
+export interface SystemComponent {
+  name: string;
+  status: SystemComponentStatus;
+  latencyMs: number;
+  lastCheckedAt: string;
+  error?: string;
+}
+
+export interface SystemHealth {
+  status: SystemHealthStatus;
+  components: SystemComponent[];
+  uptime: number;
+  version: string;
+}
+
+export async function fetchSystemHealth(): Promise<SystemHealth> {
+  // Public endpoint (no auth) — used by Docker healthcheck + dashboard pill.
+  const res = await fetch(`${BASE}/api/orchestrator/health`, {
+    credentials: "include",
+  });
+  // 503 is a valid "down" response; we still want to read the body.
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Network / Router ---
 
 export type RouterErrorCode =

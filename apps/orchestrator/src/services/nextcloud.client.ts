@@ -43,6 +43,29 @@ function davHeaders(token: string): Record<string, string> {
   };
 }
 
+// ── Health ──
+
+/**
+ * WARP-43: lightweight health probe. Hits `/status.php` which is
+ * unauthenticated and returns JSON with server metadata. 3s cap so the
+ * health monitor's 5s ceiling has headroom.
+ */
+export async function ncPing(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`${config.NEXTCLOUD_URL}/status.php`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return false;
+    const body = (await res.json()) as { installed?: boolean };
+    return body.installed === true;
+  } catch {
+    return false;
+  }
+}
+
 // ── WebDAV File Operations ──
 
 export async function ncListFiles(
