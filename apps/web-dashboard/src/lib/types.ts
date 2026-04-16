@@ -386,10 +386,54 @@ export interface WirelessScanResult {
   };
 }
 
+// WARP-42: mirror the routing service's wire shape (services/routing/schemas.py).
+// Fields are optional because OpenWrt omits defaults; index signatures let
+// the UI read extras like `.anonymous`, `.type`, etc. without compile errors.
+
+export interface FirewallZone {
+  name?: string;
+  network?: string | string[];
+  input?: string;
+  output?: string;
+  forward?: string;
+  masq?: string;
+  [key: string]: unknown;
+}
+
+export interface FirewallRule {
+  name?: string;
+  src?: string;
+  dest?: string;
+  src_mac?: string;
+  proto?: string | string[];
+  src_port?: string;
+  dest_port?: string;
+  target?: string;
+  enabled?: string;
+  [key: string]: unknown;
+}
+
+export interface FirewallRedirect {
+  name?: string;
+  src?: string;
+  dest?: string;
+  proto?: string | string[];
+  src_dport?: string;
+  dest_ip?: string;
+  dest_port?: string;
+  target?: string;
+  enabled?: string;
+  [key: string]: unknown;
+}
+
+export interface FirewallCollection<T> {
+  values: Record<string, T>;
+}
+
 export interface FirewallConfig {
-  zones: Record<string, unknown>;
-  rules: Record<string, unknown>;
-  redirects: Record<string, unknown>;
+  zones: FirewallCollection<FirewallZone>;
+  rules: FirewallCollection<FirewallRule>;
+  redirects: FirewallCollection<FirewallRedirect>;
 }
 
 export interface NetworkCommandResult {

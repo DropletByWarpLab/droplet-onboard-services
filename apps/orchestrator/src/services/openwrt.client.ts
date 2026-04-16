@@ -21,7 +21,15 @@ import type {
   WirelessClient,
   DhcpLease,
   RouterSystemInfo,
+  FirewallZones,
+  FirewallRules,
+  FirewallRedirects,
 } from "../types/network.js";
+import {
+  FirewallZonesSchema,
+  FirewallRulesSchema,
+  FirewallRedirectsSchema,
+} from "../types/firewall-schema.js";
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
@@ -313,22 +321,29 @@ export async function setDnsServers(servers: string[]): Promise<WriteResult> {
 
 // --- Firewall ---
 
-export async function fetchFirewallZones(): Promise<Record<string, unknown>> {
-  return routingFetchJson<Record<string, unknown>>("/firewall/zones", {
+// WARP-42: every firewall response is parsed through a zod schema so schema
+// drift on the routing side surfaces as a typed error at this boundary
+// instead of an `undefined` blowup deep in dashboard rendering.
+
+export async function fetchFirewallZones(): Promise<FirewallZones> {
+  const raw = await routingFetchJson<unknown>("/firewall/zones", {
     label: "Firewall zones",
   });
+  return FirewallZonesSchema.parse(raw) as FirewallZones;
 }
 
-export async function fetchFirewallRules(): Promise<Record<string, unknown>> {
-  return routingFetchJson<Record<string, unknown>>("/firewall/rules", {
+export async function fetchFirewallRules(): Promise<FirewallRules> {
+  const raw = await routingFetchJson<unknown>("/firewall/rules", {
     label: "Firewall rules",
   });
+  return FirewallRulesSchema.parse(raw) as FirewallRules;
 }
 
-export async function fetchFirewallRedirects(): Promise<Record<string, unknown>> {
-  return routingFetchJson<Record<string, unknown>>("/firewall/redirects", {
+export async function fetchFirewallRedirects(): Promise<FirewallRedirects> {
+  const raw = await routingFetchJson<unknown>("/firewall/redirects", {
     label: "Firewall redirects",
   });
+  return FirewallRedirectsSchema.parse(raw) as FirewallRedirects;
 }
 
 export async function blockDevice(mac: string, name?: string): Promise<WriteResult> {
