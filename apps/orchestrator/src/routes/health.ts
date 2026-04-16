@@ -7,6 +7,7 @@ import { isHomeAssistantHealthy } from "../services/smart-home.service.js";
 import { isRouterHealthy } from "../services/network.service.js";
 import { isFrigateHealthy } from "../services/camera.service.js";
 import { healthCheck as switchHealthCheck } from "../services/switch.client.js";
+import { getAggregateHealth } from "../services/health-monitor.service.js";
 import type { HealthResponse } from "../types/index.js";
 
 const startTime = Date.now();
@@ -46,6 +47,17 @@ export function createHealthRouter(prisma: PrismaClient): Router {
     };
 
     res.status(allOk ? 200 : 503).json(response);
+  });
+
+  // WARP-43: rolled-up health for Docker healthcheck + dashboard pill.
+  // Returns the cached snapshot from the background poller — this endpoint
+  // is cheap even under heavy polling load.
+  router.get("/orchestrator/health", (_req, res) => {
+    const snapshot = getAggregateHealth();
+    // Return HTTP 200 for `ok`/`degraded`, 503 for `down` so Docker's
+    // healthcheck restarts the container when a HARD dependency fails.
+    const httpStatus = snapshot.status === "down" ? 503 : 200;
+    res.status(httpStatus).json(snapshot);
   });
 
   return router;

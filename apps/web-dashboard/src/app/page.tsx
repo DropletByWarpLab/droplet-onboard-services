@@ -1,5 +1,6 @@
 "use client";
 
+import useSWR from "swr";
 import Link from "next/link";
 import { MessageSquare } from "lucide-react";
 import { StatusCard } from "@/components/StatusCard";
@@ -7,11 +8,41 @@ import { StorageGauge } from "@/components/StorageGauge";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStorage } from "@/lib/hooks/useStorage";
+import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
+
+// WARP-43: aggregate status → { label, pill classes } used by the banner.
+const SYSTEM_HEALTH_COPY: Record<
+  SystemHealth["status"],
+  { label: string; pillClass: string; dotClass: string }
+> = {
+  ok: {
+    label: "All systems operational",
+    pillClass: "border-system-green bg-system-green/5 text-system-green",
+    dotClass: "bg-system-green",
+  },
+  degraded: {
+    label: "Degraded — some components offline",
+    pillClass: "border-system-orange bg-system-orange/5 text-system-orange",
+    dotClass: "bg-system-orange",
+  },
+  down: {
+    label: "Down — critical dependency unreachable",
+    pillClass: "border-system-red bg-system-red/5 text-system-red",
+    dotClass: "bg-system-red",
+  },
+};
 
 export default function DashboardPage() {
   const { device, health, isLoading } = useDevice();
   const { models } = useModels();
   const { storage, isLoading: storageLoading } = useStorage();
+  // WARP-43: rolled-up system health. Polls every 15s to match the
+  // orchestrator's probe cadence.
+  const { data: systemHealth } = useSWR<SystemHealth>(
+    "/api/orchestrator/health",
+    fetchSystemHealth,
+    { refreshInterval: 15_000 },
+  );
 
   const localModels = models.filter((m) => m.provider === "ollama");
   const cloudModels = models.filter((m) => m.provider !== "ollama");
@@ -69,6 +100,44 @@ export default function DashboardPage() {
               />
             </div>
           </section>
+
+          {/* WARP-43: rolled-up system-health pill */}
+          {systemHealth && (
+            <section className="mb-10" aria-labelledby="system-health-title">
+              <h2 id="system-health-title" className="type-title-3 text-label-primary mb-4">
+                System health
+              </h2>
+              <div
+                className={`dp-card flex flex-col gap-3 ${SYSTEM_HEALTH_COPY[systemHealth.status].pillClass}`}
+                role={systemHealth.status === "ok" ? "status" : "alert"}
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`inline-block w-2.5 h-2.5 rounded-full ${SYSTEM_HEALTH_COPY[systemHealth.status].dotClass}`}
+                  />
+                  <span className="type-subheadline font-medium">
+                    {SYSTEM_HEALTH_COPY[systemHealth.status].label}
+                  </span>
+                </div>
+                <ul className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                  {systemHealth.components.map((c) => (
+                    <li
+                      key={c.name}
+                      className="flex items-center gap-2 type-caption-1 text-label-secondary"
+                      title={c.error ?? `${c.latencyMs}ms @ ${new Date(c.lastCheckedAt).toLocaleTimeString()}`}
+                    >
+                      <span
+                        className={`inline-block w-1.5 h-1.5 rounded-full ${
+                          c.status === "ok" ? "bg-system-green" : "bg-system-red"
+                        }`}
+                      />
+                      <span className="capitalize">{c.name.replace("-", " ")}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </section>
+          )}
 
           {/* Storage */}
           <section className="mb-10">

@@ -18,6 +18,10 @@ import {
   initDeviceRegistration,
   shutdownDeviceRegistration,
 } from "./services/device-registration.service.js";
+import {
+  startHealthMonitor,
+  stopHealthMonitor,
+} from "./services/health-monitor.service.js";
 
 const logger = pino({ name: "api-server" });
 
@@ -80,6 +84,10 @@ async function main() {
     logger.warn("Frigate NVR unavailable, camera features disabled");
   }
 
+  // WARP-43: begin background polling of component health. Non-blocking —
+  // the first snapshot is seeded immediately and the poller keeps running.
+  startHealthMonitor(prisma);
+
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
   const app = createApp(prisma);
@@ -92,6 +100,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info("Shutting down...");
+    stopHealthMonitor();
     shutdownDeviceRegistration();
     await shutdownMatterService();
     await shutdownCameraService();
