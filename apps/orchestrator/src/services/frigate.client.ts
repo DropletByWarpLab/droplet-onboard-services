@@ -133,3 +133,32 @@ export async function deleteCamera(cameraName: string): Promise<void> {
   );
   if (!resp.ok) throw new Error(`Delete camera: ${resp.status}`);
 }
+
+export async function addCamera(
+  name: string,
+  rtspUrl: string,
+  detect = true
+): Promise<boolean> {
+  const safeName = name.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
+  const cameraConfig = {
+    cameras: {
+      [safeName]: {
+        ffmpeg: {
+          inputs: [{ path: rtspUrl, roles: ["detect", "record"] }],
+        },
+        detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
+        record: { enabled: true },
+        snapshots: { enabled: true },
+      },
+    },
+  };
+
+  const resp = await fetch(`${FRIGATE_URL}/api/config/set`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cameraConfig),
+    signal: timeout(15_000),
+  });
+
+  return resp.ok;
+}

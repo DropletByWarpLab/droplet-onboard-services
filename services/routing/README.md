@@ -2,6 +2,109 @@
 
 FastAPI wrapper around the Droplet OpenWrt SDK. Exposes the OpenWrt router's ubus JSON-RPC API as REST endpoints for the orchestrator and AI gateway.
 
+## Architecture
+
+```
+Orchestrator ──→ Routing Service (FastAPI :8080) ──→ OpenWrt Router (ubus JSON-RPC)
+AI Gateway ────┘                                     192.168.50.1 / 10.0.0.1
+```
+
+The routing service runs with `network_mode: host` so it can reach the router directly. All requests go through the orchestrator's auth middleware before reaching this service.
+
+## REST API
+
+### Health
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Router connectivity check |
+
+### Network
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/network/summary` | Full network summary (interfaces, wireless, DHCP, firewall) |
+| GET | `/network/interfaces` | All interface statuses |
+| GET | `/network/interfaces/{name}` | Single interface status |
+| POST | `/network/interfaces/{name}/up` | Bring interface up |
+| POST | `/network/interfaces/{name}/down` | Bring interface down |
+
+### Wireless
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/wireless/status` | WiFi radio status |
+| GET | `/wireless/scan` | Scan available networks |
+| GET | `/wireless/clients` | Connected WiFi clients |
+| POST | `/wireless/ssid` | Set SSID |
+| POST | `/wireless/password` | Set WiFi password |
+| POST | `/wireless/channel` | Set channel |
+| POST | `/wireless/guest` | Create guest network |
+
+### DHCP
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/dhcp/leases` | Active DHCP leases (IPv4) |
+| GET | `/dhcp/leases/v6` | Active DHCP leases (IPv6) |
+| POST | `/dhcp/static-lease` | Add static IP reservation |
+| POST | `/dhcp/dns` | Set upstream DNS servers |
+
+### Firewall
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/firewall/zones` | Firewall zones |
+| GET | `/firewall/rules` | Firewall rules |
+| GET | `/firewall/redirects` | Port forwarding rules |
+| POST | `/firewall/block-device` | Block device by MAC |
+| POST | `/firewall/unblock-device` | Unblock device by MAC |
+| POST | `/firewall/port-forward` | Add port forwarding rule |
+
+### VLANs / Camera Subnet
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/network/vlans` | List all configured VLANs |
+| POST | `/network/vlans` | Create a new VLAN |
+| GET | `/network/subnets/cameras` | Camera subnet status and config |
+| POST | `/network/subnets/cameras/setup` | One-click camera subnet setup (VLAN + firewall + DHCP) |
+| DELETE | `/network/subnets/cameras` | Remove camera subnet |
+
+### System
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/system/info` | Board info + resource usage |
+| POST | `/system/reboot` | Reboot router |
+
+### Config Management
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/config/apply` | Safe apply with automatic rollback on connectivity loss |
+
+## Camera Subnet Setup
+
+The `POST /network/subnets/cameras/setup` endpoint creates everything in a single atomic transaction with automatic rollback:
+
+1. Bridge VLAN 100 on br-lan
+2. `cameras` interface (192.168.100.1/24)
+3. `cameras` firewall zone (REJECT/ACCEPT/REJECT)
+4. Forwarding: LAN → cameras, cameras → WAN
+5. Allow rules: camera DHCP, DNS, ping
+6. DHCP pool: 192.168.100.100-249
+
+If connectivity is lost during setup, all changes automatically roll back.
+
+## OpenWrt SDK
+
+The `droplet_openwrt_sdk.py` file provides a high-level Python SDK with sub-APIs:
+
+| Sub-API | Class | Capabilities |
+|---------|-------|-------------|
+| Network | `NetworkApi` | Interface status, VLAN creation, IP configuration |
+| Wireless | `WirelessApi` | WiFi scan, SSID/password, channel, guest networks |
+| DHCP | `DHCPApi` | Active leases, static reservations, DNS |
+| Firewall | `FirewallApi` | Zones, rules, forwarding, port forwards, device blocking |
+| System | `SystemApi` | Board info, reboot, hostname |
+| VPN | `VPNApi` | WireGuard management |
+| UCI | `UCIApi` | Low-level config read/write/commit |
+
+All config changes can be wrapped in `router.safe_apply(timeout=30)` for automatic rollback.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -41,7 +144,11 @@ docker compose -f docker/docker-compose.yml restart routing
 ## Local Development
 
 ```bash
+cd services/routing
 pip install -r requirements.txt
+
+OPENWRT_HOST=192.168.50.1 \
+OPENWRT_PASSWORD=yourpassword \
 uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
@@ -57,15 +164,29 @@ Fixtures in `tests/conftest.py` mock `DropletRouter`, so no live OpenWrt is need
 
 CI runs this suite on every PR that touches `services/routing/` — see `.github/workflows/routing-tests.yml`.
 
+## Docker
+
+```bash
+docker compose --profile full up routing
+```
+
+Runs with `network_mode: host` and `NET_ADMIN` capability for direct router access.
+
 ## Endpoints
 
-- `GET /health` -- Router connectivity check
-- `GET /network/*` -- Interface status
-- `GET /wireless/*` -- WiFi status, scan, clients
-- `POST /wireless/*` -- Set SSID, password, channel
-- `GET /dhcp/*` -- DHCP leases
-- `POST /dhcp/*` -- Static leases, DNS
-- `GET /firewall/*` -- Zones, rules, redirects
-- `POST /firewall/*` -- Block/unblock, port forwards
-- `GET /system/info` -- Board + resources
-- `POST /system/reboot` -- Reboot device
+## LLM Tools
+
+The AI gateway exposes these network tools (defined in `services/ai-gateway/tools/`):
+
+| Tool | Endpoint |
+|------|----------|
+| `get_network_status` | `/api/network/status` |
+| `get_connected_devices` | `/api/network/devices` |
+| `scan_wifi_networks` | `/api/network/wifi/scan` |
+| `set_wifi_ssid` | `/api/network/wifi/ssid` |
+| `set_wifi_channel` | `/api/network/wifi/channel` |
+| `get_firewall_rules` | `/api/network/firewall` |
+| `block_network_device` | `/api/network/firewall/block` |
+| `unblock_network_device` | `/api/network/firewall/unblock` |
+| `add_port_forward` | `/api/network/firewall/port-forward` |
+| `get_router_system_info` | `/api/network/system` |

@@ -13,6 +13,7 @@ services/ai-gateway/    FastAPI + LiteLLM — model routing proxy
 services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-indexer/  Python watchdog — filesystem indexer + embedder (formerly `file-sync`)
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
+services/switch/        FastAPI — Managed switch control (Lantronix/ASIC driver)
 openwrt/                OpenWrt image builder + config overlay for Pi 5 router
 docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home Assistant, Frigate NVR
 ```
@@ -25,6 +26,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home 
 - **Routing service:** Python, FastAPI, OpenWrt ubus JSON-RPC SDK
 - **File indexer:** Python, watchdog (was `file-sync`; renamed to reflect its indexer+embedder role)
 - **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
+- **Switch service:** Python, FastAPI, abstract driver interface (Lantronix SM8TAT2SA / future ASIC)
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Home Assistant, Frigate
 
@@ -67,6 +69,7 @@ npm run test:ai-gateway     # ai-gateway only
 | ai-gateway     | :8000 | FastAPI + LiteLLM          |
 | homeassistant  | :8123 | Profile: `full`            |
 | frigate        | :8971 | NVR + AI detection, `full` |
+| switch         | :8081 | Managed switch control, `full` |
 | camera-discovery | —   | ONVIF/RTSP scanner, `full` |
 | routing        | :8080 | OpenWrt control, `full`    |
 
@@ -92,6 +95,12 @@ npm run test:ai-gateway     # ai-gateway only
 | `FRIGATE_URL`        | Frigate NVR API endpoint (default `http://frigate:5000`) |
 | `CAMERA_SCAN_INTERVAL` | Camera discovery scan interval in seconds (default `30`) |
 | `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`) |
+| `SWITCH_HOST`        | Managed switch IP (default `192.168.1.77`)             |
+| `SWITCH_PORT`        | Managed switch HTTPS port (default `443`)              |
+| `SWITCH_USERNAME`    | Switch admin username (default `admin`)                |
+| `SWITCH_PASSWORD`    | Switch admin password                                  |
+| `SWITCH_DRIVER`      | Switch driver: `lantronix` (default) or `asic` (future) |
+| `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://localhost:8081`) |
 
 ## GTM Alignment (April 2026)
 

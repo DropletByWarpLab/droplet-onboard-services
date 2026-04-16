@@ -80,6 +80,7 @@ prepare_and_build() {
     "nextcloud:29-apache"
     "node:20-alpine"
     "python:3.12-slim"
+    "ghcr.io/blakeblackshear/frigate:stable"
   )
 
   local failed=0

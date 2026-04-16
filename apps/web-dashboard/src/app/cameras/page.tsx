@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { RefreshCw, Video, ExternalLink } from "lucide-react";
+import { RefreshCw, Video, ExternalLink, Plus, Radar } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
@@ -11,7 +11,9 @@ import { CameraDiscoveryBanner } from "@/components/cameras/CameraDiscoveryBanne
 import { CameraDetailPanel } from "@/components/cameras/CameraDetailPanel";
 import { CameraNotificationToast } from "@/components/cameras/CameraNotificationToast";
 import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
+import { AddCameraModal } from "@/components/cameras/AddCameraModal";
 import { authFetch } from "@/lib/auth";
+import { triggerCameraScan } from "@/lib/api";
 import type { CameraInfo } from "@/lib/types";
 
 export default function CamerasPage() {
@@ -44,6 +46,8 @@ export default function CamerasPage() {
   );
 
   const [selectedCamera, setSelectedCamera] = useState<CameraInfo | null>(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
   if (isLoading) {
     return (
@@ -97,6 +101,28 @@ export default function CamerasPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg"
+          >
+            <Plus size={16} />
+            <span className="type-subheadline">Add Camera</span>
+          </button>
+          <button
+            onClick={async () => {
+              setScanning(true);
+              try {
+                await triggerCameraScan();
+                refresh();
+              } catch { /* scan service may not be running */ }
+              setScanning(false);
+            }}
+            disabled={scanning}
+            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+          >
+            <Radar size={16} className={scanning ? "animate-pulse" : ""} />
+            <span className="type-subheadline">Scan</span>
+          </button>
           <a
             href="/frigate/"
             target="_blank"
@@ -140,11 +166,31 @@ export default function CamerasPage() {
           <h2 className="type-title-3 text-label-primary mb-1">
             No Cameras Yet
           </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Connect RTSP or ONVIF cameras to your network. They&apos;ll be
-            automatically discovered and configured for recording and AI
-            detection.
+          <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
+            Frigate NVR is running and ready. Add a camera manually with its
+            RTSP URL, or scan your network to auto-discover ONVIF cameras.
           </p>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="dp-btn-primary flex items-center gap-2 px-4 py-2.5 rounded-lg"
+            >
+              <Plus size={16} />
+              Add Camera
+            </button>
+            <button
+              onClick={async () => {
+                setScanning(true);
+                try { await triggerCameraScan(); refresh(); } catch {}
+                setScanning(false);
+              }}
+              disabled={scanning}
+              className="dp-btn-secondary flex items-center gap-2 px-4 py-2.5 rounded-lg"
+            >
+              <Radar size={16} className={scanning ? "animate-pulse" : ""} />
+              Scan Network
+            </button>
+          </div>
         </div>
       )}
 
@@ -166,6 +212,14 @@ export default function CamerasPage() {
           onDisable={disableCam}
           onRemove={removeCam}
           onClose={() => setSelectedCamera(null)}
+        />
+      )}
+
+      {/* Add Camera Modal */}
+      {showAddModal && (
+        <AddCameraModal
+          onClose={() => setShowAddModal(false)}
+          onAdded={refresh}
         />
       )}
     </div>

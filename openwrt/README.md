@@ -96,18 +96,68 @@ Credentials are **unique per device** — generated randomly during first boot a
 ssh root@192.168.50.1 cat /etc/droplet/droplet-ai-password
 ```
 
+## Camera Subnet (VLAN 100)
+
+The image ships with a pre-configured isolated subnet for IP cameras:
+
+| Setting | Value |
+|---------|-------|
+| VLAN | 100 on br-lan |
+| Interface | `cameras` (192.168.100.1/24) |
+| DHCP pool | 192.168.100.100 — 192.168.100.249 |
+| Firewall zone | `cameras` (REJECT input, REJECT forward) |
+| LAN → cameras | ACCEPT (Droplet RTSP/ONVIF access) |
+| cameras → LAN | REJECT (users can't browse camera feeds) |
+| cameras → WAN | ACCEPT (NTP, DNS, firmware updates) |
+
+Cameras plugged into VLAN 100 ports are automatically isolated from the main network. Only the Droplet appliance can access them.
+
+## Upgrading an Existing Router
+
+### In-Place Sysupgrade (Preserves Config)
+
+```bash
+# Build the image (produces both SD card + sysupgrade images)
+cd openwrt && ./build.sh
+
+# Push firmware to the running router from any LAN device
+./scripts/upgrade-router.sh output/openwrt-*-sysupgrade.img.gz
+```
+
+UCI configs (`/etc/config/*`) are preserved across sysupgrade — WiFi, firewall, DHCP, camera VLAN all stay intact.
+
+Options:
+- `--no-preserve` — clean flash with new defaults
+- `--dry-run` — upload only, don't flash
+- `--apply-defaults` — re-run uci-defaults scripts after upgrade (e.g., add new camera VLAN config)
+- `--host <ip>` — specify router IP (default: `OPENWRT_HOST` or `10.0.0.1`)
+
+### Adding Camera VLAN to Existing Router (No Firmware Flash)
+
+```bash
+scp openwrt/scripts/setup-camera-subnet.sh root@10.0.0.1:/tmp/
+ssh root@10.0.0.1 'sh /tmp/setup-camera-subnet.sh'
+```
+
+The script is idempotent (safe to re-run) and supports:
+- `--status` — show connected cameras and VLAN config
+- `--remove` — tear down the camera subnet
+- `--dry-run` — preview changes without applying
+- `--vlan-id <id>` — custom VLAN ID (default: 100)
+- `--subnet <ip>` — custom gateway IP (default: 192.168.100.1)
+
 ## File Structure
 
 ```
 openwrt/
-├── build.sh                            # Image builder script (Pi 5 / bcm2712)
+├── build.sh                            # Image builder (produces .img.gz + sysupgrade)
 ├── README.md                           # This file
 ├── files/                              # OpenWrt overlay (baked into image)
 │   ├── etc/config/
-│   │   ├── network                     # WAN/LAN/bridge config
+│   │   ├── network                     # WAN/LAN/bridge + camera VLAN 100
 │   │   ├── wireless                    # WiFi 7 tri-band AP
-│   │   ├── firewall                    # NAT, zones, rules
-│   │   ├── dhcp                        # DHCP server config
+│   │   ├── firewall                    # NAT, zones, rules + camera isolation
+│   │   ├── dhcp                        # DHCP (LAN + camera subnet)
 │   │   ├── uhttpd                      # Web server + ubus endpoint
 │   │   ├── rpcd                        # RPC daemon + droplet-ai user
 │   │   └── system                      # Hostname, NTP, LEDs
@@ -118,6 +168,8 @@ openwrt/
 │   └── usr/share/rpcd/acl.d/
 │       └── droplet-ai.json             # ubus API permissions for AI agent
 ├── scripts/
+│   ├── setup-camera-subnet.sh          # Standalone camera VLAN setup for existing routers
+│   ├── upgrade-router.sh               # Remote firmware upgrade (sysupgrade)
 │   ├── jetson-router-connect.py        # Connection test & monitor
 │   └── droplet-router-monitor.service  # systemd unit for Jetson
 └── output/                             # Built images (gitignored)

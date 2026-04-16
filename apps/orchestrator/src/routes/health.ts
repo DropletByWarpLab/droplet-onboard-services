@@ -6,6 +6,7 @@ import { isMatterInitialized } from "../services/matter.service.js";
 import { isHomeAssistantHealthy } from "../services/smart-home.service.js";
 import { isRouterHealthy } from "../services/network.service.js";
 import { isFrigateHealthy } from "../services/camera.service.js";
+import { healthCheck as switchHealthCheck } from "../services/switch.client.js";
 import type { HealthResponse } from "../types/index.js";
 
 const startTime = Date.now();
@@ -14,7 +15,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/health", async (_req, res) => {
-    const [dbOk, redisOk, aiOk, haOk, routerOk, frigateOk] = await Promise.all([
+    const [dbOk, redisOk, aiOk, haOk, routerOk, frigateOk, switchOk] = await Promise.all([
       prisma.$queryRaw`SELECT 1`
         .then(() => true)
         .catch(() => false),
@@ -23,6 +24,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       isHomeAssistantHealthy(),
       isRouterHealthy(),
       isFrigateHealthy(),
+      switchHealthCheck(),
     ]);
 
     const matterOk = isMatterInitialized();
@@ -39,6 +41,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
         homeAssistant: haOk,
         router: routerOk,
         frigate: frigateOk,
+        switch: switchOk,
       },
     };
 

@@ -208,6 +208,7 @@ services:
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
       # No longer exposed via `docker inspect`.
+      # ROUTING_SERVICE_TOKEN (WARP-36) replaces PR#5's SERVICE_SECRET for this service.
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       - PORT=8080
     secrets:
@@ -215,13 +216,31 @@ services:
     profiles: ["full"]
     restart: always
 
+  # --- Managed Switch (PoE + VLAN control) ---
+  switch:
+    build:
+      context: ../services/switch
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
+      - SWITCH_PORT=${SWITCH_PORT:-443}
+      - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
+      - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
+      - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
+      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      - PORT=8081
+    profiles: ["full"]
+    restart: always
+
   # --- Frigate NVR (camera management + AI detection) ---
+  # Always runs — even with zero cameras. Ready to accept cameras later
+  # via auto-discovery or manual add in the dashboard.
+  # Override FRIGATE_IMAGE in .env for GPU-accelerated variant:
+  #   FRIGATE_IMAGE=ghcr.io/blakeblackshear/frigate:stable-tensorrt
   frigate:
-    image: ghcr.io/blakeblackshear/frigate:stable-tensorrt
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
     shm_size: "256mb"
-    runtime: nvidia
-    cap_add:
-      - SYS_RAWIO      # GPU access for TensorRT
     expose:
       - "8971"
       - "5000"
@@ -246,7 +265,6 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
     depends_on:
       - broker
-    profiles: ["full"]
     restart: always
 
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---

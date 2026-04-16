@@ -411,6 +411,109 @@ AVAILABLE_TOOLS: list[ToolDefinition] = [
             },
         )
     ),
+    # --- Managed Switch tools ---
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_switch_ports",
+            description="Get the status of all ports on the managed PoE switch, including link state, speed, VLAN assignment, and PoE power delivery. The switch has 8 copper PoE ports (1-8) and 2 SFP uplinks (9-10).",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_switch_vlans",
+            description="List all VLANs configured on the managed switch with their port memberships.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="set_port_vlan",
+            description="Assign a switch port to a VLAN. Use tagged=true for trunk/uplink ports, false for access ports. Requires user confirmation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "vlan_id": {
+                        "type": "integer",
+                        "description": "VLAN ID to assign (2-4094).",
+                    },
+                    "ports": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "port": {"type": "integer"},
+                                "tagged": {"type": "boolean"},
+                                "member": {"type": "boolean"},
+                            },
+                        },
+                        "description": "Port membership list.",
+                    },
+                },
+                "required": ["vlan_id", "ports"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="get_switch_poe",
+            description="Get PoE power delivery status for all ports on the managed switch. Shows power draw in milliwatts, PoE class, and delivery state.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="set_port_poe",
+            description="Enable or disable PoE power on a switch port (ports 1-8 only, not SFP). Requires user confirmation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "port": {
+                        "type": "integer",
+                        "description": "Port number (1-8, copper PoE ports only).",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "True to enable PoE, false to disable.",
+                    },
+                },
+                "required": ["port", "enabled"],
+            },
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="detect_wan_port",
+            description="Auto-detect which switch port is the WAN uplink to the router. Checks SFP ports first, then copper ports with active links.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ),
+    ToolDefinition(
+        function=ToolFunction(
+            name="setup_camera_ports",
+            description="One-click setup: create a camera VLAN on the switch and assign ports. Camera ports get untagged access, uplink ports get tagged trunk. Requires user confirmation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "vlan_id": {
+                        "type": "integer",
+                        "description": "VLAN ID for cameras (default: 100).",
+                        "default": 100,
+                    },
+                    "camera_ports": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Ports for cameras (default: [1,2,3,4,5,6,7,8]).",
+                    },
+                    "uplink_ports": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Trunk/uplink ports (default: [9,10]).",
+                    },
+                },
+            },
+        )
+    ),
 ]
 
 

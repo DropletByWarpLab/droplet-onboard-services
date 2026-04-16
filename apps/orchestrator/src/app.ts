@@ -17,6 +17,7 @@ import { createSmartHomeRouter } from "./routes/smart-home.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createCamerasRouter } from "./routes/cameras.js";
+import { createSwitchRouter } from "./routes/switch.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -49,6 +50,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createMatterRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
+  app.use("/api", createSwitchRouter(prisma));
 
   // Error handling
   app.use(errorHandler);
