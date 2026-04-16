@@ -195,29 +195,74 @@ export async function evaluateNetworkCommand(
   };
 }
 
+/** Structured error codes returned by `confirmNetworkCommand` (WARP-41). */
+export type ConfirmNetworkCommandError =
+  | "TOKEN_MISSING"
+  | "TOKEN_EXPIRED"
+  | "TOKEN_USER_MISMATCH"
+  | "TOKEN_OPERATION_MISMATCH";
+
 /**
  * Confirm a Tier 2/3 network command.
+ *
+ * The caller MUST echo back the `expectedOperation` (and optionally
+ * `expectedEntityId`) that they think they're confirming. If the server's
+ * pending record doesn't match, the request is rejected with
+ * `TOKEN_OPERATION_MISMATCH` — this prevents a confused dashboard from
+ * confirming the wrong pending operation when multiple are in flight.
+ * See WARP-41.
  */
 export async function confirmNetworkCommand(
   prisma: PrismaClient,
   confirmationToken: string,
-  userId?: string
+  userId?: string,
+  expected?: { operation?: string; entityId?: string }
 ): Promise<
   | { confirmed: true; entityId: string; domain: string; operation: string; params?: Record<string, unknown> }
-  | { confirmed: false; reason: string }
+  | { confirmed: false; code: ConfirmNetworkCommandError; reason: string }
 > {
   const pending = pendingConfirmations.get(confirmationToken);
   if (!pending) {
-    return { confirmed: false, reason: "Invalid or expired confirmation token" };
+    return {
+      confirmed: false,
+      code: "TOKEN_MISSING",
+      reason: "Invalid or expired confirmation token",
+    };
   }
 
   if (Date.now() > pending.expiresAt) {
     pendingConfirmations.delete(confirmationToken);
-    return { confirmed: false, reason: "Confirmation token has expired (60s limit)" };
+    return {
+      confirmed: false,
+      code: "TOKEN_EXPIRED",
+      reason: "Confirmation token has expired (60s limit)",
+    };
   }
 
   if (userId && pending.userId && userId !== pending.userId) {
-    return { confirmed: false, reason: "Confirmation must come from the requesting user" };
+    return {
+      confirmed: false,
+      code: "TOKEN_USER_MISMATCH",
+      reason: "Confirmation must come from the requesting user",
+    };
+  }
+
+  // WARP-41: reject if the caller is confirming a different operation than
+  // the one this token was issued for. The token on its own isn't enough —
+  // the echoed operation has to match.
+  if (expected?.operation && expected.operation !== pending.operation) {
+    return {
+      confirmed: false,
+      code: "TOKEN_OPERATION_MISMATCH",
+      reason: `Confirmation operation mismatch: expected '${pending.operation}', got '${expected.operation}'`,
+    };
+  }
+  if (expected?.entityId && expected.entityId !== pending.entityId) {
+    return {
+      confirmed: false,
+      code: "TOKEN_OPERATION_MISMATCH",
+      reason: `Confirmation entityId mismatch: expected '${pending.entityId}', got '${expected.entityId}'`,
+    };
   }
 
   pendingConfirmations.delete(confirmationToken);

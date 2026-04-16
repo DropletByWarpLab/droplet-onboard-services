@@ -20,7 +20,7 @@ Usage:
     router.firewall.block_device("AA:BB:CC:DD:EE:FF", name="Kids-iPad")
 
     # Safe apply with auto-rollback
-    with router.safe_apply(timeout=30):
+    with router.safe_apply(timeout=60):
         router.uci.set("network", "lan", {"ipaddr": "192.168.2.1"})
         router.uci.commit("network")
 """
@@ -778,17 +778,20 @@ class DropletRouter:
             raise
 
     @contextmanager
-    def safe_apply(self, timeout: int = 30):
+    def safe_apply(self, timeout: int = 60):
         """
         Context manager for safe configuration changes.
 
         Usage:
-            with router.safe_apply(timeout=30):
+            with router.safe_apply(timeout=60):
                 router.uci.set("network", "lan", {"ipaddr": "192.168.2.1"})
                 router.uci.commit("network")
 
         Changes are applied with a rollback timer. If connectivity is lost,
         OpenWrt will automatically revert after `timeout` seconds.
+
+        Default is 60s to match the orchestrator's confirmation-token TTL
+        (WARP-41) — a Tier 2 token can never outlive the apply window.
         """
         yield self
 

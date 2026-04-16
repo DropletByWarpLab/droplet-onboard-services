@@ -252,11 +252,18 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
-export async function confirmNetworkCommand(token: string): Promise<void> {
+export async function confirmNetworkCommand(
+  token: string,
+  operation: string,
+  entityId?: string,
+): Promise<void> {
+  // WARP-41: echo the operation (and optionally the entity) from the 202
+  // response so the orchestrator can reject a token that was issued for a
+  // different pending op.
   const res = await authFetch(`${BASE}/api/network/command/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ confirmationToken: token }),
+    body: JSON.stringify({ confirmationToken: token, operation, entityId }),
   });
   if (!res.ok) throw new Error(`Failed to confirm command: ${res.status}`);
 }

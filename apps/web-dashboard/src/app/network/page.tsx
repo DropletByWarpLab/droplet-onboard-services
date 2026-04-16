@@ -111,8 +111,11 @@ export default function NetworkPage() {
             </button>
             <button
               onClick={async () => {
-                if (pendingConfirm.confirmationToken) {
-                  await confirmNetworkCommand(pendingConfirm.confirmationToken);
+                if (pendingConfirm.confirmationToken && pendingConfirm.operation) {
+                  await confirmNetworkCommand(
+                    pendingConfirm.confirmationToken,
+                    pendingConfirm.operation,
+                  );
                   setPendingConfirm(null);
                   refresh();
                 }

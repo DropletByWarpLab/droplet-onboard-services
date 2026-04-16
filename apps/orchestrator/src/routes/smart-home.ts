@@ -160,16 +160,29 @@ export function createSmartHomeRouter(prisma: PrismaClient): Router {
         return res.status(503).json({ error: "Home Assistant not connected" });
       }
 
-      const { confirmationToken } = req.body;
+      const { confirmationToken, service } = req.body;
       if (!confirmationToken || typeof confirmationToken !== "string") {
-        return res.status(400).json({ error: "Missing 'confirmationToken' in request body" });
+        return res.status(400).json({
+          error: "Missing 'confirmationToken' in request body",
+          code: "TOKEN_MISSING",
+        });
+      }
+      // WARP-41: require echo of the service the caller thinks they're confirming.
+      if (!service || typeof service !== "string") {
+        return res.status(400).json({
+          error: "Missing 'service' — clients must echo the service from the 202 response",
+          code: "TOKEN_OPERATION_MISMATCH",
+        });
       }
 
       const userId = req.user?.id;
-      const result = await confirmCommand(prisma, confirmationToken, userId);
+      const result = await confirmCommand(prisma, confirmationToken, userId, {
+        service,
+        entityId: req.params.entityId,
+      });
 
       if (!result.confirmed) {
-        return res.status(400).json({ error: result.reason });
+        return res.status(400).json({ error: result.reason, code: result.code });
       }
 
       await sendCommand(result.entityId, result.service, result.data);

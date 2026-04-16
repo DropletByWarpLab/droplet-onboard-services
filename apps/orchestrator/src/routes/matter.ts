@@ -276,24 +276,33 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       if (!isValidNodeId(req.params.nodeId)) {
         return res.status(400).json({ error: "Invalid node ID format" });
       }
-      const { confirmationToken } = req.body;
+      const { confirmationToken, service } = req.body;
       if (!confirmationToken) {
-        return res
-          .status(400)
-          .json({ error: "Missing 'confirmationToken' in request body" });
+        return res.status(400).json({
+          error: "Missing 'confirmationToken' in request body",
+          code: "TOKEN_MISSING",
+        });
+      }
+      // WARP-41: require echo of the service the caller thinks they're confirming.
+      if (!service || typeof service !== "string") {
+        return res.status(400).json({
+          error: "Missing 'service' — clients must echo the service from the 202 response",
+          code: "TOKEN_OPERATION_MISMATCH",
+        });
       }
 
       const userId = (req as any).user?.id;
-      const result = await confirmCommand(prisma, confirmationToken, userId);
+      // The nodeId in the URL determines the expected entityId. The safety-tier
+      // service now enforces the match centrally (WARP-41). "matter" domain is
+      // hardcoded because this router only mounts under /devices/matter.
+      const expectedEntityId = `matter.${req.params.nodeId}`;
+      const result = await confirmCommand(prisma, confirmationToken, userId, {
+        service,
+        entityId: expectedEntityId,
+      });
 
       if (!result.confirmed) {
-        return res.status(400).json({ error: result.reason });
-      }
-
-      // Validate the token was issued for this device (prevent cross-device replay)
-      const expectedEntityId = `${result.domain}.${req.params.nodeId}`;
-      if (result.entityId !== expectedEntityId) {
-        return res.status(403).json({ error: "Token was not issued for this device" });
+        return res.status(400).json({ error: result.reason, code: result.code });
       }
 
       // Use only the command/data from the confirmed token — never from the request body

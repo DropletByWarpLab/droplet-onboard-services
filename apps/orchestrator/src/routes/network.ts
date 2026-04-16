@@ -385,21 +385,35 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   // --- Confirm Tier 2/3 network command ---
   router.post("/network/command/confirm", async (req, res, next) => {
     try {
-      const { confirmationToken } = req.body;
+      const { confirmationToken, operation, entityId } = req.body;
       if (!confirmationToken || typeof confirmationToken !== "string") {
-        return res.status(400).json({ error: "Missing 'confirmationToken'" });
+        return res.status(400).json({ error: "Missing 'confirmationToken'", code: "TOKEN_MISSING" });
+      }
+      // WARP-41: require callers to echo the operation they think they're confirming.
+      // The dashboard receives it in the 202 response and hands it back unchanged.
+      if (!operation || typeof operation !== "string") {
+        return res.status(400).json({
+          error: "Missing 'operation' — clients must echo the operation from the 202 response",
+          code: "TOKEN_OPERATION_MISMATCH",
+        });
       }
 
       const userId = req.user?.id;
-      const result = await confirmNetworkCommand(prisma, confirmationToken, userId);
-
-      if (!result.confirmed) {
-        return res.status(400).json({ error: result.reason });
+      const expected: { operation: string; entityId?: string } = { operation };
+      if (typeof entityId === "string" && entityId.length > 0) {
+        expected.entityId = entityId;
       }
 
-      // Execute the confirmed command
-      const { operation, params } = result;
-      switch (operation) {
+      const result = await confirmNetworkCommand(prisma, confirmationToken, userId, expected);
+
+      if (!result.confirmed) {
+        return res.status(400).json({ error: result.reason, code: result.code });
+      }
+
+      // Execute the confirmed command — use the confirmed operation from the
+      // pending record, which we already validated matches the caller's echo.
+      const { operation: confirmedOp, params } = result;
+      switch (confirmedOp) {
         case "block_device":
           await blockDevice(params?.mac as string, params?.name as string | undefined);
           break;
@@ -425,10 +439,10 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
           await rebootRouter();
           break;
         default:
-          return res.status(400).json({ error: `Unknown operation: ${operation}` });
+          return res.status(400).json({ error: `Unknown operation: ${confirmedOp}` });
       }
 
-      res.json({ status: "ok", operation, confirmed: true });
+      res.json({ status: "ok", operation: confirmedOp, confirmed: true });
     } catch (err) {
       next(err);
     }

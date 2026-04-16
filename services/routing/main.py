@@ -524,7 +524,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
     try:
         r = get_router()
 
-        with r.safe_apply(timeout=30):
+        with r.safe_apply(timeout=60):
             # 1. Create VLAN interface
             device_name = f"br-lan.{req.vlan_id}"
             r.uci.set("network", "cameras", {
@@ -617,7 +617,7 @@ def teardown_camera_subnet():
     try:
         r = get_router()
 
-        with r.safe_apply(timeout=30):
+        with r.safe_apply(timeout=60):
             # Remove network interface
             try:
                 r.uci.delete("network", "cameras")
