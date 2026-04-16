@@ -25,7 +25,15 @@ import {
   fetchNetworkOperation,
   type NetworkOperation,
 } from "@/lib/api";
-import type { ConnectedDevice, FirewallConfig, NetworkCommandResult, NetworkOverview, WirelessScanResult } from "@/lib/types";
+import type {
+  ConnectedDevice,
+  FirewallConfig,
+  FirewallRedirect,
+  FirewallRule,
+  NetworkCommandResult,
+  NetworkOverview,
+  WirelessScanResult,
+} from "@/lib/types";
 
 // WARP-40: poll /network/operations/:id every second until terminal.
 type OperationStatus =
@@ -585,8 +593,15 @@ function WifiTab() {
 
 // --- Firewall Tab ---
 function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
-  const rules = firewall?.rules?.values ? Object.entries(firewall.rules.values) : [];
-  const redirects = firewall?.redirects?.values ? Object.entries(firewall.redirects.values) : [];
+  // WARP-42: typed Object.entries — each entry is [sectionId, typed section]
+  // instead of [string, any], so a missing `target` or a `proto` type change
+  // on the routing side now fails compile.
+  const rules: Array<[string, FirewallRule]> = firewall?.rules?.values
+    ? Object.entries(firewall.rules.values)
+    : [];
+  const redirects: Array<[string, FirewallRedirect]> = firewall?.redirects?.values
+    ? Object.entries(firewall.redirects.values)
+    : [];
 
   return (
     <div className="space-y-4">
@@ -596,17 +611,17 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
         </h3>
         {rules.length > 0 ? (
           <div className="space-y-2">
-            {rules.map(([key, rule]: [string, any]) => (
+            {rules.map(([key, rule]) => (
               <div
                 key={key}
                 className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
               >
                 <div>
                   <p className="type-subheadline text-label-primary">
-                    {rule.name || key}
+                    {rule.name ?? key}
                   </p>
                   <p className="type-caption-2 text-label-tertiary">
-                    {rule.src} &rarr; {rule.dest || "*"} | Target: {rule.target}
+                    {rule.src ?? "*"} &rarr; {rule.dest ?? "*"} | Target: {rule.target ?? "—"}
                     {rule.src_mac ? ` | MAC: ${rule.src_mac}` : ""}
                   </p>
                 </div>
@@ -615,7 +630,7 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
                     rule.target === "ACCEPT" ? "text-system-green" : "text-system-red"
                   }`}
                 >
-                  {rule.target}
+                  {rule.target ?? "—"}
                 </span>
               </div>
             ))}
@@ -631,17 +646,18 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
         </h3>
         {redirects.length > 0 ? (
           <div className="space-y-2">
-            {redirects.map(([key, fwd]: [string, any]) => (
+            {redirects.map(([key, fwd]) => (
               <div
                 key={key}
                 className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
               >
                 <div>
                   <p className="type-subheadline text-label-primary">
-                    {fwd.name || key}
+                    {fwd.name ?? key}
                   </p>
                   <p className="type-caption-2 text-label-tertiary">
-                    :{fwd.src_dport} ({fwd.proto}) &rarr; {fwd.dest_ip}:{fwd.dest_port}
+                    :{fwd.src_dport ?? "—"} ({Array.isArray(fwd.proto) ? fwd.proto.join("/") : fwd.proto ?? "tcp"}) &rarr;{" "}
+                    {fwd.dest_ip ?? "—"}:{fwd.dest_port ?? "—"}
                   </p>
                 </div>
                 <span className={`type-caption-1 ${fwd.enabled === "1" ? "text-system-green" : "text-label-quaternary"}`}>

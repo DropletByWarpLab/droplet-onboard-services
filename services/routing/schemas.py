@@ -1,7 +1,7 @@
 """Pydantic models for the routing service REST API."""
 
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Optional, Union
 
 
 # --- Request models ---
@@ -96,3 +96,75 @@ class HealthResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
+
+
+# --- Firewall response models (WARP-42) ---
+#
+# These mirror the OpenWrt UCI section shape. Every field is optional because
+# OpenWrt may omit keys when a default applies, and `extra="allow"` means the
+# dashboard keeps working even if OpenWrt adds a new field we didn't anticipate.
+# The inner `.anonymous`, `.type`, `.name` meta-keys are preserved as-is.
+
+
+class FirewallZone(BaseModel):
+    """A `config zone` section from /etc/config/firewall."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    name: Optional[str] = None
+    # `network` can be a single string or a list in OpenWrt — uci returns
+    # whatever is on disk. Keeping it loose at the type boundary.
+    network: Optional[Union[str, list[str]]] = None
+    input: Optional[str] = None
+    output: Optional[str] = None
+    forward: Optional[str] = None
+    masq: Optional[str] = None
+
+
+class FirewallRule(BaseModel):
+    """A `config rule` section from /etc/config/firewall."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    name: Optional[str] = None
+    src: Optional[str] = None
+    dest: Optional[str] = None
+    src_mac: Optional[str] = None
+    proto: Optional[Union[str, list[str]]] = None
+    src_port: Optional[str] = None
+    dest_port: Optional[str] = None
+    target: Optional[str] = None
+    enabled: Optional[str] = None
+
+
+class FirewallRedirect(BaseModel):
+    """A `config redirect` (port-forward / NAT) section."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    name: Optional[str] = None
+    src: Optional[str] = None
+    dest: Optional[str] = None
+    proto: Optional[Union[str, list[str]]] = None
+    src_dport: Optional[str] = None
+    dest_ip: Optional[str] = None
+    dest_port: Optional[str] = None
+    target: Optional[str] = None
+    enabled: Optional[str] = None
+
+
+class FirewallZoneCollection(BaseModel):
+    """Wire shape of `GET /firewall/zones`."""
+
+    model_config = ConfigDict(extra="allow")
+    values: dict[str, FirewallZone] = Field(default_factory=dict)
+
+
+class FirewallRuleCollection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    values: dict[str, FirewallRule] = Field(default_factory=dict)
+
+
+class FirewallRedirectCollection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    values: dict[str, FirewallRedirect] = Field(default_factory=dict)

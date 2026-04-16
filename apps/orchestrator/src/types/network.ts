@@ -80,37 +80,60 @@ export interface DhcpLease {
   macaddr: string;
 }
 
+// WARP-42: firewall payload shape mirrors the routing service's Pydantic
+// models (services/routing/schemas.py). Every field is optional because
+// OpenWrt may omit defaults; `[key: string]` allows unknown future keys to
+// flow through without breaking the dashboard. `network` and `proto` are
+// unions because UCI stores them as either a string or a list on disk.
+
 export interface FirewallZone {
-  name: string;
-  input: string;
-  output: string;
-  forward: string;
-  network?: string;
+  name?: string;
+  network?: string | string[];
+  input?: string;
+  output?: string;
+  forward?: string;
   masq?: string;
+  [key: string]: unknown;
 }
 
 export interface FirewallRule {
-  name: string;
-  src: string;
+  name?: string;
+  src?: string;
   dest?: string;
   src_mac?: string;
-  proto?: string;
+  proto?: string | string[];
+  src_port?: string;
   dest_port?: string;
-  target: string;
-  enabled: string;
+  target?: string;
+  enabled?: string;
+  [key: string]: unknown;
 }
 
-export interface PortForward {
-  name: string;
-  src: string;
-  dest: string;
-  proto: string;
-  src_dport: string;
-  dest_ip: string;
-  dest_port: string;
-  target: string;
-  enabled: string;
+/** Port-forward / NAT redirect rule. Renamed historically from `PortForward`. */
+export interface FirewallRedirect {
+  name?: string;
+  src?: string;
+  dest?: string;
+  proto?: string | string[];
+  src_dport?: string;
+  dest_ip?: string;
+  dest_port?: string;
+  target?: string;
+  enabled?: string;
+  [key: string]: unknown;
 }
+
+/** Back-compat alias — older callers referenced `PortForward`. */
+export type PortForward = FirewallRedirect;
+
+/** Wire shape of the `GET /firewall/{zones,rules,redirects}` endpoints. */
+export interface FirewallCollection<T> {
+  values: Record<string, T>;
+}
+
+export type FirewallZones = FirewallCollection<FirewallZone>;
+export type FirewallRules = FirewallCollection<FirewallRule>;
+export type FirewallRedirects = FirewallCollection<FirewallRedirect>;
 
 export interface RouterBoardInfo {
   kernel: string;
@@ -168,9 +191,9 @@ export interface ConnectedDevice {
 }
 
 export interface FirewallConfig {
-  zones: Record<string, unknown>;
-  rules: Record<string, unknown>;
-  redirects: Record<string, unknown>;
+  zones: FirewallZones;
+  rules: FirewallRules;
+  redirects: FirewallRedirects;
 }
 
 export interface NetworkOverview {

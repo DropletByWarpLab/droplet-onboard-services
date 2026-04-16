@@ -37,6 +37,9 @@ from schemas import (
     ApplyConfigRequest,
     CreateVlanRequest,
     CameraSubnetSetupRequest,
+    FirewallZoneCollection,
+    FirewallRuleCollection,
+    FirewallRedirectCollection,
 )
 
 logger = logging.getLogger("droplet.routing")
@@ -447,26 +450,29 @@ def set_dns(req: SetDnsRequest):
 # ---------------------------------------------------------------------------
 # Firewall
 # ---------------------------------------------------------------------------
-@app.get("/firewall/zones")
-def firewall_zones():
+@app.get("/firewall/zones", response_model=FirewallZoneCollection)
+def firewall_zones() -> FirewallZoneCollection:
+    # WARP-42: typed through the response model so schema drift becomes a
+    # Pydantic validation error at the boundary instead of a silent break
+    # in the dashboard.
     try:
-        return get_router().firewall.get_zones()
+        return FirewallZoneCollection.model_validate(get_router().firewall.get_zones())
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
 
-@app.get("/firewall/rules")
-def firewall_rules():
+@app.get("/firewall/rules", response_model=FirewallRuleCollection)
+def firewall_rules() -> FirewallRuleCollection:
     try:
-        return get_router().firewall.get_rules()
+        return FirewallRuleCollection.model_validate(get_router().firewall.get_rules())
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
 
-@app.get("/firewall/redirects")
-def firewall_redirects():
+@app.get("/firewall/redirects", response_model=FirewallRedirectCollection)
+def firewall_redirects() -> FirewallRedirectCollection:
     try:
-        return get_router().firewall.get_redirects()
+        return FirewallRedirectCollection.model_validate(get_router().firewall.get_redirects())
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
