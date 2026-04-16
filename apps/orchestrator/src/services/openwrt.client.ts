@@ -32,19 +32,130 @@ if (!TOKEN && process.env.NODE_ENV === "production") {
 type RoutingFetchInit = Omit<RequestInit, "headers"> & {
   headers?: Record<string, string>;
   label?: string;
+  /** Override retry policy for a single call (e.g. health check, idempotent probes). */
+  retry?: Partial<RetryPolicy>;
 };
 
-async function routingFetch(path: string, init: RoutingFetchInit = {}): Promise<Response> {
-  const { headers = {}, label, ...rest } = init;
+export type RetryPolicy = {
+  /** Total attempts including the initial one. `1` disables retries. */
+  attempts: number;
+  /**
+   * Delay in ms BEFORE each retry (length = attempts - 1). Clamped to 0. The
+   * helper applies ±20% jitter per attempt to avoid thundering herd when many
+   * calls fail simultaneously.
+   */
+  delaysMs: number[];
+  /** Injectable for tests; defaults to `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable for tests; defaults to `Math.random`. */
+  random?: () => number;
+};
+
+// WARP-38: 3 total attempts with 100ms then 250ms spacing gives ~350ms of
+// resilience against routing-service restarts and brief LAN blips without
+// meaningfully delaying 4xx failures (which short-circuit to the caller).
+export const DEFAULT_RETRY: RetryPolicy = {
+  attempts: 3,
+  delaysMs: [100, 250],
+};
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function jittered(baseMs: number, random: () => number): number {
+  // ±20% jitter; clamp at 0 so negative values don't turn into weird sleeps.
+  const jitter = baseMs * 0.2 * (random() * 2 - 1);
+  return Math.max(0, Math.round(baseMs + jitter));
+}
+
+type AttemptOutcome =
+  | { kind: "success"; res: Response }
+  | { kind: "abort"; err: Error }
+  | { kind: "retry"; err: Error; status?: number };
+
+async function singleAttempt(
+  url: string,
+  init: RequestInit,
+  label: string,
+): Promise<AttemptOutcome> {
+  try {
+    const res = await fetch(url, init);
+    if (res.ok) {
+      return { kind: "success", res };
+    }
+    // 4xx: client error — no point retrying, caller made an incorrect request.
+    if (res.status >= 400 && res.status < 500) {
+      return {
+        kind: "abort",
+        err: new Error(`${label}: ${res.status} ${res.statusText}`),
+      };
+    }
+    // 5xx or other non-ok: transient, retryable.
+    return {
+      kind: "retry",
+      err: new Error(`${label}: ${res.status} ${res.statusText}`),
+      status: res.status,
+    };
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    // AbortError is deliberate (caller cancelled or hit a timeout) — never retry.
+    if (error.name === "AbortError") {
+      return { kind: "abort", err: error };
+    }
+    // Network errors (DNS, connection refused, reset) land here — retryable.
+    return { kind: "retry", err: error };
+  }
+}
+
+/**
+ * HTTP helper for the routing service. Adds the shared bearer token (WARP-36),
+ * retries transient failures (WARP-38), and converts 4xx into immediate throws.
+ * Exported so tests and WARP-39 (typed RouterError) can compose on top.
+ */
+export async function routingFetch(path: string, init: RoutingFetchInit = {}): Promise<Response> {
+  const { headers = {}, label, retry = {}, ...rest } = init;
+  const policy: RetryPolicy = { ...DEFAULT_RETRY, ...retry };
+  const sleep = policy.sleep ?? defaultSleep;
+  const random = policy.random ?? Math.random;
+
   const merged: Record<string, string> = { ...headers };
   if (TOKEN) {
     merged["Authorization"] = `Bearer ${TOKEN}`;
   }
-  const res = await fetch(`${BASE_URL}${path}`, { ...rest, headers: merged });
-  if (!res.ok) {
-    throw new Error(`${label ?? path}: ${res.status} ${res.statusText}`);
+
+  const url = `${BASE_URL}${path}`;
+  const displayLabel = label ?? path;
+  const fetchInit: RequestInit = { ...rest, headers: merged };
+
+  for (let attempt = 1; attempt <= policy.attempts; attempt++) {
+    const outcome = await singleAttempt(url, fetchInit, displayLabel);
+    if (outcome.kind === "success") {
+      return outcome.res;
+    }
+    if (outcome.kind === "abort") {
+      throw outcome.err;
+    }
+    // retry
+    if (attempt >= policy.attempts) {
+      throw outcome.err;
+    }
+    const baseDelay = policy.delaysMs[attempt - 1] ?? policy.delaysMs[policy.delaysMs.length - 1] ?? 0;
+    const waitMs = jittered(baseDelay, random);
+    logger.warn(
+      {
+        path,
+        attempt,
+        maxAttempts: policy.attempts,
+        status: outcome.status,
+        err: outcome.err.message,
+        waitMs,
+      },
+      "routing call failed, retrying",
+    );
+    await sleep(waitMs);
   }
-  return res;
+
+  // Unreachable — the loop always exits via return or throw.
+  throw new Error(`${displayLabel}: retry loop exited without outcome`);
 }
 
 async function routingFetchJson<T>(path: string, init?: RoutingFetchInit): Promise<T> {
@@ -234,8 +345,13 @@ export async function healthCheck(): Promise<boolean> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     // /health is exempt from auth on the routing side (Docker healthcheck); send the
-    // token anyway to keep the code path uniform.
-    const res = await routingFetch("/health", { signal: controller.signal, label: "Health" });
+    // token anyway to keep the code path uniform. Retries are disabled — health
+    // should be a cheap single probe, and the 3s AbortController cap is the SLO.
+    const res = await routingFetch("/health", {
+      signal: controller.signal,
+      label: "Health",
+      retry: { attempts: 1 },
+    });
     clearTimeout(timeout);
     const data = await res.json();
     return data.connected === true;
