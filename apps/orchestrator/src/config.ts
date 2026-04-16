@@ -34,6 +34,17 @@ const envSchema = z.object({
   MATTER_STORAGE_PATH: z.string().default(defaultMatterStorage),
   MATTER_CONTROLLER_NAME: z.string().default("Droplet"),
 
+  // --- JWT ---
+  // In production this must be set — setup.sh generates a 64-byte random hex value.
+  // The default is intentionally weak so tests work without env setup.
+  JWT_SECRET: z
+    .string()
+    .default("dev-jwt-secret-do-not-use-in-production")
+    .refine(
+      (s) => process.env.NODE_ENV !== "production" || s !== "dev-jwt-secret-do-not-use-in-production",
+      "JWT_SECRET must be set to a strong random value in production",
+    ),
+
   // --- OAuth2 ---
   AUTH_MODE: z.enum(["oauth2", "legacy"]).default("legacy"),
   OAUTH2_CLIENT_ID: z.string().default(""),

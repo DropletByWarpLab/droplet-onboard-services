@@ -382,7 +382,7 @@ curl http://localhost:3000/api/storage
 Phases are ordered by prototype impact. Each is independently shippable.
 
 1. [x] **Phase 1** — Remove stubs + security gaps — DONE (rate limiting, input validation, CORS restriction; usage tracking descoped)
-2. [ ] **Phase 2** — JWT authentication (est. scope: 4 files, ~250 lines)
+2. [x] **Phase 2** — JWT authentication — DONE (sign/verify/refresh, Nextcloud fallback, role claims, JWT_SECRET in setup.sh)
 3. [ ] **Phase 3** — RBAC + audit log (est. scope: 3 files, ~200 lines + migration)
 4. [ ] **Phase 4** — CI/CD pipeline (est. scope: 2 new workflow files)
 5. [ ] **Phase 5** — Setup wizard (est. scope: 2 files backend + 1 file frontend)

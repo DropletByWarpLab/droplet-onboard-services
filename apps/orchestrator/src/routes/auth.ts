@@ -17,8 +17,19 @@ import {
   ncOAuth2ExchangeCode,
   ncOAuth2RefreshToken,
 } from "../services/nextcloud.client.js";
-import { cacheDel } from "../services/cache.service.js";
-import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS } from "../middleware/auth.js";
+import {
+  signAccessToken,
+  signRefreshToken,
+  verifyAccessToken,
+  verifyRefreshToken,
+  denyRefreshToken,
+  claimRefreshRotation,
+  roleFromGroups,
+  ACCESS_TOKEN_TTL_SECONDS,
+  REFRESH_TOKEN_TTL_SECONDS,
+  type Role,
+} from "../services/jwt.service.js";
+import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { config } from "../config.js";
 
 const logger = pino({ name: "auth-route" });
@@ -125,7 +136,7 @@ export function createPublicAuthRouter(): Router {
     }
   });
 
-  // ── Login: validate credentials, set session cookie ──
+  // ── Login: validate credentials, issue JWT tokens ──
   router.post("/auth/login", async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
@@ -140,30 +151,50 @@ export function createPublicAuthRouter(): Router {
         return;
       }
 
-      // Fetch user details with the new token
-      const tokenForAuth = result.token.startsWith("basic:")
-        ? result.token
-        : result.token;
+      // Fetch user details (groups included) to determine role
+      const ncUser = await ncGetCurrentUser(result.token);
 
-      const user = await ncGetCurrentUser(tokenForAuth);
+      const userId = ncUser?.id || result.loginName;
+      const username = ncUser?.id || result.loginName;
+      const displayName = ncUser?.displayName || result.loginName;
+      const role: Role = roleFromGroups(ncUser?.groups ?? []);
 
-      // Set HTTP-only session cookie.
-      // Secure flag is set when the request arrived over HTTPS (via nginx TLS).
-      const isHttps =
-        req.secure || req.headers["x-forwarded-proto"] === "https";
+      // We've captured everything we need from Nextcloud. Revoke the
+      // app-password we were just issued so it can't be used as a
+      // long-lived credential if it ever leaks — from here on the browser
+      // only holds our short-lived JWT access token.
+      try {
+        await ncDeleteAppPassword(result.token);
+      } catch (err) {
+        logger.warn({ err }, "Failed to revoke Nextcloud app password after login (non-fatal)");
+      }
 
-      res.cookie(SESSION_COOKIE_NAME, result.token, {
+      // Issue JWT access + refresh tokens
+      const accessToken = signAccessToken({ id: userId, username, displayName, role });
+      const refreshToken = signRefreshToken({ id: userId, username, displayName, role });
+
+      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+
+      // Access token in session cookie
+      res.cookie(SESSION_COOKIE_NAME, accessToken, {
         httpOnly: true,
         secure: isHttps,
         sameSite: "lax",
         path: "/",
-        maxAge: SESSION_MAX_AGE_MS,
+        maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
       });
 
-      // Only return user info — the token is in the HTTP-only cookie,
-      // never exposed to JavaScript.
+      // Refresh token in separate cookie (scoped to /api/auth)
+      res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/api/auth",
+        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+      });
+
       res.json({
-        user: user || { id: result.loginName, username: result.loginName, displayName: result.loginName },
+        user: { id: userId, username, displayName, role },
       });
     } catch (err) {
       next(err);
@@ -246,12 +277,12 @@ export function createPublicAuthRouter(): Router {
         maxAge: tokens.expiresIn * 1000,
       });
 
-      res.cookie("droplet_refresh", tokens.refreshToken, {
+      res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, {
         httpOnly: true,
         secure: isHttps,
         sameSite: "lax",
         path: "/api/auth",
-        maxAge: SESSION_MAX_AGE_MS,
+        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
       });
 
       // Redirect to dashboard with user info (or return JSON for API clients)
@@ -267,51 +298,96 @@ export function createPublicAuthRouter(): Router {
     }
   });
 
-  // ── OAuth2: Refresh token ──
+  // ── Refresh: exchange refresh token for new access token ──
   router.post("/auth/refresh", async (req, res, next) => {
     try {
-      if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
-        res.status(400).json({ error: "OAuth2 is not configured" });
-        return;
-      }
-
-      const refreshToken = req.cookies?.droplet_refresh;
-      if (!refreshToken) {
+      const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME];
+      if (!refreshTokenCookie) {
         res.status(401).json({ error: "No refresh token available" });
         return;
       }
 
-      const tokens = await ncOAuth2RefreshToken(
-        refreshToken,
-        config.OAUTH2_CLIENT_ID,
-        config.OAUTH2_CLIENT_SECRET
-      );
+      // --- Try JWT refresh first ---
+      const refreshResult = await verifyRefreshToken(refreshTokenCookie);
+      if (refreshResult) {
+        // Claim exclusive rotation rights before issuing new tokens. If
+        // another concurrent /auth/refresh call (e.g. a browser double-submit
+        // on flaky networks) already claimed this token, reject to prevent
+        // two valid token pairs from being issued for the same refresh token.
+        const claimed = await claimRefreshRotation(refreshTokenCookie);
+        if (!claimed) {
+          res.status(401).json({ error: "Refresh token is already being rotated" });
+          return;
+        }
 
-      if (!tokens) {
-        res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
-        res.clearCookie("droplet_refresh", { path: "/api/auth" });
-        res.status(401).json({ error: "Failed to refresh token" });
+        const { sub, username, displayName, role } = refreshResult;
+
+        // Rotate: denylist the old refresh token (overwrites the short-TTL
+        // rotation claim with a full-lifetime entry) and issue a new pair.
+        await denyRefreshToken(refreshTokenCookie);
+        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role });
+        const newAccessToken = signAccessToken({ id: sub, username, displayName, role });
+
+        const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+        res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
+          httpOnly: true,
+          secure: isHttps,
+          sameSite: "lax",
+          path: "/",
+          maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
+        });
+        res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
+          httpOnly: true,
+          secure: isHttps,
+          sameSite: "lax",
+          path: "/api/auth",
+          maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+        });
+
+        res.json({ status: "ok", expiresIn: ACCESS_TOKEN_TTL_SECONDS });
         return;
       }
 
-      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-      res.cookie(SESSION_COOKIE_NAME, tokens.accessToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/",
-        maxAge: tokens.expiresIn * 1000,
-      });
+      // --- Fallback: OAuth2 refresh (legacy Nextcloud tokens) ---
+      if (config.AUTH_MODE === "oauth2" && config.OAUTH2_CLIENT_ID) {
+        const tokens = await ncOAuth2RefreshToken(
+          refreshTokenCookie,
+          config.OAUTH2_CLIENT_ID,
+          config.OAUTH2_CLIENT_SECRET
+        );
 
-      res.cookie("droplet_refresh", tokens.refreshToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/api/auth",
-        maxAge: SESSION_MAX_AGE_MS,
-      });
+        if (!tokens) {
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({ error: "Failed to refresh token" });
+          return;
+        }
 
-      res.json({ status: "ok", expiresIn: tokens.expiresIn });
+        const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+        res.cookie(SESSION_COOKIE_NAME, tokens.accessToken, {
+          httpOnly: true,
+          secure: isHttps,
+          sameSite: "lax",
+          path: "/",
+          maxAge: tokens.expiresIn * 1000,
+        });
+
+        res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, {
+          httpOnly: true,
+          secure: isHttps,
+          sameSite: "lax",
+          path: "/api/auth",
+          maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+        });
+
+        res.json({ status: "ok", expiresIn: tokens.expiresIn });
+        return;
+      }
+
+      // Neither JWT nor OAuth2 could handle the token
+      res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+      res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+      res.status(401).json({ error: "Invalid or expired refresh token" });
     } catch (err) {
       next(err);
     }
@@ -339,24 +415,37 @@ export function createProtectedAuthRouter(): Router {
         id: req.user.id,
         username: req.user.username,
         displayName: req.user.displayName,
+        role: req.user.role,
       });
     } catch (err) {
       next(err);
     }
   });
 
-  // ── Logout: revoke token + clear cookie ──
+  // ── Logout: denylist refresh token + clear cookies ──
   router.post("/auth/logout", async (req, res, next) => {
     try {
-      const token = resolveToken(req);
-
-      if (token) {
-        await ncDeleteAppPassword(token);
-        await cacheDel(`auth:token:*`);
+      // Denylist the JWT refresh token so it can't be reused
+      const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+      if (refreshToken) {
+        await denyRefreshToken(refreshToken);
       }
 
-      // Clear the session cookie
+      // Best-effort Nextcloud app password revocation for legacy (non-JWT)
+      // tokens. After the login-path change, fresh sessions no longer hold a
+      // Nextcloud token — only grandfathered legacy sessions do. Skip the
+      // OCS call for JWTs to avoid a guaranteed-failing round-trip.
+      const token = resolveToken(req);
+      if (token && !verifyAccessToken(token)) {
+        try {
+          await ncDeleteAppPassword(token);
+        } catch {
+          // Non-fatal — token may already be revoked or expired
+        }
+      }
+
       res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+      res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
 
       res.json({ status: "ok" });
     } catch (err) {

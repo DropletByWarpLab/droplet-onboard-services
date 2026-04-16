@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import pino from "pino";
 import { config } from "../config.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
 
 const logger = pino({ name: "auth" });
 
@@ -10,6 +11,7 @@ export interface AuthUser {
   id: string;
   username: string;
   displayName: string;
+  role: Role;
 }
 
 declare global {
@@ -24,22 +26,25 @@ const TOKEN_CACHE_PREFIX = "auth:token:";
 const TOKEN_CACHE_TTL = 300; // 5 minutes
 
 // ── Cookie configuration ──
+// Cookie max-ages derive from the TTL constants in jwt.service (single source
+// of truth). Import `ACCESS_TOKEN_TTL_SECONDS` / `REFRESH_TOKEN_TTL_SECONDS`
+// there and multiply by 1000.
 export const SESSION_COOKIE_NAME = "droplet_session";
-export const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const REFRESH_COOKIE_NAME = "droplet_refresh";
 
 /**
- * Auth middleware that validates tokens against Nextcloud's OCS API.
+ * Auth middleware — validates JWT access tokens, with Nextcloud OCS fallback.
  *
  * Token resolution order:
- *   1. `droplet_session` HTTP-only cookie  (browser sessions)
- *   2. `Authorization: Bearer <token>`     (API clients)
+ *   1. `Authorization: Bearer <jwt>`        (API clients — JWT preferred)
+ *   2. `droplet_session` HTTP-only cookie   (browser sessions — JWT or legacy Nextcloud token)
  *
- * Controlled by AUTH_ENABLED env var — when false, all requests pass through.
+ * JWT tokens are self-verifying (no Redis/Nextcloud call needed).
+ * Legacy Nextcloud tokens fall through to OCS validation with Redis cache.
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!config.AUTH_ENABLED) {
-    // Auth disabled — set a default dev user and continue
-    req.user = { id: "dev", username: "dev", displayName: "Developer" };
+    req.user = { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
     next();
     return;
   }
@@ -62,10 +67,23 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  validateToken(token)
+  // Try JWT first — self-verifying, no network call
+  const jwtPayload = verifyAccessToken(token);
+  if (jwtPayload) {
+    req.user = {
+      id: jwtPayload.sub,
+      username: jwtPayload.username,
+      displayName: jwtPayload.displayName,
+      role: jwtPayload.role,
+    };
+    next();
+    return;
+  }
+
+  // Fallback: validate against Nextcloud OCS (legacy tokens)
+  validateNextcloudToken(token)
     .then((user) => {
       if (!user) {
-        // Clear stale cookie if present
         if (cookieToken) {
           res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
         }
@@ -82,31 +100,39 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 /**
- * Validate a session cookie / bearer token outside the Express pipeline.
- *
- * Used by the WebSocket upgrade handler, which gets a raw IncomingMessage
- * rather than a Request. Returns the authenticated user, or the dev user
- * when `AUTH_ENABLED=false`.
+ * Validate a session token outside the Express pipeline (WebSocket upgrade).
  */
 export async function validateTokenForWs(token: string | null): Promise<AuthUser | null> {
   if (!config.AUTH_ENABLED) {
-    return { id: "dev", username: "dev", displayName: "Developer" };
+    return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
   if (!token) return null;
-  return validateToken(token);
+
+  // Try JWT first
+  const jwtPayload = verifyAccessToken(token);
+  if (jwtPayload) {
+    return {
+      id: jwtPayload.sub,
+      username: jwtPayload.username,
+      displayName: jwtPayload.displayName,
+      role: jwtPayload.role,
+    };
+  }
+
+  // Fallback to Nextcloud
+  return validateNextcloudToken(token);
 }
 
 /**
- * Validate a token by checking Redis cache first, then querying Nextcloud.
+ * Validate a token against Nextcloud OCS API with Redis cache.
+ * Returns a user with default "family" role (Nextcloud doesn't have role claims).
  */
-async function validateToken(token: string): Promise<AuthUser | null> {
+async function validateNextcloudToken(token: string): Promise<AuthUser | null> {
   const cacheKey = TOKEN_CACHE_PREFIX + hashToken(token);
 
-  // Check cache first
   const cached = await cacheGet<AuthUser>(cacheKey);
   if (cached) return cached;
 
-  // Validate against Nextcloud OCS API
   try {
     const url = `${config.NEXTCLOUD_URL}/ocs/v1.php/cloud/user`;
     const authHeaderValue = token.startsWith("basic:")
@@ -126,13 +152,14 @@ async function validateToken(token: string): Promise<AuthUser | null> {
     const ocs = data?.ocs;
     if (ocs?.meta?.status !== "ok") return null;
 
+    const groups: string[] = ocs.data.groups || [];
     const user: AuthUser = {
       id: ocs.data.id,
       username: ocs.data.id,
       displayName: ocs.data["display-name"] || ocs.data.id,
+      role: roleFromGroups(groups),
     };
 
-    // Cache the validated user
     await cacheSet(cacheKey, user, TOKEN_CACHE_TTL);
     return user;
   } catch (err) {
@@ -142,6 +169,7 @@ async function validateToken(token: string): Promise<AuthUser | null> {
 }
 
 function hashToken(token: string): string {
-  // SHA-256 truncated to 16 hex chars — collision-resistant cache key
-  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+  // Full SHA-256 output — a truncated hash would allow cache collisions that
+  // could return the wrong user's identity (serious auth bypass).
+  return createHash("sha256").update(token).digest("hex");
 }

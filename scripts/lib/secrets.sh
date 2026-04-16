@@ -34,13 +34,14 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
   nc_password=$(_gen_password 24)
   device_secret=$(_gen_fernet_key)
   device_secret_key=$(openssl rand -base64 32)
+  jwt_secret=$(openssl rand -hex 64)
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -79,6 +80,9 @@ JETSON_OLLAMA_URL=http://inference-engine.local:11434
 DEVICE_SECRET=$device_secret
 DEVICE_SECRET_KEY=$device_secret_key
 
+# --- JWT ---
+JWT_SECRET=$jwt_secret
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -99,6 +103,7 @@ EOF
   log_info "  NEXTCLOUD_ADMIN   : ${nc_password:0:4}****"
   log_info "  DEVICE_SECRET     : ${device_secret:0:8}****"
   log_info "  DEVICE_SECRET_KEY : ${device_secret_key:0:8}****"
+  log_info "  JWT_SECRET        : ${jwt_secret:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # --- Generate Mosquitto password file ---
