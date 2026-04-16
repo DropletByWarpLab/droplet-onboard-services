@@ -34,9 +34,9 @@ import {
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
-import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import type { FileEntryInfo } from "../types/index.js";
 
 const logger = pino({ name: "files-route" });
@@ -49,14 +49,25 @@ const upload = multer({
   limits: { fileSize: config.MAX_UPLOAD_SIZE_MB * 1024 * 1024 },
 });
 
-/** Extract session token from cookie (browser) or Authorization header (API). */
-function getToken(req: Request): string {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
+/**
+ * Resolve the Nextcloud credential for this request. For JWT sessions the
+ * token is looked up from the Redis-backed NC session store; for legacy
+ * sessions the cookie IS the NC token. Throws a sentinel error that the
+ * route handlers convert to 401 when no credential is available (e.g. the
+ * session pre-dates the NC-session store or the user hasn't logged in
+ * since the fix shipped).
+ */
+class MissingNcTokenError extends Error {
+  constructor() {
+    super("Nextcloud session is missing — please log in again");
+    this.name = "MissingNcTokenError";
+  }
+}
 
-  const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return "";
-  return header.slice(7);
+async function getToken(req: Request): Promise<string> {
+  const token = await resolveNcToken(req);
+  if (!token) throw new MissingNcTokenError();
+  return token;
 }
 
 /** Get the username from the authenticated request. */
@@ -83,6 +94,10 @@ function handleFileError(
   res: Response,
   next: NextFunction
 ): void {
+  if (err instanceof MissingNcTokenError) {
+    res.status(401).json({ error: err.message });
+    return;
+  }
   if (err instanceof NextcloudOcsError) {
     const status =
       err.ocsStatus >= 400 && err.ocsStatus < 600 ? err.ocsStatus : 400;
@@ -135,7 +150,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      const entries = await ncListFiles(getToken(req), user, filePath);
+      const entries = await ncListFiles(await getToken(req), user, filePath);
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
@@ -155,7 +170,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const filename = path.basename(filePath);
       const ext = path.extname(filename).toLowerCase();
 
-      const stream = await ncDownloadFile(getToken(req), getUser(req), filePath);
+      const stream = await ncDownloadFile(await getToken(req), getUser(req), filePath);
       if (!stream) {
         res.status(404).json({ error: "File not found" });
         return;
@@ -185,7 +200,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      const token = getToken(req);
+      const token = await getToken(req);
       const user = getUser(req);
       const results: { name: string; path: string; size: number }[] = [];
 
@@ -224,7 +239,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
 
       const user = getUser(req);
-      await ncDeleteFile(getToken(req), user, filePath);
+      await ncDeleteFile(await getToken(req), user, filePath);
 
       const parentPath = path.posix.dirname(filePath) || "/";
       await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
@@ -249,7 +264,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
 
       const user = getUser(req);
-      await ncCreateDirectory(getToken(req), user, parsed.data.path);
+      await ncCreateDirectory(await getToken(req), user, parsed.data.path);
 
       const parentPath = path.posix.dirname(parsed.data.path) || "/";
       await cacheDel(CACHE_PREFIX + user + ":" + parentPath);
@@ -288,7 +303,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
 
-      const share = await ncCreateShareV2(getToken(req), parsed.data.path, {
+      const share = await ncCreateShareV2(await getToken(req), parsed.data.path, {
         shareType: parsed.data.shareType,
         permissions: parsed.data.permissions,
         expireDate: parsed.data.expireDate,
@@ -311,7 +326,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         res.status(400).json({ error: "path query parameter is required" });
         return;
       }
-      const shares = await ncListShares(getToken(req), filePath);
+      const shares = await ncListShares(await getToken(req), filePath);
       res.json({ shares });
     } catch (err) {
       handleFileError(err, res, next);
@@ -383,7 +398,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const newPath = parentDir === "/" ? `/${newName}` : `${parentDir}/${newName}`;
 
       const user = getUser(req);
-      await ncMoveFile(getToken(req), user, filePath, newPath, false);
+      await ncMoveFile(await getToken(req), user, filePath, newPath, false);
 
       await invalidateParents(user, filePath);
       safePublish(`droplet/files/${user}/renamed`, { from: filePath, to: newPath });
@@ -409,7 +424,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const { from, to, overwrite } = parsed.data;
 
       const user = getUser(req);
-      await ncMoveFile(getToken(req), user, from, to, overwrite);
+      await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
       await invalidateParents(user, from, to);
       safePublish(`droplet/files/${user}/moved`, { from, to });
@@ -435,7 +450,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       const { from, to, overwrite } = parsed.data;
 
       const user = getUser(req);
-      await ncCopyFile(getToken(req), user, from, to, overwrite);
+      await ncCopyFile(await getToken(req), user, from, to, overwrite);
 
       await invalidateParents(user, to);
       safePublish(`droplet/files/${user}/copied`, { from, to });
@@ -456,7 +471,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
       const { paths } = parsed.data;
       const user = getUser(req);
-      const token = getToken(req);
+      const token = await getToken(req);
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
         try {
@@ -496,7 +511,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
       const { paths, toDir, overwrite } = parsed.data;
       const user = getUser(req);
-      const token = getToken(req);
+      const token = await getToken(req);
       const normalizedDir = toDir.replace(/\/+$/, "") || "/";
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
@@ -540,7 +555,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
       const { paths, toDir, overwrite } = parsed.data;
       const user = getUser(req);
-      const token = getToken(req);
+      const token = await getToken(req);
       const normalizedDir = toDir.replace(/\/+$/, "") || "/";
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
@@ -572,7 +587,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Trash: list (GET /api/files/trash) ──
   router.get("/files/trash", async (req, res, next) => {
     try {
-      const items = await ncListTrash(getToken(req), getUser(req));
+      const items = await ncListTrash(await getToken(req), getUser(req));
       res.json({ items });
     } catch (err) {
       handleFileError(err, res, next);
@@ -589,7 +604,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
       const user = getUser(req);
-      await ncRestoreTrashItem(getToken(req), user, parsed.data.name);
+      await ncRestoreTrashItem(await getToken(req), user, parsed.data.name);
       safePublish(`droplet/files/${user}/trash-restored`, { name: parsed.data.name });
       res.json({ restored: parsed.data.name });
     } catch (err) {
@@ -606,7 +621,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
       const user = getUser(req);
-      await ncDeleteTrashItem(getToken(req), user, name);
+      await ncDeleteTrashItem(await getToken(req), user, name);
       safePublish(`droplet/files/${user}/trash-purged`, { name });
       res.json({ deleted: name });
     } catch (err) {
@@ -618,7 +633,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   router.delete("/files/trash", async (_req, res, next) => {
     try {
       const user = getUser(_req);
-      await ncEmptyTrash(getToken(_req), user);
+      await ncEmptyTrash(await getToken(_req), user);
       safePublish(`droplet/files/${user}/trash-emptied`, {});
       res.json({ emptied: true });
     } catch (err) {
@@ -635,7 +650,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
       const user = getUser(req);
-      const token = getToken(req);
+      const token = await getToken(req);
       const fileId = await ncGetFileId(token, user, filePath);
       if (fileId === null) {
         res.status(404).json({ error: "File not found" });
@@ -662,7 +677,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
       const { path: filePath, versionId } = parsed.data;
       const user = getUser(req);
-      const token = getToken(req);
+      const token = await getToken(req);
 
       const fileId = await ncGetFileId(token, user, filePath);
       if (fileId === null) {
@@ -705,7 +720,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       }
       const { path: filePath, favorite } = parsed.data;
       const user = getUser(req);
-      await ncSetFavorite(getToken(req), user, filePath, favorite);
+      await ncSetFavorite(await getToken(req), user, filePath, favorite);
       await cacheDel(FAVORITES_CACHE_PREFIX + user);
       safePublish(`droplet/files/${user}/favorited`, { path: filePath, favorite });
       res.json({ path: filePath, favorite });
@@ -724,7 +739,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         res.json({ items: cached });
         return;
       }
-      const items = await ncListFavorites(getToken(req), user);
+      const items = await ncListFavorites(await getToken(req), user);
       await cacheSet(cacheKey, items, FAVORITES_TTL);
       res.json({ items });
     } catch (err) {
@@ -746,7 +761,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         res.json({ items: cached });
         return;
       }
-      const items = await ncListRecents(getToken(req), user, limit);
+      const items = await ncListRecents(await getToken(req), user, limit);
       await cacheSet(cacheKey, items, RECENTS_TTL);
       res.json({ items });
     } catch (err) {
@@ -778,7 +793,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         res.json({ items: cached });
         return;
       }
-      const items = await ncSearchFiles(getToken(req), user, {
+      const items = await ncSearchFiles(await getToken(req), user, {
         query: q,
         mime,
         limit,
@@ -807,7 +822,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         Math.min(1024, parseInt((req.query.y as string) || "256", 10) || 256)
       );
       const user = getUser(req);
-      const token = getToken(req);
+      const token = await getToken(req);
 
       const fileId = await ncGetFileId(token, user, filePath);
       if (fileId === null) {
@@ -858,7 +873,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         });
         return;
       }
-      const token = getToken(req);
+      const token = await getToken(req);
 
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {
@@ -887,7 +902,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         res.status(400).json({ error: "Invalid share id" });
         return;
       }
-      await ncDeleteShare(getToken(req), shareId);
+      await ncDeleteShare(await getToken(req), shareId);
       res.json({ deleted: shareId });
     } catch (err) {
       handleFileError(err, res, next);
@@ -897,7 +912,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // ── Shared-with-me inbox (GET /api/files/shared-with-me) ──
   router.get("/files/shared-with-me", async (req, res, next) => {
     try {
-      const shares = await ncListSharedWithMe(getToken(req));
+      const shares = await ncListSharedWithMe(await getToken(req));
       res.json({ shares });
     } catch (err) {
       handleFileError(err, res, next);

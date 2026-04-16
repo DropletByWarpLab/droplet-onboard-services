@@ -4,11 +4,11 @@ import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { config } from "../config.js";
-import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import {
   ncGenerateAppPassword,
   ncDeleteAppPassword,
 } from "../services/nextcloud.client.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encryptSecret, decryptSecret } from "../services/encryption.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { publish } from "../services/mqtt.service.js";
@@ -41,13 +41,6 @@ function safePublish(topic: string, payload: Record<string, unknown>): void {
   }
 }
 
-function getToken(req: Request): string {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
-  const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return "";
-  return header.slice(7);
-}
 
 function getUser(req: Request): string {
   return req.user?.username || "dev";
@@ -257,7 +250,14 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       const platform = meta?.platform ?? "other";
 
       // Mint a dedicated Nextcloud app password for this device.
-      const appPassword = await ncGenerateAppPassword(getToken(req));
+      const ncToken = await resolveNcToken(req);
+      if (!ncToken) {
+        res.status(401).json({
+          error: "Nextcloud session unavailable — please log in again",
+        });
+        return;
+      }
+      const appPassword = await ncGenerateAppPassword(ncToken);
       if (!appPassword) {
         res.status(502).json({
           error: "Failed to generate device credentials from Nextcloud",

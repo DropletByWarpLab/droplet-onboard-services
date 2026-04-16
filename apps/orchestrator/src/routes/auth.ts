@@ -30,6 +30,13 @@ import {
   type Role,
 } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
+import {
+  storeNcToken,
+  getNcToken,
+  deleteNcToken,
+  touchNcToken,
+  resolveNcToken,
+} from "../services/nextcloud-session.service.js";
 import { config } from "../config.js";
 
 const logger = pino({ name: "auth-route" });
@@ -159,14 +166,17 @@ export function createPublicAuthRouter(): Router {
       const displayName = ncUser?.displayName || result.loginName;
       const role: Role = roleFromGroups(ncUser?.groups ?? []);
 
-      // We've captured everything we need from Nextcloud. Revoke the
-      // app-password we were just issued so it can't be used as a
-      // long-lived credential if it ever leaks — from here on the browser
-      // only holds our short-lived JWT access token.
+      // Stash the Nextcloud app-password server-side so downstream routes
+      // (files, storage, user admin) can impersonate the caller against
+      // Nextcloud's WebDAV/OCS APIs — the browser only ever sees our JWT.
+      // TTL matches the refresh-token lifetime; the entry is overwritten on
+      // every successful login and deleted at logout.
       try {
-        await ncDeleteAppPassword(result.token);
+        await storeNcToken(userId, result.token, REFRESH_TOKEN_TTL_SECONDS);
       } catch (err) {
-        logger.warn({ err }, "Failed to revoke Nextcloud app password after login (non-fatal)");
+        logger.error({ err }, "Failed to persist Nextcloud session token");
+        res.status(500).json({ error: "Session store unavailable" });
+        return;
       }
 
       // Issue JWT access + refresh tokens
@@ -328,6 +338,11 @@ export function createPublicAuthRouter(): Router {
         const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role });
         const newAccessToken = signAccessToken({ id: sub, username, displayName, role });
 
+        // Extend the NC session token's TTL so it doesn't expire mid-session
+        // (the user would otherwise see silent 401s on /api/files after the
+        // original 7-day window elapses even though their JWT is fresh).
+        await touchNcToken(sub, REFRESH_TOKEN_TTL_SECONDS);
+
         const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
         res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
           httpOnly: true,
@@ -431,14 +446,25 @@ export function createProtectedAuthRouter(): Router {
         await denyRefreshToken(refreshToken);
       }
 
-      // Best-effort Nextcloud app password revocation for legacy (non-JWT)
-      // tokens. After the login-path change, fresh sessions no longer hold a
-      // Nextcloud token — only grandfathered legacy sessions do. Skip the
-      // OCS call for JWTs to avoid a guaranteed-failing round-trip.
-      const token = resolveToken(req);
-      if (token && !verifyAccessToken(token)) {
+      // Revoke the stored Nextcloud app-password so it can't outlive the
+      // session. Two code paths:
+      //   • JWT sessions: the NC token lives in Redis keyed by user id;
+      //     fetch it, ask Nextcloud to revoke, then delete from Redis.
+      //   • Legacy sessions: the cookie IS the NC token; revoke it directly.
+      const sessionToken = resolveToken(req);
+      if (sessionToken && verifyAccessToken(sessionToken) && req.user?.id) {
+        const ncToken = await getNcToken(req.user.id);
+        if (ncToken) {
+          try {
+            await ncDeleteAppPassword(ncToken);
+          } catch {
+            // Non-fatal — token may already be revoked upstream
+          }
+        }
+        await deleteNcToken(req.user.id);
+      } else if (sessionToken) {
         try {
-          await ncDeleteAppPassword(token);
+          await ncDeleteAppPassword(sessionToken);
         } catch {
           // Non-fatal — token may already be revoked or expired
         }
@@ -456,7 +482,7 @@ export function createProtectedAuthRouter(): Router {
   // ── List users (admin only) ──
   router.get("/auth/users", async (req, res, next) => {
     try {
-      const token = resolveToken(req);
+      const token = await resolveNcToken(req);
       if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
@@ -486,7 +512,7 @@ export function createProtectedAuthRouter(): Router {
         return;
       }
 
-      const token = resolveToken(req);
+      const token = await resolveNcToken(req);
       if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
@@ -510,7 +536,7 @@ export function createProtectedAuthRouter(): Router {
   // partial failure leaves the previously-applied fields in place.
   router.put("/auth/users/:username", async (req, res, next) => {
     try {
-      const token = resolveToken(req);
+      const token = await resolveNcToken(req);
       if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
@@ -550,7 +576,7 @@ export function createProtectedAuthRouter(): Router {
   // ── Disable / enable user (admin only) ──
   router.post("/auth/users/:username/disable", async (req, res, next) => {
     try {
-      const token = resolveToken(req);
+      const token = await resolveNcToken(req);
       if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
@@ -568,7 +594,7 @@ export function createProtectedAuthRouter(): Router {
 
   router.post("/auth/users/:username/enable", async (req, res, next) => {
     try {
-      const token = resolveToken(req);
+      const token = await resolveNcToken(req);
       if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
@@ -587,7 +613,7 @@ export function createProtectedAuthRouter(): Router {
   // ── Delete user (admin only) ──
   router.delete("/auth/users/:username", async (req, res, next) => {
     try {
-      const token = resolveToken(req);
+      const token = await resolveNcToken(req);
       if (!token) {
         res.status(401).json({ error: "Authentication required" });
         return;
