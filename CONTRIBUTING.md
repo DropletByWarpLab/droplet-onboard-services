@@ -5,7 +5,7 @@
 ```
 edge-platform/                  Turbo monorepo
 ├── apps/
-│   ├── api-server/             Express + TypeScript (port 3000)
+│   ├── orchestrator/             Express + TypeScript (port 3000)
 │   └── web-dashboard/          Next.js + React (port 3001)
 ├── services/
 │   └── ai-gateway/             Python FastAPI + LiteLLM (port 8000)
@@ -41,7 +41,7 @@ pip install -r requirements-dev.txt
 cd ../..
 
 # Generate Prisma client
-cd apps/api-server && npx prisma generate && cd ../..
+cd apps/orchestrator && npx prisma generate && cd ../..
 
 # Run all tests
 npm run test
@@ -69,9 +69,9 @@ npm run test:ai-gateway
 cd services/ai-gateway && source .venv/bin/activate && python -m pytest tests/ -v
 
 # API Server (TypeScript)
-npm run test:api-server
+npm run test:orchestrator
 # or directly:
-cd apps/api-server && npx vitest run
+cd apps/orchestrator && npx vitest run
 
 # Web Dashboard (React)
 npm run test:dashboard
@@ -82,7 +82,7 @@ cd apps/web-dashboard && npx vitest run
 ### Watch mode (auto-rerun on changes)
 
 ```bash
-cd apps/api-server && npx vitest        # API server
+cd apps/orchestrator && npx vitest        # API server
 cd apps/web-dashboard && npx vitest     # Dashboard
 ```
 
@@ -95,7 +95,7 @@ source .venv/bin/activate
 python -m pytest tests/ -v --cov=. --cov-report=term-missing
 
 # API Server
-cd apps/api-server && npx vitest run --coverage
+cd apps/orchestrator && npx vitest run --coverage
 
 # Dashboard
 cd apps/web-dashboard && npx vitest run --coverage
@@ -151,7 +151,7 @@ source .venv/bin/activate
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 2: API Server
-cd apps/api-server
+cd apps/orchestrator
 DATABASE_URL=postgresql://droplet:droplet@localhost:5432/droplet \
 REDIS_URL=redis://localhost:6379 \
 MQTT_BROKER=mqtt://localhost:1883 \
@@ -169,7 +169,7 @@ The Next.js dev server auto-proxies `/api/*` to localhost:3000 and `/ai/*` to lo
 ### Database setup
 
 ```bash
-cd apps/api-server
+cd apps/orchestrator
 
 # Create a migration (first time only)
 npx prisma migrate dev --name init
@@ -191,7 +191,7 @@ npx prisma studio
 | Service | Framework | Location | What's tested |
 |---------|-----------|----------|---------------|
 | AI Gateway | pytest + pytest-asyncio | `services/ai-gateway/tests/` | Schemas, keystore encryption, BYOK validation, router resolution, FastAPI endpoints |
-| API Server | Vitest + Supertest | `apps/api-server/src/__tests__/` | Express routes, request validation, service mocking |
+| API Server | Vitest + Supertest | `apps/orchestrator/src/__tests__/` | Express routes, request validation, service mocking |
 | Web Dashboard | Vitest + Testing Library | `apps/web-dashboard/src/__tests__/` | React components, API client, user interactions |
 
 **Mocking strategy:**
@@ -236,7 +236,7 @@ models/
 tests/                   pytest test suite
 ```
 
-### API Server (`apps/api-server/`)
+### API Server (`apps/orchestrator/`)
 
 ```
 src/
