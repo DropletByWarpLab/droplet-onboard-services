@@ -16,6 +16,7 @@
 #   --skip-start       Skip starting the Docker Compose stack
 #   --systemd          Install systemd service for auto-start on boot
 #   --regenerate-env   Force-regenerate .env (backs up existing)
+#   --sync-secrets     Only rewrite Docker secret files from .env, then exit
 #   --verbose          Show full command output
 #   --dry-run          Show what would be done without executing
 #   -h, --help         Show this help message
@@ -35,6 +36,7 @@ SKIP_BUILD=false
 SKIP_START=false
 INSTALL_SYSTEMD=false
 REGENERATE_ENV=false
+SYNC_SECRETS_ONLY=false
 VERBOSE=false
 DRY_RUN=false
 export VERBOSE REGENERATE_ENV
@@ -49,6 +51,7 @@ Options:
   --skip-start       Skip starting the Docker Compose stack
   --systemd          Install systemd service for auto-start on boot
   --regenerate-env   Force-regenerate .env (backs up existing)
+  --sync-secrets     Only rewrite Docker secret files from .env, then exit
   --verbose          Show full command output
   --dry-run          Show what would be done without executing
   -h, --help         Show this help message
@@ -65,6 +68,7 @@ while [ $# -gt 0 ]; do
     --skip-start)       SKIP_START=true; shift ;;
     --systemd)          INSTALL_SYSTEMD=true; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
+    --sync-secrets)     SYNC_SECRETS_ONLY=true; shift ;;
     --verbose)          VERBOSE=true; shift ;;
     --dry-run)          DRY_RUN=true; VERBOSE=true; shift ;;
     -h|--help)          usage ;;
@@ -87,6 +91,17 @@ source "$SCRIPT_DIR/lib/compose.sh"
 source "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/camera-drivers.sh
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
+
+# --- Sync-secrets short-circuit ---
+# Runs the secret-file materializer without touching .env, Docker, or any
+# service. Useful after editing .env to rotate OPENWRT_PASSWORD.
+if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
+  log_info "Syncing Docker secret files from .env..."
+  sync_openwrt_password_secret
+  log_success "Done. Restart the routing container for the change to take effect:"
+  log_info "  docker compose -f docker/docker-compose.yml restart routing"
+  exit 0
+fi
 
 # --- Lockfile ---
 LOCK_FILE="$REPO_ROOT/.data/.setup.lock"
@@ -151,6 +166,7 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
     log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY,"
     log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN"
+    log_info "  Would materialize Docker secret files: docker/secrets/openwrt_password"
     log_info "  Would write .env via heredoc (no .env.example dependency)"
     log_info "  Would generate MQTT password file and TLS certificate"
   fi

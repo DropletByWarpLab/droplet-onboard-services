@@ -21,3 +21,6 @@ docker/mosquitto_passwd
 
 # Generated TLS certificates (device-specific, created by setup.sh)
 docker/certs/
+
+# Device-specific secrets materialized for Docker secret mounts (created by setup.sh)
+docker/secrets/

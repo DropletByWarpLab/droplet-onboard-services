@@ -121,7 +121,45 @@ EOF
   # --- Generate TLS certificate for HTTPS ---
   _generate_tls_cert
 
+  # --- Materialize Docker secret file for OpenWrt router password (WARP-37) ---
+  sync_openwrt_password_secret
+
   log_divider
+}
+
+# Write $OPENWRT_PASSWORD (from env or .env) into docker/secrets/openwrt_password
+# so Docker Compose can mount it as a read-only secret at /run/secrets/openwrt_password.
+# Safe to call independently after editing .env — the file is overwritten atomically.
+sync_openwrt_password_secret() {
+  local secret_dir="$REPO_ROOT/docker/secrets"
+  local secret_file="$secret_dir/openwrt_password"
+  local password="${OPENWRT_PASSWORD:-}"
+
+  # Fall back to reading .env if the value isn't already in the shell environment.
+  if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
+    password=$(grep -E '^OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2-)
+  fi
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  if [ -z "$password" ]; then
+    # Write an empty placeholder so Docker Compose can still start (routing
+    # service degrades to "router not connected" at startup without crashing).
+    : > "$secret_file"
+    chmod 600 "$secret_file"
+    log_warn "OPENWRT_PASSWORD is empty — wrote empty $secret_file"
+    log_info "  Set OPENWRT_PASSWORD in .env, then re-run ./scripts/setup.sh --sync-secrets"
+    return 0
+  fi
+
+  # Write atomically: stage to .tmp then rename, so a crashed write never leaves
+  # a half-populated secret file that the routing container would then read.
+  local tmp="$secret_file.tmp"
+  printf '%s' "$password" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$secret_file"
+  log_success "Wrote $secret_file (chmod 600)"
 }
 
 _generate_mosquitto_passwd() {

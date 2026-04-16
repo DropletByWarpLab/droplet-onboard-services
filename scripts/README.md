@@ -54,6 +54,7 @@ Each device gets its own random secrets — no two devices share credentials:
   --skip-start       Skip starting the Docker Compose stack
   --systemd          Install systemd service for auto-start on boot
   --regenerate-env   Force-regenerate .env (backs up existing)
+  --sync-secrets     Only rewrite Docker secret files from .env, then exit
   --verbose          Show full command output
   --dry-run          Show what would be done without executing
   -h, --help         Show help
@@ -73,6 +74,9 @@ Each device gets its own random secrets — no two devices share credentials:
 
 # Generate new secrets (backs up old .env)
 ./scripts/setup.sh --skip-docker --skip-build --skip-start --regenerate-env
+
+# Rewrite Docker secret files after editing .env (e.g. rotate OPENWRT_PASSWORD)
+./scripts/setup.sh --sync-secrets
 
 # Factory provisioning: full setup + auto-start on boot
 ./scripts/setup.sh --systemd

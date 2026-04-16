@@ -206,9 +206,12 @@ services:
       - OPENWRT_HOST=${OPENWRT_HOST:-10.0.0.1}
       - OPENWRT_PORT=${OPENWRT_PORT:-80}
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
-      - OPENWRT_PASSWORD=${OPENWRT_PASSWORD:-}
+      # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
+      # No longer exposed via `docker inspect`.
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       - PORT=8080
+    secrets:
+      - openwrt_password
     profiles: ["full"]
     restart: always
 
@@ -270,6 +273,12 @@ services:
       - broker
     profiles: ["full"]
     restart: always
+
+secrets:
+  # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
+  # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
+  openwrt_password:
+    file: ../docker/secrets/openwrt_password
 
 volumes:
   pgdata:
