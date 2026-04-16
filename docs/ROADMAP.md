@@ -37,11 +37,11 @@ Status legend:
 
 ### M1.3 JWT authentication
 - **GTM scope:** Login endpoint, token issuance/refresh, Bearer auth on all endpoints, basic owner/guest roles.
-- **This repo's slice:** Orchestrator has auth middleware, but it currently validates Bearer tokens against Nextcloud's OCS API (5-minute Redis cache) and uses `droplet_session` cookies — **not JWT**. No role claims, no refresh tokens, no `jsonwebtoken` dependency.
-- **Files involved:** `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/prisma/schema.prisma`
-- **Status:** `[ ]` Not started (JWT specifically)
-- **Blockers:** Architectural decision: keep Nextcloud session auth or switch to JWT+refresh? GTM doc assumes JWT; current code leans on Nextcloud.
-- **Next action:** Add ADR under `docs/` capturing the auth-model decision; if JWT, add `jsonwebtoken`, issue/verify middleware, refresh-token route, `owner`/`guest` role field on `User`.
+- **This repo's slice:** JWT access tokens (15 min) + refresh tokens (7 days) issued on login. Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Refresh endpoint reissues access tokens. Logout denylists refresh tokens in Redis.
+- **Files involved:** `apps/orchestrator/src/services/jwt.service.ts`, `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/src/config.ts`, `scripts/lib/secrets.sh`
+- **Status:** `[x]` Done
+- **What was done:** Added `jsonwebtoken` dependency; created `jwt.service.ts` (sign/verify/refresh/denylist); updated auth middleware with JWT-first + Nextcloud fallback; login issues JWT pair; refresh endpoint verifies and reissues; `JWT_SECRET` generated per-device by `setup.sh`; role claim (owner/admin/family/guest) derived from Nextcloud groups.
+- **Next action:** Phase 3 (RBAC) builds on this — adds `requireRole()` middleware and per-route guards.
 
 ### M1.4 HTTPS
 - **GTM scope:** Self-signed TLS certificate auto-generated on first boot; nginx termination.

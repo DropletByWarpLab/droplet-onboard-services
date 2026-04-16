@@ -55,7 +55,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 
 ## 🟡 Partial / stubbed
 
-- **Auth middleware** (`apps/orchestrator/src/middleware/auth.ts`): validates Bearer tokens against Nextcloud OCS API with a 5-minute Redis cache and `droplet_session` cookies. **No JWT issuance**, **no role claims**, **no refresh tokens**. GTM M1.3 is not done.
+- **Auth middleware** (`apps/orchestrator/src/middleware/auth.ts`): JWT access tokens (15 min) + refresh tokens (7 days). Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Role claim (owner/admin/family/guest) included in JWT. GTM M1.3 is `[x]` Done. **RBAC per-route guards (M2.2) not yet implemented.**
 - **HTTPS** (`docker/docker-compose.yml` `gateway`, `docker/nginx.conf`, `docker/certs/`): port `:443` is exposed and certs volume is mounted, but self-signed cert auto-generation on first boot needs to be verified inside `scripts/setup.sh`. GTM M1.4 is `[~]`.
 - **Conversation persistence** (`services/ai-gateway/sessions/`, `apps/orchestrator/src/routes/llm.ts`): session CRUD endpoints exist; whether the backing store is Postgres or in-memory is unverified — needs audit. GTM M1.5 is `[~]`.
 - **Response streaming** (`apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/main.py`, `services/ai-gateway/providers/`): `sse-starlette` is in the gateway's deps and streaming hooks exist, but true end-to-end streaming depends on upstream `inference-engine` which per cross-repo notes has not implemented Ollama-streaming passthrough yet. GTM M1.6 is `[~]`.
@@ -86,7 +86,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 | Phase | Name | Status here | Notes |
 |---|---|---|---|
 | PH1 | Repo + Runtime | `[x]` Complete | Turbo monorepo, 20-service Compose stack, setup/factory-reset scripts, per-workspace tests, OpenWrt image builder. |
-| PH2 | Device Control API — auth/RBAC | `[ ]` Not started (as specified by GTM) | Routes exist under `apps/orchestrator/src/routes/` but auth is Nextcloud-session-cookie based, not JWT/RBAC. No role model in Prisma. See `docs/ROADMAP.md` M1.3, M2.2. |
+| PH2 | Device Control API — auth/RBAC | `[~]` Partial | JWT auth implemented (M1.3 done). Role claim in tokens. RBAC per-route guards (M2.2) not yet implemented — no `requireRole()` middleware or Prisma User/Role model. |
 | PH3 | Service stubs → real | `[~]` Partial | `services/routing/`, `services/camera-discovery/`, `services/file-indexer/` are real services (not stubs). Gaps: storage metrics endpoint completeness, audit log, full NVR clip-export path. |
 | PH4 | Assistant tooling hardening | `[~]` (cross-repo) | This repo's `services/ai-gateway/` is the outer input layer; primary hardening (OpenClaw sandbox, tool policy) lives in `inference-engine`. Verify input-validation + rate-limit coverage here as part of M2.7. |
 | PH5 | Docs + polish | `[~]` Partial | README, CLAUDE.md, CONTRIBUTING.md, scripts/README.md, service-level TESTING.md exist. **Missing:** OpenAPI wiring (delegated to `shared-api` repo), threat model document, architecture diagrams beyond README ASCII art. |

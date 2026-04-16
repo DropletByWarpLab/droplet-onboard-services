@@ -24,6 +24,7 @@ vi.mock("../config.js", () => ({
     HOMEASSISTANT_URL: "http://localhost:8123",
     HOMEASSISTANT_TOKEN: "",
     AI_GATEWAY_GRPC_URL: "localhost:50051",
+    JWT_SECRET: "test-jwt-secret-for-oauth2-tests",
   },
 }));
 
@@ -33,7 +34,7 @@ vi.mock("../middleware/auth.js", async (importOriginal) => {
   return {
     ...original,
     authMiddleware: (_req: any, _res: any, next: any) => {
-      _req.user = { id: "test-user", username: "test-user", displayName: "Test User" };
+      _req.user = { id: "test-user", username: "test-user", displayName: "Test User", role: "owner" };
       next();
     },
   };
@@ -150,6 +151,7 @@ describe("OAuth2 endpoints", () => {
         id: "testuser",
         displayName: "Test User",
         email: "test@example.com",
+        groups: [],
       });
 
       const state = "valid-state-token";

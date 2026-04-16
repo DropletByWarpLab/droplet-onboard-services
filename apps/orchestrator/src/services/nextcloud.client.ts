@@ -508,7 +508,7 @@ export async function ncListUsers(
 
 export async function ncGetCurrentUser(
   token: string
-): Promise<{ id: string; displayName: string; email: string | null } | null> {
+): Promise<{ id: string; displayName: string; email: string | null; groups: string[] } | null> {
   try {
     const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/user"), {
       headers: ocsHeaders(token),
@@ -523,6 +523,7 @@ export async function ncGetCurrentUser(
       id: data.ocs.data.id,
       displayName: data.ocs.data["display-name"] || data.ocs.data.id,
       email: data.ocs.data.email || null,
+      groups: data.ocs.data.groups || [],
     };
   } catch {
     return null;
