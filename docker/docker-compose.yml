@@ -94,7 +94,10 @@ services:
 
   # --- Infrastructure ---
   db:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 = official postgres 16 image + pgvector extension
+    # pre-installed. The 20260412000000_add_file_content_index migration
+    # needs `CREATE EXTENSION vector`, which plain postgres:16-alpine lacks.
+    image: pgvector/pgvector:pg16
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
