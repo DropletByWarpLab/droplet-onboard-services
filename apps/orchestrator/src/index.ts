@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { config } from "./config.js";
@@ -22,6 +23,8 @@ import {
   startHealthMonitor,
   stopHealthMonitor,
 } from "./services/health-monitor.service.js";
+import { createOuiLookup } from "./services/oui-lookup.service.js";
+import { createDeviceRegistry } from "./services/device-registry.service.js";
 
 const logger = pino({ name: "api-server" });
 
@@ -87,6 +90,25 @@ async function main() {
   // WARP-43: begin background polling of component health. Non-blocking —
   // the first snapshot is seeded immediately and the poller keeps running.
   startHealthMonitor(prisma);
+
+  // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
+  // at startup (best-effort — missing file is logged, lookups degrade to
+  // null) and constructs the registry that drives NetworkDevice /
+  // DevicePresenceDay from DHCP + wireless + firewall snapshots.
+  const ouiCsvPath =
+    process.env.OUI_CSV_PATH ?? path.resolve(process.cwd(), "data/oui.csv");
+  const ouiLookup = createOuiLookup(ouiCsvPath);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const deviceRegistry = createDeviceRegistry(prisma, ouiLookup);
+  // TODO(WARP-82): hook `deviceRegistry.reconcile(...)` into the routing
+  // poller once the orchestrator owns one. Today network.service.ts is
+  // request-driven (cached fetches on demand); wiring a background poll
+  // cadence + piping `{ leases, wirelessClients, firewallRules }` through
+  // lives in WARP-82.
+  // TODO(WARP-82): schedule `deviceRegistry.purgePresenceRows(30)` at 03:00
+  // local once a cron runtime is added (no scheduler dep in orchestrator
+  // today). Manual purge still works via the exposed method.
+  void deviceRegistry;
 
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
