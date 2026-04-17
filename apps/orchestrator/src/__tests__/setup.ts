@@ -42,6 +42,21 @@ vi.mock("mqtt", () => ({
 }));
 
 // --- Mock @prisma/client ---
+// Minimal stand-in for `Prisma.PrismaClientKnownRequestError` — the
+// service layer uses `instanceof` on it to translate P2025 into
+// DeviceRegistryError.notFound (WARP-82 fix-up). Mirroring the shape
+// here keeps unit tests from having to generate the real Prisma client.
+class PrismaClientKnownRequestError extends Error {
+  code: string;
+  clientVersion: string;
+  constructor(message: string, opts: { code: string; clientVersion: string }) {
+    super(message);
+    this.name = "PrismaClientKnownRequestError";
+    this.code = opts.code;
+    this.clientVersion = opts.clientVersion;
+  }
+}
+
 vi.mock("@prisma/client", () => {
   const mockPrisma = {
     $connect: vi.fn().mockResolvedValue(undefined),
@@ -64,5 +79,8 @@ vi.mock("@prisma/client", () => {
       update: vi.fn().mockResolvedValue({}),
     },
   };
-  return { PrismaClient: vi.fn(() => mockPrisma) };
+  return {
+    PrismaClient: vi.fn(() => mockPrisma),
+    Prisma: { PrismaClientKnownRequestError },
+  };
 });

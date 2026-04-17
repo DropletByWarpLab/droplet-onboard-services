@@ -57,6 +57,10 @@ export class DeviceRegistryError extends Error {
     });
   }
 
+  /** Phase 2 reserve: not currently thrown — WARP-82 lets Prisma cascade
+   *  the implicit join table so deleting a group with devices simply
+   *  ungroups them. Kept here for a future opt-in "refuse if non-empty"
+   *  delete mode. */
   static groupInUse(id: string): DeviceRegistryError {
     return new DeviceRegistryError("GROUP_IN_USE", `Group ${id} still has devices`, {
       status: 409,
