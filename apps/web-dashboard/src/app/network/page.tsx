@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  CalendarClock,
   CheckCircle2,
   Globe,
   Loader2,
@@ -20,6 +21,7 @@ import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
+import { SchedulesTab } from "@/components/network/SchedulesTab";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -45,7 +47,7 @@ type OperationStatus =
   | { state: "applied"; id: string; finishedAt: number | null }
   | { state: "rolled_back"; id: string; reason: string | null };
 
-type Tab = "overview" | "devices" | "wifi" | "firewall" | "system";
+type Tab = "overview" | "devices" | "schedules" | "wifi" | "firewall" | "system";
 
 // WARP-39: user-facing strings keyed by the RouterError.code coming off the hook.
 const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
@@ -189,6 +191,7 @@ export default function NetworkPage() {
   const tabs: { id: Tab; label: string; icon: typeof Globe }[] = [
     { id: "overview", label: "Overview", icon: Globe },
     { id: "devices", label: "Devices", icon: Monitor },
+    { id: "schedules", label: "Schedules", icon: CalendarClock },
     { id: "wifi", label: "WiFi", icon: Wifi },
     { id: "firewall", label: "Firewall", icon: Shield },
     { id: "system", label: "System", icon: Router },
@@ -341,6 +344,7 @@ export default function NetworkPage() {
       {/* Tab Content */}
       {activeTab === "overview" && <OverviewTab overview={overview} />}
       {activeTab === "devices" && <DevicesTab />}
+      {activeTab === "schedules" && <SchedulesTab />}
       {activeTab === "wifi" && <WifiTab />}
       {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
       {activeTab === "system" && <SystemTab overview={overview} />}
