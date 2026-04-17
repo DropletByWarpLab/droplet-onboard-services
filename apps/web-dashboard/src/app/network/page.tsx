@@ -15,9 +15,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { useNetwork } from "@/lib/hooks/useNetwork";
+import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
+import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
+import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import {
-  blockNetworkDevice,
-  unblockNetworkDevice,
   setWifiSsid,
   setWifiChannel,
   scanWifiNetworks,
@@ -26,7 +27,7 @@ import {
   type NetworkOperation,
 } from "@/lib/api";
 import type {
-  ConnectedDevice,
+  EnrichedNetworkDevice,
   FirewallConfig,
   FirewallRedirect,
   FirewallRule,
@@ -77,7 +78,6 @@ const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
 export default function NetworkPage() {
   const {
     overview,
-    devices,
     firewall,
     isLoading,
     isRefreshing,
@@ -338,27 +338,7 @@ export default function NetworkPage() {
 
       {/* Tab Content */}
       {activeTab === "overview" && <OverviewTab overview={overview} />}
-      {activeTab === "devices" && (
-        <DevicesTab
-          devices={devices}
-          onBlock={async (mac, name) => {
-            const result = await blockNetworkDevice(mac, name);
-            if (result.requiresConfirmation) {
-              setPendingConfirm(result);
-            } else {
-              refresh();
-            }
-          }}
-          onUnblock={async (mac) => {
-            const result = await unblockNetworkDevice(mac);
-            if (result.requiresConfirmation) {
-              setPendingConfirm(result);
-            } else {
-              refresh();
-            }
-          }}
-        />
-      )}
+      {activeTab === "devices" && <DevicesTab />}
       {activeTab === "wifi" && <WifiTab />}
       {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
       {activeTab === "system" && <SystemTab overview={overview} />}
@@ -445,77 +425,154 @@ function StatusCard({
   );
 }
 
-// --- Devices Tab ---
-function DevicesTab({
-  devices,
-  onBlock,
-  onUnblock,
-}: {
-  devices: ConnectedDevice[];
-  onBlock: (mac: string, name?: string) => Promise<void>;
-  onUnblock: (mac: string) => Promise<void>;
-}) {
-  if (devices.length === 0) {
-    return (
-      <div className="dp-card text-center py-12">
-        <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
-        <h3 className="type-title-3 text-label-primary mb-1">No Devices Found</h3>
-        <p className="type-subheadline text-label-tertiary">
-          No devices are currently connected to the network.
-        </p>
-      </div>
+// --- Devices Tab (WARP-83: sectioned 3-col card grid) ---
+type DeviceSort = "name" | "lastSeen" | "vendor";
+
+function DevicesTab() {
+  const [search, setSearch] = useState("");
+  const [onlineOnly, setOnlineOnly] = useState(false);
+  const [sort, setSort] = useState<DeviceSort>("name");
+  // WARP-84 will render a detail panel off this state.
+  const [, setOpenMac] = useState<string | null>(null);
+
+  const devicesSwr = useNetworkDevices({ onlineOnly });
+  const groupsSwr = useNetworkGroups();
+
+  const devices = devicesSwr.data?.devices ?? [];
+  const groups = groupsSwr.data?.groups ?? [];
+
+  // Search filter (case-insensitive contains on displayName, hostname, vendor, IP).
+  const filtered = devices.filter((d) => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return [d.displayName, d.hostname, d.vendor, d.lastIp].some((v) =>
+      (v ?? "").toLowerCase().includes(q),
     );
+  });
+
+  function sortFn(a: EnrichedNetworkDevice, b: EnrichedNetworkDevice) {
+    if (a.online !== b.online) return a.online ? -1 : 1;
+    if (sort === "name") {
+      return (a.displayName ?? a.hostname ?? "").localeCompare(b.displayName ?? b.hostname ?? "");
+    }
+    if (sort === "lastSeen") {
+      return new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime();
+    }
+    if (sort === "vendor") {
+      return (a.vendor ?? "").localeCompare(b.vendor ?? "");
+    }
+    return 0;
+  }
+  const sorted = filtered.slice().sort(sortFn);
+
+  // Bucket by group; a device may belong to multiple groups and appear in each.
+  const byGroup = new Map<string, EnrichedNetworkDevice[]>();
+  for (const d of sorted) {
+    if (d.groups.length === 0) {
+      byGroup.set("__ungrouped", [...(byGroup.get("__ungrouped") ?? []), d]);
+    } else {
+      for (const g of d.groups) {
+        byGroup.set(g.id, [...(byGroup.get(g.id) ?? []), d]);
+      }
+    }
   }
 
+  const groupsWithMembers = groups
+    .filter((g) => (byGroup.get(g.id) ?? []).length > 0)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const ungrouped = byGroup.get("__ungrouped") ?? [];
+
+  const isLoading = !devicesSwr.data && devicesSwr.isLoading;
+
   return (
-    <div className="dp-card overflow-hidden">
-      <table className="w-full">
-        <thead>
-          <tr className="border-b border-separator">
-            <th className="text-left type-footnote text-label-tertiary font-medium px-4 py-3">Hostname</th>
-            <th className="text-left type-footnote text-label-tertiary font-medium px-4 py-3">IP Address</th>
-            <th className="text-left type-footnote text-label-tertiary font-medium px-4 py-3">MAC Address</th>
-            <th className="text-left type-footnote text-label-tertiary font-medium px-4 py-3">Type</th>
-            <th className="text-left type-footnote text-label-tertiary font-medium px-4 py-3">Signal</th>
-            <th className="text-right type-footnote text-label-tertiary font-medium px-4 py-3">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {devices.map((device) => (
-            <tr key={device.macaddr} className="border-b border-separator last:border-0 hover:bg-surface-secondary/50">
-              <td className="px-4 py-3 type-subheadline text-label-primary">
-                {device.hostname || "Unknown"}
-              </td>
-              <td className="px-4 py-3 type-subheadline text-label-secondary font-mono text-sm">
-                {device.ipaddr}
-              </td>
-              <td className="px-4 py-3 type-caption-1 text-label-tertiary font-mono">
-                {device.macaddr}
-              </td>
-              <td className="px-4 py-3">
-                {device.isWireless ? (
-                  <span className="inline-flex items-center gap-1 type-caption-1 text-accent">
-                    <Wifi size={12} /> WiFi
-                  </span>
-                ) : (
-                  <span className="type-caption-1 text-label-tertiary">Wired</span>
-                )}
-              </td>
-              <td className="px-4 py-3 type-caption-1 text-label-tertiary">
-                {device.signal ? `${device.signal} dBm` : "-"}
-              </td>
-              <td className="px-4 py-3 text-right">
-                <button
-                  onClick={() => onBlock(device.macaddr, device.hostname)}
-                  className="type-caption-1 text-system-red hover:underline"
-                >
-                  Block
-                </button>
-              </td>
-            </tr>
+    <div>
+      {/* Header controls */}
+      <div className="flex flex-wrap items-center gap-3 mb-6">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search devices…"
+          aria-label="Search devices"
+          className="dp-input flex-1 min-w-[200px]"
+        />
+        <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+          <input
+            type="checkbox"
+            checked={onlineOnly}
+            onChange={(e) => setOnlineOnly(e.target.checked)}
+            className="accent-accent"
+          />
+          Online only
+        </label>
+        <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+          Sort by
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as DeviceSort)}
+            aria-label="Sort devices"
+            className="dp-input"
+          >
+            <option value="name">Name</option>
+            <option value="lastSeen">Last seen</option>
+            <option value="vendor">Vendor</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          // Wired in WARP-85 (group manager dialog).
+          onClick={() => {}}
+          className="dp-button-secondary text-sm"
+        >
+          Manage groups
+        </button>
+      </div>
+
+      {isLoading && (
+        <div className="flex items-center justify-center py-12 text-label-tertiary">
+          <Loader2 size={20} className="animate-spin mr-2" />
+          <span className="type-subheadline">Loading devices…</span>
+        </div>
+      )}
+
+      {!isLoading && devices.length === 0 && (
+        <div className="dp-card text-center py-12">
+          <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
+          <h3 className="type-title-3 text-label-primary mb-1">
+            Your router hasn&apos;t seen any devices yet
+          </h3>
+          <p className="type-subheadline text-label-tertiary mb-4">
+            Devices will appear as soon as the router reports them.
+          </p>
+          <button
+            type="button"
+            onClick={() => devicesSwr.mutate()}
+            className="dp-button-secondary text-sm"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!isLoading && devices.length > 0 && (
+        <>
+          {groupsWithMembers.map((g) => (
+            <DeviceGridSection
+              key={g.id}
+              group={g}
+              devices={byGroup.get(g.id) ?? []}
+              onOpen={(d) => setOpenMac(d.mac)}
+            />
           ))}
-        </tbody>
-      </table>
+          {ungrouped.length > 0 && (
+            <DeviceGridSection
+              group={{ id: "__ungrouped", name: "Ungrouped" }}
+              devices={ungrouped}
+              onOpen={(d) => setOpenMac(d.mac)}
+            />
+          )}
+        </>
+      )}
     </div>
   );
 }

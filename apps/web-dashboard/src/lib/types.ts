@@ -445,3 +445,38 @@ export interface NetworkCommandResult {
   expiresIn?: number;
   operation?: string;
 }
+
+// --- WARP-83: enriched device types for the card-grid view ---
+
+export interface DevicePresenceDay {
+  date: string;
+  seenMinutes: number;
+}
+
+export interface DeviceGroupRef {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+}
+
+export interface EnrichedNetworkDevice {
+  mac: string;
+  displayName: string | null;
+  icon: string | null;
+  notes: string | null;
+  vendor: string | null;
+  hostname: string | null;
+  lastIp: string | null;
+  firstSeen: string;
+  lastSeen: string;
+  isBlocked: boolean;
+  online: boolean;
+  signal?: number;
+  groups: DeviceGroupRef[];
+  presenceDays?: DevicePresenceDay[];
+}
+
+export interface DeviceGroupWithCount extends DeviceGroupRef {
+  _count: { devices: number };
+}
