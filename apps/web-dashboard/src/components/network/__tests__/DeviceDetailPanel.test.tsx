@@ -34,12 +34,15 @@ function makePresence(): DevicePresenceDay[] {
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
-function mockFetchOnceJson(mock: FetchMock, body: unknown, ok = true, status = 200) {
-  mock.mockImplementationOnce(async () => ({
-    ok,
-    status,
-    json: async () => body,
-  }));
+// The queue backs mockFetchOnceJson. We can't use vi.fn().mockImplementationOnce
+// because GroupTypeahead (WARP-85) independently fetches /api/network/groups,
+// which would otherwise consume the per-test queued mocks out of order.
+// Entries are popped in FIFO — excluding any device-fetch from the /api/network/groups
+// path, which gets a permanent empty-list default in beforeEach.
+let fetchQueue: Array<{ ok: boolean; status: number; body: unknown }> = [];
+
+function mockFetchOnceJson(_mock: FetchMock, body: unknown, ok = true, status = 200) {
+  fetchQueue.push({ ok, status, body });
 }
 
 function renderPanel(onClose = () => {}) {
@@ -54,7 +57,19 @@ describe("DeviceDetailPanel", () => {
   let fetchMock: FetchMock;
 
   beforeEach(() => {
+    fetchQueue = [];
     fetchMock = vi.fn();
+    fetchMock.mockImplementation(async (url: string) => {
+      // WARP-85: GroupTypeahead (inside the panel) always fetches
+      // /api/network/groups via SWR. Route it to a permanent empty-list
+      // default so tests only queue responses for the device endpoints.
+      if (typeof url === "string" && url.startsWith("/api/network/groups")) {
+        return { ok: true, status: 200, json: async () => ({ groups: [] }) };
+      }
+      const next = fetchQueue.shift();
+      if (!next) return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: next.ok, status: next.status, json: async () => next.body };
+    });
     vi.stubGlobal("fetch", fetchMock);
   });
 
