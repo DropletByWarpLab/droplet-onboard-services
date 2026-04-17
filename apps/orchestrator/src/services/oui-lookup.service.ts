@@ -21,6 +21,47 @@ export interface OuiLookup {
   lookup(mac: string): string | null;
 }
 
+/**
+ * Minimal RFC 4180-aware row parser. The IEEE registry legitimately
+ * quotes vendor names containing commas (e.g. `"Cisco Systems, Inc"`)
+ * and escapes embedded quotes by doubling them (`""`). We only need
+ * columns 2 and 3, so a tiny hand-rolled parser beats pulling in a
+ * full CSV library.
+ */
+function parseRow(row: string): string[] {
+  const fields: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i];
+    if (inQuotes) {
+      if (ch === '"' && row[i + 1] === '"') {
+        cur += '"';
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inQuotes = false;
+        continue;
+      }
+      cur += ch;
+    } else {
+      if (ch === '"' && cur.length === 0) {
+        inQuotes = true;
+        continue;
+      }
+      if (ch === ",") {
+        fields.push(cur);
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+  }
+  fields.push(cur);
+  return fields;
+}
+
 export function createOuiLookup(csvPath: string): OuiLookup {
   const table = new Map<string, string>();
 
@@ -36,7 +77,7 @@ export function createOuiLookup(csvPath: string): OuiLookup {
     for (let i = 1; i < lines.length; i++) {
       const row = lines[i];
       if (!row) continue;
-      const parts = row.split(",");
+      const parts = parseRow(row);
       if (parts.length < 3) continue;
       const prefix = parts[1].trim().toUpperCase();
       const name = parts[2].trim();

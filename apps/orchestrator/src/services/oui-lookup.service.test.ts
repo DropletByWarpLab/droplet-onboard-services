@@ -7,7 +7,7 @@
  * vendor lookup is nice-to-have, not load-bearing.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -49,11 +49,9 @@ describe("oui-lookup.service", () => {
     expect(lookup.lookup("AA:BB:CC:DD:EE:FF")).toBeNull();
   });
 
-  it("missing file degrades to null + logs warning", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("missing file degrades to null (no throw)", () => {
     const lookup = createOuiLookup("/nonexistent/path/to/oui.csv");
     expect(lookup.lookup("AA:BB:CC:DD:EE:FF")).toBeNull();
-    warn.mockRestore();
   });
 
   it("malformed rows are skipped without crashing", () => {
@@ -67,5 +65,25 @@ describe("oui-lookup.service", () => {
     const lookup = createOuiLookup(csv);
     expect(lookup.lookup("00:11:22:33:44:55")).toBe("Acme");
     expect(lookup.lookup("F8:1E:DF:AA:BB:CC")).toBe("Apple");
+  });
+
+  it("handles quoted vendor names with commas", () => {
+    const csv = withCsv(
+      "Registry,Assignment,Organization Name,Organization Address\n" +
+        'MA-L,0040C7,"Cisco Systems, Inc",\n' +
+        'MA-L,FCB6D8,"Apple, Inc.",'
+    );
+    const lookup = createOuiLookup(csv);
+    expect(lookup.lookup("00:40:C7:11:22:33")).toBe("Cisco Systems, Inc");
+    expect(lookup.lookup("FC:B6:D8:00:00:00")).toBe("Apple, Inc.");
+  });
+
+  it("unescapes doubled quotes inside quoted vendor names", () => {
+    const csv = withCsv(
+      "Registry,Assignment,Organization Name,Organization Address\n" +
+        'MA-L,112233,"Ring ""Doorbell"" Co",'
+    );
+    const lookup = createOuiLookup(csv);
+    expect(lookup.lookup("11:22:33:44:55:66")).toBe('Ring "Doorbell" Co');
   });
 });
