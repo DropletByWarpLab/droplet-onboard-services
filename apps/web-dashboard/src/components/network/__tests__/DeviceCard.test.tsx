@@ -92,6 +92,21 @@ describe("DeviceCard", () => {
     expect(screen.getByText("Kids")).toBeInTheDocument();
   });
 
+  it("renders a colored dot next to group name when color is set", () => {
+    const device = makeDevice({ groups: [{ id: "g1", name: "Living Room", color: "#FF0000" }] });
+    const { container } = render(<DeviceCard device={device} onOpen={vi.fn()} />);
+    const chip = Array.from(container.querySelectorAll("span")).find((s) =>
+      s.textContent?.includes("Living Room"),
+    );
+    expect(chip).toBeDefined();
+    // Chip should have background "surface-secondary" class (readable), NOT g.color as background
+    expect(chip!.className).toContain("bg-surface-secondary");
+    // The colored dot should exist with the group color as backgroundColor inline style
+    const dot = chip!.querySelector("span[style]");
+    expect(dot).not.toBeNull();
+    expect((dot as HTMLElement).style.backgroundColor).toMatch(/rgb|#/);
+  });
+
   it("renders 30 sparkline bars when given 30 presence days", () => {
     const presenceDays: DevicePresenceDay[] = Array.from({ length: 30 }, (_, i) => ({
       date: `2026-03-${String(i + 1).padStart(2, "0")}`,

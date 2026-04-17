@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { EnrichedNetworkDevice, DeviceGroupRef } from "@/lib/types";
 import { DeviceCard } from "./DeviceCard";
@@ -28,7 +28,12 @@ function saveState(id: string, expanded: boolean) {
 }
 
 export function DeviceGridSection({ group, devices, onOpen }: Props) {
-  const [expanded, setExpanded] = useState<boolean>(() => loadState()[group.id] ?? true);
+  const [expanded, setExpanded] = useState<boolean>(true);
+
+  useEffect(() => {
+    const stored = loadState()[group.id];
+    if (typeof stored === "boolean") setExpanded(stored);
+  }, [group.id]);
 
   function toggle() {
     const next = !expanded;

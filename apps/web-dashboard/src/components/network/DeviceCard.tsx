@@ -58,9 +58,15 @@ export function DeviceCard({ device, onOpen }: Props) {
           {device.groups.map((g) => (
             <span
               key={g.id}
-              className="type-caption-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary"
-              style={g.color ? { backgroundColor: g.color } : undefined}
+              className="type-caption-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary inline-flex items-center gap-1.5"
             >
+              {g.color && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: g.color }}
+                  aria-hidden="true"
+                />
+              )}
               {g.name}
             </span>
           ))}
