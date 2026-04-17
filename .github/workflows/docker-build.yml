@@ -40,6 +40,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-latest has ~14GB free. `docker compose --profile full build`
+      # fills that before BuildKit finishes (see setup-e2e.yml for the same
+      # fix). Strip the preinstalled toolchains we don't use to reclaim ~25GB.
+      - name: Free disk space
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
