@@ -162,21 +162,21 @@ describe("DeviceDetailPanel", () => {
   });
 
   it("rolls back local state and shows typed-error toast when PATCH fails", async () => {
+    // Baseline device has icon = null.
     mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
     renderPanel();
 
     const input = (await screen.findByLabelText("Display name")) as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe("Romain's MacBook"));
 
-    // Fail the PATCH with INVALID_ICON; and the mutate-triggered refetch will
-    // then re-load the original device data.
+    // Fail the PATCH with INVALID_ICON. Post-fix, we no longer refetch on
+    // error, so only a single failing PATCH is queued here.
     mockFetchOnceJson(
       fetchMock,
       { error: { code: "INVALID_ICON", message: "Bad icon", status: 400 } },
       false,
       400,
     );
-    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
 
     // Open picker and pick a new icon to exercise the icon save path.
     fireEvent.click(screen.getByRole("button", { name: "Change icon" }));
@@ -184,5 +184,16 @@ describe("DeviceDetailPanel", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Pick a different icon");
+
+    // Local state must have been reverted to the server-truth baseline
+    // (icon = null). Re-open the picker and verify that no radio is selected,
+    // in particular the "Tv" we optimistically selected is aria-checked=false.
+    fireEvent.click(screen.getByRole("button", { name: "Change icon" }));
+    const tvButton = await screen.findByRole("radio", { name: "Tv" });
+    expect(tvButton).toHaveAttribute("aria-checked", "false");
+    const radios = screen.getAllByRole("radio");
+    for (const r of radios) {
+      expect(r).toHaveAttribute("aria-checked", "false");
+    }
   });
 });

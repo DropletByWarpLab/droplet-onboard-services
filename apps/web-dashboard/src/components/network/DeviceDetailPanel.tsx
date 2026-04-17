@@ -65,15 +65,23 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
   }, []);
 
   async function save(field: "displayName" | "icon" | "notes", value: string | null) {
-    const prev = field === "displayName" ? displayName : field === "notes" ? notes : icon;
+    // Snapshot server-truth (pre-edit) so rollback on error restores the
+    // real original, not the in-flight optimistic local value.
+    const serverValue = data?.device
+      ? field === "displayName"
+        ? (data.device.displayName ?? null)
+        : field === "notes"
+          ? (data.device.notes ?? null)
+          : data.device.icon
+      : null;
     try {
       await patchDevice(mac, { [field]: value } as Partial<
         Pick<EnrichedNetworkDevice, "displayName" | "icon" | "notes">
       >);
     } catch (err) {
-      if (field === "displayName") setDisplayName(String(prev ?? ""));
-      if (field === "notes") setNotes(String(prev ?? ""));
-      if (field === "icon") setIcon(prev as string | null);
+      if (field === "displayName") setDisplayName(String(serverValue ?? ""));
+      if (field === "notes") setNotes(String(serverValue ?? ""));
+      if (field === "icon") setIcon(serverValue as string | null);
       setToast(toastForError(err));
     }
   }
@@ -117,7 +125,6 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
     <div
       ref={dialogRef}
       role="dialog"
-      aria-modal="true"
       aria-label="Device details"
       className="fixed top-0 right-0 h-full w-[440px] bg-surface-primary border-l border-separator shadow-xl overflow-y-auto z-40"
     >
