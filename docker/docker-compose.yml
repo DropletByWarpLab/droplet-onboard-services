@@ -185,8 +185,11 @@ services:
   # pgvector for semantic search. Read-only access to Nextcloud data.
   file-indexer:
     build:
-      context: ../services/file-indexer
-      dockerfile: Dockerfile
+      # Repo root as context so Dockerfile can `COPY proto/` at build time
+      # (proto/ lives outside the service dir). All COPY paths in the
+      # Dockerfile are relative to the monorepo root.
+      context: ..
+      dockerfile: services/file-indexer/Dockerfile
     volumes:
       - nextcloud-data:/data/nextcloud:ro
       - ../proto:/app/proto:ro

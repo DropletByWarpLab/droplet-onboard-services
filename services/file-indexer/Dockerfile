@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Build context is the monorepo root (see docker-compose.yml) so that
+# `proto/` is visible alongside `services/file-indexer/`. All COPY paths
+# here are therefore relative to the repo root.
+
 WORKDIR /app
 
 # System deps for pdfplumber (poppler) and psycopg2
@@ -8,11 +12,10 @@ RUN apt-get update && \
       libpq-dev gcc && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY services/file-indexer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy proto from the monorepo root (via Docker build context or volume)
-# and generate gRPC stubs at build time.
+# Copy proto from the monorepo root and generate gRPC stubs at build time.
 COPY proto/ /app/proto/
 RUN mkdir -p /app/grpc_generated && \
     touch /app/grpc_generated/__init__.py && \
@@ -22,6 +25,6 @@ RUN mkdir -p /app/grpc_generated && \
       --grpc_python_out=/app/grpc_generated \
       /app/proto/inference.proto
 
-COPY . .
+COPY services/file-indexer/ .
 
 CMD ["python", "main.py"]

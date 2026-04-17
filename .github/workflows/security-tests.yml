@@ -1,0 +1,30 @@
+name: security-tests
+
+# Static security regression checks (scripts/test-security.sh). Very fast,
+# no Docker. Triggered whenever compose or setup wiring changes because
+# those are the main places security invariants live.
+
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - "scripts/**"
+      - ".github/workflows/security-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "scripts/**"
+      - ".github/workflows/security-tests.yml"
+
+concurrency:
+  group: security-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run security regression suite
+        run: ./scripts/test-security.sh

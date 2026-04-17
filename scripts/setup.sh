@@ -13,6 +13,7 @@
 # Options:
 #   --skip-docker      Skip Docker installation (assume already installed)
 #   --skip-build       Skip building container images
+#   --skip-drivers     Skip camera-driver / kernel-module setup
 #   --skip-start       Skip starting the Docker Compose stack
 #   --systemd          Install systemd service for auto-start on boot
 #   --regenerate-env   Force-regenerate .env (backs up existing)
@@ -33,6 +34,7 @@ export REPO_ROOT
 # --- Parse arguments ---
 SKIP_DOCKER=false
 SKIP_BUILD=false
+SKIP_DRIVERS=false
 SKIP_START=false
 INSTALL_SYSTEMD=false
 REGENERATE_ENV=false
@@ -48,6 +50,7 @@ Usage: ./scripts/setup.sh [OPTIONS]
 Options:
   --skip-docker      Skip Docker installation (assume already installed)
   --skip-build       Skip building container images
+  --skip-drivers     Skip camera-driver / kernel-module setup
   --skip-start       Skip starting the Docker Compose stack
   --systemd          Install systemd service for auto-start on boot
   --regenerate-env   Force-regenerate .env (backs up existing)
@@ -65,6 +68,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --skip-docker)      SKIP_DOCKER=true; shift ;;
     --skip-build)       SKIP_BUILD=true; shift ;;
+    --skip-drivers)     SKIP_DRIVERS=true; shift ;;
     --skip-start)       SKIP_START=true; shift ;;
     --systemd)          INSTALL_SYSTEMD=true; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
@@ -237,7 +241,12 @@ main() {
 
   # --- Phase 3: Camera Drivers ---
   log_step 3 $total_steps "Camera Drivers"
-  install_camera_drivers
+  if [ "$SKIP_DRIVERS" = "true" ]; then
+    log_info "Skipping camera driver setup (--skip-drivers)"
+    log_divider
+  else
+    install_camera_drivers
+  fi
 
   # --- Phase 4: Secrets ---
   log_step 4 $total_steps "Secrets"

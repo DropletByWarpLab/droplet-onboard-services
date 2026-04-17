@@ -1,0 +1,53 @@
+name: docker-build
+
+# Build every image in docker/docker-compose.yml (including services gated
+# behind `profiles: ["full"]`). Fails the PR if any Dockerfile is broken,
+# without spending time on the full scripts/setup.sh flow.
+
+on:
+  pull_request:
+    paths:
+      - "apps/**/Dockerfile"
+      - "services/**/Dockerfile"
+      - "apps/**/package.json"
+      - "apps/**/package-lock.json"
+      - "services/**/requirements*.txt"
+      - "docker/docker-compose.yml"
+      - ".dockerignore"
+      - "proto/**"
+      - ".github/workflows/docker-build.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/**/Dockerfile"
+      - "services/**/Dockerfile"
+      - "apps/**/package.json"
+      - "apps/**/package-lock.json"
+      - "services/**/requirements*.txt"
+      - "docker/docker-compose.yml"
+      - ".dockerignore"
+      - "proto/**"
+      - ".github/workflows/docker-build.yml"
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-all:
+    name: build all images (default + full profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Validate compose YAML before eating the full build cost.
+      # Ignore the "variable not set" warnings from unbaked secrets —
+      # those are only used at runtime, not at build time.
+      - name: Validate compose file
+        run: docker compose -f docker/docker-compose.yml --profile full config --quiet
+
+      - name: Build all images
+        run: docker compose -f docker/docker-compose.yml --profile full build --pull

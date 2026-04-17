@@ -1,0 +1,47 @@
+name: orchestrator-tests
+
+# Vitest for apps/orchestrator. Path-filtered so dashboard-only or service-only
+# PRs don't trigger a Prisma generate + Node install for no reason.
+
+on:
+  pull_request:
+    paths:
+      - "apps/orchestrator/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/orchestrator-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/orchestrator/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/orchestrator-tests.yml"
+
+concurrency:
+  group: orchestrator-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      # Vitest imports from @prisma/client; without `prisma generate` the
+      # suite crashes with "Cannot find module .prisma/client".
+      - name: Generate Prisma client
+        run: npm run -w @droplet/orchestrator db:generate
+
+      - name: Run vitest
+        run: npm run -w @droplet/orchestrator test
