@@ -150,3 +150,53 @@ model FileContentChunk {
   @@unique([ncFileId, chunkIdx])
   @@index([userId])
 }
+
+// ── WARP-80: Device intelligence ──
+// Per-client-device registry (laptops, phones, smart bulbs, printers on the LAN).
+// Populated by the reconciler (WARP-81) from routing-service leases/ARP snapshots.
+// Primary key is the MAC address in canonical form (see src/lib/mac.ts).
+model NetworkDevice {
+  mac          String              @id
+  displayName  String?
+  icon         String?
+  notes        String?
+  vendor       String?
+  hostname     String?
+  lastIp       String?
+  firstSeen    DateTime            @default(now())
+  lastSeen     DateTime            @default(now())
+  isBlocked    Boolean             @default(false)
+  groups       DeviceGroup[]       @relation("DeviceGroups")
+  presenceDays DevicePresenceDay[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  @@index([lastSeen])
+  @@index([vendor])
+}
+
+// User-curated grouping (rooms, categories, etc.). Many-to-many with
+// NetworkDevice — a device can be in multiple groups (e.g. "Living Room"
+// and "Media"). Seeded with 5 default rooms by the migration.
+model DeviceGroup {
+  id        String          @id @default(cuid())
+  name      String          @unique
+  color     String?
+  icon      String?
+  devices   NetworkDevice[] @relation("DeviceGroups")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+}
+
+// Daily presence roll-up — one row per (device, calendar day) with the
+// number of minutes the device was seen. Powers the "who's home" and
+// presence-timeline dashboards without scanning per-minute lease data.
+model DevicePresenceDay {
+  mac         String
+  date        DateTime      @db.Date
+  seenMinutes Int           @default(0)
+  device      NetworkDevice @relation(fields: [mac], references: [mac], onDelete: Cascade)
+
+  @@id([mac, date])
+  @@index([date])
+}
