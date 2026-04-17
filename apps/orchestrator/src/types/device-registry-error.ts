@@ -8,11 +8,16 @@
  * foreign-key guard) flows through this class.
  *
  * Codes:
- *   - NOT_FOUND              — requested device or group does not exist (404)
- *   - GROUP_IN_USE           — attempted to delete a group that still has devices (409)
- *   - INVALID_ICON           — icon name is not in the allowlist (400)
- *   - INVALID_MAC            — MAC failed normalization (400)
- *   - DUPLICATE_GROUP_NAME   — unique-constraint violation on DeviceGroup.name (409)
+ *   - NOT_FOUND                — requested device or group does not exist (404)
+ *   - GROUP_IN_USE             — attempted to delete a group that still has devices (409)
+ *   - INVALID_ICON             — icon name is not in the allowlist (400)
+ *   - INVALID_MAC              — MAC failed normalization (400)
+ *   - DUPLICATE_GROUP_NAME     — unique-constraint violation on DeviceGroup.name (409)
+ *   - SCHEDULE_NOT_FOUND       — schedule id does not exist (404)
+ *   - SCHEDULE_INVALID_WINDOW  — window payload rejected (bad mask / minute range / wrap) (400)
+ *   - SCHEDULE_SUBJECT_MISMATCH — schedule subject (device vs group) does not match target (400)
+ *   - OVERRIDE_NOT_FOUND       — override id does not exist (404)
+ *   - OVERRIDE_INVALID_RANGE   — override start/end range is invalid (400)
  */
 
 export type DeviceRegistryErrorCode =

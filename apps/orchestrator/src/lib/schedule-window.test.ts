@@ -59,3 +59,26 @@ describe("isWindowActive", () => {
     expect(isWindowActive(w, at("2026-04-14T10:00:00"))).toBe(false); // Tue
   });
 });
+
+describe("isWindowActive edge cases", () => {
+  it("endMin=0 (midnight end) on a single day: active until 23:59, false at 00:00 next day", () => {
+    // "Mon 22:00-00:00" means active Mon 22:00-23:59. 00:00 Tue is NOT active.
+    const w: Window = { daysOfWeek: DAY.Mon, startMin: 22 * 60, endMin: 0 };
+    expect(isWindowActive(w, at("2026-04-13T22:30:00"))).toBe(true);   // Mon 22:30
+    expect(isWindowActive(w, at("2026-04-13T23:59:00"))).toBe(true);   // Mon 23:59
+    expect(isWindowActive(w, at("2026-04-14T00:00:00"))).toBe(false);  // Tue 00:00 — NOT active (wrap requires nowMin < endMin=0 which is impossible)
+  });
+
+  it("startMin=0 (midnight start) non-wrap: active from 00:00 inclusive", () => {
+    const w: Window = { daysOfWeek: DAY.Mon, startMin: 0, endMin: 6 * 60 };
+    expect(isWindowActive(w, at("2026-04-13T00:00:00"))).toBe(true);   // Mon midnight exact
+    expect(isWindowActive(w, at("2026-04-13T05:59:00"))).toBe(true);
+    expect(isWindowActive(w, at("2026-04-13T06:00:00"))).toBe(false);  // end boundary exclusive
+  });
+
+  it("wrap window at exact start minute is active", () => {
+    // Sun 21:00-07:00 at exactly Sun 21:00 is active
+    const w: Window = { daysOfWeek: DAY.Sun, startMin: 21 * 60, endMin: 7 * 60 };
+    expect(isWindowActive(w, at("2026-04-12T21:00:00"))).toBe(true);
+  });
+});
