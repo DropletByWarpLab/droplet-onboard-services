@@ -5,6 +5,7 @@ import * as Icons from "lucide-react";
 import type { EnrichedNetworkDevice, DevicePresenceDay } from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { IconPicker, type DeviceIconName } from "./IconPicker";
+import { GroupTypeahead } from "./GroupTypeahead";
 import { useDeviceMutations } from "@/lib/hooks/useDeviceMutations";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
 
@@ -219,9 +220,11 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
               </button>
             </span>
           ))}
-          <span className="type-caption-1 px-2 py-0.5 rounded-full border border-dashed border-separator text-label-tertiary">
-            + Add to group (WARP-85)
-          </span>
+          <GroupTypeahead
+            mac={mac}
+            currentGroups={data?.device.groups ?? []}
+            onError={setToast}
+          />
         </div>
       </div>
 

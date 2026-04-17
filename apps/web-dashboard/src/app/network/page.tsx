@@ -19,6 +19,7 @@ import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
+import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -440,6 +441,8 @@ function DevicesTab() {
   // so a `title` tooltip would vanish the moment the row hides. A floating
   // toast pinned to the viewport survives the hover-out.
   const [toast, setToast] = useState<string | null>(null);
+  // WARP-85: group manager dialog visibility.
+  const [groupManagerOpen, setGroupManagerOpen] = useState(false);
 
   const devicesSwr = useNetworkDevices({ onlineOnly });
   const groupsSwr = useNetworkGroups();
@@ -526,8 +529,7 @@ function DevicesTab() {
         </label>
         <button
           type="button"
-          // Wired in WARP-85 (group manager dialog).
-          onClick={() => {}}
+          onClick={() => setGroupManagerOpen(true)}
           className="dp-button-secondary text-sm"
         >
           Manage groups
@@ -602,6 +604,11 @@ function DevicesTab() {
           </button>
         </div>
       )}
+
+      <GroupManagerDialog
+        open={groupManagerOpen}
+        onClose={() => setGroupManagerOpen(false)}
+      />
     </div>
   );
 }
