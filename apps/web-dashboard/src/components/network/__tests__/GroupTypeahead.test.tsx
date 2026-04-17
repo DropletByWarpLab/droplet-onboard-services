@@ -120,6 +120,86 @@ describe("GroupTypeahead", () => {
     expect(createBtn).toBeInTheDocument();
   });
 
+  it("ArrowDown + Enter picks the highlighted existing group", async () => {
+    mockFetchOnceJson(fetchMock, {
+      groups: [
+        makeGroup({ id: "g1", name: "Living Room" }),
+        makeGroup({ id: "g2", name: "Office" }),
+      ],
+    });
+    renderTypeahead();
+
+    const input = (await screen.findByLabelText("Add to group")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "r" } });
+
+    // Both "Living Room" and "Office" (via "r" in... wait, "Office" has no r).
+    // "r" only matches "Living Room". Wait for the listbox to render.
+    await screen.findByRole("button", { name: "Living Room" });
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(input.getAttribute("aria-activedescendant")).toBe("gt-opt-0");
+    });
+    const firstOption = document.getElementById("gt-opt-0");
+    expect(firstOption?.getAttribute("aria-selected")).toBe("true");
+
+    mockFetchOnceJson(fetchMock, {});
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      const postCalls = fetchMock.mock.calls.filter(
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0].includes("/api/network/devices/") &&
+          c[0].endsWith("/groups") &&
+          c[1]?.method === "POST",
+      );
+      expect(postCalls).toHaveLength(1);
+      expect(JSON.parse(postCalls[0][1].body)).toEqual({ groupIds: ["g1"] });
+    });
+  });
+
+  it("Enter on highlighted Create option creates group then assigns", async () => {
+    mockFetchOnceJson(fetchMock, { groups: [] });
+    renderTypeahead();
+
+    const input = (await screen.findByLabelText("Add to group")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Lab" } });
+
+    // Wait for the Create option to render.
+    await screen.findByRole("button", { name: /Create .Lab./ });
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(input.getAttribute("aria-activedescendant")).toBe("gt-opt-0");
+    });
+
+    mockFetchOnceJson(fetchMock, { id: "new-lab", name: "Lab" });
+    mockFetchOnceJson(fetchMock, {});
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      const createCall = fetchMock.mock.calls.find(
+        (c) => c[0] === "/api/network/groups" && c[1]?.method === "POST",
+      );
+      expect(createCall).toBeTruthy();
+      expect(JSON.parse(createCall![1].body)).toEqual({ name: "Lab" });
+
+      const assignCall = fetchMock.mock.calls.find(
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0].includes("/api/network/devices/") &&
+          c[0].endsWith("/groups") &&
+          c[1]?.method === "POST",
+      );
+      expect(assignCall).toBeTruthy();
+      expect(JSON.parse(assignCall![1].body)).toEqual({ groupIds: ["new-lab"] });
+    });
+  });
+
   it("clicking Create POSTs /api/network/groups then POSTs device/:mac/groups", async () => {
     mockFetchOnceJson(fetchMock, { groups: [] });
     renderTypeahead();
