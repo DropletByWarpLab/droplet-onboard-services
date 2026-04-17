@@ -776,8 +776,34 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   router.post("/network/overrides", async (req, res, next) => {
     try {
       const body = { ...(req.body ?? {}) };
-      if (body.startAt) body.startAt = new Date(body.startAt);
-      if (body.endAt) body.endAt = new Date(body.endAt);
+      // Guard against `new Date("not-a-date")` silently yielding Invalid Date —
+      // `getTime()` on Invalid Date returns NaN, which makes every range
+      // comparison in the service layer (`endAt <= startAt`) resolve false
+      // and write a corrupt row. Reject at the edge before the service sees it.
+      if (body.startAt !== undefined) {
+        const d = new Date(body.startAt);
+        if (Number.isNaN(d.getTime())) {
+          return res.status(400).json({
+            error: DeviceRegistryError.invalidDate(
+              "startAt",
+              String(body.startAt),
+            ).toJSON(),
+          });
+        }
+        body.startAt = d;
+      }
+      if (body.endAt !== undefined) {
+        const d = new Date(body.endAt);
+        if (Number.isNaN(d.getTime())) {
+          return res.status(400).json({
+            error: DeviceRegistryError.invalidDate(
+              "endAt",
+              String(body.endAt),
+            ).toJSON(),
+          });
+        }
+        body.endAt = d;
+      }
       const override = await scheduleApi.createOverride(body);
       res.status(201).json({ override });
     } catch (err) {
@@ -796,11 +822,21 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
 
   router.get("/network/schedule-events", async (req, res, next) => {
     try {
+      let since: Date | undefined;
+      if (typeof req.query.since === "string") {
+        const d = new Date(req.query.since);
+        if (Number.isNaN(d.getTime())) {
+          return res.status(400).json({
+            error: DeviceRegistryError.invalidDate(
+              "since",
+              req.query.since,
+            ).toJSON(),
+          });
+        }
+        since = d;
+      }
       const events = await scheduleApi.listScheduleEvents({
-        since:
-          typeof req.query.since === "string"
-            ? new Date(req.query.since)
-            : undefined,
+        since,
         limit: req.query.limit ? Number(req.query.limit) : undefined,
       });
       res.json({ events });

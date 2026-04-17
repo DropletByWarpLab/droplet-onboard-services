@@ -35,6 +35,7 @@ import { DeviceRegistryError } from "../types/device-registry-error.js";
 
 function mapPrismaNotFound<T>(
   what: "Schedule" | "Override" | "Device",
+  id: string,
   fn: () => Promise<T>,
 ): Promise<T> {
   return fn().catch((err) => {
@@ -43,12 +44,12 @@ function mapPrismaNotFound<T>(
       err.code === "P2025"
     ) {
       if (what === "Schedule") {
-        throw DeviceRegistryError.scheduleNotFound("unknown");
+        throw DeviceRegistryError.scheduleNotFound(id);
       }
       if (what === "Override") {
-        throw DeviceRegistryError.overrideNotFound("unknown");
+        throw DeviceRegistryError.overrideNotFound(id);
       }
-      throw DeviceRegistryError.notFound(what);
+      throw DeviceRegistryError.notFound(`${what} ${id}`);
     }
     throw err;
   });
@@ -217,7 +218,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
     }
     if (patch.windows) validateWindows(patch.windows);
 
-    return mapPrismaNotFound("Schedule", () =>
+    return mapPrismaNotFound("Schedule", id, () =>
       p.$transaction(async (tx: any) => {
         if (patch.windows) {
           await tx.scheduleWindow.deleteMany({ where: { scheduleId: id } });
@@ -236,7 +237,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
   }
 
   async function deleteSchedule(id: string) {
-    return mapPrismaNotFound("Schedule", () =>
+    return mapPrismaNotFound("Schedule", id, () =>
       p.schedule.delete({ where: { id } }),
     );
   }
@@ -282,7 +283,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
   }
 
   async function cancelOverride(id: string) {
-    return mapPrismaNotFound("Override", () =>
+    return mapPrismaNotFound("Override", id, () =>
       p.scheduleOverride.delete({ where: { id } }),
     );
   }
@@ -297,7 +298,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
   }
 
   async function setManualBlock(mac: string, blocked: boolean) {
-    return mapPrismaNotFound("Device", () =>
+    return mapPrismaNotFound("Device", mac, () =>
       p.networkDevice.update({
         where: { mac },
         data: { manualBlock: blocked },

@@ -572,6 +572,33 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe("OVERRIDE_INVALID_RANGE");
     });
+
+    it("400s with INVALID_DATE when endAt is not a valid ISO date", async () => {
+      const res = await request(app)
+        .post("/api/network/overrides")
+        .send({
+          subjectType: "device",
+          deviceMac: "AA:BB:CC:DD:EE:FF",
+          action: "allow",
+          endAt: "garbage",
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("INVALID_DATE");
+    });
+
+    it("400s with INVALID_DATE when startAt is not a valid ISO date", async () => {
+      const res = await request(app)
+        .post("/api/network/overrides")
+        .send({
+          subjectType: "device",
+          deviceMac: "AA:BB:CC:DD:EE:FF",
+          action: "allow",
+          startAt: "nope",
+          endAt: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("INVALID_DATE");
+    });
   });
 
   // ---------- GET /network/overrides ----------
@@ -671,6 +698,14 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
       expect(res.status).toBe(200);
       expect(res.body.events).toHaveLength(1);
       expect(res.body.events[0].id).toBe("e-new");
+    });
+
+    it("400s with INVALID_DATE when ?since= is not a valid ISO date", async () => {
+      const res = await request(app).get(
+        "/api/network/schedule-events?since=garbage",
+      );
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("INVALID_DATE");
     });
   });
 

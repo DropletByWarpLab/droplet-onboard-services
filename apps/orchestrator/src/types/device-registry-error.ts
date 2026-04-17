@@ -18,6 +18,7 @@
  *   - SCHEDULE_SUBJECT_MISMATCH — schedule subject (device vs group) does not match target (400)
  *   - OVERRIDE_NOT_FOUND       — override id does not exist (404)
  *   - OVERRIDE_INVALID_RANGE   — override start/end range is invalid (400)
+ *   - INVALID_DATE             — ISO-date input failed Date parsing (400)
  */
 
 export type DeviceRegistryErrorCode =
@@ -30,7 +31,8 @@ export type DeviceRegistryErrorCode =
   | "SCHEDULE_INVALID_WINDOW"
   | "SCHEDULE_SUBJECT_MISMATCH"
   | "OVERRIDE_NOT_FOUND"
-  | "OVERRIDE_INVALID_RANGE";
+  | "OVERRIDE_INVALID_RANGE"
+  | "INVALID_DATE";
 
 export class DeviceRegistryError extends Error {
   readonly code: DeviceRegistryErrorCode;
@@ -109,6 +111,14 @@ export class DeviceRegistryError extends Error {
     return new DeviceRegistryError(
       "OVERRIDE_INVALID_RANGE",
       `Invalid override range: ${detail}`,
+      { status: 400 },
+    );
+  }
+
+  static invalidDate(field: string, value: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "INVALID_DATE",
+      `Invalid ISO date for ${field}: ${value}`,
       { status: 400 },
     );
   }
