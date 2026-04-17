@@ -191,7 +191,10 @@ export function createNetworkDeviceService(
     if (existing) {
       throw DeviceRegistryError.duplicateGroupName(name);
     }
-    const data: Record<string, string> = { name };
+    // Use Prisma's generated input type so optional scalar columns line up
+    // with the `.create()` signature — `Record<string, string>` is not
+    // assignable to `DeviceGroupCreateInput`.
+    const data: Prisma.DeviceGroupCreateInput = { name };
     if (color !== undefined) data.color = color;
     if (icon !== undefined) data.icon = icon;
     return prisma.deviceGroup.create({ data });
@@ -209,9 +212,9 @@ export function createNetworkDeviceService(
         throw DeviceRegistryError.duplicateGroupName(patch.name);
       }
     }
-    // No null values are ever produced by this patch shape, so the
-    // record's value type is plain `string`.
-    const data: Record<string, string> = {};
+    // Use Prisma's generated update input so only declared columns are
+    // settable and optional patch fields line up with the update signature.
+    const data: Prisma.DeviceGroupUpdateInput = {};
     if (patch.name !== undefined) data.name = patch.name;
     if (patch.color !== undefined) data.color = patch.color;
     if (patch.icon !== undefined) data.icon = patch.icon;

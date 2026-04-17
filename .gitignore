@@ -24,3 +24,6 @@ docker/certs/
 
 # Device-specific secrets materialized for Docker secret mounts (created by setup.sh)
 docker/secrets/
+
+# Brainstorming companion session state (mockups, event logs)
+.superpowers/

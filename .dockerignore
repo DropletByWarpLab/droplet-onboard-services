@@ -1,0 +1,42 @@
+# Root-level .dockerignore — applies to any docker build whose context
+# is the monorepo root (currently services/file-indexer, see
+# docker/docker-compose.yml). Keeps the build context small and avoids
+# shipping secrets or per-service builds into unrelated images.
+
+# Node / npm
+node_modules
+**/node_modules
+npm-debug.log
+.turbo
+
+# Python
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.pytest_cache
+**/.mypy_cache
+
+# Git / editor
+.git
+.gitignore
+.idea
+.vscode
+
+# Secrets + device-specific files (never bake into an image)
+.env
+.env.*
+docker/secrets
+docker/certs
+docker/mosquitto_passwd
+docker/mosquitto_passwd_dir
+
+# Per-app build output
+apps/*/dist
+apps/*/.next
+apps/*/coverage
+services/*/dist
+services/*/coverage
+
+# Plan/session artifacts
+.superpowers
+.claude

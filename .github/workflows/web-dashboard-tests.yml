@@ -1,0 +1,42 @@
+name: web-dashboard-tests
+
+# Vitest for apps/web-dashboard. Path-filtered so only dashboard-relevant
+# changes trigger a run.
+
+on:
+  pull_request:
+    paths:
+      - "apps/web-dashboard/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/web-dashboard-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/web-dashboard/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/web-dashboard-tests.yml"
+
+concurrency:
+  group: web-dashboard-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      - name: Run vitest
+        run: npm run -w @droplet/web-dashboard test

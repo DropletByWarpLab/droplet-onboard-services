@@ -1,0 +1,29 @@
+name: setup-tests
+
+# Fast unit tests for scripts/setup.sh and scripts/lib/* — secret generation,
+# .env permissions, idempotency, compose.sh psql wiring. < 5s, no Docker.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "tests/setup.test.sh"
+      - ".github/workflows/setup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "tests/setup.test.sh"
+      - ".github/workflows/setup-tests.yml"
+
+concurrency:
+  group: setup-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run setup unit tests
+        run: bash tests/setup.test.sh

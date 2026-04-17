@@ -136,8 +136,11 @@ sync_openwrt_password_secret() {
   local password="${OPENWRT_PASSWORD:-}"
 
   # Fall back to reading .env if the value isn't already in the shell environment.
+  # `|| true` keeps a missing OPENWRT_PASSWORD line from tripping `set -euo pipefail`
+  # (grep exits 1 on no match, which with pipefail would kill setup.sh mid-flight).
+  # The function already handles an empty password below.
   if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
-    password=$(grep -E '^OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2-)
+    password=$(grep -E '^OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
   fi
 
   mkdir -p "$secret_dir"

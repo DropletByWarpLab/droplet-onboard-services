@@ -1,0 +1,80 @@
+name: setup-e2e
+
+# End-to-end smoke test of ./scripts/setup.sh up to (but not including)
+# `docker compose up`. Verifies a fresh device can actually be provisioned
+# by the setup script: preflight → secrets → image build. Catches
+# regressions in the setup flow itself, not just individual Dockerfiles
+# (which the docker-build workflow covers separately).
+
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "docker/docker-compose.yml"
+      - "apps/**/Dockerfile"
+      - "services/**/Dockerfile"
+      - ".github/workflows/setup-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "docker/docker-compose.yml"
+      - "apps/**/Dockerfile"
+      - "services/**/Dockerfile"
+      - ".github/workflows/setup-e2e.yml"
+
+concurrency:
+  group: setup-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest has ~14GB free. `docker compose --profile full build`
+      # (invoked by setup.sh in the build phase) fills that before BuildKit
+      # finishes — the ai-gateway image alone pulls ~5GB of CUDA/NCCL libs.
+      # Strip the preinstalled toolchains we don't use to reclaim ~25GB.
+      # Mirrors the same step in docker-build.yml.
+      - name: Free disk space
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --skip-docker   → CI runner has Docker; also tells preflight to skip
+      #                   the sudo prompt (unattended path).
+      # --skip-drivers  → `modprobe uvcvideo` etc. is blocked inside the GHA
+      #                   runner sandbox; the setup script would otherwise
+      #                   exit 1 in Phase 3 before ever reaching image builds.
+      # --skip-start    → no real router/Nextcloud account, so don't try to
+      #                   bring the stack up.
+      - name: Run setup.sh (preflight + secrets + build)
+        run: ./scripts/setup.sh --skip-docker --skip-drivers --skip-start --verbose
+
+      - name: Verify .env was generated correctly
+        run: |
+          test -f .env || { echo "::error::.env not produced by setup.sh"; exit 1; }
+          for var in POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD \
+                     NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY; do
+            grep -q "^${var}=" .env || { echo "::error::missing $var in .env"; exit 1; }
+          done
+          perms=$(stat -c "%a" .env)
+          [ "$perms" = "600" ] || { echo "::error::.env perms are $perms, expected 600"; exit 1; }
