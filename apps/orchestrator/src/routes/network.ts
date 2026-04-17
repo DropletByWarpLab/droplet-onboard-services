@@ -34,11 +34,49 @@ import {
   confirmNetworkCommand,
   getNetworkAuditLog,
 } from "../services/network-safety.service.js";
+import { createNetworkDeviceService } from "../services/network-device.service.js";
+import * as openwrt from "../services/openwrt.client.js";
+import { DeviceRegistryError } from "../types/device-registry-error.js";
 
 const logger = pino({ name: "network-routes" });
 
 export function createNetworkRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // --- WARP-82: device-registry service ---
+  // Fed a live routing-service snapshot (DHCP + wireless) so listDevices can
+  // enrich the NetworkDevice rows with current signal strength. If the
+  // router is unreachable we fail soft to an empty snapshot — the
+  // dashboard still renders last-known state, just without signal bars.
+  const networkDeviceService = createNetworkDeviceService(prisma, async () => {
+    try {
+      const [leases, wirelessClients] = await Promise.all([
+        openwrt.fetchDhcpLeases().catch(() => []),
+        openwrt.fetchWirelessClients().catch(() => []),
+      ]);
+      return {
+        leases: leases.map((l) => ({
+          mac: l.macaddr,
+          ip: l.ipaddr,
+          hostname: l.hostname,
+        })),
+        wirelessClients: wirelessClients.map((w) => ({
+          mac: w.mac,
+          signal: w.signal,
+        })),
+      };
+    } catch {
+      return { leases: [], wirelessClients: [] };
+    }
+  });
+
+  function handleRegistryError(err: unknown, res: any, next: any): void {
+    if (err instanceof DeviceRegistryError) {
+      res.status(err.status ?? 400).json({ error: err.toJSON() });
+      return;
+    }
+    next(err);
+  }
 
   // --- Network overview ---
   router.get("/network/status", async (_req, res, next) => {
@@ -57,13 +95,25 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // --- Connected devices ---
-  router.get("/network/devices", async (_req, res, next) => {
+  // --- WARP-82: enriched device registry ---
+  // Replaces the old DHCP-lease passthrough with the joined NetworkDevice
+  // view (displayName, icon, notes, groups, online flag, signal). Callers
+  // that still want the raw connected-devices snapshot can opt in via
+  // `?legacy=1` — kept for one release while clients migrate.
+  router.get("/network/devices", async (req, res, next) => {
     try {
-      const devices = await getConnectedDevices();
+      if (req.query.legacy === "1") {
+        const devices = await getConnectedDevices();
+        return res.json({ devices });
+      }
+      const devices = await networkDeviceService.listDevices({
+        onlineOnly: req.query.onlineOnly === "1",
+        groupId:
+          typeof req.query.groupId === "string" ? req.query.groupId : undefined,
+      });
       res.json({ devices });
     } catch (err) {
-      next(err);
+      handleRegistryError(err, res, next);
     }
   });
 
@@ -504,6 +554,141 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
       res.json({ logs });
     } catch (err) {
       next(err);
+    }
+  });
+
+  // --- WARP-82: single device + mutations ---
+
+  router.get("/network/devices/:mac", async (req, res, next) => {
+    try {
+      const result = await networkDeviceService.getDevice(req.params.mac);
+      res.json(result);
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  router.patch("/network/devices/:mac", async (req, res, next) => {
+    try {
+      const { displayName, icon, notes } = req.body ?? {};
+      const patch: { displayName?: string; icon?: string; notes?: string } = {};
+      if (displayName !== undefined) {
+        if (typeof displayName !== "string") {
+          return res.status(400).json({ error: "displayName must be a string" });
+        }
+        patch.displayName = displayName;
+      }
+      if (icon !== undefined) {
+        if (typeof icon !== "string") {
+          return res.status(400).json({ error: "icon must be a string" });
+        }
+        patch.icon = icon;
+      }
+      if (notes !== undefined) {
+        if (typeof notes !== "string") {
+          return res.status(400).json({ error: "notes must be a string" });
+        }
+        patch.notes = notes;
+      }
+      const device = await networkDeviceService.updateDevice(req.params.mac, patch);
+      res.json({ device });
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  router.post("/network/devices/:mac/groups", async (req, res, next) => {
+    try {
+      const { groupIds } = req.body ?? {};
+      if (!Array.isArray(groupIds) || !groupIds.every((x) => typeof x === "string")) {
+        return res
+          .status(400)
+          .json({ error: "Body must be { groupIds: string[] }" });
+      }
+      const device = await networkDeviceService.assignDeviceGroups(
+        req.params.mac,
+        groupIds,
+      );
+      res.json({ device });
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  router.delete("/network/devices/:mac", async (req, res, next) => {
+    try {
+      await networkDeviceService.forgetDevice(req.params.mac);
+      res.status(204).end();
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  // --- WARP-82: groups ---
+
+  router.get("/network/groups", async (_req, res, next) => {
+    try {
+      const groups = await networkDeviceService.listGroups();
+      res.json({ groups });
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  router.post("/network/groups", async (req, res, next) => {
+    try {
+      const { name, color, icon } = req.body ?? {};
+      if (typeof name !== "string" || name.trim().length === 0) {
+        return res.status(400).json({ error: "name is required" });
+      }
+      if (color !== undefined && typeof color !== "string") {
+        return res.status(400).json({ error: "color must be a string" });
+      }
+      if (icon !== undefined && typeof icon !== "string") {
+        return res.status(400).json({ error: "icon must be a string" });
+      }
+      const group = await networkDeviceService.createGroup(name, color, icon);
+      res.status(201).json({ group });
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  router.patch("/network/groups/:id", async (req, res, next) => {
+    try {
+      const { name, color, icon } = req.body ?? {};
+      const patch: { name?: string; color?: string; icon?: string } = {};
+      if (name !== undefined) {
+        if (typeof name !== "string") {
+          return res.status(400).json({ error: "name must be a string" });
+        }
+        patch.name = name;
+      }
+      if (color !== undefined) {
+        if (typeof color !== "string") {
+          return res.status(400).json({ error: "color must be a string" });
+        }
+        patch.color = color;
+      }
+      if (icon !== undefined) {
+        if (typeof icon !== "string") {
+          return res.status(400).json({ error: "icon must be a string" });
+        }
+        patch.icon = icon;
+      }
+      const group = await networkDeviceService.renameGroup(req.params.id, patch);
+      res.json({ group });
+    } catch (err) {
+      handleRegistryError(err, res, next);
+    }
+  });
+
+  router.delete("/network/groups/:id", async (req, res, next) => {
+    try {
+      await networkDeviceService.deleteGroup(req.params.id);
+      res.status(204).end();
+    } catch (err) {
+      handleRegistryError(err, res, next);
     }
   });
 
