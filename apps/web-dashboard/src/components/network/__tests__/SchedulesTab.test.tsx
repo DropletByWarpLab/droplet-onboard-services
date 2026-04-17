@@ -85,7 +85,7 @@ describe("SchedulesTab", () => {
     });
   });
 
-  it("opens the editor stub when '+ New schedule' is clicked", async () => {
+  it("opens the editor modal when '+ New schedule' is clicked", async () => {
     mockAllEndpoints([]);
     renderTab();
     await waitFor(() =>
@@ -93,12 +93,15 @@ describe("SchedulesTab", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /new schedule/i }));
     expect(
-      screen.getByText(/Schedule editor coming soon \(WARP-96\)/),
+      screen.getByRole("dialog", { name: /edit schedule/i }),
     ).toBeInTheDocument();
-    // Close the stub
-    fireEvent.click(screen.getByRole("button", { name: /close/i }));
     expect(
-      screen.queryByText(/Schedule editor coming soon \(WARP-96\)/),
+      screen.getByRole("heading", { name: /new schedule/i }),
+    ).toBeInTheDocument();
+    // Close via Cancel
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(
+      screen.queryByRole("dialog", { name: /edit schedule/i }),
     ).not.toBeInTheDocument();
   });
 });

@@ -1,0 +1,211 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { SWRConfig } from "swr";
+import { ScheduleEditorModal } from "../ScheduleEditorModal";
+import type { Schedule } from "@/lib/types";
+
+type FetchMock = ReturnType<typeof vi.fn>;
+
+function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
+  return {
+    id: "s1",
+    name: "Bedtime",
+    enabled: true,
+    subjectType: "group",
+    groupId: "kids",
+    windows: [{ id: "w1", daysOfWeek: 31, startMin: 21 * 60, endMin: 7 * 60 }],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function renderModal(
+  opts: {
+    scheduleId?: string | "new" | null;
+    onClose?: () => void;
+    schedules?: Schedule[];
+  } = {},
+) {
+  const onClose = opts.onClose ?? vi.fn();
+  return {
+    onClose,
+    ...render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <ScheduleEditorModal
+          scheduleId={opts.scheduleId ?? "new"}
+          onClose={onClose}
+        />
+      </SWRConfig>,
+    ),
+  };
+}
+
+function mockEndpoints(fetchMock: FetchMock, schedules: Schedule[]) {
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url.startsWith("/api/network/schedules") && (!init || init.method === undefined || init.method === "GET"))
+      return { ok: true, status: 200, json: async () => ({ schedules }) };
+    if (url.startsWith("/api/network/devices"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          devices: [
+            {
+              mac: "aa:bb",
+              displayName: "iPad",
+              icon: null,
+              notes: null,
+              vendor: null,
+              hostname: "ipad",
+              lastIp: null,
+              firstSeen: "",
+              lastSeen: "",
+              isBlocked: false,
+              online: true,
+              groups: [],
+            },
+          ],
+        }),
+      };
+    if (url.startsWith("/api/network/groups"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          groups: [{ id: "kids", name: "Kids", _count: { devices: 2 } }],
+        }),
+      };
+    return { ok: true, status: 200, json: async () => ({ schedule: { id: "s1" } }) };
+  });
+}
+
+describe("ScheduleEditorModal", () => {
+  let fetchMock: FetchMock;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("renders pre-filled fields for an existing schedule", async () => {
+    mockEndpoints(fetchMock, [makeSchedule()]);
+    renderModal({ scheduleId: "s1" });
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/^name$/i) as HTMLInputElement).value,
+      ).toBe("Bedtime");
+    });
+  });
+
+  it("subject selector is disabled when editing an existing schedule", async () => {
+    mockEndpoints(fetchMock, [makeSchedule()]);
+    renderModal({ scheduleId: "s1" });
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/^name$/i) as HTMLInputElement).value,
+      ).toBe("Bedtime");
+    });
+    const deviceRadio = screen.getByRole("radio", { name: /device/i });
+    const groupRadio = screen.getByRole("radio", { name: /^group$/i });
+    expect(deviceRadio).toBeDisabled();
+    expect(groupRadio).toBeDisabled();
+    // The dropdown for the current subject type should also be disabled.
+    expect(screen.getByRole("combobox", { name: /^group$/i })).toBeDisabled();
+  });
+
+  it("ESC key closes the modal (calls onClose)", async () => {
+    mockEndpoints(fetchMock, []);
+    const onClose = vi.fn();
+    renderModal({ scheduleId: "new", onClose });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("click on backdrop closes the modal", () => {
+    mockEndpoints(fetchMock, []);
+    const onClose = vi.fn();
+    renderModal({ scheduleId: "new", onClose });
+    fireEvent.click(screen.getByTestId("schedule-editor-backdrop"));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("Save on update path calls PATCH without subject fields", async () => {
+    mockEndpoints(fetchMock, [makeSchedule()]);
+    renderModal({ scheduleId: "s1" });
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/^name$/i) as HTMLInputElement).value,
+      ).toBe("Bedtime");
+    });
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: "Bedtime v2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        (c) =>
+          c[0] === "/api/network/schedules/s1" &&
+          (c[1]?.method === "PATCH"),
+      );
+      expect(call).toBeDefined();
+      const body = JSON.parse(call![1].body);
+      expect(body.name).toBe("Bedtime v2");
+      expect(body).not.toHaveProperty("subjectType");
+      expect(body).not.toHaveProperty("groupId");
+      expect(body).not.toHaveProperty("deviceMac");
+    });
+  });
+
+  it("Save with a typed error shows a toast and keeps the form open", async () => {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/network/schedules/s1") && init?.method === "PATCH") {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: { code: "SCHEDULE_INVALID_WINDOW", message: "bad" },
+          }),
+        };
+      }
+      if (url.startsWith("/api/network/schedules"))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ schedules: [makeSchedule()] }),
+        };
+      if (url.startsWith("/api/network/devices"))
+        return { ok: true, status: 200, json: async () => ({ devices: [] }) };
+      if (url.startsWith("/api/network/groups"))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            groups: [{ id: "kids", name: "Kids", _count: { devices: 0 } }],
+          }),
+        };
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    const onClose = vi.fn();
+    renderModal({ scheduleId: "s1", onClose });
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/^name$/i) as HTMLInputElement).value,
+      ).toBe("Bedtime");
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /check your schedule windows/i,
+      );
+    });
+    expect(onClose).not.toHaveBeenCalled();
+    // Form still open.
+    expect(
+      screen.getByRole("dialog", { name: /edit schedule/i }),
+    ).toBeInTheDocument();
+  });
+});
