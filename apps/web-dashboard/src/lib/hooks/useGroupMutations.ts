@@ -1,5 +1,6 @@
 "use client";
 import { useSWRConfig } from "swr";
+import { apiFetch } from "./apiFetch";
 
 // WARP-85: friendly toast copy for typed errors from the group CRUD endpoints.
 // The orchestrator returns `{ error: { code, message } }` on failures; we map
@@ -18,24 +19,6 @@ export function groupToastForError(err: unknown, fallback = "Something went wron
     return GROUP_TOAST_COPY[code] ?? fallback;
   }
   return fallback;
-}
-
-type TypedError = { code: string; message: string; status?: number };
-
-async function apiFetch(path: string, init?: RequestInit): Promise<unknown> {
-  const r = await fetch(path, init);
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const typed =
-      (body as { error?: TypedError })?.error ?? { code: "UNKNOWN", message: `HTTP ${r.status}` };
-    const e: Error & { code?: string; status?: number } = new Error(
-      typed.message ?? `HTTP ${r.status}`,
-    );
-    e.code = typed.code;
-    e.status = r.status;
-    throw e;
-  }
-  return body;
 }
 
 export function useGroupMutations() {

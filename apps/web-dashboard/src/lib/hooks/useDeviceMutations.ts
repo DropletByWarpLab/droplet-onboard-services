@@ -1,8 +1,7 @@
 "use client";
 import { useSWRConfig } from "swr";
 import type { EnrichedNetworkDevice } from "@/lib/types";
-
-type TypedError = { code: string; message: string; status?: number };
+import { apiFetch } from "./apiFetch";
 
 const TOAST_COPY: Record<string, string> = {
   INVALID_ICON: "Pick a different icon",
@@ -15,28 +14,12 @@ const TOAST_COPY: Record<string, string> = {
   REQUIRES_CONFIRMATION: "This action requires confirmation — not wired yet",
 };
 
-export function toastForError(err: TypedError | unknown, fallback = "Something went wrong"): string {
+export function toastForError(err: unknown, fallback = "Something went wrong"): string {
   if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
     const code = (err as { code: string }).code;
     return TOAST_COPY[code] ?? fallback;
   }
   return fallback;
-}
-
-async function apiFetch(path: string, init?: RequestInit): Promise<unknown> {
-  const r = await fetch(path, init);
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const typed =
-      (body as { error?: TypedError })?.error ?? { code: "UNKNOWN", message: `HTTP ${r.status}` };
-    const e: Error & { code?: string; status?: number } = new Error(
-      typed.message ?? `HTTP ${r.status}`,
-    );
-    e.code = typed.code;
-    e.status = r.status;
-    throw e;
-  }
-  return body;
 }
 
 export function useDeviceMutations() {
