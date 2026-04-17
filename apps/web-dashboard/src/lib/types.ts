@@ -480,3 +480,53 @@ export interface EnrichedNetworkDevice {
 export interface DeviceGroupWithCount extends DeviceGroupRef {
   _count: { devices: number };
 }
+
+// --- WARP-95: schedule types ---
+
+export interface ScheduleWindow {
+  id: string;
+  /** Day-of-week bitmask: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64. */
+  daysOfWeek: number;
+  /** Start minute-of-day, [0, 1440). */
+  startMin: number;
+  /** End minute-of-day, [0, 1440). If endMin <= startMin, window wraps past midnight. */
+  endMin: number;
+}
+
+export interface Schedule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  subjectType: "device" | "group";
+  deviceMac?: string;
+  groupId?: string;
+  windows: ScheduleWindow[];
+  lastFiredAt?: string;
+  nextTransitionAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleOverride {
+  id: string;
+  subjectType: "device" | "group";
+  deviceMac?: string;
+  groupId?: string;
+  action: "allow" | "block";
+  startAt: string;
+  endAt: string;
+  note?: string;
+  createdAt: string;
+}
+
+export interface ScheduleEvent {
+  id: string;
+  scheduleId?: string;
+  overrideId?: string;
+  subjectType: "device" | "group";
+  deviceMac?: string;
+  groupId?: string;
+  transition: "blocked" | "unblocked";
+  reason: string;
+  occurredAt: string;
+}
