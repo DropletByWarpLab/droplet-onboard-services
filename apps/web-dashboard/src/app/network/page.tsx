@@ -18,6 +18,7 @@ import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
+import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -432,8 +433,8 @@ function DevicesTab() {
   const [search, setSearch] = useState("");
   const [onlineOnly, setOnlineOnly] = useState(false);
   const [sort, setSort] = useState<DeviceSort>("name");
-  // WARP-84 will render a detail panel off this state.
-  const [, setOpenMac] = useState<string | null>(null);
+  // WARP-84: render a detail panel off this state.
+  const [openMac, setOpenMac] = useState<string | null>(null);
 
   const devicesSwr = useNetworkDevices({ onlineOnly });
   const groupsSwr = useNetworkGroups();
@@ -572,6 +573,10 @@ function DevicesTab() {
             />
           )}
         </>
+      )}
+
+      {openMac && (
+        <DeviceDetailPanel mac={openMac} onClose={() => setOpenMac(null)} />
       )}
     </div>
   );
