@@ -8,11 +8,16 @@
  * foreign-key guard) flows through this class.
  *
  * Codes:
- *   - NOT_FOUND              — requested device or group does not exist (404)
- *   - GROUP_IN_USE           — attempted to delete a group that still has devices (409)
- *   - INVALID_ICON           — icon name is not in the allowlist (400)
- *   - INVALID_MAC            — MAC failed normalization (400)
- *   - DUPLICATE_GROUP_NAME   — unique-constraint violation on DeviceGroup.name (409)
+ *   - NOT_FOUND                — requested device or group does not exist (404)
+ *   - GROUP_IN_USE             — attempted to delete a group that still has devices (409)
+ *   - INVALID_ICON             — icon name is not in the allowlist (400)
+ *   - INVALID_MAC              — MAC failed normalization (400)
+ *   - DUPLICATE_GROUP_NAME     — unique-constraint violation on DeviceGroup.name (409)
+ *   - SCHEDULE_NOT_FOUND       — schedule id does not exist (404)
+ *   - SCHEDULE_INVALID_WINDOW  — window payload rejected (bad mask / minute range / wrap) (400)
+ *   - SCHEDULE_SUBJECT_MISMATCH — schedule subject (device vs group) does not match target (400)
+ *   - OVERRIDE_NOT_FOUND       — override id does not exist (404)
+ *   - OVERRIDE_INVALID_RANGE   — override start/end range is invalid (400)
  */
 
 export type DeviceRegistryErrorCode =
@@ -20,7 +25,12 @@ export type DeviceRegistryErrorCode =
   | "GROUP_IN_USE"
   | "INVALID_ICON"
   | "INVALID_MAC"
-  | "DUPLICATE_GROUP_NAME";
+  | "DUPLICATE_GROUP_NAME"
+  | "SCHEDULE_NOT_FOUND"
+  | "SCHEDULE_INVALID_WINDOW"
+  | "SCHEDULE_SUBJECT_MISMATCH"
+  | "OVERRIDE_NOT_FOUND"
+  | "OVERRIDE_INVALID_RANGE";
 
 export class DeviceRegistryError extends Error {
   readonly code: DeviceRegistryErrorCode;
@@ -65,6 +75,42 @@ export class DeviceRegistryError extends Error {
     return new DeviceRegistryError("GROUP_IN_USE", `Group ${id} still has devices`, {
       status: 409,
     });
+  }
+
+  static scheduleNotFound(id: string): DeviceRegistryError {
+    return new DeviceRegistryError("SCHEDULE_NOT_FOUND", `Schedule ${id} not found`, {
+      status: 404,
+    });
+  }
+
+  static scheduleInvalidWindow(detail: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "SCHEDULE_INVALID_WINDOW",
+      `Invalid schedule window: ${detail}`,
+      { status: 400 },
+    );
+  }
+
+  static scheduleSubjectMismatch(detail: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "SCHEDULE_SUBJECT_MISMATCH",
+      `Schedule subject mismatch: ${detail}`,
+      { status: 400 },
+    );
+  }
+
+  static overrideNotFound(id: string): DeviceRegistryError {
+    return new DeviceRegistryError("OVERRIDE_NOT_FOUND", `Override ${id} not found`, {
+      status: 404,
+    });
+  }
+
+  static overrideInvalidRange(detail: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "OVERRIDE_INVALID_RANGE",
+      `Invalid override range: ${detail}`,
+      { status: 400 },
+    );
   }
 
   /** Shape sent over the wire. Omits `status` when unset so downstream

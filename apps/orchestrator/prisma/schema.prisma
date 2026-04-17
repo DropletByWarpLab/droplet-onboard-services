@@ -166,8 +166,11 @@ model NetworkDevice {
   firstSeen    DateTime            @default(now())
   lastSeen     DateTime            @default(now())
   isBlocked    Boolean             @default(false)
+  manualBlock  Boolean             @default(false)
   groups       DeviceGroup[]       @relation("DeviceGroups")
   presenceDays DevicePresenceDay[]
+  schedules    Schedule[]          @relation("DeviceSchedules")
+  overrides    ScheduleOverride[]  @relation("DeviceOverrides")
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
 
@@ -179,13 +182,15 @@ model NetworkDevice {
 // NetworkDevice — a device can be in multiple groups (e.g. "Living Room"
 // and "Media"). Seeded with 5 default rooms by the migration.
 model DeviceGroup {
-  id        String          @id @default(cuid())
-  name      String          @unique
+  id        String             @id @default(cuid())
+  name      String             @unique
   color     String?
   icon      String?
-  devices   NetworkDevice[] @relation("DeviceGroups")
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  devices   NetworkDevice[]    @relation("DeviceGroups")
+  schedules Schedule[]         @relation("GroupSchedules")
+  overrides ScheduleOverride[] @relation("GroupOverrides")
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
 }
 
 // Daily presence roll-up — one row per (device, calendar day) with the
@@ -199,4 +204,79 @@ model DevicePresenceDay {
 
   @@id([mac, date])
   @@index([date])
+}
+
+// ── WARP-92: Phase 2 scheduling (parental controls / time-of-day) ──
+// Schedule = a named rule that blocks a subject (device OR group) during
+// one or more recurring weekly windows. Windows live in ScheduleWindow
+// rows keyed by day-of-week bitmask + minutes-of-day range.
+model Schedule {
+  id          String   @id @default(cuid())
+  name        String
+  enabled     Boolean  @default(true)
+  subjectType String // "device" | "group"
+  deviceMac   String?
+  groupId     String?
+  windows     ScheduleWindow[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  device NetworkDevice? @relation("DeviceSchedules", fields: [deviceMac], references: [mac], onDelete: Cascade)
+  group  DeviceGroup?   @relation("GroupSchedules", fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([enabled])
+  @@index([deviceMac])
+  @@index([groupId])
+}
+
+// Recurring weekly window inside a Schedule. daysOfWeek is a 7-bit mask
+// (Sun=1..Sat=64). startMin/endMin are minutes since local midnight.
+// endMin <= startMin means the window wraps past midnight.
+model ScheduleWindow {
+  id         String   @id @default(cuid())
+  scheduleId String
+  daysOfWeek Int
+  startMin   Int
+  endMin     Int
+  schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  @@index([scheduleId])
+}
+
+// Ad-hoc one-shot override of schedule state for a subject over a window
+// of wall-clock time. "allow" unblocks during the range; "block" blocks
+// during the range. Expires naturally once endAt passes.
+model ScheduleOverride {
+  id          String   @id @default(cuid())
+  subjectType String
+  deviceMac   String?
+  groupId     String?
+  action      String // "allow" | "block"
+  startAt     DateTime
+  endAt       DateTime
+  note        String?
+  createdAt   DateTime @default(now())
+
+  device NetworkDevice? @relation("DeviceOverrides", fields: [deviceMac], references: [mac], onDelete: Cascade)
+  group  DeviceGroup?   @relation("GroupOverrides", fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([endAt])
+  @@index([deviceMac])
+  @@index([groupId])
+}
+
+// Append-only audit log of every block/unblock transition the ticker
+// causes. Powers the "why is this blocked?" UI and historical reports.
+model ScheduleEvent {
+  id          String   @id @default(cuid())
+  scheduleId  String?
+  overrideId  String?
+  subjectType String
+  deviceMac   String?
+  groupId     String?
+  transition  String // "blocked" | "unblocked"
+  reason      String
+  occurredAt  DateTime @default(now())
+
+  @@index([occurredAt])
 }
