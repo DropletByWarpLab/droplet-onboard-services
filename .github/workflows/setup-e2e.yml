@@ -33,6 +33,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-latest has ~14GB free. `docker compose --profile full build`
+      # (invoked by setup.sh in the build phase) fills that before BuildKit
+      # finishes — the ai-gateway image alone pulls ~5GB of CUDA/NCCL libs.
+      # Strip the preinstalled toolchains we don't use to reclaim ~25GB.
+      # Mirrors the same step in docker-build.yml.
+      - name: Free disk space
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
