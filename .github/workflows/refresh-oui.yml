@@ -1,0 +1,60 @@
+name: Refresh OUI Registry
+
+on:
+  schedule:
+    # 12:00 UTC on the 1st of Jan, Apr, Jul, Oct — quarterly vendor refresh.
+    - cron: "0 12 1 */3 *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Fetch IEEE OUI CSV and open PR if changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run fetch script
+        run: ./scripts/fetch-oui.sh
+
+      - name: Diff check
+        id: diff
+        run: |
+          if git diff --quiet apps/orchestrator/data/oui.csv; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to apps/orchestrator/data/oui.csv — skipping PR."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Detected diff in apps/orchestrator/data/oui.csv — will open PR."
+            git --no-pager diff --stat apps/orchestrator/data/oui.csv
+          fi
+
+      - name: Open PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: quarterly OUI registry refresh"
+          branch: chore/oui-refresh
+          delete-branch: true
+          title: "chore: quarterly OUI registry refresh"
+          labels: |
+            automated
+            data-refresh
+          body: |
+            Automated quarterly refresh of the IEEE OUI vendor registry.
+
+            This PR was opened by `.github/workflows/refresh-oui.yml` after
+            running `scripts/fetch-oui.sh` and detecting a diff against the
+            committed `apps/orchestrator/data/oui.csv`.
+
+            **Review checklist**
+            - [ ] Row count is in the expected range (2MB–10MB file size is auto-validated by the fetch script; ~35K–45K rows is typical)
+            - [ ] No suspicious vendor substitutions or bulk deletions
+            - [ ] No merge conflicts with `main`
+
+            **Never auto-merge.** A human reviews the vendor diff.
