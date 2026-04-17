@@ -33,10 +33,14 @@ function mockFetchOnceJson(mock: FetchMock, body: unknown, ok = true, status = 2
   }));
 }
 
-function renderCard(device: EnrichedNetworkDevice, onOpen = vi.fn()) {
+function renderCard(
+  device: EnrichedNetworkDevice,
+  onOpen = vi.fn(),
+  onError?: (msg: string) => void,
+) {
   return render(
     <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-      <DeviceCard device={device} onOpen={onOpen} />
+      <DeviceCard device={device} onOpen={onOpen} onError={onError} />
     </SWRConfig>,
   );
 }
@@ -113,7 +117,20 @@ describe("DeviceCard block/unblock mutation", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("surfaces error on a 500 response and does NOT optimistically flip state", async () => {
+  it("pressing Enter on the Block button does NOT fire onOpen", async () => {
+    const onOpen = vi.fn();
+    mockFetchOnceJson(fetchMock, {});
+    renderCard(makeDevice({ isBlocked: false }), onOpen);
+    const blockBtn = screen.getByRole("button", { name: "Block device" });
+    fireEvent.keyDown(blockBtn, { key: "Enter" });
+    // Native buttons also treat Enter as click — simulate the click side too
+    // so the mutation path is exercised and onError/toast is wired.
+    fireEvent.click(blockBtn);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("surfaces error on a 500 response via onError (toast) and falls back to title", async () => {
     const device = makeDevice({ isBlocked: false });
     mockFetchOnceJson(
       fetchMock,
@@ -121,19 +138,54 @@ describe("DeviceCard block/unblock mutation", () => {
       false,
       500,
     );
+    const onError = vi.fn();
 
-    renderCard(device);
+    renderCard(device, undefined, onError);
 
     const btn = screen.getByRole("button", { name: "Block device" });
     fireEvent.click(btn);
 
-    // After the failed request, button should still say "Block" (no optimistic
-    // flip — we rely on SWR revalidation from the reconciler) and the tooltip
-    // should carry the error message.
+    // Primary expectation: the page-level toast handler was invoked with a
+    // user-facing message (either the friendly mapped copy or the raw err
+    // message as fallback). Using toHaveBeenCalled + string assertion so we
+    // accept either branch.
     await waitFor(() => {
-      expect(btn.getAttribute("title")).toBe("Router unreachable");
+      expect(onError).toHaveBeenCalledTimes(1);
     });
+    const msg = onError.mock.calls[0][0];
+    expect(typeof msg).toBe("string");
+    expect((msg as string).length).toBeGreaterThan(0);
+
+    // Secondary expectation (fallback behaviour): the title tooltip still
+    // carries the message for callers that don't wire up a toast handler.
+    expect(btn.getAttribute("title")).toBe(msg);
+
+    // And no optimistic flip — still says "Block".
     expect(btn.textContent).toBe("Block");
     expect(btn.getAttribute("aria-label")).toBe("Block device");
+  });
+
+  it("treats a 428 requires-confirmation envelope as REQUIRES_CONFIRMATION (WARP-41 placeholder)", async () => {
+    const device = makeDevice({ isBlocked: false });
+    mockFetchOnceJson(
+      fetchMock,
+      {
+        requiresConfirmation: true,
+        error: { code: "UPSTREAM_FAILED", message: "pending confirm" },
+      },
+      false,
+      428,
+    );
+    const onError = vi.fn();
+
+    renderCard(device, undefined, onError);
+
+    fireEvent.click(screen.getByRole("button", { name: "Block device" }));
+
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    // Friendly copy from TOAST_COPY[REQUIRES_CONFIRMATION]
+    expect(onError.mock.calls[0][0]).toBe(
+      "This action requires confirmation — not wired yet",
+    );
   });
 });

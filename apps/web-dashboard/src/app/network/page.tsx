@@ -435,6 +435,11 @@ function DevicesTab() {
   const [sort, setSort] = useState<DeviceSort>("name");
   // WARP-84: render a detail panel off this state.
   const [openMac, setOpenMac] = useState<string | null>(null);
+  // WARP-86 follow-up: unified error UX for card-level block/unblock failures.
+  // The detail panel surfaces its own toast inline; here the card is hover-only
+  // so a `title` tooltip would vanish the moment the row hides. A floating
+  // toast pinned to the viewport survives the hover-out.
+  const [toast, setToast] = useState<string | null>(null);
 
   const devicesSwr = useNetworkDevices({ onlineOnly });
   const groupsSwr = useNetworkGroups();
@@ -563,6 +568,7 @@ function DevicesTab() {
               group={g}
               devices={byGroup.get(g.id) ?? []}
               onOpen={(d) => setOpenMac(d.mac)}
+              onError={setToast}
             />
           ))}
           {ungrouped.length > 0 && (
@@ -570,6 +576,7 @@ function DevicesTab() {
               group={{ id: "__ungrouped", name: "Ungrouped" }}
               devices={ungrouped}
               onOpen={(d) => setOpenMac(d.mac)}
+              onError={setToast}
             />
           )}
         </>
@@ -577,6 +584,23 @@ function DevicesTab() {
 
       {openMac && (
         <DeviceDetailPanel mac={openMac} onClose={() => setOpenMac(null)} />
+      )}
+
+      {toast && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 bg-system-red text-white px-3 py-2 rounded shadow flex items-center gap-2 z-50"
+        >
+          <span className="type-subheadline">{toast}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Dismiss toast"
+            className="ml-1 opacity-80 hover:opacity-100"
+          >
+            ×
+          </button>
+        </div>
       )}
     </div>
   );

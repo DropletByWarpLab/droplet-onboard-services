@@ -41,6 +41,20 @@ export function useDeviceBlockMutation() {
           code: "UNKNOWN",
           message: `HTTP ${res.status}`,
         };
+      // Loud fail for requires-confirmation until WARP-41 confirm flow lands.
+      // Without this the user just sees a generic "HTTP 428" / upstream message
+      // and has no idea the action was actually paused on a Tier 2 gate.
+      const needsConfirm =
+        (body as { requiresConfirmation?: boolean })?.requiresConfirmation === true ||
+        typed.code === "REQUIRES_CONFIRMATION";
+      if (needsConfirm) {
+        const e: Error & { code?: string; status?: number } = new Error(
+          "This action requires Tier 2 confirmation (WARP-41)",
+        );
+        e.code = "REQUIRES_CONFIRMATION";
+        e.status = res.status;
+        throw e;
+      }
       const e: Error & { code?: string; status?: number } = new Error(
         typed.message ?? `HTTP ${res.status}`,
       );

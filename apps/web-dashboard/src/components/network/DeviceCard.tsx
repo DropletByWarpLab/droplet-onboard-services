@@ -4,10 +4,15 @@ import * as Icons from "lucide-react";
 import type { EnrichedNetworkDevice } from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
+import { toastForError } from "@/lib/hooks/useDeviceMutations";
 
 interface Props {
   device: EnrichedNetworkDevice;
   onOpen: (device: EnrichedNetworkDevice) => void;
+  // Optional channel for surfacing block/unblock failures. The card doesn't
+  // own toast rendering — the page-level DevicesTab does. When omitted the
+  // inner button falls back to a `title` tooltip so the message isn't lost.
+  onError?: (message: string) => void;
 }
 
 function iconFor(name: string | null) {
@@ -28,11 +33,15 @@ function timeAgo(iso: string): string {
   return `${days}d ago`;
 }
 
-export function DeviceCard({ device, onOpen }: Props) {
+export function DeviceCard({ device, onOpen, onError }: Props) {
   const IconComp = iconFor(device.icon);
   const displayName = device.displayName ?? device.hostname ?? device.vendor ?? "Device";
 
   function handleKey(e: React.KeyboardEvent<HTMLDivElement>) {
+    // Enter/Space from nested controls (e.g. the Block button) bubbles to this
+    // wrapper. Without the target/currentTarget guard, pressing Enter on the
+    // Block button would toggle the firewall AND open the detail panel.
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       onOpen(device);
@@ -92,15 +101,23 @@ export function DeviceCard({ device, onOpen }: Props) {
         <DeviceSparkline days={device.presenceDays ?? []} size="sm" />
       </div>
       <div className="mt-3 flex justify-end opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
-        <BlockActionButton device={device} />
+        <BlockActionButton device={device} onError={onError} />
       </div>
     </div>
   );
 }
 
-function BlockActionButton({ device }: { device: EnrichedNetworkDevice }) {
+function BlockActionButton({
+  device,
+  onError,
+}: {
+  device: EnrichedNetworkDevice;
+  onError?: (message: string) => void;
+}) {
   const { toggleBlock } = useDeviceBlockMutation();
   const [pending, setPending] = useState(false);
+  // Retained as a fallback for callers that don't wire up a toast handler —
+  // primary error UX is the page-level toast via `onError`.
   const [error, setError] = useState<string | null>(null);
 
   async function handle(e: React.MouseEvent) {
@@ -114,8 +131,9 @@ function BlockActionButton({ device }: { device: EnrichedNetworkDevice }) {
     try {
       await toggleBlock(device);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed";
-      setError(msg);
+      const friendly = toastForError(err, err instanceof Error ? err.message : "Failed to update block state");
+      if (onError) onError(friendly);
+      setError(friendly);
     } finally {
       setPending(false);
     }
