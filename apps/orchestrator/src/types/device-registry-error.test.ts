@@ -73,4 +73,35 @@ describe("DeviceRegistryError", () => {
     expect(json).toEqual({ code: "NOT_FOUND", message: "missing" });
     expect("status" in json).toBe(false);
   });
+
+  it("scheduleNotFound carries 404", () => {
+    const e = DeviceRegistryError.scheduleNotFound("abc");
+    expect(e.code).toBe("SCHEDULE_NOT_FOUND");
+    expect(e.status).toBe(404);
+    expect(e.message).toContain("abc");
+  });
+
+  it("scheduleInvalidWindow carries 400", () => {
+    const e = DeviceRegistryError.scheduleInvalidWindow("zero-length");
+    expect(e.code).toBe("SCHEDULE_INVALID_WINDOW");
+    expect(e.status).toBe(400);
+  });
+
+  it("scheduleSubjectMismatch carries 400", () => {
+    const e = DeviceRegistryError.scheduleSubjectMismatch("device+group both set");
+    expect(e.code).toBe("SCHEDULE_SUBJECT_MISMATCH");
+    expect(e.status).toBe(400);
+  });
+
+  it("overrideNotFound carries 404", () => {
+    const e = DeviceRegistryError.overrideNotFound("xyz");
+    expect(e.code).toBe("OVERRIDE_NOT_FOUND");
+    expect(e.status).toBe(404);
+  });
+
+  it("overrideInvalidRange carries 400", () => {
+    const e = DeviceRegistryError.overrideInvalidRange("endAt <= startAt");
+    expect(e.code).toBe("OVERRIDE_INVALID_RANGE");
+    expect(e.status).toBe(400);
+  });
 });

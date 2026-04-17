@@ -20,7 +20,12 @@ export type DeviceRegistryErrorCode =
   | "GROUP_IN_USE"
   | "INVALID_ICON"
   | "INVALID_MAC"
-  | "DUPLICATE_GROUP_NAME";
+  | "DUPLICATE_GROUP_NAME"
+  | "SCHEDULE_NOT_FOUND"
+  | "SCHEDULE_INVALID_WINDOW"
+  | "SCHEDULE_SUBJECT_MISMATCH"
+  | "OVERRIDE_NOT_FOUND"
+  | "OVERRIDE_INVALID_RANGE";
 
 export class DeviceRegistryError extends Error {
   readonly code: DeviceRegistryErrorCode;
@@ -65,6 +70,42 @@ export class DeviceRegistryError extends Error {
     return new DeviceRegistryError("GROUP_IN_USE", `Group ${id} still has devices`, {
       status: 409,
     });
+  }
+
+  static scheduleNotFound(id: string): DeviceRegistryError {
+    return new DeviceRegistryError("SCHEDULE_NOT_FOUND", `Schedule ${id} not found`, {
+      status: 404,
+    });
+  }
+
+  static scheduleInvalidWindow(detail: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "SCHEDULE_INVALID_WINDOW",
+      `Invalid schedule window: ${detail}`,
+      { status: 400 },
+    );
+  }
+
+  static scheduleSubjectMismatch(detail: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "SCHEDULE_SUBJECT_MISMATCH",
+      `Schedule subject mismatch: ${detail}`,
+      { status: 400 },
+    );
+  }
+
+  static overrideNotFound(id: string): DeviceRegistryError {
+    return new DeviceRegistryError("OVERRIDE_NOT_FOUND", `Override ${id} not found`, {
+      status: 404,
+    });
+  }
+
+  static overrideInvalidRange(detail: string): DeviceRegistryError {
+    return new DeviceRegistryError(
+      "OVERRIDE_INVALID_RANGE",
+      `Invalid override range: ${detail}`,
+      { status: 400 },
+    );
   }
 
   /** Shape sent over the wire. Omits `status` when unset so downstream
