@@ -160,6 +160,37 @@ describe("ScheduleEditorModal", () => {
     });
   });
 
+  it("Save strips window ids from the API body (update path)", async () => {
+    // Existing schedule with a window that has an id.
+    mockEndpoints(fetchMock, [makeSchedule()]);
+    renderModal({ scheduleId: "s1" });
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/^name$/i) as HTMLInputElement).value,
+      ).toBe("Bedtime");
+    });
+    // Add a new window (no id) via the editor's "Add window" button.
+    fireEvent.click(screen.getByRole("button", { name: /add window/i }));
+    // Save.
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => {
+      const patchCall = fetchMock.mock.calls.find(
+        (c) =>
+          c[0] === "/api/network/schedules/s1" && c[1]?.method === "PATCH",
+      );
+      expect(patchCall).toBeDefined();
+      const body = JSON.parse(patchCall![1].body);
+      expect(Array.isArray(body.windows)).toBe(true);
+      expect(body.windows.length).toBeGreaterThanOrEqual(2);
+      for (const w of body.windows) {
+        expect(w).not.toHaveProperty("id");
+        expect(w.daysOfWeek).toBeDefined();
+        expect(w.startMin).toBeDefined();
+        expect(w.endMin).toBeDefined();
+      }
+    });
+  });
+
   it("Save with a typed error shows a toast and keeps the form open", async () => {
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.startsWith("/api/network/schedules/s1") && init?.method === "PATCH") {

@@ -36,7 +36,11 @@ export function useScheduleMutations() {
 
   async function updateSchedule(
     id: string,
-    patch: { name?: string; enabled?: boolean; windows?: Schedule["windows"] },
+    patch: {
+      name?: string;
+      enabled?: boolean;
+      windows?: Omit<ScheduleWindow, "id">[];
+    },
   ) {
     const res = await apiFetch<{ schedule: Schedule }>(
       `/api/network/schedules/${id}`,

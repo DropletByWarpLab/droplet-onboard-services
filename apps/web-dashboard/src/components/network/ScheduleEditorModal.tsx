@@ -52,6 +52,20 @@ interface FormState {
   windows: WindowDraft[];
 }
 
+/**
+ * Serialize windows for the API payload. The backend (WARP-94 `updateSchedule`)
+ * does `deleteMany + re-create all windows`, so window ids are ignored on
+ * both create and update paths. We strip them here so we never send
+ * `id: undefined` for freshly-added windows.
+ */
+function serializeWindows(windows: WindowDraft[]) {
+  return windows.map((w) => ({
+    daysOfWeek: w.daysOfWeek,
+    startMin: w.startMin,
+    endMin: w.endMin,
+  }));
+}
+
 function blankForm(): FormState {
   return {
     name: "",
@@ -148,11 +162,7 @@ export function ScheduleEditorModal({ scheduleId, onClose }: Props) {
           ...(form.subjectType === "device"
             ? { deviceMac: form.deviceMac || undefined }
             : { groupId: form.groupId || undefined }),
-          windows: form.windows.map((w) => ({
-            daysOfWeek: w.daysOfWeek,
-            startMin: w.startMin,
-            endMin: w.endMin,
-          })),
+          windows: serializeWindows(form.windows),
         };
         await createSchedule(payload);
       } else {
@@ -160,12 +170,7 @@ export function ScheduleEditorModal({ scheduleId, onClose }: Props) {
         await updateSchedule(scheduleId as string, {
           name: form.name.trim(),
           enabled: form.enabled,
-          windows: form.windows.map((w) => ({
-            id: w.id!,
-            daysOfWeek: w.daysOfWeek,
-            startMin: w.startMin,
-            endMin: w.endMin,
-          })) as Schedule["windows"],
+          windows: serializeWindows(form.windows),
         });
       }
       onClose();

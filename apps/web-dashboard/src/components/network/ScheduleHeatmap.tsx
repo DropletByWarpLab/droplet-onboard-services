@@ -1,4 +1,5 @@
 "use client";
+import { useMemo } from "react";
 
 /**
  * 7×24 heatmap preview of a schedule's weekly windows.
@@ -65,7 +66,7 @@ function buildOverlap(windows: HeatmapWindow[]): number[][] {
 }
 
 export function ScheduleHeatmap({ windows }: Props) {
-  const matrix = buildOverlap(windows);
+  const matrix = useMemo(() => buildOverlap(windows), [windows]);
 
   return (
     <div
