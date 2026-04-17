@@ -104,4 +104,12 @@ describe("DeviceRegistryError", () => {
     expect(e.code).toBe("OVERRIDE_INVALID_RANGE");
     expect(e.status).toBe(400);
   });
+
+  it("invalidDate carries 400 and includes field + value", () => {
+    const e = DeviceRegistryError.invalidDate("endAt", "garbage");
+    expect(e.code).toBe("INVALID_DATE");
+    expect(e.status).toBe(400);
+    expect(e.message).toContain("endAt");
+    expect(e.message).toContain("garbage");
+  });
 });
