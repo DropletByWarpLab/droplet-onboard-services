@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { ScheduleRow } from "./ScheduleRow";
 import { ScheduleActivityFeed } from "./ScheduleActivityFeed";
+import { ScheduleEditorModal } from "./ScheduleEditorModal";
 
 export function SchedulesTab() {
   const { data, isLoading } = useSchedules();
@@ -59,26 +60,11 @@ export function SchedulesTab() {
       {/* Recent activity */}
       <ScheduleActivityFeed />
 
-      {/* Editor stub — the real modal lands in WARP-96 / T5. */}
-      {editorOpenFor && (
-        <div
-          role="dialog"
-          aria-label="Schedule editor (stub)"
-          className="dp-card p-4 text-label-tertiary flex items-center gap-2"
-        >
-          <span>
-            Schedule editor coming soon (WARP-96). Target:{" "}
-            {editorOpenFor === "new" ? "new" : editorOpenFor}
-          </span>
-          <button
-            type="button"
-            className="dp-button-secondary text-sm"
-            onClick={() => setEditorOpenFor(null)}
-          >
-            Close
-          </button>
-        </div>
-      )}
+      {/* Editor modal (WARP-96 / T5) */}
+      <ScheduleEditorModal
+        scheduleId={editorOpenFor}
+        onClose={() => setEditorOpenFor(null)}
+      />
     </div>
   );
 }
