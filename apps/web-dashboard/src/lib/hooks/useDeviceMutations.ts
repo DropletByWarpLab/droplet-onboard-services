@@ -10,6 +10,9 @@ const TOAST_COPY: Record<string, string> = {
   NOT_FOUND: "Device was forgotten or never seen",
   DUPLICATE_GROUP_NAME: "A group with that name already exists",
   GROUP_IN_USE: "Can't delete — group still has devices",
+  // WARP-41 will wire the confirm flow; until then we want the user to know
+  // why the action didn't go through rather than seeing a raw upstream error.
+  REQUIRES_CONFIRMATION: "This action requires confirmation — not wired yet",
 };
 
 export function toastForError(err: TypedError | unknown, fallback = "Something went wrong"): string {

@@ -8,6 +8,9 @@ interface Props {
   group: DeviceGroupRef | { id: "__ungrouped"; name: "Ungrouped" };
   devices: EnrichedNetworkDevice[];
   onOpen: (device: EnrichedNetworkDevice) => void;
+  // Forwarded to each DeviceCard so block/unblock errors can bubble up to
+  // the page-level toast (see DevicesTab).
+  onError?: (message: string) => void;
 }
 
 const LS_KEY = "droplet.network.sections";
@@ -27,7 +30,7 @@ function saveState(id: string, expanded: boolean) {
   window.localStorage.setItem(LS_KEY, JSON.stringify(s));
 }
 
-export function DeviceGridSection({ group, devices, onOpen }: Props) {
+export function DeviceGridSection({ group, devices, onOpen, onError }: Props) {
   const [expanded, setExpanded] = useState<boolean>(true);
 
   useEffect(() => {
@@ -61,7 +64,7 @@ export function DeviceGridSection({ group, devices, onOpen }: Props) {
       {expanded && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {devices.map((d) => (
-            <DeviceCard key={d.mac} device={d} onOpen={onOpen} />
+            <DeviceCard key={d.mac} device={d} onOpen={onOpen} onError={onError} />
           ))}
         </div>
       )}
