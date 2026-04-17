@@ -28,7 +28,7 @@ One pass per ticket. Each gate must pass before the next fires.
 | **UI/UX** | `.superpowers/agents/ui-ux.md` (dashboard only) | branch + spec §8 + ADR-002 | UX Review (APPROVED / APPROVED_WITH_NOTES / CHANGES_REQUESTED) | UX verdict ≠ CHANGES_REQUESTED |
 | **Manager** | `.superpowers/agents/manager.md` | QA + UX + ticket | `READY_FOR_PR` or `SEND_BACK_TO_DEV` or `HANDOFF_TO_HUMAN` | `READY_FOR_PR` |
 | **PR** | Manager invokes `gh pr create` | PR body + title | PR number + URL | PR created |
-| **CI** | GitHub Actions | PR | 7 workflows green | all green |
+| **CI** | GitHub Actions | PR | 8 workflows green | all green |
 | **Code Reviewer** | `.superpowers/agents/code-reviewer.md` | PR diff + spec + QA + UX | single PR comment (APPROVE / APPROVE_WITH_COMMENTS / REQUEST_CHANGES) | Reviewer verdict ≠ REQUEST_CHANGES |
 | **Human** | project lead | everything above | merge or defer | human clicks merge |
 
@@ -94,7 +94,7 @@ For the WARP-84/85/86 fan-out, each branch is off `WARP-83` (not `main`) until W
 
 ## 3. Stuck CI — the ralph-loop
 
-CI has seven workflows: orchestrator-vitest, orchestrator-tsc, dashboard-vitest, dashboard-tsc, routing-pytest, setup-e2e, docker-build, security-tests. When one fails, classify:
+CI has eight workflows: orchestrator-vitest, orchestrator-tsc, dashboard-vitest, dashboard-tsc, routing-pytest, setup-e2e, docker-build, security-tests. When one fails, classify:
 
 | Failure pattern | Category | Action |
 |---|---|---|
@@ -161,7 +161,7 @@ For the pre-merge handoff, the controller's last action is to confirm CI is gree
 PR #<n> is ready for human merge.
 - QA: PASS
 - UX: APPROVED (or N/A)
-- CI: 7/7 green
+- CI: 8/8 green
 - Code Reviewer: APPROVE (or APPROVE_WITH_COMMENTS — see comment)
 Merge when ready.
 ```

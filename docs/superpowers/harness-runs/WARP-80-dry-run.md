@@ -79,10 +79,10 @@ Not a dashboard ticket → UI/UX gate skipped per playbook §1.
 **What I did**
 
 - `apps/orchestrator/src/types/device-registry-error.ts` — typed error class
-  mirroring `router-error.ts`. Codes: `NOT_FOUND`, `GROUP_IN_USE`, `INVALID_ICON`,
-  `INVALID_MAC`, `DUPLICATE_GROUP_NAME`. Static factories + `toJSON()` with
-  `{ code, message, status }` shape matching WARP-39 precedent.
-  Satisfies AC: foundational error type used by `normalizeMac`.
+  mirroring `router-error.ts`. Codes per spec §6.4 (e.g. `INVALID_MAC`), with
+  static factories + `toJSON()` returning `{ code, message, status }` matching
+  the WARP-39 precedent. Satisfies AC: foundational error type used by
+  `normalizeMac`.
 - `apps/orchestrator/src/types/device-registry-error.test.ts` — 5 unit tests
   covering each factory's code + status + `toJSON()` shape. [fabricated: 5 tests]
 - `apps/orchestrator/src/lib/mac.ts` — `normalizeMac(raw)` with regex
@@ -291,7 +291,7 @@ Spec: [docs/superpowers/specs/2026-04-16-device-intelligence-design.md](docs/sup
 |---|---|
 | `apps/orchestrator/src/lib/mac.ts` | `normalizeMac(raw: string): string` — strips `[:.\-]`, uppercases, validates `/^[0-9A-F]{12}$/`, re-colonizes every two chars. Throws `DeviceRegistryError.invalidMac(raw)` on failure with the raw input preserved in the message. |
 | `apps/orchestrator/src/lib/mac.test.ts` | 7 cases covering the variants spec §5.3 enumerates plus a Cisco dot-separator case. |
-| `apps/orchestrator/src/types/device-registry-error.ts` | Typed `DeviceRegistryError` class mirroring `RouterError`: `code` enum (`NOT_FOUND`, `GROUP_IN_USE`, `INVALID_ICON`, `INVALID_MAC`, `DUPLICATE_GROUP_NAME`), `toJSON()`, static factories. |
+| `apps/orchestrator/src/types/device-registry-error.ts` | Typed `DeviceRegistryError` class mirroring `RouterError`: `code` enum (codes per spec §6.4), `toJSON()`, static factories. |
 | `apps/orchestrator/src/types/device-registry-error.test.ts` | 5 cases covering `notFound`, `invalidMac`, `duplicateGroupName` factories + `toJSON()` shape. |
 
 ## Acceptance
@@ -351,7 +351,7 @@ Spec: [docs/superpowers/specs/2026-04-16-device-intelligence-design.md](docs/sup
 
 ### 5.1 CI
 
-`gh pr checks 35` — 7/7 green [fabricated]:
+`gh pr checks 35` — 8/8 green [fabricated]:
 
 - `orchestrator-vitest` ✓
 - `orchestrator-tsc` ✓

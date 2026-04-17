@@ -61,13 +61,11 @@ Spec requires 3-col ≥ 1024 px, 2-col ≥ 640 px, 1-col below.
 
 ## Design-token adherence
 
-Run the equivalent of:
+Use the `Grep` tool to scan `apps/web-dashboard/src/components/network/*.tsx` for:
 
-```
-grep -n "background-color:\s*#" apps/web-dashboard/src/components/network/*.tsx
-grep -n "color:\s*#" apps/web-dashboard/src/components/network/*.tsx
-grep -n "font-size:\s*[0-9]" apps/web-dashboard/src/components/network/*.tsx
-```
+- pattern `background-color:\s*#` (hardcoded hex backgrounds)
+- pattern `color:\s*#` (hardcoded hex colors)
+- pattern `font-size:\s*[0-9]` (hardcoded font sizes)
 
 Any hardcoded hex, rgb, or px font-size is a CHANGES_REQUESTED unless it matches a documented exception. Components must use `dp-card`, `type-*`, `text-label-*`, and CSS variables.
 

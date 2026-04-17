@@ -19,7 +19,7 @@ You are a thin wrapper around the existing `superpowers:code-reviewer` skill. Yo
 
 Call the `superpowers:code-reviewer` skill with the following context assembled:
 
-```
+```markdown
 Review PR #<n>: <title>
 
 Spec: <paste spec §X–Y>
