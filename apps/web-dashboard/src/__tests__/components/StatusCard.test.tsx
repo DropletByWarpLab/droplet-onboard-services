@@ -20,7 +20,9 @@ describe("StatusCard", () => {
     const { container } = render(
       <StatusCard title="IP" value="192.168.1.100" />
     );
-    const subtitles = container.querySelectorAll(".text-xs.text-slate-500");
+    // Subtitle element uses `type-caption-1 text-label-tertiary`; absent when
+    // no subtitle prop is provided.
+    const subtitles = container.querySelectorAll(".text-label-tertiary");
     expect(subtitles.length).toBe(0);
   });
 
@@ -28,7 +30,9 @@ describe("StatusCard", () => {
     const { container } = render(
       <StatusCard title="DB" value="Connected" status="ok" />
     );
-    const indicator = container.querySelector(".bg-emerald-500");
+    // StatusCard maps `ok` → `bg-system-green` (design-system token, replaces
+    // the former `bg-emerald-500` Tailwind default).
+    const indicator = container.querySelector(".bg-system-green");
     expect(indicator).toBeInTheDocument();
   });
 
@@ -36,7 +40,9 @@ describe("StatusCard", () => {
     const { container } = render(
       <StatusCard title="DB" value="Offline" status="error" />
     );
-    const indicator = container.querySelector(".bg-red-500");
+    // `error` → `bg-system-red` (design-system token, replaces former
+    // `bg-red-500` Tailwind default).
+    const indicator = container.querySelector(".bg-system-red");
     expect(indicator).toBeInTheDocument();
   });
 });

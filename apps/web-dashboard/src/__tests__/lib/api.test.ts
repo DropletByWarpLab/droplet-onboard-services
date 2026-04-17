@@ -28,7 +28,12 @@ describe("API client", () => {
       });
 
       const result = await fetchHealth();
-      expect(mockFetch).toHaveBeenCalledWith("/api/health");
+      // fetchHealth goes through authFetch, which always attaches
+      // `credentials: "same-origin"` so the droplet_session cookie rides along.
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/health",
+        expect.objectContaining({ credentials: "same-origin" }),
+      );
       expect(result.status).toBe("ok");
     });
 

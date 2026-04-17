@@ -1,8 +1,7 @@
 "use client";
 import { useSWRConfig } from "swr";
 import type { EnrichedNetworkDevice } from "@/lib/types";
-
-type TypedError = { code: string; message: string };
+import { apiFetch, type TypedError } from "./apiFetch";
 
 /**
  * Hook for toggling a device's firewall block state.
@@ -29,38 +28,33 @@ export function useDeviceBlockMutation() {
       ? "/api/network/firewall/block"
       : "/api/network/firewall/unblock";
 
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mac: device.mac }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const typed =
-        (body as { error?: TypedError })?.error ?? {
-          code: "UNKNOWN",
-          message: `HTTP ${res.status}`,
-        };
+    let body: { operationId?: string };
+    try {
+      body = await apiFetch<{ operationId?: string }>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mac: device.mac }),
+      });
+    } catch (err) {
       // Loud fail for requires-confirmation until WARP-41 confirm flow lands.
       // Without this the user just sees a generic "HTTP 428" / upstream message
-      // and has no idea the action was actually paused on a Tier 2 gate.
+      // and has no idea the action was actually paused on a Tier 2 gate. We
+      // detect via either the typed `error.code` (populated on `err.code` by
+      // apiFetch) or the envelope-level `requiresConfirmation` flag (exposed
+      // via `err.body` so callers don't re-parse the response).
+      const e = err as TypedError;
+      const envelope = e?.body as { requiresConfirmation?: boolean } | undefined;
       const needsConfirm =
-        (body as { requiresConfirmation?: boolean })?.requiresConfirmation === true ||
-        typed.code === "REQUIRES_CONFIRMATION";
+        e?.code === "REQUIRES_CONFIRMATION" || envelope?.requiresConfirmation === true;
       if (needsConfirm) {
-        const e: Error & { code?: string; status?: number } = new Error(
+        const loud: TypedError = new Error(
           "This action requires Tier 2 confirmation (WARP-41)",
         );
-        e.code = "REQUIRES_CONFIRMATION";
-        e.status = res.status;
-        throw e;
+        loud.code = "REQUIRES_CONFIRMATION";
+        loud.status = e?.status;
+        throw loud;
       }
-      const e: Error & { code?: string; status?: number } = new Error(
-        typed.message ?? `HTTP ${res.status}`,
-      );
-      e.code = typed.code;
-      e.status = res.status;
-      throw e;
+      throw err;
     }
 
     // Trigger SWR refresh — the WARP-81 reconciler will confirm the flipped
@@ -69,7 +63,7 @@ export function useDeviceBlockMutation() {
       (key) => typeof key === "string" && key.startsWith("/api/network/devices"),
     );
 
-    return { operationId: (body as { operationId?: string })?.operationId };
+    return { operationId: body?.operationId };
   }
 
   return { toggleBlock };
