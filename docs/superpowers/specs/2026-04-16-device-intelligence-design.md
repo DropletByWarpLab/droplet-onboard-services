@@ -37,36 +37,36 @@ This spec replaces the Phase 1 sketch in ADR-002 §Phase 1 with a fully-resolved
 Nine capabilities split into seven implementation tickets + one CI ticket + one harness ticket. All in Sprint 1, assigned to the project lead.
 
 ```
-WARP-46  Data model (NetworkDevice, DeviceGroup, _DeviceToGroup, DevicePresenceDay)
+WARP-80  Data model (NetworkDevice, DeviceGroup, _DeviceToGroup, DevicePresenceDay)
    |        + Prisma migration + seeded rooms
    v
-WARP-47  Reconciler service + OUI vendor lookup
+WARP-81  Reconciler service + OUI vendor lookup
    |        (observes DHCP/wireless, upserts devices, resolves vendor,
    |         writes daily presence rollup, cascades firewall block state)
    |
    +-----+-----+-----+-----+-----+
    v     v     v     v     v     v
-WARP-48 WARP-49 WARP-50 WARP-51 WARP-52 WARP-53
+WARP-82 WARP-83 WARP-84 WARP-85 WARP-86 WARP-87
 API     List    Detail  Group   Block/  CI: OUI
 layer   grid    panel   manager unblock refresh
                                 wiring
 
-WARP-54 Agent harness documentation + dry-run
+WARP-88 Agent harness documentation + dry-run
 ```
 
 | Ticket | Summary | Depends on | Rough size |
 |---|---|---|---|
-| **WARP-54** | Agent harness doc + first dry-run of the pipeline | — | S |
-| **WARP-46** | Prisma data model + migration + group seeds | — | S |
-| **WARP-47** | Reconciler + `oui-lookup.service` + bundled CSV + daily rollup job | WARP-46 | M |
-| **WARP-48** | Orchestrator API — `/network/devices/*` + `/network/groups/*` | WARP-46, WARP-47 | S |
-| **WARP-49** | Dashboard card grid list view, sectioned by group | WARP-48 | M |
-| **WARP-50** | Detail panel — rename, icon picker, notes, sparkline | WARP-49 | L |
-| **WARP-51** | Group manager dialog + chip-edit UX on cards | WARP-49 | M |
-| **WARP-52** | Block/unblock wired from card to existing firewall endpoints | WARP-49 | S |
-| **WARP-53** | `.github/workflows/refresh-oui.yml` + `scripts/fetch-oui.sh` | WARP-47 | S |
+| **WARP-88** | Agent harness doc + first dry-run of the pipeline | — | S |
+| **WARP-80** | Prisma data model + migration + group seeds | — | S |
+| **WARP-81** | Reconciler + `oui-lookup.service` + bundled CSV + daily rollup job | WARP-80 | M |
+| **WARP-82** | Orchestrator API — `/network/devices/*` + `/network/groups/*` | WARP-80, WARP-81 | S |
+| **WARP-83** | Dashboard card grid list view, sectioned by group | WARP-82 | M |
+| **WARP-84** | Detail panel — rename, icon picker, notes, sparkline | WARP-83 | L |
+| **WARP-85** | Group manager dialog + chip-edit UX on cards | WARP-83 | M |
+| **WARP-86** | Block/unblock wired from card to existing firewall endpoints | WARP-83 | S |
+| **WARP-87** | `.github/workflows/refresh-oui.yml` + `scripts/fetch-oui.sh` | WARP-81 | S |
 
-**Execution order:** WARP-54 first (harness dry-runs on WARP-46 before any code ships). Then WARP-46 → WARP-47 sequentially. After that, **WARP-48–WARP-53 run in parallel** under the agent harness.
+**Execution order:** WARP-88 first (harness dry-runs on WARP-80 before any code ships). Then WARP-80 → WARP-81 sequentially. After that, **WARP-82–WARP-87 run in parallel** under the agent harness.
 
 ## 5. Data model
 
@@ -263,7 +263,7 @@ Lucide grid of ~20 device-relevant icons: `Tv`, `Smartphone`, `Laptop`, `Tablet`
 
 ### 9.1 Initial checked-in CSV
 
-`apps/orchestrator/data/oui.csv` — normalized form of IEEE's public OUI registry. ~4 MB, ~35 K rows. One-time fetch in WARP-47 via `scripts/fetch-oui.sh`.
+`apps/orchestrator/data/oui.csv` — normalized form of IEEE's public OUI registry. ~4 MB, ~35 K rows. One-time fetch in WARP-81 via `scripts/fetch-oui.sh`.
 
 ### 9.2 Dockerfile
 
@@ -368,54 +368,54 @@ Main conversation pauses for the project lead only when:
 
 ## 12. Acceptance criteria per ticket
 
-**WARP-46 — Data model**
+**WARP-80 — Data model**
 - Migration creates three tables, seeds five default groups idempotently.
 - `normalizeMac()` helper + unit tests.
 - `tsc --noEmit` + Prisma validate clean.
 
-**WARP-47 — Reconciler + OUI**
+**WARP-81 — Reconciler + OUI**
 - On DHCP poll, observed MACs appear in `NetworkDevice` with vendor resolved.
 - Daily rollup `seenMinutes` increments correctly; purge cron runs at 03:00.
 - Block-state cascade verified — blocking a device via firewall updates `isBlocked`.
 - OUI lookup: 35K+ entries loaded; missing-file path returns null gracefully.
 
-**WARP-48 — Orchestrator API**
+**WARP-82 — Orchestrator API**
 - All 9 endpoints return typed responses + typed errors.
 - Caching invalidates on writes (verified by integration test).
 - Auth gate: unauthenticated calls rejected (uses existing middleware).
 
-**WARP-49 — Card grid list**
+**WARP-83 — Card grid list**
 - Grid renders 3/2/1 column responsively.
 - Sections-by-group collapsible, state persisted.
 - Online-first + alphabetical sort within section.
 - Empty state rendered when no devices.
 
-**WARP-50 — Detail panel**
+**WARP-84 — Detail panel**
 - Slide-over opens over grid, grid stays visible.
 - Inline rename saves on blur, debounced.
 - Icon picker grid of ~20 Lucide options.
 - Sparkline renders 30 daily bars; "seen X/30 days" copy correct.
 - "Forget device" confirms + deletes row.
 
-**WARP-51 — Group manager**
+**WARP-85 — Group manager**
 - Create, rename, color-pick, delete flows work.
 - Duplicate-name validation shows typed error.
 - Deleting group confirms count of affected devices.
 - Typeahead on card chip-edit works with existing groups + "Create new".
 
-**WARP-52 — Block / unblock wiring**
+**WARP-86 — Block / unblock wiring**
 - Card button triggers existing firewall endpoint.
 - Reconciler picks up state change, card reflects it within 10 s.
 - Tier 2 confirmation flow (WARP-41) preserved.
 
-**WARP-53 — CI refresh**
+**WARP-87 — CI refresh**
 - `refresh-oui.yml` runs on schedule + manual dispatch.
 - Opens PR with vendor diff when CSV changed; no-op otherwise.
 - `fetch-oui.sh` validates download size + format.
 
-**WARP-54 — Harness**
+**WARP-88 — Harness**
 - Role prompts written + checked into `.superpowers/agents/`.
-- Dry-run against WARP-46 produces a valid branch, QA report, manager PR body.
+- Dry-run against WARP-80 produces a valid branch, QA report, manager PR body.
 - Ralph-loop template documented.
 
 ## 13. Risks and mitigations
