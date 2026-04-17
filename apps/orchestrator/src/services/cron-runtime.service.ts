@@ -10,11 +10,19 @@
  *   in `index.ts` calls it during graceful shutdown so Vitest / the
  *   Node runtime can exit cleanly.
  *
- * Handler exceptions are caught and logged at `warn` so a single bad
- * tick never takes the runtime down. This is deliberate: the ticker
- * already distinguishes RouterError from unexpected errors internally,
- * so by the time something bubbles out here, we just want to keep
- * subsequent ticks firing.
+ * Error-severity policy in `safeRun`:
+ *   - `RouterError` → `warn`. The ticker already catches these
+ *     per-device and logs them in context; this is a belt-and-suspenders
+ *     catch for anything that slips past.
+ *   - Any other `Error` → `error`. Prisma connection loss, null-deref,
+ *     etc. should be loud so downstream alerting can key on them.
+ *
+ * We also track a consecutive-failure streak per registered handler via
+ * a `WeakMap` keyed on the handler function identity. Each successful
+ * run resets the streak to zero; each failure increments it and the
+ * current streak length is attached to the log line as
+ * `consecutiveFailures`. Downstream alerting can fire on
+ * `consecutiveFailures >= N` without needing log aggregation.
  *
  * Note on WARP-89: that ticket will add a reconciler poller + cron.
  * When it lands it should reuse this same primitive; no API changes
@@ -22,8 +30,15 @@
  */
 import cron, { type ScheduledTask } from "node-cron";
 import pino from "pino";
+import { RouterError } from "../types/router-error.js";
 
-const log = pino({ name: "cron-runtime" });
+const defaultLog = pino({ name: "cron-runtime" });
+
+/** Minimal logger surface `safeRun` needs; pino-compatible. */
+export interface CronRuntimeLogger {
+  warn(obj: unknown, msg?: string): void;
+  error(obj: unknown, msg?: string): void;
+}
 
 export interface CronRuntime {
   scheduleInterval(ms: number, handler: () => void | Promise<void>): void;
@@ -31,15 +46,29 @@ export interface CronRuntime {
   stop(): void;
 }
 
-export function createCronRuntime(): CronRuntime {
+export function createCronRuntime(
+  logger: CronRuntimeLogger = defaultLog,
+): CronRuntime {
   const intervals: NodeJS.Timeout[] = [];
   const crons: ScheduledTask[] = [];
+  // Per-handler consecutive-failure counter. WeakMap so handlers that
+  // go out of scope (e.g. when the runtime is stopped) don't pin their
+  // closures here.
+  const failureCounts = new WeakMap<() => void | Promise<void>, number>();
 
   async function safeRun(handler: () => void | Promise<void>) {
     try {
       await handler();
+      failureCounts.set(handler, 0);
     } catch (err) {
-      log.warn({ err }, "cron handler threw; continuing");
+      const n = (failureCounts.get(handler) ?? 0) + 1;
+      failureCounts.set(handler, n);
+      const ctx = { err, consecutiveFailures: n };
+      if (err instanceof RouterError) {
+        logger.warn(ctx, "cron handler caught RouterError");
+      } else {
+        logger.error(ctx, "cron handler threw unexpected error");
+      }
     }
   }
 

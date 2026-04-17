@@ -22,7 +22,7 @@ export async function purgeScheduleEvents(
   olderThanDays = 7,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanDays * 86400_000);
-  const res = await (prisma as any).scheduleEvent.deleteMany({
+  const res = await prisma.scheduleEvent.deleteMany({
     where: { occurredAt: { lt: cutoff } },
   });
   return res.count;
@@ -33,7 +33,7 @@ export async function purgeExpiredOverrides(
   olderThanHours = 24,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanHours * 3600_000);
-  const res = await (prisma as any).scheduleOverride.deleteMany({
+  const res = await prisma.scheduleOverride.deleteMany({
     where: { endAt: { lt: cutoff } },
   });
   return res.count;

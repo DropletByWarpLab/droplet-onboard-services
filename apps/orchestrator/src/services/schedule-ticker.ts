@@ -4,19 +4,26 @@
  * Runs every 30s (configurable via SCHEDULE_TICK_MS): fetches every
  * NetworkDevice + its relevant enabled schedules + currently-active
  * overrides, computes the desired firewall state via
- * `computeDesiredBlocked`, diffs against what the firewall reports, and
- * dispatches block/unblock via the injected FirewallClient. Every
- * successful transition writes a ScheduleEvent row for the audit log.
+ * `computeDesiredBlocked`, diffs against the last-applied state cached
+ * in-closure, and dispatches block/unblock via the injected
+ * FirewallClient. Every successful transition writes a ScheduleEvent
+ * row for the audit log.
+ *
+ * Desired-state cache: we keep a `Map<mac, boolean>` of the last state
+ * we successfully dispatched to the firewall. The first tick for any
+ * device (`previous === undefined`) always dispatches — this is the
+ * bootstrap path so we re-apply state on orchestrator restart.
+ * Thereafter only true transitions (prev !== desired) hit the router,
+ * which cuts router traffic from ~2,880 calls/device/day (one per
+ * tick) down to only the actual state changes. We do NOT update the
+ * cache on failure, so a transient router outage means the next tick
+ * retries the same transition.
  *
  * Error handling: if the firewall call throws RouterError (router
  * unreachable, auth, disabled, etc.) we log at `warn` and skip the
  * event emission — the prior state stands and we'll try again on the
  * next tick. Unexpected errors are logged at `error` but also don't
  * emit an event (since the transition didn't happen).
- *
- * The FirewallClient's `isBlocked` is best-effort — see the adapter in
- * `index.ts`. Over-attempting on stale state is fine because the
- * routing service's block/unblock endpoints are idempotent.
  */
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
@@ -28,13 +35,6 @@ const log = pino({ name: "schedule-ticker" });
 export interface FirewallClient {
   block(mac: string): Promise<void>;
   unblock(mac: string): Promise<void>;
-  /**
-   * Best-effort lookup of the live firewall state for `mac`. The ticker
-   * uses this to skip no-op dispatches. Returning a stale value is
-   * acceptable since the routing service's block/unblock endpoints are
-   * idempotent.
-   */
-  isBlocked(mac: string): boolean;
 }
 
 export interface ScheduleTicker {
@@ -45,16 +45,23 @@ export function createScheduleTicker(
   prisma: PrismaClient,
   firewall: FirewallClient,
 ): ScheduleTicker {
+  // mac -> last desired-blocked state we successfully dispatched. Undefined
+  // means "we've never applied a state for this MAC" (first tick, or first
+  // time we see this device). We only update this on success, so a failed
+  // router call leaves the previous entry intact and the next tick will
+  // re-attempt the transition.
+  const lastAppliedBlocked = new Map<string, boolean>();
+
   async function tickOnce() {
     const now = new Date();
-    const devices = await (prisma as any).networkDevice.findMany({
+    const devices = await prisma.networkDevice.findMany({
       include: { groups: true },
     });
-    const schedules = await (prisma as any).schedule.findMany({
+    const schedules = await prisma.schedule.findMany({
       where: { enabled: true },
       include: { windows: true },
     });
-    const overrides = await (prisma as any).scheduleOverride.findMany({
+    const overrides = await prisma.scheduleOverride.findMany({
       where: { AND: [{ startAt: { lte: now } }, { endAt: { gt: now } }] },
     });
 
@@ -105,14 +112,18 @@ export function createScheduleTicker(
         now,
       });
 
-      const current = firewall.isBlocked(device.mac);
-      if (desired === current) continue;
+      const previous = lastAppliedBlocked.get(device.mac);
+      if (previous === desired) continue;
 
       try {
         if (desired) await firewall.block(device.mac);
         else await firewall.unblock(device.mac);
 
-        await (prisma as any).scheduleEvent.create({
+        // Only record on success — on failure we leave `lastAppliedBlocked`
+        // alone so the next tick retries.
+        lastAppliedBlocked.set(device.mac, desired);
+
+        await prisma.scheduleEvent.create({
           data: {
             subjectType: "device",
             deviceMac: device.mac,

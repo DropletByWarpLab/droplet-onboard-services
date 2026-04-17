@@ -132,13 +132,6 @@ async function main() {
     async unblock(mac) {
       await openwrt.unblockDevice(mac);
     },
-    // Best-effort: the reconciler (~10s) is the authoritative source of
-    // truth for firewall state; for the ticker's diff we always return
-    // false and let the idempotent block/unblock endpoints absorb
-    // duplicates. Revisit once WARP-82 wires the reconciler snapshot in.
-    isBlocked() {
-      return false;
-    },
   };
   const cronRuntime = createCronRuntime();
   const scheduleTicker = createScheduleTicker(prisma, firewall);
