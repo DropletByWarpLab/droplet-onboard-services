@@ -161,6 +161,32 @@ describe("DeviceDetailPanel", () => {
     });
   });
 
+  it("footer Block button toggles firewall state on click", async () => {
+    mockFetchOnceJson(fetchMock, {
+      device: makeDevice({ isBlocked: false }),
+      presence: makePresence(),
+    });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    // The footer Block button is rendered alongside Forget/Close; find by
+    // its visible text. In the unblocked state the label is "Block".
+    const blockBtn = await screen.findByRole("button", { name: "Block" });
+
+    // POST to the firewall endpoint resolves OK.
+    mockFetchOnceJson(fetchMock, { operationId: "op-42" });
+
+    fireEvent.click(blockBtn);
+
+    await waitFor(() => {
+      const postCalls = fetchMock.mock.calls.filter(
+        (c) => c[0] === "/api/network/firewall/block",
+      );
+      expect(postCalls).toHaveLength(1);
+      expect(JSON.parse(postCalls[0][1].body)).toEqual({ mac: MAC });
+    });
+  });
+
   it("rolls back local state and shows typed-error toast when PATCH fails", async () => {
     // Baseline device has icon = null.
     mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });

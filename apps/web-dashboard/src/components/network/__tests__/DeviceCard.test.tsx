@@ -68,11 +68,13 @@ describe("DeviceCard", () => {
     expect(screen.getByText(/last seen 3h ago/)).toBeInTheDocument();
   });
 
-  it("invokes onOpen with the device when clicked", () => {
+  it("invokes onOpen with the device when the card wrapper is clicked", () => {
     const onOpen = vi.fn();
     const device = makeDevice();
     render(<DeviceCard device={device} onOpen={onOpen} />);
-    fireEvent.click(screen.getByRole("button"));
+    // The card wrapper has aria-label "Open <name> details" — the inner
+    // Block button has its own distinct label so it no longer shadows.
+    fireEvent.click(screen.getByRole("button", { name: /Open .* details/ }));
     expect(onOpen).toHaveBeenCalledWith(device);
   });
 

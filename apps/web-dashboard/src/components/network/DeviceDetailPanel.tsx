@@ -6,6 +6,7 @@ import type { EnrichedNetworkDevice, DevicePresenceDay } from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { IconPicker, type DeviceIconName } from "./IconPicker";
 import { useDeviceMutations } from "@/lib/hooks/useDeviceMutations";
+import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
 
 const fetcher = async (url: string) => {
   const r = await fetch(url);
@@ -25,6 +26,8 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
     { refreshInterval: 10_000 },
   );
   const { patchDevice, forgetDevice, assignGroups, toastForError } = useDeviceMutations();
+  const { toggleBlock } = useDeviceBlockMutation();
+  const [blockPending, setBlockPending] = useState(false);
 
   const [displayName, setDisplayName] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
@@ -106,6 +109,20 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       await assignGroups(mac, remaining);
     } catch (err) {
       setToast(toastForError(err));
+    }
+  }
+
+  async function handleBlockToggle() {
+    if (!data?.device) return;
+    // TODO(WARP-41): run tier-2 token-bound confirm here before hitting the
+    // firewall endpoint. The hook doesn't exist on this branch yet.
+    setBlockPending(true);
+    try {
+      await toggleBlock(data.device);
+    } catch (err) {
+      setToast(toastForError(err));
+    } finally {
+      setBlockPending(false);
     }
   }
 
@@ -278,11 +295,11 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       <div className="px-4 py-3 border-t border-separator flex gap-2">
         <button
           type="button"
-          disabled
-          title="Wired in WARP-86"
-          className="type-footnote px-3 py-1.5 rounded bg-surface-secondary text-label-tertiary cursor-not-allowed"
+          onClick={() => void handleBlockToggle()}
+          disabled={blockPending || !data?.device}
+          className={`type-footnote px-3 py-1.5 rounded ${data?.device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
         >
-          {data?.device.isBlocked ? "Unblock" : "Block"}
+          {blockPending ? "..." : data?.device.isBlocked ? "Unblock" : "Block"}
         </button>
         {!confirmForget ? (
           <button
