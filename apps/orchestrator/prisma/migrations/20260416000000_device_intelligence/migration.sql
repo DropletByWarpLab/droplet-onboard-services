@@ -5,11 +5,6 @@
 -- rooms idempotently so a fresh install lights up the dashboard with useful
 -- grouping out of the box.
 
--- gen_random_uuid() lives in the pgcrypto extension. No earlier migration in
--- this repo enables it, so we guarantee it here. Idempotent — safe on re-run
--- and safe if the DBA already enabled it globally.
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 -- CreateTable
 CREATE TABLE "NetworkDevice" (
     "mac" TEXT NOT NULL,
@@ -83,11 +78,13 @@ ALTER TABLE "_DeviceGroups" ADD CONSTRAINT "_DeviceGroups_A_fkey" FOREIGN KEY ("
 ALTER TABLE "_DeviceGroups" ADD CONSTRAINT "_DeviceGroups_B_fkey" FOREIGN KEY ("B") REFERENCES "NetworkDevice"("mac") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- Seed default rooms (idempotent — re-running the migration will not duplicate rows).
+-- IDs are literal 25-char cuid-shape strings so they sort stable across DB recreation
+-- and match the shape produced by Prisma's @default(cuid()) at runtime.
 INSERT INTO "DeviceGroup" ("id", "name", "createdAt", "updatedAt")
 VALUES
-  (gen_random_uuid()::text, 'Living Room', NOW(), NOW()),
-  (gen_random_uuid()::text, 'Bedroom',     NOW(), NOW()),
-  (gen_random_uuid()::text, 'Office',      NOW(), NOW()),
-  (gen_random_uuid()::text, 'Kitchen',     NOW(), NOW()),
-  (gen_random_uuid()::text, 'Garage',      NOW(), NOW())
+  ('cseed00000000000000livingrm', 'Living Room', NOW(), NOW()),
+  ('cseed00000000000000bedroom0', 'Bedroom',     NOW(), NOW()),
+  ('cseed00000000000000office00', 'Office',      NOW(), NOW()),
+  ('cseed00000000000000kitchen0', 'Kitchen',     NOW(), NOW()),
+  ('cseed00000000000000garage00', 'Garage',      NOW(), NOW())
 ON CONFLICT ("name") DO NOTHING;

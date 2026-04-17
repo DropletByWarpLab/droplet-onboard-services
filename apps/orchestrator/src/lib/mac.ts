@@ -12,6 +12,12 @@
  *   - dot-separated   (`aabb.ccdd.eeff`, Cisco style)
  *   - no separators   (`aabbccddeeff`)
  *
+ * Any combination of `:`, `-`, `.` separators (or none) is tolerated; input
+ * may mix them freely (e.g. `aa:bb-cc.ddeeff`). This is intentional —
+ * OpenWrt UCI / ARP dumps occasionally emit mixed forms and the reconciler
+ * benefits from the permissive parse. The 12 hex characters themselves
+ * remain the only hard requirement.
+ *
  * Any other shape — wrong length, non-hex chars, empty string,
  * non-string input — throws `DeviceRegistryError.invalidMac`.
  */

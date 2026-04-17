@@ -66,4 +66,11 @@ describe("DeviceRegistryError", () => {
       expect(err.message).toContain("grp_abc");
     });
   });
+
+  it("toJSON omits status when unset", () => {
+    const e = new DeviceRegistryError("NOT_FOUND", "missing");
+    const json = e.toJSON();
+    expect(json).toEqual({ code: "NOT_FOUND", message: "missing" });
+    expect("status" in json).toBe(false);
+  });
 });

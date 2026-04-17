@@ -28,6 +28,10 @@ describe("normalizeMac", () => {
     expect(normalizeMac("aabbccddeeff")).toBe("AA:BB:CC:DD:EE:FF");
   });
 
+  it("tolerates mixed separators (router UCI dumps are sometimes messy)", () => {
+    expect(normalizeMac("aa:bb-cc.ddeeff")).toBe("AA:BB:CC:DD:EE:FF");
+  });
+
   it("rejects wrong length with INVALID_MAC", () => {
     let caught: unknown;
     try {

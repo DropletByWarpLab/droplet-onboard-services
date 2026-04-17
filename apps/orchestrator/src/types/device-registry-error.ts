@@ -63,12 +63,14 @@ export class DeviceRegistryError extends Error {
     });
   }
 
-  /** Shape sent over the wire. */
+  /** Shape sent over the wire. Omits `status` when unset so downstream
+   *  wrappers like `{ error: err.toJSON() }` do not leak `status: undefined`. */
   toJSON(): { code: DeviceRegistryErrorCode; message: string; status?: number } {
-    return {
+    const out: { code: DeviceRegistryErrorCode; message: string; status?: number } = {
       code: this.code,
       message: this.message,
-      status: this.status,
     };
+    if (this.status !== undefined) out.status = this.status;
+    return out;
   }
 }
