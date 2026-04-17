@@ -20,8 +20,30 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { normalizeMac } from "../lib/mac.js";
+
+/**
+ * Prisma's `update` and `delete` throw `PrismaClientKnownRequestError` with
+ * code `P2025` when the target row does not exist. Left unhandled these
+ * bubble out as 500s — for a dashboard user deleting or editing a stale
+ * ID the right surface is a clean 404. This helper re-wraps P2025 into a
+ * `DeviceRegistryError.notFound(<what>)` so the route layer maps it to
+ * 404 via the usual `err.status` path; every other error passes through
+ * untouched.
+ */
+function mapPrismaNotFound<T>(what: string, fn: () => Promise<T>): Promise<T> {
+  return fn().catch((err) => {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2025"
+    ) {
+      throw DeviceRegistryError.notFound(what);
+    }
+    throw err;
+  });
+}
 
 /**
  * Spec §6.1: icon allowlist. Dashboard renders lucide-react icons; this
@@ -139,19 +161,23 @@ export function createNetworkDeviceService(
     if (patch.icon !== undefined) data.icon = patch.icon;
     if (patch.notes !== undefined) data.notes = patch.notes;
 
-    return prisma.networkDevice.update({
-      where: { mac },
-      data,
-    });
+    return mapPrismaNotFound("Device", () =>
+      prisma.networkDevice.update({
+        where: { mac },
+        data,
+      }),
+    );
   }
 
   async function assignDeviceGroups(macRaw: string, groupIds: string[]) {
     const mac = normalizeMac(macRaw);
-    return prisma.networkDevice.update({
-      where: { mac },
-      data: { groups: { set: groupIds.map((id) => ({ id })) } },
-      include: { groups: true },
-    });
+    return mapPrismaNotFound("Device", () =>
+      prisma.networkDevice.update({
+        where: { mac },
+        data: { groups: { set: groupIds.map((id) => ({ id })) } },
+        include: { groups: true },
+      }),
+    );
   }
 
   async function listGroups() {
@@ -183,21 +209,29 @@ export function createNetworkDeviceService(
         throw DeviceRegistryError.duplicateGroupName(patch.name);
       }
     }
-    const data: Record<string, string | null> = {};
+    // No null values are ever produced by this patch shape, so the
+    // record's value type is plain `string`.
+    const data: Record<string, string> = {};
     if (patch.name !== undefined) data.name = patch.name;
     if (patch.color !== undefined) data.color = patch.color;
     if (patch.icon !== undefined) data.icon = patch.icon;
-    return prisma.deviceGroup.update({ where: { id }, data });
+    return mapPrismaNotFound("Group", () =>
+      prisma.deviceGroup.update({ where: { id }, data }),
+    );
   }
 
   async function deleteGroup(id: string) {
     // Prisma cascades the implicit join table; NetworkDevice rows stay.
-    return prisma.deviceGroup.delete({ where: { id } });
+    return mapPrismaNotFound("Group", () =>
+      prisma.deviceGroup.delete({ where: { id } }),
+    );
   }
 
   async function forgetDevice(macRaw: string) {
     const mac = normalizeMac(macRaw);
-    return prisma.networkDevice.delete({ where: { mac } });
+    return mapPrismaNotFound("Device", () =>
+      prisma.networkDevice.delete({ where: { mac } }),
+    );
   }
 
   return {

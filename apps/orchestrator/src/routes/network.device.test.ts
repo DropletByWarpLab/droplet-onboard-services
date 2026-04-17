@@ -123,6 +123,24 @@ function hydrateDevice(row: DeviceRow, include?: any): any {
 }
 
 vi.mock("@prisma/client", () => {
+  // Defined inside the factory so vitest's top-level hoisting of
+  // `vi.mock` doesn't race the class declaration. Mirrors the real
+  // `Prisma.PrismaClientKnownRequestError` well enough for the service
+  // layer's `instanceof` + `code === "P2025"` check.
+  class PrismaClientKnownRequestError extends Error {
+    code: string;
+    clientVersion: string;
+    constructor(
+      message: string,
+      opts: { code: string; clientVersion: string },
+    ) {
+      super(message);
+      this.name = "PrismaClientKnownRequestError";
+      this.code = opts.code;
+      this.clientVersion = opts.clientVersion;
+    }
+  }
+
   const networkDevice = {
     findMany: vi.fn(async (args: any = {}) => {
       let rows = Array.from(deviceStore.values());
@@ -229,10 +247,13 @@ vi.mock("@prisma/client", () => {
     networkDevice,
     deviceGroup,
   };
-  return { PrismaClient: vi.fn(() => mockPrisma) };
+  return {
+    PrismaClient: vi.fn(() => mockPrisma),
+    Prisma: { PrismaClientKnownRequestError },
+  };
 });
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { createApp } from "../app.js";
 
 describe("Network devices + groups API (WARP-82)", () => {
@@ -449,6 +470,29 @@ describe("Network devices + groups API (WARP-82)", () => {
       const res = await request(app).delete("/api/network/devices/AA:BB:CC:DD:EE:01");
       expect(res.status).toBe(204);
       expect(deviceStore.has("AA:BB:CC:DD:EE:01")).toBe(false);
+    });
+
+    // Proves the Prisma P2025 → DeviceRegistryError.notFound translation
+    // in the service layer surfaces as a clean 404 to HTTP clients instead
+    // of an opaque 500 from the generic error middleware.
+    it("404s when prisma throws P2025 for a stale MAC", async () => {
+      const client = new PrismaClient() as any;
+      const original = client.networkDevice.delete;
+      client.networkDevice.delete = vi.fn().mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError("Not found", {
+          code: "P2025",
+          clientVersion: "test",
+        }),
+      );
+      try {
+        const res = await request(app).delete(
+          "/api/network/devices/AA:BB:CC:DD:EE:99",
+        );
+        expect(res.status).toBe(404);
+        expect(res.body.error.code).toBe("NOT_FOUND");
+      } finally {
+        client.networkDevice.delete = original;
+      }
     });
   });
 

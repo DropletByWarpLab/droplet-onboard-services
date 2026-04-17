@@ -9,8 +9,21 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Prisma } from "@prisma/client";
 import { createNetworkDeviceService } from "./network-device.service.js";
 import { DeviceRegistryError } from "../types/device-registry-error.js";
+
+/**
+ * Builds a realistic P2025 error the same way Prisma throws it internally
+ * when `update` / `delete` can't find the target row. Kept in a helper so
+ * every NOT_FOUND mapping test reads uniformly.
+ */
+function p2025(): Error {
+  return new Prisma.PrismaClientKnownRequestError("Not found", {
+    code: "P2025",
+    clientVersion: "test",
+  });
+}
 
 type DeviceRow = {
   mac: string;
@@ -386,6 +399,52 @@ describe("network-device.service", () => {
       devices.set("AA:BB:CC:DD:EE:01", makeDevice({ mac: "AA:BB:CC:DD:EE:01" }));
       await svc.forgetDevice("aa:bb:cc:dd:ee:01");
       expect(devices.has("AA:BB:CC:DD:EE:01")).toBe(false);
+    });
+  });
+
+  /**
+   * P2025 → DeviceRegistryError(NOT_FOUND) mapping. Without the service
+   * layer helper these would bubble out as 500s through Express — the
+   * route layer only branches on `DeviceRegistryError`.
+   */
+  describe("Prisma P2025 → NOT_FOUND mapping", () => {
+    async function expectNotFound(promise: Promise<unknown>): Promise<void> {
+      try {
+        await promise;
+        expect.fail("should have thrown");
+      } catch (e) {
+        expect(e).toBeInstanceOf(DeviceRegistryError);
+        expect((e as DeviceRegistryError).code).toBe("NOT_FOUND");
+      }
+    }
+
+    it("updateDevice on missing MAC throws DeviceRegistryError NOT_FOUND", async () => {
+      prisma.networkDevice.update = vi.fn().mockRejectedValue(p2025());
+      await expectNotFound(
+        svc.updateDevice("AA:BB:CC:DD:EE:FF", { displayName: "x" }),
+      );
+    });
+
+    it("assignDeviceGroups on missing MAC throws DeviceRegistryError NOT_FOUND", async () => {
+      prisma.networkDevice.update = vi.fn().mockRejectedValue(p2025());
+      await expectNotFound(
+        svc.assignDeviceGroups("AA:BB:CC:DD:EE:FF", ["grp-a"]),
+      );
+    });
+
+    it("forgetDevice on missing MAC throws DeviceRegistryError NOT_FOUND", async () => {
+      prisma.networkDevice.delete = vi.fn().mockRejectedValue(p2025());
+      await expectNotFound(svc.forgetDevice("AA:BB:CC:DD:EE:FF"));
+    });
+
+    it("renameGroup on missing id throws DeviceRegistryError NOT_FOUND", async () => {
+      prisma.deviceGroup.update = vi.fn().mockRejectedValue(p2025());
+      await expectNotFound(svc.renameGroup("grp-missing", { name: "Fresh" }));
+    });
+
+    it("deleteGroup on missing id throws DeviceRegistryError NOT_FOUND", async () => {
+      prisma.deviceGroup.delete = vi.fn().mockRejectedValue(p2025());
+      await expectNotFound(svc.deleteGroup("grp-missing"));
     });
   });
 

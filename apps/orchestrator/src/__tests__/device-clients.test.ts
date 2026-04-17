@@ -116,7 +116,20 @@ vi.mock("@prisma/client", () => {
       }),
     },
   };
-  return { PrismaClient: vi.fn(() => mockPrisma) };
+  class PrismaClientKnownRequestError extends Error {
+    code: string;
+    clientVersion: string;
+    constructor(message: string, opts: { code: string; clientVersion: string }) {
+      super(message);
+      this.name = "PrismaClientKnownRequestError";
+      this.code = opts.code;
+      this.clientVersion = opts.clientVersion;
+    }
+  }
+  return {
+    PrismaClient: vi.fn(() => mockPrisma),
+    Prisma: { PrismaClientKnownRequestError },
+  };
 });
 
 import { PrismaClient } from "@prisma/client";
