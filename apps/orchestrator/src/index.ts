@@ -25,6 +25,16 @@ import {
 } from "./services/health-monitor.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
+import * as openwrt from "./services/openwrt.client.js";
+import { createCronRuntime } from "./services/cron-runtime.service.js";
+import {
+  createScheduleTicker,
+  type FirewallClient,
+} from "./services/schedule-ticker.js";
+import {
+  purgeScheduleEvents,
+  purgeExpiredOverrides,
+} from "./services/schedule-purge.js";
 
 const logger = pino({ name: "api-server" });
 
@@ -110,6 +120,32 @@ async function main() {
   // today). Manual purge still works via the exposed method.
   void deviceRegistry;
 
+  // WARP-93: Phase 2 scheduling runtime. Every 30s the ticker diffs
+  // the desired blocked state (from computeDesiredBlocked) against the
+  // live firewall state and dispatches block/unblock via the openwrt
+  // client. A daily 03:00 cron purges old schedule events (>7d) and
+  // long-expired overrides (>24h past endAt).
+  const firewall: FirewallClient = {
+    async block(mac) {
+      await openwrt.blockDevice(mac);
+    },
+    async unblock(mac) {
+      await openwrt.unblockDevice(mac);
+    },
+  };
+  const cronRuntime = createCronRuntime();
+  const scheduleTicker = createScheduleTicker(prisma, firewall);
+  const tickMs = Number(process.env.SCHEDULE_TICK_MS ?? 30_000);
+  cronRuntime.scheduleInterval(tickMs, () => scheduleTicker.tickOnce());
+  cronRuntime.scheduleCron("0 3 * * *", async () => {
+    const eventsDeleted = await purgeScheduleEvents(prisma, 7);
+    const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
+    logger.info(
+      { eventsDeleted, overridesDeleted },
+      "schedule purge complete",
+    );
+  });
+
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
   const app = createApp(prisma);
@@ -122,6 +158,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info("Shutting down...");
+    cronRuntime.stop();
     stopHealthMonitor();
     shutdownDeviceRegistration();
     await shutdownMatterService();
