@@ -40,9 +40,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      # --ignore tests/test_grpc.py: quarantined until the async mock
-      # fixtures there are rebuilt. All 6 failures are in the test harness
-      # itself (MagicMock.await + servicer patching), not in production
-      # code. Tracking: https://warp-lab.atlassian.net/browse/WARP-79
       - name: Run pytest
-        run: pytest -v --ignore=tests/test_grpc.py
+        run: pytest -v
