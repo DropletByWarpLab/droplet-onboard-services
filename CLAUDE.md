@@ -14,7 +14,7 @@ services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-indexer/  Python watchdog — filesystem indexer + embedder (formerly `file-sync`)
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
 services/switch/        FastAPI — Managed switch control (Lantronix/ASIC driver)
-services/oled-display/  Python FastAPI — SSD1351 128x128 OLED display driver
+services/oled-display/  Python FastAPI — ILI9481 480x320 TFT + XPT2046 touch (Inland 3.5" shield)
 openwrt/                OpenWrt image builder + config overlay for Pi 5 router
 docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home Assistant, Frigate NVR
 ```
@@ -28,7 +28,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home 
 - **File indexer:** Python, watchdog (was `file-sync`; renamed to reflect its indexer+embedder role)
 - **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
 - **Switch service:** Python, FastAPI, abstract driver interface (Lantronix SM8TAT2SA / future ASIC)
-- **OLED display:** Python, FastAPI, luma.oled (SSD1351), Pillow, psutil
+- **TFT display:** Python, FastAPI, luma.lcd (ILI9481/9486), fbtft framebuffer fallback, XPT2046 touch via evdev/spidev, Pillow, psutil
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Home Assistant, Frigate
 
@@ -74,7 +74,7 @@ npm run test:ai-gateway     # ai-gateway only
 | switch         | :8081 | Managed switch control, `full` |
 | camera-discovery | —   | ONVIF/RTSP scanner, `full` |
 | routing        | :8080 | OpenWrt control, `full`    |
-| oled-display   | :8082 | SSD1351 OLED screen, `full`|
+| oled-display   | :8082 | 3.5" ILI9481 TFT + touch, `full` |
 
 ## Environment variables
 
@@ -105,10 +105,17 @@ npm run test:ai-gateway     # ai-gateway only
 | `SWITCH_DRIVER`      | Switch driver: `lantronix` (default) or `asic` (future) |
 | `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://localhost:8081`) |
 | `ROUTING_MODE`       | `real` (default) / `mock` (fixture-driven, no OpenWrt needed) / `disabled` (orchestrator skips router calls). See WARP-44. |
-| `DISPLAY_SERVICE_URL`| OLED display service endpoint (default `http://localhost:8082`) |
-| `DC_PIN`             | OLED Data/Command GPIO pin (default `18`)                  |
-| `RST_PIN`            | OLED Reset GPIO pin (default `22`)                         |
+| `DISPLAY_SERVICE_URL`| TFT display service endpoint (default `http://localhost:8082`) |
+| `DISPLAY_BACKEND`    | `auto` / `framebuffer` / `spi` / `sim` (default `auto`)    |
+| `FB_DEVICE`          | Framebuffer device for fbtft path (default `/dev/fb1`)     |
+| `LCD_DRIVER`         | luma.lcd driver (default `ili9486`, 9481-compatible)       |
+| `LCD_WIDTH` / `LCD_HEIGHT` | Panel resolution (default `480` / `320`)             |
+| `SPI_HZ`             | SPI bus speed (default `32000000`)                         |
+| `DC_PIN`             | TFT Data/Command GPIO pin (default `18`)                   |
+| `RST_PIN`            | TFT Reset GPIO pin (default `22`)                          |
 | `SPI_DEVICE`         | SPI device path (default `/dev/spidev0.0`)                 |
+| `TOUCH_BACKEND`      | `auto` / `evdev` / `spi` / `sim` (default `auto`)          |
+| `TOUCH_CS`           | XPT2046 SPI chip-select (default `1` = CE1)                |
 
 ## GTM Alignment (April 2026)
 

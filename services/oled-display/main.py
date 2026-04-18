@@ -1,26 +1,28 @@
 """
-Droplet OLED Display Service
-==============================
-FastAPI wrapper for the 128x128 SSD1351 OLED display.
-Exposes REST endpoints for the orchestrator and AI gateway to control
-what's shown on the physical display.
+Droplet TFT Display Service
+=============================
+FastAPI wrapper for the 480x320 ILI9481 TFT display (with XPT2046 touch).
+Exposes REST endpoints for the orchestrator and AI gateway to control what's
+shown on the physical display and to read touch input.
 """
 
 import os
 import io
+import hmac
 import logging
 from contextlib import asynccontextmanager
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
 from PIL import Image
 
-from display import OLEDDisplay, SIM_OUTPUT
+from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT
+from touch import TouchReader
 
-logger = logging.getLogger("droplet.oled")
+logger = logging.getLogger("droplet.tft")
 logging.basicConfig(level=logging.INFO)
 
 # ---------------------------------------------------------------------------
@@ -28,14 +30,11 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
 if not SERVICE_SECRET:
-    logger.warning("SERVICE_SECRET not set — all endpoints are unauthenticated.")
+    logger.warning("SERVICE_SECRET not set - all endpoints are unauthenticated.")
 
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests without a valid SERVICE_SECRET Bearer token."""
-
     async def dispatch(self, request: Request, call_next):
-        import hmac
         if request.url.path == "/health":
             return await call_next(request)
         if SERVICE_SECRET:
@@ -49,21 +48,26 @@ class ServiceAuthMiddleware(BaseHTTPMiddleware):
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
-display: Optional[OLEDDisplay] = None
+display: Optional[TFTDisplay] = None
+touch: Optional[TouchReader] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global display
-    display = OLEDDisplay()
+    global display, touch
+    display = TFTDisplay()
     display.start_cycle()
-    logger.info("OLED display service started (simulated=%s)", display._simulated)
+    touch = TouchReader(width=WIDTH, height=HEIGHT)
+    touch.start()
+    logger.info("TFT display service started (backend=%s, touch=%s)",
+                display._backend, touch._backend)
     yield
     display.stop_cycle()
-    logger.info("OLED display service stopped")
+    touch.stop()
+    logger.info("TFT display service stopped")
 
 
-app = FastAPI(title="Droplet OLED Display Service", lifespan=lifespan)
+app = FastAPI(title="Droplet TFT Display Service", lifespan=lifespan)
 app.add_middleware(ServiceAuthMiddleware)
 
 
@@ -71,12 +75,16 @@ app.add_middleware(ServiceAuthMiddleware)
 # Request models
 # ---------------------------------------------------------------------------
 class MessageRequest(BaseModel):
-    title: str = Field(..., max_length=20, description="Header text")
-    lines: List[str] = Field(..., max_length=7, description="Body lines (max 7)")
+    title: str = Field(..., max_length=40, description="Header text")
+    lines: List[str] = Field(..., max_length=10, description="Body lines (max 10)")
 
 
 class BrightnessRequest(BaseModel):
     value: int = Field(..., ge=0, le=255, description="Brightness 0-255")
+
+
+# Upload ceiling - bigger panel warrants a bigger ceiling, but still bounded.
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +92,12 @@ class BrightnessRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "oled-display", "simulated": display._simulated if display else True}
+    return {
+        "status": "ok",
+        "service": "tft-display",
+        "backend": display._backend if display else "uninitialized",
+        "resolution": f"{WIDTH}x{HEIGHT}",
+    }
 
 
 @app.get("/display/status")
@@ -96,7 +109,6 @@ async def get_status():
 
 @app.post("/display/stats")
 async def show_stats():
-    """Switch to the device stats screen."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     display.resume_cycle()
@@ -106,7 +118,6 @@ async def show_stats():
 
 @app.post("/display/logo")
 async def show_logo():
-    """Switch to the full-screen logo."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     display.show_logo()
@@ -115,7 +126,6 @@ async def show_logo():
 
 @app.post("/display/message")
 async def show_message(req: MessageRequest):
-    """Show a custom message (pauses auto-cycle for 30s)."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     display.show_message(req.title, req.lines)
@@ -123,17 +133,14 @@ async def show_message(req: MessageRequest):
 
 
 @app.post("/display/custom")
-MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MB
-
-
 async def show_custom(file: UploadFile = File(...)):
-    """Upload a custom image to display (resized to 128x128, max 2MB)."""
+    """Upload a custom image (resized to panel resolution, max 8 MB)."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     try:
         data = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, "Image too large (max 2MB)")
+            raise HTTPException(413, "Image too large (max 8MB)")
         image = Image.open(io.BytesIO(data))
         display.show_custom_image(image)
         return {"ok": True, "mode": "custom"}
@@ -145,7 +152,6 @@ async def show_custom(file: UploadFile = File(...)):
 
 @app.post("/display/brightness")
 async def set_brightness(req: BrightnessRequest):
-    """Set display brightness (0-255)."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     display.set_brightness(req.value)
@@ -154,7 +160,6 @@ async def set_brightness(req: BrightnessRequest):
 
 @app.post("/display/cycle/resume")
 async def resume_cycle():
-    """Resume auto-cycling immediately."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     display.resume_cycle()
@@ -163,7 +168,6 @@ async def resume_cycle():
 
 @app.post("/display/cycle/stop")
 async def stop_cycle():
-    """Stop auto-cycling (pin current screen)."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     display.stop_cycle()
@@ -172,9 +176,19 @@ async def stop_cycle():
 
 @app.get("/display/preview")
 async def get_preview():
-    """Return the current simulated frame as PNG (dev/debug only)."""
-    if not display or not display._simulated:
+    if not display or display._backend != "sim":
         raise HTTPException(404, "Preview only available in simulated mode")
     if not SIM_OUTPUT.exists():
         raise HTTPException(404, "No frame rendered yet")
     return FileResponse(str(SIM_OUTPUT), media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Touch endpoints
+# ---------------------------------------------------------------------------
+@app.get("/touch/state")
+async def touch_state():
+    """Current touch state: pressed flag, last (x,y), press/release counters."""
+    if not touch:
+        raise HTTPException(503, "Touch not initialized")
+    return touch.get_state()

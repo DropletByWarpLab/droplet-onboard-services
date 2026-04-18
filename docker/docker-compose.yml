@@ -332,7 +332,8 @@ services:
     profiles: ["full"]
     restart: always
 
-  # --- OLED Display (128x128 SSD1351 via SPI) ---
+  # --- TFT Display (Inland 3.5" 480x320 ILI9481 + XPT2046 touch, SPI) ---
+  # Directory name stays `oled-display` for compat with orchestrator client.
   oled-display:
     build:
       context: ../services/oled-display
@@ -343,12 +344,24 @@ services:
     environment:
       - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
       - PORT=8082
+      - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
+      - FB_DEVICE=${FB_DEVICE:-/dev/fb1}
       - SPI_DEVICE=/dev/spidev0.0
+      - LCD_DRIVER=${LCD_DRIVER:-ili9486}
+      - LCD_WIDTH=480
+      - LCD_HEIGHT=320
+      - SPI_HZ=${SPI_HZ:-32000000}
       - DC_PIN=18
       - RST_PIN=22
+      - TOUCH_BACKEND=${TOUCH_BACKEND:-auto}
+      - TOUCH_CS=1
     devices:
       - /dev/spidev0.0:/dev/spidev0.0
+      - /dev/spidev0.1:/dev/spidev0.1
       - /dev/gpiochip0:/dev/gpiochip0
+      # fb1 / input event devices are mounted below via volumes when present.
+    volumes:
+      - /dev:/dev:rw
     profiles: ["full"]
     restart: always
 

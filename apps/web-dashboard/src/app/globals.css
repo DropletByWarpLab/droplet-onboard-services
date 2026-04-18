@@ -324,6 +324,68 @@
 }
 
 /* ============================================================
+   Kiosk / Small-Display Tuning (Inland 3.5" TFT: 480x320)
+   ============================================================
+   Chromium running in kiosk mode on the built-in TFT renders at
+   ~480x320. These rules tighten spacing and type so the dashboard
+   stays usable on the panel. Triggered on very-short viewports
+   rather than a raw width match so larger phones in landscape
+   aren't affected. */
+
+@media (max-width: 560px) and (max-height: 380px) {
+  :root {
+    font-size: 13px;
+  }
+
+  body {
+    /* Prevent rubber-band scrolling on the built-in screen */
+    overscroll-behavior: none;
+  }
+
+  /* Shrink cards and rows so the 4-stat status grid fits */
+  .dp-card,
+  .dp-group {
+    border-radius: 8px;
+  }
+
+  .dp-row {
+    @apply px-3 py-2 min-h-[36px];
+  }
+
+  .dp-input {
+    @apply px-2 py-1.5 text-sm;
+  }
+
+  .dp-btn-primary,
+  .dp-btn-secondary {
+    @apply px-3 py-1.5 text-sm min-h-[36px];
+  }
+
+  /* Compact the type scale so headlines don't wrap */
+  .type-large-title { @apply text-[22px] leading-[26px]; }
+  .type-title-1     { @apply text-[18px] leading-[22px]; }
+  .type-title-2     { @apply text-[16px] leading-[20px]; }
+  .type-title-3     { @apply text-[15px] leading-[19px]; }
+  .type-headline,
+  .type-body        { @apply text-[13px] leading-[17px]; }
+  .type-callout     { @apply text-[12px] leading-[16px]; }
+  .type-subheadline { @apply text-[12px] leading-[15px]; }
+  .type-footnote    { @apply text-[11px] leading-[14px]; }
+  .type-caption-1,
+  .type-caption-2   { @apply text-[10px] leading-[12px]; }
+}
+
+/* Explicit opt-in via ?kiosk=1 or <html data-kiosk> for when the
+   TFT is mirrored on a larger monitor during development. */
+html[data-kiosk="1"] {
+  font-size: 13px;
+}
+
+html[data-kiosk="1"] .dp-row {
+  @apply px-3 py-2 min-h-[36px];
+}
+
+/* ============================================================
    Reduced Motion
    ============================================================ */
 

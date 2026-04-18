@@ -1,14 +1,23 @@
 """
-Droplet OLED Display Driver
-============================
-Drives a Waveshare 1.5" SSD1351 128x128 RGB OLED via SPI using luma.oled.
-Falls back to simulated file output when no hardware is detected.
+Droplet TFT Display Driver
+===========================
+Drives a 3.5" Inland/Waveshare-compatible TFT LCD (ILI9481, 480x320) with
+XPT2046 resistive touch over SPI on the Jetson 40-pin header.
+
+Supports three backends, chosen automatically:
+  1. framebuffer  - writes RGB565 into /dev/fb1 (fbtft kernel module path)
+  2. luma.lcd     - direct SPI via luma.lcd ILI9486 driver (9481-compatible)
+  3. simulated    - writes a PNG to SIM_OUTPUT (dev/CI fallback)
+
+The class is exposed as both TFTDisplay (preferred) and OLEDDisplay (legacy
+alias) so existing orchestrator clients keep working.
 """
 
 import os
 import time
 import socket
 import logging
+import struct
 import threading
 from pathlib import Path
 from typing import Optional, List
@@ -16,42 +25,57 @@ from typing import Optional, List
 import psutil
 from PIL import Image, ImageDraw, ImageFont
 
-logger = logging.getLogger("droplet.oled")
+logger = logging.getLogger("droplet.tft")
 
-# Display dimensions
-WIDTH = 128
-HEIGHT = 128
+# ---------------------------------------------------------------------------
+# Display geometry
+# ---------------------------------------------------------------------------
+WIDTH = int(os.environ.get("LCD_WIDTH", "480"))
+HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 
-# Pin configuration (Jetson GPIO numbering)
-DC_PIN = int(os.environ.get("DC_PIN", "18"))
-RST_PIN = int(os.environ.get("RST_PIN", "22"))
+# ---------------------------------------------------------------------------
+# Hardware config (Jetson 40-pin header, Pi-shield compatible pinout)
+# ---------------------------------------------------------------------------
+DC_PIN = int(os.environ.get("DC_PIN", "18"))       # Data/Command
+RST_PIN = int(os.environ.get("RST_PIN", "22"))     # Reset
 SPI_DEVICE = os.environ.get("SPI_DEVICE", "/dev/spidev0.0")
+FB_DEVICE = os.environ.get("FB_DEVICE", "/dev/fb1")
+LCD_DRIVER = os.environ.get("LCD_DRIVER", "ili9486").lower()  # ili9486 speaks 9481
+BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()   # auto|framebuffer|spi|sim
+SPI_HZ = int(os.environ.get("SPI_HZ", "32000000"))            # 32 MHz per panel spec
 
-# Colors (RGB)
-BG_COLOR = (0, 0, 0)
+# Backlight (optional PWM on GPIO18/pin 12 on the shield)
+BACKLIGHT_PIN = int(os.environ.get("BACKLIGHT_PIN", "12"))
+
+# ---------------------------------------------------------------------------
+# Colours - Droplet design system (RGB)
+# ---------------------------------------------------------------------------
+BG_COLOR = (12, 12, 18)
+CARD_COLOR = (24, 24, 32)
 TEXT_COLOR = (255, 255, 255)
-ACCENT_COLOR = (99, 102, 241)       # indigo-500 (#6366f1)
-ACCENT_LIGHT = (129, 140, 248)      # indigo-400 (#818cf8)
-DIM_COLOR = (140, 140, 160)
-BAR_BG = (40, 40, 50)
+ACCENT_COLOR = (99, 102, 241)     # indigo-500
+ACCENT_LIGHT = (129, 140, 248)    # indigo-400
+DIM_COLOR = (150, 150, 170)
+BAR_BG = (40, 40, 55)
 TEMP_WARN = (255, 180, 0)
 TEMP_CRIT = (255, 60, 60)
+GOOD_COLOR = (52, 199, 89)
 
-# Assets
+# ---------------------------------------------------------------------------
+# Assets + cycle timing
+# ---------------------------------------------------------------------------
 ASSETS_DIR = Path(__file__).parent / "assets"
-LOGO_PATH = ASSETS_DIR / "logo_128.png"
-SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/oled_preview.png"))
+LOGO_PATH_PRIMARY = ASSETS_DIR / "logo_480.png"
+LOGO_PATH_FALLBACK = ASSETS_DIR / "logo_128.png"
+SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 
-# Cycle timing
-LOGO_DURATION = 5       # seconds to show logo
-STATS_DURATION = 10     # seconds to show stats
-MESSAGE_HOLD = 30       # seconds to hold LLM message before resuming cycle
+LOGO_DURATION = 5
+STATS_DURATION = 10
+MESSAGE_HOLD = 30
 
 
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    """Load a built-in font at the given size."""
     try:
-        # Try DejaVu (common on Linux/Docker)
         variant = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
         for search in ["/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/"]:
             path = Path(search) / variant
@@ -62,12 +86,26 @@ def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-class OLEDDisplay:
-    """SSD1351 128x128 OLED display controller with auto-cycle support."""
+def _rgb888_to_rgb565_bytes(image: Image.Image) -> bytes:
+    """Convert a PIL RGB image to a packed RGB565 little-endian byte buffer."""
+    # PIL has a built-in BGR;16 mode but coverage is spotty - do it manually.
+    arr = image.tobytes("raw", "RGB")
+    out = bytearray(len(arr) // 3 * 2)
+    for i in range(0, len(arr), 3):
+        r, g, b = arr[i], arr[i + 1], arr[i + 2]
+        v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        out[(i // 3) * 2] = v & 0xFF
+        out[(i // 3) * 2 + 1] = (v >> 8) & 0xFF
+    return bytes(out)
+
+
+class TFTDisplay:
+    """ILI9481 480x320 TFT controller with auto-cycling status screens."""
 
     def __init__(self):
-        self._device = None
-        self._simulated = False
+        self._device = None                     # luma.lcd device (SPI backend)
+        self._fb_path: Optional[str] = None     # framebuffer path (fb backend)
+        self._backend = "sim"                   # resolved backend
         self._current_mode = "logo"
         self._current_image: Optional[Image.Image] = None
         self._custom_title: Optional[str] = None
@@ -82,175 +120,282 @@ class OLEDDisplay:
         self._init_device()
         self._load_logo()
 
+    # ----- Backend init -------------------------------------------------
+
     def _init_device(self):
-        """Try to initialize real SPI hardware, fall back to simulated."""
+        """Resolve the best available backend for this host."""
+        order = (
+            ["framebuffer", "spi", "sim"] if BACKEND == "auto"
+            else [BACKEND]
+        )
+        for name in order:
+            if name == "framebuffer" and self._try_framebuffer():
+                return
+            if name == "spi" and self._try_spi():
+                return
+            if name == "sim":
+                self._backend = "sim"
+                logger.warning("Using simulated display (no hardware detected)")
+                return
+
+    def _try_framebuffer(self) -> bool:
+        """fbtft kernel driver exposes the panel as /dev/fb1."""
+        try:
+            if not Path(FB_DEVICE).exists():
+                return False
+            # Sanity check: fb must be writable
+            with open(FB_DEVICE, "r+b"):
+                pass
+            self._fb_path = FB_DEVICE
+            self._backend = "framebuffer"
+            logger.info("TFT initialised via framebuffer %s (%dx%d)", FB_DEVICE, WIDTH, HEIGHT)
+            return True
+        except Exception as e:
+            logger.debug("Framebuffer backend unavailable: %s", e)
+            return False
+
+    def _try_spi(self) -> bool:
+        """Direct SPI via luma.lcd - ILI9486 driver is register-compatible with ILI9481."""
         try:
             from luma.core.interface.serial import spi
-            from luma.oled.device import ssd1351
+            from luma.lcd.device import ili9486
 
-            serial = spi(device=0, port=0, gpio_DC=DC_PIN, gpio_RST=RST_PIN)
-            self._device = ssd1351(serial, width=WIDTH, height=HEIGHT)
-            self._device.contrast(self._brightness)
-            logger.info("SSD1351 OLED initialized on SPI")
+            serial = spi(
+                device=0, port=0,
+                gpio_DC=DC_PIN, gpio_RST=RST_PIN,
+                bus_speed_hz=SPI_HZ,
+            )
+            # luma.lcd ili9486 is landscape-first by convention (480x320)
+            self._device = ili9486(
+                serial, width=WIDTH, height=HEIGHT,
+                rotate=int(os.environ.get("LCD_ROTATE", "0")),
+            )
+            self._backend = "spi"
+            logger.info("TFT initialised via luma.lcd %s over SPI (%dx%d @ %dHz)",
+                        LCD_DRIVER, WIDTH, HEIGHT, SPI_HZ)
+            return True
         except Exception as e:
-            logger.warning("No SPI hardware detected (%s), using simulated display", e)
-            self._simulated = True
+            logger.debug("SPI backend unavailable: %s", e)
+            return False
+
+    # ----- Assets -------------------------------------------------------
 
     def _load_logo(self):
-        """Load the 128x128 logo asset."""
-        if LOGO_PATH.exists():
-            self._logo_image = Image.open(LOGO_PATH).convert("RGB").resize((WIDTH, HEIGHT))
-        else:
-            # Generate a placeholder logo from the SVG design
-            self._logo_image = self._render_logo_fallback()
+        """Load a logo asset sized for this display."""
+        for candidate in (LOGO_PATH_PRIMARY, LOGO_PATH_FALLBACK):
+            if candidate.exists():
+                self._logo_image = (
+                    Image.open(candidate).convert("RGB").resize((WIDTH, HEIGHT))
+                )
+                return
+        self._logo_image = self._render_logo_fallback()
 
     def _render_logo_fallback(self) -> Image.Image:
-        """Render the Droplet logo programmatically when PNG asset is missing."""
+        """Vector-style fallback logo scaled to full 480x320 canvas."""
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
 
-        # Draw the faceted drop mark (scaled to 128x128)
-        cx, cy_top = 64, 20
-        scale = 1.8
-        points_left = [
+        # Faceted water-drop mark, centred
+        cx = WIDTH // 2
+        cy_top = HEIGHT // 2 - 90
+        s = 2.6  # scale factor for 480x320
+        left = [
             (cx, cy_top),
-            (cx + int(18 * scale), cy_top + int(28 * scale)),
-            (cx + int(10 * scale), cy_top + int(48 * scale)),
-            (cx - int(10 * scale), cy_top + int(48 * scale)),
-            (cx - int(18 * scale), cy_top + int(28 * scale)),
+            (cx + int(18 * s), cy_top + int(28 * s)),
+            (cx + int(10 * s), cy_top + int(48 * s)),
+            (cx - int(10 * s), cy_top + int(48 * s)),
+            (cx - int(18 * s), cy_top + int(28 * s)),
         ]
-        draw.polygon(points_left, fill=ACCENT_COLOR)
-
-        # Right highlight face
-        points_right = [
+        draw.polygon(left, fill=ACCENT_COLOR)
+        right = [
             (cx, cy_top),
-            (cx + int(18 * scale), cy_top + int(28 * scale)),
-            (cx, cy_top + int(36 * scale)),
+            (cx + int(18 * s), cy_top + int(28 * s)),
+            (cx, cy_top + int(36 * s)),
         ]
-        draw.polygon(points_right, fill=ACCENT_LIGHT)
+        draw.polygon(right, fill=ACCENT_LIGHT)
 
-        # Wordmark
-        font = _get_font(14, bold=True)
+        font = _get_font(48, bold=True)
         text = "Droplet"
         bbox = draw.textbbox((0, 0), text, font=font)
         tw = bbox[2] - bbox[0]
-        draw.text(((WIDTH - tw) // 2, 112), text, fill=TEXT_COLOR, font=font)
+        draw.text(((WIDTH - tw) // 2, HEIGHT - 70), text, fill=TEXT_COLOR, font=font)
+
+        sub = _get_font(16)
+        draw.text((cx - 70, HEIGHT - 22), "edge ai appliance", fill=DIM_COLOR, font=sub)
 
         return img
 
+    # ----- Push to display ---------------------------------------------
+
     def _push(self, image: Image.Image):
-        """Send image to the physical display or write to file."""
         self._current_image = image
-        if self._simulated:
+        if self._backend == "framebuffer":
+            self._push_framebuffer(image)
+        elif self._backend == "spi" and self._device is not None:
+            self._device.display(image)
+        else:
             SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
             image.save(str(SIM_OUTPUT))
             logger.debug("Simulated frame saved to %s", SIM_OUTPUT)
-        else:
-            self._device.display(image)
 
-    # ----- Screen Renderers -----
+    def _push_framebuffer(self, image: Image.Image):
+        """Pack to RGB565 and write into /dev/fb1."""
+        try:
+            rgb = image if image.size == (WIDTH, HEIGHT) else image.resize((WIDTH, HEIGHT))
+            buf = _rgb888_to_rgb565_bytes(rgb)
+            with open(self._fb_path, "wb") as fb:
+                fb.write(buf)
+        except Exception as e:
+            logger.error("Framebuffer write failed: %s", e)
+
+    # ----- Screen renderers --------------------------------------------
 
     def render_logo(self) -> Image.Image:
-        """Full-screen Droplet logo."""
         return self._logo_image.copy()
 
     def render_stats(self) -> Image.Image:
-        """Device stats screen with mini logo header."""
+        """480x320 status dashboard - CPU, RAM, disk, temp, IP, uptime, clock."""
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
 
-        font_sm = _get_font(9)
-        font_md = _get_font(10, bold=True)
-        font_title = _get_font(9, bold=True)
+        font_xl = _get_font(28, bold=True)
+        font_lg = _get_font(20, bold=True)
+        font_md = _get_font(16)
+        font_sm = _get_font(13)
+        font_label = _get_font(12, bold=True)
 
-        # Mini logo at top (32x32)
+        # --- Header bar ---
+        draw.rectangle([(0, 0), (WIDTH, 46)], fill=ACCENT_COLOR)
         if self._logo_image:
-            mini = self._logo_image.resize((28, 28))
-            img.paste(mini, (50, 2))
+            mini = self._logo_image.resize((38, 38))
+            img.paste(mini, (6, 4))
+        draw.text((52, 4), "Droplet Edge", fill=(255, 255, 255), font=font_lg)
+        clock = time.strftime("%H:%M")
+        bbox = draw.textbbox((0, 0), clock, font=font_xl)
+        draw.text((WIDTH - (bbox[2] - bbox[0]) - 10, 6), clock,
+                  fill=(255, 255, 255), font=font_xl)
 
-        # Title
-        draw.text((4, 4), "Droplet Edge", fill=ACCENT_LIGHT, font=font_title)
+        # --- Metric cards (2x2 grid) ---
+        card_w = (WIDTH - 30) // 2
+        card_h = 100
+        y0 = 58
+        gap = 10
 
-        y = 34
-        draw.line([(4, y), (124, y)], fill=(60, 60, 80), width=1)
-        y += 4
-
-        # CPU
         cpu_pct = psutil.cpu_percent(interval=0.1)
-        draw.text((4, y), "CPU", fill=DIM_COLOR, font=font_sm)
-        draw.text((36, y), f"{cpu_pct:.0f}%", fill=TEXT_COLOR, font=font_md)
-        bar_x = 68
-        bar_w = 56
-        draw.rectangle([(bar_x, y + 2), (bar_x + bar_w, y + 8)], fill=BAR_BG)
-        fill_w = int(bar_w * min(cpu_pct, 100) / 100)
-        if fill_w > 0:
-            color = ACCENT_COLOR if cpu_pct < 80 else TEMP_WARN if cpu_pct < 95 else TEMP_CRIT
-            draw.rectangle([(bar_x, y + 2), (bar_x + fill_w, y + 8)], fill=color)
-        y += 16
-
-        # RAM
         mem = psutil.virtual_memory()
-        used_gb = mem.used / (1024 ** 3)
-        total_gb = mem.total / (1024 ** 3)
-        draw.text((4, y), "RAM", fill=DIM_COLOR, font=font_sm)
-        draw.text((36, y), f"{used_gb:.1f}/{total_gb:.0f}G", fill=TEXT_COLOR, font=font_md)
-        bar_x = 90
-        bar_w = 34
-        draw.rectangle([(bar_x, y + 2), (bar_x + bar_w, y + 8)], fill=BAR_BG)
-        fill_w = int(bar_w * mem.percent / 100)
-        if fill_w > 0:
-            color = ACCENT_COLOR if mem.percent < 80 else TEMP_WARN
-            draw.rectangle([(bar_x, y + 2), (bar_x + fill_w, y + 8)], fill=color)
-        y += 16
-
-        # Temperature
+        try:
+            disk = psutil.disk_usage("/")
+        except Exception:
+            disk = None
         temp = self._get_cpu_temp()
-        temp_color = TEXT_COLOR if temp < 70 else TEMP_WARN if temp < 85 else TEMP_CRIT
-        draw.text((4, y), "Temp", fill=DIM_COLOR, font=font_sm)
-        draw.text((36, y), f"{temp:.0f}C", fill=temp_color, font=font_md)
-        y += 16
 
-        # IP
-        ip = self._get_ip()
-        draw.text((4, y), "IP", fill=DIM_COLOR, font=font_sm)
-        draw.text((36, y), ip, fill=TEXT_COLOR, font=font_sm)
-        y += 16
+        self._draw_metric_card(
+            draw, 10, y0, card_w, card_h,
+            "CPU", f"{cpu_pct:.0f}%", cpu_pct,
+            font_label, font_xl, font_sm,
+            danger_thresh=(80, 95),
+        )
+        self._draw_metric_card(
+            draw, 20 + card_w, y0, card_w, card_h,
+            "RAM", f"{mem.used / (1024**3):.1f}/{mem.total / (1024**3):.0f} GB",
+            mem.percent,
+            font_label, font_xl, font_sm,
+            danger_thresh=(80, 95),
+        )
+        self._draw_metric_card(
+            draw, 10, y0 + card_h + gap, card_w, card_h,
+            "DISK",
+            f"{(disk.used / (1024**3)):.0f}/{(disk.total / (1024**3)):.0f} GB" if disk else "n/a",
+            disk.percent if disk else 0,
+            font_label, font_xl, font_sm,
+            danger_thresh=(85, 95),
+        )
+        self._draw_temp_card(
+            draw, 20 + card_w, y0 + card_h + gap, card_w, card_h,
+            temp, font_label, font_xl, font_sm,
+        )
 
-        # Uptime
+        # --- Footer: IP + uptime ---
+        foot_y = HEIGHT - 28
+        draw.line([(10, foot_y - 6), (WIDTH - 10, foot_y - 6)],
+                  fill=(60, 60, 80), width=1)
+        draw.text((10, foot_y), "IP", fill=DIM_COLOR, font=font_label)
+        draw.text((36, foot_y - 2), self._get_ip(), fill=TEXT_COLOR, font=font_md)
+
         up = time.time() - psutil.boot_time()
         days = int(up // 86400)
         hours = int((up % 86400) // 3600)
-        up_str = f"{days}d {hours}h" if days else f"{hours}h {int((up % 3600) // 60)}m"
-        draw.text((4, y), "Up", fill=DIM_COLOR, font=font_sm)
-        draw.text((36, y), up_str, fill=TEXT_COLOR, font=font_sm)
+        mins = int((up % 3600) // 60)
+        up_str = f"{days}d {hours}h" if days else f"{hours}h {mins}m"
+        bbox = draw.textbbox((0, 0), up_str, font=font_md)
+        draw.text((WIDTH - (bbox[2] - bbox[0]) - 10, foot_y - 2),
+                  up_str, fill=TEXT_COLOR, font=font_md)
+        draw.text((WIDTH - (bbox[2] - bbox[0]) - 40, foot_y),
+                  "UP", fill=DIM_COLOR, font=font_label)
 
         return img
 
+    @staticmethod
+    def _draw_metric_card(draw, x, y, w, h, label, value, pct,
+                          font_label, font_value, font_sm, danger_thresh=(80, 95)):
+        draw.rounded_rectangle([(x, y), (x + w, y + h)], radius=10, fill=CARD_COLOR)
+        draw.text((x + 10, y + 8), label, fill=DIM_COLOR, font=font_label)
+        draw.text((x + 10, y + 26), value, fill=TEXT_COLOR, font=font_value)
+        # Progress bar
+        bar_x = x + 10
+        bar_y = y + h - 18
+        bar_w = w - 20
+        draw.rounded_rectangle([(bar_x, bar_y), (bar_x + bar_w, bar_y + 8)],
+                               radius=4, fill=BAR_BG)
+        fill_w = int(bar_w * min(max(pct, 0), 100) / 100)
+        if fill_w > 0:
+            warn, crit = danger_thresh
+            color = (ACCENT_COLOR if pct < warn
+                     else TEMP_WARN if pct < crit
+                     else TEMP_CRIT)
+            draw.rounded_rectangle([(bar_x, bar_y), (bar_x + fill_w, bar_y + 8)],
+                                   radius=4, fill=color)
+
+    @staticmethod
+    def _draw_temp_card(draw, x, y, w, h, temp,
+                        font_label, font_value, font_sm):
+        draw.rounded_rectangle([(x, y), (x + w, y + h)], radius=10, fill=CARD_COLOR)
+        draw.text((x + 10, y + 8), "TEMP", fill=DIM_COLOR, font=font_label)
+        color = (TEXT_COLOR if temp < 70
+                 else TEMP_WARN if temp < 85
+                 else TEMP_CRIT)
+        draw.text((x + 10, y + 26), f"{temp:.0f}\u00b0C", fill=color, font=font_value)
+        status_text = ("nominal" if temp < 70
+                       else "warm" if temp < 85
+                       else "hot")
+        status_color = (GOOD_COLOR if temp < 70
+                        else TEMP_WARN if temp < 85
+                        else TEMP_CRIT)
+        draw.text((x + 10, y + h - 22), status_text, fill=status_color, font=font_sm)
+
     def render_message(self, title: str, lines: List[str]) -> Image.Image:
-        """Custom message screen for LLM tool output."""
+        """Full-screen message view for LLM tool output."""
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
 
-        font_title = _get_font(11, bold=True)
-        font_body = _get_font(10)
+        font_title = _get_font(22, bold=True)
+        font_body = _get_font(18)
 
         # Title bar
-        draw.rectangle([(0, 0), (WIDTH, 18)], fill=ACCENT_COLOR)
-        draw.text((4, 3), title[:20], fill=(255, 255, 255), font=font_title)
+        draw.rectangle([(0, 0), (WIDTH, 50)], fill=ACCENT_COLOR)
+        draw.text((14, 12), title[:40], fill=(255, 255, 255), font=font_title)
 
-        # Body lines
-        y = 24
-        for line in lines[:7]:
-            draw.text((4, y), line[:22], fill=TEXT_COLOR, font=font_body)
-            y += 15
+        y = 68
+        for line in lines[:10]:
+            draw.text((16, y), line[:52], fill=TEXT_COLOR, font=font_body)
+            y += 24
 
         return img
 
-    # ----- Helpers -----
+    # ----- Sensor helpers ----------------------------------------------
 
     @staticmethod
     def _get_cpu_temp() -> float:
-        """Read CPU temperature, platform-aware."""
         try:
             temps = psutil.sensors_temperatures()
             for name in ["thermal_zone0", "cpu_thermal", "coretemp", "cpu-thermal"]:
@@ -258,7 +403,6 @@ class OLEDDisplay:
                     return temps[name][0].current
         except Exception:
             pass
-        # Jetson fallback
         try:
             with open("/sys/devices/virtual/thermal/thermal_zone0/temp") as f:
                 return int(f.read().strip()) / 1000.0
@@ -267,7 +411,6 @@ class OLEDDisplay:
 
     @staticmethod
     def _get_ip() -> str:
-        """Get primary IP address."""
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(("8.8.8.8", 80))
@@ -275,7 +418,7 @@ class OLEDDisplay:
         except Exception:
             return "unknown"
 
-    # ----- Display Control -----
+    # ----- Display control ---------------------------------------------
 
     def show_logo(self):
         with self._lock:
@@ -304,21 +447,31 @@ class OLEDDisplay:
 
     def set_brightness(self, value: int):
         self._brightness = max(0, min(255, value))
-        if self._device and not self._simulated:
-            self._device.contrast(self._brightness)
+        if self._backend == "spi" and self._device is not None:
+            try:
+                self._device.contrast(self._brightness)
+            except Exception as e:
+                logger.debug("contrast() not supported on this driver: %s", e)
 
     def get_status(self) -> dict:
         return {
             "mode": self._current_mode,
-            "simulated": self._simulated,
+            "backend": self._backend,
+            "simulated": self._backend == "sim",
+            "resolution": f"{WIDTH}x{HEIGHT}",
+            "driver": LCD_DRIVER,
             "brightness": self._brightness,
             "cycling": self._cycle_running and time.time() >= self._cycle_paused_until,
         }
 
-    # ----- Auto-Cycle -----
+    # Backwards-compat property for legacy callers checking _simulated
+    @property
+    def _simulated(self) -> bool:
+        return self._backend == "sim"
+
+    # ----- Auto-cycle ---------------------------------------------------
 
     def start_cycle(self):
-        """Start the auto-cycle background thread."""
         if self._cycle_running:
             return
         self._cycle_running = True
@@ -330,29 +483,26 @@ class OLEDDisplay:
         self._cycle_running = False
 
     def resume_cycle(self):
-        """Resume cycling immediately (cancel any message hold)."""
         self._cycle_paused_until = 0.0
 
     def _cycle_loop(self):
-        """Background loop: logo (5s) -> stats (10s) -> repeat."""
         while self._cycle_running:
             if time.time() < self._cycle_paused_until:
                 time.sleep(1)
                 continue
-
-            # Logo phase
             self.show_logo()
             for _ in range(LOGO_DURATION * 2):
                 if not self._cycle_running or time.time() < self._cycle_paused_until:
                     break
                 time.sleep(0.5)
-
             if not self._cycle_running or time.time() < self._cycle_paused_until:
                 continue
-
-            # Stats phase (refresh every 2s for live data)
             for _ in range(STATS_DURATION // 2):
                 if not self._cycle_running or time.time() < self._cycle_paused_until:
                     break
                 self.show_stats()
                 time.sleep(2)
+
+
+# Legacy alias so existing callers keep working without changes.
+OLEDDisplay = TFTDisplay
