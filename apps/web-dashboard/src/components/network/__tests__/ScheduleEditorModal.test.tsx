@@ -191,6 +191,26 @@ describe("ScheduleEditorModal", () => {
     });
   });
 
+  it("initialPreset='school' pre-fills name + windows from SCHEDULE_PRESETS", async () => {
+    mockEndpoints(fetchMock, []);
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <ScheduleEditorModal
+          scheduleId="new"
+          initialPreset="school"
+          onClose={vi.fn()}
+        />
+      </SWRConfig>,
+    );
+    const nameInput = (await screen.findByLabelText(
+      /^name$/i,
+    )) as HTMLInputElement;
+    expect(nameInput.value).toBe("School hours");
+    // School preset has exactly one window (Mon–Fri 8am–3pm).
+    const windows = screen.getAllByRole("group", { name: /^window \d+$/i });
+    expect(windows).toHaveLength(1);
+  });
+
   it("Save with a typed error shows a toast and keeps the form open", async () => {
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.startsWith("/api/network/schedules/s1") && init?.method === "PATCH") {

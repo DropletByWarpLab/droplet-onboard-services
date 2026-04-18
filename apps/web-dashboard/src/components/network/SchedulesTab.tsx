@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { ScheduleRow } from "./ScheduleRow";
 import { ScheduleActivityFeed } from "./ScheduleActivityFeed";
-import { ScheduleEditorModal } from "./ScheduleEditorModal";
+import { ScheduleEditorModal, type SchedulePresetId } from "./ScheduleEditorModal";
 import { SchedulePresetCards } from "./SchedulePresetCards";
 import { OverrideModal } from "./OverrideModal";
 import type { SchedulePreset } from "./schedule-presets";
@@ -27,11 +27,13 @@ export function SchedulesTab() {
         ? "new"
         : editorOpenFor.id;
 
-  const initialPresetProp =
+  // Any recurring preset in SCHEDULE_PRESETS flows through `initialPreset`;
+  // the modal delegates to `presetById` for both the name and the windows.
+  // Override presets (e.g. `homework`) open `OverrideModal` instead, so they
+  // don't reach this branch.
+  const initialPresetProp: SchedulePresetId | undefined =
     editorOpenFor?.mode === "new" && editorOpenFor.preset?.kind === "recurring"
-      ? editorOpenFor.preset.id === "bedtime"
-        ? "bedtime"
-        : undefined
+      ? (editorOpenFor.preset.id as SchedulePresetId)
       : undefined;
 
   return (

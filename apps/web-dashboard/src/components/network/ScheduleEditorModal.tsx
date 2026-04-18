@@ -23,9 +23,11 @@ import { presetById } from "./schedule-presets";
  * and keep the form open so the user can fix the offending field.
  */
 
-/** Preset identifier used when creating a new schedule. Keeps the union
- * tiny + shared with WARP-99's eventual `SCHEDULE_PRESETS` registry. */
-export type SchedulePresetId = "bedtime";
+/** Preset identifier used when creating a new schedule. Mirrors the
+ * recurring-preset ids in the shared `SCHEDULE_PRESETS` registry. Override
+ * presets (e.g. `homework`) don't flow through this path — they open the
+ * `OverrideModal` instead, so they're intentionally excluded here. */
+export type SchedulePresetId = "bedtime" | "school";
 
 /** Subject hint for pre-filling the subject selector on a new schedule. */
 export type InitialSubject =
