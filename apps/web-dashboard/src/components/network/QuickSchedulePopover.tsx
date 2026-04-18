@@ -1,16 +1,16 @@
-// TODO(WARP-99): replace inline Bedtime constants with SCHEDULE_PRESETS.bedtime
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useScheduleMutations } from "@/lib/hooks/useScheduleMutations";
 import { ScheduleEditorModal } from "./ScheduleEditorModal";
+import { presetById } from "./schedule-presets";
 
 /**
  * Compact popover that one-click applies the "Bedtime" preset to a device or
  * group, with an escape-hatch to open the full editor pre-filled with the
  * preset's windows.
  *
- * WARP-98 hard-codes the Bedtime preset windows here; WARP-99 will swap them
- * for `SCHEDULE_PRESETS.bedtime` and drop the TODO above.
+ * The Bedtime windows come from the shared `SCHEDULE_PRESETS` registry
+ * (WARP-99 / T8) — keep them out of this file.
  */
 
 export type QuickScheduleSubject =
@@ -22,12 +22,7 @@ interface Props {
   onClose: () => void;
 }
 
-// Day-of-week bitmask: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64.
-// These MUST stay in sync with ScheduleEditorModal.BEDTIME_WINDOWS until T8.
-const BEDTIME_WINDOWS = [
-  { daysOfWeek: 1 | 2 | 4 | 8 | 16, startMin: 21 * 60, endMin: 7 * 60 },
-  { daysOfWeek: 32 | 64, startMin: 23 * 60, endMin: 8 * 60 },
-];
+const BEDTIME = presetById("bedtime")!;
 
 export function QuickSchedulePopover({ subject, onClose }: Props) {
   const { createSchedule } = useScheduleMutations();
@@ -73,13 +68,13 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
     setToast(null);
     try {
       await createSchedule({
-        name: "Bedtime",
+        name: BEDTIME.name,
         enabled: true,
         subjectType: subject.type,
         ...(subject.type === "device"
           ? { deviceMac: subject.deviceMac }
           : { groupId: subject.groupId }),
-        windows: BEDTIME_WINDOWS.map((w) => ({ ...w })),
+        windows: BEDTIME.windows!.map((w) => ({ ...w })),
       });
       onClose();
     } catch (err) {

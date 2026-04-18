@@ -4,6 +4,8 @@ import * as Icons from "lucide-react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { useActiveOverrides } from "@/lib/hooks/useActiveOverrides";
 import { useOverrideMutations } from "@/lib/hooks/useOverrideMutations";
+import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
+import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { nextTransitionFor } from "@/lib/scheduleEval";
 import type { Schedule, ScheduleOverride } from "@/lib/types";
 
@@ -28,9 +30,17 @@ import type { Schedule, ScheduleOverride } from "@/lib/types";
  * do NOT widen the shared helper here, matching WARP-96's pattern.
  */
 
+/**
+ * Subject at open-time. When both `deviceMac` and `groupId` are undefined,
+ * the modal renders an inline subject picker so the user can choose — this
+ * is the path WARP-99's Homework preset card takes. When a subject is
+ * pre-filled (WARP-97/98 flows), the picker is hidden and the subject is
+ * immutable.
+ */
 type Subject =
   | { type: "device"; deviceMac: string; groupId?: undefined }
-  | { type: "group"; groupId: string; deviceMac?: undefined };
+  | { type: "group"; groupId: string; deviceMac?: undefined }
+  | { type: "device"; deviceMac?: undefined; groupId?: undefined };
 
 interface Props {
   subject: Subject;
@@ -98,11 +108,21 @@ function pickInitialChip(defaultDurationMin?: number): DurationChip {
   return "60";
 }
 
-function matchesSubject(s: Schedule, subject: Subject): boolean {
+interface ResolvedSubject {
+  type: "device" | "group";
+  deviceMac?: string;
+  groupId?: string;
+}
+
+function matchesSubject(s: Schedule, subject: ResolvedSubject): boolean {
   if (!s.enabled) return false;
   if (subject.type === "device")
     return s.subjectType === "device" && s.deviceMac === subject.deviceMac;
   return s.subjectType === "group" && s.groupId === subject.groupId;
+}
+
+function subjectIsPreset(s: Subject): boolean {
+  return Boolean(s.deviceMac || s.groupId);
 }
 
 export function OverrideModal({
@@ -112,10 +132,41 @@ export function OverrideModal({
   defaultDurationMin,
   onClose,
 }: Props) {
+  const presetSubject = subjectIsPreset(subject);
+  // When the subject is blank at open-time (preset-launched flow), the user
+  // picks inside the modal. Once picked, the picker stays interactive until
+  // Apply — at which point `createOverride` uses the resolved values.
+  const [pickerType, setPickerType] = useState<"device" | "group">(
+    subject.type,
+  );
+  const [pickerDeviceMac, setPickerDeviceMac] = useState<string>("");
+  const [pickerGroupId, setPickerGroupId] = useState<string>("");
+
+  const devicesSwr = useNetworkDevices();
+  const groupsSwr = useNetworkGroups();
+
+  const resolvedSubject: ResolvedSubject = presetSubject
+    ? {
+        type: subject.type,
+        deviceMac:
+          subject.type === "device" ? (subject.deviceMac as string) : undefined,
+        groupId:
+          subject.type === "group" ? (subject.groupId as string) : undefined,
+      }
+    : {
+        type: pickerType,
+        deviceMac: pickerType === "device" ? pickerDeviceMac || undefined : undefined,
+        groupId: pickerType === "group" ? pickerGroupId || undefined : undefined,
+      };
+
+  const subjectSelected =
+    (resolvedSubject.type === "device" && !!resolvedSubject.deviceMac) ||
+    (resolvedSubject.type === "group" && !!resolvedSubject.groupId);
+
   const schedulesSwr = useSchedules();
   const overridesSwr = useActiveOverrides({
-    deviceMac: subject.type === "device" ? subject.deviceMac : undefined,
-    groupId: subject.type === "group" ? subject.groupId : undefined,
+    deviceMac: subjectSelected && resolvedSubject.type === "device" ? resolvedSubject.deviceMac : undefined,
+    groupId: subjectSelected && resolvedSubject.type === "group" ? resolvedSubject.groupId : undefined,
   });
   const { createOverride, cancelOverride } = useOverrideMutations();
 
@@ -141,7 +192,8 @@ export function OverrideModal({
   // exist), we substitute a "+30m" fallback chip.
   const transitionInfo = useMemo(() => {
     const all: Schedule[] = schedulesSwr.data?.schedules ?? [];
-    const applicable = all.filter((s) => matchesSubject(s, subject));
+    if (!subjectSelected) return { kind: "fallback" as const };
+    const applicable = all.filter((s) => matchesSubject(s, resolvedSubject));
     if (applicable.length === 0) return { kind: "fallback" as const };
     const now = new Date();
     const next = nextTransitionFor(applicable, now);
@@ -155,7 +207,7 @@ export function OverrideModal({
     };
     // Intentionally recompute only when the schedules change; "now" is frozen
     // to the render time, which is good enough for the modal's lifetime.
-  }, [schedulesSwr.data, subject]);
+  }, [schedulesSwr.data, subjectSelected, resolvedSubject.type, resolvedSubject.deviceMac, resolvedSubject.groupId]);
 
   // ESC closes.
   useEffect(() => {
@@ -195,11 +247,19 @@ export function OverrideModal({
   }
 
   const endAtDate = computeEndAt();
-  const applyDisabled = saving || !endAtDate || endAtDate.getTime() <= Date.now();
+  const applyDisabled =
+    saving ||
+    !endAtDate ||
+    endAtDate.getTime() <= Date.now() ||
+    !subjectSelected;
 
   async function handleApply() {
     if (saving) return;
     setInlineError(null);
+    if (!subjectSelected) {
+      setInlineError("Pick a device or group");
+      return;
+    }
     const endAt = computeEndAt();
     if (!endAt) {
       setInlineError("Pick an end time");
@@ -212,9 +272,11 @@ export function OverrideModal({
     setSaving(true);
     try {
       await createOverride({
-        subjectType: subject.type,
-        deviceMac: subject.type === "device" ? subject.deviceMac : undefined,
-        groupId: subject.type === "group" ? subject.groupId : undefined,
+        subjectType: resolvedSubject.type,
+        deviceMac:
+          resolvedSubject.type === "device" ? resolvedSubject.deviceMac : undefined,
+        groupId:
+          resolvedSubject.type === "group" ? resolvedSubject.groupId : undefined,
         action,
         startAt: new Date().toISOString(),
         endAt: endAt.toISOString(),
@@ -236,7 +298,16 @@ export function OverrideModal({
     }
   }
 
-  const subjectLabel = subjectName ?? (subject.type === "device" ? "device" : "group");
+  const subjectLabel =
+    subjectName ??
+    (presetSubject
+      ? subject.type === "device"
+        ? "device"
+        : "group"
+      : "new override");
+
+  const devices = devicesSwr.data?.devices ?? [];
+  const groups = groupsSwr.data?.groups ?? [];
 
   return (
     <div
@@ -265,6 +336,70 @@ export function OverrideModal({
         </div>
 
         <div className="p-4 space-y-4">
+          {!presetSubject && (
+            <fieldset
+              className="space-y-2"
+              data-testid="subject-picker"
+              aria-label="Subject"
+            >
+              <legend className="type-caption-1 text-label-secondary">
+                Subject
+              </legend>
+              <div className="flex gap-4">
+                <label className="type-subheadline text-label-primary flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="override-subject-type"
+                    value="device"
+                    checked={pickerType === "device"}
+                    onChange={() => setPickerType("device")}
+                  />
+                  Device
+                </label>
+                <label className="type-subheadline text-label-primary flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="override-subject-type"
+                    value="group"
+                    checked={pickerType === "group"}
+                    onChange={() => setPickerType("group")}
+                  />
+                  Group
+                </label>
+              </div>
+
+              {pickerType === "device" ? (
+                <select
+                  value={pickerDeviceMac}
+                  onChange={(e) => setPickerDeviceMac(e.target.value)}
+                  aria-label="Device"
+                  className="dp-input"
+                >
+                  <option value="">Select a device…</option>
+                  {devices.map((d) => (
+                    <option key={d.mac} value={d.mac}>
+                      {d.displayName ?? d.hostname ?? d.mac} ({d.mac})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <select
+                  value={pickerGroupId}
+                  onChange={(e) => setPickerGroupId(e.target.value)}
+                  aria-label="Group"
+                  className="dp-input"
+                >
+                  <option value="">Select a group…</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </fieldset>
+          )}
+
           {currentOverride && (
             <div
               role="status"

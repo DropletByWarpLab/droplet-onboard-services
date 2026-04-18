@@ -3,23 +3,48 @@ import { useState } from "react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { ScheduleRow } from "./ScheduleRow";
 import { ScheduleActivityFeed } from "./ScheduleActivityFeed";
-import { ScheduleEditorModal } from "./ScheduleEditorModal";
+import { ScheduleEditorModal, type SchedulePresetId } from "./ScheduleEditorModal";
+import { SchedulePresetCards } from "./SchedulePresetCards";
+import { OverrideModal } from "./OverrideModal";
+import type { SchedulePreset } from "./schedule-presets";
+
+type EditorState =
+  | { mode: "new"; preset?: SchedulePreset }
+  | { mode: "edit"; id: string }
+  | null;
 
 export function SchedulesTab() {
   const { data, isLoading } = useSchedules();
-  const [editorOpenFor, setEditorOpenFor] = useState<string | "new" | null>(
-    null,
-  );
+  const [editorOpenFor, setEditorOpenFor] = useState<EditorState>(null);
+  const [overrideModalOpen, setOverrideModalOpen] =
+    useState<SchedulePreset | null>(null);
   const schedules = data?.schedules ?? [];
+
+  const scheduleIdProp =
+    editorOpenFor === null
+      ? null
+      : editorOpenFor.mode === "new"
+        ? "new"
+        : editorOpenFor.id;
+
+  // Any recurring preset in SCHEDULE_PRESETS flows through `initialPreset`;
+  // the modal delegates to `presetById` for both the name and the windows.
+  // Override presets (e.g. `homework`) open `OverrideModal` instead, so they
+  // don't reach this branch.
+  const initialPresetProp: SchedulePresetId | undefined =
+    editorOpenFor?.mode === "new" && editorOpenFor.preset?.kind === "recurring"
+      ? (editorOpenFor.preset.id as SchedulePresetId)
+      : undefined;
 
   return (
     <div className="space-y-6">
-      {/* Preset placeholder — real preset cards land in WARP-99 / T8. */}
-      <section aria-label="Presets">
-        <div className="dp-card p-4 text-label-tertiary type-footnote">
-          Presets coming soon (WARP-99 / T8)
-        </div>
-      </section>
+      {/* Preset cards (WARP-99 / T8) */}
+      <SchedulePresetCards
+        onUseRecurring={(preset) =>
+          setEditorOpenFor({ mode: "new", preset })
+        }
+        onUseOverride={(preset) => setOverrideModalOpen(preset)}
+      />
 
       {/* Schedules list */}
       <section aria-labelledby="schedules-heading" className="space-y-3">
@@ -29,7 +54,7 @@ export function SchedulesTab() {
           </h2>
           <button
             type="button"
-            onClick={() => setEditorOpenFor("new")}
+            onClick={() => setEditorOpenFor({ mode: "new" })}
             className="dp-button-primary"
           >
             + New schedule
@@ -50,7 +75,7 @@ export function SchedulesTab() {
               <ScheduleRow
                 key={s.id}
                 schedule={s}
-                onEdit={() => setEditorOpenFor(s.id)}
+                onEdit={() => setEditorOpenFor({ mode: "edit", id: s.id })}
               />
             ))}
           </ul>
@@ -62,9 +87,22 @@ export function SchedulesTab() {
 
       {/* Editor modal (WARP-96 / T5) */}
       <ScheduleEditorModal
-        scheduleId={editorOpenFor}
+        scheduleId={scheduleIdProp}
+        initialPreset={initialPresetProp}
         onClose={() => setEditorOpenFor(null)}
       />
+
+      {/* Override modal — launched from the Homework preset card (WARP-99 / T8).
+          Subject is intentionally blank; the modal's subject picker lets the
+          user choose a device or group at apply-time. */}
+      {overrideModalOpen && (
+        <OverrideModal
+          subject={{ type: "device" }}
+          defaultAction="block"
+          defaultDurationMin={overrideModalOpen.overrideDurationMin}
+          onClose={() => setOverrideModalOpen(null)}
+        />
+      )}
     </div>
   );
 }

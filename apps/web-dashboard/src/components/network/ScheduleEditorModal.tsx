@@ -8,6 +8,7 @@ import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import type { Schedule } from "@/lib/types";
 import { WeeklyWindowsEditor, type WindowDraft } from "./WeeklyWindowsEditor";
 import { ScheduleHeatmap } from "./ScheduleHeatmap";
+import { presetById } from "./schedule-presets";
 
 /**
  * Full-viewport modal for creating and editing a schedule.
@@ -22,9 +23,11 @@ import { ScheduleHeatmap } from "./ScheduleHeatmap";
  * and keep the form open so the user can fix the offending field.
  */
 
-/** Preset identifier used when creating a new schedule. Keeps the union
- * tiny + shared with WARP-99's eventual `SCHEDULE_PRESETS` registry. */
-export type SchedulePresetId = "bedtime";
+/** Preset identifier used when creating a new schedule. Mirrors the
+ * recurring-preset ids in the shared `SCHEDULE_PRESETS` registry. Override
+ * presets (e.g. `homework`) don't flow through this path — they open the
+ * `OverrideModal` instead, so they're intentionally excluded here. */
+export type SchedulePresetId = "bedtime" | "school";
 
 /** Subject hint for pre-filling the subject selector on a new schedule. */
 export type InitialSubject =
@@ -42,23 +45,16 @@ interface Props {
   initialPreset?: SchedulePresetId;
 }
 
-// --- Preset window pre-fill (WARP-98 inline — will move to SCHEDULE_PRESETS in WARP-99) ---
-// Day-of-week bitmask: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64.
-const BEDTIME_WINDOWS = [
-  // Sun–Thu 9pm–7am (wraps past midnight → endMin <= startMin)
-  { daysOfWeek: 1 | 2 | 4 | 8 | 16, startMin: 21 * 60, endMin: 7 * 60 },
-  // Fri–Sat 11pm–8am
-  { daysOfWeek: 32 | 64, startMin: 23 * 60, endMin: 8 * 60 },
-];
-
+// Preset pre-fill now comes from the shared SCHEDULE_PRESETS registry
+// (WARP-99 / T8) rather than being inlined here.
 function windowsForPreset(preset: SchedulePresetId) {
-  if (preset === "bedtime") return BEDTIME_WINDOWS.map((w) => ({ ...w }));
+  const p = presetById(preset);
+  if (p?.windows) return p.windows.map((w) => ({ ...w }));
   return [{ daysOfWeek: 0, startMin: 0, endMin: 60 }];
 }
 
 function nameForPreset(preset: SchedulePresetId): string {
-  if (preset === "bedtime") return "Bedtime";
-  return "";
+  return presetById(preset)?.name ?? "";
 }
 
 const TOAST_COPY: Record<string, string> = {
