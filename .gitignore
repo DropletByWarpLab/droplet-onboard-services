@@ -27,3 +27,11 @@ docker/secrets/
 
 # Brainstorming companion session state (mockups, event logs)
 .superpowers/
+
+# macOS iCloud Drive conflict copies — when the repo sits under
+# ~/Documents (iCloud-synced) and git worktree operations or rapid file
+# writes race with the sync daemon, iCloud appends " 2" to the local copy.
+# These are never authoritative; delete + re-sync from git.
+# Better long-term: move the repo outside ~/Documents (e.g., to ~/Projects).
+* 2
+* 2.*
