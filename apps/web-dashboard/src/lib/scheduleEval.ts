@@ -70,3 +70,40 @@ export function formatDaysOfWeek(mask: number): string {
 export function formatWindow(w: ScheduleWindowLike): string {
   return `${formatDaysOfWeek(w.daysOfWeek)} ${formatHHMM(w.startMin)}-${formatHHMM(w.endMin)}`.trim();
 }
+
+// --- WARP-97: next-transition scan used by the override modal ---
+
+interface ScheduleLike {
+  windows: ScheduleWindowLike[];
+}
+
+/**
+ * Given a set of enabled schedules applicable to a subject, find the next
+ * minute where the aggregated active/not-active state flips, scanning forward
+ * from `now` up to 7 days ahead. Returns `null` if no transition occurs in
+ * that window.
+ *
+ * `isBlocked` reflects the state at the returned minute (i.e. the state the
+ * subject is transitioning INTO).
+ *
+ * Implementation note: naive minute-by-minute scan. Tops out at 10,080 iters
+ * per call, which is fine — the override modal opens infrequently and
+ * typically works with ≤3 schedules × ~3 windows each. Can be optimized later
+ * to jump by hours when in a stable zone if it shows up on a profile.
+ */
+export function nextTransitionFor(
+  schedules: ScheduleLike[],
+  now: Date,
+): { at: Date; isBlocked: boolean } | null {
+  const startMs = now.getTime();
+  const isActiveAt = (d: Date): boolean =>
+    schedules.some((s) => s.windows.some((w) => isWindowActive(w, d)));
+
+  const initialBlocked = isActiveAt(now);
+  for (let min = 1; min <= 7 * 24 * 60; min++) {
+    const at = new Date(startMs + min * 60_000);
+    const blocked = isActiveAt(at);
+    if (blocked !== initialBlocked) return { at, isBlocked: blocked };
+  }
+  return null;
+}
