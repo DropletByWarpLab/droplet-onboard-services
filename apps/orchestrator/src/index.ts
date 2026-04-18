@@ -27,6 +27,7 @@ import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -108,17 +109,7 @@ async function main() {
   const ouiCsvPath =
     process.env.OUI_CSV_PATH ?? path.resolve(process.cwd(), "data/oui.csv");
   const ouiLookup = createOuiLookup(ouiCsvPath);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const deviceRegistry = createDeviceRegistry(prisma, ouiLookup);
-  // TODO(WARP-82): hook `deviceRegistry.reconcile(...)` into the routing
-  // poller once the orchestrator owns one. Today network.service.ts is
-  // request-driven (cached fetches on demand); wiring a background poll
-  // cadence + piping `{ leases, wirelessClients, firewallRules }` through
-  // lives in WARP-82.
-  // TODO(WARP-82): schedule `deviceRegistry.purgePresenceRows(30)` at 03:00
-  // local once a cron runtime is added (no scheduler dep in orchestrator
-  // today). Manual purge still works via the exposed method.
-  void deviceRegistry;
 
   // WARP-93: Phase 2 scheduling runtime. Every 30s the ticker diffs
   // the desired blocked state (from computeDesiredBlocked) against the
@@ -137,12 +128,29 @@ async function main() {
   const scheduleTicker = createScheduleTicker(prisma, firewall);
   const tickMs = Number(process.env.SCHEDULE_TICK_MS ?? 30_000);
   cronRuntime.scheduleInterval(tickMs, () => scheduleTicker.tickOnce());
+
+  // WARP-89: device-intelligence reconciler poller + daily presence purge.
+  // Reuses the same cron runtime as the schedule ticker. The poller pulls
+  // DHCP + wireless + firewall snapshots from the routing service every
+  // `DEVICE_RECONCILE_MS` (default 10s) and feeds them into the registry
+  // from WARP-81; the 03:00 purge drops `DevicePresenceDay` rows older
+  // than 30 days per spec §5.4.
+  const reconcileMs = Number(process.env.DEVICE_RECONCILE_MS ?? 10_000);
+  const reconcilePoller = createDeviceReconcilePoller(
+    deviceRegistry,
+    openwrt,
+    reconcileMs,
+  );
+  cronRuntime.scheduleInterval(reconcileMs, () => reconcilePoller.pollOnce());
+  logger.info({ reconcileMs }, "device reconcile poller started");
+
   cronRuntime.scheduleCron("0 3 * * *", async () => {
     const eventsDeleted = await purgeScheduleEvents(prisma, 7);
     const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
+    const presenceDeleted = await deviceRegistry.purgePresenceRows(30);
     logger.info(
-      { eventsDeleted, overridesDeleted },
-      "schedule purge complete",
+      { eventsDeleted, overridesDeleted, presenceDeleted: presenceDeleted.count },
+      "daily purges complete",
     );
   });
 
