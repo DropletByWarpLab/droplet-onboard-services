@@ -124,10 +124,19 @@ async function main() {
       await openwrt.unblockDevice(mac);
     },
   };
-  const cronRuntime = createCronRuntime();
+  // Critical fix #1: pass prisma so `scheduleInterval`/`scheduleCron` can
+  // acquire a pg advisory lock per tick. In multi-instance deploys (K8s
+  // replicas, warm standby) only the replica that wins the lock runs
+  // the handler; the others silently skip. Each distinct cron task gets
+  // its own lock key so they don't starve each other.
+  const cronRuntime = createCronRuntime(prisma);
   const scheduleTicker = createScheduleTicker(prisma, firewall);
   const tickMs = Number(process.env.SCHEDULE_TICK_MS ?? 30_000);
-  cronRuntime.scheduleInterval(tickMs, () => scheduleTicker.tickOnce());
+  cronRuntime.scheduleInterval(
+    tickMs,
+    () => scheduleTicker.tickOnce(),
+    { lockKey: "droplet:schedule-ticker" },
+  );
 
   // WARP-89: device-intelligence reconciler poller + daily presence purge.
   // Reuses the same cron runtime as the schedule ticker. The poller pulls
@@ -141,18 +150,30 @@ async function main() {
     openwrt,
     reconcileMs,
   );
-  cronRuntime.scheduleInterval(reconcileMs, () => reconcilePoller.pollOnce());
+  cronRuntime.scheduleInterval(
+    reconcileMs,
+    () => reconcilePoller.pollOnce(),
+    { lockKey: "droplet:device-reconcile-poller" },
+  );
   logger.info({ reconcileMs }, "device reconcile poller started");
 
-  cronRuntime.scheduleCron("0 3 * * *", async () => {
-    const eventsDeleted = await purgeScheduleEvents(prisma, 7);
-    const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
-    const presenceDeleted = await deviceRegistry.purgePresenceRows(30);
-    logger.info(
-      { eventsDeleted, overridesDeleted, presenceDeleted: presenceDeleted.count },
-      "daily purges complete",
-    );
-  });
+  cronRuntime.scheduleCron(
+    "0 3 * * *",
+    async () => {
+      const eventsDeleted = await purgeScheduleEvents(prisma, 7);
+      const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
+      const presenceDeleted = await deviceRegistry.purgePresenceRows(30);
+      logger.info(
+        {
+          eventsDeleted,
+          overridesDeleted,
+          presenceDeleted: presenceDeleted.count,
+        },
+        "daily purges complete",
+      );
+    },
+    { lockKey: "droplet:daily-purge" },
+  );
 
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.

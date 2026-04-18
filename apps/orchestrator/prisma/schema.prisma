@@ -167,6 +167,12 @@ model NetworkDevice {
   lastSeen     DateTime            @default(now())
   isBlocked    Boolean             @default(false)
   manualBlock  Boolean             @default(false)
+  // Last firewall state successfully dispatched by the schedule ticker.
+  // Nullable — null means "ticker has never touched this device" and the
+  // next tick will dispatch regardless of desired state (bootstrap). On
+  // orchestrator restart this field reconstitutes the ticker's state so we
+  // don't re-dispatch every device. See WARP critical-fix-cron-state.
+  lastAppliedBlocked Boolean?
   groups       DeviceGroup[]       @relation("DeviceGroups")
   presenceDays DevicePresenceDay[]
   schedules    Schedule[]          @relation("DeviceSchedules")
