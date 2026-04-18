@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { isWindowActive, formatDaysOfWeek, formatWindow } from "./scheduleEval";
+import {
+  isWindowActive,
+  formatDaysOfWeek,
+  formatWindow,
+  nextTransitionFor,
+} from "./scheduleEval";
 
 type Window = { daysOfWeek: number; startMin: number; endMin: number };
 
@@ -111,5 +116,38 @@ describe("formatWindow", () => {
   it("formats single Tue 09:00-17:00 window", () => {
     const w: Window = { daysOfWeek: DAY.Tue, startMin: 9 * 60, endMin: 17 * 60 };
     expect(formatWindow(w)).toBe("Tue 09:00-17:00");
+  });
+});
+
+describe("nextTransitionFor", () => {
+  // Bedtime: Sun-Thu 21:00-07:00 (midnight-wrap window).
+  const bedtime = {
+    windows: [
+      {
+        daysOfWeek: DAY.Sun | DAY.Mon | DAY.Tue | DAY.Wed | DAY.Thu,
+        startMin: 21 * 60,
+        endMin: 7 * 60,
+      },
+    ],
+  };
+
+  it("returns null when no schedules provided", () => {
+    expect(nextTransitionFor([], at("2026-04-14T10:00:00"))).toBeNull();
+  });
+
+  it("at Tue 10:00 with Bedtime → next transition Tue 21:00, isBlocked=true", () => {
+    const result = nextTransitionFor([bedtime], at("2026-04-14T10:00:00"));
+    expect(result).not.toBeNull();
+    expect(result!.isBlocked).toBe(true);
+    // Tue 2026-04-14 21:00 local time.
+    expect(result!.at.getTime()).toBe(at("2026-04-14T21:00:00").getTime());
+  });
+
+  it("at Tue 22:00 (inside Bedtime) → next transition Wed 07:00, isBlocked=false", () => {
+    const result = nextTransitionFor([bedtime], at("2026-04-14T22:00:00"));
+    expect(result).not.toBeNull();
+    expect(result!.isBlocked).toBe(false);
+    // Wed 2026-04-15 07:00 local time.
+    expect(result!.at.getTime()).toBe(at("2026-04-15T07:00:00").getTime());
   });
 });

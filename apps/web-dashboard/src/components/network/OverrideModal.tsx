@@ -1,0 +1,476 @@
+"use client";
+import { useEffect, useMemo, useState } from "react";
+import * as Icons from "lucide-react";
+import { useSchedules } from "@/lib/hooks/useSchedules";
+import { useActiveOverrides } from "@/lib/hooks/useActiveOverrides";
+import { useOverrideMutations } from "@/lib/hooks/useOverrideMutations";
+import { nextTransitionFor } from "@/lib/scheduleEval";
+import type { Schedule, ScheduleOverride } from "@/lib/types";
+
+/**
+ * Compact modal for creating one-off allow/block overrides against a device
+ * or a group (per WARP-97 / spec §7.4).
+ *
+ * Layout is a ~450px centered dialog with:
+ *   - Active-override banner (if one exists for this subject) with Cancel.
+ *   - Action radio: allow / block.
+ *   - Duration quick chips: 15m / 30m / 1h / 2h / "until next transition" /
+ *     custom. The "until next transition" chip reads the subject's applicable
+ *     schedules via `useSchedules` + `nextTransitionFor`. If the subject has
+ *     no applicable schedule (or the next transition is >24h out), we fall
+ *     back to a "+30m" chip.
+ *   - Optional note.
+ *
+ * On Apply we compute `endAt` from the selected chip (or the custom
+ * datetime-local input), `startAt = now`, and POST via
+ * `useOverrideMutations.createOverride`. Typed errors (`OVERRIDE_INVALID_RANGE`,
+ * `INVALID_DATE`) surface through a local `TOAST_COPY` map — we intentionally
+ * do NOT widen the shared helper here, matching WARP-96's pattern.
+ */
+
+type Subject =
+  | { type: "device"; deviceMac: string; groupId?: undefined }
+  | { type: "group"; groupId: string; deviceMac?: undefined };
+
+interface Props {
+  subject: Subject;
+  subjectName?: string;
+  defaultAction?: "allow" | "block";
+  /**
+   * If set, preselects the matching duration chip (15 / 30 / 60 / 120).
+   * Any other value drops into the "custom" chip with the computed endAt
+   * prefilled into the datetime input. This is how WARP-99 preset cards
+   * (e.g. Homework = 90m) will pre-select their default.
+   */
+  defaultDurationMin?: number;
+  onClose: () => void;
+}
+
+const TOAST_COPY: Record<string, string> = {
+  OVERRIDE_INVALID_RANGE: "End time must be after start time",
+  INVALID_DATE: "Please enter a valid date and time",
+  OVERRIDE_NOT_FOUND: "Override no longer exists",
+};
+
+function toastForOverrideError(err: unknown, fallback = "Something went wrong"): string {
+  if (
+    err &&
+    typeof err === "object" &&
+    "code" in err &&
+    typeof (err as { code: unknown }).code === "string"
+  ) {
+    const code = (err as { code: string }).code;
+    return TOAST_COPY[code] ?? fallback;
+  }
+  return fallback;
+}
+
+type DurationChip = "15" | "30" | "60" | "120" | "transition" | "fallback30" | "custom";
+
+function formatHHMM(d: Date): string {
+  return `${d.getHours().toString().padStart(2, "0")}:${d
+    .getMinutes()
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+/** Shape "in 6h" / "in 45m" for the transition-chip label. */
+function formatRelative(minutesAhead: number): string {
+  if (minutesAhead < 60) return `${minutesAhead}m`;
+  const h = Math.round(minutesAhead / 60);
+  return `${h}h`;
+}
+
+/** Convert a Date to the `<input type="datetime-local">` value format. */
+function toDatetimeLocalValue(d: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
+
+function pickInitialChip(defaultDurationMin?: number): DurationChip {
+  if (defaultDurationMin === 15) return "15";
+  if (defaultDurationMin === 30) return "30";
+  if (defaultDurationMin === 60) return "60";
+  if (defaultDurationMin === 120) return "120";
+  if (typeof defaultDurationMin === "number" && defaultDurationMin > 0) return "custom";
+  return "60";
+}
+
+function matchesSubject(s: Schedule, subject: Subject): boolean {
+  if (!s.enabled) return false;
+  if (subject.type === "device")
+    return s.subjectType === "device" && s.deviceMac === subject.deviceMac;
+  return s.subjectType === "group" && s.groupId === subject.groupId;
+}
+
+export function OverrideModal({
+  subject,
+  subjectName,
+  defaultAction = "allow",
+  defaultDurationMin,
+  onClose,
+}: Props) {
+  const schedulesSwr = useSchedules();
+  const overridesSwr = useActiveOverrides({
+    deviceMac: subject.type === "device" ? subject.deviceMac : undefined,
+    groupId: subject.type === "group" ? subject.groupId : undefined,
+  });
+  const { createOverride, cancelOverride } = useOverrideMutations();
+
+  const [action, setAction] = useState<"allow" | "block">(defaultAction);
+  const [chip, setChip] = useState<DurationChip>(() =>
+    pickInitialChip(defaultDurationMin),
+  );
+  const [customEndAt, setCustomEndAt] = useState<string>(() => {
+    if (typeof defaultDurationMin === "number" && defaultDurationMin > 0) {
+      return toDatetimeLocalValue(
+        new Date(Date.now() + defaultDurationMin * 60_000),
+      );
+    }
+    return "";
+  });
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [inlineError, setInlineError] = useState<string | null>(null);
+
+  // Compute the "until next transition" chip label from the subject's
+  // applicable schedules. If the next transition is >24h out (or doesn't
+  // exist), we substitute a "+30m" fallback chip.
+  const transitionInfo = useMemo(() => {
+    const all: Schedule[] = schedulesSwr.data?.schedules ?? [];
+    const applicable = all.filter((s) => matchesSubject(s, subject));
+    if (applicable.length === 0) return { kind: "fallback" as const };
+    const now = new Date();
+    const next = nextTransitionFor(applicable, now);
+    if (!next) return { kind: "fallback" as const };
+    const minutesAhead = Math.round((next.at.getTime() - now.getTime()) / 60_000);
+    if (minutesAhead > 24 * 60) return { kind: "fallback" as const };
+    return {
+      kind: "transition" as const,
+      at: next.at,
+      label: `until ${formatHHMM(next.at)} (${formatRelative(minutesAhead)})`,
+    };
+    // Intentionally recompute only when the schedules change; "now" is frozen
+    // to the render time, which is good enough for the modal's lifetime.
+  }, [schedulesSwr.data, subject]);
+
+  // ESC closes.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const activeOverrides: ScheduleOverride[] =
+    overridesSwr.data?.overrides ?? [];
+  const currentOverride = activeOverrides[0];
+
+  function computeEndAt(): Date | null {
+    const now = new Date();
+    switch (chip) {
+      case "15":
+        return new Date(now.getTime() + 15 * 60_000);
+      case "30":
+        return new Date(now.getTime() + 30 * 60_000);
+      case "60":
+        return new Date(now.getTime() + 60 * 60_000);
+      case "120":
+        return new Date(now.getTime() + 120 * 60_000);
+      case "fallback30":
+        return new Date(now.getTime() + 30 * 60_000);
+      case "transition":
+        return transitionInfo.kind === "transition" ? transitionInfo.at : null;
+      case "custom": {
+        if (!customEndAt) return null;
+        const d = new Date(customEndAt);
+        if (Number.isNaN(d.getTime())) return null;
+        return d;
+      }
+    }
+  }
+
+  const endAtDate = computeEndAt();
+  const applyDisabled = saving || !endAtDate || endAtDate.getTime() <= Date.now();
+
+  async function handleApply() {
+    if (saving) return;
+    setInlineError(null);
+    const endAt = computeEndAt();
+    if (!endAt) {
+      setInlineError("Pick an end time");
+      return;
+    }
+    if (endAt.getTime() <= Date.now()) {
+      setInlineError("End time must be in the future");
+      return;
+    }
+    setSaving(true);
+    try {
+      await createOverride({
+        subjectType: subject.type,
+        deviceMac: subject.type === "device" ? subject.deviceMac : undefined,
+        groupId: subject.type === "group" ? subject.groupId : undefined,
+        action,
+        startAt: new Date().toISOString(),
+        endAt: endAt.toISOString(),
+        note: note.trim() || undefined,
+      });
+      onClose();
+    } catch (err) {
+      setToast(toastForOverrideError(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCancelOverride(id: string) {
+    try {
+      await cancelOverride(id);
+    } catch (err) {
+      setToast(toastForOverrideError(err));
+    }
+  }
+
+  const subjectLabel = subjectName ?? (subject.type === "device" ? "device" : "group");
+
+  return (
+    <div
+      data-testid="override-modal-backdrop"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-label="Create override"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-surface-primary border border-separator rounded-lg w-full max-w-[450px] max-h-[90vh] overflow-y-auto shadow-xl"
+      >
+        <div className="p-4 border-b border-separator flex items-center justify-between">
+          <h2 className="type-title-3 text-label-primary">
+            Override for {subjectLabel}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="text-label-secondary hover:text-label-primary"
+          >
+            <Icons.X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4">
+          {currentOverride && (
+            <div
+              role="status"
+              data-testid="active-override-banner"
+              className="flex items-center justify-between gap-2 rounded-sm border border-separator bg-surface-secondary px-3 py-2"
+            >
+              <span className="type-footnote text-label-primary">
+                Current override: {currentOverride.action} until{" "}
+                {formatHHMM(new Date(currentOverride.endAt))}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleCancelOverride(currentOverride.id)}
+                className="type-footnote text-system-red hover:underline"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* Action */}
+          <fieldset className="space-y-2">
+            <legend className="type-caption-1 text-label-secondary">
+              Action
+            </legend>
+            <div className="flex gap-4">
+              <label className="type-subheadline text-label-primary flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="override-action"
+                  value="allow"
+                  checked={action === "allow"}
+                  onChange={() => setAction("allow")}
+                />
+                Allow
+              </label>
+              <label className="type-subheadline text-label-primary flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="override-action"
+                  value="block"
+                  checked={action === "block"}
+                  onChange={() => setAction("block")}
+                />
+                Block
+              </label>
+            </div>
+          </fieldset>
+
+          {/* Duration chips */}
+          <fieldset className="space-y-2">
+            <legend className="type-caption-1 text-label-secondary">
+              Duration
+            </legend>
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  { id: "15" as const, label: "15m" },
+                  { id: "30" as const, label: "30m" },
+                  { id: "60" as const, label: "1h" },
+                  { id: "120" as const, label: "2h" },
+                ]
+              ).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setChip(c.id)}
+                  aria-pressed={chip === c.id}
+                  className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
+                    chip === c.id
+                      ? "bg-accent text-white border-accent"
+                      : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
+                  }`}
+                >
+                  {c.label}
+                </button>
+              ))}
+
+              {transitionInfo.kind === "transition" ? (
+                <button
+                  type="button"
+                  data-testid="chip-transition"
+                  onClick={() => setChip("transition")}
+                  aria-pressed={chip === "transition"}
+                  className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
+                    chip === "transition"
+                      ? "bg-accent text-white border-accent"
+                      : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
+                  }`}
+                >
+                  {transitionInfo.label}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="chip-fallback"
+                  onClick={() => setChip("fallback30")}
+                  aria-pressed={chip === "fallback30"}
+                  className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
+                    chip === "fallback30"
+                      ? "bg-accent text-white border-accent"
+                      : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
+                  }`}
+                >
+                  +30m
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setChip("custom")}
+                aria-pressed={chip === "custom"}
+                className={`px-3 py-1 rounded-full type-footnote border transition-colors ${
+                  chip === "custom"
+                    ? "bg-accent text-white border-accent"
+                    : "bg-surface-secondary text-label-primary border-separator hover:bg-surface-tertiary"
+                }`}
+              >
+                Custom
+              </button>
+            </div>
+
+            {chip === "custom" && (
+              <div className="pt-2 space-y-1">
+                <label
+                  htmlFor="override-end-at"
+                  className="type-caption-1 text-label-secondary block"
+                >
+                  End at
+                </label>
+                <input
+                  id="override-end-at"
+                  type="datetime-local"
+                  value={customEndAt}
+                  onChange={(e) => setCustomEndAt(e.target.value)}
+                  className="dp-input"
+                  aria-label="End at"
+                />
+              </div>
+            )}
+          </fieldset>
+
+          {/* Note */}
+          <div className="space-y-1">
+            <label
+              htmlFor="override-note"
+              className="type-caption-1 text-label-secondary"
+            >
+              Note (optional)
+            </label>
+            <input
+              id="override-note"
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. Homework help"
+              className="dp-input"
+            />
+          </div>
+
+          {inlineError && (
+            <div
+              role="alert"
+              className="type-footnote text-system-red"
+            >
+              {inlineError}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t border-separator flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="dp-button-secondary"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleApply}
+            disabled={applyDisabled}
+            className="dp-button-primary disabled:opacity-50"
+          >
+            {saving ? "Applying…" : "Apply"}
+          </button>
+        </div>
+
+        {toast && (
+          <div
+            role="alert"
+            className="fixed bottom-4 right-4 bg-system-red/90 text-white px-4 py-2 rounded-sm shadow-lg flex items-center gap-2"
+          >
+            <span>{toast}</span>
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              aria-label="Dismiss"
+              className="hover:opacity-80"
+            >
+              <Icons.X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
