@@ -43,6 +43,8 @@ describe("SchedulesTab", () => {
         return { ok: true, status: 200, json: async () => ({ schedules }) };
       if (url.startsWith("/api/network/schedule-events"))
         return { ok: true, status: 200, json: async () => ({ events: [] }) };
+      if (url.startsWith("/api/network/overrides"))
+        return { ok: true, status: 200, json: async () => ({ overrides: [] }) };
       if (url.startsWith("/api/network/devices"))
         return { ok: true, status: 200, json: async () => ({ devices: [] }) };
       if (url.startsWith("/api/network/groups"))
@@ -57,12 +59,13 @@ describe("SchedulesTab", () => {
     });
   }
 
-  it("renders the presets placeholder and empty state when no schedules", async () => {
+  it("renders the preset cards and empty state when no schedules", async () => {
     mockAllEndpoints([]);
     renderTab();
-    expect(
-      screen.getByText(/Presets coming soon \(WARP-99/),
-    ).toBeInTheDocument();
+    // Three preset cards from SCHEDULE_PRESETS.
+    expect(screen.getByTestId("preset-card-bedtime")).toBeInTheDocument();
+    expect(screen.getByTestId("preset-card-school")).toBeInTheDocument();
+    expect(screen.getByTestId("preset-card-homework")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByText("No schedules yet")).toBeInTheDocument();
     });
@@ -70,6 +73,32 @@ describe("SchedulesTab", () => {
       screen.getByText(
         "Pick a preset above, or create a custom schedule.",
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking a recurring preset card opens the schedule editor", async () => {
+    mockAllEndpoints([]);
+    renderTab();
+    await waitFor(() =>
+      expect(screen.getByText("No schedules yet")).toBeInTheDocument(),
+    );
+    const bedtimeCard = screen.getByTestId("preset-card-bedtime");
+    fireEvent.click(bedtimeCard.querySelector("button")!);
+    expect(
+      screen.getByRole("dialog", { name: /edit schedule/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking the Homework preset card opens the override modal", async () => {
+    mockAllEndpoints([]);
+    renderTab();
+    await waitFor(() =>
+      expect(screen.getByText("No schedules yet")).toBeInTheDocument(),
+    );
+    const homeworkCard = screen.getByTestId("preset-card-homework");
+    fireEvent.click(homeworkCard.querySelector("button")!);
+    expect(
+      screen.getByRole("dialog", { name: /create override/i }),
     ).toBeInTheDocument();
   });
 

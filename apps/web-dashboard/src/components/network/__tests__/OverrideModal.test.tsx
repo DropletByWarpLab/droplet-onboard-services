@@ -247,4 +247,87 @@ describe("OverrideModal", () => {
     }) as HTMLButtonElement;
     expect(applyBtn.disabled).toBe(true);
   });
+
+  it("does NOT render the subject picker when subject is pre-filled", async () => {
+    installDefaultMocks(fetchMock);
+    renderModal();
+    // Default renderModal fixture passes a device subject, so the picker
+    // should be hidden (existing WARP-97/98 behavior is preserved).
+    expect(screen.queryByTestId("subject-picker")).not.toBeInTheDocument();
+  });
+
+  it("renders the subject picker and disables Apply until a subject is chosen", async () => {
+    // Provide at least one device so the dropdown has something to pick.
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.startsWith("/api/network/schedules") && method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ schedules: [] }) };
+      }
+      if (url.startsWith("/api/network/overrides") && method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ overrides: [] }) };
+      }
+      if (url.startsWith("/api/network/devices")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            devices: [
+              {
+                mac: "aa:bb:cc:dd:ee:01",
+                displayName: "Emma's iPad",
+                icon: null,
+                notes: null,
+                vendor: null,
+                hostname: "ipad",
+                lastIp: null,
+                firstSeen: "",
+                lastSeen: "",
+                isBlocked: false,
+                online: true,
+                groups: [],
+              },
+            ],
+          }),
+        };
+      }
+      if (url.startsWith("/api/network/groups")) {
+        return { ok: true, status: 200, json: async () => ({ groups: [] }) };
+      }
+      if (url === "/api/network/overrides" && method === "POST") {
+        return { ok: true, status: 201, json: async () => ({ override: {} }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <OverrideModal
+          subject={{ type: "device" }}
+          defaultAction="block"
+          defaultDurationMin={90}
+          onClose={vi.fn()}
+        />
+      </SWRConfig>,
+    );
+
+    expect(screen.getByTestId("subject-picker")).toBeInTheDocument();
+    const applyBtn = screen.getByRole("button", {
+      name: /^apply$/i,
+    }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(true);
+
+    // The subject picker exposes a Device <select> inside the fieldset.
+    const picker = screen.getByTestId("subject-picker");
+    // Wait for SWR to populate the dropdown before picking an option.
+    await waitFor(() => {
+      const sel = picker.querySelector("select")!;
+      expect(sel.querySelectorAll("option").length).toBeGreaterThan(1);
+    });
+    const deviceSelect = picker.querySelector("select") as HTMLSelectElement;
+    fireEvent.change(deviceSelect, { target: { value: "aa:bb:cc:dd:ee:01" } });
+
+    await waitFor(() => {
+      expect(applyBtn.disabled).toBe(false);
+    });
+  });
 });
