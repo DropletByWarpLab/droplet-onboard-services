@@ -189,7 +189,12 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  SKIPPED (--skip-start)"
   else
     log_info "  Would start: db, cache, broker, gateway, orchestrator, web-dashboard,"
-    log_info "               ai-gateway, nextcloud, frigate, camera-discovery"
+    log_info "               ai-gateway, nextcloud, homeassistant, routing"
+    if [ "$(uname)" = "Linux" ]; then
+      log_info "               + frigate (linux profile)"
+    else
+      log_info "               (frigate skipped — macOS, no GPU device node)"
+    fi
     log_info "  Would wait for health checks"
   fi
 

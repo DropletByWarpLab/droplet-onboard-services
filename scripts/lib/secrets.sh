@@ -97,6 +97,14 @@ STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
 FILES_ROOT=/data/files
 MAX_UPLOAD_SIZE_MB=100
+
+# --- Compose profiles ---
+# Linux: include "linux" so Frigate (which needs /dev/dri/renderD128 and
+# /dev/bus/usb) is part of the default \`docker compose up\`.
+# macOS: leave empty — Frigate is skipped, dashboard remains reachable via
+# the gateway. Add "full" by hand to opt into HA/file-indexer/switch/camera-
+# discovery on either OS.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux' || printf '')
 EOF
 
   chmod 600 "$env_file"
@@ -157,8 +165,15 @@ migrate_env() {
   local routing_mode_default="real"
   [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
 
+  # COMPOSE_PROFILES: "linux" on Linux turns on the Frigate service (gated
+  # by `profiles: ["linux"]` in docker-compose.yml because it needs Linux-
+  # only device nodes). macOS gets an empty default so frigate is skipped.
+  local compose_profiles_default=""
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux"
+
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
+  _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
 
   if [ "$appended_count" -gt 0 ]; then
     log_success "Migrated .env: appended$appended_keys"

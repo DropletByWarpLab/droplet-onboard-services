@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "turbo run dev",
-    "dev:docker": "docker compose -f docker/docker-compose.yml up --build",
+    "dev:docker": "docker compose -f docker/docker-compose.yml --env-file .env up --build",
     "build": "turbo run build",
     "test": "turbo run test",
     "test:ai-gateway": "cd services/ai-gateway && python -m pytest tests/ -v",

@@ -59,19 +59,21 @@ npm run test:ai-gateway     # ai-gateway only
 
 | Service        | Port  | Notes                      |
 |----------------|-------|----------------------------|
-| gateway        | :80   | Nginx reverse proxy        |
-| web-dashboard  | :3001 |                            |
-| orchestrator   | :3000 |                            |
-| nextcloud      | :8080 |                            |
-| db             | :5432 | PostgreSQL 16              |
-| cache          | :6379 | Redis 7                    |
-| broker         | :1883 | MQTT                       |
-| ai-gateway     | :8000 | FastAPI + LiteLLM          |
-| homeassistant  | :8123 | Profile: `full`            |
-| frigate        | :8971 | NVR + AI detection, `full` |
-| switch         | :8081 | Managed switch control, `full` |
-| camera-discovery | —   | ONVIF/RTSP scanner, `full` |
-| routing        | :8080 | OpenWrt control, `full`    |
+| gateway        | :80, :443 | Nginx reverse proxy — single host entry point |
+| web-dashboard  | —     | Proxied at `/`                            |
+| orchestrator   | —     | Proxied at `/api/`                        |
+| nextcloud      | —     | Proxied at `/nextcloud/` (no host port — collided with routing) |
+| db             | —     | PostgreSQL 16, internal only              |
+| cache          | —     | Redis 7, internal only                    |
+| broker         | —     | MQTT, internal only                       |
+| ai-gateway     | —     | Proxied at `/ai/`                         |
+| homeassistant  | :8123 |                                           |
+| frigate        | —     | NVR + AI detection, profile `linux` (needs `/dev/dri/renderD128`) |
+| switch         | :8081 | Managed switch control, profile `full`    |
+| camera-discovery | —   | ONVIF/RTSP scanner, profile `full`        |
+| routing        | :8080 | OpenWrt control, host network             |
+
+`COMPOSE_PROFILES=linux` is set in `.env` automatically by `setup.sh` on Linux so Frigate starts with the default stack; on macOS it's empty so the GPU device mount never trips. Add `full` to opt into HA/switch/camera-discovery on either OS.
 
 ## Environment variables
 

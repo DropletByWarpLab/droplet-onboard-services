@@ -82,10 +82,11 @@ services:
     restart: always
 
   # --- Nextcloud (headless backend) ---
+  # Not published to host — accessed only via nginx at /nextcloud/.
+  # Direct host publish would collide with routing (host-net :8080) and
+  # bypass auth/HTTPS the gateway enforces.
   nextcloud:
     image: nextcloud:29-apache
-    ports:
-      - "8080:80"
     depends_on:
       db:
         condition: service_healthy
@@ -256,12 +257,15 @@ services:
     restart: always
 
   # --- Frigate NVR (camera management + AI detection) ---
-  # Always runs — even with zero cameras. Ready to accept cameras later
-  # via auto-discovery or manual add in the dashboard.
+  # Linux-only: requires /dev/dri/renderD128 (Intel/AMD VAAPI) and /dev/bus/usb,
+  # neither of which exist in Docker Desktop on macOS. Setup writes
+  # COMPOSE_PROFILES=linux to .env on Linux so this starts automatically;
+  # macOS dev installs skip it and reach the dashboard via the gateway only.
   # Override FRIGATE_IMAGE in .env for GPU-accelerated variant:
   #   FRIGATE_IMAGE=ghcr.io/blakeblackshear/frigate:stable-tensorrt
   frigate:
     image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
+    profiles: ["linux"]
     shm_size: "256mb"
     expose:
       - "8971"
@@ -308,8 +312,11 @@ services:
       - FRIGATE_URL=http://localhost:5000
       - SCAN_INTERVAL=${CAMERA_SCAN_INTERVAL:-30}
       - CAMERA_SUBNET=${CAMERA_SUBNET:-192.168.100.0/24}
+    # NOTE: no `depends_on: frigate` — frigate is profile-gated to "linux"
+    # (Linux-only). Compose errors on a depends_on whose target isn't in the
+    # active profile set, so camera-discovery waits only on broker and treats
+    # frigate as best-effort over its localhost HTTP client.
     depends_on:
-      - frigate
       - broker
     profiles: ["full"]
     restart: always
