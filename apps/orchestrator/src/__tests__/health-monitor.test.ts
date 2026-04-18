@@ -21,6 +21,13 @@ vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn().mockResolvedValue(null),
   cacheSet: vi.fn().mockResolvedValue(undefined),
   cacheDel: vi.fn().mockResolvedValue(undefined),
+  // WARP-90: passthrough stubs so downstream services that import these
+  // from cache.service don't see `undefined is not a function`.
+  withSwrCache: vi.fn(
+    async (_k: string, _ttl: number, producer: () => Promise<unknown>) =>
+      producer(),
+  ),
+  invalidatePrefix: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("../services/openwrt.client.js", async () => {
