@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { DeviceDetailPanel } from "../DeviceDetailPanel";
-import type { EnrichedNetworkDevice, DevicePresenceDay } from "@/lib/types";
+import type {
+  EnrichedNetworkDevice,
+  DevicePresenceDay,
+  Schedule,
+  ScheduleOverride,
+} from "@/lib/types";
 
 const MAC = "aa:bb:cc:dd:ee:01";
 
@@ -40,6 +45,11 @@ type FetchMock = ReturnType<typeof vi.fn>;
 // Entries are popped in FIFO — excluding any device-fetch from the /api/network/groups
 // path, which gets a permanent empty-list default in beforeEach.
 let fetchQueue: Array<{ ok: boolean; status: number; body: unknown }> = [];
+// WARP-98: per-test schedule + override + groups defaults. The
+// ScheduleSection fetches these via SWR; individual tests can override them.
+let schedulesResponse: Schedule[] = [];
+let overridesResponse: ScheduleOverride[] = [];
+let groupsResponse: Array<{ id: string; name: string; color?: string | null; icon?: string | null; _count: { devices: number } }> = [];
 
 function mockFetchOnceJson(_mock: FetchMock, body: unknown, ok = true, status = 200) {
   fetchQueue.push({ ok, status, body });
@@ -58,13 +68,24 @@ describe("DeviceDetailPanel", () => {
 
   beforeEach(() => {
     fetchQueue = [];
+    schedulesResponse = [];
+    overridesResponse = [];
+    groupsResponse = [];
     fetchMock = vi.fn();
     fetchMock.mockImplementation(async (url: string) => {
       // WARP-85: GroupTypeahead (inside the panel) always fetches
-      // /api/network/groups via SWR. Route it to a permanent empty-list
-      // default so tests only queue responses for the device endpoints.
+      // /api/network/groups via SWR. Route it to a configurable list
+      // (defaults to empty) so tests only queue responses for device endpoints.
       if (typeof url === "string" && url.startsWith("/api/network/groups")) {
-        return { ok: true, status: 200, json: async () => ({ groups: [] }) };
+        return { ok: true, status: 200, json: async () => ({ groups: groupsResponse }) };
+      }
+      // WARP-98: the ScheduleSection subcomponent fetches schedules +
+      // overrides via SWR. Route those to per-test responses (default empty).
+      if (typeof url === "string" && url.startsWith("/api/network/schedules")) {
+        return { ok: true, status: 200, json: async () => ({ schedules: schedulesResponse }) };
+      }
+      if (typeof url === "string" && url.startsWith("/api/network/overrides")) {
+        return { ok: true, status: 200, json: async () => ({ overrides: overridesResponse }) };
       }
       const next = fetchQueue.shift();
       if (!next) return { ok: false, status: 500, json: async () => ({}) };
@@ -195,10 +216,12 @@ describe("DeviceDetailPanel", () => {
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
-        (c) => c[0] === "/api/network/firewall/block",
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0] === `/api/network/devices/${encodeURIComponent(MAC)}/manualBlock`,
       );
       expect(postCalls).toHaveLength(1);
-      expect(JSON.parse(postCalls[0][1].body)).toEqual({ mac: MAC });
+      expect(JSON.parse(postCalls[0][1].body)).toEqual({ blocked: true });
     });
   });
 
@@ -236,5 +259,101 @@ describe("DeviceDetailPanel", () => {
     for (const r of radios) {
       expect(r).toHaveAttribute("aria-checked", "false");
     }
+  });
+
+  // --- WARP-98: Schedule section ---
+
+  function makeSchedule(over: Partial<Schedule> = {}): Schedule {
+    return {
+      id: "s1",
+      name: "Bedtime",
+      enabled: true,
+      subjectType: "device",
+      deviceMac: MAC,
+      windows: [
+        // Every day 21:00-07:00 (wraps). Mask 0x7f = all days.
+        { id: "w1", daysOfWeek: 127, startMin: 21 * 60, endMin: 7 * 60 },
+      ],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...over,
+    };
+  }
+
+  it("renders '+ Schedule' split button when no schedule applies", async () => {
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "+ Schedule" })).toBeInTheDocument();
+    });
+  });
+
+  it("renders the effective schedule name + 'own schedule' badge when a device-level schedule applies", async () => {
+    schedulesResponse = [makeSchedule({ name: "Bedtime", deviceMac: MAC })];
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    await waitFor(() => {
+      expect(screen.getByText("Bedtime")).toBeInTheDocument();
+    });
+    const badge = screen.getByTestId("schedule-source-badge");
+    expect(badge.textContent).toContain("own schedule");
+  });
+
+  it("renders 'via Kids group' source badge when only a group-level schedule applies", async () => {
+    groupsResponse = [
+      { id: "g-kids", name: "Kids", _count: { devices: 2 }, color: null, icon: null },
+    ];
+    schedulesResponse = [
+      makeSchedule({
+        id: "s-group",
+        name: "Kids Bedtime",
+        subjectType: "group",
+        deviceMac: undefined,
+        groupId: "g-kids",
+      }),
+    ];
+    mockFetchOnceJson(fetchMock, {
+      device: makeDevice({
+        groups: [{ id: "g-kids", name: "Kids" }],
+      }),
+      presence: makePresence(),
+    });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    await waitFor(() => {
+      expect(screen.getByText("Kids Bedtime")).toBeInTheDocument();
+    });
+    const badge = screen.getByTestId("schedule-source-badge");
+    expect(badge.textContent).toContain("via Kids");
+  });
+
+  it("renders the active override banner + Cancel button when an override is live", async () => {
+    const now = new Date();
+    const endAt = new Date(now.getTime() + 60 * 60_000).toISOString();
+    overridesResponse = [
+      {
+        id: "o1",
+        subjectType: "device",
+        deviceMac: MAC,
+        action: "allow",
+        startAt: now.toISOString(),
+        endAt,
+        createdAt: now.toISOString(),
+      },
+    ];
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    const banner = await screen.findByTestId("schedule-override-banner");
+    expect(banner.textContent).toMatch(/Override: allow until/);
+    // Cancel button is present inside the banner.
+    const cancelBtn = within(banner).getByRole("button", { name: "Cancel" });
+    expect(cancelBtn).toBeInTheDocument();
   });
 });

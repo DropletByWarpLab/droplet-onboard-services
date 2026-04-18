@@ -5,6 +5,7 @@ import type { EnrichedNetworkDevice } from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
 import { toastForError } from "@/lib/hooks/useDeviceMutations";
+import { QuickSchedulePopover } from "./QuickSchedulePopover";
 
 interface Props {
   device: EnrichedNetworkDevice;
@@ -100,9 +101,45 @@ export function DeviceCard({ device, onOpen, onError }: Props) {
       <div className="mt-2">
         <DeviceSparkline days={device.presenceDays ?? []} size="sm" />
       </div>
-      <div className="mt-3 flex justify-end opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+      <div className="mt-3 flex justify-end gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+        <QuickScheduleActionButton device={device} />
         <BlockActionButton device={device} onError={onError} />
       </div>
+    </div>
+  );
+}
+
+function QuickScheduleActionButton({
+  device,
+}: {
+  device: EnrichedNetworkDevice;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="relative" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        onClick={(e) => {
+          // The card wrapper treats any click as "open details" — keep this
+          // one isolated so toggling the popover doesn't also spring the
+          // detail panel open.
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1"
+        aria-label="Quick schedule"
+      >
+        <Icons.CalendarClock className="w-3.5 h-3.5" />
+        Quick schedule
+      </button>
+      {open && (
+        <QuickSchedulePopover
+          subject={{ type: "device", deviceMac: device.mac }}
+          onClose={() => setOpen(false)}
+        />
+      )}
     </div>
   );
 }

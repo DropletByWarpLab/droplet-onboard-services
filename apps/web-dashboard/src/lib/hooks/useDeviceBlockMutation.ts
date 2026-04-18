@@ -4,18 +4,24 @@ import type { EnrichedNetworkDevice } from "@/lib/types";
 import { apiFetch, type TypedError } from "./apiFetch";
 
 /**
- * Hook for toggling a device's firewall block state.
+ * Hook for toggling a device's manual-block state.
  *
- * Posts to the existing `/api/network/firewall/{block,unblock}` endpoints
- * (Next.js same-origin proxy → orchestrator). The WARP-81 reconciler updates
- * `NetworkDevice.isBlocked` within ~10 s of the rule change, so after a
- * successful toggle we just kick SWR to revalidate and let the next refresh
- * (or the 10 s SWR refreshInterval) reflect the new state.
+ * WARP-98 migration: previously this POSTed `/api/network/firewall/{block,
+ * unblock}`, which spoke directly to the routing service. It now POSTs
+ * `/api/network/devices/:mac/manualBlock` with body `{ blocked: boolean }`,
+ * the WARP-94 endpoint that writes `NetworkDevice.manualBlock`. The
+ * reconciler picks that flag up on its next tick (~30s) and derives the
+ * firewall state from the full schedule + override + manualBlock pipeline.
+ *
+ * `device.isBlocked` reflects the reconciler-synced firewall state, so the
+ * card won't visibly flip until the next reconciliation pass — we simply
+ * invalidate the devices SWR keys so any mutated `manualBlock` surface
+ * refreshes right away.
  *
  * TODO(WARP-41): wire Tier 2 token-bound confirm flow once the
  * `useTierConfirm` hook lands. Today a direct POST is the only path — if the
  * orchestrator returns `requiresConfirmation` the caller currently sees a
- * thrown error.
+ * thrown error (we preserve the loud-fail path here for that case).
  */
 export function useDeviceBlockMutation() {
   const { mutate } = useSWRConfig();
@@ -23,17 +29,15 @@ export function useDeviceBlockMutation() {
   async function toggleBlock(
     device: EnrichedNetworkDevice,
   ): Promise<{ operationId?: string } | void> {
-    const shouldBlock = !device.isBlocked;
-    const path = shouldBlock
-      ? "/api/network/firewall/block"
-      : "/api/network/firewall/unblock";
+    const blocked = !device.isBlocked;
+    const path = `/api/network/devices/${encodeURIComponent(device.mac)}/manualBlock`;
 
     let body: { operationId?: string };
     try {
       body = await apiFetch<{ operationId?: string }>(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mac: device.mac }),
+        body: JSON.stringify({ blocked }),
       });
     } catch (err) {
       // Loud fail for requires-confirmation until WARP-41 confirm flow lands.
@@ -57,8 +61,9 @@ export function useDeviceBlockMutation() {
       throw err;
     }
 
-    // Trigger SWR refresh — the WARP-81 reconciler will confirm the flipped
-    // `isBlocked` within ~10 s, so the next fetch picks up the new state.
+    // Trigger SWR refresh on all device listings/detail — `manualBlock`
+    // surfaces show new state immediately; `isBlocked` reconciles via ticker
+    // within ~30s.
     await mutate(
       (key) => typeof key === "string" && key.startsWith("/api/network/devices"),
     );
