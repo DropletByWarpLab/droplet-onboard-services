@@ -4,26 +4,30 @@
  * Runs every 30s (configurable via SCHEDULE_TICK_MS): fetches every
  * NetworkDevice + its relevant enabled schedules + currently-active
  * overrides, computes the desired firewall state via
- * `computeDesiredBlocked`, diffs against the last-applied state cached
- * in-closure, and dispatches block/unblock via the injected
- * FirewallClient. Every successful transition writes a ScheduleEvent
- * row for the audit log.
+ * `computeDesiredBlocked`, diffs against the last-applied state
+ * persisted on the NetworkDevice row, and dispatches block/unblock via
+ * the injected FirewallClient. Every successful transition writes a
+ * ScheduleEvent row for the audit log AND updates
+ * `NetworkDevice.lastAppliedBlocked` — atomically, inside one
+ * `prisma.$transaction`, so we can't log an event without also recording
+ * the state update (and vice-versa).
  *
- * Desired-state cache: we keep a `Map<mac, boolean>` of the last state
- * we successfully dispatched to the firewall. The first tick for any
- * device (`previous === undefined`) always dispatches — this is the
- * bootstrap path so we re-apply state on orchestrator restart.
- * Thereafter only true transitions (prev !== desired) hit the router,
- * which cuts router traffic from ~2,880 calls/device/day (one per
- * tick) down to only the actual state changes. We do NOT update the
- * cache on failure, so a transient router outage means the next tick
- * retries the same transition.
+ * ── Critical fix #2: state persistence ──
+ * Previously this module held a closure-local `Map<mac, boolean>`. That
+ * worked for a single long-running process, but lost all state on
+ * restart — first tick after restart re-dispatched every device (~40
+ * redundant router writes at home scale), and worse, if an override had
+ * expired during an orchestrator outage the first tick could re-apply
+ * the wrong state with no memory of the prior "unblock." We now read
+ * and write `NetworkDevice.lastAppliedBlocked` instead. NULL means
+ * "ticker has never touched this device" — bootstrap dispatches once.
  *
  * Error handling: if the firewall call throws RouterError (router
- * unreachable, auth, disabled, etc.) we log at `warn` and skip the
- * event emission — the prior state stands and we'll try again on the
- * next tick. Unexpected errors are logged at `error` but also don't
- * emit an event (since the transition didn't happen).
+ * unreachable, auth, disabled, etc.) we log at `warn` and skip BOTH the
+ * event emission and the state update — the prior state (in-DB) stands
+ * and we'll try again on the next tick. Unexpected errors are logged at
+ * `error` but also don't touch state (since the transition didn't
+ * happen).
  */
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
@@ -45,13 +49,6 @@ export function createScheduleTicker(
   prisma: PrismaClient,
   firewall: FirewallClient,
 ): ScheduleTicker {
-  // mac -> last desired-blocked state we successfully dispatched. Undefined
-  // means "we've never applied a state for this MAC" (first tick, or first
-  // time we see this device). We only update this on success, so a failed
-  // router call leaves the previous entry intact and the next tick will
-  // re-attempt the transition.
-  const lastAppliedBlocked = new Map<string, boolean>();
-
   async function tickOnce() {
     const now = new Date();
     const devices = await prisma.networkDevice.findMany({
@@ -112,26 +109,35 @@ export function createScheduleTicker(
         now,
       });
 
-      const previous = lastAppliedBlocked.get(device.mac);
+      // Previous dispatched state lives on the device row (null = never
+      // dispatched). Any mismatch — including null !== true/false —
+      // triggers a dispatch, which matches the "ticker hasn't touched
+      // this yet" bootstrap semantics from the original in-memory cache.
+      const previous: boolean | null = (device as any).lastAppliedBlocked ?? null;
       if (previous === desired) continue;
 
       try {
         if (desired) await firewall.block(device.mac);
         else await firewall.unblock(device.mac);
 
-        // Only record on success — on failure we leave `lastAppliedBlocked`
-        // alone so the next tick retries.
-        lastAppliedBlocked.set(device.mac, desired);
-
-        await prisma.scheduleEvent.create({
-          data: {
-            subjectType: "device",
-            deviceMac: device.mac,
-            transition: desired ? "blocked" : "unblocked",
-            reason,
-            occurredAt: now,
-          },
-        });
+        // Atomically record the event and flip `lastAppliedBlocked`. If
+        // either statement fails, both roll back — so we never log a
+        // transition we can't also remember.
+        await prisma.$transaction([
+          prisma.scheduleEvent.create({
+            data: {
+              subjectType: "device",
+              deviceMac: device.mac,
+              transition: desired ? "blocked" : "unblocked",
+              reason,
+              occurredAt: now,
+            },
+          }),
+          prisma.networkDevice.update({
+            where: { mac: device.mac },
+            data: { lastAppliedBlocked: desired },
+          }),
+        ]);
       } catch (err) {
         if (err instanceof RouterError) {
           log.warn(
