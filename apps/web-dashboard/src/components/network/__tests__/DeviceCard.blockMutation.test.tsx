@@ -57,7 +57,7 @@ describe("DeviceCard block/unblock mutation", () => {
     vi.unstubAllGlobals();
   });
 
-  it("isBlocked=false → renders 'Block' and POSTs /api/network/firewall/block with mac on click", async () => {
+  it("isBlocked=false → renders 'Block' and POSTs /devices/:mac/manualBlock with { blocked: true } on click", async () => {
     const device = makeDevice({ isBlocked: false });
     mockFetchOnceJson(fetchMock, { operationId: "op-123" });
 
@@ -70,16 +70,18 @@ describe("DeviceCard block/unblock mutation", () => {
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
-        (c) => c[0] === "/api/network/firewall/block",
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0] === `/api/network/devices/${encodeURIComponent(device.mac)}/manualBlock`,
       );
       expect(postCalls).toHaveLength(1);
       const init = postCalls[0][1];
       expect(init.method).toBe("POST");
-      expect(JSON.parse(init.body)).toEqual({ mac: device.mac });
+      expect(JSON.parse(init.body)).toEqual({ blocked: true });
     });
   });
 
-  it("isBlocked=true → renders 'Unblock' and POSTs /api/network/firewall/unblock on click", async () => {
+  it("isBlocked=true → renders 'Unblock' and POSTs /devices/:mac/manualBlock with { blocked: false } on click", async () => {
     const device = makeDevice({ isBlocked: true });
     mockFetchOnceJson(fetchMock, {});
 
@@ -92,10 +94,12 @@ describe("DeviceCard block/unblock mutation", () => {
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
-        (c) => c[0] === "/api/network/firewall/unblock",
+        (c) =>
+          typeof c[0] === "string" &&
+          c[0] === `/api/network/devices/${encodeURIComponent(device.mac)}/manualBlock`,
       );
       expect(postCalls).toHaveLength(1);
-      expect(JSON.parse(postCalls[0][1].body)).toEqual({ mac: device.mac });
+      expect(JSON.parse(postCalls[0][1].body)).toEqual({ blocked: false });
     });
   });
 

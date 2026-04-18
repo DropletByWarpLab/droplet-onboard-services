@@ -1,13 +1,25 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import * as Icons from "lucide-react";
-import type { EnrichedNetworkDevice, DevicePresenceDay } from "@/lib/types";
+import type {
+  EnrichedNetworkDevice,
+  DevicePresenceDay,
+  Schedule,
+  ScheduleOverride,
+} from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { IconPicker, type DeviceIconName } from "./IconPicker";
 import { GroupTypeahead } from "./GroupTypeahead";
 import { useDeviceMutations } from "@/lib/hooks/useDeviceMutations";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
+import { useSchedules } from "@/lib/hooks/useSchedules";
+import { useActiveOverrides } from "@/lib/hooks/useActiveOverrides";
+import { useOverrideMutations } from "@/lib/hooks/useOverrideMutations";
+import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
+import { isWindowActive, nextTransitionFor } from "@/lib/scheduleEval";
+import { OverrideModal } from "./OverrideModal";
+import { ScheduleEditorModal } from "./ScheduleEditorModal";
 
 const fetcher = async (url: string) => {
   const r = await fetch(url);
@@ -228,6 +240,13 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
         </div>
       </div>
 
+      {/* Schedule (WARP-98) */}
+      <ScheduleSection
+        mac={mac}
+        deviceGroups={data?.device.groups ?? []}
+        onError={setToast}
+      />
+
       {/* Notes */}
       <div className="px-4 py-3 border-t border-separator">
         <label className="type-footnote text-label-tertiary block mb-2">Notes</label>
@@ -351,6 +370,255 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
             ×
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+// --- WARP-98: Inline Schedule section for the device detail panel ---
+
+interface ScheduleSectionProps {
+  mac: string;
+  deviceGroups: EnrichedNetworkDevice["groups"];
+  onError: (message: string) => void;
+}
+
+function formatHHMM(d: Date): string {
+  return `${d.getHours().toString().padStart(2, "0")}:${d
+    .getMinutes()
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
+  const schedulesSwr = useSchedules();
+  const overridesSwr = useActiveOverrides({ deviceMac: mac });
+  const groupsSwr = useNetworkGroups();
+  const { cancelOverride } = useOverrideMutations();
+
+  const [overrideModalOpen, setOverrideModalOpen] = useState<
+    { action: "allow" | "block"; durationMin?: number } | null
+  >(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
+
+  const schedules: Schedule[] = schedulesSwr.data?.schedules ?? [];
+  const overrides: ScheduleOverride[] = overridesSwr.data?.overrides ?? [];
+  const activeOverride = overrides[0];
+
+  // Resolve the effective schedule for this device. Device-level schedules
+  // take precedence (matching the backend) — if none match, fall back to the
+  // first group-level schedule that applies to one of the device's groups.
+  const effective = useMemo(() => {
+    const lower = mac.toLowerCase();
+    const deviceSchedules = schedules.filter(
+      (s) =>
+        s.enabled &&
+        s.subjectType === "device" &&
+        (s.deviceMac ?? "").toLowerCase() === lower,
+    );
+    if (deviceSchedules.length > 0) {
+      return { schedule: deviceSchedules[0], source: "device" as const };
+    }
+    const groupIds = new Set(deviceGroups.map((g) => g.id));
+    const groupSchedule = schedules.find(
+      (s) =>
+        s.enabled &&
+        s.subjectType === "group" &&
+        s.groupId &&
+        groupIds.has(s.groupId),
+    );
+    if (groupSchedule) {
+      const viaGroup = deviceGroups.find((g) => g.id === groupSchedule.groupId);
+      return {
+        schedule: groupSchedule,
+        source: "group" as const,
+        groupName:
+          viaGroup?.name ??
+          groupsSwr.data?.groups.find((g) => g.id === groupSchedule.groupId)
+            ?.name ??
+          "group",
+      };
+    }
+    return null;
+  }, [schedules, deviceGroups, mac, groupsSwr.data]);
+
+  // Derive the current state string. When any window of the effective
+  // schedule is active right now, we're "Blocked by <name>"; otherwise
+  // "Allowed". Transition time comes from nextTransitionFor.
+  const now = new Date();
+  const scheduleActiveNow = effective
+    ? effective.schedule.windows.some((w) => isWindowActive(w, now))
+    : false;
+  const nextTransition = effective
+    ? nextTransitionFor([effective.schedule], now)
+    : null;
+
+  let stateLine: string | null = null;
+  if (effective) {
+    if (scheduleActiveNow) {
+      stateLine = `Blocked by ${effective.schedule.name}`;
+      if (nextTransition)
+        stateLine += ` · ends ${formatHHMM(nextTransition.at)}`;
+    } else {
+      stateLine = nextTransition
+        ? `Allowed until ${formatHHMM(nextTransition.at)}`
+        : "Allowed";
+    }
+  }
+
+  async function handleCancelOverride() {
+    if (!activeOverride) return;
+    try {
+      await cancelOverride(activeOverride.id);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not cancel override");
+    }
+  }
+
+  function jumpToSchedulesTab(scheduleId: string) {
+    // The network page owns tab state as a useState hook — we don't have a
+    // router hook we can reach in here. Best-effort: set location.hash so
+    // deep-linking can pick it up later, and scroll to a matching element if
+    // one happens to be in the DOM (Schedules tab already rendered).
+    if (typeof window !== "undefined") {
+      window.location.hash = `schedule-${scheduleId}`;
+      const el = document.getElementById(`schedule-${scheduleId}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  return (
+    <div className="px-4 py-3 border-t border-separator">
+      <p className="type-footnote text-label-tertiary mb-2">Schedule</p>
+
+      {activeOverride && (
+        <div
+          role="status"
+          data-testid="schedule-override-banner"
+          className="mb-2 flex items-center justify-between gap-2 rounded border border-accent bg-accent/10 px-3 py-2"
+        >
+          <span className="type-footnote text-label-primary">
+            Override: {activeOverride.action} until{" "}
+            {formatHHMM(new Date(activeOverride.endAt))}
+          </span>
+          <button
+            type="button"
+            onClick={() => void handleCancelOverride()}
+            className="type-footnote text-system-red hover:underline"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {!effective ? (
+        // No schedule applies — split button.
+        <div className="flex items-center">
+          <button
+            type="button"
+            onClick={() =>
+              setOverrideModalOpen({ action: "allow", durationMin: 30 })
+            }
+            className="type-footnote px-3 py-1.5 rounded-l border border-separator text-label-secondary hover:text-label-primary hover:bg-surface-secondary"
+          >
+            + Schedule
+          </button>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setSplitOpen((o) => !o)}
+              aria-label="Schedule options"
+              className="px-2 py-1.5 rounded-r border border-l-0 border-separator text-label-secondary hover:text-label-primary hover:bg-surface-secondary"
+            >
+              <Icons.ChevronDown className="w-4 h-4" />
+            </button>
+            {splitOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 mt-1 w-52 bg-surface-primary border border-separator rounded shadow-xl z-10"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setSplitOpen(false);
+                    setEditorOpen(true);
+                  }}
+                  className="w-full text-left px-3 py-2 type-footnote text-label-primary hover:bg-surface-secondary"
+                >
+                  Create recurring schedule…
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => jumpToSchedulesTab(effective.schedule.id)}
+              className="type-subheadline text-accent hover:underline"
+            >
+              {effective.schedule.name}
+            </button>
+            <span
+              data-testid="schedule-source-badge"
+              className="type-caption-1 px-2 py-0.5 rounded-full bg-surface-secondary text-label-secondary"
+            >
+              {effective.source === "device"
+                ? "own schedule"
+                : `via ${effective.groupName ?? "group"}`}
+            </span>
+          </div>
+
+          {stateLine && (
+            <p className="type-footnote text-label-secondary">{stateLine}</p>
+          )}
+
+          {/* Quick allow/block actions — suppressed while an override is
+              live (one override at a time is clearer). */}
+          {!activeOverride && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setOverrideModalOpen({ action: "allow", durationMin: 30 })
+                }
+                className="type-footnote px-3 py-1 rounded bg-system-green/10 text-system-green"
+              >
+                Allow for 30 min
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setOverrideModalOpen({ action: "block", durationMin: 120 })
+                }
+                className="type-footnote px-3 py-1 rounded bg-system-red/10 text-system-red"
+              >
+                Block for 2h
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {overrideModalOpen && (
+        <OverrideModal
+          subject={{ type: "device", deviceMac: mac }}
+          defaultAction={overrideModalOpen.action}
+          defaultDurationMin={overrideModalOpen.durationMin}
+          onClose={() => setOverrideModalOpen(null)}
+        />
+      )}
+
+      {editorOpen && (
+        <ScheduleEditorModal
+          scheduleId="new"
+          initialSubject={{ type: "device", deviceMac: mac }}
+          onClose={() => setEditorOpen(false)}
+        />
       )}
     </div>
   );

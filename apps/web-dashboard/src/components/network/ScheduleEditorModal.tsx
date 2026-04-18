@@ -22,9 +22,43 @@ import { ScheduleHeatmap } from "./ScheduleHeatmap";
  * and keep the form open so the user can fix the offending field.
  */
 
+/** Preset identifier used when creating a new schedule. Keeps the union
+ * tiny + shared with WARP-99's eventual `SCHEDULE_PRESETS` registry. */
+export type SchedulePresetId = "bedtime";
+
+/** Subject hint for pre-filling the subject selector on a new schedule. */
+export type InitialSubject =
+  | { type: "device"; deviceMac: string }
+  | { type: "group"; groupId: string };
+
 interface Props {
   scheduleId: string | "new" | null;
   onClose: () => void;
+  /** Pre-select a device/group when opening a NEW schedule. Ignored when
+   * editing an existing one (subject is immutable post-create). */
+  initialSubject?: InitialSubject;
+  /** Optional preset flag — pre-fills name + windows on a NEW schedule.
+   * Kept as a string for forward-compat with WARP-99's preset registry. */
+  initialPreset?: SchedulePresetId;
+}
+
+// --- Preset window pre-fill (WARP-98 inline — will move to SCHEDULE_PRESETS in WARP-99) ---
+// Day-of-week bitmask: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64.
+const BEDTIME_WINDOWS = [
+  // Sun–Thu 9pm–7am (wraps past midnight → endMin <= startMin)
+  { daysOfWeek: 1 | 2 | 4 | 8 | 16, startMin: 21 * 60, endMin: 7 * 60 },
+  // Fri–Sat 11pm–8am
+  { daysOfWeek: 32 | 64, startMin: 23 * 60, endMin: 8 * 60 },
+];
+
+function windowsForPreset(preset: SchedulePresetId) {
+  if (preset === "bedtime") return BEDTIME_WINDOWS.map((w) => ({ ...w }));
+  return [{ daysOfWeek: 0, startMin: 0, endMin: 60 }];
+}
+
+function nameForPreset(preset: SchedulePresetId): string {
+  if (preset === "bedtime") return "Bedtime";
+  return "";
 }
 
 const TOAST_COPY: Record<string, string> = {
@@ -66,14 +100,21 @@ function serializeWindows(windows: WindowDraft[]) {
   }));
 }
 
-function blankForm(): FormState {
+function blankForm(
+  initialSubject?: InitialSubject,
+  initialPreset?: SchedulePresetId,
+): FormState {
+  const windows = initialPreset
+    ? windowsForPreset(initialPreset)
+    : [{ daysOfWeek: 0, startMin: 0, endMin: 60 }];
+  const name = initialPreset ? nameForPreset(initialPreset) : "";
   return {
-    name: "",
+    name,
     enabled: true,
-    subjectType: "device",
-    deviceMac: "",
-    groupId: "",
-    windows: [{ daysOfWeek: 0, startMin: 0, endMin: 60 }],
+    subjectType: initialSubject?.type ?? "device",
+    deviceMac: initialSubject?.type === "device" ? initialSubject.deviceMac : "",
+    groupId: initialSubject?.type === "group" ? initialSubject.groupId : "",
+    windows,
   };
 }
 
@@ -93,7 +134,12 @@ function fromSchedule(s: Schedule): FormState {
   };
 }
 
-export function ScheduleEditorModal({ scheduleId, onClose }: Props) {
+export function ScheduleEditorModal({
+  scheduleId,
+  onClose,
+  initialSubject,
+  initialPreset,
+}: Props) {
   const schedulesSwr = useSchedules();
   const devicesSwr = useNetworkDevices();
   const groupsSwr = useNetworkGroups();
@@ -108,7 +154,7 @@ export function ScheduleEditorModal({ scheduleId, onClose }: Props) {
   }, [isEditing, scheduleId, schedulesSwr.data]);
 
   const [form, setForm] = useState<FormState>(() =>
-    existing ? fromSchedule(existing) : blankForm(),
+    existing ? fromSchedule(existing) : blankForm(initialSubject, initialPreset),
   );
   const [toast, setToast] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { SWRConfig } from "swr";
 import { DeviceCard } from "../DeviceCard";
 import type { EnrichedNetworkDevice, DevicePresenceDay } from "@/lib/types";
 
@@ -116,5 +117,26 @@ describe("DeviceCard", () => {
     }));
     render(<DeviceCard device={makeDevice({ presenceDays })} onOpen={() => {}} />);
     expect(screen.getAllByTestId("sparkline-bar")).toHaveLength(30);
+  });
+
+  // --- WARP-98: Quick Schedule hover action ---
+
+  it("renders a Quick Schedule button in the hover action row", () => {
+    render(<DeviceCard device={makeDevice()} onOpen={() => {}} />);
+    expect(
+      screen.getByRole("button", { name: "Quick schedule" }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking Quick Schedule does NOT fire onOpen (stopPropagation)", () => {
+    const onOpen = vi.fn();
+    // Wrap in SWRConfig because the popover (mounted on click) uses SWR.
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <DeviceCard device={makeDevice()} onOpen={onOpen} />
+      </SWRConfig>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Quick schedule" }));
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });
