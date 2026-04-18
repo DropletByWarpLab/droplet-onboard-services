@@ -100,10 +100,11 @@ source "$SCRIPT_DIR/lib/camera-drivers.sh"
 # Runs the secret-file materializer without touching .env, Docker, or any
 # service. Useful after editing .env to rotate OPENWRT_PASSWORD.
 if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
-  log_info "Syncing Docker secret files from .env..."
-  sync_openwrt_password_secret
-  log_success "Done. Restart the routing container for the change to take effect:"
-  log_info "  docker compose -f docker/docker-compose.yml restart routing"
+  log_info "Syncing setup artifacts from .env..."
+  migrate_env
+  materialize_artifacts
+  log_success "Done. Restart affected containers for changes to take effect:"
+  log_info "  docker compose -f docker/docker-compose.yml restart"
   exit 0
 fi
 
@@ -164,16 +165,17 @@ if [ "$DRY_RUN" = "true" ]; then
 
   log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
-    log_info "  SKIPPED (.env already exists)"
+    log_info "  Would skip secret generation (.env already exists)"
+    log_info "  Would migrate .env: backfill ROUTING_SERVICE_TOKEN, ROUTING_MODE if missing"
   else
     log_info "  Would generate secrets: POSTGRES_PASSWORD, REDIS_PASSWORD,"
     log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
     log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY,"
     log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN"
-    log_info "  Would materialize Docker secret files: docker/secrets/openwrt_password"
     log_info "  Would write .env via heredoc (no .env.example dependency)"
-    log_info "  Would generate MQTT password file and TLS certificate"
   fi
+  log_info "  Would materialize artifacts (idempotent): MQTT password file,"
+  log_info "                  mosquitto.conf, TLS cert, docker/secrets/openwrt_password"
 
   log_step 5 $TOTAL_STEPS "Build container images"
   if [ "$SKIP_BUILD" = "true" ]; then
@@ -251,6 +253,11 @@ main() {
   # --- Phase 4: Secrets ---
   log_step 4 $total_steps "Secrets"
   generate_env
+  # Self-heal pre-existing installs: backfill missing keys (e.g. WARP-36
+  # ROUTING_SERVICE_TOKEN) and (re)materialize Docker bind-mount sources.
+  # No-ops on a fresh install; recovers stale installs without --regenerate-env.
+  migrate_env
+  materialize_artifacts
 
   # --- Phase 5: Build ---
   log_step 5 $total_steps "Build"

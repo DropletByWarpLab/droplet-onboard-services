@@ -158,6 +158,27 @@ check ".env exists (chmod 600)" \
     [ "$perms" = "600" ]
   ' || true
 
+# --- Required setup artifacts (Docker bind-mount sources) ---
+# These are materialized by setup.sh's materialize_artifacts(). If any are
+# missing on a started stack, the corresponding container failed to start
+# (Compose errors with "bind source path does not exist"). Re-run:
+#   ./scripts/setup.sh --sync-secrets
+check "Docker secret: openwrt_password" \
+  bash -c '[ -f "'"$REPO_ROOT/docker/secrets/openwrt_password"'" ]' || true
+
+check "TLS certificate" \
+  bash -c '[ -f "'"$REPO_ROOT/docker/certs/droplet.crt"'" ] && [ -f "'"$REPO_ROOT/docker/certs/droplet.key"'" ]' || true
+
+check "MQTT password file" \
+  bash -c '[ -f "'"$REPO_ROOT/docker/mosquitto_passwd_dir/mosquitto_passwd"'" ]' || true
+
+# --- Stale .env drift (WARP-36, WARP-44) ---
+# Older installs predate ROUTING_SERVICE_TOKEN — if missing, routing-service
+# auth is disabled (services/routing/main.py:113 falls through to "dev mode").
+# migrate_env() backfills these on every setup; warn if still absent.
+check_warn "ROUTING_SERVICE_TOKEN set" \
+  bash -c '[ -n "${ROUTING_SERVICE_TOKEN:-}" ]'
+
 # =============================================================================
 # Summary
 # =============================================================================
