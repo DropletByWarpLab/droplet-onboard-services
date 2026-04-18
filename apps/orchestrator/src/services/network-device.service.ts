@@ -23,6 +23,10 @@ import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { normalizeMac } from "../lib/mac.js";
+import {
+  withSwrCache as defaultWithSwrCache,
+  invalidatePrefix as defaultInvalidatePrefix,
+} from "./cache.service.js";
 
 /**
  * Prisma's `update` and `delete` throw `PrismaClientKnownRequestError` with
@@ -82,6 +86,38 @@ export interface LiveSnapshot {
 
 export type LiveSnapshotFn = () => Promise<LiveSnapshot>;
 
+/**
+ * WARP-90: cache adapter injected into the service. The default
+ * implementation delegates to the Redis-backed helpers in
+ * `cache.service.ts`; tests pass a no-op variant (or a controllable fake)
+ * so the existing behavioral assertions never observe a stale read and
+ * so the new read-through-write-through tests can verify producer
+ * invocation counts.
+ */
+export interface NetworkDeviceCache {
+  withSwrCache<T>(
+    key: string,
+    ttlSec: number,
+    producer: () => Promise<T>,
+  ): Promise<T>;
+  invalidatePrefix(prefix: string): Promise<number>;
+}
+
+/** Passthrough cache — producer every time, no invalidation side effects. */
+export const noopNetworkDeviceCache: NetworkDeviceCache = {
+  withSwrCache: async (_key, _ttl, producer) => producer(),
+  invalidatePrefix: async () => 0,
+};
+
+const defaultNetworkDeviceCache: NetworkDeviceCache = {
+  withSwrCache: defaultWithSwrCache,
+  invalidatePrefix: defaultInvalidatePrefix,
+};
+
+const DEVICE_LIST_PREFIX = "network:devices:";
+const GROUP_LIST_PREFIX = "network:groups:";
+const LIST_TTL_SEC = 10;
+
 function safeNormalize(mac: string): string | null {
   try {
     return normalizeMac(mac);
@@ -93,41 +129,51 @@ function safeNormalize(mac: string): string | null {
 export function createNetworkDeviceService(
   prisma: PrismaClient,
   liveSnapshot: LiveSnapshotFn,
+  cache: NetworkDeviceCache = defaultNetworkDeviceCache,
 ) {
   async function listDevices(
     opts: { onlineOnly?: boolean; groupId?: string } = {},
   ) {
-    const where = opts.groupId
-      ? { groups: { some: { id: opts.groupId } } }
-      : undefined;
+    // Stable key: encodes the two opt dimensions that actually change the
+    // result shape. Kept deliberately short + readable so Redis output is
+    // easy to eyeball in ops. See WARP-90.
+    const onlineSegment = opts.onlineOnly ? "online" : "all";
+    const groupSegment = opts.groupId ?? "none";
+    const cacheKey = `${DEVICE_LIST_PREFIX}list:${onlineSegment}:${groupSegment}`;
 
-    const [rows, snap] = await Promise.all([
-      prisma.networkDevice.findMany({
-        where,
-        include: { groups: true },
-      }),
-      liveSnapshot().catch(() => ({ leases: [], wirelessClients: [] })),
-    ]);
+    return cache.withSwrCache(cacheKey, LIST_TTL_SEC, async () => {
+      const where = opts.groupId
+        ? { groups: { some: { id: opts.groupId } } }
+        : undefined;
 
-    // Build a MAC -> signal lookup from wireless clients (normalized).
-    const signalByMac = new Map<string, number | undefined>();
-    for (const w of snap.wirelessClients) {
-      const mac = safeNormalize(w.mac);
-      if (mac) signalByMac.set(mac, w.signal);
-    }
+      const [rows, snap] = await Promise.all([
+        prisma.networkDevice.findMany({
+          where,
+          include: { groups: true },
+        }),
+        liveSnapshot().catch(() => ({ leases: [], wirelessClients: [] })),
+      ]);
 
-    const now = Date.now();
-    const enriched = rows.map((row: any) => {
-      const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
-      const signal = signalByMac.get(row.mac);
-      return {
-        ...row,
-        online,
-        signal,
-      };
+      // Build a MAC -> signal lookup from wireless clients (normalized).
+      const signalByMac = new Map<string, number | undefined>();
+      for (const w of snap.wirelessClients) {
+        const mac = safeNormalize(w.mac);
+        if (mac) signalByMac.set(mac, w.signal);
+      }
+
+      const now = Date.now();
+      const enriched = rows.map((row: any) => {
+        const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
+        const signal = signalByMac.get(row.mac);
+        return {
+          ...row,
+          online,
+          signal,
+        };
+      });
+
+      return opts.onlineOnly ? enriched.filter((d: any) => d.online) : enriched;
     });
-
-    return opts.onlineOnly ? enriched.filter((d: any) => d.online) : enriched;
   }
 
   async function getDevice(macRaw: string) {
@@ -161,29 +207,42 @@ export function createNetworkDeviceService(
     if (patch.icon !== undefined) data.icon = patch.icon;
     if (patch.notes !== undefined) data.notes = patch.notes;
 
-    return mapPrismaNotFound("Device", () =>
+    const result = await mapPrismaNotFound("Device", () =>
       prisma.networkDevice.update({
         where: { mac },
         data,
       }),
     );
+    // WARP-90: metadata patch doesn't touch group membership — only the
+    // device-list cache can be stale, so skip the groups prefix.
+    await cache.invalidatePrefix(DEVICE_LIST_PREFIX);
+    return result;
   }
 
   async function assignDeviceGroups(macRaw: string, groupIds: string[]) {
     const mac = normalizeMac(macRaw);
-    return mapPrismaNotFound("Device", () =>
+    const result = await mapPrismaNotFound("Device", () =>
       prisma.networkDevice.update({
         where: { mac },
         data: { groups: { set: groupIds.map((id) => ({ id })) } },
         include: { groups: true },
       }),
     );
+    // Membership change affects device rows (embedded groups[]) AND the
+    // group _count.devices aggregate returned by listGroups.
+    await Promise.all([
+      cache.invalidatePrefix(DEVICE_LIST_PREFIX),
+      cache.invalidatePrefix(GROUP_LIST_PREFIX),
+    ]);
+    return result;
   }
 
   async function listGroups() {
-    return prisma.deviceGroup.findMany({
-      include: { _count: { select: { devices: true } } },
-    });
+    return cache.withSwrCache(`${GROUP_LIST_PREFIX}list`, LIST_TTL_SEC, () =>
+      prisma.deviceGroup.findMany({
+        include: { _count: { select: { devices: true } } },
+      }),
+    );
   }
 
   async function createGroup(name: string, color?: string, icon?: string) {
@@ -197,7 +256,14 @@ export function createNetworkDeviceService(
     const data: Prisma.DeviceGroupCreateInput = { name };
     if (color !== undefined) data.color = color;
     if (icon !== undefined) data.icon = icon;
-    return prisma.deviceGroup.create({ data });
+    const result = await prisma.deviceGroup.create({ data });
+    // New group → group list is stale; device rows inherit groups[] in
+    // their payload so conservative invalidation covers both prefixes.
+    await Promise.all([
+      cache.invalidatePrefix(DEVICE_LIST_PREFIX),
+      cache.invalidatePrefix(GROUP_LIST_PREFIX),
+    ]);
+    return result;
   }
 
   async function renameGroup(
@@ -218,23 +284,42 @@ export function createNetworkDeviceService(
     if (patch.name !== undefined) data.name = patch.name;
     if (patch.color !== undefined) data.color = patch.color;
     if (patch.icon !== undefined) data.icon = patch.icon;
-    return mapPrismaNotFound("Group", () =>
+    const result = await mapPrismaNotFound("Group", () =>
       prisma.deviceGroup.update({ where: { id }, data }),
     );
+    // Group rename/recolor leaks into the embedded groups[] array on
+    // every device row that references it — invalidate both prefixes.
+    await Promise.all([
+      cache.invalidatePrefix(DEVICE_LIST_PREFIX),
+      cache.invalidatePrefix(GROUP_LIST_PREFIX),
+    ]);
+    return result;
   }
 
   async function deleteGroup(id: string) {
     // Prisma cascades the implicit join table; NetworkDevice rows stay.
-    return mapPrismaNotFound("Group", () =>
+    const result = await mapPrismaNotFound("Group", () =>
       prisma.deviceGroup.delete({ where: { id } }),
     );
+    await Promise.all([
+      cache.invalidatePrefix(DEVICE_LIST_PREFIX),
+      cache.invalidatePrefix(GROUP_LIST_PREFIX),
+    ]);
+    return result;
   }
 
   async function forgetDevice(macRaw: string) {
     const mac = normalizeMac(macRaw);
-    return mapPrismaNotFound("Device", () =>
+    const result = await mapPrismaNotFound("Device", () =>
       prisma.networkDevice.delete({ where: { mac } }),
     );
+    // Removing a device shrinks _count.devices on every group it belonged
+    // to, so wipe both prefixes.
+    await Promise.all([
+      cache.invalidatePrefix(DEVICE_LIST_PREFIX),
+      cache.invalidatePrefix(GROUP_LIST_PREFIX),
+    ]);
+    return result;
   }
 
   return {

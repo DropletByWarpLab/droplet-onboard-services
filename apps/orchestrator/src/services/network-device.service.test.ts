@@ -10,7 +10,11 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Prisma } from "@prisma/client";
-import { createNetworkDeviceService } from "./network-device.service.js";
+import {
+  createNetworkDeviceService,
+  noopNetworkDeviceCache,
+  type NetworkDeviceCache,
+} from "./network-device.service.js";
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 
 /**
@@ -215,7 +219,16 @@ describe("network-device.service", () => {
     groups = mock.groups;
     presence = mock.presence;
     snapshot = { leases: [], wirelessClients: [] };
-    svc = createNetworkDeviceService(prisma, async () => snapshot);
+    // Pass the no-op cache explicitly so these tests keep observing the
+    // direct Prisma-backed behavior they were written against. The
+    // default Redis-backed cache degrades to passthrough in the test
+    // environment anyway (REDIS_URL unset), but being explicit keeps the
+    // test intent obvious.
+    svc = createNetworkDeviceService(
+      prisma,
+      async () => snapshot,
+      noopNetworkDeviceCache,
+    );
   });
 
   describe("listDevices", () => {
@@ -460,9 +473,122 @@ describe("network-device.service", () => {
         groupIds: ["grp-a"],
       }));
 
-      const list = await svc.listGroups();
+      const list = (await svc.listGroups()) as any[];
       expect(list).toHaveLength(1);
       expect(list[0]._count.devices).toBe(2);
+    });
+  });
+
+  /**
+   * WARP-90: read → write → read cycle. Verifies that the cache layer is
+   * actually wired in (producer hit on miss, served on hit) AND that
+   * write-through invalidation forces the next read to re-run the
+   * producer rather than serve a 10s-stale payload.
+   */
+  describe("WARP-90 SWR cache integration", () => {
+    function makeFakeCache(): NetworkDeviceCache & {
+      store: Map<string, string>;
+    } {
+      const store = new Map<string, string>();
+      return {
+        store,
+        withSwrCache: async (key, _ttl, producer) => {
+          const hit = store.get(key);
+          if (hit !== undefined) {
+            return JSON.parse(hit);
+          }
+          const value = await producer();
+          store.set(key, JSON.stringify(value));
+          return value;
+        },
+        invalidatePrefix: async (prefix) => {
+          let n = 0;
+          for (const k of Array.from(store.keys())) {
+            if (k.startsWith(prefix)) {
+              store.delete(k);
+              n++;
+            }
+          }
+          return n;
+        },
+      };
+    }
+
+    it("serves from cache on repeat reads and refreshes after a write", async () => {
+      const cache = makeFakeCache();
+      const findMany = prisma.networkDevice.findMany as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      devices.set("AA:BB:CC:DD:EE:01", makeDevice({
+        mac: "AA:BB:CC:DD:EE:01",
+        lastSeen: new Date(),
+      }));
+
+      const cached = createNetworkDeviceService(
+        prisma,
+        async () => snapshot,
+        cache,
+      );
+
+      const beforeCalls = findMany.mock.calls.length;
+
+      // 1st call — producer runs, result cached.
+      await cached.listDevices();
+      expect(findMany.mock.calls.length).toBe(beforeCalls + 1);
+
+      // 2nd call with identical opts — served from cache, no Prisma hit.
+      await cached.listDevices();
+      expect(findMany.mock.calls.length).toBe(beforeCalls + 1);
+
+      // Write path invalidates the devices prefix.
+      await cached.updateDevice("aa:bb:cc:dd:ee:01", { displayName: "Fresh" });
+
+      // 3rd call — producer runs again, surfaces the new displayName.
+      const fresh = await cached.listDevices();
+      expect(findMany.mock.calls.length).toBe(beforeCalls + 2);
+      expect(fresh[0].displayName).toBe("Fresh");
+    });
+
+    it("invalidates both prefixes on group-membership mutations", async () => {
+      const cache = makeFakeCache();
+      groups.set("grp-a", { id: "grp-a", name: "A", color: null, icon: null });
+      devices.set("AA:BB:CC:DD:EE:01", makeDevice({
+        mac: "AA:BB:CC:DD:EE:01",
+        groupIds: [],
+      }));
+
+      const cached = createNetworkDeviceService(
+        prisma,
+        async () => snapshot,
+        cache,
+      );
+
+      await cached.listDevices();
+      await cached.listGroups();
+      expect(
+        Array.from(cache.store.keys()).some((k) =>
+          k.startsWith("network:devices:"),
+        ),
+      ).toBe(true);
+      expect(
+        Array.from(cache.store.keys()).some((k) =>
+          k.startsWith("network:groups:"),
+        ),
+      ).toBe(true);
+
+      await cached.assignDeviceGroups("aa:bb:cc:dd:ee:01", ["grp-a"]);
+
+      // Both prefixes wiped — next reads will re-run their producers.
+      expect(
+        Array.from(cache.store.keys()).some((k) =>
+          k.startsWith("network:devices:"),
+        ),
+      ).toBe(false);
+      expect(
+        Array.from(cache.store.keys()).some((k) =>
+          k.startsWith("network:groups:"),
+        ),
+      ).toBe(false);
     });
   });
 });
