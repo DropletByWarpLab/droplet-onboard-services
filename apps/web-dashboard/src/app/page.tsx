@@ -198,7 +198,7 @@ export default function DashboardPage() {
             style={{ background: "var(--color-surface-raised)" }}
           >
             <div className="flex items-end gap-3 p-3 pl-5">
-              <Sparkles size={18} className="mt-3 flex-shrink-0" style={{ color: "var(--aurora-ink)" }} />
+              <Sparkles size={18} className="self-center flex-shrink-0" style={{ color: "var(--aurora-ink)" }} />
               <textarea
                 ref={taRef}
                 rows={1}
