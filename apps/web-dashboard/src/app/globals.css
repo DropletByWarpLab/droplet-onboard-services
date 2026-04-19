@@ -36,6 +36,19 @@
   /* Material backgrounds */
   --color-sidebar-bg: rgba(242, 242, 247, 0.82);
   --color-toolbar-bg: rgba(255, 255, 255, 0.82);
+
+  /* Aurora — premium AI accents (indigo → violet → blush) */
+  --aurora-1: #c7d2fe;
+  --aurora-2: #e9d5ff;
+  --aurora-3: #fecdd3;
+  --aurora-ink: #4338ca;
+
+  /* Elevated surface (premium tiles) */
+  --color-surface-raised: #ffffff;
+  --shadow-tile: 0 1px 0 rgba(60, 60, 67, 0.04),
+                 0 8px 24px -12px rgba(17, 24, 39, 0.10),
+                 0 24px 48px -24px rgba(17, 24, 39, 0.08);
+  --shadow-hero: 0 30px 80px -40px rgba(99, 102, 241, 0.35);
 }
 
 .dark {
@@ -68,6 +81,19 @@
   /* Material backgrounds */
   --color-sidebar-bg: rgba(28, 28, 30, 0.82);
   --color-toolbar-bg: rgba(0, 0, 0, 0.82);
+
+  /* Aurora — dark variants */
+  --aurora-1: #312e81;
+  --aurora-2: #4c1d95;
+  --aurora-3: #831843;
+  --aurora-ink: #c7d2fe;
+
+  /* Elevated surface (premium tiles) */
+  --color-surface-raised: #18181b;
+  --shadow-tile: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+                 0 8px 24px -12px rgba(0, 0, 0, 0.6),
+                 0 24px 48px -24px rgba(0, 0, 0, 0.45);
+  --shadow-hero: 0 30px 80px -40px rgba(129, 140, 248, 0.45);
 }
 
 /* ============================================================
@@ -177,6 +203,108 @@
   /* Translucent material */
   .dp-material {
     @apply backdrop-blur-xl backdrop-saturate-150;
+  }
+
+  /* ─────────── Premium display type ─────────── */
+  .type-display {
+    font-family: var(--font-display), "Instrument Serif", Georgia, serif;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    line-height: 1.02;
+  }
+  .type-display-italic {
+    font-family: var(--font-display), "Instrument Serif", Georgia, serif;
+    font-style: italic;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+
+  /* ─────────── Premium tile surface ─────────── */
+  .dp-tile {
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-separator);
+    border-radius: 20px;
+    box-shadow: var(--shadow-tile);
+    transition: transform 250ms cubic-bezier(0.25, 0.1, 0.25, 1),
+                box-shadow 250ms cubic-bezier(0.25, 0.1, 0.25, 1),
+                border-color 250ms cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+  .dp-tile-interactive {
+    cursor: pointer;
+  }
+  .dp-tile-interactive:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--color-accent) 28%, var(--color-separator));
+    box-shadow: 0 2px 0 rgba(99, 102, 241, 0.06) inset,
+                0 12px 32px -12px rgba(99, 102, 241, 0.25),
+                0 28px 56px -28px rgba(17, 24, 39, 0.14);
+  }
+
+  /* ─────────── Aurora gradient (AI moments) ─────────── */
+  .aurora-bg {
+    background:
+      radial-gradient(55% 80% at 12% 0%,
+        color-mix(in srgb, var(--aurora-1) 70%, transparent) 0%,
+        transparent 60%),
+      radial-gradient(60% 85% at 92% 10%,
+        color-mix(in srgb, var(--aurora-3) 55%, transparent) 0%,
+        transparent 62%),
+      radial-gradient(70% 90% at 50% 110%,
+        color-mix(in srgb, var(--aurora-2) 55%, transparent) 0%,
+        transparent 65%);
+  }
+  .aurora-ring {
+    position: relative;
+    isolation: isolate;
+  }
+  .aurora-ring::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background:
+      conic-gradient(
+        from 200deg,
+        color-mix(in srgb, var(--aurora-1) 80%, transparent),
+        color-mix(in srgb, var(--aurora-2) 80%, transparent),
+        color-mix(in srgb, var(--aurora-3) 80%, transparent),
+        color-mix(in srgb, var(--aurora-1) 80%, transparent)
+      );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0.9;
+  }
+
+  /* Compact status chip */
+  .dp-status-chip {
+    @apply inline-flex items-center gap-2 px-3 h-9 rounded-full
+           border border-separator bg-surface-tertiary
+           type-footnote text-label-secondary;
+  }
+}
+
+@layer utilities {
+  @keyframes aurora-drift {
+    0%   { transform: translate3d(0, 0, 0) rotate(0deg); }
+    50%  { transform: translate3d(-2%, 1%, 0) rotate(1deg); }
+    100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  }
+  .animate-aurora {
+    animation: aurora-drift 18s ease-in-out infinite;
+  }
+
+  @keyframes fade-rise {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-rise {
+    animation: fade-rise 500ms cubic-bezier(0.25, 0.1, 0.25, 1) both;
   }
 }
 

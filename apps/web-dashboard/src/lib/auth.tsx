@@ -35,12 +35,60 @@ const USER_KEY = "droplet-auth-user";
  * automatically attaches the `droplet_session` HTTP-only cookie set by
  * the orchestrator on login.  No token is stored in JavaScript-accessible
  * storage, eliminating the XSS attack surface for session tokens.
+ *
+ * On a 401 from a non-auth endpoint we transparently try to refresh the
+ * access token (the refresh cookie is scoped to /api/auth and outlives the
+ * 15-minute access JWT). If the refresh succeeds we retry the original call
+ * once; if it fails we evict the cached user and bounce to /login. Without
+ * this, an expired session leaves stale SWR data on screen and every action
+ * silently fails with 401 — which is what users see as "delete is broken".
  */
-export function authFetch(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, {
-    ...init,
-    credentials: "same-origin",
-  });
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function attemptRefresh(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = fetch("/api/auth/refresh", {
+      method: "POST",
+      credentials: "same-origin",
+    })
+      .then((r) => r.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
+export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(url, { ...init, credentials: "same-origin" });
+
+  if (
+    res.status !== 401 ||
+    typeof window === "undefined" ||
+    url.includes("/api/auth/")
+  ) {
+    return res;
+  }
+
+  const refreshed = await attemptRefresh();
+  if (refreshed) {
+    return fetch(url, { ...init, credentials: "same-origin" });
+  }
+
+  // Refresh failed — session is truly dead. Drop cached user and bounce to
+  // login so the UI doesn't keep showing stale data while every call 401s.
+  try {
+    localStorage.removeItem(USER_KEY);
+  } catch {
+    /* ignore — privacy mode, etc. */
+  }
+  if (!window.location.pathname.startsWith("/login")) {
+    window.location.assign(
+      `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
+    );
+  }
+  return res;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
