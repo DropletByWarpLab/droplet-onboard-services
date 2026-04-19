@@ -22,16 +22,27 @@ import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { useAuth } from "@/lib/auth";
 
-const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+type NavItem = {
+  href: string;
+  label: string;
+  icon: typeof Home;
+};
+
+const primaryNav: NavItem[] = [
+  { href: "/", label: "Home", icon: LayoutDashboard },
+  { href: "/chat", label: "Ask AI", icon: MessageSquare },
+  { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/devices", label: "Devices", icon: Home },
+];
+
+const secondaryNav: NavItem[] = [
   { href: "/cameras", label: "Cameras", icon: Video },
   { href: "/network", label: "Network", icon: Network },
-  { href: "/files", label: "Files", icon: FolderOpen },
-  { href: "/chat", label: "Chat", icon: MessageSquare },
   { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
+
+const navItems: NavItem[] = [...primaryNav, ...secondaryNav];
 
 // Sub-navigation rendered under Files when we're on a /files/* route.
 const filesSubNav = [
@@ -78,66 +89,37 @@ export function Sidebar() {
         "
       >
         {/* Logo */}
-        <div className="flex items-center gap-2.5 px-5 h-14">
+        <div className="flex items-center gap-2.5 px-5 h-16">
           <DropletMark size={22} className="text-accent" />
-          <span className="type-headline text-label-primary">Droplet</span>
+          <span className="type-headline text-label-primary tracking-tight">Droplet</span>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 px-3 py-2 space-y-1">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const active = isActive(item.href);
-            return (
-              <div key={item.href}>
-                <Link
-                  href={item.href}
-                  className={`
-                    flex items-center gap-3 px-3 h-9 rounded-sm
-                    type-subheadline transition-all duration-200 ease-smooth
-                    ${
-                      active
-                        ? "bg-accent-subtle text-accent font-medium"
-                        : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-                    }
-                  `}
-                >
-                  <Icon size={18} strokeWidth={active ? 2 : 1.5} />
-                  {item.label}
-                </Link>
+        <nav className="flex-1 px-3 py-1 space-y-0.5">
+          {primaryNav.map((item) => (
+            <NavLink
+              key={item.href}
+              item={item}
+              active={isActive(item.href)}
+              showFilesSubNav={showFilesSubNav}
+              filesSubNav={filesSubNav}
+              pathname={pathname}
+            />
+          ))}
 
-                {/* Files sub-nav (expands inline when on any /files route) */}
-                {item.href === "/files" && showFilesSubNav && (
-                  <div className="ml-7 mt-1 space-y-0.5">
-                    {filesSubNav.map((sub) => {
-                      const SubIcon = sub.icon;
-                      const subActive = sub.exact
-                        ? pathname === sub.href
-                        : pathname.startsWith(sub.href);
-                      return (
-                        <Link
-                          key={sub.href}
-                          href={sub.href}
-                          className={`
-                            flex items-center gap-2 px-2 h-8 rounded-sm
-                            type-footnote transition-all duration-200 ease-smooth
-                            ${
-                              subActive
-                                ? "text-accent font-medium"
-                                : "text-label-tertiary hover:text-label-primary"
-                            }
-                          `}
-                        >
-                          <SubIcon size={14} strokeWidth={subActive ? 2 : 1.5} />
-                          {sub.label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {/* Subtle divider between primary and secondary nav */}
+          <div className="px-3 pt-4 pb-2">
+            <div className="h-px bg-separator" />
+          </div>
+
+          {secondaryNav.map((item) => (
+            <NavLink
+              key={item.href}
+              item={item}
+              active={isActive(item.href)}
+              pathname={pathname}
+            />
+          ))}
         </nav>
 
         {/* Footer */}
@@ -176,7 +158,7 @@ export function Sidebar() {
         </div>
       </aside>
 
-      {/* ── Mobile Bottom Tab Bar ── */}
+      {/* ── Mobile Bottom Tab Bar (primary items only for density) ── */}
       <nav
         className="
           lg:hidden fixed bottom-0 inset-x-0 z-40
@@ -186,7 +168,7 @@ export function Sidebar() {
         "
       >
         <div className="flex items-stretch h-[56px]">
-          {navItems.map((item) => {
+          {primaryNav.map((item) => {
             const Icon = item.icon;
             const active = isActive(item.href);
             return (
@@ -207,5 +189,71 @@ export function Sidebar() {
         </div>
       </nav>
     </>
+  );
+}
+
+// ─────────────────────── Nav link sub-component ────────────────────────
+
+function NavLink({
+  item,
+  active,
+  showFilesSubNav,
+  filesSubNav: subNav,
+  pathname,
+}: {
+  item: NavItem;
+  active: boolean;
+  showFilesSubNav?: boolean;
+  filesSubNav?: typeof filesSubNav;
+  pathname: string;
+}) {
+  const Icon = item.icon;
+  return (
+    <div>
+      <Link
+        href={item.href}
+        className={`
+          flex items-center gap-3 px-3 h-9 rounded-lg
+          type-subheadline transition-all duration-200 ease-smooth
+          ${
+            active
+              ? "bg-accent-subtle text-accent font-medium"
+              : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+          }
+        `}
+      >
+        <Icon size={17} strokeWidth={active ? 2 : 1.5} />
+        {item.label}
+      </Link>
+
+      {item.href === "/files" && showFilesSubNav && subNav && (
+        <div className="ml-7 mt-1 space-y-0.5">
+          {subNav.map((sub) => {
+            const SubIcon = sub.icon;
+            const subActive = sub.exact
+              ? pathname === sub.href
+              : pathname.startsWith(sub.href);
+            return (
+              <Link
+                key={sub.href}
+                href={sub.href}
+                className={`
+                  flex items-center gap-2 px-2 h-8 rounded-md
+                  type-footnote transition-all duration-200 ease-smooth
+                  ${
+                    subActive
+                      ? "text-accent font-medium"
+                      : "text-label-tertiary hover:text-label-primary"
+                  }
+                `}
+              >
+                <SubIcon size={14} strokeWidth={subActive ? 2 : 1.5} />
+                {sub.label}
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

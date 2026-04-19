@@ -19,7 +19,13 @@ function formatBytes(bytes: number): string {
 
 export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
   const [animatedPct, setAnimatedPct] = useState(0);
-  const percentage = storage?.percentage ?? 0;
+  // The orchestrator rounds `percentage` to an integer, which collapses sub-1%
+  // usage to 0 and hides that the disk has been measured. Recompute from raw
+  // bytes for display so a fresh disk reads "<1%" instead of "0%".
+  const percentage =
+    storage && storage.total > 0
+      ? (storage.used / storage.total) * 100
+      : 0;
 
   useEffect(() => {
     const timeout = setTimeout(() => setAnimatedPct(percentage), 120);
@@ -181,7 +187,9 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
             />
           ))}
 
-          {/* Center percentage text */}
+          {/* Center percentage text — show "<1%" when the disk has been
+              measured but rounds to zero, so the gauge isn't mistaken for an
+              uninitialized state. */}
           <text
             x={cx}
             y={cy - 2}
@@ -194,8 +202,11 @@ export function StorageGauge({ storage, isLoading }: StorageGaugeProps) {
               fontVariantNumeric: "tabular-nums",
             }}
           >
-            {Math.round(animatedPct)}
-            <tspan style={{ fontSize: 20, fontWeight: 500 }}>%</tspan>
+            {animatedPct > 0 && animatedPct < 1 ? (
+              <tspan>&lt;1<tspan style={{ fontSize: 20, fontWeight: 500 }}>%</tspan></tspan>
+            ) : (
+              <tspan>{Math.round(animatedPct)}<tspan style={{ fontSize: 20, fontWeight: 500 }}>%</tspan></tspan>
+            )}
           </text>
           <text
             x={cx}

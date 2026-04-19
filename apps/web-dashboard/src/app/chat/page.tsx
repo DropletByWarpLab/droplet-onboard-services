@@ -44,6 +44,25 @@ export default function ChatPage() {
     }
   }, [models, selectedModel]);
 
+  // If the home-page hero handed off a prompt, send it once a model is ready.
+  useEffect(() => {
+    if (!selectedModel) return;
+    let pending: string | null = null;
+    try {
+      pending = window.sessionStorage.getItem("droplet.pendingPrompt");
+    } catch {
+      pending = null;
+    }
+    if (!pending) return;
+    try {
+      window.sessionStorage.removeItem("droplet.pendingPrompt");
+    } catch {
+      /* ignore */
+    }
+    sendMessage(pending, selectedModel, systemPrompt || undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedModel]);
+
   // Load sessions on mount
   useEffect(() => {
     refreshSessions();
