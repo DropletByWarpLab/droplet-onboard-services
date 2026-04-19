@@ -80,8 +80,12 @@ prepare_and_build() {
     "nextcloud:29-apache"
     "node:20-alpine"
     "python:3.12-slim"
-    "ghcr.io/blakeblackshear/frigate:stable"
   )
+  # Frigate is gated to the `linux` compose profile (see docker-compose.yml);
+  # skip the ~2GB pull on macOS where it can never run.
+  if [ "$(uname)" = "Linux" ]; then
+    images+=("ghcr.io/blakeblackshear/frigate:stable")
+  fi
 
   local failed=0
   for img in "${images[@]}"; do

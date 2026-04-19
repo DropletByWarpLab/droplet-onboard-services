@@ -97,6 +97,14 @@ STORAGE_BACKEND=nextcloud
 AUTH_ENABLED=true
 FILES_ROOT=/data/files
 MAX_UPLOAD_SIZE_MB=100
+
+# --- Compose profiles ---
+# Linux: include "linux" so Frigate (which needs /dev/dri/renderD128 and
+# /dev/bus/usb) is part of the default \`docker compose up\`.
+# macOS: leave empty — Frigate is skipped, dashboard remains reachable via
+# the gateway. Add "full" by hand to opt into HA/file-indexer/switch/camera-
+# discovery on either OS.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux' || printf '')
 EOF
 
   chmod 600 "$env_file"
@@ -112,19 +120,90 @@ EOF
   log_info "  ROUTING_TOKEN     : ${routing_service_token:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
-  # --- Generate Mosquitto password file ---
-  _generate_mosquitto_passwd "$mqtt_password"
-
-  # --- Write authenticated mosquitto.conf ---
-  _write_mosquitto_conf
-
-  # --- Generate TLS certificate for HTTPS ---
-  _generate_tls_cert
-
-  # --- Materialize Docker secret file for OpenWrt router password (WARP-37) ---
-  sync_openwrt_password_secret
+  # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
+  # secret files) and key migration are intentionally NOT called from here.
+  # They run unconditionally from setup.sh Phase 4 via materialize_artifacts()
+  # and migrate_env() so existing installs whose .env predates a new artifact
+  # (e.g. WARP-37 docker/secrets/openwrt_password) self-heal on the next setup.
 
   log_divider
+}
+
+# Backfill missing keys in an existing .env file. Older installs predate
+# WARP-36 (ROUTING_SERVICE_TOKEN) and WARP-44 (ROUTING_MODE); without this,
+# new keys silently default to empty/insecure values at compose time —
+# notably ROUTING_SERVICE_TOKEN="" disables routing-service auth entirely
+# (services/routing/main.py:113).
+#
+# Idempotent: only appends when a key is missing, never rewrites an existing
+# value. Backs up .env once on first append.
+migrate_env() {
+  local env_file="$REPO_ROOT/.env"
+  [ -f "$env_file" ] || return 0
+
+  local backed_up=false
+  local appended_count=0
+  local appended_keys=""
+
+  _migrate_ensure_key() {
+    local key="$1" value="$2"
+    if ! grep -qE "^${key}=" "$env_file" 2>/dev/null; then
+      if [ "$backed_up" = "false" ]; then
+        local backup="$env_file.bak.$(date +%s)"
+        cp "$env_file" "$backup"
+        log_info "Backed up existing .env to $backup before migration"
+        backed_up=true
+      fi
+      printf '%s=%s\n' "$key" "$value" >> "$env_file"
+      appended_count=$((appended_count + 1))
+      appended_keys="$appended_keys $key"
+    fi
+  }
+
+  # Default ROUTING_MODE to `mock` on macOS (no local OpenWrt), `real` on
+  # Linux. Only set when missing — never overwrite a user's choice.
+  local routing_mode_default="real"
+  [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
+
+  # COMPOSE_PROFILES: "linux" on Linux turns on the Frigate service (gated
+  # by `profiles: ["linux"]` in docker-compose.yml because it needs Linux-
+  # only device nodes). macOS gets an empty default so frigate is skipped.
+  local compose_profiles_default=""
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux"
+
+  _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
+  _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+
+  if [ "$appended_count" -gt 0 ]; then
+    log_success "Migrated .env: appended$appended_keys"
+  fi
+}
+
+# Materialize all setup-time artifact files that Docker Compose bind-mounts
+# (Docker secret file, MQTT password file + conf, TLS cert). Each underlying
+# generator is individually idempotent, so this is safe to run on every
+# setup invocation.
+#
+# This intentionally lives outside generate_env() so it runs even when .env
+# already exists — the common upgrade-an-existing-install path.
+materialize_artifacts() {
+  log_info "Materializing setup artifacts (idempotent)..."
+
+  # Source .env so MQTT_PASSWORD / OPENWRT_PASSWORD / MQTT_USER are in scope
+  # for the helpers below. Reachable via setup.sh --sync-secrets where nothing
+  # else has loaded .env yet.
+  if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$REPO_ROOT/.env"
+    set +a
+  fi
+
+  _generate_mosquitto_passwd "${MQTT_PASSWORD:-}"
+  _write_mosquitto_conf
+  _generate_tls_cert
+  sync_openwrt_password_secret
 }
 
 # Write $OPENWRT_PASSWORD (from env or .env) into docker/secrets/openwrt_password
