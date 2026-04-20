@@ -334,7 +334,19 @@ services:
 
   # --- TFT Display (Inland 3.5" 480x320 ILI9481 + XPT2046 touch, SPI) ---
   # Directory name stays `oled-display` for compat with orchestrator client.
+  #
+  # `privileged: true` is needed because the Jetson.GPIO chardev ioctls
+  # are blocked by Docker's default seccomp/AppArmor profile even with
+  # `cap_add: SYS_RAWIO`. The alternative is a custom seccomp profile
+  # explicitly allowing GPIO ioctls; privileged is simpler and this
+  # service already has full /dev access anyway.
+  #
+  # `JETSON_MODEL_NAME` short-circuits Jetson.GPIO's auto-detection,
+  # which fails inside the container because /proc/device-tree isn't
+  # remounted from the host. We also bind the device tree directory for
+  # any code path that falls through to file-based detection.
   oled-display:
+    privileged: true
     build:
       context: ../services/oled-display
       dockerfile: Dockerfile
@@ -350,11 +362,13 @@ services:
       - LCD_DRIVER=${LCD_DRIVER:-ili9486}
       - LCD_WIDTH=480
       - LCD_HEIGHT=320
+      - LCD_ROTATE=${LCD_ROTATE:-1}
       - SPI_HZ=${SPI_HZ:-32000000}
       - DC_PIN=18
       - RST_PIN=22
       - TOUCH_BACKEND=${TOUCH_BACKEND:-auto}
       - TOUCH_CS=1
+      - JETSON_MODEL_NAME=${JETSON_MODEL_NAME:-JETSON_ORIN_NANO}
     devices:
       - /dev/spidev0.0:/dev/spidev0.0
       - /dev/spidev0.1:/dev/spidev0.1
@@ -362,6 +376,7 @@ services:
       # fb1 / input event devices are mounted below via volumes when present.
     volumes:
       - /dev:/dev:rw
+      - /sys/firmware/devicetree/base:/sys/firmware/devicetree/base:ro
     profiles: ["full"]
     restart: always
 
