@@ -6,6 +6,13 @@ Exposes REST endpoints for the orchestrator and AI gateway to control what's
 shown on the physical display and to read touch input.
 """
 
+# GPIO shim must run BEFORE any import that might `import RPi.GPIO` (luma.core
+# does this transitively via `display.py` -> `luma.core.interface.serial.spi`).
+# On a Jetson it aliases Jetson.GPIO as RPi.GPIO and sets BOARD pin mode, so
+# DC_PIN=18 / RST_PIN=22 etc. map to the physical pins of the 40-pin header —
+# the same way they do on a real Pi.
+import gpio_shim  # noqa: F401  -- import-for-side-effect (must come before luma.core)
+
 import os
 import io
 import hmac

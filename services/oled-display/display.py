@@ -160,22 +160,50 @@ class TFTDisplay:
             from luma.core.interface.serial import spi
             from luma.lcd.device import ili9486
 
+            # Pass our pre-configured GPIO module (Jetson.GPIO or RPi.GPIO,
+            # aliased as RPi.GPIO by gpio_shim and already set to BOARD mode)
+            # so luma.core doesn't try to GPIO.setmode(BCM) itself — which
+            # fails on Jetson once BOARD mode is set.
+            import RPi.GPIO as _GPIO
+
             serial = spi(
                 device=0, port=0,
+                gpio=_GPIO,
                 gpio_DC=DC_PIN, gpio_RST=RST_PIN,
                 bus_speed_hz=SPI_HZ,
             )
-            # luma.lcd ili9486 is landscape-first by convention (480x320)
+            # luma.lcd's ili9486 constructor validates `width x height`
+            # against the *panel-native* portrait dimensions 320x480 and
+            # rejects anything else. Rotation (0=portrait, 1=landscape CW,
+            # 2=portrait flipped, 3=landscape CCW) is applied on top.
+            # We always pass the native 320x480 to luma; the rest of the
+            # service continues to use logical landscape WIDTH x HEIGHT
+            # (480x320) for drawing, which luma rotates on its way out.
+            # Also pass gpio=_GPIO so ili9486 (which inherits backlit_device)
+            # doesn't try its own GPIO.setmode(BCM) and blow up on Jetson.
+            native_w, native_h = 320, 480
+            rotate = int(os.environ.get("LCD_ROTATE", "1"))  # 1 = landscape
             self._device = ili9486(
-                serial, width=WIDTH, height=HEIGHT,
-                rotate=int(os.environ.get("LCD_ROTATE", "0")),
+                serial,
+                width=native_w, height=native_h,
+                rotate=rotate,
+                gpio=_GPIO,
             )
             self._backend = "spi"
             logger.info("TFT initialised via luma.lcd %s over SPI (%dx%d @ %dHz)",
                         LCD_DRIVER, WIDTH, HEIGHT, SPI_HZ)
             return True
         except Exception as e:
-            logger.debug("SPI backend unavailable: %s", e)
+            # Log at WARNING so deploy-time diagnostics are visible without
+            # having to bump the root log level. The service still falls back
+            # to the simulated backend, so this is non-fatal.
+            logger.warning("SPI backend unavailable (falling back to sim): %s", e, exc_info=True)
+            # Make sure we don't leak GPIO line claims from a partial init.
+            try:
+                import RPi.GPIO as _GPIO
+                _GPIO.cleanup()
+            except Exception:
+                pass
             return False
 
     # ----- Assets -------------------------------------------------------
