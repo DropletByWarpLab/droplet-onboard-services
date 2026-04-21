@@ -1,23 +1,50 @@
 # =============================================================================
-# Droplet Wireless Configuration — Intel BE200 Tri-Band
+# Droplet Wireless Configuration
 # =============================================================================
-# The BE200 exposes up to 3 radios in OpenWrt:
-#   radio0 → 2.4 GHz (802.11ax, HE20/HE40) — legacy IoT devices
-#   radio1 → 5 GHz   (802.11ax, HE80/HE160) — backward compatibility
-#   radio2 → 6 GHz   (802.11be, EHT320) — WiFi 7 high performance
+# On Raspberry Pi 5 + Intel BE200 HAT, running OpenWrt 24.10 (kernel 6.6.73),
+# only TWO physical radios actually exist:
 #
-# All radios are bridged into br-lan (192.168.50.0/24)
+#   phy0 (radio1 here) - Intel BE200 Wi-Fi 7 on the M.2 HAT (tri-band capable)
+#                        iwlwifi driver: AP MODE DOES NOT WORK. Association
+#                        fails with "Hardware does not support configured
+#                        channel" / "Frequency NNNN not allowed (NO-IR)" on
+#                        every 2.4/5/6 GHz channel, including non-DFS ones.
+#                        This is an Intel/iwlwifi driver policy (soft-AP is
+#                        not officially supported on AX/BE cards), not a
+#                        config issue. Keep disabled and use as STA only, or
+#                        swap the M.2 card for a MediaTek MT7921K (mt7921e
+#                        has working AP mode) or MT7925 once kernel 6.8 lands.
+#
+#   phy1 (radio0 here) - Pi 5 onboard Broadcom BCM4345/6 (2.4G + 5G, SDIO)
+#                        brcmfmac driver: AP MODE WORKS but has client
+#                        compatibility quirks. See the iOS-friendly settings
+#                        below (NOHT, WMM off, PMF off, inactivity-poll off).
+#
+# The 24.10 base image's `wireless` file also declares 2-3 "virtual" BE200
+# sub-radios using the `<path>+1` / `<path>+2` MLO notation. Those radios
+# never materialise on this kernel (netifd logs "Phy not found / Could not
+# find PHY for device 'radioN'") so we do not include them.
+#
+# WiFi password: placeholder only. The scripts/setup.sh / first-boot flow
+# MUST rotate this per device before shipping - do not leave `ChangeMe!2024`
+# on production hardware.
 # =============================================================================
 
-# --- 2.4 GHz Radio ---
+# --- Pi 5 onboard Broadcom (BCM4345/6) via brcmfmac / SDIO ---
 config wifi-device 'radio0'
     option type 'mac80211'
-    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0'
+    option path 'platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'
     option band '2g'
-    option channel 'auto'
-    option htmode 'HE40'
-    option cell_density '0'
+    option channel '6'
+    # htmode=NOHT drops to plain 802.11g (54 Mbps cap). brcmfmac advertises
+    # HT capabilities that some iOS builds and stock Android Wi-Fi stacks
+    # reject during (re)association, causing a tight associate -> disassociate
+    # loop with no 4-way handshake. NOHT sidesteps the mismatch entirely.
+    # If you replace the onboard chip with an MT7921K, flip back to HE40.
+    option htmode 'NOHT'
     option country 'US'
+    option cell_density '0'
+    option noscan '1'
     option disabled '0'
 
 config wifi-iface 'default_radio0'
@@ -25,49 +52,44 @@ config wifi-iface 'default_radio0'
     option network 'lan'
     option mode 'ap'
     option ssid 'Droplet'
-    option encryption 'sae-mixed'
+    # WPA2-PSK only. WPA3/SAE and sae-mixed trigger an iOS associate/disassoc
+    # loop on brcmfmac — the SAE advertisement itself is what iOS rejects, not
+    # PMF. PMF stays at '1' (MFP-capable / optional): it's interoperable with
+    # every WPA2-PSK client and protects against management-frame forgery
+    # (deauth/disassoc floods and the handshake-capture chain they enable).
+    # Only drop to '0' if a specific client is proven to fail with psk2+PMF=1.
+    option encryption 'psk2'
     option key 'ChangeMe!2024'
     option ieee80211w '1'
+    # disassoc_low_ack: brcmfmac reports spurious low-ack events; leaving
+    # this on kicks legit clients. skip_inactivity_poll: brcmfmac's null-data
+    # keepalive confuses some phones and triggers a disassoc.
+    option disassoc_low_ack '0'
+    option skip_inactivity_poll '1'
+    option wmm '0'
     option disabled '0'
 
-# --- 5 GHz Radio ---
+# --- Intel BE200 WiFi 7 (M.2 HAT) - disabled: iwlwifi cannot do AP mode ---
+# Left in the config so it can be enabled for STA/client use (`mode 'sta'`
+# below). Do NOT change this to `mode 'ap'`: iwlwifi's AP path rejects every
+# channel it advertises as scannable, so the interface fails to start and
+# blocks netifd from bringing up the rest of wireless. Swap the M.2 card
+# (MT7921K recommended) before running this radio as an AP.
 config wifi-device 'radio1'
     option type 'mac80211'
-    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0+1'
+    option path 'axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
     option band '5g'
-    option channel 'auto'
-    option htmode 'HE160'
-    option cell_density '0'
+    option channel '36'
+    option htmode 'HE80'
     option country 'US'
-    option disabled '0'
+    option cell_density '0'
+    option disabled '1'
 
 config wifi-iface 'default_radio1'
     option device 'radio1'
     option network 'lan'
-    option mode 'ap'
-    option ssid 'Droplet'
-    option encryption 'sae-mixed'
+    option mode 'sta'
+    option ssid 'upstream-ssid-placeholder'
+    option encryption 'psk2'
     option key 'ChangeMe!2024'
-    option ieee80211w '1'
-    option disabled '0'
-
-# --- 6 GHz Radio (WiFi 7) ---
-config wifi-device 'radio2'
-    option type 'mac80211'
-    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0+2'
-    option band '6g'
-    option channel 'auto'
-    option htmode 'EHT320'
-    option cell_density '0'
-    option country 'US'
-    option disabled '0'
-
-config wifi-iface 'default_radio2'
-    option device 'radio2'
-    option network 'lan'
-    option mode 'ap'
-    option ssid 'Droplet-6G'
-    option encryption 'sae'
-    option key 'ChangeMe!2024'
-    option ieee80211w '2'
-    option disabled '0'
+    option disabled '1'

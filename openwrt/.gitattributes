@@ -1,0 +1,15 @@
+# UCI and OpenWrt shell files must be LF-terminated. The UCI parser treats a
+# trailing `\r` as part of the section name, producing:
+#
+#   uci: Parse error (invalid character in name field) at line N, byte M
+#
+# which silently prevents `br-lan` (and therefore LAN, DHCP, WiFi) from coming
+# up on first boot. See WARP: router config regression April 2026.
+files/etc/config/*             text eol=lf
+files/etc/uci-defaults/*       text eol=lf
+files/etc/droplet/*            text eol=lf
+files/usr/share/rpcd/acl.d/*   text eol=lf
+scripts/*.sh                   text eol=lf
+scripts/*.py                   text eol=lf
+scripts/*.service              text eol=lf
+build.sh                       text eol=lf

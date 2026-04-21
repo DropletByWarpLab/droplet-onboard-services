@@ -1,9 +1,16 @@
 # =============================================================================
 # Droplet Network Configuration
 # =============================================================================
-# ETH0 (onboard BCM54213PE) → WAN — picks up address via DHCP from upstream
-# ETH1 (TP-Link UE306 / RTL8153B USB NIC) → LAN bridge with WiFi
-# LAN subnet: 192.168.50.1/24
+# ETH0 (onboard BCM54213PE) -> WAN - picks up address via DHCP from upstream
+# ETH1 (USB NIC: ASIX AX88179B or TP-Link UE306 / RTL8153B) -> LAN bridge
+# LAN subnet:      192.168.50.1/24
+# Cameras subnet:  192.168.100.1/24 via 802.1Q VLAN 100 tagged on eth1
+# =============================================================================
+#
+# IMPORTANT: this file MUST be LF-terminated. A trailing CR is included in the
+# UCI section-name token and the parser aborts with "invalid character in name
+# field", which prevents br-lan from coming up (no LAN, no DHCP, no WiFi AP).
+# The repo's openwrt/.gitattributes pins LF; do not override in your editor.
 # =============================================================================
 
 config interface 'loopback'
@@ -25,12 +32,15 @@ config interface 'wan6'
     option reqaddress 'try'
     option reqprefix 'auto'
 
-# --- LAN bridge: USB NIC (eth1) + WiFi radios ---
-config device 'br-lan'
+# --- LAN bridge: USB NIC (eth1) + WiFi ---
+# Anonymous section: UCI in 24.10 rejects section names containing '-' (so
+# `config device 'br-lan'` fails to parse). The bridge name is set via
+# `option name`, which is what netifd and the kernel actually use.
+config device
     option type 'bridge'
     option name 'br-lan'
     list ports 'eth1'
-    option stp '1'
+    option stp '0'
 
 config interface 'lan'
     option device 'br-lan'
@@ -41,17 +51,14 @@ config interface 'lan'
     option delegate '0'
 
 # --- Camera VLAN (isolated subnet for IP cameras) ---
-# VLAN 100 on br-lan, subnet 192.168.100.0/24
-# Cameras on this subnet are isolated from the main LAN.
-# Only the Droplet appliance (Frigate NVR) can reach them.
-# Future: ASIC chip will handle VLAN tagging in hardware.
-config bridge-vlan
-    option device 'br-lan'
-    option vlan '100'
-    list ports 'eth1:t'
-
+# VLAN 100 carried as an 802.1Q sub-interface on eth1 directly (eth1.100).
+# We deliberately do NOT use `config bridge-vlan` on br-lan here: netifd in
+# 24.10 flips the bridge to vlan_filtering=1 but does not attach eth1 to
+# VLAN 1 with PVID 1, so untagged LAN frames are dropped on ingress and the
+# bridge shows RX=0. A plain sub-interface avoids the problem without
+# losing VLAN isolation (the switch still tags/untags per port).
 config interface 'cameras'
-    option device 'br-lan.100'
+    option device 'eth1.100'
     option proto 'static'
     option ipaddr '192.168.100.1'
     option netmask '255.255.255.0'

@@ -79,11 +79,11 @@ for svc in uhttpd rpcd dnsmasq firewall network wireless umdns; do
 done
 
 # ---------------------------------------------------------------------------
-# 6. Set up WiFi — ensure radios are enabled
+# 6. Set up WiFi — enable onboard Broadcom (radio0); keep BE200 (radio1)
+#    disabled by default since iwlwifi cannot do AP mode. Operators who want
+#    to use it as an STA/client can flip radio1.disabled=0 manually.
 # ---------------------------------------------------------------------------
 uci set wireless.radio0.disabled='0'
-uci set wireless.radio1.disabled='0'
-uci set wireless.radio2.disabled='0'
 uci commit wireless
 
 # ---------------------------------------------------------------------------
