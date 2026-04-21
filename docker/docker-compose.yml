@@ -68,6 +68,9 @@ services:
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
+      # Display service runs with network_mode: host, so orchestrator reaches
+      # it over localhost rather than the compose network.
+      - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://localhost:8082}
     volumes:
       - matter-data:/data/matter-storage
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
@@ -318,6 +321,60 @@ services:
     # frigate as best-effort over its localhost HTTP client.
     depends_on:
       - broker
+    profiles: ["full"]
+    restart: always
+
+  # --- TFT Display (3.5" front-panel) ---
+  # Supports two backends, chosen at runtime by DISPLAY_BACKEND (auto|spi|
+  # pyportal|framebuffer|sim):
+  #   * pyportal: USB-serial control of an Adafruit PyPortal Titano running
+  #     the firmware in services/oled-display/pyportal/. Preferred backend
+  #     on the Jetson because it avoids all of the Tegra-vs-Pi GPIO driver
+  #     incompatibility we hit with direct SPI shields.
+  #   * spi: direct luma.lcd (ILI9486-compatible) over /dev/spidev0.0 for
+  #     Raspberry Pi-compatible boards.
+  #   * framebuffer: fbtft /dev/fb1 path (requires out-of-tree kernel
+  #     module; not available on stock L4T).
+  #   * sim: renders frames to a PNG for dev/CI.
+  # Service name stays `oled-display` for backwards-compatibility with the
+  # orchestrator's display.client.ts and existing env wiring.
+  oled-display:
+    privileged: true
+    build:
+      context: ../services/oled-display
+      dockerfile: Dockerfile
+    network_mode: host
+    cap_add:
+      - SYS_RAWIO
+    environment:
+      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      - PORT=8082
+      - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
+      # SPI backend pins (Pi 40-pin physical numbering via Jetson.GPIO BOARD)
+      - FB_DEVICE=${FB_DEVICE:-/dev/fb1}
+      - SPI_DEVICE=/dev/spidev0.0
+      - LCD_DRIVER=${LCD_DRIVER:-ili9486}
+      - LCD_WIDTH=480
+      - LCD_HEIGHT=320
+      - LCD_ROTATE=${LCD_ROTATE:-1}
+      - SPI_HZ=${SPI_HZ:-32000000}
+      - DC_PIN=18
+      - RST_PIN=22
+      - TOUCH_BACKEND=${TOUCH_BACKEND:-auto}
+      - TOUCH_CS=1
+      - JETSON_MODEL_NAME=${JETSON_MODEL_NAME:-JETSON_ORIN_NANO}
+      # PyPortal backend
+      - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
+      - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
+    devices:
+      - /dev/spidev0.0:/dev/spidev0.0
+      - /dev/spidev0.1:/dev/spidev0.1
+      - /dev/gpiochip0:/dev/gpiochip0
+    volumes:
+      # Full /dev so /dev/ttyACM* (PyPortal) and /dev/fb1 (framebuffer) appear
+      # in the container as soon as they're plugged in / loaded on the host.
+      - /dev:/dev:rw
+      - /sys/firmware/devicetree/base:/sys/firmware/devicetree/base:ro
     profiles: ["full"]
     restart: always
 

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Droplet OLED Display Preview — 128x128 SSD1351</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    min-height: 100vh;
+  }
+  h1 { color: #818cf8; margin-bottom: 8px; font-size: 24px; }
+  .subtitle { color: #888; margin-bottom: 40px; font-size: 14px; }
+  .screens { display: flex; gap: 48px; flex-wrap: wrap; justify-content: center; }
+  .screen-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+  .screen-label {
+    color: #818cf8;
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+  }
+  .screen-desc { color: #666; font-size: 11px; max-width: 200px; text-align: center; }
+  .oled-bezel {
+    background: #111;
+    border: 3px solid #333;
+    border-radius: 8px;
+    padding: 12px;
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.15), inset 0 0 10px rgba(0,0,0,0.5);
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    width: 256px;
+    height: 256px;
+  }
+  .cycle-indicator {
+    margin-top: 32px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #888;
+    font-size: 13px;
+  }
+  .cycle-indicator .arrow { color: #6366f1; font-size: 20px; }
+  .cycle-indicator .phase {
+    background: #222;
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid #333;
+  }
+  .cycle-indicator .phase.active { border-color: #6366f1; color: #818cf8; }
+</style>
+</head>
+<body>
+
+<h1>Droplet OLED Preview</h1>
+<p class="subtitle">Waveshare 1.5" SSD1351 — 128x128 RGB — Actual pixel layout at 2x zoom</p>
+
+<div class="screens">
+  <div class="screen-wrapper">
+    <span class="screen-label">STATS SCREEN</span>
+    <div class="oled-bezel"><canvas id="stats" width="128" height="128"></canvas></div>
+    <span class="screen-desc">Auto-refreshes every 2s. Shows CPU, RAM, temp, IP, uptime.</span>
+  </div>
+  <div class="screen-wrapper">
+    <span class="screen-label">LOGO SCREEN</span>
+    <div class="oled-bezel"><canvas id="logo" width="128" height="128"></canvas></div>
+    <span class="screen-desc">Full-screen Droplet logo with faceted drop icon.</span>
+  </div>
+  <div class="screen-wrapper">
+    <span class="screen-label">MESSAGE SCREEN</span>
+    <div class="oled-bezel"><canvas id="message" width="128" height="128"></canvas></div>
+    <span class="screen-desc">LLM tool output. Title bar + body lines. Holds 30s then resumes cycle.</span>
+  </div>
+</div>
+
+<div class="cycle-indicator">
+  <span class="phase active">Logo 5s</span>
+  <span class="arrow">→</span>
+  <span class="phase active">Stats 10s</span>
+  <span class="arrow">→</span>
+  <span class="phase">repeat</span>
+  <span style="margin-left: 16px; color: #555">|</span>
+  <span style="margin-left: 16px; color: #555">LLM message pauses cycle for 30s</span>
+</div>
+
+<script>
+// Colors matching display.py
+const BG = '#000000';
+const TEXT = '#ffffff';
+const ACCENT = '#6366f1';
+const ACCENT_LIGHT = '#818cf8';
+const DIM = '#8c8ca0';
+const BAR_BG = '#28283a';
+const TEMP_WARN = '#ffb400';
+
+function drawDropIcon(ctx, cx, cyTop, scale) {
+  // Left face - full indigo
+  ctx.fillStyle = ACCENT;
+  ctx.beginPath();
+  ctx.moveTo(cx, cyTop);
+  ctx.lineTo(cx + 18*scale, cyTop + 28*scale);
+  ctx.lineTo(cx + 10*scale, cyTop + 48*scale);
+  ctx.lineTo(cx - 10*scale, cyTop + 48*scale);
+  ctx.lineTo(cx - 18*scale, cyTop + 28*scale);
+  ctx.closePath();
+  ctx.fill();
+
+  // Right highlight face
+  ctx.fillStyle = ACCENT_LIGHT;
+  ctx.beginPath();
+  ctx.moveTo(cx, cyTop);
+  ctx.lineTo(cx + 18*scale, cyTop + 28*scale);
+  ctx.lineTo(cx, cyTop + 36*scale);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ---- STATS SCREEN ----
+function drawStats() {
+  const c = document.getElementById('stats');
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, 128, 128);
+
+  // Mini drop icon top-right
+  drawDropIcon(ctx, 113, 2, 0.38);
+
+  // Title
+  ctx.font = 'bold 9px monospace';
+  ctx.fillStyle = ACCENT_LIGHT;
+  ctx.fillText('Droplet Edge', 4, 12);
+
+  // Separator
+  ctx.strokeStyle = '#3c3c50';
+  ctx.beginPath();
+  ctx.moveTo(4, 34);
+  ctx.lineTo(124, 34);
+  ctx.stroke();
+
+  let y = 46;
+  const lineH = 16;
+
+  // CPU
+  ctx.font = '9px monospace';
+  ctx.fillStyle = DIM;
+  ctx.fillText('CPU', 4, y);
+  ctx.font = 'bold 10px monospace';
+  ctx.fillStyle = TEXT;
+  ctx.fillText('45%', 36, y);
+  // bar
+  ctx.fillStyle = BAR_BG;
+  ctx.fillRect(68, y-7, 56, 7);
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(68, y-7, 25, 7);
+  y += lineH;
+
+  // RAM
+  ctx.font = '9px monospace';
+  ctx.fillStyle = DIM;
+  ctx.fillText('RAM', 4, y);
+  ctx.font = 'bold 10px monospace';
+  ctx.fillStyle = TEXT;
+  ctx.fillText('2.1/8G', 36, y);
+  ctx.fillStyle = BAR_BG;
+  ctx.fillRect(90, y-7, 34, 7);
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(90, y-7, 9, 7);
+  y += lineH;
+
+  // Temp
+  ctx.font = '9px monospace';
+  ctx.fillStyle = DIM;
+  ctx.fillText('Temp', 4, y);
+  ctx.font = 'bold 10px monospace';
+  ctx.fillStyle = TEXT;
+  ctx.fillText('52\u00B0C', 36, y);
+  y += lineH;
+
+  // IP
+  ctx.font = '9px monospace';
+  ctx.fillStyle = DIM;
+  ctx.fillText('IP', 4, y);
+  ctx.fillStyle = TEXT;
+  ctx.fillText('192.168.1.100', 36, y);
+  y += lineH;
+
+  // Uptime
+  ctx.fillStyle = DIM;
+  ctx.fillText('Up', 4, y);
+  ctx.fillStyle = TEXT;
+  ctx.fillText('3d 14h', 36, y);
+}
+
+// ---- LOGO SCREEN ----
+function drawLogo() {
+  const c = document.getElementById('logo');
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, 128, 128);
+
+  drawDropIcon(ctx, 64, 20, 1.8);
+
+  // Wordmark
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillStyle = TEXT;
+  const text = 'Droplet';
+  const tw = ctx.measureText(text).width;
+  ctx.fillText(text, (128 - tw) / 2, 122);
+}
+
+// ---- MESSAGE SCREEN ----
+function drawMessage() {
+  const c = document.getElementById('message');
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, 128, 128);
+
+  // Title bar
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(0, 0, 128, 18);
+  ctx.font = 'bold 11px monospace';
+  ctx.fillStyle = TEXT;
+  ctx.fillText('Alert', 4, 13);
+
+  // Body
+  ctx.font = '10px monospace';
+  ctx.fillStyle = TEXT;
+  const lines = [
+    'Camera offline:',
+    'front-door-cam',
+    '',
+    'Last seen: 2m ago',
+    'Checking network...',
+    '',
+    'Action: restarting'
+  ];
+  let y = 32;
+  for (const line of lines) {
+    ctx.fillText(line, 4, y);
+    y += 15;
+  }
+}
+
+drawStats();
+drawLogo();
+drawMessage();
+</script>
+</body>
+</html>
