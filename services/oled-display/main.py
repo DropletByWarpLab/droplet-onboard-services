@@ -10,10 +10,6 @@ screen is a compact version of the admin UI. Touch tiles on the home
 screen route to Health, Network, Chat and Settings sub-screens.
 """
 
-# GPIO shim must run BEFORE any import that might `import RPi.GPIO` (luma.core
-# does this transitively). On Jetson it aliases Jetson.GPIO as RPi.GPIO.
-import gpio_shim  # noqa: F401  -- import-for-side-effect
-
 import os
 import io
 import hmac

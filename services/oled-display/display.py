@@ -1,13 +1,20 @@
 """
 Droplet TFT Display Driver
 ===========================
-Drives a 3.5" Inland/Waveshare-compatible TFT LCD (ILI9481, 480x320) with
-XPT2046 resistive touch over SPI on the Jetson 40-pin header.
+Drives the front-panel 480x320 TFT via an Adafruit PyPortal Titano connected
+over USB-serial. The PyPortal's own SAMD51 + ILI9341 handles rendering; this
+module streams JSON commands over /dev/ttyACM* and mirrors every frame to a
+preview PNG so the dashboard can show what's on the panel.
 
-Supports three backends, chosen automatically:
-  1. framebuffer  - writes RGB565 into /dev/fb1 (fbtft kernel module path)
-  2. luma.lcd     - direct SPI via luma.lcd ILI9486 driver (9481-compatible)
-  3. simulated    - writes a PNG to SIM_OUTPUT (dev/CI fallback)
+Backends:
+  1. pyportal   - USB-serial to an Adafruit PyPortal Titano (primary)
+  2. simulated  - writes a PNG to SIM_OUTPUT (dev/CI fallback, auto-used
+                  when no PyPortal is present)
+
+The direct-SPI / luma.lcd / fbtft-framebuffer paths were removed after the
+pivot to PyPortal (Tegra's GPIO/SPI driver stack is incompatible with the
+Pi-shield TFTs we originally targeted; see WARP-127). gpio_shim,
+Jetson.GPIO, RPi.GPIO, luma, spidev, and the XPT2046 touch code are gone.
 
 The visual system mirrors the web dashboard (`apps/web-dashboard/`) so the
 on-device screen looks like a compact version of the admin UI: same Droplet
@@ -51,26 +58,23 @@ WIDTH = int(os.environ.get("LCD_WIDTH", "480"))
 HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 
 # ---------------------------------------------------------------------------
-# Hardware config (Jetson 40-pin header, Pi-shield compatible pinout)
+# Backend selection
 # ---------------------------------------------------------------------------
-DC_PIN = int(os.environ.get("DC_PIN", "18"))
-RST_PIN = int(os.environ.get("RST_PIN", "22"))
-SPI_DEVICE = os.environ.get("SPI_DEVICE", "/dev/spidev0.0")
-FB_DEVICE = os.environ.get("FB_DEVICE", "/dev/fb1")
-LCD_DRIVER = os.environ.get("LCD_DRIVER", "ili9486").lower()
+# "auto" (default) probes the PyPortal on USB-serial and falls back to "sim".
+# "pyportal" / "sim" force a specific backend (primarily for CI / dev).
 BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
-SPI_HZ = int(os.environ.get("SPI_HZ", "32000000"))
-BACKLIGHT_PIN = int(os.environ.get("BACKLIGHT_PIN", "12"))
 
 # PyPortal backend (USB-serial-connected Adafruit PyPortal Titano).
 PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
 PYPORTAL_BAUD = int(os.environ.get("PYPORTAL_BAUD", "115200"))
 
-# Host-side wifi helper URL (see services/oled-display/wifi-helper.py).
-# The helper runs on the Jetson host and shells out to `nmcli` so the
-# container can get live wifi scan results without NetworkManager access.
+# Host-side device-bridge URL (see services/oled-display/device-bridge.py).
+# The bridge runs on the Jetson host and exposes /wifi, /files, /cameras,
+# /drives, /openwrt/qr so the container gets live data without mounting
+# NetworkManager/DBus/etc. inside. Default 127.0.0.1 because the bridge
+# binds to loopback by default (see BRIDGE_BIND in device-bridge.py).
 WIFI_HELPER_URL = os.environ.get(
-    "WIFI_HELPER_URL", "http://192.168.50.197:9090")
+    "WIFI_HELPER_URL", "http://127.0.0.1:9090")
 WIFI_REFRESH_SECONDS = int(os.environ.get("WIFI_REFRESH_SECONDS", "20"))
 FILES_REFRESH_SECONDS = int(os.environ.get("FILES_REFRESH_SECONDS", "30"))
 CAMERAS_REFRESH_SECONDS = int(os.environ.get("CAMERAS_REFRESH_SECONDS", "15"))
@@ -139,17 +143,6 @@ def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     except Exception:
         pass
     return ImageFont.load_default()
-
-
-def _rgb888_to_rgb565_bytes(image: Image.Image) -> bytes:
-    arr = image.tobytes("raw", "RGB")
-    out = bytearray(len(arr) // 3 * 2)
-    for i in range(0, len(arr), 3):
-        r, g, b = arr[i], arr[i + 1], arr[i + 2]
-        v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-        out[(i // 3) * 2] = v & 0xFF
-        out[(i // 3) * 2 + 1] = (v >> 8) & 0xFF
-    return bytes(out)
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +217,6 @@ class TFTDisplay:
     MESSAGE = "message"
 
     def __init__(self):
-        self._device = None
-        self._fb_path: Optional[str] = None
         self._pyportal = None
         self._pyportal_lock = threading.Lock()
         self._backend = "sim"
@@ -255,31 +246,19 @@ class TFTDisplay:
     # ----- Backend init -------------------------------------------------
 
     def _init_device(self):
-        order = (
-            ["pyportal", "framebuffer", "spi", "sim"] if BACKEND == "auto"
-            else [BACKEND]
-        )
         # PyPortal takes several seconds to finish USB enumeration after a
-        # Jetson reboot. Retry a few times before falling through to the
-        # next backend — otherwise a cold boot ends up on SPI/sim and the
-        # user sees an empty screen until the container is restarted.
-        pyportal_attempts = 6 if BACKEND == "auto" else 1
-        for name in order:
-            if name == "pyportal":
-                for attempt in range(pyportal_attempts):
-                    if self._try_pyportal():
-                        return
-                    if attempt < pyportal_attempts - 1:
-                        time.sleep(2)
-                continue
-            if name == "framebuffer" and self._try_framebuffer():
-                return
-            if name == "spi" and self._try_spi():
-                return
-            if name == "sim":
-                self._backend = "sim"
-                logger.warning("Using simulated display (no hardware detected)")
-                return
+        # Jetson reboot, so retry a few times before falling through to sim.
+        # Otherwise a cold boot leaves the user with a blank screen until
+        # the container is restarted.
+        if BACKEND in ("auto", "pyportal"):
+            attempts = 6 if BACKEND == "auto" else 1
+            for attempt in range(attempts):
+                if self._try_pyportal():
+                    return
+                if attempt < attempts - 1:
+                    time.sleep(2)
+        self._backend = "sim"
+        logger.warning("Using simulated display (no PyPortal detected on USB)")
 
     def _try_pyportal(self) -> bool:
         try:
@@ -376,53 +355,6 @@ class TFTDisplay:
                 except Exception as e2:
                     logger.debug("resend after reconnect failed: %s", e2)
 
-    def _try_framebuffer(self) -> bool:
-        try:
-            if not Path(FB_DEVICE).exists():
-                return False
-            with open(FB_DEVICE, "r+b"):
-                pass
-            self._fb_path = FB_DEVICE
-            self._backend = "framebuffer"
-            logger.info("TFT initialised via framebuffer %s (%dx%d)", FB_DEVICE, WIDTH, HEIGHT)
-            return True
-        except Exception as e:
-            logger.debug("Framebuffer backend unavailable: %s", e)
-            return False
-
-    def _try_spi(self) -> bool:
-        try:
-            from luma.core.interface.serial import spi
-            from luma.lcd.device import ili9486
-            import RPi.GPIO as _GPIO
-
-            serial = spi(
-                device=0, port=0,
-                gpio=_GPIO,
-                gpio_DC=DC_PIN, gpio_RST=RST_PIN,
-                bus_speed_hz=SPI_HZ,
-            )
-            native_w, native_h = 320, 480
-            rotate = int(os.environ.get("LCD_ROTATE", "1"))
-            self._device = ili9486(
-                serial,
-                width=native_w, height=native_h,
-                rotate=rotate,
-                gpio=_GPIO,
-            )
-            self._backend = "spi"
-            logger.info("TFT initialised via luma.lcd over SPI (%dx%d @ %dHz)",
-                        WIDTH, HEIGHT, SPI_HZ)
-            return True
-        except Exception as e:
-            logger.warning("SPI backend unavailable (falling back to sim): %s", e)
-            try:
-                import RPi.GPIO as _GPIO
-                _GPIO.cleanup()
-            except Exception:
-                pass
-            return False
-
     # ----- Assets -------------------------------------------------------
 
     def _load_logo(self):
@@ -482,31 +414,15 @@ class TFTDisplay:
     # ----- Push to display ---------------------------------------------
 
     def _push(self, image: Image.Image):
+        # Both backends write the preview PNG: PyPortal renders the frame
+        # itself from the data commands we stream over serial, and the sim
+        # backend has nothing else to do with the image.
         self._current_image = image
-        if self._backend == "pyportal":
-            SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                image.save(str(SIM_OUTPUT))
-            except Exception as e:
-                logger.debug("preview save failed: %s", e)
-            return
-        if self._backend == "framebuffer":
-            self._push_framebuffer(image)
-        elif self._backend == "spi" and self._device is not None:
-            self._device.display(image)
-        else:
-            SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-            image.save(str(SIM_OUTPUT))
-            logger.debug("Simulated frame saved to %s", SIM_OUTPUT)
-
-    def _push_framebuffer(self, image: Image.Image):
+        SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         try:
-            rgb = image if image.size == (WIDTH, HEIGHT) else image.resize((WIDTH, HEIGHT))
-            buf = _rgb888_to_rgb565_bytes(rgb)
-            with open(self._fb_path, "wb") as fb:
-                fb.write(buf)
+            image.save(str(SIM_OUTPUT))
         except Exception as e:
-            logger.error("Framebuffer write failed: %s", e)
+            logger.debug("preview save failed: %s", e)
 
     # ----- Shared chrome -----------------------------------------------
 
@@ -1224,11 +1140,6 @@ class TFTDisplay:
                         self._pyportal.flush()
             except Exception as e:
                 logger.warning("PyPortal brightness write failed: %s", e)
-        if self._backend == "spi" and self._device is not None:
-            try:
-                self._device.contrast(self._brightness)
-            except Exception as e:
-                logger.debug("contrast() not supported on this driver: %s", e)
         # Re-render settings page if that's where we are so the number
         # and bar update instantly.
         with self._lock:
@@ -1377,7 +1288,6 @@ class TFTDisplay:
             "backend": self._backend,
             "simulated": self._backend == "sim",
             "resolution": f"{WIDTH}x{HEIGHT}",
-            "driver": LCD_DRIVER,
             "brightness": self._brightness,
             "cycling": (self._cycle_running and
                         time.time() >= self._cycle_paused_until),
@@ -1451,17 +1361,15 @@ class TFTDisplay:
         last_backend_retry = 0.0
         serial_buf = b""
         while self._cycle_running:
-            # If we're not currently driving the PyPortal but one has
-            # since appeared on USB, promote to the pyportal backend.
-            # This covers the cold-boot race where the Jetson starts
-            # the container before USB enumeration finishes — we don't
-            # want to be stuck on SPI/sim forever in that case.
+            # If we started on sim because USB enumeration hadn't finished
+            # yet, keep probing every 5s and promote to pyportal once it
+            # appears. Covers the cold-boot race where the Jetson starts
+            # the container before /dev/ttyACM* is ready.
             if self._backend != "pyportal":
                 if time.time() - last_backend_retry > 5.0:
                     last_backend_retry = time.time()
                     if BACKEND in ("auto", "pyportal") and self._try_pyportal():
-                        logger.info("Promoted backend: %s -> pyportal",
-                                    "(previous)")
+                        logger.info("Promoted backend: sim -> pyportal")
             touch = getattr(self, "_touch_source", None)
             if touch is not None:
                 state = touch.get_state()

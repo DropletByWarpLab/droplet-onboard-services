@@ -291,7 +291,9 @@ services:
       - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
     volumes:
       - frigate-config:/config
-      - nvrdata:/media/frigate
+      # NVR recordings live on the dedicated 'cameras' partition (ext4) on NVMe.
+      # Mount is provisioned by /etc/fstab on the Jetson — see docs/STATUS.md.
+      - /mnt/cameras:/media/frigate
       - /etc/localtime:/etc/localtime:ro
       - ../docker/frigate/config.yml:/config/config.yml:ro
     env_file:
@@ -336,56 +338,30 @@ services:
     restart: always
 
   # --- TFT Display (3.5" front-panel) ---
-  # Supports two backends, chosen at runtime by DISPLAY_BACKEND (auto|spi|
-  # pyportal|framebuffer|sim):
-  #   * pyportal: USB-serial control of an Adafruit PyPortal Titano running
-  #     the firmware in services/oled-display/pyportal/. Preferred backend
-  #     on the Jetson because it avoids all of the Tegra-vs-Pi GPIO driver
-  #     incompatibility we hit with direct SPI shields.
-  #   * spi: direct luma.lcd (ILI9486-compatible) over /dev/spidev0.0 for
-  #     Raspberry Pi-compatible boards.
-  #   * framebuffer: fbtft /dev/fb1 path (requires out-of-tree kernel
-  #     module; not available on stock L4T).
-  #   * sim: renders frames to a PNG for dev/CI.
+  # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
+  # accepts: auto (probe PyPortal, fall back to sim), pyportal, or sim.
+  # The direct-SPI / fbtft-framebuffer / GPIO paths were removed; the
+  # PyPortal's own SAMD51 handles rendering, so we just stream JSON
+  # commands over /dev/ttyACM* — no privileged access or GPIO needed.
   # Service name stays `oled-display` for backwards-compatibility with the
   # orchestrator's display.client.ts and existing env wiring.
   oled-display:
-    privileged: true
     build:
       context: ../services/oled-display
       dockerfile: Dockerfile
     network_mode: host
-    cap_add:
-      - SYS_RAWIO
     environment:
       - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
       - PORT=8082
       - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
-      # SPI backend pins (Pi 40-pin physical numbering via Jetson.GPIO BOARD)
-      - FB_DEVICE=${FB_DEVICE:-/dev/fb1}
-      - SPI_DEVICE=/dev/spidev0.0
-      - LCD_DRIVER=${LCD_DRIVER:-ili9486}
       - LCD_WIDTH=480
       - LCD_HEIGHT=320
-      - LCD_ROTATE=${LCD_ROTATE:-1}
-      - SPI_HZ=${SPI_HZ:-32000000}
-      - DC_PIN=18
-      - RST_PIN=22
-      - TOUCH_BACKEND=${TOUCH_BACKEND:-auto}
-      - TOUCH_CS=1
-      - JETSON_MODEL_NAME=${JETSON_MODEL_NAME:-JETSON_ORIN_NANO}
-      # PyPortal backend
       - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
       - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
-    devices:
-      - /dev/spidev0.0:/dev/spidev0.0
-      - /dev/spidev0.1:/dev/spidev0.1
-      - /dev/gpiochip0:/dev/gpiochip0
     volumes:
-      # Full /dev so /dev/ttyACM* (PyPortal) and /dev/fb1 (framebuffer) appear
-      # in the container as soon as they're plugged in / loaded on the host.
+      # Bind /dev so /dev/ttyACM* is visible in the container and survives
+      # PyPortal re-enumeration (USB hotplug changes the minor number).
       - /dev:/dev:rw
-      - /sys/firmware/devicetree/base:/sys/firmware/devicetree/base:ro
     profiles: ["full"]
     restart: always
 
@@ -397,7 +373,6 @@ secrets:
 
 volumes:
   pgdata:
-  nvrdata:
   frigate-config:
   aikeys:
   nextcloud-data:
