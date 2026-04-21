@@ -15,12 +15,13 @@ alias) so existing orchestrator clients keep working.
 
 import os
 import time
+import json
 import socket
 import logging
 import struct
 import threading
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any
 
 import psutil
 from PIL import Image, ImageDraw, ImageFont
@@ -41,11 +42,19 @@ RST_PIN = int(os.environ.get("RST_PIN", "22"))     # Reset
 SPI_DEVICE = os.environ.get("SPI_DEVICE", "/dev/spidev0.0")
 FB_DEVICE = os.environ.get("FB_DEVICE", "/dev/fb1")
 LCD_DRIVER = os.environ.get("LCD_DRIVER", "ili9486").lower()  # ili9486 speaks 9481
-BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()   # auto|framebuffer|spi|sim
+# Supported DISPLAY_BACKEND values: auto | framebuffer | spi | pyportal | sim
+BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
 SPI_HZ = int(os.environ.get("SPI_HZ", "32000000"))            # 32 MHz per panel spec
 
 # Backlight (optional PWM on GPIO18/pin 12 on the shield)
 BACKLIGHT_PIN = int(os.environ.get("BACKLIGHT_PIN", "12"))
+
+# PyPortal backend (USB-serial-connected Adafruit PyPortal Titano).
+# When this backend is active, the service stops pushing pixels and sends
+# newline-delimited JSON commands over /dev/ttyACM1; the PyPortal renders
+# screens locally with its own MCU. See services/oled-display/pyportal/.
+PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
+PYPORTAL_BAUD = int(os.environ.get("PYPORTAL_BAUD", "115200"))
 
 # ---------------------------------------------------------------------------
 # Colours - Droplet design system (RGB)
@@ -105,6 +114,8 @@ class TFTDisplay:
     def __init__(self):
         self._device = None                     # luma.lcd device (SPI backend)
         self._fb_path: Optional[str] = None     # framebuffer path (fb backend)
+        self._pyportal = None                   # serial.Serial (PyPortal backend)
+        self._pyportal_lock = threading.Lock()  # serial writes are not reentrant
         self._backend = "sim"                   # resolved backend
         self._current_mode = "logo"
         self._current_image: Optional[Image.Image] = None
@@ -123,12 +134,20 @@ class TFTDisplay:
     # ----- Backend init -------------------------------------------------
 
     def _init_device(self):
-        """Resolve the best available backend for this host."""
+        """Resolve the best available backend for this host.
+
+        `auto` prefers pyportal > framebuffer > spi > sim. pyportal is first
+        because it's a USB-attached self-contained device — if it's plugged in
+        it is the intended display, and we shouldn't confuse the state by also
+        driving an SPI panel we may have left wired up from an earlier build.
+        """
         order = (
-            ["framebuffer", "spi", "sim"] if BACKEND == "auto"
+            ["pyportal", "framebuffer", "spi", "sim"] if BACKEND == "auto"
             else [BACKEND]
         )
         for name in order:
+            if name == "pyportal" and self._try_pyportal():
+                return
             if name == "framebuffer" and self._try_framebuffer():
                 return
             if name == "spi" and self._try_spi():
@@ -137,6 +156,60 @@ class TFTDisplay:
                 self._backend = "sim"
                 logger.warning("Using simulated display (no hardware detected)")
                 return
+
+    def _try_pyportal(self) -> bool:
+        """Serial-connected Adafruit PyPortal Titano.
+
+        Opens /dev/ttyACM1 (or whatever $PYPORTAL_TTY points at), sends a
+        ping, and accepts the backend if the port opens cleanly. We don't
+        hard-fail on a missing ping response — the firmware may need a moment
+        after USB enumeration to start its main loop.
+        """
+        try:
+            import serial  # pyserial, added to requirements.txt
+        except ImportError:
+            logger.debug("pyportal backend unavailable: pyserial not installed")
+            return False
+        if not Path(PYPORTAL_TTY).exists():
+            logger.debug("pyportal backend unavailable: %s not present", PYPORTAL_TTY)
+            return False
+        try:
+            s = serial.Serial(PYPORTAL_TTY, PYPORTAL_BAUD, timeout=1)
+            s.reset_input_buffer()
+            s.write(b'{"mode":"ping"}\n')
+            s.flush()
+            # Drain a couple of lines — expect OK or READY within 500 ms
+            deadline = time.time() + 0.5
+            while time.time() < deadline:
+                line = s.readline()
+                if not line:
+                    break
+                if b"OK" in line or b"READY" in line:
+                    break
+            self._pyportal = s
+            self._backend = "pyportal"
+            logger.info("TFT initialised via PyPortal on %s @ %d baud",
+                        PYPORTAL_TTY, PYPORTAL_BAUD)
+            return True
+        except Exception as e:                                     # noqa: BLE001
+            logger.warning("PyPortal backend unavailable: %s", e, exc_info=False)
+            return False
+
+    def _pyportal_send(self, mode: str, data: Optional[dict] = None):
+        """Send one JSON command to the PyPortal. Silent on no-backend."""
+        if self._pyportal is None:
+            return
+        payload: dict[str, Any] = {"mode": mode}
+        if data is not None:
+            payload["data"] = data
+        try:
+            with self._pyportal_lock:
+                self._pyportal.write(
+                    json.dumps(payload).encode("utf-8") + b"\n"
+                )
+                self._pyportal.flush()
+        except Exception as e:                                     # noqa: BLE001
+            logger.warning("PyPortal write failed (mode=%s): %s", mode, e)
 
     def _try_framebuffer(self) -> bool:
         """fbtft kernel driver exposes the panel as /dev/fb1."""
@@ -257,9 +330,31 @@ class TFTDisplay:
 
     def _push(self, image: Image.Image):
         self._current_image = image
+        # PyPortal renders its own content locally — the structured-data
+        # send happened in the show_*() method. We still save a preview PNG
+        # so /display/preview works for dashboards.
+        if self._backend == "pyportal":
+            SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                image.save(str(SIM_OUTPUT))
+            except Exception as e:                                 # noqa: BLE001
+                logger.debug("preview save failed: %s", e)
+            return
         if self._backend == "framebuffer":
             self._push_framebuffer(image)
         elif self._backend == "spi" and self._device is not None:
+            # DIAGNOSTIC: log a fingerprint of each frame pushed to SPI so
+            # wiring problems can be distinguished from no-data-sent
+            # problems. When this log ticks but the panel stays white, the
+            # bytes are leaving the Jetson and the issue is on the cable
+            # side (CS, DC, RST, MOSI, SCLK, or 3V3 logic not connected).
+            import hashlib
+            b = image.tobytes()
+            digest = hashlib.md5(b).hexdigest()[:8]
+            logger.info(
+                "SPI frame -> panel: mode=%s bytes=%d md5=%s",
+                self._current_mode, len(b), digest,
+            )
             self._device.display(image)
         else:
             SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
@@ -451,11 +546,15 @@ class TFTDisplay:
     def show_logo(self):
         with self._lock:
             self._current_mode = "logo"
+            self._pyportal_send("logo")
             self._push(self.render_logo())
 
     def show_stats(self):
         with self._lock:
             self._current_mode = "stats"
+            # Send compact JSON to the PyPortal (it renders locally) and also
+            # produce the full pixel image for sim / SPI / preview consumers.
+            self._pyportal_send("stats", self._gather_stats())
             self._push(self.render_stats())
 
     def show_message(self, title: str, lines: List[str]):
@@ -464,6 +563,7 @@ class TFTDisplay:
             self._custom_title = title
             self._custom_lines = lines
             self._cycle_paused_until = time.time() + MESSAGE_HOLD
+            self._pyportal_send("message", {"title": title, "lines": list(lines)})
             self._push(self.render_message(title, lines))
 
     def show_custom_image(self, image: Image.Image):
@@ -471,15 +571,72 @@ class TFTDisplay:
             self._current_mode = "custom"
             self._cycle_paused_until = time.time() + MESSAGE_HOLD
             resized = image.convert("RGB").resize((WIDTH, HEIGHT))
+            # PyPortal can't decode arbitrary PIL images over serial without
+            # writing a base64/binary transfer path — for v1, fall back to
+            # the "custom" logo placeholder on the PyPortal side. Pixel sinks
+            # (SPI, framebuffer, sim) still get the full image.
+            self._pyportal_send("message", {
+                "title": "Custom",
+                "lines": ["image from orchestrator"],
+            })
             self._push(resized)
 
     def set_brightness(self, value: int):
         self._brightness = max(0, min(255, value))
+        if self._backend == "pyportal":
+            self._pyportal_send("brightness", None)
+            # PyPortal expects the value on the top-level key, not inside data
+            try:
+                with self._pyportal_lock:
+                    if self._pyportal is not None:
+                        self._pyportal.write(
+                            json.dumps({"mode": "brightness",
+                                        "value": self._brightness}).encode()
+                            + b"\n"
+                        )
+                        self._pyportal.flush()
+            except Exception as e:                                 # noqa: BLE001
+                logger.warning("PyPortal brightness write failed: %s", e)
         if self._backend == "spi" and self._device is not None:
             try:
                 self._device.contrast(self._brightness)
             except Exception as e:
                 logger.debug("contrast() not supported on this driver: %s", e)
+
+    # ----- Structured-data helpers (used by PyPortal backend) ----------
+
+    def _gather_stats(self) -> dict:
+        """Collect the same numbers render_stats() uses, in a compact form
+        suitable for transmission to the PyPortal as JSON."""
+        try:
+            cpu_pct = psutil.cpu_percent(interval=0.1)
+        except Exception:
+            cpu_pct = None
+        try:
+            mem_pct = psutil.virtual_memory().percent
+        except Exception:
+            mem_pct = None
+        try:
+            disk_pct = psutil.disk_usage("/").percent
+        except Exception:
+            disk_pct = None
+        temp = self._get_cpu_temp()
+        try:
+            up = time.time() - psutil.boot_time()
+            days = int(up // 86400)
+            hours = int((up % 86400) // 3600)
+            mins = int((up % 3600) // 60)
+            uptime = f"{days}d {hours}h" if days else f"{hours}h {mins}m"
+        except Exception:
+            uptime = None
+        return {
+            "cpu": round(cpu_pct) if cpu_pct is not None else None,
+            "mem": round(mem_pct) if mem_pct is not None else None,
+            "disk": round(disk_pct) if disk_pct is not None else None,
+            "temp": round(temp) if isinstance(temp, (int, float)) else temp,
+            "ip": self._get_ip(),
+            "uptime": uptime,
+        }
 
     def get_status(self) -> dict:
         return {

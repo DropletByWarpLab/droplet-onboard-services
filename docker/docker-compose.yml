@@ -369,6 +369,11 @@ services:
       - TOUCH_BACKEND=${TOUCH_BACKEND:-auto}
       - TOUCH_CS=1
       - JETSON_MODEL_NAME=${JETSON_MODEL_NAME:-JETSON_ORIN_NANO}
+      # PyPortal backend — if $PYPORTAL_TTY exists inside the container, the
+      # service uses it instead of the SPI / framebuffer path when
+      # DISPLAY_BACKEND=auto or =pyportal. See services/oled-display/pyportal/.
+      - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
+      - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
     devices:
       - /dev/spidev0.0:/dev/spidev0.0
       - /dev/spidev0.1:/dev/spidev0.1

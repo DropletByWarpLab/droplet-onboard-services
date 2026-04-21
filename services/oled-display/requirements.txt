@@ -11,3 +11,6 @@ evdev>=1.6.1
 # API that gpio_shim.py aliases so luma.core can drive DC/RST without
 # modification. Harmless on dev hosts where it just won't import.
 Jetson.GPIO>=2.1.3
+# PyPortal backend — USB-serial control channel to an Adafruit PyPortal
+# Titano running the CircuitPython firmware in ./pyportal/.
+pyserial>=3.5
