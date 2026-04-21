@@ -1,261 +1,633 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Droplet OLED Display Preview — 128x128 SSD1351</title>
+<meta charset="UTF-8" />
+<title>Droplet TFT Display Preview — 480x320 Interactive</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0b0b10;
+    --panel: #18181b;
+    --card: #1c1c1e;
+    --sep: #46464c;
+    --label: #ffffff;
+    --label-2: #bebec8;
+    --label-3: #9191a0;
+    --label-4: #646473;
+    --accent: #818cf8;
+    --accent-primary: #6366f1;
+    --accent-light: #a5b4fc;
+    --accent-subtle: rgba(129,140,248,0.15);
+    --green: #30d158;
+    --orange: #ff9f0a;
+    --red: #ff453a;
+  }
   body {
-    background: #1a1a2e;
-    color: #e0e0e0;
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 40px 20px;
+    background: radial-gradient(1200px 600px at 50% -20%, rgba(99,102,241,0.15), transparent 60%), var(--bg);
+    color: var(--label);
+    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
     min-height: 100vh;
+    padding: 40px 24px 80px;
   }
-  h1 { color: #818cf8; margin-bottom: 8px; font-size: 24px; }
-  .subtitle { color: #888; margin-bottom: 40px; font-size: 14px; }
-  .screens { display: flex; gap: 48px; flex-wrap: wrap; justify-content: center; }
-  .screen-wrapper {
+  header {
+    max-width: 1200px;
+    margin: 0 auto 28px;
+    text-align: center;
+  }
+  header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+  header .tag {
+    margin-top: 8px;
+    color: var(--label-3);
+    font-size: 13px;
+  }
+  .layout {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(520px, 1fr) 280px;
+    gap: 32px;
+    align-items: start;
+  }
+  .stage {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 12px;
+    gap: 18px;
   }
-  .screen-label {
-    color: #818cf8;
-    font-weight: 600;
-    font-size: 14px;
-    letter-spacing: 0.5px;
-  }
-  .screen-desc { color: #666; font-size: 11px; max-width: 200px; text-align: center; }
-  .oled-bezel {
-    background: #111;
-    border: 3px solid #333;
-    border-radius: 8px;
-    padding: 12px;
-    box-shadow: 0 0 20px rgba(99, 102, 241, 0.15), inset 0 0 10px rgba(0,0,0,0.5);
+  .bezel {
+    position: relative;
+    background: #0a0a0c;
+    border: 1px solid #2a2a31;
+    border-radius: 18px;
+    padding: 16px;
+    box-shadow:
+      0 30px 80px -30px rgba(99,102,241,0.35),
+      0 0 0 1px rgba(255,255,255,0.03) inset;
   }
   canvas {
     display: block;
-    image-rendering: pixelated;
-    width: 256px;
-    height: 256px;
+    width: 800px;
+    height: 533px;          /* 480x320 scaled up ~1.66x */
+    image-rendering: crisp-edges;
+    cursor: crosshair;
+    border-radius: 6px;
+    background: #000;
   }
-  .cycle-indicator {
-    margin-top: 32px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    color: #888;
-    font-size: 13px;
+  .hotspots {
+    position: absolute;
+    inset: 16px;
+    pointer-events: none;
   }
-  .cycle-indicator .arrow { color: #6366f1; font-size: 20px; }
-  .cycle-indicator .phase {
-    background: #222;
-    padding: 4px 12px;
+  .hotspots div {
+    position: absolute;
+    border: 1px dashed rgba(129,140,248,0.35);
     border-radius: 4px;
-    border: 1px solid #333;
+    display: none;
   }
-  .cycle-indicator .phase.active { border-color: #6366f1; color: #818cf8; }
+  .hotspots.visible div { display: block; }
+
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .controls button {
+    background: var(--card);
+    color: var(--label);
+    border: 1px solid var(--sep);
+    border-radius: 10px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .controls button:hover { border-color: var(--accent); color: var(--accent); }
+  .controls button.active { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+
+  .side {
+    background: var(--card);
+    border: 1px solid var(--sep);
+    border-radius: 14px;
+    padding: 18px;
+  }
+  .side h2 { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+  .side p { color: var(--label-3); font-size: 12px; line-height: 1.55; margin-bottom: 16px; }
+  .side .row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
+  .side .row .k { color: var(--label-3); }
+  .side .row .v { color: var(--label); font-family: 'Menlo', monospace; }
+  .side label.toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; margin-top: 10px; }
 </style>
 </head>
 <body>
+<header>
+  <h1>Droplet TFT Display — 480×320 Interactive Preview</h1>
+  <p class="tag">Faithful canvas render of <code>services/oled-display/display.py</code>. Click tiles on the panel to navigate.</p>
+</header>
 
-<h1>Droplet OLED Preview</h1>
-<p class="subtitle">Waveshare 1.5" SSD1351 — 128x128 RGB — Actual pixel layout at 2x zoom</p>
+<div class="layout">
+  <div class="stage">
+    <div class="bezel">
+      <canvas id="panel" width="480" height="320"></canvas>
+      <div class="hotspots" id="hotspots"></div>
+    </div>
+    <div class="controls">
+      <button data-screen="home" class="active">Home</button>
+      <button data-screen="stats">Health</button>
+      <button data-screen="chat">Ask AI</button>
+      <button data-screen="devices">Network</button>
+      <button data-screen="settings">Settings</button>
+      <button data-screen="logo">Logo</button>
+      <button data-screen="message">Message</button>
+      <button id="toggleRegions">Show tap regions</button>
+    </div>
+  </div>
 
-<div class="screens">
-  <div class="screen-wrapper">
-    <span class="screen-label">STATS SCREEN</span>
-    <div class="oled-bezel"><canvas id="stats" width="128" height="128"></canvas></div>
-    <span class="screen-desc">Auto-refreshes every 2s. Shows CPU, RAM, temp, IP, uptime.</span>
-  </div>
-  <div class="screen-wrapper">
-    <span class="screen-label">LOGO SCREEN</span>
-    <div class="oled-bezel"><canvas id="logo" width="128" height="128"></canvas></div>
-    <span class="screen-desc">Full-screen Droplet logo with faceted drop icon.</span>
-  </div>
-  <div class="screen-wrapper">
-    <span class="screen-label">MESSAGE SCREEN</span>
-    <div class="oled-bezel"><canvas id="message" width="128" height="128"></canvas></div>
-    <span class="screen-desc">LLM tool output. Title bar + body lines. Holds 30s then resumes cycle.</span>
-  </div>
-</div>
-
-<div class="cycle-indicator">
-  <span class="phase active">Logo 5s</span>
-  <span class="arrow">→</span>
-  <span class="phase active">Stats 10s</span>
-  <span class="arrow">→</span>
-  <span class="phase">repeat</span>
-  <span style="margin-left: 16px; color: #555">|</span>
-  <span style="margin-left: 16px; color: #555">LLM message pauses cycle for 30s</span>
+  <aside class="side">
+    <h2>Current screen</h2>
+    <p id="desc">Dashboard-style tile grid. Tap a tile to navigate.</p>
+    <div class="row"><span class="k">Screen</span><span class="v" id="meta-screen">home</span></div>
+    <div class="row"><span class="k">Resolution</span><span class="v">480 × 320</span></div>
+    <div class="row"><span class="k">Brightness</span><span class="v" id="meta-bri">255</span></div>
+    <div class="row"><span class="k">Last tap</span><span class="v" id="meta-tap">–</span></div>
+    <label class="toggle">
+      <input type="checkbox" id="liveTime" checked />
+      <span>Update clock / metrics live</span>
+    </label>
+  </aside>
 </div>
 
 <script>
-// Colors matching display.py
-const BG = '#000000';
-const TEXT = '#ffffff';
-const ACCENT = '#6366f1';
-const ACCENT_LIGHT = '#818cf8';
-const DIM = '#8c8ca0';
-const BAR_BG = '#28283a';
-const TEMP_WARN = '#ffb400';
+// ──────────────────────────────────────────────────────────────
+// Design tokens — mirror services/oled-display/display.py exactly
+// (dark-mode values from apps/web-dashboard/src/app/globals.css)
+// ──────────────────────────────────────────────────────────────
+const C = {
+  bg: '#121214',
+  surfaceSecondary: '#1c1c1e',
+  surfaceRaised: '#18181b',
+  separator: '#46464c',
+  text: '#ffffff',
+  labelSecondary: 'rgb(190,190,200)',
+  labelTertiary: 'rgb(145,145,160)',
+  labelQuaternary: 'rgb(100,100,115)',
+  accent: '#818cf8',
+  accentPrimary: '#6366f1',
+  accentLight: '#a5b4fc',
+  accentSubtle: 'rgb(45,47,85)',
+  green: '#30d158',
+  orange: '#ff9f0a',
+  red: '#ff453a',
+};
 
-function drawDropIcon(ctx, cx, cyTop, scale) {
-  // Left face - full indigo
-  ctx.fillStyle = ACCENT;
-  ctx.beginPath();
-  ctx.moveTo(cx, cyTop);
-  ctx.lineTo(cx + 18*scale, cyTop + 28*scale);
-  ctx.lineTo(cx + 10*scale, cyTop + 48*scale);
-  ctx.lineTo(cx - 10*scale, cyTop + 48*scale);
-  ctx.lineTo(cx - 18*scale, cyTop + 28*scale);
-  ctx.closePath();
-  ctx.fill();
+const W = 480, H = 320;
+const canvas = document.getElementById('panel');
+const ctx = canvas.getContext('2d');
 
-  // Right highlight face
-  ctx.fillStyle = ACCENT_LIGHT;
+// ──────────────────────────────────────────────────────────────
+// State
+// ──────────────────────────────────────────────────────────────
+let screen = 'home';
+let brightness = 255;
+let touchRegions = [];
+let lastTap = null;
+let tapAt = 0;
+let lastMessage = null;
+let liveTime = true;
+// Fake metrics — refreshed on a timer, not real data.
+const metrics = { cpu: 18, mem: 42, disk: 61, temp: 48, ip: '192.168.50.41', hostname: 'droplet-lab' };
+
+// ──────────────────────────────────────────────────────────────
+// Primitives
+// ──────────────────────────────────────────────────────────────
+function rrect(x, y, w, h, r, fill, stroke, sw=1) {
   ctx.beginPath();
-  ctx.moveTo(cx, cyTop);
-  ctx.lineTo(cx + 18*scale, cyTop + 28*scale);
-  ctx.lineTo(cx, cyTop + 36*scale);
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
   ctx.closePath();
-  ctx.fill();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = sw; ctx.stroke(); }
+}
+function text(s, x, y, {size=14, bold=false, color=C.text, align='left', baseline='top'}={}) {
+  ctx.font = `${bold ? '700' : '400'} ${size}px -apple-system, 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillStyle = color;
+  ctx.textAlign = align;
+  ctx.textBaseline = baseline;
+  ctx.fillText(s, x, y);
+}
+function measure(s, size, bold) {
+  ctx.font = `${bold?'700':'400'} ${size}px -apple-system,'Segoe UI',system-ui,sans-serif`;
+  return ctx.measureText(s).width;
+}
+// Canonical Droplet mark — geometry from apps/web-dashboard/src/components/DropletMark.tsx
+const MARK_LEFT  = [[26,0],[44,28],[36,48],[16,48],[8,28]];
+const MARK_RIGHT = [[26,0],[44,28],[26,36]];
+function drawMark(x, y, size, primary=C.accentPrimary, highlight=C.accentLight) {
+  const vw = 52, vh = 60;
+  const s = size/vh;
+  const xOff = x + (size - vw*s)/2;
+  const poly = (pts, fill) => {
+    ctx.beginPath();
+    pts.forEach(([px,py],i) => {
+      const X = xOff + px*s, Y = y + py*s;
+      if (i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+  };
+  poly(MARK_LEFT, primary);
+  poly(MARK_RIGHT, highlight);
 }
 
-// ---- STATS SCREEN ----
-function drawStats() {
-  const c = document.getElementById('stats');
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, 128, 128);
+// ──────────────────────────────────────────────────────────────
+// Touch regions
+// ──────────────────────────────────────────────────────────────
+function addRegion(name, x, y, w, h, action) {
+  touchRegions.push({name, x, y, w, h, action});
+}
+function renderHotspots() {
+  const el = document.getElementById('hotspots');
+  el.innerHTML = '';
+  const rect = canvas.getBoundingClientRect();
+  const sx = rect.width / W, sy = rect.height / H;
+  touchRegions.forEach(r => {
+    const d = document.createElement('div');
+    d.style.left = (r.x * sx) + 'px';
+    d.style.top = (r.y * sy) + 'px';
+    d.style.width = (r.w * sx) + 'px';
+    d.style.height = (r.h * sy) + 'px';
+    el.appendChild(d);
+  });
+}
 
-  // Mini drop icon top-right
-  drawDropIcon(ctx, 113, 2, 0.38);
+// ──────────────────────────────────────────────────────────────
+// Shared header
+// ──────────────────────────────────────────────────────────────
+function drawHeader({title='Droplet', showBack=false, showHome=false, status='Online'}) {
+  const barH = 52;
+  rrect(0, 0, W, barH, 0, C.surfaceSecondary);
+  ctx.strokeStyle = C.separator; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, barH); ctx.lineTo(W, barH); ctx.stroke();
+
+  let x = 12;
+  if (showBack) {
+    drawButton(x, 10, 70, 32, '< Back', 12, () => { setScreen('home'); });
+    x += 80;
+  } else if (showHome) {
+    drawButton(x, 10, 70, 32, 'Home', 12, () => { setScreen('home'); });
+    x += 80;
+  }
+
+  drawMark(x, 10, 32, C.accent, C.accentLight);
+  x += 36;
+  text(title, x, 14, {size:17, bold:true});
+
+  const clock = new Date().toTimeString().slice(0,5);
+  text(clock, W-14, 14, {size:20, bold:true, align:'right'});
+
+  if (status) {
+    const chipFont = 11;
+    const clockW = measure(clock, 20, true);
+    const chipW = measure(status, chipFont, true) + 22;
+    const chipX = W - clockW - 14 - chipW - 10;
+    rrect(chipX, 16, chipW, 20, 10, C.surfaceRaised);
+    ctx.fillStyle = C.green;
+    ctx.beginPath(); ctx.arc(chipX+10, 26, 3, 0, Math.PI*2); ctx.fill();
+    text(status, chipX+16, 19, {size:chipFont, bold:true, color:C.labelSecondary});
+  }
+  return barH + 6;
+}
+
+function drawButton(x, y, w, h, label, size, action) {
+  const active = lastTap && lastTap.name && touchRegions.length && Date.now()-tapAt < 250
+      && touchRegions[touchRegions.length-1]?.name === lastTap.name;
+  rrect(x, y, w, h, h/2, C.surfaceRaised, C.separator, 1);
+  text(label, x+w/2, y+h/2+1, {size, bold:true, align:'center', baseline:'middle'});
+  if (action) addRegion(`btn_${label}`, x, y, w, h, action);
+}
+
+// ──────────────────────────────────────────────────────────────
+// Screens
+// ──────────────────────────────────────────────────────────────
+function renderHome() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  const y0 = drawHeader({});
+
+  const pad = 10, gap = 10;
+  const gridW = W - 2*pad;
+  const gridH = H - y0 - 66;
+  const tW = (gridW - gap) / 2;
+  const tH = (gridH - gap) / 2;
+
+  const tiles = [
+    {tag:'CHAT', title:'Ask AI',   sub:'Tap to chat',     go:'chat'},
+    {tag:'SYS',  title:'Status',   sub:'Health & metrics',go:'stats'},
+    {tag:'NET',  title:'Network',  sub:metrics.ip,        go:'devices'},
+    {tag:'CFG',  title:'Settings', sub:'Brightness & more',go:'settings'},
+  ];
+  tiles.forEach((t,i) => {
+    const col = i%2, row = (i/2)|0;
+    const x = pad + col*(tW+gap), y = y0 + row*(tH+gap);
+    drawTile(x,y,tW,tH, t.tag,t.title,t.sub, () => setScreen(t.go));
+  });
+
+  // Status ribbon
+  drawStatusRibbon(pad, H-56, W-2*pad, 44);
+}
+
+function drawTile(x, y, w, h, tag, title, sub, action) {
+  const active = lastTap && lastTap.x>=x && lastTap.x<=x+w && lastTap.y>=y && lastTap.y<=y+h
+      && Date.now()-tapAt < 300;
+  rrect(x,y,w,h,14, active ? C.surfaceSecondary : C.surfaceRaised,
+        active ? C.accent : C.separator, 1);
+
+  const pad = 12;
+  // Tag pill
+  const pillW = 42, pillH = 20;
+  rrect(x+pad, y+pad, pillW, pillH, 10, C.accentSubtle);
+  text(tag, x+pad+pillW/2, y+pad+pillH/2, {size:12, bold:true, color:C.accent, align:'center', baseline:'middle'});
 
   // Title
-  ctx.font = 'bold 9px monospace';
-  ctx.fillStyle = ACCENT_LIGHT;
-  ctx.fillText('Droplet Edge', 4, 12);
+  text(title, x+pad, y+pad+pillH+22, {size:19, bold:true});
+  // Sub
+  text(sub.slice(0,28), x+pad, y+pad+pillH+48, {size:12, color:C.labelTertiary});
 
-  // Separator
-  ctx.strokeStyle = '#3c3c50';
+  // Chevron
+  ctx.fillStyle = C.labelTertiary;
   ctx.beginPath();
-  ctx.moveTo(4, 34);
-  ctx.lineTo(124, 34);
-  ctx.stroke();
+  ctx.moveTo(x+w-26, y+h-24);
+  ctx.lineTo(x+w-16, y+h-18);
+  ctx.lineTo(x+w-26, y+h-12);
+  ctx.closePath(); ctx.fill();
 
-  let y = 46;
-  const lineH = 16;
-
-  // CPU
-  ctx.font = '9px monospace';
-  ctx.fillStyle = DIM;
-  ctx.fillText('CPU', 4, y);
-  ctx.font = 'bold 10px monospace';
-  ctx.fillStyle = TEXT;
-  ctx.fillText('45%', 36, y);
-  // bar
-  ctx.fillStyle = BAR_BG;
-  ctx.fillRect(68, y-7, 56, 7);
-  ctx.fillStyle = ACCENT;
-  ctx.fillRect(68, y-7, 25, 7);
-  y += lineH;
-
-  // RAM
-  ctx.font = '9px monospace';
-  ctx.fillStyle = DIM;
-  ctx.fillText('RAM', 4, y);
-  ctx.font = 'bold 10px monospace';
-  ctx.fillStyle = TEXT;
-  ctx.fillText('2.1/8G', 36, y);
-  ctx.fillStyle = BAR_BG;
-  ctx.fillRect(90, y-7, 34, 7);
-  ctx.fillStyle = ACCENT;
-  ctx.fillRect(90, y-7, 9, 7);
-  y += lineH;
-
-  // Temp
-  ctx.font = '9px monospace';
-  ctx.fillStyle = DIM;
-  ctx.fillText('Temp', 4, y);
-  ctx.font = 'bold 10px monospace';
-  ctx.fillStyle = TEXT;
-  ctx.fillText('52\u00B0C', 36, y);
-  y += lineH;
-
-  // IP
-  ctx.font = '9px monospace';
-  ctx.fillStyle = DIM;
-  ctx.fillText('IP', 4, y);
-  ctx.fillStyle = TEXT;
-  ctx.fillText('192.168.1.100', 36, y);
-  y += lineH;
-
-  // Uptime
-  ctx.fillStyle = DIM;
-  ctx.fillText('Up', 4, y);
-  ctx.fillStyle = TEXT;
-  ctx.fillText('3d 14h', 36, y);
+  addRegion(`tile_${tag.toLowerCase()}`, x, y, w, h, action);
 }
 
-// ---- LOGO SCREEN ----
-function drawLogo() {
-  const c = document.getElementById('logo');
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, 128, 128);
-
-  drawDropIcon(ctx, 64, 20, 1.8);
-
-  // Wordmark
-  ctx.font = 'bold 14px system-ui, sans-serif';
-  ctx.fillStyle = TEXT;
-  const text = 'Droplet';
-  const tw = ctx.measureText(text).width;
-  ctx.fillText(text, (128 - tw) / 2, 122);
-}
-
-// ---- MESSAGE SCREEN ----
-function drawMessage() {
-  const c = document.getElementById('message');
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, 128, 128);
-
-  // Title bar
-  ctx.fillStyle = ACCENT;
-  ctx.fillRect(0, 0, 128, 18);
-  ctx.font = 'bold 11px monospace';
-  ctx.fillStyle = TEXT;
-  ctx.fillText('Alert', 4, 13);
-
-  // Body
-  ctx.font = '10px monospace';
-  ctx.fillStyle = TEXT;
-  const lines = [
-    'Camera offline:',
-    'front-door-cam',
-    '',
-    'Last seen: 2m ago',
-    'Checking network...',
-    '',
-    'Action: restarting'
+function drawStatusRibbon(x, y, w, h) {
+  rrect(x, y, w, h, 12, C.surfaceRaised, C.separator, 1);
+  const segs = [
+    [`${metrics.cpu}%`,  'CPU'],
+    [`${metrics.mem}%`,  'RAM'],
+    [`${metrics.disk}%`, 'DISK'],
+    [`${metrics.temp}°C`, 'TEMP'],
+    ['12h 5m',            'UP'],
   ];
-  let y = 32;
-  for (const line of lines) {
-    ctx.fillText(line, 4, y);
-    y += 15;
+  const sW = w/segs.length;
+  segs.forEach(([p,s], i) => {
+    const cx = x + i*sW;
+    text(p, cx+12, y+6, {size:15, bold:true});
+    text(s, cx+12, y+26, {size:10, bold:true, color:C.labelTertiary});
+    if (i>0) {
+      ctx.strokeStyle = C.separator; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(cx, y+8); ctx.lineTo(cx, y+h-8); ctx.stroke();
+    }
+  });
+}
+
+function renderStats() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+  const y0 = drawHeader({title:'Health', showBack:true});
+  const pad = 10, gap = 10;
+  const cW = (W - 2*pad - gap)/2;
+  const cH = (H - y0 - 56 - gap)/2;
+
+  drawMetric(pad, y0, cW, cH, 'CPU', `${metrics.cpu}%`, metrics.cpu, 80, 95);
+  drawMetric(pad+cW+gap, y0, cW, cH, 'MEMORY', `${(metrics.mem*16/100).toFixed(1)}/16 GB`, metrics.mem, 80, 95);
+  drawMetric(pad, y0+cH+gap, cW, cH, 'DISK', `${(metrics.disk*1024/100)|0}/1024 GB`, metrics.disk, 85, 95);
+  drawTemp(pad+cW+gap, y0+cH+gap, cW, cH, metrics.temp);
+
+  // Footer
+  const fy = H-42;
+  text('IP', pad, fy, {size:10, bold:true, color:C.labelTertiary});
+  text(metrics.ip, pad+24, fy-2, {size:14});
+  const up = '12h 5m';
+  const upW = measure(up, 14, false);
+  text(up, W-pad-upW, fy-2, {size:14});
+  text('UP', W-pad-upW-28, fy, {size:10, bold:true, color:C.labelTertiary});
+}
+function drawMetric(x,y,w,h,label,value,pct, warn=80, crit=95) {
+  rrect(x,y,w,h,14, C.surfaceRaised);
+  text(label, x+14, y+12, {size:11, bold:true, color:C.labelTertiary});
+  text(value, x+14, y+30, {size:26, bold:true});
+  const bx=x+14, by=y+h-22, bw=w-28;
+  rrect(bx,by,bw,8,4, C.surfaceSecondary);
+  const fw = (bw*Math.max(0,Math.min(100,pct)))/100|0;
+  if (fw>0) {
+    const fill = pct<warn ? C.accent : pct<crit ? C.orange : C.red;
+    rrect(bx,by,fw,8,4, fill);
+  }
+}
+function drawTemp(x,y,w,h,temp) {
+  rrect(x,y,w,h,14, C.surfaceRaised);
+  text('TEMP', x+14, y+12, {size:11, bold:true, color:C.labelTertiary});
+  const color = temp<70 ? C.text : temp<85 ? C.orange : C.red;
+  text(`${temp}°C`, x+14, y+30, {size:26, bold:true, color});
+  const s = temp<70 ? 'nominal' : temp<85 ? 'warm' : 'hot';
+  const sc = temp<70 ? C.green : temp<85 ? C.orange : C.red;
+  text(s, x+14, y+h-24, {size:12, color:sc});
+}
+
+function renderChat() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+  const y0 = drawHeader({title:'Ask AI', showBack:true});
+
+  text('What can I', 16, y0+6, {size:30, bold:true});
+  text('help you with?', 16, y0+40, {size:30, bold:true, color:C.accent});
+
+  const cy = y0+92, cw = W-32, ch = 48;
+  rrect(16, cy, cw, ch, ch/2, C.surfaceRaised, C.accent, 1);
+  text('*  Open chat on dashboard to ask…', 34, cy+14, {size:15, color:C.labelSecondary});
+
+  const bW = 60, bX = 16+cw-bW-6, bY = cy+6, bH = ch-12;
+  rrect(bX, bY, bW, bH, bH/2, C.accent);
+  text('Ask', bX+bW/2, bY+bH/2+1, {size:13, bold:true, align:'center', baseline:'middle', color:'#fff'});
+
+  const my = cy+ch+16, mh = H-my-16;
+  rrect(16, my, W-32, mh, 12, C.surfaceRaised);
+  text('LATEST', 28, my+10, {size:10, bold:true, color:C.labelTertiary});
+  if (lastMessage) {
+    text(lastMessage.title, 28, my+28, {size:16, bold:true});
+    (lastMessage.lines || []).slice(0,3).forEach((ln, i) => {
+      text(ln.slice(0,54), 28, my+54+i*20, {size:13, color:C.labelSecondary});
+    });
+  } else {
+    text('Assistant is idle.', 28, my+28, {size:14, color:C.labelSecondary});
+    text('Tool calls and replies appear here.', 28, my+50, {size:12, color:C.labelTertiary});
   }
 }
 
-drawStats();
-drawLogo();
-drawMessage();
+function renderDevices() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+  const y0 = drawHeader({title:'Network', showBack:true});
+
+  const pad = 16, cardH = 96;
+  rrect(pad, y0+4, W-2*pad, cardH, 14, C.surfaceRaised);
+  drawMark(pad+16, y0+18, 52, C.accent, C.accentLight);
+  text(metrics.hostname, pad+86, y0+18, {size:17, bold:true});
+  text(metrics.ip, pad+86, y0+44, {size:16, color:C.accent});
+  text('This device', pad+86, y0+66, {size:12, color:C.labelTertiary});
+
+  const sy = y0+4+cardH+12, sh = H-sy-16, cw = (W-2*pad-12)/2;
+  [['LAN', metrics.ip, 'Via gateway'],
+   ['UPLINK', 'Online', 'DNS reachable']].forEach(([l,p,s], i) => {
+    const sx = pad + i*(cw+12);
+    rrect(sx, sy, cw, sh, 14, C.surfaceRaised);
+    text(l, sx+14, sy+12, {size:10, bold:true, color:C.labelTertiary});
+    text(p, sx+14, sy+30, {size:17, bold:true});
+    text(s, sx+14, sy+sh-26, {size:12, color:C.labelSecondary});
+  });
+}
+
+function renderSettings() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+  const y0 = drawHeader({title:'Settings', showBack:true});
+
+  const pad=16, cy=y0+4, ch=130;
+  rrect(pad, cy, W-2*pad, ch, 14, C.surfaceRaised);
+  text('BRIGHTNESS', pad+16, cy+14, {size:11, bold:true, color:C.labelTertiary});
+  text(`${brightness}/255`, pad+16, cy+32, {size:24, bold:true});
+
+  const mx = W-pad-120, px = W-pad-60, by = cy+18;
+  rrect(mx, by, 50, 44, 22, C.surfaceRaised, C.separator, 1);
+  text('-', mx+25, by+22, {size:20, bold:true, align:'center', baseline:'middle'});
+  addRegion('bri_minus', mx, by, 50, 44, () => { brightness = Math.max(0, brightness-25); render(); });
+  rrect(px, by, 50, 44, 22, C.surfaceRaised, C.separator, 1);
+  text('+', px+25, by+22, {size:20, bold:true, align:'center', baseline:'middle'});
+  addRegion('bri_plus', px, by, 50, 44, () => { brightness = Math.min(255, brightness+25); render(); });
+
+  const bx=pad+16, bby=cy+ch-22, bw=W-2*pad-32;
+  rrect(bx, bby, bw, 8, 4, C.surfaceSecondary);
+  const fw = (bw*brightness/255)|0;
+  if (fw>0) rrect(bx, bby, fw, 8, 4, C.accent);
+
+  const ay = cy+ch+14, ah = H-ay-16, cw=(W-2*pad-12)/2;
+  rrect(pad, ay, cw, ah, 14, C.surfaceRaised);
+  text('SHOW LOGO', pad+14, ay+14, {size:11, bold:true, color:C.labelTertiary});
+  text('Splash screen', pad+14, ay+34, {size:17, bold:true});
+  addRegion('act_logo', pad, ay, cw, ah, () => setScreen('logo'));
+
+  const rx = pad+cw+12;
+  rrect(rx, ay, cw, ah, 14, C.surfaceRaised);
+  text('CYCLE', rx+14, ay+14, {size:11, bold:true, color:C.labelTertiary});
+  text('Auto-cycle off', rx+14, ay+34, {size:17, bold:true});
+  addRegion('act_cycle', rx, ay, cw, ah, () => {});
+}
+
+function renderLogo() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+  const size = 140;
+  const mx = (W-size)/2, my = H/2 - size/2 - 30;
+  rrect(mx-28, my-22, size+56, size+44, 28, C.surfaceRaised);
+  drawMark(mx, my, size, C.accentPrimary, C.accentLight);
+  text('Droplet', W/2, my+size+52, {size:44, bold:true, align:'center', baseline:'middle'});
+  text('Edge AI Appliance', W/2, my+size+94, {size:14, color:C.labelTertiary, align:'center', baseline:'middle'});
+
+  // Tap anywhere to go home
+  addRegion('logo_home', 0, 0, W, H, () => setScreen('home'));
+}
+
+function renderMessage() {
+  touchRegions = [];
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+  const msg = lastMessage || {title:'Example', lines:['Nextcloud sync finished.','Added 12 files (48 MB).','Ready for embedding.']};
+  const y0 = drawHeader({title: msg.title, showHome:true});
+  rrect(16, y0+6, W-32, H-y0-22, 14, C.surfaceRaised);
+  (msg.lines||[]).slice(0,10).forEach((ln,i) => {
+    text(ln.slice(0,52), 28, y0+18+i*24, {size:17});
+  });
+}
+
+// ──────────────────────────────────────────────────────────────
+// Controller
+// ──────────────────────────────────────────────────────────────
+function render() {
+  switch (screen) {
+    case 'stats':    renderStats(); break;
+    case 'chat':     renderChat(); break;
+    case 'devices':  renderDevices(); break;
+    case 'settings': renderSettings(); break;
+    case 'logo':     renderLogo(); break;
+    case 'message':  renderMessage(); break;
+    default:         renderHome(); break;
+  }
+  document.getElementById('meta-screen').textContent = screen;
+  document.getElementById('meta-bri').textContent = String(brightness);
+  renderHotspots();
+}
+function setScreen(s, desc) {
+  screen = s;
+  document.querySelectorAll('.controls button[data-screen]').forEach(b => {
+    b.classList.toggle('active', b.dataset.screen === s);
+  });
+  const descs = {
+    home: 'Dashboard-style tile grid. Tap a tile to navigate.',
+    stats: '2×2 metric cards — CPU, memory, disk, temp. Back returns home.',
+    chat: 'Mirrors dashboard AI hero. Tap the capsule to open chat on the web UI.',
+    devices: 'Device identity + LAN/uplink summary.',
+    settings: 'Brightness stepper + quick actions. + / − buttons are tappable.',
+    logo: 'Full-screen Droplet mark. Tap anywhere to go home.',
+    message: 'LLM-pushed message. Auto-returns home after 30s.',
+  };
+  document.getElementById('desc').textContent = desc || descs[s] || '';
+  render();
+}
+
+// Click -> tap
+canvas.addEventListener('click', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * W | 0;
+  const y = ((e.clientY - rect.top)  / rect.height) * H | 0;
+  for (const r of touchRegions) {
+    if (x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h) {
+      lastTap = {name:r.name, x, y};
+      tapAt = Date.now();
+      document.getElementById('meta-tap').textContent = `${r.name} (${x},${y})`;
+      r.action && r.action();
+      render();
+      return;
+    }
+  }
+  document.getElementById('meta-tap').textContent = `miss (${x},${y})`;
+});
+
+// Controls
+document.querySelectorAll('.controls button[data-screen]').forEach(b => {
+  b.addEventListener('click', () => setScreen(b.dataset.screen));
+});
+document.getElementById('toggleRegions').addEventListener('click', () => {
+  document.getElementById('hotspots').classList.toggle('visible');
+});
+document.getElementById('liveTime').addEventListener('change', (e) => {
+  liveTime = e.target.checked;
+});
+
+// Animate a tiny amount (clock + small metric jitter) so the preview feels live.
+setInterval(() => {
+  if (!liveTime) return;
+  metrics.cpu = Math.max(5, Math.min(90, metrics.cpu + (Math.random()*6-3)));
+  metrics.mem = Math.max(10, Math.min(95, metrics.mem + (Math.random()*3-1.5)));
+  render();
+}, 1500);
+
+// Sample message so the Message screen isn't empty
+lastMessage = {
+  title: 'Tool call',
+  lines: ['Nextcloud sync finished.', 'Added 12 files (48 MB).', 'Ready for embedding.'],
+};
+
+// Initial render
+render();
 </script>
 </body>
 </html>

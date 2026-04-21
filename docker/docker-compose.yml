@@ -109,6 +109,17 @@ services:
       - nextcloud-data:/var/www/html
       - ./nextcloud-skeleton:/skeleton:ro
       - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      # USB drives auto-mounted on the host show up under /mnt/droplet/<name>.
+      # Bind-mounting with rshared propagation lets new drives appear inside
+      # Nextcloud without a container restart, so the automount script's
+      # `occ files_external:create --datadir="/host/<name>"` works for any
+      # drive plugged in after container boot.
+      - type: bind
+        source: /mnt/droplet
+        target: /host
+        bind:
+          create_host_path: true
+          propagation: rshared
     restart: always
 
   # --- Infrastructure ---

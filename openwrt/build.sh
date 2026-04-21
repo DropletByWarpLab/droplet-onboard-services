@@ -67,7 +67,7 @@ PACKAGES+=" kmod-mii"
 # --- Intel BE200 WiFi 7 ---
 PACKAGES+=" kmod-iwlwifi iwlwifi-firmware-be200"
 PACKAGES+=" kmod-mac80211 kmod-cfg80211"
-PACKAGES+=" hostapd-openssl wpad-openssl -wpad-basic-mbedtls -wpad-basic-wolfssl"
+PACKAGES+=" wpad-openssl -wpad-basic-mbedtls -wpad-basic-wolfssl"
 
 # --- Wireless tools ---
 PACKAGES+=" iw iwinfo wireless-regdb"
@@ -96,7 +96,7 @@ PACKAGES+=" collectd collectd-mod-interface collectd-mod-load collectd-mod-memor
 PACKAGES+=" luci-app-statistics"
 
 # --- VLAN support ---
-PACKAGES+=" kmod-8021q"
+# kmod-8021q folded into core kernel in 24.10 — no explicit package needed
 
 # --- mDNS (so Jetson can discover router as droplet-router.local) ---
 PACKAGES+=" umdns"

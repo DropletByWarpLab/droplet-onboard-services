@@ -51,6 +51,15 @@ export async function showLogo(): Promise<boolean> {
   }
 }
 
+export async function showHome(): Promise<boolean> {
+  try {
+    const res = await displayFetch("/display/home", { method: "POST" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function showMessage(title: string, lines: string[]): Promise<boolean> {
   try {
     const res = await displayFetch("/display/message", {

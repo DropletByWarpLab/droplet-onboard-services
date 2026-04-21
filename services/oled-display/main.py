@@ -3,15 +3,16 @@ Droplet TFT Display Service
 =============================
 FastAPI wrapper for the 480x320 ILI9481 TFT display (with XPT2046 touch).
 Exposes REST endpoints for the orchestrator and AI gateway to control what's
-shown on the physical display and to read touch input.
+shown on the physical display and to read / simulate touch input.
+
+The visual system mirrors apps/web-dashboard (dark mode) so the on-device
+screen is a compact version of the admin UI. Touch tiles on the home
+screen route to Health, Network, Chat and Settings sub-screens.
 """
 
 # GPIO shim must run BEFORE any import that might `import RPi.GPIO` (luma.core
-# does this transitively via `display.py` -> `luma.core.interface.serial.spi`).
-# On a Jetson it aliases Jetson.GPIO as RPi.GPIO and sets BOARD pin mode, so
-# DC_PIN=18 / RST_PIN=22 etc. map to the physical pins of the 40-pin header —
-# the same way they do on a real Pi.
-import gpio_shim  # noqa: F401  -- import-for-side-effect (must come before luma.core)
+# does this transitively). On Jetson it aliases Jetson.GPIO as RPi.GPIO.
+import gpio_shim  # noqa: F401  -- import-for-side-effect
 
 import os
 import io
@@ -63,9 +64,11 @@ touch: Optional[TouchReader] = None
 async def lifespan(app: FastAPI):
     global display, touch
     display = TFTDisplay()
-    display.start_cycle()
     touch = TouchReader(width=WIDTH, height=HEIGHT)
     touch.start()
+    # Wire touch -> display so the cycle loop can consume events.
+    display.bind_touch_source(touch)
+    display.start_cycle()
     logger.info("TFT display service started (backend=%s, touch=%s)",
                 display._backend, touch._backend)
     yield
@@ -90,7 +93,16 @@ class BrightnessRequest(BaseModel):
     value: int = Field(..., ge=0, le=255, description="Brightness 0-255")
 
 
-# Upload ceiling - bigger panel warrants a bigger ceiling, but still bounded.
+class TapRequest(BaseModel):
+    x: int = Field(..., ge=0, le=WIDTH - 1)
+    y: int = Field(..., ge=0, le=HEIGHT - 1)
+
+
+class WifiConnectRequest(BaseModel):
+    ssid: str = Field(..., min_length=1, max_length=64)
+    password: str = Field("", max_length=128)
+
+
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
 
 
@@ -114,11 +126,18 @@ async def get_status():
     return display.get_status()
 
 
+@app.post("/display/home")
+async def show_home():
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_home()
+    return {"ok": True, "mode": "home"}
+
+
 @app.post("/display/stats")
 async def show_stats():
     if not display:
         raise HTTPException(503, "Display not initialized")
-    display.resume_cycle()
     display.show_stats()
     return {"ok": True, "mode": "stats"}
 
@@ -141,7 +160,6 @@ async def show_message(req: MessageRequest):
 
 @app.post("/display/custom")
 async def show_custom(file: UploadFile = File(...)):
-    """Upload a custom image (resized to panel resolution, max 8 MB)."""
     if not display:
         raise HTTPException(503, "Display not initialized")
     try:
@@ -183,8 +201,14 @@ async def stop_cycle():
 
 @app.get("/display/preview")
 async def get_preview():
-    if not display or display._backend != "sim":
-        raise HTTPException(404, "Preview only available in simulated mode")
+    """Download the last rendered frame as PNG.
+
+    In `sim`/`pyportal` backends the service always writes SIM_OUTPUT,
+    so the preview is always available. On SPI/framebuffer hardware
+    we render ourselves to the same PNG for dashboard use.
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
     if not SIM_OUTPUT.exists():
         raise HTTPException(404, "No frame rendered yet")
     return FileResponse(str(SIM_OUTPUT), media_type="image/png")
@@ -195,7 +219,53 @@ async def get_preview():
 # ---------------------------------------------------------------------------
 @app.get("/touch/state")
 async def touch_state():
-    """Current touch state: pressed flag, last (x,y), press/release counters."""
     if not touch:
         raise HTTPException(503, "Touch not initialized")
     return touch.get_state()
+
+
+@app.post("/touch/tap")
+async def simulate_tap(req: TapRequest):
+    """Simulate a tap at (x, y) — useful for the preview harness and
+    end-to-end tests on hosts without a real panel connected."""
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    hit = display.handle_touch(req.x, req.y)
+    return {"ok": True, "hit": hit, "x": req.x, "y": req.y}
+
+
+@app.get("/wifi/scan")
+async def wifi_scan():
+    """Return the latest wifi scan snapshot from the host helper."""
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    snap = display.fetch_wifi()
+    if snap is None:
+        raise HTTPException(502, "Wi-Fi helper unreachable")
+    # Also push to PyPortal so the on-screen list refreshes immediately
+    display._pyportal_send("wifi", snap)
+    return snap
+
+
+@app.post("/wifi/connect")
+async def wifi_connect(req: WifiConnectRequest):
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    result = display.connect_wifi(req.ssid, req.password)
+    return result
+
+
+@app.get("/touch/regions")
+async def touch_regions():
+    """List the currently-active tap targets (name + bounding box).
+
+    Handy for building HTML previews that overlay clickable hotspots on
+    the rendered PNG frame."""
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    return {
+        "regions": [
+            {"name": r.name, "x": r.x, "y": r.y, "w": r.w, "h": r.h}
+            for r in display._touch_regions
+        ],
+    }

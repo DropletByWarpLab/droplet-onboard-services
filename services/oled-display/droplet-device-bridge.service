@@ -1,0 +1,33 @@
+[Unit]
+Description=Droplet device-bridge (wifi scan + drives + QR for on-device screen)
+# The bridge shells out to docker for Nextcloud/Frigate queries and to
+# nmcli/ssh for wifi. It's useless before docker + network are up.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=droplet
+Group=droplet
+# Runtime config is loaded from an operator-managed env file. The file
+# is created by `setup.sh` with 0600 perms and holds the OpenWrt SSH
+# password, Frigate URL, etc. Keeping these out of the committed unit
+# file so git history never carries live credentials.
+EnvironmentFile=-/etc/droplet/device-bridge.env
+# Sensible defaults for endpoints that are always the same on a Droplet
+# deployment. Credentials come from EnvironmentFile above.
+Environment=OPENWRT_HOST=192.168.50.1
+Environment=OPENWRT_USER=root
+Environment=OPENWRT_IFACE=wlan0
+Environment=FRIGATE_URL=http://172.18.0.11:5000
+Environment=ORCHESTRATOR_URL=http://172.18.0.2:3000
+Environment=BRIDGE_PORT=9090
+Environment=BRIDGE_BIND=127.0.0.1
+ExecStart=/usr/bin/python3 /home/droplet/Documents/droplet-pi-platform/services/oled-display/device-bridge.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/droplet-device-bridge.log
+StandardError=append:/var/log/droplet-device-bridge.log
+
+[Install]
+WantedBy=multi-user.target
