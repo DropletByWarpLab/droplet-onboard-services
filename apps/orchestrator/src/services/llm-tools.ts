@@ -273,12 +273,11 @@ const search_files: Tool = {
   },
   handler: async (args, ctx) => {
     if (!ctx.userId || !ctx.ncToken) return { error: "auth_required" };
-    const results = await nc.ncSearchFiles(
-      ctx.ncToken,
-      ctx.userId,
-      String(args.query),
-    );
-    return results.slice(0, 50);
+    const results = await nc.ncSearchFiles(ctx.ncToken, ctx.userId, {
+      query: String(args.query),
+      limit: 50,
+    });
+    return results;
   },
 };
 
