@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, Instrument_Serif } from "next/font/google";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthProvider } from "@/lib/auth";
@@ -32,6 +32,16 @@ export const metadata: Metadata = {
   openGraph: {
     images: [{ url: "/og-image.png", width: 1200, height: 630 }],
   },
+};
+
+// Without this export the dashboard renders at ~980px on mobile and
+// the whole UI ends up scaled-down and side-scrolling. Next.js 14
+// requires viewport / themeColor to live in their own export (they
+// used to be on `metadata` — that's a silent deprecation warning).
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
   themeColor: "#6366f1",
 };
 
