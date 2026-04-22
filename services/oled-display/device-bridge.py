@@ -416,29 +416,60 @@ def _bytes_for(path):
         return 0, 0, 0
 
 
+# Filesystem types we consider "data storage" worth surfacing in the UI.
+# Excludes tmpfs, devtmpfs, cgroup, overlay, squashfs, procfs, sysfs, etc.
+_DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
+                 "vfat", "exfat", "ntfs", "ntfs3", "zfs"}
+
+
+def _label_and_uuid_for(device):
+    """Look up filesystem LABEL and UUID for a device path via /dev/disk/by-*.
+
+    Pure filesystem walk — no subprocess, no blkid dependency — so this
+    stays cheap on every poll.
+    """
+    label = uuid = ""
+    try:
+        real = os.path.realpath(device)
+        for by, attr in (("/dev/disk/by-label", "label"),
+                         ("/dev/disk/by-uuid", "uuid")):
+            if not os.path.isdir(by):
+                continue
+            for name in os.listdir(by):
+                if os.path.realpath(os.path.join(by, name)) == real:
+                    if attr == "label":
+                        label = name.replace("\\x20", " ")
+                    else:
+                        uuid = name
+                    break
+    except Exception:
+        pass
+    return label, uuid
+
+
 def drives_snapshot(invalidate=False):
+    """Return every 'data' drive mounted on /mnt/*, from both the automount
+    state file (hot-plug USB/NVMe) and /proc/mounts (fstab-installed
+    storage like /mnt/cameras and /mnt/cloud-storage). Deduplicates by
+    mount point when both sources report the same drive.
+    """
     now = time.time()
     if not invalidate and _drives_cache["snap"] and now - _drives_cache["at"] < 10:
         return _drives_cache["snap"]
 
-    mounts = []
-    # Canonical source of truth is the state file written by the
-    # automount script. Fall back to /proc/mounts if it's missing.
+    by_mount = {}  # mount-point -> entry, so state + /proc/mounts merge cleanly
+
+    # 1) Hot-plug automount state (authoritative label/uuid for USB drives)
     state_path = "/var/lib/droplet-automount/mounts.json"
-    state = None
     try:
         with open(state_path) as f:
             state = json.load(f)
-    except Exception:
-        pass
-
-    if state:
         for m in state.get("mounts", []):
             mp = m.get("mount")
             if not mp:
                 continue
             total, used, free = _bytes_for(mp)
-            mounts.append({
+            by_mount[mp] = {
                 "device": m.get("device"),
                 "mount": mp,
                 "label": m.get("label") or "",
@@ -447,26 +478,48 @@ def drives_snapshot(invalidate=False):
                 "used_bytes": used,
                 "free_bytes": free,
                 "mounted": os.path.ismount(mp),
-            })
-    else:
-        try:
-            with open("/proc/mounts") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) < 3:
-                        continue
-                    dev, mp, fs = parts[0], parts[1], parts[2]
-                    if not mp.startswith("/mnt/droplet/"):
-                        continue
-                    total, used, free = _bytes_for(mp)
-                    mounts.append({
-                        "device": dev, "mount": mp, "label": "",
-                        "uuid": "", "size_bytes": total,
-                        "used_bytes": used, "free_bytes": free,
-                        "mounted": True,
-                    })
-        except Exception:
-            pass
+                "source": "automount",
+            }
+    except Exception:
+        pass
+
+    # 2) Installed storage from /proc/mounts: any real-fs mount on /mnt/*
+    # that isn't already covered by automount state. Covers fstab-mounted
+    # NVMe/SATA partitions that never go through the udev hot-plug path.
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                dev, mp, fs = parts[0], parts[1], parts[2]
+                if not mp.startswith("/mnt/"):
+                    continue
+                if fs not in _DATA_FSTYPES:
+                    continue
+                if mp in by_mount:
+                    continue  # automount state already has it
+                total, used, free = _bytes_for(mp)
+                label, uuid = _label_and_uuid_for(dev)
+                by_mount[mp] = {
+                    "device": dev,
+                    "mount": mp,
+                    "label": label,
+                    "uuid": uuid,
+                    "size_bytes": total,
+                    "used_bytes": used,
+                    "free_bytes": free,
+                    "mounted": True,
+                    "source": "fstab",
+                }
+    except Exception:
+        pass
+
+    # Stable order: fstab first (usually the big data drives), then
+    # automount (hot-plug), each group sorted by mount path for a
+    # predictable on-screen list.
+    mounts = sorted(by_mount.values(),
+                    key=lambda d: (d["source"] != "fstab", d["mount"]))
 
     snap = {
         "drives": mounts,
