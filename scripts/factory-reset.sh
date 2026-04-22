@@ -297,6 +297,28 @@ if [ -d "$REPO_ROOT/.data" ]; then
   log_success "Removed .data/ (logs and lock files)"
 fi
 
+# Device-bridge state + logs (needs sudo because systemd StateDirectory
+# runs as root). Silent if not installed — dev machines won't have this.
+if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
+  # Stop the bridge + rotation timer before wiping state so they don't
+  # race us writing back.
+  sudo systemctl stop droplet-wifi-rotate.timer 2>/dev/null || true
+  sudo systemctl stop droplet-device-bridge.service 2>/dev/null || true
+  # /var/lib/droplet-bridge holds the rotation timestamp + key digest.
+  # systemd will recreate it on next start via StateDirectory=.
+  sudo rm -rf /var/lib/droplet-bridge 2>/dev/null || true
+  # The env file carries the auth token + OpenWrt password — regenerate
+  # from the repo example on re-setup. We only remove the populated
+  # copy, not the example template in the repo.
+  sudo rm -f /etc/droplet/device-bridge.env 2>/dev/null || true
+  # Log files. These grow over time and can contain the current wifi
+  # key's sha256 digest on "rotated" lines; nothing sensitive but
+  # no reason to keep logs that pre-date the reset.
+  sudo rm -f /var/log/droplet-device-bridge.log \
+             /var/log/droplet-wifi-rotate.log 2>/dev/null || true
+  log_success "Removed device-bridge state, env, and logs"
+fi
+
 log_divider
 
 # =============================================================================

@@ -23,11 +23,38 @@ Environment=FRIGATE_URL=http://172.18.0.11:5000
 Environment=ORCHESTRATOR_URL=http://172.18.0.2:3000
 Environment=BRIDGE_PORT=9090
 Environment=BRIDGE_BIND=127.0.0.1
+Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
 ExecStart=/usr/bin/python3 /home/droplet/Documents/droplet-pi-platform/services/oled-display/device-bridge.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/var/log/droplet-device-bridge.log
 StandardError=append:/var/log/droplet-device-bridge.log
+
+# --- Hardening ---
+# StateDirectory creates /var/lib/droplet-bridge owned by droplet:droplet
+# with 0700 perms on every start, even after a factory-reset wipes it.
+# The bridge writes rotation timestamps + a key digest there; cleartext
+# keys never hit disk.
+StateDirectory=droplet-bridge
+StateDirectoryMode=0700
+# Lock down the filesystem view: readonly rootfs, private /tmp, mask
+# /proc so other users' details aren't visible.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+NoNewPrivileges=true
+# The bridge only needs IPv4/IPv6 + Unix sockets (SSH, curl, HTTP server).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Writable paths the bridge actually touches. Log file is per-unit so
+# append:/var/log/... needs that path writable; StateDirectory above is
+# handled automatically.
+ReadWritePaths=/var/log/droplet-device-bridge.log
+# Allow reading by-label/by-uuid for drive enumeration, and /proc/mounts.
+# Those are under /dev and /proc respectively — both readable by default.
 
 [Install]
 WantedBy=multi-user.target
