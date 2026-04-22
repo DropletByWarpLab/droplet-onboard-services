@@ -352,6 +352,8 @@ services:
     network_mode: host
     environment:
       - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      # Same token — the container talks to host-side device-bridge.
+      - BRIDGE_AUTH_TOKEN=${DEVICE_SECRET_KEY:-}
       - PORT=8082
       - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
       - LCD_WIDTH=480
@@ -362,6 +364,19 @@ services:
       # Bind /dev so /dev/ttyACM* is visible in the container and survives
       # PyPortal re-enumeration (USB hotplug changes the minor number).
       - /dev:/dev:rw
+    # Scoped device access — just the USB ACM class (major 166) instead of
+    # full `privileged: true`. Without the cgroup rule the kernel refuses
+    # open() on /dev/ttyACM* with EPERM and the service falls back to sim
+    # mode; with it, and only it, nothing else in the container can touch
+    # arbitrary host devices. `c 166:* rmw` = character device, major 166,
+    # any minor, read/write/mknod.
+    device_cgroup_rules:
+      - "c 166:* rmw"
+    # Don't let the container escalate beyond whatever cap-bag it launched
+    # with. Belt-and-braces — device_cgroup_rules above is the actual
+    # access control; this just blocks setuid binaries from flipping.
+    security_opt:
+      - no-new-privileges:true
     profiles: ["full"]
     restart: always
 

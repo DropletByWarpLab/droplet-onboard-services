@@ -2,49 +2,68 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Droplet TFT Display Preview — 480x320 Interactive</title>
+<title>Droplet PyPortal — New Swipe Dashboard (Preview)</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
-    --bg: #0b0b10;
-    --panel: #18181b;
-    --card: #1c1c1e;
-    --sep: #46464c;
+    --bg: #0a0a0c;
+    --panel: #111114;
+    --card: #16161a;
+    --card-2: #1c1c22;
+    --sep: #2a2a31;
+    --sep-2: #3a3a44;
     --label: #ffffff;
-    --label-2: #bebec8;
-    --label-3: #9191a0;
-    --label-4: #646473;
+    --label-2: #c4c4cc;
+    --label-3: #8b8b96;
+    --label-4: #545461;
     --accent: #818cf8;
     --accent-primary: #6366f1;
     --accent-light: #a5b4fc;
-    --accent-subtle: rgba(129,140,248,0.15);
+    --accent-subtle: rgba(99,102,241,0.16);
+    --accent-glow: rgba(99,102,241,0.30);
     --green: #30d158;
+    --green-soft: rgba(48,209,88,0.18);
     --orange: #ff9f0a;
+    --orange-soft: rgba(255,159,10,0.20);
     --red: #ff453a;
+    --red-soft: rgba(255,69,58,0.22);
+    --blue: #0a84ff;
   }
-  body {
-    background: radial-gradient(1200px 600px at 50% -20%, rgba(99,102,241,0.15), transparent 60%), var(--bg);
+  html, body {
+    background:
+      radial-gradient(1200px 600px at 50% -10%, rgba(99,102,241,0.12), transparent 60%),
+      radial-gradient(800px 400px at 85% 90%, rgba(10,132,255,0.08), transparent 60%),
+      var(--bg);
     color: var(--label);
-    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    font-family: -apple-system, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
     min-height: 100vh;
-    padding: 40px 24px 80px;
   }
+  body { padding: 36px 24px 96px; }
   header {
-    max-width: 1200px;
+    max-width: 1280px;
     margin: 0 auto 28px;
     text-align: center;
   }
   header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
-  header .tag {
-    margin-top: 8px;
-    color: var(--label-3);
-    font-size: 13px;
+  header .tag { margin-top: 6px; color: var(--label-3); font-size: 12px; }
+  header .badge {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: var(--accent);
+    background: var(--accent-subtle);
+    border: 1px solid rgba(129,140,248,0.3);
+    border-radius: 999px;
+    vertical-align: middle;
   }
   .layout {
-    max-width: 1200px;
+    max-width: 1280px;
     margin: 0 auto;
     display: grid;
-    grid-template-columns: minmax(520px, 1fr) 280px;
+    grid-template-columns: minmax(600px, 1fr) 320px;
     gap: 32px;
     align-items: start;
   }
@@ -52,156 +71,284 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 18px;
+    gap: 20px;
   }
   .bezel {
     position: relative;
-    background: #0a0a0c;
+    background: #060608;
     border: 1px solid #2a2a31;
-    border-radius: 18px;
-    padding: 16px;
+    border-radius: 22px;
+    padding: 18px;
     box-shadow:
-      0 30px 80px -30px rgba(99,102,241,0.35),
-      0 0 0 1px rgba(255,255,255,0.03) inset;
+      0 30px 80px -20px rgba(99,102,241,0.35),
+      0 0 0 1px rgba(255,255,255,0.025) inset;
+  }
+  .bezel::before {
+    content: '';
+    position: absolute;
+    top: 8px; left: 50%;
+    transform: translateX(-50%);
+    width: 6px; height: 6px;
+    background: #2a2a31;
+    border-radius: 50%;
   }
   canvas {
     display: block;
     width: 800px;
-    height: 533px;          /* 480x320 scaled up ~1.66x */
+    height: 533px;
     image-rendering: crisp-edges;
-    cursor: crosshair;
+    cursor: grab;
     border-radius: 6px;
     background: #000;
+    touch-action: none;
   }
-  .hotspots {
-    position: absolute;
-    inset: 16px;
-    pointer-events: none;
-  }
-  .hotspots div {
-    position: absolute;
-    border: 1px dashed rgba(129,140,248,0.35);
-    border-radius: 4px;
-    display: none;
-  }
-  .hotspots.visible div { display: block; }
-
+  canvas.dragging { cursor: grabbing; }
   .controls {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
     justify-content: center;
+    max-width: 800px;
   }
-  .controls button {
+  .controls button, .controls select {
     background: var(--card);
     color: var(--label);
     border: 1px solid var(--sep);
     border-radius: 10px;
     padding: 8px 14px;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s;
+    font-family: inherit;
   }
   .controls button:hover { border-color: var(--accent); color: var(--accent); }
-  .controls button.active { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+  .controls button.active {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .controls button.danger:hover { border-color: var(--red); color: var(--red); }
+  .hint {
+    color: var(--label-3);
+    font-size: 12px;
+    text-align: center;
+    line-height: 1.6;
+    max-width: 720px;
+  }
+  .hint code {
+    background: var(--card);
+    border: 1px solid var(--sep);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: var(--accent-light);
+  }
 
   .side {
     background: var(--card);
     border: 1px solid var(--sep);
     border-radius: 14px;
-    padding: 18px;
+    padding: 20px;
   }
-  .side h2 { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
-  .side p { color: var(--label-3); font-size: 12px; line-height: 1.55; margin-bottom: 16px; }
-  .side .row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
+  .side h2 {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--label-2);
+    margin-bottom: 12px;
+  }
+  .side p {
+    color: var(--label-3);
+    font-size: 12px;
+    line-height: 1.55;
+    margin-bottom: 14px;
+  }
+  .side .row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
   .side .row .k { color: var(--label-3); }
-  .side .row .v { color: var(--label); font-family: 'Menlo', monospace; }
-  .side label.toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; margin-top: 10px; }
+  .side .row .v { color: var(--label); font-family: 'SF Mono', 'Menlo', monospace; }
+  .side hr { border: none; border-top: 1px solid var(--sep); margin: 14px 0; }
+  .side ul { list-style: none; padding: 0; margin: 0; font-size: 12px; color: var(--label-2); line-height: 1.8; }
+  .side ul li::before { content: '›'; color: var(--accent); margin-right: 6px; font-weight: 700; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Droplet TFT Display — 480×320 Interactive Preview</h1>
-  <p class="tag">Faithful canvas render of <code>services/oled-display/display.py</code>. Click tiles on the panel to navigate.</p>
+  <h1>Droplet PyPortal — New Swipe Dashboard <span class="badge">PREVIEW</span></h1>
+  <p class="tag">Idle logo ⇠ (swipe left) Stats — Logo — QR (swipe right) ⇢ · Tap logo or red bubble · 480×320 canvas</p>
 </header>
 
 <div class="layout">
   <div class="stage">
     <div class="bezel">
       <canvas id="panel" width="480" height="320"></canvas>
-      <div class="hotspots" id="hotspots"></div>
     </div>
     <div class="controls">
-      <button data-screen="home" class="active">Home</button>
-      <button data-screen="stats">Health</button>
-      <button data-screen="chat">Ask AI</button>
-      <button data-screen="devices">Network</button>
-      <button data-screen="settings">Settings</button>
-      <button data-screen="logo">Logo</button>
-      <button data-screen="message">Message</button>
-      <button id="toggleRegions">Show tap regions</button>
+      <button data-screen="idle" class="active">Idle (logo)</button>
+      <button data-screen="stats">Stats</button>
+      <button data-screen="qr">QR / Join Wi-Fi</button>
+      <button id="btnAlert" class="danger">+ Fire camera alert</button>
+      <button id="btnClearAlerts">Clear alerts</button>
+      <button id="btnRotate">Rotate Wi-Fi key</button>
     </div>
+    <p class="hint">
+      Drag left/right on the screen to swipe · arrow keys <code>←</code> <code>→</code> also swipe · tap the logo to wake · tap the red <code>!</code> on Stats for alerts ·
+      after <code id="idleLabel">30s</code> of no input Stats/QR fade back to the dimmed idle logo.
+    </p>
   </div>
 
   <aside class="side">
-    <h2>Current screen</h2>
-    <p id="desc">Dashboard-style tile grid. Tap a tile to navigate.</p>
-    <div class="row"><span class="k">Screen</span><span class="v" id="meta-screen">home</span></div>
-    <div class="row"><span class="k">Resolution</span><span class="v">480 × 320</span></div>
-    <div class="row"><span class="k">Brightness</span><span class="v" id="meta-bri">255</span></div>
-    <div class="row"><span class="k">Last tap</span><span class="v" id="meta-tap">–</span></div>
-    <label class="toggle">
-      <input type="checkbox" id="liveTime" checked />
-      <span>Update clock / metrics live</span>
-    </label>
+    <h2>What's new</h2>
+    <ul>
+      <li>Logo = screensaver, not a nav tile</li>
+      <li>Swipe carousel: Stats ⇠ Logo ⇢ QR</li>
+      <li>Ubiquiti-style stats: radial dials + sparklines + rolled-up cards for network / drives / cams / wifi</li>
+      <li>Red <code>!</code> bubble top-right for Frigate parameter hits &amp; system errors — tap to see &amp; clear</li>
+      <li>QR pulls from router + rotates key on a TTL (lives in device-bridge)</li>
+    </ul>
+
+    <hr/>
+    <h2>Current</h2>
+    <div class="row"><span class="k">Screen</span><span class="v" id="metaScreen">idle</span></div>
+    <div class="row"><span class="k">Brightness</span><span class="v" id="metaBri">255</span></div>
+    <div class="row"><span class="k">Idle timer</span><span class="v" id="metaIdle">--</span></div>
+    <div class="row"><span class="k">Alerts</span><span class="v" id="metaAlerts">0</span></div>
+    <div class="row"><span class="k">Key rotates</span><span class="v" id="metaRot">--</span></div>
+
+    <hr/>
+    <h2>Sign-off checklist</h2>
+    <p>When you're happy with this preview, I'll port the design to <code>pyportal/code.py</code> (renderers + a swipe detector in the touch loop), then add <code>POST /openwrt/wifi/rotate</code> to <code>device-bridge.py</code> with a nightly cron. Nothing ships until you say go.</p>
   </aside>
 </div>
 
 <script>
-// ──────────────────────────────────────────────────────────────
-// Design tokens — mirror services/oled-display/display.py exactly
-// (dark-mode values from apps/web-dashboard/src/app/globals.css)
-// ──────────────────────────────────────────────────────────────
+// ============================================================
+// Design tokens — mirror apps/web-dashboard dark mode
+// ============================================================
 const C = {
-  bg: '#121214',
-  surfaceSecondary: '#1c1c1e',
-  surfaceRaised: '#18181b',
-  separator: '#46464c',
+  bg: '#0a0a0c',
+  panel: '#111114',
+  card: '#16161a',
+  card2: '#1c1c22',
+  sep: '#2a2a31',
+  sep2: '#3a3a44',
   text: '#ffffff',
-  labelSecondary: 'rgb(190,190,200)',
-  labelTertiary: 'rgb(145,145,160)',
-  labelQuaternary: 'rgb(100,100,115)',
+  label2: '#c4c4cc',
+  label3: '#8b8b96',
+  label4: '#545461',
   accent: '#818cf8',
   accentPrimary: '#6366f1',
   accentLight: '#a5b4fc',
-  accentSubtle: 'rgb(45,47,85)',
+  accentSubtle: 'rgba(99,102,241,0.16)',
+  accentGlow: 'rgba(99,102,241,0.30)',
   green: '#30d158',
+  greenSoft: 'rgba(48,209,88,0.18)',
   orange: '#ff9f0a',
+  orangeSoft: 'rgba(255,159,10,0.20)',
   red: '#ff453a',
+  redSoft: 'rgba(255,69,58,0.22)',
+  blue: '#0a84ff',
 };
 
 const W = 480, H = 320;
 const canvas = document.getElementById('panel');
 const ctx = canvas.getContext('2d');
 
-// ──────────────────────────────────────────────────────────────
-// State
-// ──────────────────────────────────────────────────────────────
-let screen = 'home';
-let brightness = 255;
-let touchRegions = [];
-let lastTap = null;
-let tapAt = 0;
-let lastMessage = null;
-let liveTime = true;
-// Fake metrics — refreshed on a timer, not real data.
-const metrics = { cpu: 18, mem: 42, disk: 61, temp: 48, ip: '192.168.50.41', hostname: 'droplet-lab' };
+// ============================================================
+// Live fake data (in real firmware this comes from the bridge)
+// ============================================================
+const data = {
+  hostname: 'droplet-lab',
+  ip: '192.168.50.41',
+  uptime: '4d 12h 38m',
+  cpu: 24, mem: 47, disk: 62, temp: 54,
+  sparks: { cpu: [], mem: [], disk: [], temp: [] },
+  wan: { up: true, latency: 12 },
+  lan: { clients: 7 },
+  wifi: {
+    ssid: 'Droplet-AI',
+    clients: 3,
+    channel: 36,
+    band: '5GHz',
+    keyRotatesInSec: 24 * 60,  // 24 minutes to next rotation
+  },
+  drives: {
+    count: 2,
+    usedBytes: 412 * 1e9,
+    totalBytes: 1024 * 1e9,
+  },
+  cams: {
+    online: 3, total: 4,
+    lastEvent: { camera: 'driveway', label: 'person', score: 0.91, ago: '2m' },
+  },
+  files: { count: 1287, sizeBytes: 48 * 1e9 },
+};
+for (const k of ['cpu','mem','disk','temp']) {
+  for (let i = 0; i < 40; i++) data.sparks[k].push(data[k] + (Math.random()*12-6));
+}
 
-// ──────────────────────────────────────────────────────────────
-// Primitives
-// ──────────────────────────────────────────────────────────────
+// Alerts — Frigate parameter hits + system errors. Seed with a couple so
+// the bubble is visible by default.
+let alerts = [
+  { type: 'cam',  title: 'driveway: person',     detail: 'confidence 91%', time: '2m ago',  cleared: false },
+  { type: 'sys',  title: 'orchestrator restart', detail: 'auto-recovered', time: '14m ago', cleared: false },
+];
+
+// ============================================================
+// Screen state
+// ============================================================
+let screen = 'idle';        // 'idle' | 'stats' | 'qr'
+let eventsOpen = false;      // overlay on top of 'stats'
+let brightness = 255;        // 255 = full; dims to 96 when idle
+let idleTimer = null;
+let idleAt = 0;              // monotonic time left until auto-idle
+const IDLE_MS = 30000;
+let rotTimer = null;         // rotation countdown
+
+// Carousel X-position for swipe animation (-W..W during drag, snaps back)
+let dragX = 0;
+let dragging = false;
+let dragStart = null;
+let dragAnim = null;
+
+// Simulated metric drift so sparklines breathe
+setInterval(() => {
+  for (const k of ['cpu','mem']) {
+    const v = Math.max(3, Math.min(92, data[k] + (Math.random()*10-5)));
+    data[k] = v;
+    data.sparks[k].push(v);
+    if (data.sparks[k].length > 40) data.sparks[k].shift();
+  }
+  data.temp = Math.max(38, Math.min(78, data.temp + (Math.random()*2-1)));
+  data.sparks.temp.push(data.temp);
+  if (data.sparks.temp.length > 40) data.sparks.temp.shift();
+  render();
+}, 1200);
+
+// Wi-Fi key rotation countdown (demo: decrements every second)
+setInterval(() => {
+  if (data.wifi.keyRotatesInSec > 0) data.wifi.keyRotatesInSec--;
+  if (data.wifi.keyRotatesInSec === 0) {
+    data.wifi.keyRotatesInSec = 60 * 60;  // 1h cadence
+    alerts.unshift({
+      type: 'sys', title: 'Wi-Fi key rotated', detail: 'Droplet AI · new QR available',
+      time: 'just now', cleared: false
+    });
+  }
+  render();
+}, 1000);
+
+// ============================================================
+// Helpers
+// ============================================================
 function rrect(x, y, w, h, r, fill, stroke, sw=1) {
+  r = Math.min(r, w/2, h/2);
   ctx.beginPath();
   ctx.moveTo(x+r,y);
   ctx.arcTo(x+w,y,x+w,y+h,r);
@@ -212,24 +359,41 @@ function rrect(x, y, w, h, r, fill, stroke, sw=1) {
   if (fill) { ctx.fillStyle = fill; ctx.fill(); }
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = sw; ctx.stroke(); }
 }
-function text(s, x, y, {size=14, bold=false, color=C.text, align='left', baseline='top'}={}) {
-  ctx.font = `${bold ? '700' : '400'} ${size}px -apple-system, 'Segoe UI', system-ui, sans-serif`;
+function text(s, x, y, {size=13, weight=400, color=C.text, align='left', baseline='top', letter=0}={}) {
+  ctx.font = `${weight} ${size}px -apple-system,'SF Pro Text','Segoe UI',system-ui,sans-serif`;
   ctx.fillStyle = color;
   ctx.textAlign = align;
   ctx.textBaseline = baseline;
-  ctx.fillText(s, x, y);
+  if (letter) {
+    const chars = s.split('');
+    let cx = x;
+    const origAlign = ctx.textAlign;
+    ctx.textAlign = 'left';
+    const total = chars.reduce((a,ch) => a + ctx.measureText(ch).width + letter, -letter);
+    if (origAlign === 'center') cx = x - total/2;
+    else if (origAlign === 'right') cx = x - total;
+    chars.forEach(ch => {
+      ctx.fillText(ch, cx, y);
+      cx += ctx.measureText(ch).width + letter;
+    });
+    ctx.textAlign = origAlign;
+  } else {
+    ctx.fillText(s, x, y);
+  }
 }
-function measure(s, size, bold) {
-  ctx.font = `${bold?'700':'400'} ${size}px -apple-system,'Segoe UI',system-ui,sans-serif`;
-  return ctx.measureText(s).width;
-}
-// Canonical Droplet mark — geometry from apps/web-dashboard/src/components/DropletMark.tsx
+
+// Droplet mark — geometry matches apps/web-dashboard/src/components/DropletMark.tsx
 const MARK_LEFT  = [[26,0],[44,28],[36,48],[16,48],[8,28]];
 const MARK_RIGHT = [[26,0],[44,28],[26,36]];
-function drawMark(x, y, size, primary=C.accentPrimary, highlight=C.accentLight) {
+function drawMark(x, y, size, primary=C.accentPrimary, highlight=C.accentLight, glow=false) {
   const vw = 52, vh = 60;
   const s = size/vh;
   const xOff = x + (size - vw*s)/2;
+  if (glow) {
+    ctx.save();
+    ctx.shadowColor = C.accentGlow;
+    ctx.shadowBlur = 30;
+  }
   const poly = (pts, fill) => {
     ctx.beginPath();
     pts.forEach(([px,py],i) => {
@@ -242,391 +406,679 @@ function drawMark(x, y, size, primary=C.accentPrimary, highlight=C.accentLight) 
   };
   poly(MARK_LEFT, primary);
   poly(MARK_RIGHT, highlight);
+  if (glow) ctx.restore();
 }
 
-// ──────────────────────────────────────────────────────────────
-// Touch regions
-// ──────────────────────────────────────────────────────────────
-function addRegion(name, x, y, w, h, action) {
-  touchRegions.push({name, x, y, w, h, action});
-}
-function renderHotspots() {
-  const el = document.getElementById('hotspots');
-  el.innerHTML = '';
-  const rect = canvas.getBoundingClientRect();
-  const sx = rect.width / W, sy = rect.height / H;
-  touchRegions.forEach(r => {
-    const d = document.createElement('div');
-    d.style.left = (r.x * sx) + 'px';
-    d.style.top = (r.y * sy) + 'px';
-    d.style.width = (r.w * sx) + 'px';
-    d.style.height = (r.h * sy) + 'px';
-    el.appendChild(d);
-  });
+function fmtBytes(n) {
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length-1) { n /= 1024; i++; }
+  return n.toFixed(i < 2 ? 0 : 1) + ' ' + units[i];
 }
 
-// ──────────────────────────────────────────────────────────────
-// Shared header
-// ──────────────────────────────────────────────────────────────
-function drawHeader({title='Droplet', showBack=false, showHome=false, status='Online'}) {
-  const barH = 52;
-  rrect(0, 0, W, barH, 0, C.surfaceSecondary);
-  ctx.strokeStyle = C.separator; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(0, barH); ctx.lineTo(W, barH); ctx.stroke();
-
-  let x = 12;
-  if (showBack) {
-    drawButton(x, 10, 70, 32, '< Back', 12, () => { setScreen('home'); });
-    x += 80;
-  } else if (showHome) {
-    drawButton(x, 10, 70, 32, 'Home', 12, () => { setScreen('home'); });
-    x += 80;
-  }
-
-  drawMark(x, 10, 32, C.accent, C.accentLight);
-  x += 36;
-  text(title, x, 14, {size:17, bold:true});
-
-  const clock = new Date().toTimeString().slice(0,5);
-  text(clock, W-14, 14, {size:20, bold:true, align:'right'});
-
-  if (status) {
-    const chipFont = 11;
-    const clockW = measure(clock, 20, true);
-    const chipW = measure(status, chipFont, true) + 22;
-    const chipX = W - clockW - 14 - chipW - 10;
-    rrect(chipX, 16, chipW, 20, 10, C.surfaceRaised);
-    ctx.fillStyle = C.green;
-    ctx.beginPath(); ctx.arc(chipX+10, 26, 3, 0, Math.PI*2); ctx.fill();
-    text(status, chipX+16, 19, {size:chipFont, bold:true, color:C.labelSecondary});
-  }
-  return barH + 6;
+function fmtDuration(s) {
+  const m = Math.floor(s/60), sec = s%60;
+  return m + ':' + String(sec).padStart(2,'0');
 }
 
-function drawButton(x, y, w, h, label, size, action) {
-  const active = lastTap && lastTap.name && touchRegions.length && Date.now()-tapAt < 250
-      && touchRegions[touchRegions.length-1]?.name === lastTap.name;
-  rrect(x, y, w, h, h/2, C.surfaceRaised, C.separator, 1);
-  text(label, x+w/2, y+h/2+1, {size, bold:true, align:'center', baseline:'middle'});
-  if (action) addRegion(`btn_${label}`, x, y, w, h, action);
+function colorFor(pct, warn=80, crit=95) {
+  if (pct >= crit) return C.red;
+  if (pct >= warn) return C.orange;
+  return C.accent;
 }
 
-// ──────────────────────────────────────────────────────────────
-// Screens
-// ──────────────────────────────────────────────────────────────
-function renderHome() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
-  const y0 = drawHeader({});
+// ============================================================
+// Reusable widgets
+// ============================================================
+function radialGauge(cx, cy, r, pct, label, valueStr, sparks) {
+  const color = colorFor(pct);
+  const startA = Math.PI * 0.75;
+  const endA   = Math.PI * 2.25;
+  const sweep  = endA - startA;
 
-  const pad = 10, gap = 10;
-  const gridW = W - 2*pad;
-  const gridH = H - y0 - 66;
-  const tW = (gridW - gap) / 2;
-  const tH = (gridH - gap) / 2;
-
-  const tiles = [
-    {tag:'CHAT', title:'Ask AI',   sub:'Tap to chat',     go:'chat'},
-    {tag:'SYS',  title:'Status',   sub:'Health & metrics',go:'stats'},
-    {tag:'NET',  title:'Network',  sub:metrics.ip,        go:'devices'},
-    {tag:'CFG',  title:'Settings', sub:'Brightness & more',go:'settings'},
-  ];
-  tiles.forEach((t,i) => {
-    const col = i%2, row = (i/2)|0;
-    const x = pad + col*(tW+gap), y = y0 + row*(tH+gap);
-    drawTile(x,y,tW,tH, t.tag,t.title,t.sub, () => setScreen(t.go));
-  });
-
-  // Status ribbon
-  drawStatusRibbon(pad, H-56, W-2*pad, 44);
-}
-
-function drawTile(x, y, w, h, tag, title, sub, action) {
-  const active = lastTap && lastTap.x>=x && lastTap.x<=x+w && lastTap.y>=y && lastTap.y<=y+h
-      && Date.now()-tapAt < 300;
-  rrect(x,y,w,h,14, active ? C.surfaceSecondary : C.surfaceRaised,
-        active ? C.accent : C.separator, 1);
-
-  const pad = 12;
-  // Tag pill
-  const pillW = 42, pillH = 20;
-  rrect(x+pad, y+pad, pillW, pillH, 10, C.accentSubtle);
-  text(tag, x+pad+pillW/2, y+pad+pillH/2, {size:12, bold:true, color:C.accent, align:'center', baseline:'middle'});
-
-  // Title
-  text(title, x+pad, y+pad+pillH+22, {size:19, bold:true});
-  // Sub
-  text(sub.slice(0,28), x+pad, y+pad+pillH+48, {size:12, color:C.labelTertiary});
-
-  // Chevron
-  ctx.fillStyle = C.labelTertiary;
+  // Track
+  ctx.strokeStyle = C.sep;
+  ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.moveTo(x+w-26, y+h-24);
-  ctx.lineTo(x+w-16, y+h-18);
-  ctx.lineTo(x+w-26, y+h-12);
-  ctx.closePath(); ctx.fill();
+  ctx.arc(cx, cy, r, startA, endA);
+  ctx.stroke();
 
-  addRegion(`tile_${tag.toLowerCase()}`, x, y, w, h, action);
-}
+  // Fill
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, startA, startA + sweep * Math.max(0, Math.min(100, pct))/100);
+  ctx.stroke();
+  ctx.lineCap = 'butt';
 
-function drawStatusRibbon(x, y, w, h) {
-  rrect(x, y, w, h, 12, C.surfaceRaised, C.separator, 1);
-  const segs = [
-    [`${metrics.cpu}%`,  'CPU'],
-    [`${metrics.mem}%`,  'RAM'],
-    [`${metrics.disk}%`, 'DISK'],
-    [`${metrics.temp}°C`, 'TEMP'],
-    ['12h 5m',            'UP'],
-  ];
-  const sW = w/segs.length;
-  segs.forEach(([p,s], i) => {
-    const cx = x + i*sW;
-    text(p, cx+12, y+6, {size:15, bold:true});
-    text(s, cx+12, y+26, {size:10, bold:true, color:C.labelTertiary});
-    if (i>0) {
-      ctx.strokeStyle = C.separator; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(cx, y+8); ctx.lineTo(cx, y+h-8); ctx.stroke();
-    }
-  });
-}
+  // Center text
+  text(valueStr, cx, cy-2, {size:16, weight:700, align:'center', baseline:'middle'});
+  text(label, cx, cy+13, {size:9, weight:700, color:C.label3, align:'center', baseline:'middle', letter:0.6});
 
-function renderStats() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
-  const y0 = drawHeader({title:'Health', showBack:true});
-  const pad = 10, gap = 10;
-  const cW = (W - 2*pad - gap)/2;
-  const cH = (H - y0 - 56 - gap)/2;
-
-  drawMetric(pad, y0, cW, cH, 'CPU', `${metrics.cpu}%`, metrics.cpu, 80, 95);
-  drawMetric(pad+cW+gap, y0, cW, cH, 'MEMORY', `${(metrics.mem*16/100).toFixed(1)}/16 GB`, metrics.mem, 80, 95);
-  drawMetric(pad, y0+cH+gap, cW, cH, 'DISK', `${(metrics.disk*1024/100)|0}/1024 GB`, metrics.disk, 85, 95);
-  drawTemp(pad+cW+gap, y0+cH+gap, cW, cH, metrics.temp);
-
-  // Footer
-  const fy = H-42;
-  text('IP', pad, fy, {size:10, bold:true, color:C.labelTertiary});
-  text(metrics.ip, pad+24, fy-2, {size:14});
-  const up = '12h 5m';
-  const upW = measure(up, 14, false);
-  text(up, W-pad-upW, fy-2, {size:14});
-  text('UP', W-pad-upW-28, fy, {size:10, bold:true, color:C.labelTertiary});
-}
-function drawMetric(x,y,w,h,label,value,pct, warn=80, crit=95) {
-  rrect(x,y,w,h,14, C.surfaceRaised);
-  text(label, x+14, y+12, {size:11, bold:true, color:C.labelTertiary});
-  text(value, x+14, y+30, {size:26, bold:true});
-  const bx=x+14, by=y+h-22, bw=w-28;
-  rrect(bx,by,bw,8,4, C.surfaceSecondary);
-  const fw = (bw*Math.max(0,Math.min(100,pct)))/100|0;
-  if (fw>0) {
-    const fill = pct<warn ? C.accent : pct<crit ? C.orange : C.red;
-    rrect(bx,by,fw,8,4, fill);
-  }
-}
-function drawTemp(x,y,w,h,temp) {
-  rrect(x,y,w,h,14, C.surfaceRaised);
-  text('TEMP', x+14, y+12, {size:11, bold:true, color:C.labelTertiary});
-  const color = temp<70 ? C.text : temp<85 ? C.orange : C.red;
-  text(`${temp}°C`, x+14, y+30, {size:26, bold:true, color});
-  const s = temp<70 ? 'nominal' : temp<85 ? 'warm' : 'hot';
-  const sc = temp<70 ? C.green : temp<85 ? C.orange : C.red;
-  text(s, x+14, y+h-24, {size:12, color:sc});
-}
-
-function renderChat() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
-  const y0 = drawHeader({title:'Ask AI', showBack:true});
-
-  text('What can I', 16, y0+6, {size:30, bold:true});
-  text('help you with?', 16, y0+40, {size:30, bold:true, color:C.accent});
-
-  const cy = y0+92, cw = W-32, ch = 48;
-  rrect(16, cy, cw, ch, ch/2, C.surfaceRaised, C.accent, 1);
-  text('*  Open chat on dashboard to ask…', 34, cy+14, {size:15, color:C.labelSecondary});
-
-  const bW = 60, bX = 16+cw-bW-6, bY = cy+6, bH = ch-12;
-  rrect(bX, bY, bW, bH, bH/2, C.accent);
-  text('Ask', bX+bW/2, bY+bH/2+1, {size:13, bold:true, align:'center', baseline:'middle', color:'#fff'});
-
-  const my = cy+ch+16, mh = H-my-16;
-  rrect(16, my, W-32, mh, 12, C.surfaceRaised);
-  text('LATEST', 28, my+10, {size:10, bold:true, color:C.labelTertiary});
-  if (lastMessage) {
-    text(lastMessage.title, 28, my+28, {size:16, bold:true});
-    (lastMessage.lines || []).slice(0,3).forEach((ln, i) => {
-      text(ln.slice(0,54), 28, my+54+i*20, {size:13, color:C.labelSecondary});
+  // Mini sparkline beneath the dial
+  if (sparks && sparks.length > 1) {
+    const sx = cx - r, sy = cy + r + 4, sw = r*2, sh = 10;
+    const lo = Math.min(...sparks), hi = Math.max(...sparks);
+    const span = Math.max(1, hi - lo);
+    ctx.strokeStyle = color + 'cc';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    sparks.forEach((v,i) => {
+      const px = sx + (i/(sparks.length-1)) * sw;
+      const py = sy + sh - ((v-lo)/span) * sh;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     });
+    ctx.stroke();
+  }
+}
+
+function statusDot(x, y, color, r=3) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = color + '44';
+  ctx.beginPath();
+  ctx.arc(x, y, r+2, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function card(x, y, w, h) {
+  rrect(x, y, w, h, 10, C.card);
+  rrect(x, y, w, h, 10, null, C.sep, 1);
+}
+
+// ============================================================
+// SCREENS
+// ============================================================
+
+// ---------- Idle (logo screensaver) ----------
+function drawIdle(offsetX=0) {
+  ctx.save();
+  ctx.translate(offsetX, 0);
+
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle radial glow
+  const grd = ctx.createRadialGradient(W/2, H/2, 20, W/2, H/2, 240);
+  grd.addColorStop(0, 'rgba(99,102,241,0.12)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, W, H);
+
+  // Breath animation — tiny scale + brightness pulse
+  const t = (Date.now() % 4000) / 4000;
+  const pulse = 1 + 0.02 * Math.sin(t * Math.PI * 2);
+  const size = 150 * pulse;
+  const mx = (W - size*52/60) / 2;
+  const my = (H - size) / 2 - 16;
+  drawMark(mx, my, size, C.accentPrimary, C.accentLight, true);
+
+  // Wordmark
+  text('Droplet', W/2, my + size + 36, {size:28, weight:700, align:'center', baseline:'middle', letter:0.5});
+
+  // Hints
+  ctx.globalAlpha = 0.6;
+  text('‹ swipe      tap to wake      swipe ›', W/2, H - 20,
+    {size:10, weight:500, color:C.label3, align:'center', baseline:'middle', letter:1.2});
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
+// ---------- Stats (Ubiquiti-style) ----------
+function drawStats(offsetX=0) {
+  ctx.save();
+  ctx.translate(offsetX, 0);
+
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Header (42px)
+  rrect(0, 0, W, 42, 0, C.panel);
+  rrect(0, 41, W, 1, 0, C.sep);
+
+  drawMark(12, 8, 26, C.accent, C.accentLight);
+  text(data.hostname, 44, 12, {size:14, weight:700});
+  text(data.ip + ' · up ' + data.uptime, 44, 28, {size:10, color:C.label3});
+
+  // Clock + alert bubble top-right
+  const clock = new Date().toTimeString().slice(0,5);
+  const openCount = alerts.filter(a => !a.cleared).length;
+  if (openCount > 0) {
+    // Red bubble with count
+    const bx = W - 30, by = 10, br = 11;
+    ctx.save();
+    ctx.shadowColor = C.red;
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = C.red;
+    ctx.beginPath();
+    ctx.arc(bx, by+br, br, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    text('!', bx, by+br+0.5, {size:14, weight:900, color:'#fff', align:'center', baseline:'middle'});
+    if (openCount > 1) {
+      // Small count chip on top-right of bubble
+      const cw = 14, ch = 12;
+      rrect(bx + 5, by - 3, cw, ch, ch/2, '#fff');
+      text(String(openCount), bx + 5 + cw/2, by + 3, {size:9, weight:700, color:C.red, align:'center', baseline:'middle'});
+    }
+    // Tap region
+    regions.push({x: bx-br-4, y: by-4, w: br*2+8, h: br*2+8, on: () => { eventsOpen = true; bumpIdle(); render(); }});
   } else {
-    text('Assistant is idle.', 28, my+28, {size:14, color:C.labelSecondary});
-    text('Tool calls and replies appear here.', 28, my+50, {size:12, color:C.labelTertiary});
+    // Soft status ring (all clear)
+    statusDot(W - 28, 21, C.green, 3);
+    text('OK', W - 18, 22, {size:10, weight:700, color:C.green, baseline:'middle'});
+  }
+  // Clock next to bubble
+  text(clock, W - 50, 22, {size:12, weight:600, color:C.label2, align:'right', baseline:'middle'});
+
+  // --- Row 1: 4 radial dials ---
+  const dials = [
+    ['CPU',  data.cpu,  data.cpu.toFixed(0) + '%', data.sparks.cpu],
+    ['MEM',  data.mem,  data.mem.toFixed(0) + '%', data.sparks.mem],
+    ['DISK', data.disk, data.disk.toFixed(0) + '%', data.sparks.disk],
+    ['TEMP', data.temp, data.temp.toFixed(0) + '°', data.sparks.temp],
+  ];
+  const gRowY = 82;
+  const gGap = W / 4;
+  dials.forEach(([lbl, pct, val, sp], i) => {
+    radialGauge(gGap * (i + 0.5), gRowY, 26, pct, lbl, val, sp);
+  });
+
+  // --- Row 2: Network + Storage (2 cards) ---
+  const pad = 10;
+  const r2y = 138;
+  const cw = (W - 3*pad) / 2;
+  const ch = 72;
+  drawNetworkCard(pad, r2y, cw, ch);
+  drawStorageCard(pad*2 + cw, r2y, cw, ch);
+
+  // --- Row 3: Cameras + Wi-Fi (2 cards) ---
+  const r3y = r2y + ch + pad;
+  drawCamerasCard(pad, r3y, cw, ch);
+  drawWifiCard(pad*2 + cw, r3y, cw, ch);
+
+  ctx.restore();
+}
+
+function drawNetworkCard(x, y, w, h) {
+  card(x, y, w, h);
+  text('NETWORK', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
+  statusDot(x + w - 14, y + 13, data.wan.up ? C.green : C.red);
+  text(data.wan.up ? 'UP' : 'DOWN', x + w - 22, y + 13, {
+    size:9, weight:700, color:data.wan.up?C.green:C.red, align:'right', baseline:'middle'
+  });
+  text(data.ip, x+10, y+24, {size:14, weight:700});
+  // Two metrics under: clients, latency
+  text(data.lan.clients + ' clients', x+10, y+46, {size:11, color:C.label2});
+  text(data.wan.latency + 'ms', x+10, y+60, {size:11, color:C.label3});
+  // Mini LAN icon-ish bar on right
+  const bx = x + w - 60, by = y + 44, bw = 50;
+  rrect(bx, by, bw, 3, 1.5, C.sep);
+  rrect(bx, by, Math.min(bw, data.lan.clients * 6), 3, 1.5, C.accent);
+  text('LAN', x + w - 14, y + 58, {size:9, weight:700, color:C.label3, align:'right'});
+}
+
+function drawStorageCard(x, y, w, h) {
+  card(x, y, w, h);
+  text('STORAGE', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
+  const pct = (data.drives.usedBytes / data.drives.totalBytes) * 100;
+  const col = colorFor(pct, 80, 95);
+  statusDot(x + w - 14, y + 13, col);
+  text(data.drives.count + ' drive' + (data.drives.count === 1 ? '' : 's'),
+    x + w - 22, y + 13, {size:9, weight:700, color:col, align:'right', baseline:'middle'});
+
+  text(fmtBytes(data.drives.usedBytes), x+10, y+24, {size:14, weight:700});
+  text('of ' + fmtBytes(data.drives.totalBytes), x+10, y+46, {size:10, color:C.label3});
+
+  // Fill bar
+  const bx = x+10, by = y + h - 16, bw = w - 20;
+  rrect(bx, by, bw, 6, 3, C.sep);
+  const fw = Math.floor(bw * Math.max(0, Math.min(100, pct)) / 100);
+  if (fw > 0) rrect(bx, by, fw, 6, 3, col);
+  text(pct.toFixed(0)+'%', x + w - 10, by - 2, {size:9, weight:700, color:col, align:'right', baseline:'bottom'});
+}
+
+function drawCamerasCard(x, y, w, h) {
+  card(x, y, w, h);
+  text('CAMERAS', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
+  const ok = data.cams.online === data.cams.total;
+  const col = ok ? C.green : (data.cams.online === 0 ? C.red : C.orange);
+  statusDot(x + w - 14, y + 13, col);
+  text(data.cams.online + '/' + data.cams.total + ' online',
+    x + w - 22, y + 13, {size:9, weight:700, color:col, align:'right', baseline:'middle'});
+
+  const ev = data.cams.lastEvent;
+  if (ev) {
+    text(ev.camera, x+10, y+24, {size:13, weight:700});
+    text(ev.label + ' · ' + (ev.score*100).toFixed(0) + '%',
+      x+10, y+44, {size:11, color:C.accent});
+    text(ev.ago + ' ago', x+10, y+58, {size:10, color:C.label3});
+  } else {
+    text('No events', x+10, y+28, {size:12, color:C.label3});
   }
 }
 
-function renderDevices() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
-  const y0 = drawHeader({title:'Network', showBack:true});
+function drawWifiCard(x, y, w, h) {
+  card(x, y, w, h);
+  text('WI-FI', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
+  statusDot(x + w - 14, y + 13, C.accent);
+  text('ch ' + data.wifi.channel + ' · ' + data.wifi.band,
+    x + w - 22, y + 13, {size:9, weight:700, color:C.accent, align:'right', baseline:'middle'});
 
-  const pad = 16, cardH = 96;
-  rrect(pad, y0+4, W-2*pad, cardH, 14, C.surfaceRaised);
-  drawMark(pad+16, y0+18, 52, C.accent, C.accentLight);
-  text(metrics.hostname, pad+86, y0+18, {size:17, bold:true});
-  text(metrics.ip, pad+86, y0+44, {size:16, color:C.accent});
-  text('This device', pad+86, y0+66, {size:12, color:C.labelTertiary});
-
-  const sy = y0+4+cardH+12, sh = H-sy-16, cw = (W-2*pad-12)/2;
-  [['LAN', metrics.ip, 'Via gateway'],
-   ['UPLINK', 'Online', 'DNS reachable']].forEach(([l,p,s], i) => {
-    const sx = pad + i*(cw+12);
-    rrect(sx, sy, cw, sh, 14, C.surfaceRaised);
-    text(l, sx+14, sy+12, {size:10, bold:true, color:C.labelTertiary});
-    text(p, sx+14, sy+30, {size:17, bold:true});
-    text(s, sx+14, sy+sh-26, {size:12, color:C.labelSecondary});
-  });
+  text(data.wifi.ssid, x+10, y+24, {size:13, weight:700});
+  text(data.wifi.clients + ' client' + (data.wifi.clients === 1 ? '' : 's'),
+    x+10, y+44, {size:11, color:C.label2});
+  // Countdown to next key rotation
+  text('rotates in ' + fmtDuration(data.wifi.keyRotatesInSec),
+    x+10, y+58, {size:10, color:C.label3});
 }
 
-function renderSettings() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
-  const y0 = drawHeader({title:'Settings', showBack:true});
+// ---------- QR / Join Wi-Fi ----------
+function drawQR(offsetX=0) {
+  ctx.save();
+  ctx.translate(offsetX, 0);
 
-  const pad=16, cy=y0+4, ch=130;
-  rrect(pad, cy, W-2*pad, ch, 14, C.surfaceRaised);
-  text('BRIGHTNESS', pad+16, cy+14, {size:11, bold:true, color:C.labelTertiary});
-  text(`${brightness}/255`, pad+16, cy+32, {size:24, bold:true});
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
 
-  const mx = W-pad-120, px = W-pad-60, by = cy+18;
-  rrect(mx, by, 50, 44, 22, C.surfaceRaised, C.separator, 1);
-  text('-', mx+25, by+22, {size:20, bold:true, align:'center', baseline:'middle'});
-  addRegion('bri_minus', mx, by, 50, 44, () => { brightness = Math.max(0, brightness-25); render(); });
-  rrect(px, by, 50, 44, 22, C.surfaceRaised, C.separator, 1);
-  text('+', px+25, by+22, {size:20, bold:true, align:'center', baseline:'middle'});
-  addRegion('bri_plus', px, by, 50, 44, () => { brightness = Math.min(255, brightness+25); render(); });
+  // Header
+  rrect(0, 0, W, 42, 0, C.panel);
+  rrect(0, 41, W, 1, 0, C.sep);
+  drawMark(12, 8, 26, C.accent, C.accentLight);
+  text('Join Wi-Fi', 44, 12, {size:14, weight:700});
+  text('Scan with your phone camera', 44, 28, {size:10, color:C.label3});
 
-  const bx=pad+16, bby=cy+ch-22, bw=W-2*pad-32;
-  rrect(bx, bby, bw, 8, 4, C.surfaceSecondary);
-  const fw = (bw*brightness/255)|0;
-  if (fw>0) rrect(bx, bby, fw, 8, 4, C.accent);
+  // Rotation TTL chip
+  const secs = data.wifi.keyRotatesInSec;
+  const ttlStr = 'KEY ' + fmtDuration(secs);
+  const ttlW = 72;
+  rrect(W - ttlW - 10, 10, ttlW, 22, 11, secs < 60 ? C.orangeSoft : C.accentSubtle);
+  text(ttlStr, W - ttlW/2 - 10, 21,
+    {size:10, weight:700, color:secs < 60 ? C.orange : C.accent, align:'center', baseline:'middle', letter:0.6});
 
-  const ay = cy+ch+14, ah = H-ay-16, cw=(W-2*pad-12)/2;
-  rrect(pad, ay, cw, ah, 14, C.surfaceRaised);
-  text('SHOW LOGO', pad+14, ay+14, {size:11, bold:true, color:C.labelTertiary});
-  text('Splash screen', pad+14, ay+34, {size:17, bold:true});
-  addRegion('act_logo', pad, ay, cw, ah, () => setScreen('logo'));
+  // QR block — simulated, not a real encoder (preview only).
+  // We draw a 25x25 pseudo-random-but-stable matrix so it *feels* like a QR.
+  const qrSize = 220;
+  const qx = 32, qy = 60;
+  rrect(qx - 10, qy - 10, qrSize + 20, qrSize + 20, 12, '#fff');
+  drawFakeQR(qx, qy, qrSize);
 
-  const rx = pad+cw+12;
-  rrect(rx, ay, cw, ah, 14, C.surfaceRaised);
-  text('CYCLE', rx+14, ay+14, {size:11, bold:true, color:C.labelTertiary});
-  text('Auto-cycle off', rx+14, ay+34, {size:17, bold:true});
-  addRegion('act_cycle', rx, ay, cw, ah, () => {});
+  // Right side panel
+  const rx = qx + qrSize + 24;
+  const rw = W - rx - 16;
+  text('SSID', rx, 62, {size:9, weight:700, color:C.label3, letter:0.6});
+  text(data.wifi.ssid, rx, 78, {size:16, weight:700});
+
+  text('SECURITY', rx, 108, {size:9, weight:700, color:C.label3, letter:0.6});
+  text('WPA2', rx, 124, {size:14, weight:700, color:C.accent});
+
+  text('BAND', rx, 150, {size:9, weight:700, color:C.label3, letter:0.6});
+  text(data.wifi.band + ' · ch ' + data.wifi.channel, rx, 166, {size:12, weight:600, color:C.label2});
+
+  // Rotate button
+  const btnY = 230;
+  rrect(rx, btnY, rw, 32, 16, C.accentSubtle);
+  rrect(rx, btnY, rw, 32, 16, null, C.accent, 1);
+  text('⟳ Rotate now', rx + rw/2, btnY + 16,
+    {size:12, weight:700, color:C.accent, align:'center', baseline:'middle'});
+  regions.push({x: rx, y: btnY, w: rw, h: 32, on: rotateNow});
+
+  // Footer hint
+  text('‹ back to logo', 12, H - 14, {size:10, color:C.label3});
+
+  ctx.restore();
 }
 
-function renderLogo() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
-  const size = 140;
-  const mx = (W-size)/2, my = H/2 - size/2 - 30;
-  rrect(mx-28, my-22, size+56, size+44, 28, C.surfaceRaised);
-  drawMark(mx, my, size, C.accentPrimary, C.accentLight);
-  text('Droplet', W/2, my+size+52, {size:44, bold:true, align:'center', baseline:'middle'});
-  text('Edge AI Appliance', W/2, my+size+94, {size:14, color:C.labelTertiary, align:'center', baseline:'middle'});
-
-  // Tap anywhere to go home
-  addRegion('logo_home', 0, 0, W, H, () => setScreen('home'));
-}
-
-function renderMessage() {
-  touchRegions = [];
-  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
-  const msg = lastMessage || {title:'Example', lines:['Nextcloud sync finished.','Added 12 files (48 MB).','Ready for embedding.']};
-  const y0 = drawHeader({title: msg.title, showHome:true});
-  rrect(16, y0+6, W-32, H-y0-22, 14, C.surfaceRaised);
-  (msg.lines||[]).slice(0,10).forEach((ln,i) => {
-    text(ln.slice(0,52), 28, y0+18+i*24, {size:17});
-  });
-}
-
-// ──────────────────────────────────────────────────────────────
-// Controller
-// ──────────────────────────────────────────────────────────────
-function render() {
-  switch (screen) {
-    case 'stats':    renderStats(); break;
-    case 'chat':     renderChat(); break;
-    case 'devices':  renderDevices(); break;
-    case 'settings': renderSettings(); break;
-    case 'logo':     renderLogo(); break;
-    case 'message':  renderMessage(); break;
-    default:         renderHome(); break;
-  }
-  document.getElementById('meta-screen').textContent = screen;
-  document.getElementById('meta-bri').textContent = String(brightness);
-  renderHotspots();
-}
-function setScreen(s, desc) {
-  screen = s;
-  document.querySelectorAll('.controls button[data-screen]').forEach(b => {
-    b.classList.toggle('active', b.dataset.screen === s);
-  });
-  const descs = {
-    home: 'Dashboard-style tile grid. Tap a tile to navigate.',
-    stats: '2×2 metric cards — CPU, memory, disk, temp. Back returns home.',
-    chat: 'Mirrors dashboard AI hero. Tap the capsule to open chat on the web UI.',
-    devices: 'Device identity + LAN/uplink summary.',
-    settings: 'Brightness stepper + quick actions. + / − buttons are tappable.',
-    logo: 'Full-screen Droplet mark. Tap anywhere to go home.',
-    message: 'LLM-pushed message. Auto-returns home after 30s.',
+// Deterministic pseudo-random matrix keyed off a seed that flips each rotation.
+let qrSeed = 1;
+function drawFakeQR(x, y, size) {
+  const N = 25;
+  const cell = size / N;
+  const rand = (i, j) => {
+    // Tiny LCG seeded with coordinates + qrSeed
+    let s = (i * 73856093) ^ (j * 19349663) ^ (qrSeed * 83492791);
+    s = (s ^ (s >>> 13)) * 1274126177;
+    return ((s ^ (s >>> 16)) & 0xff) / 255;
   };
-  document.getElementById('desc').textContent = desc || descs[s] || '';
-  render();
-}
-
-// Click -> tap
-canvas.addEventListener('click', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const x = ((e.clientX - rect.left) / rect.width) * W | 0;
-  const y = ((e.clientY - rect.top)  / rect.height) * H | 0;
-  for (const r of touchRegions) {
-    if (x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h) {
-      lastTap = {name:r.name, x, y};
-      tapAt = Date.now();
-      document.getElementById('meta-tap').textContent = `${r.name} (${x},${y})`;
-      r.action && r.action();
-      render();
-      return;
+  ctx.fillStyle = '#000';
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      // Finder patterns in 3 corners
+      const inFinder = (i < 7 && j < 7) || (i < 7 && j >= N-7) || (i >= N-7 && j < 7);
+      if (inFinder) {
+        const li = i >= N-7 ? i - (N-7) : i;
+        const lj = j >= N-7 ? j - (N-7) : j;
+        const onBorder = li === 0 || li === 6 || lj === 0 || lj === 6;
+        const onInner = li >= 2 && li <= 4 && lj >= 2 && lj <= 4;
+        if (onBorder || onInner) {
+          ctx.fillRect(x + j*cell, y + i*cell, cell+0.5, cell+0.5);
+        }
+        continue;
+      }
+      if (rand(i, j) > 0.52) {
+        ctx.fillRect(x + j*cell, y + i*cell, cell+0.5, cell+0.5);
+      }
     }
   }
-  document.getElementById('meta-tap').textContent = `miss (${x},${y})`;
-});
+}
 
-// Controls
-document.querySelectorAll('.controls button[data-screen]').forEach(b => {
-  b.addEventListener('click', () => setScreen(b.dataset.screen));
-});
-document.getElementById('toggleRegions').addEventListener('click', () => {
-  document.getElementById('hotspots').classList.toggle('visible');
-});
-document.getElementById('liveTime').addEventListener('change', (e) => {
-  liveTime = e.target.checked;
-});
+// ---------- Alerts drawer (over stats) ----------
+function drawAlertsDrawer() {
+  // Dim the stats behind
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
 
-// Animate a tiny amount (clock + small metric jitter) so the preview feels live.
-setInterval(() => {
-  if (!liveTime) return;
-  metrics.cpu = Math.max(5, Math.min(90, metrics.cpu + (Math.random()*6-3)));
-  metrics.mem = Math.max(10, Math.min(95, metrics.mem + (Math.random()*3-1.5)));
+  const dw = 300, dx = W - dw, dy = 0, dh = H;
+  rrect(dx, dy, dw, dh, 0, C.panel);
+  rrect(dx, dy, 1, dh, 0, C.sep);
+
+  // Header
+  text('ALERTS', dx + 14, 14, {size:11, weight:700, color:C.label2, letter:0.8});
+  const open = alerts.filter(a => !a.cleared).length;
+  text(open + ' open', dx + dw - 58, 14, {size:10, color:C.label3});
+
+  // Close X
+  text('✕', dx + dw - 14, 14, {size:16, weight:400, color:C.label2, align:'right'});
+  regions.push({x: dx + dw - 30, y: 4, w: 26, h: 26, on: () => { eventsOpen = false; bumpIdle(); render(); }});
+
+  // List
+  const listY = 40;
+  const rowH = 58;
+  let y = listY;
+  const visible = alerts.slice(0, 4);
+  if (visible.length === 0) {
+    text('No alerts.', dx + dw/2, H/2, {size:14, color:C.label3, align:'center', baseline:'middle'});
+  } else {
+    visible.forEach((a, i) => {
+      rrect(dx + 10, y, dw - 20, rowH - 6, 8, a.cleared ? C.card : C.card2);
+      rrect(dx + 10, y, dw - 20, rowH - 6, 8, null, C.sep, 1);
+      // type icon
+      const ic = a.type === 'cam' ? '◉' : '⚠';
+      const iconCol = a.cleared ? C.label3 : (a.type === 'cam' ? C.red : C.orange);
+      text(ic, dx + 22, y + 16, {size:16, weight:700, color:iconCol, baseline:'middle'});
+      text(a.title, dx + 38, y + 10, {size:12, weight:700, color:a.cleared?C.label3:C.text});
+      text(a.detail, dx + 38, y + 26, {size:10, color:C.label3});
+      text(a.time, dx + 38, y + 40, {size:9, color:C.label4});
+      // Clear "x" per row
+      if (!a.cleared) {
+        const cx2 = dx + dw - 30, cy2 = y + rowH/2 - 3;
+        text('×', cx2, cy2, {size:18, weight:400, color:C.label3, align:'center', baseline:'middle'});
+        regions.push({
+          x: cx2 - 14, y: y + 4, w: 28, h: rowH - 14,
+          on: () => { alerts[i].cleared = true; bumpIdle(); render(); }
+        });
+      }
+      y += rowH;
+    });
+  }
+
+  // Clear all
+  const cbtnY = H - 44;
+  rrect(dx + 14, cbtnY, dw - 28, 32, 16, C.card2);
+  rrect(dx + 14, cbtnY, dw - 28, 32, 16, null, C.sep2, 1);
+  text('Clear all', dx + dw/2, cbtnY + 16,
+    {size:12, weight:700, color:C.label2, align:'center', baseline:'middle'});
+  regions.push({
+    x: dx + 14, y: cbtnY, w: dw - 28, h: 32,
+    on: () => { alerts.forEach(a => a.cleared = true); alerts = []; bumpIdle(); render(); }
+  });
+}
+
+// ============================================================
+// Render + carousel animation
+// ============================================================
+let regions = [];  // click/tap targets for the current frame
+
+// Carousel = only the active screens. Idle (logo) is the screensaver, not
+// part of the swipe order — tapping/swiping from idle jumps to the first
+// active screen (stats).
+const ORDER = ['stats', 'qr'];
+const NAV_LABELS = { stats: 'System', qr: 'Join Wi-Fi' };
+function screenIndex(s) { return ORDER.indexOf(s); }
+
+function render() {
+  regions = [];
+
+  // 178 = 70% of 255 — same on idle and active so the logo screensaver
+  // stays readable in a normally-lit room.
+  const targetBrightness = 178;
+  brightness += (targetBrightness - brightness) * 0.18;
+
+  // Paint the current screen, plus siblings during a swipe. Idle is
+  // outside the carousel so we only draw neighbors when on an active
+  // screen.
+  if (screen !== 'idle' && (dragging || Math.abs(dragX) > 0.5)) {
+    const idx = screenIndex(screen);
+    drawScreenByName(screen, dragX);
+    if (idx > 0 && dragX > 0) drawScreenByName(ORDER[idx-1], dragX - W);
+    if (idx < ORDER.length-1 && dragX < 0) drawScreenByName(ORDER[idx+1], dragX + W);
+  } else {
+    drawScreenByName(screen, 0);
+  }
+
+  // No idle veil — brightness stays at 70% across idle + active.
+
+  // Bottom nav on active screens
+  if (screen !== 'idle' && !dragging && Math.abs(dragX) < 1) drawNavBar();
+
+  // Alerts drawer on top of stats
+  if (screen === 'stats' && eventsOpen) drawAlertsDrawer();
+
+  // Meta in sidebar
+  document.getElementById('metaScreen').textContent = screen + (eventsOpen ? ' + alerts' : '');
+  document.getElementById('metaBri').textContent = Math.round(brightness);
+  document.getElementById('metaAlerts').textContent = alerts.filter(a => !a.cleared).length;
+  document.getElementById('metaRot').textContent = fmtDuration(data.wifi.keyRotatesInSec);
+  const idleLeft = Math.max(0, Math.ceil((idleAt - Date.now())/1000));
+  document.getElementById('metaIdle').textContent =
+    (screen === 'idle') ? 'asleep' : (idleLeft + 's');
+
+  document.querySelectorAll('.controls button[data-screen]').forEach(b => {
+    b.classList.toggle('active', b.dataset.screen === screen);
+  });
+}
+
+function drawScreenByName(name, dx) {
+  if (name === 'idle')  return drawIdle(dx);
+  if (name === 'stats') return drawStats(dx);
+  if (name === 'qr')    return drawQR(dx);
+}
+
+function drawNavBar() {
+  const h = 28, y = H - h;
+  rrect(0, y, W, h, 0, C.panel);
+  rrect(0, y, W, 1, 0, C.sep);
+  const pads = 10, gap = 8;
+  const pw = (W - 2*pads - gap*(ORDER.length-1)) / ORDER.length;
+  const ph = h - 10;
+  ORDER.forEach((name, i) => {
+    const px = pads + i*(pw+gap);
+    const py = y + (h - ph)/2;
+    const isCur = name === screen;
+    rrect(px, py, pw, ph, ph/2, isCur ? C.accentSubtle : C.card,
+          isCur ? C.accent : C.sep, 1);
+    text(NAV_LABELS[name] || name, px + pw/2, py + ph/2,
+      {size:11, weight:700, color: isCur ? C.accent : C.label2,
+       align:'center', baseline:'middle'});
+    regions.push({
+      x: px, y: py, w: pw, h: ph,
+      on: () => { goTo(name); }
+    });
+  });
+}
+
+// ============================================================
+// Idle timer, navigation, input
+// ============================================================
+function bumpIdle() {
+  idleAt = Date.now() + IDLE_MS;
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (screen !== 'idle') {
+      eventsOpen = false;
+      goTo('idle');
+    }
+  }, IDLE_MS);
+  if (screen === 'idle') {
+    // Tap while idle -> wake to stats
+    goTo('stats');
+  }
+}
+
+function goTo(name, animate=true) {
+  if (!ORDER.includes(name)) return;
+  if (screen === name) { render(); return; }
+  screen = name;
+  eventsOpen = false;
+  if (screen !== 'idle') bumpIdle();
   render();
-}, 1500);
+}
 
-// Sample message so the Message screen isn't empty
-lastMessage = {
-  title: 'Tool call',
-  lines: ['Nextcloud sync finished.', 'Added 12 files (48 MB).', 'Ready for embedding.'],
-};
+// Swipe — advance/rewind along the ORDER
+function swipe(dir) {
+  const idx = screenIndex(screen);
+  const next = idx + dir;
+  if (next < 0 || next >= ORDER.length) return;
+  animateCarousel(dir, () => { screen = ORDER[next]; if (screen !== 'idle') bumpIdle(); render(); });
+}
 
-// Initial render
+function animateCarousel(dir, onDone) {
+  cancelAnimationFrame(dragAnim);
+  const from = dragX;
+  const to = dir > 0 ? -W : W;  // dir=1 = swipe left (to next, canvas moves left)
+  const t0 = performance.now();
+  function step(t) {
+    const p = Math.min(1, (t - t0) / 220);
+    const ease = 1 - Math.pow(1 - p, 3);
+    dragX = from + (to - from) * ease;
+    render();
+    if (p < 1) {
+      dragAnim = requestAnimationFrame(step);
+    } else {
+      dragX = 0;
+      onDone();
+    }
+  }
+  dragAnim = requestAnimationFrame(step);
+}
+
+function snapBack() {
+  cancelAnimationFrame(dragAnim);
+  const from = dragX, t0 = performance.now();
+  function step(t) {
+    const p = Math.min(1, (t - t0) / 180);
+    const ease = 1 - Math.pow(1 - p, 3);
+    dragX = from * (1 - ease);
+    render();
+    if (p < 1) dragAnim = requestAnimationFrame(step);
+    else { dragX = 0; render(); }
+  }
+  dragAnim = requestAnimationFrame(step);
+}
+
+// ----- Pointer / touch -----
+function canvasXY(e) {
+  const rect = canvas.getBoundingClientRect();
+  const sx = W / rect.width, sy = H / rect.height;
+  return [(e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy];
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  const [x, y] = canvasXY(e);
+  dragStart = { x, y, t: Date.now() };
+  dragging = true;
+  canvas.classList.add('dragging');
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!dragging || !dragStart) return;
+  const [x, y] = canvasXY(e);
+  dragX = x - dragStart.x;
+  // Resist at edges
+  const idx = screenIndex(screen);
+  if (idx === 0 && dragX > 0) dragX *= 0.3;
+  if (idx === ORDER.length - 1 && dragX < 0) dragX *= 0.3;
+  render();
+});
+canvas.addEventListener('pointerup', (e) => {
+  canvas.classList.remove('dragging');
+  dragging = false;
+  if (!dragStart) return;
+  const [x, y] = canvasXY(e);
+  const dx = x - dragStart.x;
+  const dy = y - dragStart.y;
+  const dt = Date.now() - dragStart.t;
+  dragStart = null;
+
+  // Quick horizontal movement → swipe
+  if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+    // dx > 0 = swipe right (to previous), dx < 0 = swipe left (to next)
+    swipe(dx < 0 ? 1 : -1);
+    return;
+  }
+
+  // Otherwise treat as a tap if it was quick + didn't move much
+  if (dt < 400 && Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+    // Drawer hit-test first
+    const hit = regions.find(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+    if (hit) { hit.on(); snapBack(); return; }
+
+    // Idle: any tap wakes to stats
+    if (screen === 'idle') { goTo('stats'); snapBack(); return; }
+  }
+
+  snapBack();
+});
+canvas.addEventListener('pointercancel', () => {
+  dragging = false;
+  dragStart = null;
+  canvas.classList.remove('dragging');
+  snapBack();
+});
+
+// ----- Keyboard -----
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft')  swipe(-1);
+  if (e.key === 'ArrowRight') swipe(1);
+  if (e.key === 'Escape')     { eventsOpen = false; render(); }
+});
+
+// ----- Controls -----
+document.querySelectorAll('.controls button[data-screen]').forEach(b => {
+  b.addEventListener('click', () => goTo(b.dataset.screen));
+});
+document.getElementById('btnAlert').addEventListener('click', () => {
+  const types = [
+    { type: 'cam', title: 'side-gate: person',  detail: 'confidence 88%', time: 'just now', cleared: false },
+    { type: 'cam', title: 'driveway: vehicle',  detail: 'confidence 94%', time: 'just now', cleared: false },
+    { type: 'sys', title: 'disk > 85% on /mnt/cloud-storage', detail: 'auto-prune queued', time: 'just now', cleared: false },
+  ];
+  alerts.unshift(types[Math.floor(Math.random()*types.length)]);
+  render();
+});
+document.getElementById('btnClearAlerts').addEventListener('click', () => {
+  alerts = [];
+  render();
+});
+document.getElementById('btnRotate').addEventListener('click', rotateNow);
+
+function rotateNow() {
+  data.wifi.keyRotatesInSec = 60 * 60;
+  qrSeed = (qrSeed * 1103515245 + 12345) & 0x7fffffff;
+  alerts.unshift({
+    type: 'sys', title: 'Wi-Fi key rotated',
+    detail: 'Droplet-AI · scan new QR', time: 'just now', cleared: false,
+  });
+  goTo('qr');
+}
+
+// Init
+bumpIdle();
+goTo('idle', false);
 render();
 </script>
 </body>
