@@ -193,11 +193,31 @@ const block_device: Tool = {
     if (!device) {
       return { error: `unknown_device: ${mac}` };
     }
-    await openwrt.blockDevice(mac, (args.reason as string) ?? device.displayName ?? "llm");
+    // Write Prisma FIRST, then OpenWrt. The ordering is chosen so that a
+    // failure between the two steps is the safer direction: DB says
+    // "blocked" but router hasn't applied the rule yet. The device-
+    // reconcile-poller re-dispatches `isBlocked` to the router on its
+    // next pass, so the block heals automatically. The opposite order
+    // (OpenWrt first, then Prisma) would leave a live MAC-filter rule
+    // with no DB record, and the reconciler would try to REMOVE it on
+    // the next pass, leaving the device un-blocked without anyone
+    // noticing.
     await ctx.prisma.networkDevice.update({
       where: { mac },
       data: { isBlocked: true },
     });
+    try {
+      await openwrt.blockDevice(mac, (args.reason as string) ?? device.displayName ?? "llm");
+    } catch (err) {
+      // Surface the error but leave isBlocked=true; the reconciler will
+      // retry. Model sees the error and can explain to the user.
+      return {
+        mac,
+        blocked: true,
+        pending_router_apply: true,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
     return { mac, blocked: true, device_name: device.displayName };
   },
 };
@@ -428,17 +448,30 @@ const list_drives: Tool = {
     "Returns device, mount point, label, total/used/free bytes.",
   parameters: { type: "object", properties: {} },
   handler: async () => {
-    // Hit the device-bridge on the host via loopback. The bridge is the
-    // only component that sees host /proc/mounts + the automount state.
-    const res = await fetch("http://host.docker.internal:9090/drives", {
-      signal: AbortSignal.timeout(3000),
-    }).catch(() =>
-      fetch("http://192.168.50.197:9090/drives", {
-        signal: AbortSignal.timeout(3000),
-      }),
-    );
-    if (!res.ok) return { error: "device_bridge_unreachable" };
-    return await res.json();
+    // Hit the device-bridge on the host. The bridge is the only component
+    // that sees host /proc/mounts + the automount state file. Try the
+    // Docker-provided host alias first, fall back to the known Jetson LAN
+    // IP; both paths must treat non-2xx as a failure too (bridge can be up
+    // but serving 500 while the automount state is mid-rewrite).
+    const candidates = [
+      "http://host.docker.internal:9090/drives",
+      "http://192.168.50.197:9090/drives",
+    ];
+    let lastErr = "device_bridge_unreachable";
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+        if (!res.ok) {
+          lastErr = `bridge_status_${res.status}`;
+          continue;
+        }
+        return await res.json();
+      } catch (err) {
+        lastErr = err instanceof Error ? err.name : "fetch_failed";
+        continue;
+      }
+    }
+    return { error: lastErr };
   },
 };
 

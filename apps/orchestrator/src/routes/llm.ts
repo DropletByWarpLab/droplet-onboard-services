@@ -12,12 +12,16 @@ import type { ModelsResponse, ChatRequest, SessionChatRequest } from "../types/i
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
 
+// /llm/chat accepts tool-role messages on replay so a client can resume a
+// session that already went through the agent loop. tool_call_id / tool_calls
+// are optional so plain chat callers don't have to care.
 const chatRequestSchema = z.object({
   model: z.string(),
   messages: z.array(
     z.object({
-      role: z.enum(["system", "user", "assistant"]),
+      role: z.enum(["system", "user", "assistant", "tool"]),
       content: z.string(),
+      tool_call_id: z.string().optional(),
     })
   ),
   stream: z.boolean().optional().default(false),
@@ -26,19 +30,35 @@ const chatRequestSchema = z.object({
   provider: z.string().optional(),
 });
 
+// Only system / user / assistant are accepted from the caller — role="tool"
+// is intentionally NOT in the enum to prevent a client from planting a
+// spoofed tool-result message into the conversation (which would bias the
+// next turn toward calling a privileged write tool). Tool-role messages
+// are only appended by the agent loop itself, from actual dispatchTool()
+// results. See the security review in PR #66 for the threat model.
 const agentRequestSchema = z.object({
   model: z.string(),
   messages: z.array(
     z.object({
-      role: z.enum(["system", "user", "assistant", "tool"]),
+      role: z.enum(["system", "user", "assistant"]),
       content: z.string(),
-      tool_call_id: z.string().optional(),
     }),
   ),
   max_iter: z.number().int().min(1).max(10).optional(),
   temperature: z.number().min(0).max(2).optional(),
   allowed_tools: z.array(z.string()).optional(),
 });
+
+// Which tool names require the caller to have owner/admin role. Read-only
+// tools (list_*, get_*, search_*) are fine for any authenticated user; write
+// tools (block/unblock/accept/scan) must be gated because the LLM is driven
+// by user-controlled prompt text and will happily call them on request.
+const WRITE_TOOLS = new Set([
+  "block_device",
+  "unblock_device",
+  "accept_discovered_camera",
+  "scan_for_cameras",
+]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -129,11 +149,42 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
         return;
       }
-      const username = (req as { user?: { username: string } }).user?.username;
+      const user = (req as { user?: { username: string; role?: string } }).user;
+      const username = user?.username;
+      const role = user?.role;
+      const isPrivileged = role === "owner" || role === "admin";
+
+      // Narrow the advertised tool set for non-privileged users so the model
+      // never even sees the write tools as an option. Callers can further
+      // restrict via `allowed_tools[]` but not widen past this.
+      const requestedAllowed = parsed.data.allowed_tools;
+      const allowedForUser = isPrivileged
+        ? requestedAllowed
+        : (requestedAllowed ?? []).filter((n) => !WRITE_TOOLS.has(n)) ||
+          // Implicit allowed set when caller didn't pass one: all read-only.
+          Array.from(Object.keys(TOOL_REGISTRY)).filter((n) => !WRITE_TOOLS.has(n));
+
+      // Also refuse at dispatch time if the model somehow emits a write-tool
+      // call anyway (prompt-injected, hallucination). Belt and braces.
+      if (!isPrivileged) {
+        const writeAttempted = (parsed.data.messages ?? [])
+          .flatMap((m) => (m as { tool_calls?: { function: { name: string } }[] }).tool_calls ?? [])
+          .some((c) => WRITE_TOOLS.has(c.function?.name));
+        if (writeAttempted) {
+          res.status(403).json({ error: "forbidden_tool_for_role" });
+          return;
+        }
+      }
+
       // Nextcloud-scoped tools (list_files / search_files / list_recent_files)
       // need the caller's NC session token. Other tools ignore it.
       const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
-      const result = await runAgent(parsed.data, prisma, username, ncToken);
+      const result = await runAgent(
+        { ...parsed.data, allowed_tools: allowedForUser },
+        prisma,
+        username,
+        ncToken,
+      );
       res.json(result);
     } catch (err) {
       next(err);
