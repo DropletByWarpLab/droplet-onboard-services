@@ -6,6 +6,7 @@ import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent } from "../services/llm-agent.service.js";
 import { TOOL_REGISTRY } from "../services/llm-tools.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { ModelsResponse, ChatRequest, SessionChatRequest } from "../types/index.js";
 
 const MODELS_CACHE_KEY = "llm:models";
@@ -129,7 +130,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
       const username = (req as { user?: { username: string } }).user?.username;
-      const result = await runAgent(parsed.data, prisma, username);
+      // Nextcloud-scoped tools (list_files / search_files / list_recent_files)
+      // need the caller's NC session token. Other tools ignore it.
+      const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+      const result = await runAgent(parsed.data, prisma, username, ncToken);
       res.json(result);
     } catch (err) {
       next(err);

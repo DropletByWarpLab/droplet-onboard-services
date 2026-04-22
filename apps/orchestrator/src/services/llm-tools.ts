@@ -42,6 +42,9 @@ export interface ToolContext {
   prisma: PrismaClient;
   /** Username of the caller, if an auth cookie was present. */
   userId?: string;
+  /** Nextcloud session token (from resolveNcToken). Required only for the
+   *  file tools — other tools work without it. */
+  ncToken?: string;
 }
 
 export interface Tool {
@@ -113,7 +116,7 @@ const list_network_devices: Tool = {
       .filter((d) => !onlineOnly || (d.lastSeen && d.lastSeen.getTime() > cutoff))
       .map((d) => ({
         mac: d.mac,
-        ip: d.ip,
+        ip: d.lastIp,
         hostname: d.hostname,
         vendor: d.vendor,
         name: d.displayName,
@@ -132,11 +135,13 @@ const list_dhcp_leases: Tool = {
   parameters: { type: "object", properties: {} },
   handler: async () => {
     const leases = await openwrt.fetchDhcpLeases();
+    // DhcpLease fields are macaddr/ipaddr/expire (see types/network.ts) —
+    // the UCI column names, not our prettier ones.
     return leases.map((l) => ({
-      mac: l.mac,
-      ip: l.ip,
+      mac: l.macaddr,
+      ip: l.ipaddr,
       hostname: l.hostname,
-      expires: l.expires,
+      expires: l.expire,
     }));
   },
 };
@@ -240,17 +245,15 @@ const list_files: Tool = {
     },
   },
   handler: async (args, ctx) => {
-    if (!ctx.userId) {
-      return { error: "auth_required" };
-    }
+    if (!ctx.userId || !ctx.ncToken) return { error: "auth_required" };
     const path = (args.path as string) || "/";
-    const items = await nc.ncListFiles(ctx.userId, path);
+    const items = await nc.ncListFiles(ctx.ncToken, ctx.userId, path);
     return items.slice(0, 200).map((f) => ({
       name: f.name,
       path: f.path,
       is_dir: f.isDirectory,
       size: f.size,
-      mtime: f.lastModified,
+      mtime: f.modifiedAt,
       mime: f.mimeType,
     }));
   },
@@ -269,8 +272,12 @@ const search_files: Tool = {
     required: ["query"],
   },
   handler: async (args, ctx) => {
-    if (!ctx.userId) return { error: "auth_required" };
-    const results = await nc.ncSearchFiles(ctx.userId, String(args.query));
+    if (!ctx.userId || !ctx.ncToken) return { error: "auth_required" };
+    const results = await nc.ncSearchFiles(
+      ctx.ncToken,
+      ctx.userId,
+      String(args.query),
+    );
     return results.slice(0, 50);
   },
 };
@@ -280,8 +287,8 @@ const list_recent_files: Tool = {
   description: "List the 30 most recently modified files across Nextcloud.",
   parameters: { type: "object", properties: {} },
   handler: async (_args, ctx) => {
-    if (!ctx.userId) return { error: "auth_required" };
-    const items = await nc.ncListRecents(ctx.userId, 30);
+    if (!ctx.userId || !ctx.ncToken) return { error: "auth_required" };
+    const items = await nc.ncListRecents(ctx.ncToken, ctx.userId, 30);
     return items;
   },
 };
@@ -326,10 +333,10 @@ const list_discovered_cameras: Tool = {
     return pending.map((c) => ({
       id: c.id,
       name: c.name,
-      ip: c.ip,
-      mac: c.mac,
+      ip: c.ipAddress,
+      mac: c.macAddress,
       manufacturer: c.manufacturer,
-      detection_method: c.detectionMethod,
+      model: c.model,
       discovered_at: c.createdAt.toISOString(),
     }));
   },
@@ -349,10 +356,10 @@ const list_recent_camera_events: Tool = {
   },
   handler: async (args) => {
     const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 100);
-    const events = await frigate.fetchEvents({
-      camera: args.camera_name as string | undefined,
+    const events = await frigate.fetchEvents(
       limit,
-    });
+      args.camera_name as string | undefined,
+    );
     return events;
   },
 };

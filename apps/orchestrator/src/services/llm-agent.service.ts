@@ -52,9 +52,10 @@ export async function runAgent(
   req: AgentRequest,
   prisma: PrismaClient,
   userId?: string,
+  ncToken?: string,
 ): Promise<AgentResult> {
   const maxIter = Math.max(1, Math.min(req.max_iter ?? DEFAULT_MAX_ITER, 10));
-  const ctx: ToolContext = { prisma, userId };
+  const ctx: ToolContext = { prisma, userId, ncToken };
   const trace: AgentTraceEntry[] = [];
 
   // Start with a copy of the caller's message history so we can append
