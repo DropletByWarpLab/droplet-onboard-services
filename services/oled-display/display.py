@@ -1257,16 +1257,57 @@ class TFTDisplay:
     def fetch_qr(self, timeout: float = 12.0) -> Optional[dict]:
         return self._bridge_get("/openwrt/qr", timeout)
 
+    def rotate_wifi_key(self, timeout: float = 30.0) -> Optional[dict]:
+        """Ask device-bridge to roll the Droplet-AI WPA key. Used by the
+        PyPortal's "Rotate now" button on the QR screen — the board sends
+        `ROTATE_KEY` over serial, we POST here, then re-push /openwrt/qr
+        so the display shows the new QR immediately.
+
+        Sends the bridge auth token as `X-Droplet-Auth` so the bridge's
+        rate-limited rotate endpoint accepts it. Token comes from
+        SERVICE_SECRET (same one the orchestrator uses to talk to this
+        service), falling back to BRIDGE_AUTH_TOKEN if set separately.
+        """
+        headers = {"Content-Type": "application/json"}
+        token = (os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("DEVICE_SECRET_KEY")
+                 or "").strip()
+        if token:
+            headers["X-Droplet-Auth"] = token
+        req = urllib.request.Request(
+            WIFI_HELPER_URL + "/openwrt/wifi/rotate",
+            data=b"", method="POST",
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8"))
+            except Exception:
+                return {"ok": False, "error": str(e)}
+        except Exception as e:                                       # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
     def fetch_drives(self, timeout: float = 4.0) -> Optional[dict]:
         return self._bridge_get("/drives", timeout)
 
     def connect_wifi(self, ssid: str, password: str = "",
                      timeout: float = 30.0) -> dict:
         body = json.dumps({"ssid": ssid, "password": password}).encode()
+        headers = {"Content-Type": "application/json"}
+        token = (os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("DEVICE_SECRET_KEY")
+                 or "").strip()
+        if token:
+            headers["X-Droplet-Auth"] = token
         req = urllib.request.Request(
             WIFI_HELPER_URL + "/wifi/connect",
             data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -1459,12 +1500,32 @@ class TFTDisplay:
                         qr = self.fetch_qr()
                         if qr is not None:
                             self._pyportal_send("qr", qr)
+                    elif txt == "ROTATE_KEY":
+                        # PyPortal asked us to roll the Wi-Fi key. Ask the
+                        # bridge to do the UCI change on OpenWrt, then push
+                        # the fresh QR so the user can scan it right away.
+                        resp = self.rotate_wifi_key()
+                        logger.info("pyportal: rotate -> %s", resp)
+                        qr = self.fetch_qr()
+                        if qr is not None:
+                            self._pyportal_send("qr", qr)
                     elif txt == "RESCAN_WIFI":
                         snap = self.fetch_wifi()
                         if snap is not None:
                             self._pyportal_send("wifi", snap)
-                    elif txt.startswith("TAP:") or txt.startswith("NAV:") \
-                            or txt.startswith("TOUCH:"):
+                    elif txt.startswith("NAV:"):
+                        # When the user lands on the QR screen, push a
+                        # fresh matrix. Firmware also sends REQUEST_QR on
+                        # nav, but this is a belt-and-braces catch-all so
+                        # older firmware that doesn't auto-request still
+                        # works after an upgrade.
+                        logger.info("pyportal: %s", txt)
+                        if txt == "NAV:qr":
+                            qr = self.fetch_qr()
+                            if qr is not None:
+                                self._pyportal_send("qr", qr)
+                    elif txt.startswith("TAP:") or txt.startswith("TOUCH:") \
+                            or txt.startswith("SWIPE:"):
                         logger.info("pyportal: %s", txt)
                     elif txt:
                         logger.info("pyportal: %s", txt)

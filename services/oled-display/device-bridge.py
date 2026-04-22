@@ -19,14 +19,20 @@ a "waiting for X" state instead.
 """
 
 import datetime
+import hmac
 import json
+import logging
 import os
+import secrets
 import shlex
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest
 from urllib.parse import urlparse
+
+logger = logging.getLogger("droplet.bridge")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -50,6 +56,53 @@ BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
 # BRIDGE_BIND=0.0.0.0 only if you're putting an auth layer in front.
 BRIDGE_BIND       = os.environ.get("BRIDGE_BIND", "127.0.0.1")
 
+# Wi-Fi key rotation. OFF by default in production — rotating the key
+# kicks every joined station, so a phone that's set to "auto-connect
+# when I get home" stops working after each rotation. Operators who
+# want key rotation (shared office deployments, visitor kiosks, etc.)
+# can flip WIFI_KEY_ROTATION_ENABLED=true in the bridge env file.
+ROTATION_ENABLED = os.environ.get(
+    "WIFI_KEY_ROTATION_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+ROTATION_INTERVAL_S = int(os.environ.get(
+    "WIFI_KEY_ROTATION_INTERVAL_SECONDS", str(24 * 3600)))
+
+# Persisted state (survives bridge restarts; not the router).
+# systemd creates /var/lib/droplet-bridge via StateDirectory= with 0700
+# perms under the bridge user; if that's absent (dev install / container),
+# fall back to /tmp with 0600 on the file. Either way the state contains
+# only timestamps + a sha256 digest of the current wifi key — never the
+# cleartext, so an accidentally-world-readable state file doesn't leak the
+# passphrase.
+STATE_FILE = os.environ.get(
+    "BRIDGE_STATE_FILE", "/var/lib/droplet-bridge/state.json")
+if not os.access(os.path.dirname(STATE_FILE) or "/", os.W_OK):
+    STATE_FILE = "/tmp/droplet-bridge-state.json"
+
+# Shared-secret auth for mutating endpoints. Falls back to DEVICE_SECRET_KEY
+# (the same token the orchestrator uses) so the Droplet stack has one
+# credential rather than three. Even with the bridge bound to loopback,
+# any unprivileged process on the Jetson could currently POST to
+# /openwrt/wifi/rotate or /wifi/connect — requiring the token moves that
+# capability from "anyone with a shell" to "anyone with the secret".
+BRIDGE_AUTH_TOKEN = (
+    os.environ.get("BRIDGE_AUTH_TOKEN")
+    or os.environ.get("DEVICE_SECRET_KEY")
+    or os.environ.get("SERVICE_SECRET")
+    or ""
+).strip()
+
+# Minimum seconds between wifi-key rotations. Stops a stuck client or a
+# fat-fingered human from bouncing hostapd repeatedly (each rotation kicks
+# every associated station). 30s is long enough that the new QR is live
+# and scanned before a second rotation is allowed; short enough that a
+# legit "oops, didn't scan fast enough" retry works fine.
+ROTATION_MIN_INTERVAL_S = int(os.environ.get(
+    "WIFI_KEY_ROTATION_MIN_INTERVAL_SECONDS", "30"))
+
+# In-process lock: only one rotation at a time (an SSH+UCI+wifi-up run
+# takes ~4s and the HTTP server is threaded).
+_ROTATION_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Shell helper
@@ -66,6 +119,29 @@ def _run(cmd, timeout=15):
 # ---------------------------------------------------------------------------
 # OpenWrt via SSH
 # ---------------------------------------------------------------------------
+
+# Shared "find the live AP wifi-iface" shell snippet. Sets $target to the
+# uci section name of the first mode=ap + enabled + parent-radio-enabled
+# wifi-iface. Bails with exit 1 if nothing matches. Reused by the creds
+# lookup and the key rotation.
+_FIND_AP_SH = r'''
+target=""
+# uci show prints "<section-path>=wifi-iface" for each anonymous/named
+# wifi-iface. No quotes around the section type on OpenWrt 24.10, so
+# match the bare suffix.
+for s in $(uci show wireless 2>/dev/null | grep '=wifi-iface$' | cut -d= -f1); do
+    mode=$(uci -q get "$s.mode" || true)
+    if_dis=$(uci -q get "$s.disabled" || echo 0)
+    radio=$(uci -q get "$s.device" || echo "")
+    rad_dis=$(uci -q get "wireless.$radio.disabled" || echo 0)
+    if [ "$mode" = "ap" ] && [ "$if_dis" != "1" ] && [ "$rad_dis" != "1" ]; then
+        target=$s
+        break
+    fi
+done
+if [ -z "$target" ]; then echo "ERR no active AP" >&2; exit 1; fi
+'''
+
 
 def _ssh_openwrt(remote_cmd, timeout=20):
     ssh_args = [
@@ -133,20 +209,24 @@ def scan_via_openwrt():
 
 
 def openwrt_wifi_credentials():
-    """Read the LAN-side SSID + WPA key from UCI."""
-    script = (
-        "ssid=$(uci -q get wireless.default_radio0.ssid "
-        "  || uci -q get wireless.@wifi-iface[0].ssid); "
-        "key=$(uci -q get wireless.default_radio0.key "
-        "  || uci -q get wireless.@wifi-iface[0].key); "
-        "enc=$(uci -q get wireless.default_radio0.encryption "
-        "  || uci -q get wireless.@wifi-iface[0].encryption); "
-        "hid=$(uci -q get wireless.default_radio0.hidden "
-        "  || echo 0); "
-        "disabled=$(uci -q get wireless.default_radio0.disabled "
-        "  || echo 0); "
-        "printf 'SSID=%s\\nKEY=%s\\nENC=%s\\nHID=%s\\nDISABLED=%s\\n' "
-        "  \"$ssid\" \"$key\" \"$enc\" \"$hid\" \"$disabled\""
+    """Read the active AP's SSID + WPA key from UCI.
+
+    "Active" = wifi-iface with mode=ap AND iface-level disabled!=1 AND
+    its parent radio also not disabled. This matters on the Pi 5 router
+    where the first 4 radios (radio0..3) are `disabled '1'` because only
+    the onboard BCM4345/6 on radio4 actually works as an AP — without
+    the radio-level check we'd hand the dashboard the stale default
+    'Droplet/ChangeMe!2024' creds from default_radio0 that are never on
+    the air.
+    """
+    script = _FIND_AP_SH + (
+        "ssid=$(uci -q get \"$target.ssid\"); "
+        "key=$(uci -q get \"$target.key\"); "
+        "enc=$(uci -q get \"$target.encryption\"); "
+        "hid=$(uci -q get \"$target.hidden\" || echo 0); "
+        "disabled=$(uci -q get \"$target.disabled\" || echo 0); "
+        "printf 'SSID=%s\\nKEY=%s\\nENC=%s\\nHID=%s\\nDISABLED=%s\\nSECTION=%s\\n' "
+        "  \"$ssid\" \"$key\" \"$enc\" \"$hid\" \"$disabled\" \"$target\""
     )
     rc, out, err = _ssh_openwrt(script, timeout=12)
     if rc != 0:
@@ -302,12 +382,21 @@ def _qr_encode(text):
 
 
 def qr_snapshot():
-    """Fetch OpenWrt wifi creds and return a QR-matrix + payload."""
+    """Fetch OpenWrt wifi creds and return a QR-matrix + payload.
+
+    TTL/interval fields are only populated when rotation is enabled; with
+    rotation off (the production default) the UI hides the countdown chip
+    because the password never expires.
+    """
     out = {
         "ok": False, "ssid": None, "security": None, "hidden": False,
         "disabled": False, "payload": None, "matrix": None,
         "version": None, "error": None,
+        "rotation_enabled": ROTATION_ENABLED,
     }
+    if ROTATION_ENABLED:
+        out["ttl_seconds"] = _key_ttl_seconds()
+        out["rotation_interval_seconds"] = ROTATION_INTERVAL_S
     creds, err = openwrt_wifi_credentials()
     if creds is None:
         out["error"] = err or "router unreachable"
@@ -322,9 +411,173 @@ def qr_snapshot():
         "ok": True, "ssid": creds["ssid"],
         "security": creds["encryption"], "hidden": creds["hidden"],
         "disabled": creds["disabled"], "payload": payload,
+        # Cleartext key is already inside `payload` (the phone QR scanner
+        # reads it from there), so exposing it as a dedicated field costs
+        # nothing extra but lets the PyPortal render it legibly under the
+        # QR without parsing the payload. Endpoint is loopback-only and
+        # auth-gated for mutating routes.
+        "key": creds["key"],
         "matrix": matrix, "version": ver,
     })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Wi-Fi key rotation — on-demand passphrase change via UCI + wifi reload
+# ---------------------------------------------------------------------------
+
+# Avoid visually-confusable characters (0/O, 1/l/I). 30^16 ≈ 78 bits of
+# entropy, plenty for a WPA2/WPA3 passphrase, and every char is easy to
+# key in manually if the QR won't scan.
+_KEY_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
+_KEY_FIRST_CHAR = "23456789"   # subset of the alphabet — digits only
+_KEY_LEN = 16
+
+
+def _gen_passphrase():
+    """Generate a 16-char random wifi passphrase.
+
+    First char is forced to a digit so iOS / Android password fields
+    don't auto-capitalize it. Auto-cap is silent — users who type a
+    lowercase key like `gpz…` end up submitting `Gpz…` and get a PSK
+    mismatch with no obvious cause. Starting with a digit sidesteps the
+    whole problem; entropy loss is trivial (log2 30^16 → log2 8 + log2
+    30^15 ≈ 77.6 bits, still well past any practical WPA2 attack).
+    """
+    head = secrets.choice(_KEY_FIRST_CHAR)
+    tail = "".join(secrets.choice(_KEY_ALPHABET) for _ in range(_KEY_LEN - 1))
+    return head + tail
+
+
+def _load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _save_state(s):
+    """Persist bridge state atomically with tight perms.
+
+    Writes to a temp file then renames so a crash mid-write can't leave a
+    truncated state file. 0700 on the dir / 0600 on the file in case
+    StateDirectory= isn't in play (e.g. /tmp fallback) — state contains
+    only timestamps + a key digest, but there's no reason to leave it
+    world-readable.
+    """
+    try:
+        d = os.path.dirname(STATE_FILE)
+        if d:
+            os.makedirs(d, exist_ok=True)
+            try:
+                os.chmod(d, 0o700)
+            except Exception:
+                pass
+        tmp = STATE_FILE + ".tmp"
+        old_umask = os.umask(0o077)
+        try:
+            with open(tmp, "w") as f:
+                json.dump(s, f)
+            os.replace(tmp, STATE_FILE)
+            try:
+                os.chmod(STATE_FILE, 0o600)
+            except Exception:
+                pass
+        finally:
+            os.umask(old_umask)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("bridge state save failed: %s", e)
+
+
+def _key_ttl_seconds():
+    """Seconds until the next scheduled rotation window — for the QR UI."""
+    at = _load_state().get("wifi_key_rotated_at")
+    if not at:
+        return 0
+    elapsed = time.time() - float(at)
+    return max(0, int(ROTATION_INTERVAL_S - elapsed))
+
+
+# Shell script that rotates the active AP's key.
+# - Passes the new key in via environment (NEW_KEY) so it never lands in
+#   the process list or UCI audit logs as a command argument.
+# - Uses the shared _FIND_AP_SH helper so we always target the same
+#   wifi-iface the creds lookup does.
+_ROTATE_SH = "set -e\n" + _FIND_AP_SH + r'''
+old_ssid=$(uci -q get "$target.ssid" || echo "")
+radio=$(uci -q get "$target.device" || echo "")
+uci set "$target.key=$NEW_KEY"
+uci commit wireless
+# `wifi reload` regenerates /var/run/hostapd-*.conf but on OpenWrt 24.10
+# doesn't always force hostapd to pick up a changed PSK — we've seen
+# AP-STA-POSSIBLE-PSK-MISMATCH for minutes after a reload because the
+# old hostapd process keeps serving the stale config. A targeted
+# `wifi down/up` on just the affected radio respawns hostapd cleanly
+# without bouncing any other radio, and finishes in <1s.
+if [ -n "$radio" ]; then
+    wifi down "$radio" >/dev/null 2>&1 || true
+    sleep 1
+    wifi up "$radio" >/dev/null 2>&1 || true
+else
+    wifi reload >/dev/null 2>&1 || true
+fi
+printf 'OK %s %s\n' "$target" "$old_ssid"
+'''
+
+
+def rotate_wifi_key():
+    """Generate a new passphrase, push to OpenWrt via UCI, return status.
+
+    The full key is never returned by this endpoint — callers get the fresh
+    QR via /openwrt/qr on the next request. That keeps the cleartext off
+    curl logs / HTTP access logs while still letting the phone scan it.
+    """
+    # Serialize concurrent rotations. Two threads racing here would
+    # double-cycle hostapd and possibly interleave UCI writes.
+    if not _ROTATION_LOCK.acquire(blocking=False):
+        return False, "rotation already in progress"
+    try:
+        # Rate-limit: reject if we just rotated. The min interval defends
+        # against both stuck clients (retrying every frame) and fat-finger
+        # double-clicks from the PyPortal.
+        st = _load_state()
+        last = st.get("wifi_key_rotated_at") or 0
+        elapsed = time.time() - float(last)
+        if last and elapsed < ROTATION_MIN_INTERVAL_S:
+            return False, ("rate_limited: wait {}s".format(
+                int(ROTATION_MIN_INTERVAL_S - elapsed)))
+
+        new_key = _gen_passphrase()
+        # Encode the key into the remote env via `NEW_KEY='...'` sh prelude.
+        # Alphabet excludes ', \, $, so single-quoting is safe; we still
+        # double-check by refusing anything outside the alphabet.
+        if any(c not in _KEY_ALPHABET for c in new_key):
+            return False, "generated key failed alphabet check"
+        prelude = "NEW_KEY={} ".format(shlex.quote(new_key))
+        script = prelude + "sh -c " + shlex.quote(_ROTATE_SH)
+        rc, out, err = _ssh_openwrt(script, timeout=25)
+        if rc != 0:
+            msg = (err.strip() or out.strip() or "ssh/uci failed")
+            logger.warning("wifi rotate failed: %s", msg)
+            return False, msg
+        first = (out.strip().splitlines() or [""])[0]
+        st["wifi_key_rotated_at"] = time.time()
+        # Key digest only — never the cleartext. Truncated to 16 hex chars
+        # so it fits comfortably in logs without being useful for brute
+        # force (still 2^64 search space).
+        import hashlib
+        st["wifi_key_digest"] = hashlib.sha256(new_key.encode()).hexdigest()[:16]
+        _save_state(st)
+        logger.info("wifi key rotated: %s digest=%s",
+                    first, st["wifi_key_digest"])
+        return True, {
+            "message": first, "rotated_at": st["wifi_key_rotated_at"],
+            "interval_seconds": ROTATION_INTERVAL_S,
+            "key_digest": st["wifi_key_digest"],
+        }
+    finally:
+        _ROTATION_LOCK.release()
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +873,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authed(self):
+        """Return True if the request carries the right auth token.
+
+        If BRIDGE_AUTH_TOKEN is empty we fail-open so dev installs keep
+        working, but main() logs a conspicuous warning on startup so
+        nobody ships this way by accident. In production the systemd
+        unit's EnvironmentFile must set BRIDGE_AUTH_TOKEN.
+
+        Accepts either `X-Droplet-Auth: <token>` or `Authorization:
+        Bearer <token>` for flexibility with the orchestrator's existing
+        bearer-token style.
+        """
+        if not BRIDGE_AUTH_TOKEN:
+            return True
+        got = (self.headers.get("X-Droplet-Auth") or "").strip()
+        if not got:
+            authz = (self.headers.get("Authorization") or "").strip()
+            if authz.lower().startswith("bearer "):
+                got = authz.split(None, 1)[1].strip()
+        if not got:
+            return False
+        # Constant-time compare to avoid timing-oracle leaks of the token.
+        return hmac.compare_digest(got, BRIDGE_AUTH_TOKEN)
+
     def do_GET(self):
         path = urlparse(self.path).path
         try:
@@ -646,7 +923,31 @@ class Handler(BaseHTTPRequestHandler):
             # we just want to force the next GET /drives to re-read.
             drives_snapshot(invalidate=True)
             return self._send(200, {"ok": True})
+        if self.path == "/openwrt/wifi/rotate":
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            if not ROTATION_ENABLED:
+                # 410 Gone signals "this route exists in code but is not
+                # operational in this deployment" — callers (PyPortal UI,
+                # scheduled timer) can look at this and gracefully no-op
+                # instead of retrying or surfacing an error.
+                return self._send(410, {
+                    "ok": False, "error": "rotation_disabled",
+                    "hint": ("Set WIFI_KEY_ROTATION_ENABLED=true in "
+                             "/etc/droplet/device-bridge.env to re-enable."),
+                })
+            ok, info = rotate_wifi_key()
+            if not ok:
+                # 429 for rate-limit / lock contention, 502 for upstream
+                # router/SSH errors, 500 for anything else unexpected.
+                status = (429 if isinstance(info, str) and
+                          ("rate_limited" in info or "in progress" in info)
+                          else 502)
+                return self._send(status, {"ok": False, "error": info})
+            return self._send(200, {"ok": True, **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/wifi/connect":
+            if not self._authed():
+                return self._send(401, {"error": "unauthorized"})
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n).decode() if n else ""
             try:
@@ -665,7 +966,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
 
+def _boot_banner():
+    logging.basicConfig(
+        level=os.environ.get("BRIDGE_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logger.info("device-bridge starting on %s:%s (openwrt=%s, state=%s)",
+                BRIDGE_BIND, BRIDGE_PORT, OPENWRT_HOST, STATE_FILE)
+    if not BRIDGE_AUTH_TOKEN:
+        logger.warning(
+            "BRIDGE_AUTH_TOKEN not set — /openwrt/wifi/rotate and "
+            "/wifi/connect are UNAUTHENTICATED. Set BRIDGE_AUTH_TOKEN "
+            "(or DEVICE_SECRET_KEY) in production.")
+
+
 if __name__ == "__main__":
-    print("device-bridge listening on {}:{} (openwrt={})".format(
-        BRIDGE_BIND, BRIDGE_PORT, OPENWRT_HOST))
+    _boot_banner()
     ThreadingHTTPServer((BRIDGE_BIND, BRIDGE_PORT), Handler).serve_forever()

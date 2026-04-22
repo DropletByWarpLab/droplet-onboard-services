@@ -1,0 +1,31 @@
+[Unit]
+Description=Droplet — rotate Wi-Fi WPA key on the OpenWrt router
+# Needs the bridge to be up so the rotate endpoint exists. If the bridge
+# is down we'd rather no-op than error — next timer fire will pick it up.
+After=droplet-device-bridge.service network-online.target
+Requires=droplet-device-bridge.service
+
+[Service]
+Type=oneshot
+# Pull BRIDGE_AUTH_TOKEN from the same env file the bridge uses, so the
+# token never has to be duplicated. `=-` = tolerate missing file during
+# initial provisioning; the curl will 401 and exit clean.
+EnvironmentFile=-/etc/droplet/device-bridge.env
+Environment=BRIDGE_URL=http://127.0.0.1:9090
+# curl args:
+#   -sS   quiet but still print errors
+#   -f    exit non-zero on 4xx/5xx (so systemd marks the run as failed)
+#   --max-time 40  belt against a hung SSH/UCI path on the router
+#   -H    carry the auth token the bridge requires in production
+ExecStart=/bin/sh -c 'curl -sS -f --max-time 40 -X POST \
+    -H "X-Droplet-Auth: ${BRIDGE_AUTH_TOKEN:-}" \
+    "$BRIDGE_URL/openwrt/wifi/rotate" >> /var/log/droplet-wifi-rotate.log 2>&1'
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/droplet-wifi-rotate.log
+
+[Install]
+WantedBy=multi-user.target
