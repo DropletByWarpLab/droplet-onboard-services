@@ -421,6 +421,20 @@ def _bytes_for(path):
 _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
                  "vfat", "exfat", "ntfs", "ntfs3", "zfs"}
 
+# Mount points we deliberately hide from the dashboard:
+#   /mnt/droplet — a shared-mount root (bind of /) created by the
+#                  automount installer so hot-plug mounts can propagate
+#                  into the Nextcloud container. Its device is the
+#                  eMMC root (mmcblk0p1), so surfacing it would show
+#                  the OS install as a "drive" — confusing for users.
+# Hot-plug children at /mnt/droplet/<label-uuid> are still included.
+_EXCLUDED_MOUNT_POINTS = {"/mnt/droplet"}
+
+# Ignore trivially small filesystems (< 100 MB) like CIRCUITPY flash
+# drives on microcontrollers (PyPortal, etc.) that technically mount
+# but aren't user storage.
+_MIN_DRIVE_BYTES = 100 * 1024 * 1024
+
 
 def _label_and_uuid_for(device):
     """Look up filesystem LABEL and UUID for a device path via /dev/disk/by-*.
@@ -505,7 +519,11 @@ def drives_snapshot(invalidate=False):
                     continue
                 if mp in by_mount:
                     continue  # automount state already has it
+                if mp in _EXCLUDED_MOUNT_POINTS:
+                    continue
                 total, used, free = _bytes_for(mp)
+                if total < _MIN_DRIVE_BYTES:
+                    continue
                 label, uuid = _label_and_uuid_for(dev)
                 by_mount[mp] = {
                     "device": dev,
