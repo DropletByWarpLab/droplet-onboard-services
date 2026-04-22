@@ -255,10 +255,21 @@ def openwrt_wifi_credentials():
 
 
 def _openwrt_connected_ssid():
-    rc, out, _ = _ssh_openwrt(
-        "uci -q get wireless.sta.ssid 2>/dev/null || "
-        "uci -q get wireless.default_radio0.ssid 2>/dev/null || true",
-        timeout=6)
+    """Return the SSID the router is currently broadcasting (active AP).
+
+    Uses the same _FIND_AP_SH helper as openwrt_wifi_credentials so we
+    can't return the stale default_radio0 "Droplet" name on this Pi 5
+    where only radio4 actually runs as an AP. STA-mode lookup (client
+    mode) stays first for the rare deployment where OpenWrt is an
+    upstream client.
+    """
+    script = (
+        "sta=$(uci -q get wireless.sta.ssid 2>/dev/null || true); "
+        "if [ -n \"$sta\" ]; then printf '%s\\n' \"$sta\"; exit 0; fi; "
+        + _FIND_AP_SH +
+        "uci -q get \"$target.ssid\""
+    )
+    rc, out, _ = _ssh_openwrt(script, timeout=6)
     return (out.strip() or None) if rc == 0 else None
 
 
@@ -461,19 +472,26 @@ def _save_state(s):
     """Persist bridge state atomically with tight perms.
 
     Writes to a temp file then renames so a crash mid-write can't leave a
-    truncated state file. 0700 on the dir / 0600 on the file in case
-    StateDirectory= isn't in play (e.g. /tmp fallback) — state contains
-    only timestamps + a key digest, but there's no reason to leave it
-    world-readable.
+    truncated state file. 0600 on the file unconditionally; 0700 on the
+    parent dir only if it looks like a dedicated bridge dir (not a shared
+    system dir like /tmp — tightening /tmp to 0700 would kill the host
+    if the bridge ever ran as root).
     """
     try:
         d = os.path.dirname(STATE_FILE)
         if d:
             os.makedirs(d, exist_ok=True)
-            try:
-                os.chmod(d, 0o700)
-            except Exception:
-                pass
+            # Only tighten perms on a dir we own. Matching on basename
+            # catches the systemd StateDirectory (droplet-bridge) and
+            # any override the operator sets via BRIDGE_STATE_FILE as
+            # long as it points into a dedicated folder; shared dirs
+            # like /tmp or /var/tmp are left alone.
+            base = os.path.basename(d.rstrip("/"))
+            if base and base not in ("tmp", "var", "run", ""):
+                try:
+                    os.chmod(d, 0o700)
+                except Exception:
+                    pass
         tmp = STATE_FILE + ".tmp"
         old_umask = os.umask(0o077)
         try:
