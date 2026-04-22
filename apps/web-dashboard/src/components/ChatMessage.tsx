@@ -25,9 +25,16 @@ export const ChatMessage = memo(function ChatMessage({
         {isUser ? <User size={14} /> : <Bot size={14} />}
       </div>
 
-      {/* Bubble */}
+      {/* Bubble.
+          min-w-0 + break-words + overflow-wrap:anywhere: long URLs, tokens,
+          or unbroken identifiers stay inside the bubble instead of blowing
+          the chat column wider than the viewport (main cause of the
+          mobile horizontal-scroll-around bug).
+          max-w is wider on mobile (85%) to avoid skinny bubbles next to
+          the 28px avatar, then tightens to 70% on md+ for readability. */}
       <div
-        className={`max-w-[70%] px-4 py-2.5 type-body
+        className={`min-w-0 max-w-[85%] md:max-w-[70%] px-4 py-2.5 type-body
+          [overflow-wrap:anywhere] break-words
           ${
             isUser
               ? "bg-accent text-white rounded-[20px] rounded-tr-[6px]"
@@ -35,7 +42,7 @@ export const ChatMessage = memo(function ChatMessage({
           }`}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap">{message.content}</p>
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
           <div className="chat-markdown">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>

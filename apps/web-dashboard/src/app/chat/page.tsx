@@ -94,7 +94,12 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="flex h-screen">
+    // h-[100dvh]: dynamic viewport unit accounts for iOS Safari's
+    // collapsing URL bar — h-screen (100vh) clips the input off the
+    // bottom when the bar expands back.
+    // overflow-x-hidden: belt-and-braces guard against any child that
+    // sneaks horizontally past the viewport on narrow phones.
+    <div className="flex h-[100dvh] overflow-x-hidden">
       {/* Session sidebar */}
       {showSidebar && (
         <div className="hidden md:flex w-64 flex-shrink-0 flex-col border-r border-separator bg-surface-secondary">
