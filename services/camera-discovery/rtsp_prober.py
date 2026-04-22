@@ -212,15 +212,16 @@ async def _try_credentials_once(ip: str, port: int, path: str,
 async def probe_rtsp_with_credentials(ip: str, port: int
                                       ) -> tuple[str, str, str] | None:
     """Find a (path, user, password) triple that authenticates on this
-    camera. Iterates STREAM_PATHS × DEFAULT_CAMERA_CREDENTIALS in order;
-    returns the first match or None.
+    camera. Returns the first match or None.
 
-    Early-exits: once a credential pair works on one path, we assume it
-    works across paths for that camera and stop trying other pairs on the
-    same host.
+    Loop order is paths OUTER, credentials INNER so a path the camera
+    doesn't expose short-circuits the whole credential list for that
+    path via _try_credentials_once() returning False on a non-401
+    non-200 status (typically 404). For a camera that accepts the third
+    credential on path /live that's ~13 DESCRIBEs instead of ~195.
     """
-    for user, pw in DEFAULT_CAMERA_CREDENTIALS:
-        for path in STREAM_PATHS:
+    for path in STREAM_PATHS:
+        for user, pw in DEFAULT_CAMERA_CREDENTIALS:
             if await _try_credentials_once(ip, port, path, user, pw):
                 logger.info(
                     "Default credential '%s' authenticated at %s:%d%s",

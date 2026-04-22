@@ -108,13 +108,10 @@ STATUS_RED       = (255, 69, 58)     # system-red
 STATUS_ORANGE    = (255, 159, 10)    # system-orange
 STATUS_GREEN     = (48, 209, 88)     # system-green
 
-# Legacy aliases kept so older code paths keep working
+# Semantic aliases used across screens
 CARD_COLOR       = SURFACE_RAISED
-DIM_COLOR        = LABEL_TERTIARY
-BAR_BG           = SURFACE_SECONDARY
 TEMP_WARN        = STATUS_ORANGE
 TEMP_CRIT        = STATUS_RED
-GOOD_COLOR       = STATUS_GREEN
 
 # ---------------------------------------------------------------------------
 # Assets + cycle timing
@@ -203,7 +200,7 @@ class TouchRegion:
 
 
 class TFTDisplay:
-    """ILI9481 480x320 TFT controller with touch-driven screens."""
+    """PyPortal-backed 480x320 TFT controller with touch-driven screens."""
 
     # Screen ids — mirror the dashboard's top-level routes where it makes
     # sense: home tile grid, chat-prep, stats/health, device summary,
@@ -1424,11 +1421,6 @@ class TFTDisplay:
                 if cams is not None:
                     self._pyportal_send("cameras", cams)
                 last_cams_push = now
-            if self._backend == "pyportal" and (now - last_files_push) > 0 \
-                    and (now - last_files_push) > FILES_REFRESH_SECONDS:
-                # (Reuse the files timer for drives — they change on the
-                # same event cadence and we don't need a separate tick.)
-                pass
             # Drives poll — separate, shorter cadence so hot-plug is snappy.
             if self._backend == "pyportal":
                 if not hasattr(self, "_last_drives_push"):
@@ -1487,6 +1479,3 @@ class TFTDisplay:
 
             time.sleep(0.08)
 
-
-# Legacy alias so existing callers keep working without changes.
-OLEDDisplay = TFTDisplay

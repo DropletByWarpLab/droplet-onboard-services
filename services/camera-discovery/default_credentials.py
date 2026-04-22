@@ -51,6 +51,9 @@ DEFAULT_CAMERA_CREDENTIALS: list[tuple[str, str]] = [
     ("admin", "9999"),
     # Wyze / few others
     ("admin", "wyze"),
-    # Ubiquiti UniFi Protect G3 / G4 factory
-    ("ubnt", "ubnt"),
 ]
+# Intentionally NOT including ("ubnt", "ubnt"): that's the factory default
+# for Ubiquiti networking gear (EdgeRouter / UniFi APs / switches), not
+# their cameras. UniFi Protect cameras are adopted through a controller and
+# don't have a local admin/password to probe. Probing ubnt/ubnt here would
+# cheerfully try to authenticate against any Ubiquiti router on the LAN.

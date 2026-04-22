@@ -1,9 +1,9 @@
 """
 Droplet TFT Display Service
 =============================
-FastAPI wrapper for the 480x320 ILI9481 TFT display (with XPT2046 touch).
-Exposes REST endpoints for the orchestrator and AI gateway to control what's
-shown on the physical display and to read / simulate touch input.
+FastAPI wrapper for the 480x320 PyPortal Titano (ILI9341) TFT display.
+Exposes REST endpoints for the orchestrator and AI gateway to control
+what's shown on the physical display and to read / simulate touch input.
 
 The visual system mirrors apps/web-dashboard (dark mode) so the on-device
 screen is a compact version of the admin UI. Touch tiles on the home
@@ -199,9 +199,8 @@ async def stop_cycle():
 async def get_preview():
     """Download the last rendered frame as PNG.
 
-    In `sim`/`pyportal` backends the service always writes SIM_OUTPUT,
-    so the preview is always available. On SPI/framebuffer hardware
-    we render ourselves to the same PNG for dashboard use.
+    Both `sim` and `pyportal` backends always write SIM_OUTPUT so the
+    preview is available to the dashboard regardless of which is active.
     """
     if not display:
         raise HTTPException(503, "Display not initialized")

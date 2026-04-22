@@ -12,9 +12,6 @@ The direct-XPT2046 (spidev) and evdev paths, plus the calibration env
 vars, were removed when we dropped the direct-SPI TFT backend.
 """
 
-from typing import Optional, Tuple
-
-
 class TouchReader:
     """No-op touch reader.
 
@@ -27,7 +24,6 @@ class TouchReader:
         self.width = width
         self.height = height
         self._backend = "none"
-        self._last: Optional[Tuple[int, int]] = None
 
     def start(self) -> None:
         pass
