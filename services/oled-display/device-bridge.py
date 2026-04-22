@@ -468,6 +468,12 @@ def drives_snapshot(invalidate=False):
             mp = m.get("mount")
             if not mp:
                 continue
+            # Skip stale entries: automount may have recorded a mount that
+            # has since been unmounted (e.g. the drive was reformatted and
+            # remounted by fstab at a different path). The /proc/mounts
+            # pass below will pick up the current location if any.
+            if not os.path.ismount(mp):
+                continue
             total, used, free = _bytes_for(mp)
             by_mount[mp] = {
                 "device": m.get("device"),
@@ -477,7 +483,7 @@ def drives_snapshot(invalidate=False):
                 "size_bytes": total,
                 "used_bytes": used,
                 "free_bytes": free,
-                "mounted": os.path.ismount(mp),
+                "mounted": True,
                 "source": "automount",
             }
     except Exception:
