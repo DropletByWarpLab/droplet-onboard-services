@@ -78,6 +78,10 @@ export async function runAgent(
       temperature: req.temperature,
       tools,
       tool_choice: "auto",
+      // We run the tool-dispatch loop ourselves (see below) — tell the
+      // gateway to return the raw model response including tool_calls
+      // instead of executing its own internal ReAct loop.
+      execute_tools: false,
     });
     if (!gwRes.ok) {
       return {

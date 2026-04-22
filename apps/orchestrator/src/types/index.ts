@@ -39,6 +39,11 @@ export interface ChatRequest {
   provider?: string;
   tools?: ToolDefinition[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+  // Set to false when the caller wants the raw tool_calls response back
+  // (e.g. the orchestrator's /api/llm/agent runs its own loop against the
+  // service layer). Default true preserves the ai-gateway's own ReAct loop
+  // for simple chat callers that don't want to handle tools themselves.
+  execute_tools?: boolean;
 }
 
 export interface ChatChoice {

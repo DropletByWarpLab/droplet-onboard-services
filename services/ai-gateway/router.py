@@ -96,8 +96,11 @@ class ProviderRouter:
         if request.tools:
             kwargs["tools"] = request.tools
 
-        # If no tools or streaming, do a simple single call
-        if not request.tools or request.stream:
+        # If no tools, streaming, or the caller opted out of the gateway's
+        # internal tool loop (execute_tools=False), do a single call and
+        # hand the raw response back — tool_calls included. The orchestrator
+        # agent endpoint uses this path since it owns tool dispatch itself.
+        if not request.tools or request.stream or not request.execute_tools:
             return await provider.chat(
                 messages=request.messages,
                 model=request.model,
