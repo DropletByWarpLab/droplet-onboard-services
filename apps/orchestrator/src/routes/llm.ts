@@ -1,8 +1,11 @@
 import { Router } from "express";
 import { Readable } from "node:stream";
 import { z } from "zod";
+import type { PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { runAgent } from "../services/llm-agent.service.js";
+import { TOOL_REGISTRY } from "../services/llm-tools.js";
 import type { ModelsResponse, ChatRequest, SessionChatRequest } from "../types/index.js";
 
 const MODELS_CACHE_KEY = "llm:models";
@@ -22,7 +25,21 @@ const chatRequestSchema = z.object({
   provider: z.string().optional(),
 });
 
-export function createLlmRouter(): Router {
+const agentRequestSchema = z.object({
+  model: z.string(),
+  messages: z.array(
+    z.object({
+      role: z.enum(["system", "user", "assistant", "tool"]),
+      content: z.string(),
+      tool_call_id: z.string().optional(),
+    }),
+  ),
+  max_iter: z.number().int().min(1).max(10).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  allowed_tools: z.array(z.string()).optional(),
+});
+
+export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   // List available models
@@ -79,6 +96,41 @@ export function createLlmRouter(): Router {
         const data = await gatewayRes.json();
         res.json(data);
       }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // List every tool the agent can call. Useful for the dashboard to
+  // render a "capabilities" pane and for debugging tool schemas.
+  router.get("/llm/tools", (_req, res) => {
+    res.json({
+      tools: Object.values(TOOL_REGISTRY).map((t) => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      })),
+    });
+  });
+
+  // Tool-aware agent endpoint. Runs a ReAct-style loop against the local
+  // LLM — on each turn, if the model emits `tool_calls`, we dispatch
+  // them against the registry (network, files, cameras, system) and
+  // feed the results back. Returns the final assistant message plus a
+  // trace of every tool invocation.
+  router.post("/llm/agent", async (req, res, next) => {
+    try {
+      const parsed = agentRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Invalid request",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const username = (req as { user?: { username: string } }).user?.username;
+      const result = await runAgent(parsed.data, prisma, username);
+      res.json(result);
     } catch (err) {
       next(err);
     }

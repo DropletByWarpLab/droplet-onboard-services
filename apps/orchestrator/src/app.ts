@@ -43,7 +43,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createProtectedAuthRouter());
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
-  app.use("/api", createLlmRouter());
+  app.use("/api", createLlmRouter(prisma));
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter());

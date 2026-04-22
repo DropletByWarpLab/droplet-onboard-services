@@ -1,8 +1,33 @@
 // --- AI Gateway types ---
 
+// OpenAI-compatible tool call shape — LiteLLM forwards this unchanged
+// between the ai-gateway, Ollama, and any remote provider, so we model
+// it exactly as the upstream spec.
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string; // JSON-encoded
+  };
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  // Only populated on assistant messages that request tool execution.
+  tool_calls?: ToolCall[];
+  // Set on tool-role messages to correlate the result with the request.
+  tool_call_id?: string;
+}
+
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
 }
 
 export interface ChatRequest {
@@ -12,6 +37,8 @@ export interface ChatRequest {
   temperature?: number;
   max_tokens?: number;
   provider?: string;
+  tools?: ToolDefinition[];
+  tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 }
 
 export interface ChatChoice {
