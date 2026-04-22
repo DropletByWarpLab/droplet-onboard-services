@@ -521,6 +521,13 @@ def drives_snapshot(invalidate=False):
                     continue  # automount state already has it
                 if mp in _EXCLUDED_MOUNT_POINTS:
                     continue
+                # Zombie mounts: /proc/mounts keeps the entry even after a
+                # USB drive is yanked without a clean unmount, and statvfs
+                # on such a path falls through to the parent filesystem
+                # (so a pulled PyPortal reports 113 GB of the eMMC root).
+                # Skip if the backing block device is gone.
+                if dev.startswith("/dev/") and not os.path.exists(dev):
+                    continue
                 total, used, free = _bytes_for(mp)
                 if total < _MIN_DRIVE_BYTES:
                     continue
