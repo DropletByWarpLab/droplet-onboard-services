@@ -50,6 +50,14 @@ services:
     env_file:
       - path: ../.env
         required: false
+    # routing, switch, and display all run with `network_mode: host` on
+    # the Jetson. The orchestrator is on the default bridge network — so
+    # `localhost` from inside this container is the container itself, not
+    # the host. Docker's magic `host-gateway` resolves to the host's IP on
+    # the bridge subnet (172.x.0.1 on Linux, the gateway IP on Docker
+    # Desktop) and lets URLs below target `host.docker.internal`.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
@@ -65,9 +73,10 @@ services:
       # is unsupported". See apps/orchestrator/src/config.ts for the full
       # explanation.
       - DROPLET_MATTER_CONTROLLER_NAME=${DROPLET_MATTER_CONTROLLER_NAME:-Droplet}
-      # NOTE: Uses localhost because the routing service runs with network_mode: host.
-      # If routing moves to bridge networking, change to http://routing:8080.
-      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
+      # Routing runs with network_mode: host; host.docker.internal is added
+      # via the extra_hosts above so the orchestrator can reach it without
+      # bridge-network compose DNS.
+      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       # WARP-44: `real` (default) / `mock` / `disabled`. When disabled the
       # orchestrator short-circuits router calls and the dashboard surfaces a
@@ -75,9 +84,8 @@ services:
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
-      # Display service runs with network_mode: host, so orchestrator reaches
-      # it over localhost rather than the compose network.
-      - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://localhost:8082}
+      - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
+      - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
     volumes:
       - matter-data:/data/matter-storage
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
