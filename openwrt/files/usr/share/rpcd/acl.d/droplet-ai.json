@@ -14,7 +14,7 @@
         "service": ["list"],
         "session": ["access", "list"],
         "hostapd.*": ["get_clients", "get_status"],
-        "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices"]
+        "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices", "getDHCPLeases", "getHostHints"]
       },
       "uci": ["network", "wireless", "dhcp", "firewall", "system"]
     },

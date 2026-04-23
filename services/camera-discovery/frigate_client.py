@@ -103,16 +103,44 @@ class FrigateClient:
         }
 
         try:
-            # Frigate supports PATCH for config updates
-            resp = await self._client.post(
+            # Frigate 0.17 replaced the POST + flat body with a PUT that
+            # expects the ConfigSetBody envelope:
+            #   {"config_data": <nested yaml dict>, "requires_restart": 0|1}
+            # The query-string path (``?foo.bar=baz``) is reserved for
+            # single-field dotted updates and doesn't fit a whole
+            # camera block. ``requires_restart=1`` persists to disk AND
+            # schedules an internal reload; ``=0`` applies live where
+            # possible. Cameras require a full restart to start capture,
+            # so ``=1`` is the right default for the add flow.
+            resp = await self._client.put(
                 "/api/config/set",
-                json=camera_config,
+                json={
+                    "config_data": camera_config,
+                    "requires_restart": 1,
+                },
             )
             if resp.status_code in (200, 201):
-                logger.info("Added camera %s to Frigate", safe_name)
-                return True
+                body = resp.json() if resp.content else {}
+                # Missing ``success`` key defaults to False: Frigate 0.17
+                # always sets it, so absence means the response shape
+                # changed and we shouldn't assume a silent add worked.
+                if body.get("success") is True:
+                    logger.info(
+                        "Added camera %s to Frigate (triggering restart)",
+                        safe_name,
+                    )
+                    # ``requires_restart=1`` persists the change on disk
+                    # but on 0.17 doesn't always bounce capture workers —
+                    # a belt-and-suspenders POST /api/restart makes the
+                    # camera show up in /api/stats immediately.
+                    await self._trigger_restart(safe_name)
+                    return True
+                logger.warning(
+                    "Frigate config set rejected camera %s: %s",
+                    safe_name, body.get("message", "")[:200],
+                )
+                return False
 
-            # Fallback: try restart-based config update
             logger.warning(
                 "Frigate config set returned %d for camera %s: %s",
                 resp.status_code,
@@ -123,6 +151,25 @@ class FrigateClient:
         except Exception as e:
             logger.error("Failed to add camera %s to Frigate: %s", safe_name, e)
             return False
+
+    async def _trigger_restart(self, camera_name: str) -> None:
+        """Kick Frigate so a newly-added camera actually loads.
+
+        Best-effort: we already staged the config so a manual bounce
+        would still pick the change up. Swallow errors rather than
+        failing the add — the caller already logged success.
+        """
+        try:
+            resp = await self._client.post("/api/restart")
+            if resp.status_code >= 400:
+                logger.warning(
+                    "Frigate restart returned %d after adding %s: %s",
+                    resp.status_code, camera_name, resp.text[:200],
+                )
+        except Exception as exc:
+            logger.warning(
+                "Frigate restart failed after adding %s: %s", camera_name, exc
+            )
 
     async def remove_camera(self, name: str) -> bool:
         """Remove a camera from Frigate configuration."""

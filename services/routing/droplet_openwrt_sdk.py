@@ -426,12 +426,41 @@ class DHCPApi:
         self._r = router
 
     def active_leases(self) -> list[dict]:
-        """Get all active IPv4 DHCP leases."""
+        """Get all active IPv4 DHCP leases.
+
+        ``ubus call dhcp ipv4leases`` is the documented object on mainline
+        OpenWrt, but on 24.10.x it consistently returns an empty object
+        even when odhcpd/dnsmasq have live entries in /tmp/dhcp.leases.
+        The ``luci-rpc`` object reads the same files and DOES return the
+        populated list, so we try it first and fall back to the native
+        call only when luci-rpc isn't installed (build without luci).
+        """
+        try:
+            result = self._r._call("luci-rpc", "getDHCPLeases")
+            leases = result.get("dhcp_leases") or []
+            if leases:
+                return leases
+        except UbusError as exc:
+            # luci-rpc missing or permission denied — fall through. Any
+            # other ubus error from luci-rpc is treated as non-fatal so
+            # the native path still has a chance.
+            logger.debug("luci-rpc getDHCPLeases unavailable: %s", exc)
         result = self._r._call("dhcp", "ipv4leases")
         return result.get("dhcp_leases", [])
 
     def active_leases_v6(self) -> list[dict]:
-        """Get all active IPv6 DHCP leases."""
+        """Get all active IPv6 DHCP leases.
+
+        Same fallback logic as :meth:`active_leases` — ``luci-rpc
+        getDHCPLeases`` returns both v4 and v6 under ``dhcp6_leases``.
+        """
+        try:
+            result = self._r._call("luci-rpc", "getDHCPLeases")
+            leases = result.get("dhcp6_leases") or []
+            if leases:
+                return leases
+        except UbusError as exc:
+            logger.debug("luci-rpc getDHCPLeases unavailable: %s", exc)
         result = self._r._call("dhcp", "ipv6leases")
         return result.get("dhcp_leases", [])
 

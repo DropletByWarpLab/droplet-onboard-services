@@ -2,22 +2,50 @@
 
 Uses WS-Discovery multicast to find ONVIF-compatible cameras on the LAN,
 then queries device information and stream URIs via ONVIF SOAP calls.
+
+WS-Discovery is OPTIONAL. The ``python-ws-discovery`` package we depend on
+has long-running issues on Python 3.12+ (netifaces interface-name
+ValueError, ``str.getNamespace`` attribute error inside its thread pool)
+that leak file descriptors every time the scan runs — after ~1k tries the
+process hits ``EMFILE`` and any HTTP endpoint on the service starts
+returning "Connection reset by peer". To avoid poisoning the whole
+service, WS-Discovery runs behind a disable flag and with strict per-call
+resource limits; cameras that aren't found this way still get picked up
+by the RTSP subnet sweep in :mod:`rtsp_prober`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+# Opt-in flag. Default off on Linux/arm64 deployments where the netifaces
+# ValueError reproduces deterministically; set to 1 to re-enable after
+# pinning a patched wsdiscovery release.
+_WS_DISCOVERY_ENABLED = os.getenv("ONVIF_WS_DISCOVERY_ENABLED", "0").strip() not in (
+    "",
+    "0",
+    "false",
+    "no",
+)
 
 
 async def ws_discovery_scan(timeout: float = 5.0) -> list[dict]:
     """Run WS-Discovery multicast scan for ONVIF devices.
 
     Returns a list of discovered device dicts with xaddrs (service URLs).
+    Returns an empty list (without raising) when the feature is disabled
+    or the underlying library throws — the RTSP subnet sweep is the
+    authoritative discovery path, and a broken multicast scan shouldn't
+    take the /scan endpoint down with it.
     """
+    if not _WS_DISCOVERY_ENABLED:
+        return []
+
     devices: list[dict] = []
 
     try:
@@ -55,10 +83,16 @@ async def ws_discovery_scan(timeout: float = 5.0) -> list[dict]:
                             "detection_method": "ws_discovery",
                         })
         finally:
-            wsd.stop()
+            try:
+                wsd.stop()
+            except Exception as stop_exc:
+                logger.warning("wsdiscovery stop() raised: %s", stop_exc)
     except ImportError:
         logger.warning("wsdiscovery not available — skipping WS-Discovery scan")
     except Exception as e:
+        # BaseException-subclass-except on purpose: the wsdiscovery thread
+        # model throws AttributeError from worker threads and ValueError
+        # from netifaces. Neither should blow up the HTTP handler.
         logger.error("WS-Discovery scan failed: %s", e)
 
     return devices

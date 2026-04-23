@@ -97,6 +97,14 @@ npm run test:ai-gateway     # ai-gateway only
 | `FRIGATE_URL`        | Frigate NVR API endpoint (default `http://frigate:5000`) |
 | `CAMERA_SCAN_INTERVAL` | Camera discovery scan interval in seconds (default `30`) |
 | `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`) |
+| `CAMERA_DEFAULT_USERNAME` | Operator-supplied admin user for IP cameras; tried before factory defaults |
+| `CAMERA_DEFAULT_PASSWORD` | Operator-supplied admin password (paired with `CAMERA_DEFAULT_USERNAME`) |
+| `CAMERA_CREDENTIALS_JSON` | JSON array of `[user, pw]` pairs probed before factory defaults |
+| `ONVIF_WS_DISCOVERY_ENABLED` | `1` to enable WS-Discovery multicast scan (default `0`; `python-ws-discovery` leaks FDs on Python 3.12+) |
+| `CAMERA_AUTO_INITIALIZE` | `1` to auto-run the vendor first-run admin-password flow (Hanwha `/init-cgi/pw_init.cgi`) using `CAMERA_DEFAULT_PASSWORD` when an uninitialized camera is seen (default `0`) |
+| `FRIGATE_IMAGE`      | Frigate container image (default `stable` CPU; set `stable-tensorrt-jp6` on JetPack 6 Orin hardware) |
+| `FRIGATE_RUNTIME`    | Docker runtime for the Frigate container (`runc` default; set `nvidia` on Jetson / x86+NVIDIA hosts) |
+| `YOLO_MODELS`        | JP6-image model preparator trigger; leave empty until the s6 prepare script stops expecting legacy `.cfg` inputs |
 | `SWITCH_HOST`        | Managed switch IP (default `192.168.1.77`)             |
 | `SWITCH_PORT`        | Managed switch HTTPS port (default `443`)              |
 | `SWITCH_USERNAME`    | Switch admin username (default `admin`)                |

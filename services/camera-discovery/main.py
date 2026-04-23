@@ -8,6 +8,7 @@ Discovery events are published to MQTT for the orchestrator to relay to clients.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import ipaddress
 import json
 import logging
@@ -25,6 +26,8 @@ from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
 from rtsp_prober import probe_camera
+from vendor_init import check_status as vendor_status_check
+from vendor_init import initialize_camera as vendor_initialize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -52,6 +55,18 @@ try:
     SCAN_INTERVAL = max(int(os.getenv("SCAN_INTERVAL", "30")), 5)
 except ValueError:
     SCAN_INTERVAL = 30
+
+# Auto-initialization: when enabled, cameras in a pre-init state (e.g. Hanwha
+# Wisenet with ``Initialized=False``) get provisioned with the operator-supplied
+# admin credentials on first sighting. Off by default so that adopting
+# someone else's camera by accident doesn't silently rotate its password.
+AUTO_INITIALIZE = os.getenv("CAMERA_AUTO_INITIALIZE", "").strip().lower() in ("1", "true", "yes")
+AUTO_INIT_USERNAME = os.getenv("CAMERA_DEFAULT_USERNAME", "admin").strip() or "admin"
+AUTO_INIT_PASSWORD = os.getenv("CAMERA_DEFAULT_PASSWORD", "")
+
+# Track IPs we've already successfully or unsuccessfully initialized so the
+# scan loop doesn't re-hit the same camera every 30s.
+_auto_init_attempted: set[str] = set()
 
 # --- Security helpers ---
 
@@ -98,12 +113,18 @@ def is_safe_rtsp_url(url: str) -> bool:
 
 
 def _require_auth(request: Request) -> None:
-    """Verify request carries valid DEVICE_SECRET for privileged operations."""
+    """Verify request carries valid DEVICE_SECRET for privileged operations.
+
+    Uses ``hmac.compare_digest`` so token comparison runs in constant
+    time. An attacker on the LAN can't realistically exfiltrate a
+    DEVICE_SECRET via HTTP timing, but the cost of doing the right
+    thing here is a single-line import.
+    """
     if not DEVICE_SECRET:
         return  # Auth disabled when no secret configured
     auth = request.headers.get("Authorization", "")
     token = auth.removeprefix("Bearer ").strip()
-    if token != DEVICE_SECRET:
+    if not hmac.compare_digest(token.encode("utf-8"), DEVICE_SECRET.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Unauthorized — invalid device secret")
 
 
@@ -202,16 +223,173 @@ def _sanitize_camera_name(hostname: str, ip: str) -> str:
     return "camera_" + ip.replace(".", "_")
 
 
+async def _subnet_sweep(network: ipaddress.IPv4Network) -> list[str]:
+    """Async TCP-port sweep of a subnet for hosts with port 554 (RTSP) open.
+
+    Runs alongside the DHCP feed so adoption still works for static-IP
+    cameras, non-Droplet DHCP servers, and the window before a fresh
+    lease shows up. Capped to /22 (~1k hosts) and throttled to 64
+    in-flight connections — without the semaphore a /24 bursts 250+
+    sockets at once and we trip the default ``ulimit -n`` on the
+    Jetson (RLIMIT_NOFILE=1024 out of the box).
+    """
+    if network.num_addresses > 1024:
+        logger.warning(
+            "Subnet %s too large for sweep (%d hosts); skipping",
+            network, network.num_addresses,
+        )
+        return []
+
+    sem = asyncio.Semaphore(64)
+
+    async def _check(ip: str) -> str | None:
+        async with sem:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(ip, 554), timeout=1.2,
+                )
+            except (asyncio.TimeoutError, OSError):
+                return None
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return ip
+
+    hosts = [str(h) for h in network.hosts()]
+    results = await asyncio.gather(*[_check(h) for h in hosts])
+    return [ip for ip in results if ip]
+
+
+def _reconcile_synthetic_macs(leases: list[dict]) -> None:
+    """Migrate ``ip:X.X.X.X`` placeholder records to real DHCP MACs.
+
+    When a camera is adopted during a subnet sweep (static IP, or DHCP
+    hadn't resolved yet) we key it by a synthetic ``ip:<addr>`` token.
+    If a later scan finds a real DHCP lease for that same IP, move the
+    record to the real MAC so:
+      * re-scans don't re-adopt it as a "new" camera,
+      * manual ``DELETE /cameras/{mac}`` works with the real MAC,
+      * the record carries a stable hostname once DHCP knows it.
+    """
+    if not leases:
+        return
+    ip_to_mac = {
+        (lease.get("ipaddr") or ""): (lease.get("macaddr") or "").lower()
+        for lease in leases
+        if lease.get("ipaddr") and (lease.get("macaddr") or "").lower()
+    }
+    for bucket in (known_cameras, pending_cameras):
+        for stale_key in [k for k in bucket if k.startswith("ip:")]:
+            record = bucket[stale_key]
+            real_mac = ip_to_mac.get(record.get("ip"))
+            if not real_mac or real_mac.startswith("ip:"):
+                continue
+            if real_mac in bucket or real_mac in rejected_macs:
+                bucket.pop(stale_key, None)
+                continue
+            record["mac"] = real_mac
+            bucket[real_mac] = record
+            bucket.pop(stale_key, None)
+            logger.info(
+                "Reconciled synthetic key %s -> real MAC %s for %s",
+                stale_key, real_mac, record.get("ip"),
+            )
+
+
+async def _maybe_auto_initialize(ip: str) -> bool:
+    """Run vendor first-run flow for one camera when AUTO_INITIALIZE is on.
+
+    Opt-in — off by default so we don't silently rotate an admin
+    password on a camera the operator didn't intend to adopt. Defence
+    in depth: re-check the subnet gate even though the scan loop
+    already filtered by it (this function also runs from manual entry
+    points and rotates credentials — worth a second check).
+    """
+    if not AUTO_INITIALIZE:
+        return False
+    if not AUTO_INIT_PASSWORD:
+        return False
+    if not is_safe_ip(ip) or not is_camera_subnet_ip(ip):
+        return False
+    if ip in _auto_init_attempted:
+        return False
+
+    status = await vendor_status_check(ip)
+    if status is None:
+        # Transient / unknown-vendor. Don't mark as attempted — the
+        # next scan should retry once the camera is reachable or its
+        # vendor is recognized.
+        return False
+    if not status.needs_initialization:
+        # Already initialized. Record the attempt so we stop probing.
+        _auto_init_attempted.add(ip)
+        return False
+
+    _auto_init_attempted.add(ip)
+    logger.info(
+        "Auto-initializing %s (vendor=%s) with operator-supplied credentials",
+        ip, status.vendor,
+    )
+    result = await vendor_initialize(ip, AUTO_INIT_USERNAME, AUTO_INIT_PASSWORD)
+    if result.success:
+        logger.info("Auto-init succeeded on %s (vendor=%s)", ip, result.vendor)
+        publish_discovery({
+            "event": "camera_initialized",
+            "ip": ip,
+            "vendor": result.vendor,
+        })
+        return True
+    logger.warning(
+        "Auto-init failed on %s (vendor=%s): %s",
+        ip, result.vendor, result.message,
+    )
+    return False
+
+
 async def scan_and_discover() -> None:
     """Main discovery loop iteration.
 
-    1. Fetch DHCP leases
-    2. Filter for potential cameras (by hostname heuristic or new unknown devices)
-    3. Probe each candidate with RTSP and ONVIF
-    4. Add confirmed cameras to Frigate
-    5. Publish events to MQTT
+    1. Fetch DHCP leases from the routing service
+    2. Sweep the camera subnet for RTSP hosts (catches static-IP cameras)
+    3. Run any operator-approved first-run init on fresh cameras
+    4. Probe each candidate with RTSP and ONVIF
+    5. Add confirmed cameras to Frigate
+    6. Publish events to MQTT
     """
     leases = await fetch_dhcp_leases()
+
+    # Always run a port-554 sweep of the camera subnet in parallel with the
+    # DHCP query so adoption works on static IPs, non-Droplet DHCP
+    # servers, and the brief window before a fresh lease shows up.
+    # Synthetic records are keyed by ``ip:<addr>`` so a later DHCP scan
+    # can reconcile them back to the real MAC via _reconcile_synthetic_macs.
+    if _camera_network is not None:
+        try:
+            swept = await _subnet_sweep(_camera_network)
+        except Exception as exc:
+            logger.warning("Subnet sweep raised: %s", exc)
+            swept = []
+        known_lease_ips = {l.get("ipaddr") for l in leases}
+        synthetic = [
+            {
+                "ipaddr": ip,
+                "macaddr": f"ip:{ip}",
+                "hostname": "",
+                "source": "sweep",
+            }
+            for ip in swept
+            if ip not in known_lease_ips
+        ]
+        if synthetic:
+            logger.info(
+                "Subnet sweep found %d static-IP host(s) not in DHCP leases",
+                len(synthetic),
+            )
+        leases = list(leases) + synthetic
+
+    _reconcile_synthetic_macs(leases)
 
     # Also run ONVIF WS-Discovery for cameras that might not have DHCP hostnames
     onvif_devices = []
@@ -242,6 +420,7 @@ async def scan_and_discover() -> None:
             "mac": mac,
             "hostname": hostname,
             "is_likely_camera": _is_camera_hostname(hostname),
+            "source": lease.get("source", "dhcp"),
         }
 
     # Add ONVIF-discovered devices
@@ -279,6 +458,13 @@ async def scan_and_discover() -> None:
 
     for mac, candidate in candidates.items():
         ip = candidate["ip"]
+
+        # First-run provisioning: Hanwha/Wisenet etc. reject every API
+        # call (403 on SUNAPI, 401 on RTSP) until the operator sets the
+        # initial admin password. When auto-init is on AND we have a
+        # site-wide password configured, drive the vendor's first-run
+        # flow so the RTSP probe below has a chance of authenticating.
+        await _maybe_auto_initialize(ip)
 
         # Skip if already has full info from ONVIF discovery
         if candidate.get("rtsp_url"):
@@ -377,6 +563,35 @@ async def discovery_loop() -> None:
 app = FastAPI(title="Droplet Camera Discovery", version="0.1.0")
 
 
+async def _reconcile_with_frigate() -> None:
+    """Drop ``known_cameras`` entries that Frigate no longer has.
+
+    ``known_cameras`` is our in-memory cache of what we told Frigate
+    about. If someone wipes the Frigate config.yml, recreates the
+    container, or manually removes a camera, our cache goes stale and
+    the scan loop skips re-adding because the MAC looks "already
+    known". Reconcile on startup (and after explicit /scan calls) by
+    asking Frigate for its active camera list and dropping any of our
+    records whose Frigate name no longer exists.
+    """
+    try:
+        frigate_cams = await frigate.get_cameras()
+    except Exception as exc:
+        logger.debug("Frigate reconcile skipped (stats fetch failed): %s", exc)
+        return
+    live_names = set(frigate_cams.keys())
+    stale = [
+        mac for mac, rec in known_cameras.items()
+        if rec.get("name") and rec["name"] not in live_names
+    ]
+    for mac in stale:
+        logger.info(
+            "Dropping stale known-camera %s (%s) — not present in Frigate",
+            mac, known_cameras[mac].get("name"),
+        )
+        known_cameras.pop(mac, None)
+
+
 @app.on_event("startup")
 async def startup():
     global mqtt_client, _discovery_task
@@ -385,6 +600,16 @@ async def startup():
         logger.info("Connected to MQTT broker")
     except Exception as e:
         logger.warning("MQTT connection failed (will retry): %s", e)
+
+    # Wait briefly for Frigate to be ready, then reconcile our cache with
+    # its view of the world so a prior-run known_cameras doesn't block
+    # re-adoption of a camera that Frigate forgot.
+    for _ in range(12):
+        if await frigate.health_check():
+            await _reconcile_with_frigate()
+            break
+        logger.info("Waiting for Frigate to be ready...")
+        await asyncio.sleep(5)
 
     _discovery_task = asyncio.create_task(discovery_loop())
 
@@ -468,6 +693,81 @@ async def trigger_scan():
         "known": len(known_cameras),
         "pending": len(pending_cameras),
     }
+
+
+# --- First-run initialization (vendor-specific setup flow) ---
+
+
+@app.get("/cameras/{ip}/init-status")
+async def camera_init_status(ip: str, request: Request):
+    """Check whether a camera needs its first-run admin password set.
+
+    Gated by DEVICE_SECRET — the response reveals the camera's vendor
+    identity and whether an attacker-facing init endpoint is accepting
+    unauthenticated writes, both of which are reconnaissance-grade info
+    that doesn't need to be exposed to random LAN peers.
+    """
+    _require_auth(request)
+    if not is_safe_ip(ip) or not is_camera_subnet_ip(ip):
+        raise HTTPException(status_code=400, detail="IP is not inside the camera subnet")
+    status = await vendor_status_check(ip)
+    if status is None:
+        raise HTTPException(status_code=404, detail="No recognized init vendor for this IP")
+    return {
+        "ip": ip,
+        "vendor": status.vendor,
+        "initialized": status.initialized,
+        "needs_initialization": status.needs_initialization,
+        "details": status.details,
+    }
+
+
+@app.post("/cameras/{ip}/initialize")
+async def camera_initialize(ip: str, request: Request):
+    """Run the vendor-specific first-run admin-password flow.
+
+    Request body (all optional): ``{"username": "admin", "password": "site-pw"}``.
+    Falls back to ``CAMERA_DEFAULT_USERNAME`` / ``CAMERA_DEFAULT_PASSWORD``
+    from the environment when the body omits them. Privileged call —
+    requires ``DEVICE_SECRET`` when auth is enabled.
+    """
+    _require_auth(request)
+    if not is_safe_ip(ip) or not is_camera_subnet_ip(ip):
+        raise HTTPException(status_code=400, detail="IP is not inside the camera subnet")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    username = (body.get("username") or AUTO_INIT_USERNAME).strip() or "admin"
+    password = body.get("password") or AUTO_INIT_PASSWORD
+    if not password:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "no password supplied — send {\"password\": ...} in the body or set "
+                "CAMERA_DEFAULT_PASSWORD in the service environment"
+            ),
+        )
+
+    result = await vendor_initialize(ip, username, password)
+    _auto_init_attempted.add(ip)
+    payload = {
+        "ip": ip,
+        "vendor": result.vendor,
+        "success": result.success,
+        "message": result.message,
+        "http_status": result.http_status,
+    }
+    if not result.success:
+        return JSONResponse(
+            status_code=409 if result.http_status == 490 else 502,
+            content=payload,
+        )
+    return payload
 
 
 # --- Subnet status ---
