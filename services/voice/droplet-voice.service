@@ -1,0 +1,44 @@
+# Systemd unit for the Droplet voice service when running natively on the
+# Jetson host (i.e. WITHOUT docker compose). Using the host directly gives
+# uncontested access to /dev/snd and /dev/gpiochip*, which can be tricky to
+# pass through a container.
+#
+# Install with:
+#   sudo cp droplet-voice.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now droplet-voice
+#
+# Tail logs:
+#   journalctl -u droplet-voice -f
+
+[Unit]
+Description=Droplet voice service (STT/TTS + GPIO mic-mute)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=droplet
+Group=droplet
+WorkingDirectory=/opt/droplet-voice
+EnvironmentFile=-/etc/droplet/voice.env
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8090
+Restart=on-failure
+RestartSec=5
+
+# Resource limits — voice models can balloon on edge cases.
+MemoryMax=2G
+CPUQuota=200%
+
+# Hardening — keep capabilities minimal. We need /dev/snd for audio and
+# /dev/gpiochip* for GPIO; everything else is locked down.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/data/voices /data/wakeword
+DeviceAllow=/dev/snd rw
+DeviceAllow=char-gpio rw
+
+[Install]
+WantedBy=multi-user.target

@@ -476,6 +476,131 @@ const list_drives: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// Voice service (PR #6)
+// ---------------------------------------------------------------------------
+//
+// Thin HTTP wrappers around services/voice/. The actual STT/TTS/audio code
+// runs out-of-process so model loading doesn't tie up the orchestrator's
+// event loop. URL is configurable via VOICE_SERVICE_URL.
+
+const VOICE_URL = process.env.VOICE_SERVICE_URL || "http://voice:8090";
+const VOICE_TOKEN = process.env.VOICE_TOKEN;
+
+function voiceHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  if (VOICE_TOKEN) h.Authorization = `Bearer ${VOICE_TOKEN}`;
+  return h;
+}
+
+const speak_text: Tool = {
+  name: "speak_text",
+  description:
+    "Synthesize text to speech and play it through the device speaker. " +
+    "Use when the user is interacting via voice and the LLM response " +
+    "should be spoken back. Max 5000 characters per call.",
+  parameters: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "Text to speak (1-5000 chars)." },
+    },
+    required: ["text"],
+  },
+  handler: async (args, _ctx) => {
+    const text = String(args.text ?? "").trim();
+    if (!text) return { error: "text required" };
+    if (text.length > 5000) return { error: "text too long (>5000 chars)" };
+    try {
+      const resp = await fetch(`${VOICE_URL}/speak?play=true`, {
+        method: "POST",
+        headers: voiceHeaders(),
+        body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!resp.ok) return { error: `voice ${resp.status}: ${(await resp.text()).slice(0, 200)}` };
+      return await resp.json();
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const listen_for_speech: Tool = {
+  name: "listen_for_speech",
+  description:
+    "Capture N seconds of microphone audio and transcribe it. Returns the " +
+    "transcribed text. Use for push-to-talk voice input. Default 5s, max 30s.",
+  parameters: {
+    type: "object",
+    properties: {
+      seconds: { type: "number", minimum: 0.5, maximum: 30, description: "Default 5." },
+    },
+  },
+  handler: async (args, _ctx) => {
+    const seconds = Math.max(0.5, Math.min(30, Number(args.seconds) || 5));
+    try {
+      const resp = await fetch(`${VOICE_URL}/listen?seconds=${seconds}`, {
+        method: "POST",
+        headers: voiceHeaders(),
+        signal: AbortSignal.timeout((seconds + 30) * 1000),
+      });
+      if (!resp.ok) return { error: `voice ${resp.status}: ${(await resp.text()).slice(0, 200)}` };
+      return await resp.json();
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const set_voice_mute: Tool = {
+  name: "set_voice_mute",
+  description:
+    "Mute or unmute the microphone. When muted, the hardware mic VDD is " +
+    "cut via GPIO MOSFET (if configured) and the red mute LED lights — " +
+    "software cannot capture audio in this state.",
+  parameters: {
+    type: "object",
+    properties: {
+      muted: { type: "boolean", description: "true to mute, false to unmute." },
+    },
+    required: ["muted"],
+  },
+  handler: async (args, _ctx) => {
+    const path = args.muted === false ? "/unmute" : "/mute";
+    try {
+      const resp = await fetch(`${VOICE_URL}${path}`, {
+        method: "POST",
+        headers: voiceHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) return { error: `voice ${resp.status}` };
+      return await resp.json();
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const get_voice_state: Tool = {
+  name: "get_voice_state",
+  description:
+    "Return the current voice service state ('idle', 'listening', " +
+    "'processing', 'speaking', 'muted').",
+  parameters: { type: "object", properties: {} },
+  handler: async (_args, _ctx) => {
+    try {
+      const resp = await fetch(`${VOICE_URL}/state`, {
+        headers: voiceHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) return { error: `voice ${resp.status}` };
+      return await resp.json();
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -496,5 +621,10 @@ export const TOOL_REGISTRY: Record<string, Tool> = Object.fromEntries(
     accept_discovered_camera,
     get_system_health,
     list_drives,
+    // Voice service (PR #6)
+    speak_text,
+    listen_for_speech,
+    set_voice_mute,
+    get_voice_state,
   ].map((t) => [t.name, t]),
 );

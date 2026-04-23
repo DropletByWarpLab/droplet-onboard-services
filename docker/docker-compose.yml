@@ -183,6 +183,46 @@ services:
       - orchestrator
     restart: always
 
+  # --- Voice service (PR #6) ---
+  # FastAPI app exposing STT (faster-whisper) + TTS (Piper) + GPIO mute over
+  # HTTP at :8090. The orchestrator's voice LLM tools target this. Default
+  # backends are MOCK so the service boots cleanly on a fresh device with no
+  # sound card; flip to alsa/whisper/piper via env in .env when the hardware
+  # is wired (see services/voice/README.md).
+  #
+  # The `voice` profile keeps it out of the default stack — bring up with
+  # `COMPOSE_PROFILES=voice docker compose up -d`. Once you've physically
+  # wired the I2S mic + speaker + mute MOSFET on the Jetson, switch to the
+  # systemd unit at services/voice/droplet-voice.service which gets cleaner
+  # access to /dev/snd and /dev/gpiochip*.
+  voice:
+    build:
+      context: ../services/voice
+      dockerfile: Dockerfile
+    expose:
+      - "8090"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - VOICE_LISTEN_HOST=0.0.0.0
+      - VOICE_LISTEN_PORT=8090
+      - VOICE_AUDIO_BACKEND=${VOICE_AUDIO_BACKEND:-mock}
+      - VOICE_STT_BACKEND=${VOICE_STT_BACKEND:-mock}
+      - VOICE_TTS_BACKEND=${VOICE_TTS_BACKEND:-mock}
+      - VOICE_GPIO_BACKEND=${VOICE_GPIO_BACKEND:-noop}
+      - VOICE_ORCHESTRATOR_URL=http://orchestrator:3000
+    volumes:
+      - voice-data:/data
+      # When VOICE_AUDIO_BACKEND=alsa, uncomment to expose the host sound card.
+      # The default mock backend works fine without these.
+      # - /dev/snd:/dev/snd
+    # GPIO requires the host's /dev/gpiochip* and root inside the container,
+    # which is heavy for a compose deploy — prefer the systemd unit on the
+    # Jetson when you actually wire the buttons + LED.
+    profiles: ["voice", "full"]
+    restart: always
+
   # --- Home Assistant ---
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:stable
@@ -393,3 +433,6 @@ volumes:
   nextcloud-data:
   ha-config:
   matter-data:
+  # PR #6 — voice service models (whisper, piper voices, openWakeWord).
+  # Persisted so model downloads survive `docker compose down`.
+  voice-data:

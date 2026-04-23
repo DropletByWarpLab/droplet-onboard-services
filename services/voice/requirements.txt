@@ -1,0 +1,39 @@
+# --- Core HTTP server ---
+fastapi>=0.110.0,<0.120.0
+uvicorn[standard]>=0.27.0,<0.35.0
+python-multipart>=0.0.9                # File uploads on /transcribe
+
+# --- Audio I/O (alsa backend) ---
+# sounddevice needs libportaudio2 in the system; the Dockerfile installs it.
+sounddevice>=0.4.6,<0.6.0
+numpy>=1.26.0,<3.0.0
+
+# --- Speech → text (whisper backend) ---
+# faster-whisper does CPU + CUDA inference via CTranslate2.
+faster-whisper>=1.0.0,<2.0.0
+
+# --- Text → speech (piper backend) ---
+# piper-tts ships an ONNX runtime + voice models loaded from disk.
+piper-tts>=1.2.0,<2.0.0
+
+# --- Wake word (OPTIONAL — install separately) ---
+# openWakeWord depends on tflite-runtime which has no Python 3.12 wheel
+# (max 3.11). Wake word is OFF by default in v1, so we keep this commented
+# out to keep `docker build` green. To enable it:
+#
+#   1. Build with the Dockerfile pinned to python:3.11-slim, OR
+#   2. After build: `docker compose exec voice pip install openwakeword`
+#      (works on 3.11; on 3.12 you'll need a wheel-bearing fork)
+#
+# Then set VOICE_WAKE_WORD_ENABLED=true. The voice service tolerates the
+# import failure and falls back to push-to-talk if the package is missing.
+# openwakeword>=0.6.0,<2.0.0
+
+# --- GPIO (jetson backend; safe to omit on dev machines) ---
+# Jetson.GPIO is only used when VOICE_GPIO_BACKEND=jetson. The package
+# itself is installed but does nothing without root + the right kernel.
+Jetson.GPIO>=2.1.6,<3.0.0; platform_machine == "aarch64"
+
+# --- Tests ---
+pytest>=8.0.0
+httpx>=0.27.0                          # FastAPI test client transport

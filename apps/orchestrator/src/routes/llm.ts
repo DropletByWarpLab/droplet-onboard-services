@@ -58,6 +58,12 @@ const WRITE_TOOLS = new Set([
   "unblock_device",
   "accept_discovered_camera",
   "scan_for_cameras",
+  // PR #6: voice tools that change state. listen_for_speech captures audio
+  // (privacy-sensitive) so it's gated; speak_text plays through the speaker;
+  // set_voice_mute changes the hardware state. get_voice_state is read-only.
+  "speak_text",
+  "listen_for_speech",
+  "set_voice_mute",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {
