@@ -68,9 +68,6 @@ services:
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
-      # Display service runs with network_mode: host, so orchestrator reaches
-      # it over localhost rather than the compose network.
-      - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://localhost:8082}
     volumes:
       - matter-data:/data/matter-storage
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
@@ -109,17 +106,6 @@ services:
       - nextcloud-data:/var/www/html
       - ./nextcloud-skeleton:/skeleton:ro
       - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
-      # USB drives auto-mounted on the host show up under /mnt/droplet/<name>.
-      # Bind-mounting with rshared propagation lets new drives appear inside
-      # Nextcloud without a container restart, so the automount script's
-      # `occ files_external:create --datadir="/host/<name>"` works for any
-      # drive plugged in after container boot.
-      - type: bind
-        source: /mnt/droplet
-        target: /host
-        bind:
-          create_host_path: true
-          propagation: rshared
     restart: always
 
   # --- Infrastructure ---
@@ -303,9 +289,12 @@ services:
       - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
     volumes:
       - frigate-config:/config
-      # NVR recordings live on the dedicated 'cameras' partition (ext4) on NVMe.
-      # Mount is provisioned by /etc/fstab on the Jetson — see docs/STATUS.md.
-      - /mnt/cameras:/media/frigate
+      # NVR recordings default to the `nvrdata` named volume so every fresh
+      # deployment works out of the box. On Jetson lab hosts the operator
+      # can redirect this to a dedicated NVMe partition by overriding
+      # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
+      # once the partition is provisioned. See docs/STATUS.md.
+      - ${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
       # Writable: Frigate 0.17 persists API-driven config changes
       # (camera-discovery auto-adoption PUTs to /api/config/set) by
@@ -369,49 +358,6 @@ services:
     profiles: ["full"]
     restart: always
 
-  # --- TFT Display (3.5" front-panel) ---
-  # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
-  # accepts: auto (probe PyPortal, fall back to sim), pyportal, or sim.
-  # The direct-SPI / fbtft-framebuffer / GPIO paths were removed; the
-  # PyPortal's own SAMD51 handles rendering, so we just stream JSON
-  # commands over /dev/ttyACM* — no privileged access or GPIO needed.
-  # Service name stays `oled-display` for backwards-compatibility with the
-  # orchestrator's display.client.ts and existing env wiring.
-  oled-display:
-    build:
-      context: ../services/oled-display
-      dockerfile: Dockerfile
-    network_mode: host
-    environment:
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
-      # Same token — the container talks to host-side device-bridge.
-      - BRIDGE_AUTH_TOKEN=${DEVICE_SECRET_KEY:-}
-      - PORT=8082
-      - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
-      - LCD_WIDTH=480
-      - LCD_HEIGHT=320
-      - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
-      - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
-    volumes:
-      # Bind /dev so /dev/ttyACM* is visible in the container and survives
-      # PyPortal re-enumeration (USB hotplug changes the minor number).
-      - /dev:/dev:rw
-    # Scoped device access — just the USB ACM class (major 166) instead of
-    # full `privileged: true`. Without the cgroup rule the kernel refuses
-    # open() on /dev/ttyACM* with EPERM and the service falls back to sim
-    # mode; with it, and only it, nothing else in the container can touch
-    # arbitrary host devices. `c 166:* rmw` = character device, major 166,
-    # any minor, read/write/mknod.
-    device_cgroup_rules:
-      - "c 166:* rmw"
-    # Don't let the container escalate beyond whatever cap-bag it launched
-    # with. Belt-and-braces — device_cgroup_rules above is the actual
-    # access control; this just blocks setuid binaries from flipping.
-    security_opt:
-      - no-new-privileges:true
-    profiles: ["full"]
-    restart: always
-
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
@@ -420,6 +366,7 @@ secrets:
 
 volumes:
   pgdata:
+  nvrdata:
   frigate-config:
   aikeys:
   nextcloud-data:
