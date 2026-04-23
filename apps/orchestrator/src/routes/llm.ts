@@ -59,12 +59,18 @@ const WRITE_TOOLS = new Set([
   "unblock_device",
   "accept_discovered_camera",
   "scan_for_cameras",
+  // File mutation tools (from the file write/search PR). Write-gated
+  // because the LLM can be steered into destructive file operations.
   "write_file",
   "delete_file",
   "create_directory",
   "rename_file",
   "move_file",
   "copy_file",
+  // Clip export writes to Nextcloud + creates a Files entry; share_clip
+  // emits a token that grants public read access until expiry.
+  "export_clip",
+  "share_clip",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {

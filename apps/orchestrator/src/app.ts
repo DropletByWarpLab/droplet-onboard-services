@@ -16,7 +16,7 @@ import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth
 import { createSmartHomeRouter } from "./routes/smart-home.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createNetworkRouter } from "./routes/network.js";
-import { createCamerasRouter } from "./routes/cameras.js";
+import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
 
@@ -35,6 +35,11 @@ export function createApp(prisma: PrismaClient) {
 
   // Public auth routes (setup + login) — no authentication required
   app.use("/api", createPublicAuthRouter());
+
+  // Public clip-share endpoint — recipient of a shared link doesn't have a
+  // session; the HMAC-signed token in ?t=... is the authorization. Mounted
+  // BEFORE auth middleware so forwarded links work without a Droplet account.
+  app.use("/api", createCameraSharePublicRouter());
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);

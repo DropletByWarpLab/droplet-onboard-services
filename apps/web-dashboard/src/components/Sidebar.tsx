@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Film,
   FolderOpen,
   Home,
   Laptop,
@@ -37,6 +38,7 @@ const primaryNav: NavItem[] = [
 
 const secondaryNav: NavItem[] = [
   { href: "/cameras", label: "Cameras", icon: Video },
+  { href: "/clips", label: "Clips", icon: Film },
   { href: "/network", label: "Network", icon: Network },
   { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
