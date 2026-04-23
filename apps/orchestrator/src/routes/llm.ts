@@ -58,6 +58,11 @@ const WRITE_TOOLS = new Set([
   "unblock_device",
   "accept_discovered_camera",
   "scan_for_cameras",
+  // PR #4: Home Assistant scenes + automations. Scene activations and
+  // automation triggers can turn off lights, unlock locks, run heating —
+  // gate behind owner/admin like other state-changing tools.
+  "run_scene",
+  "trigger_automation",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {

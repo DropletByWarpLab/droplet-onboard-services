@@ -31,8 +31,20 @@ import * as openwrt from "./openwrt.client.js";
 import * as nc from "./nextcloud.client.js";
 import * as frigate from "./frigate.client.js";
 import * as healthMonitor from "./health-monitor.service.js";
+import * as ha from "./home-assistant.client.js";
 import { config } from "../config.js";
 import type { ToolDefinition } from "../types/index.js";
+
+// Validates an entity_id of shape `<domain>.<object_id>` where domain matches
+// `expectedDomain`. Home Assistant restricts entity_id to lowercase alphanum
+// + underscore — anything else is invalid input and we reject before sending
+// to HA so a malformed model output produces a clean tool error.
+function validateHaEntityId(input: unknown, expectedDomain: string): string | null {
+  if (typeof input !== "string") return null;
+  if (!/^[a-z0-9_]+\.[a-z0-9_]+$/.test(input)) return null;
+  if (!input.startsWith(expectedDomain + ".")) return null;
+  return input;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -476,6 +488,107 @@ const list_drives: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// Home Assistant scenes + automations (PR #4)
+// ---------------------------------------------------------------------------
+//
+// Read-and-run only. Creating, editing, or deleting scenes/automations is
+// intentionally NOT exposed to the LLM — a poisoned prompt that wrote a bad
+// rule could lock the user out of their own house. The dashboard / HA UI
+// remain the only paths to author rules.
+
+const list_scenes: Tool = {
+  name: "list_scenes",
+  description:
+    "List every scene the user has set up in Home Assistant (e.g. 'Movie " +
+    "Night', 'Bedtime'). Each result has the entity_id (use with run_scene), " +
+    "the friendly name, and the last time it was activated.",
+  parameters: { type: "object", properties: {} },
+  handler: async () => {
+    const all = await ha.fetchAllStates();
+    const scenes = all
+      .filter((s) => typeof s.entity_id === "string" && s.entity_id.startsWith("scene."))
+      .map((s) => ({
+        entity_id: s.entity_id,
+        name: (s.attributes?.friendly_name as string) ?? s.entity_id.replace(/^scene\./, "").replace(/_/g, " "),
+        last_changed: s.last_changed,
+      }));
+    return { count: scenes.length, scenes };
+  },
+};
+
+const run_scene: Tool = {
+  name: "run_scene",
+  description:
+    "Activate a Home Assistant scene by entity_id (e.g. 'scene.movie_night'). " +
+    "Use list_scenes first to find the right entity_id. The scene runs all " +
+    "its configured actions (lights, switches, etc.) atomically.",
+  parameters: {
+    type: "object",
+    properties: {
+      entity_id: { type: "string", description: "Scene entity_id, must start with 'scene.'." },
+    },
+    required: ["entity_id"],
+  },
+  handler: async (args, _ctx) => {
+    const id = validateHaEntityId(args.entity_id, "scene");
+    if (!id) return { error: "invalid scene entity_id (expected 'scene.<name>')" };
+    try {
+      await ha.callService("scene", "turn_on", id);
+      return { entity_id: id, activated: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const list_automations: Tool = {
+  name: "list_automations",
+  description:
+    "List every automation in Home Assistant — the user's 'when X happens, " +
+    "do Y' rules. Each result has entity_id (use with trigger_automation), " +
+    "friendly name, current state ('on' = enabled, 'off' = disabled), and " +
+    "last_triggered timestamp.",
+  parameters: { type: "object", properties: {} },
+  handler: async () => {
+    const all = await ha.fetchAllStates();
+    const automations = all
+      .filter((s) => typeof s.entity_id === "string" && s.entity_id.startsWith("automation."))
+      .map((s) => ({
+        entity_id: s.entity_id,
+        name: (s.attributes?.friendly_name as string) ?? s.entity_id.replace(/^automation\./, "").replace(/_/g, " "),
+        state: s.state,
+        last_triggered: s.attributes?.last_triggered ?? null,
+      }));
+    return { count: automations.length, automations };
+  },
+};
+
+const trigger_automation: Tool = {
+  name: "trigger_automation",
+  description:
+    "Manually run a Home Assistant automation regardless of its trigger " +
+    "conditions (e.g. force the 'morning routine' to run now). Pass the " +
+    "entity_id from list_automations.",
+  parameters: {
+    type: "object",
+    properties: {
+      entity_id: { type: "string", description: "Automation entity_id, must start with 'automation.'." },
+    },
+    required: ["entity_id"],
+  },
+  handler: async (args, _ctx) => {
+    const id = validateHaEntityId(args.entity_id, "automation");
+    if (!id) return { error: "invalid automation entity_id (expected 'automation.<name>')" };
+    try {
+      await ha.callService("automation", "trigger", id);
+      return { entity_id: id, triggered: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -496,5 +609,10 @@ export const TOOL_REGISTRY: Record<string, Tool> = Object.fromEntries(
     accept_discovered_camera,
     get_system_health,
     list_drives,
+    // Home Assistant scenes + automations (PR #4)
+    list_scenes,
+    run_scene,
+    list_automations,
+    trigger_automation,
   ].map((t) => [t.name, t]),
 );
