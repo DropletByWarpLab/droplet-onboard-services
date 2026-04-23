@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT
 from touch import TouchReader
@@ -32,20 +32,28 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 # Service-to-service authentication
 # ---------------------------------------------------------------------------
+# Fail closed: refuse to start with an empty secret so a misprovisioned
+# deployment (compose run without setup.sh having seeded DEVICE_SECRET_KEY)
+# can't ship wide open on the LAN. Host-mode uvicorn binds 0.0.0.0:8082, so
+# a silent empty secret would let any LAN host hit /display/*, /touch/*,
+# /wifi/connect directly. Only /health is public.
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
 if not SERVICE_SECRET:
-    logger.warning("SERVICE_SECRET not set - all endpoints are unauthenticated.")
+    raise RuntimeError(
+        "SERVICE_SECRET is required — refusing to start the display service "
+        "without an auth secret. Set SERVICE_SECRET (or DEVICE_SECRET_KEY) in "
+        "the environment; scripts/setup.sh provisions this automatically."
+    )
 
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path == "/health":
             return await call_next(request)
-        if SERVICE_SECRET:
-            auth = request.headers.get("Authorization", "")
-            token = auth.removeprefix("Bearer ").strip()
-            if not hmac.compare_digest(token, SERVICE_SECRET):
-                return JSONResponse(status_code=401, content={"error": "unauthorized"})
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(token, SERVICE_SECRET):
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
         return await call_next(request)
 
 
@@ -100,6 +108,12 @@ class WifiConnectRequest(BaseModel):
 
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
+# Cap decoded pixel count to prevent PIL decompression-bomb DoS — an 8 MB
+# PNG/TIFF can balloon to multi-GB on decode and OOM the container. 24 MP
+# covers any realistic upload (the panel itself is 480x320 = 0.15 MP).
+MAX_IMAGE_PIXELS = 24_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+ALLOWED_IMAGE_FORMATS = {"PNG", "JPEG", "BMP", "GIF"}
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +176,29 @@ async def show_custom(file: UploadFile = File(...)):
         data = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(413, "Image too large (max 8MB)")
-        image = Image.open(io.BytesIO(data))
+
+        # Two-pass decode: verify() validates structure and raises on
+        # malformed/truncated data before committing to a full decode.
+        # Re-open afterwards because verify() leaves the image unusable.
+        try:
+            probe = Image.open(io.BytesIO(data))
+            probe.verify()
+            fmt = (probe.format or "").upper()
+        except (UnidentifiedImageError, Image.DecompressionBombError) as e:
+            raise HTTPException(400, f"Invalid image: {e}")
+
+        if fmt not in ALLOWED_IMAGE_FORMATS:
+            raise HTTPException(415, f"Unsupported image format: {fmt or 'unknown'}")
+
+        try:
+            image = Image.open(io.BytesIO(data))
+            # image.size is available without decoding the full pixel buffer.
+            w, h = image.size
+            if w * h > MAX_IMAGE_PIXELS:
+                raise HTTPException(413, "Image dimensions exceed limit")
+        except Image.DecompressionBombError as e:
+            raise HTTPException(413, f"Image dimensions exceed limit: {e}")
+
         display.show_custom_image(image)
         return {"ok": True, "mode": "custom"}
     except HTTPException:

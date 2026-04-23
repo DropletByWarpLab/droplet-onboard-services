@@ -101,3 +101,19 @@ export async function stopCycle(): Promise<boolean> {
     return false;
   }
 }
+
+export async function connectWifi(
+  ssid: string,
+  password: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await displayFetch("/wifi/connect", {
+      method: "POST",
+      body: JSON.stringify({ ssid, password }),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}

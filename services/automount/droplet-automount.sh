@@ -166,8 +166,19 @@ PYEOF
 
 case "$ACTION" in
   add)
-    # Read filesystem metadata
-    eval "$(blkid -o export "$DEVICE" 2>/dev/null || echo 'TYPE= LABEL= UUID=')"
+    # Read filesystem metadata WITHOUT eval. `blkid -o export` returns
+    # KEY=VALUE lines that used to be fed to `eval`; a crafted LABEL with
+    # embedded newlines + shell metacharacters would execute as root via
+    # udev -> systemd. `-o value -s <field>` returns only the raw value
+    # for the named field, so there is no shell syntax to evaluate.
+    TYPE="$(blkid -o value -s TYPE "$DEVICE" 2>/dev/null || true)"
+    LABEL="$(blkid -o value -s LABEL "$DEVICE" 2>/dev/null || true)"
+    UUID="$(blkid -o value -s UUID "$DEVICE" 2>/dev/null || true)"
+    # Defensive: strip any stray newlines/CR so downstream string handling
+    # can't be tricked by multi-line filesystem metadata.
+    TYPE="${TYPE//$'\n'/}"; TYPE="${TYPE//$'\r'/}"
+    LABEL="${LABEL//$'\n'/}"; LABEL="${LABEL//$'\r'/}"
+    UUID="${UUID//$'\n'/}"; UUID="${UUID//$'\r'/}"
     if [ -z "${TYPE:-}" ]; then
       log "$DEVICE has no filesystem signature, skipping"
       exit 0

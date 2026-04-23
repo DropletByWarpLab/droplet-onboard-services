@@ -894,17 +894,16 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self):
         """Return True if the request carries the right auth token.
 
-        If BRIDGE_AUTH_TOKEN is empty we fail-open so dev installs keep
-        working, but main() logs a conspicuous warning on startup so
-        nobody ships this way by accident. In production the systemd
-        unit's EnvironmentFile must set BRIDGE_AUTH_TOKEN.
+        Fail closed: if BRIDGE_AUTH_TOKEN is empty every auth-gated route
+        returns 401. _boot_banner() also refuses to start the server with
+        an empty token (see __main__), so this is belt-and-braces.
 
         Accepts either `X-Droplet-Auth: <token>` or `Authorization:
         Bearer <token>` for flexibility with the orchestrator's existing
         bearer-token style.
         """
         if not BRIDGE_AUTH_TOKEN:
-            return True
+            return False
         got = (self.headers.get("X-Droplet-Auth") or "").strip()
         if not got:
             authz = (self.headers.get("Authorization") or "").strip()
@@ -992,10 +991,13 @@ def _boot_banner():
     logger.info("device-bridge starting on %s:%s (openwrt=%s, state=%s)",
                 BRIDGE_BIND, BRIDGE_PORT, OPENWRT_HOST, STATE_FILE)
     if not BRIDGE_AUTH_TOKEN:
-        logger.warning(
-            "BRIDGE_AUTH_TOKEN not set — /openwrt/wifi/rotate and "
-            "/wifi/connect are UNAUTHENTICATED. Set BRIDGE_AUTH_TOKEN "
-            "(or DEVICE_SECRET_KEY) in production.")
+        # Fail closed: refuse to start. /openwrt/wifi/rotate + /wifi/connect
+        # are mutation paths that reach OpenWrt and nmcli respectively; even
+        # loopback exposure to an unprivileged process is not acceptable.
+        raise RuntimeError(
+            "BRIDGE_AUTH_TOKEN (or DEVICE_SECRET_KEY / SERVICE_SECRET) is "
+            "required — refusing to start device-bridge without an auth "
+            "secret. scripts/setup.sh provisions this automatically.")
 
 
 if __name__ == "__main__":

@@ -62,5 +62,30 @@ export function createDisplayRouter(_prisma: PrismaClient): Router {
     res.json({ ok: true, cycling: false });
   });
 
+  // /display/wifi/connect — proxy to the display service's /wifi/connect
+  // route. Admin/owner only: joining an SSID mutates host network state
+  // and, combined with the Jetson being the video/storage hub, a coerced
+  // SSID join is a credible pivot vector. Non-privileged users (family,
+  // guest) cannot invoke this even though they can hit other /display/*.
+  router.post("/display/wifi/connect", async (req, res) => {
+    const user = (req as { user?: { role?: string } }).user;
+    const role = user?.role;
+    if (role !== "owner" && role !== "admin") {
+      return res.status(403).json({ error: "admin role required" });
+    }
+    const { ssid, password } = req.body ?? {};
+    if (typeof ssid !== "string" || ssid.length === 0 || ssid.length > 64) {
+      return res.status(400).json({ error: "ssid (1-64 chars) required" });
+    }
+    if (password !== undefined && (typeof password !== "string" || password.length > 128)) {
+      return res.status(400).json({ error: "password must be a string up to 128 chars" });
+    }
+    const result = await displayClient.connectWifi(ssid, password ?? "");
+    if (!result) {
+      return res.status(503).json({ error: "Display service unavailable" });
+    }
+    res.json(result);
+  });
+
   return router;
 }
