@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Calendar as CalendarIcon,
   FolderOpen,
   Home,
   Laptop,
@@ -31,6 +32,7 @@ type NavItem = {
 const primaryNav: NavItem[] = [
   { href: "/", label: "Home", icon: LayoutDashboard },
   { href: "/chat", label: "Ask AI", icon: MessageSquare },
+  { href: "/calendar", label: "Calendar", icon: CalendarIcon },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/devices", label: "Devices", icon: Home },
 ];

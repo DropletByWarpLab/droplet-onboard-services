@@ -59,12 +59,24 @@ const WRITE_TOOLS = new Set([
   "unblock_device",
   "accept_discovered_camera",
   "scan_for_cameras",
+  // File mutation tools (from the file write/search PR). Write-gated because
+  // the LLM can be steered into creating/deleting/moving user files via
+  // a malicious prompt — only confirmed chat flows should flip the gate.
   "write_file",
   "delete_file",
   "create_directory",
   "rename_file",
   "move_file",
   "copy_file",
+  // Calendar / Reminders / Notifications. Calendar mutations don't touch
+  // the network or other devices, but they DO modify the user's calendar
+  // — same prompt-injection threat model applies.
+  "create_event",
+  "update_event",
+  "delete_event",
+  "create_reminder",
+  "complete_reminder",
+  "send_notification",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {

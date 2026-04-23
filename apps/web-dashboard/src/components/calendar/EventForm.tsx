@@ -1,0 +1,243 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { X } from "lucide-react";
+import type { CalendarEvent } from "@/lib/hooks/useCalendar";
+import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
+import { useToast } from "@/components/Toast";
+
+interface Props {
+  open: boolean;
+  initial?: CalendarEvent | null;
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+/** datetime-local input wants `YYYY-MM-DDTHH:mm` in *local* time (no TZ
+ *  suffix). We store everything as UTC ISO on the backend; convert in/out at
+ *  the form boundary. */
+function isoToLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function localInputToIso(local: string): string {
+  return new Date(local).toISOString();
+}
+
+export function EventForm({ open, initial, onClose, onSaved }: Props) {
+  const { toast } = useToast();
+  const editing = initial != null;
+  const externallySynced = editing && initial?.source === "external";
+
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [location, setLocation] = useState("");
+  const [startsAt, setStartsAt] = useState("");
+  const [endsAt, setEndsAt] = useState("");
+  const [allDay, setAllDay] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    if (initial) {
+      setTitle(initial.title);
+      setDescription(initial.description ?? "");
+      setLocation(initial.location ?? "");
+      setStartsAt(isoToLocalInput(initial.startsAt));
+      setEndsAt(isoToLocalInput(initial.endsAt));
+      setAllDay(initial.allDay);
+    } else {
+      const now = new Date();
+      const inAnHour = new Date(now.getTime() + 60 * 60 * 1000);
+      setTitle("");
+      setDescription("");
+      setLocation("");
+      setStartsAt(isoToLocalInput(now.toISOString()));
+      setEndsAt(isoToLocalInput(inAnHour.toISOString()));
+      setAllDay(false);
+    }
+  }, [open, initial]);
+
+  if (!open) return null;
+
+  async function handleSave() {
+    if (!title.trim()) {
+      toast("Title is required", "error");
+      return;
+    }
+    if (new Date(endsAt) <= new Date(startsAt)) {
+      toast("End must be after start", "error");
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing && initial) {
+        await updateEvent(initial.id, {
+          title,
+          description: description || null,
+          location: location || null,
+          startsAt: localInputToIso(startsAt),
+          endsAt: localInputToIso(endsAt),
+          allDay,
+        });
+        toast("Event updated", "success");
+      } else {
+        await createEvent({
+          title,
+          description: description || undefined,
+          location: location || undefined,
+          startsAt: localInputToIso(startsAt),
+          endsAt: localInputToIso(endsAt),
+          allDay,
+        });
+        toast("Event created", "success");
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Save failed";
+      toast(msg, "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!editing || !initial) return;
+    if (!confirm(`Delete "${initial.title}"?`)) return;
+    setSaving(true);
+    try {
+      await deleteEvent(initial.id);
+      toast("Event deleted", "success");
+      onSaved();
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Delete failed";
+      toast(msg, "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="dp-card w-full max-w-md mx-4 p-5 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="type-title text-label-primary">
+            {editing ? "Edit event" : "New event"}
+          </h2>
+          <button onClick={onClose} className="text-label-tertiary hover:text-label-primary">
+            <X size={18} />
+          </button>
+        </div>
+
+        {externallySynced && (
+          <div className="mb-3 p-2 rounded type-caption bg-system-orange/10 text-system-orange">
+            This event is synced from an external calendar and can't be edited
+            here. Make changes in the source calendar and they'll sync back.
+          </div>
+        )}
+
+        <div className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="type-caption text-label-secondary">Title</span>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              disabled={externallySynced}
+              className="dp-input"
+              maxLength={500}
+            />
+          </label>
+
+          <label className="flex items-center gap-2 type-subheadline text-label-secondary">
+            <input
+              type="checkbox"
+              checked={allDay}
+              onChange={(e) => setAllDay(e.target.checked)}
+              disabled={externallySynced}
+            />
+            All day
+          </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="type-caption text-label-secondary">Starts</span>
+              <input
+                type="datetime-local"
+                value={startsAt}
+                onChange={(e) => setStartsAt(e.target.value)}
+                disabled={externallySynced}
+                className="dp-input"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="type-caption text-label-secondary">Ends</span>
+              <input
+                type="datetime-local"
+                value={endsAt}
+                onChange={(e) => setEndsAt(e.target.value)}
+                disabled={externallySynced}
+                className="dp-input"
+              />
+            </label>
+          </div>
+
+          <label className="flex flex-col gap-1">
+            <span className="type-caption text-label-secondary">Location</span>
+            <input
+              type="text"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              disabled={externallySynced}
+              className="dp-input"
+              maxLength={500}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="type-caption text-label-secondary">Notes</span>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              disabled={externallySynced}
+              className="dp-input min-h-[80px]"
+              maxLength={10000}
+            />
+          </label>
+        </div>
+
+        <div className="mt-5 flex items-center justify-between">
+          {editing && !externallySynced ? (
+            <button
+              onClick={handleDelete}
+              disabled={saving}
+              className="dp-btn-secondary text-system-red"
+            >
+              Delete
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="flex gap-2">
+            <button onClick={onClose} disabled={saving} className="dp-btn-secondary">
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || externallySynced}
+              className="dp-btn-primary"
+            >
+              {saving ? "Saving…" : editing ? "Save" : "Create"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
