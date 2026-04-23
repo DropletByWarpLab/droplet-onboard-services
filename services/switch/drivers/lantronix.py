@@ -14,7 +14,10 @@ Port layout: 8x GbE copper PoE (1-8) + 2x SFP (9-10)
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -37,9 +40,39 @@ SFP_PORT_MAX = 10
 POE_PORT_MIN = 1
 POE_PORT_MAX = 8
 
+# Session management tuning.
+#
+# The SM8TAT2SA firmware (v1.04.0079, April 2026) idles its web session after
+# roughly 30 s of inactivity and responds with `{"redirect_url": "/login"}`
+# afterwards. The orchestrator polls /health every 30 s, so without a
+# heartbeat every probe lands right at the expiry edge, triggers a re-auth,
+# and under that sustained re-auth rate the switch's control plane becomes
+# flaky (hangs, "Session expired and re-auth failed"). Pinging /stat/sysinfo
+# well inside the idle window keeps a single session alive, drops the probe
+# load from ~2 req/s on spikes to a steady 1 req / 20 s, and gives the
+# orchestrator a cached answer without hitting the hardware on every poll.
+_KEEPALIVE_INTERVAL_S = 20.0
+# Treat the connection as live if the keepalive has succeeded within this
+# window. 2× the interval gives one missed ping of slack before we flip.
+_LIVENESS_WINDOW_S = _KEEPALIVE_INTERVAL_S * 2
+# Back-off between failed re-auths so a dead/rebooting switch doesn't get
+# hammered with login POSTs from concurrent callers.
+_REAUTH_BACKOFF_S = 5.0
+
 
 class LantronixDriver(SwitchDriver):
-    """SM8TAT2SA driver using HTTPS JSON API with session cookie auth."""
+    """SM8TAT2SA driver using HTTPS JSON API with session cookie auth.
+
+    Concurrency model:
+    * `_auth_lock` serializes login POSTs so parallel callers can't stomp on
+      each other's session cookie. All re-auths go through `_authenticate()`,
+      which takes the lock; direct callers never write `self._authenticated`.
+    * A background `_keepalive_loop` task issues a cheap GET every
+      _KEEPALIVE_INTERVAL_S seconds and re-auths on session expiry. This is
+      the *only* path that resets `_last_ok_at`, so `is_connected()` — and by
+      extension the orchestrator's /health probe — answers from a cached
+      liveness bit instead of hitting the switch.
+    """
 
     def __init__(self, host: str, port: int, username: str, password: str):
         self._host = host
@@ -48,6 +81,10 @@ class LantronixDriver(SwitchDriver):
         self._password = password
         self._client: httpx.AsyncClient | None = None
         self._authenticated = False
+        self._auth_lock = asyncio.Lock()
+        self._keepalive_task: asyncio.Task | None = None
+        self._last_ok_at: float = 0.0
+        self._last_auth_failure_at: float = 0.0
 
     # --- Lifecycle ---
 
@@ -64,56 +101,135 @@ class LantronixDriver(SwitchDriver):
             follow_redirects=False,
         )
         await self._authenticate()
+        # Mark the startup auth as a fresh ok so is_connected() reports true
+        # before the first keepalive tick has landed.
+        self._last_ok_at = time.monotonic()
+        self._keepalive_task = asyncio.create_task(
+            self._keepalive_loop(), name="lantronix-keepalive"
+        )
         logger.info("Connected to Lantronix switch at %s:%d", self._host, self._port)
 
     async def disconnect(self) -> None:
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._keepalive_task
+            self._keepalive_task = None
         if self._client:
             await self._client.aclose()
             self._client = None
-            self._authenticated = False
+        self._authenticated = False
         logger.info("Disconnected from switch")
 
     async def is_connected(self) -> bool:
-        if not self._client or not self._authenticated:
+        # Trust the keepalive loop's last result — never hits the switch.
+        # If the loop has been unable to refresh `_last_ok_at` for longer
+        # than the liveness window, the switch is effectively offline from
+        # our perspective, even if `_authenticated` is still True from a
+        # stale login.
+        if not self._client:
             return False
-        try:
-            resp = await self._client.get("/stat/sysinfo")
-            data = resp.json()
-            # If we get redirected to login, session expired
-            return "redirect_url" not in data
-        except Exception:
-            return False
+        return (time.monotonic() - self._last_ok_at) < _LIVENESS_WINDOW_S
 
     # --- Authentication ---
 
     async def _authenticate(self) -> None:
-        """Authenticate via form POST, capturing session cookie."""
+        """Authenticate via form POST, capturing session cookie.
+
+        Serialized by `_auth_lock` so concurrent callers share a single
+        login attempt rather than racing and invalidating each other's
+        session on the switch side.
+        """
         if not self._client:
             raise ConnectionLost("Client not initialized")
 
-        try:
-            resp = await self._client.post(
-                "/config/login",
-                data={
-                    "username": self._username,
-                    "password": self._password,
-                },
-            )
+        async with self._auth_lock:
+            # If another coroutine just succeeded, skip the second login.
+            # `_last_ok_at` is only updated on a successful response, so a
+            # recent value implies the cookie jar is already good.
+            if (time.monotonic() - self._last_ok_at) < 1.0:
+                return
 
-            # Check if login succeeded (switch returns 200 or redirect to main page)
-            if resp.status_code in (200, 301, 302):
-                # Session cookie is automatically captured by httpx
-                self._authenticated = True
-                logger.info("Authenticated with switch")
-            else:
+            # Short-circuit if we just failed — avoids a thundering herd on
+            # a rebooting switch where the port is open but auth times out.
+            if (time.monotonic() - self._last_auth_failure_at) < _REAUTH_BACKOFF_S:
                 raise AuthenticationError(
-                    f"Login failed with status {resp.status_code}"
+                    f"Skipping re-auth ({_REAUTH_BACKOFF_S:.0f}s back-off after recent failure)"
                 )
 
-        except httpx.ConnectError as exc:
-            raise ConnectionLost(f"Cannot reach switch at {self._host}:{self._port}: {exc}")
-        except httpx.TimeoutException as exc:
-            raise ConnectionLost(f"Timeout connecting to switch: {exc}")
+            try:
+                resp = await self._client.post(
+                    "/config/login",
+                    data={
+                        "username": self._username,
+                        "password": self._password,
+                    },
+                )
+                if resp.status_code in (200, 301, 302):
+                    self._authenticated = True
+                    logger.info("Authenticated with switch")
+                else:
+                    self._last_auth_failure_at = time.monotonic()
+                    raise AuthenticationError(
+                        f"Login failed with status {resp.status_code}"
+                    )
+            except httpx.ConnectError as exc:
+                self._last_auth_failure_at = time.monotonic()
+                raise ConnectionLost(
+                    f"Cannot reach switch at {self._host}:{self._port}: {exc}"
+                )
+            except httpx.TimeoutException as exc:
+                self._last_auth_failure_at = time.monotonic()
+                raise ConnectionLost(f"Timeout connecting to switch: {exc}")
+
+    async def _keepalive_loop(self) -> None:
+        """Ping /stat/sysinfo at a cadence below the switch's idle timeout.
+
+        Runs forever until cancelled by `disconnect()`. Exceptions are
+        logged but never propagate — losing the switch for a while is
+        surfaced via `is_connected()` going False, not by crashing the
+        task.
+        """
+        logger.info(
+            "Keepalive started (interval=%.1fs, liveness window=%.1fs)",
+            _KEEPALIVE_INTERVAL_S, _LIVENESS_WINDOW_S,
+        )
+        try:
+            while True:
+                await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
+                try:
+                    await self._ping()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — any failure is interesting
+                    logger.warning("Keepalive ping failed: %s", exc)
+        except asyncio.CancelledError:
+            logger.info("Keepalive stopped")
+            raise
+
+    async def _ping(self) -> None:
+        """One keepalive cycle: GET sysinfo, re-auth if expired, record time."""
+        if not self._client:
+            return
+        resp = await self._client.get("/stat/sysinfo")
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and "redirect_url" in data:
+            logger.info("Keepalive: session expired, re-authenticating")
+            await self._authenticate()
+            # One retry after re-auth. If that still fails, _last_ok_at is
+            # left stale and is_connected() will flip False after the
+            # liveness window.
+            resp = await self._client.get("/stat/sysinfo")
+            try:
+                data = resp.json()
+            except Exception:
+                return
+            if isinstance(data, dict) and "redirect_url" in data:
+                return
+        self._last_ok_at = time.monotonic()
 
     async def _request(
         self, method: str, path: str, retry: bool = True, **kwargs
@@ -121,6 +237,8 @@ class LantronixDriver(SwitchDriver):
         """Make an authenticated request with auto-reauthentication on session expiry.
 
         Returns the parsed JSON response. Retries once if the session has expired.
+        Successful calls also refresh `_last_ok_at` so application traffic
+        counts toward liveness the same way keepalive pings do.
         """
         if not self._client:
             raise ConnectionLost("Not connected to switch")
@@ -150,6 +268,7 @@ class LantronixDriver(SwitchDriver):
             if isinstance(data, dict) and "error" in data:
                 raise SwitchAPIError(resp.status_code, data["error"])
 
+            self._last_ok_at = time.monotonic()
             return data
 
         except httpx.ConnectError as exc:
