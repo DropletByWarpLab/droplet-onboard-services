@@ -1,0 +1,43 @@
+name: switch-tests
+
+# Pytest for services/switch. Path-filtered so orchestrator-only or dashboard-only
+# PRs don't trigger a Python install.
+
+on:
+  pull_request:
+    paths:
+      - "services/switch/**"
+      - ".github/workflows/switch-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/switch/**"
+      - ".github/workflows/switch-tests.yml"
+
+concurrency:
+  group: switch-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/switch
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/switch/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v
