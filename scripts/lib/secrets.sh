@@ -267,13 +267,18 @@ _generate_mosquitto_passwd() {
     -v "$passwd_dir:/tmp/mqtt" \
     eclipse-mosquitto:2 \
     sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'"; then
-    chmod 600 "$passwd_file"
+    # 0644 — the runtime mosquitto container runs as uid 1883, not the host
+    # user (1000) that generated the file, so 0600 made the file unreadable
+    # and mosquitto crash-looped with "Unable to open pwfile". The bytes on
+    # disk are a bcrypt hash, not the plaintext; .env holds the plaintext
+    # at 0600 already.
+    chmod 644 "$passwd_file"
     log_success "MQTT password file generated"
   else
     # Fallback: create a plaintext file (no Docker needed)
     log_warn "Could not generate hashed MQTT password — using plaintext fallback"
     printf "%s:%s\n" "$mqtt_user" "$mqtt_password" > "$passwd_file"
-    chmod 600 "$passwd_file"
+    chmod 644 "$passwd_file"
   fi
 
   # Clean up stale intermediate file from old code path. The parent directory
