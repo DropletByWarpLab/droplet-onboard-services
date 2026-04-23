@@ -175,6 +175,17 @@ migrate_env() {
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
 
+  # Managed-switch creds — the switch is a pre-existing piece of hardware
+  # with its own admin password, so setup.sh can't generate this. Append an
+  # empty placeholder so the switch service reads "" (and logs a clear
+  # "SWITCH_PASSWORD not set" warning) instead of relying on a missing-env
+  # default path that silently produces "Wrong username or password!"
+  # failures in the Lantronix driver. Operators fill this in by hand.
+  _migrate_ensure_key SWITCH_HOST "192.168.1.77"
+  _migrate_ensure_key SWITCH_USERNAME "admin"
+  _migrate_ensure_key SWITCH_PASSWORD ""
+  _migrate_ensure_key SWITCH_DRIVER "lantronix"
+
   if [ "$appended_count" -gt 0 ]; then
     log_success "Migrated .env: appended$appended_keys"
   fi
