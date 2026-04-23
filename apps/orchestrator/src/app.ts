@@ -19,6 +19,8 @@ import { createNetworkRouter } from "./routes/network.js";
 import { createCamerasRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
+import { createMcpRouter } from "./routes/mcp.js";
+import { bootstrapRemoteMcpServers } from "./services/mcp-registry.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -53,6 +55,15 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
+  // PR #7: Model Context Protocol surface — exposes TOOL_REGISTRY to
+  // external MCP clients (Claude Desktop, Continue, etc.) so they can
+  // use Droplet's tools too. Same auth + role gate as /api/llm/agent.
+  app.use("/api", createMcpRouter(prisma));
+
+  // Discover and register tools from external MCP servers configured via
+  // MCP_SERVERS env var. Fire-and-forget — failures are logged and skipped
+  // so the orchestrator boots even if a remote server is down.
+  void bootstrapRemoteMcpServers();
 
   // Error handling
   app.use(errorHandler);
