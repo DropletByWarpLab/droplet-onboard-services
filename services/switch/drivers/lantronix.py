@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import time
 from typing import Any
 
@@ -100,6 +101,16 @@ class LantronixDriver(SwitchDriver):
             timeout=15.0,
             follow_redirects=False,
         )
+        # Install client-assigned session cookies BEFORE the first login. The
+        # SM8TAT2SA web UI generates random values for cid, seid, sesslid in
+        # JavaScript (see login.html) and uses them as the session key — the
+        # firmware never issues a Set-Cookie, so these are the only thing
+        # identifying our session to the switch. Values just need to be
+        # reasonably unique integers.
+        for name in ("cid", "seid", "sesslid"):
+            self._client.cookies.set(
+                name, str(secrets.randbelow(10**9) + 1), domain=self._host
+            )
         await self._authenticate()
         # Mark the startup auth as a fresh ok so is_connected() reports true
         # before the first keepalive tick has landed.
@@ -134,45 +145,110 @@ class LantronixDriver(SwitchDriver):
     # --- Authentication ---
 
     async def _authenticate(self) -> None:
-        """Authenticate via form POST, capturing session cookie.
+        """Authenticate against the SM8TAT2SA JSON login API.
+
+        Two-step flow (matches what the switch's own login.html does):
+
+          1. GET /config/login
+             Returns {"status":"none","userip":"<our-ip>","System Name":...}.
+             We need userip because the POST body carries it — the firmware
+             treats the userip declared by the caller as part of the session
+             key. Skipping this step and guessing userip works intermittently
+             but breaks once the switch has seen traffic from a different IP
+             recently.
+
+          2. POST /config/login
+             Body: JSON envelope
+                 {"users_login_auth": {
+                     "agent": 4,            # 4 = HTTPS, 3 = HTTP
+                     "username": ...,
+                     "password": ...,
+                     "userip": <from step 1>
+                 }}
+             Success:  {"status":"success","privilege":15,"agent_id":N,"user":...}
+             Failure:  {"status":"error","msg":"Wrong username or password!"}
+
+        The switch never issues a Set-Cookie — the only thing holding the
+        session together is the client-picked cid/seid/sesslid cookies we
+        install in `connect()`. The HTTP 200 on /config/login says nothing
+        about success; only the JSON status field does. The previous
+        driver sent `data=` (form-encoded), which the switch rejected with
+        {"error":"Invalid JSON format"} — so auth had never actually worked
+        and every /stat/sysinfo was returning a login redirect forever.
 
         Serialized by `_auth_lock` so concurrent callers share a single
-        login attempt rather than racing and invalidating each other's
-        session on the switch side.
+        login attempt rather than racing on the switch side.
         """
         if not self._client:
             raise ConnectionLost("Client not initialized")
 
         async with self._auth_lock:
             # If another coroutine just succeeded, skip the second login.
-            # `_last_ok_at` is only updated on a successful response, so a
-            # recent value implies the cookie jar is already good.
             if (time.monotonic() - self._last_ok_at) < 1.0:
                 return
 
             # Short-circuit if we just failed — avoids a thundering herd on
-            # a rebooting switch where the port is open but auth times out.
+            # a rebooting switch where the port is open but auth is failing.
+            # Also important because SM8TAT2SA rate-limits failed logins —
+            # hammering it locks out the admin account for a few minutes.
             if (time.monotonic() - self._last_auth_failure_at) < _REAUTH_BACKOFF_S:
                 raise AuthenticationError(
                     f"Skipping re-auth ({_REAUTH_BACKOFF_S:.0f}s back-off after recent failure)"
                 )
 
+            # Use HTTPS agent code (4) when the base_url scheme is https, else
+            # the plaintext agent code (3). Matches the client= ternary in the
+            # firmware's login.html.
+            agent = 4 if str(self._client.base_url).startswith("https") else 3
+
             try:
-                resp = await self._client.post(
-                    "/config/login",
-                    data={
+                pre = await self._client.get("/config/login")
+                pre_data: dict = {}
+                with contextlib.suppress(Exception):
+                    pre_data = pre.json()
+                userip = pre_data.get("userip", "")
+                if not userip:
+                    # Firmware usually returns this; if not, fall back to the
+                    # switch's configured host IP so the payload shape is still
+                    # valid (the firmware doesn't verify userip matches the
+                    # TCP source, just that it's present).
+                    userip = self._host
+
+                body = {
+                    "users_login_auth": {
+                        "agent": agent,
                         "username": self._username,
                         "password": self._password,
-                    },
-                )
-                if resp.status_code in (200, 301, 302):
-                    self._authenticated = True
-                    logger.info("Authenticated with switch")
-                else:
+                        "userip": userip,
+                    }
+                }
+                resp = await self._client.post("/config/login", json=body)
+
+                # Switch always returns 200 — success lives in the body.
+                try:
+                    result = resp.json()
+                except Exception as exc:  # noqa: BLE001
                     self._last_auth_failure_at = time.monotonic()
                     raise AuthenticationError(
-                        f"Login failed with status {resp.status_code}"
+                        f"Non-JSON login response (status {resp.status_code}): "
+                        f"{resp.text[:200]}"
+                    ) from exc
+
+                status = result.get("status") if isinstance(result, dict) else None
+                if status == "success":
+                    self._authenticated = True
+                    logger.info(
+                        "Authenticated with switch as %s (privilege %s)",
+                        result.get("user", self._username),
+                        result.get("privilege"),
                     )
+                    return
+
+                self._last_auth_failure_at = time.monotonic()
+                msg = result.get("msg") if isinstance(result, dict) else str(result)
+                raise AuthenticationError(
+                    f"Login rejected by switch: {msg or result}"
+                )
             except httpx.ConnectError as exc:
                 self._last_auth_failure_at = time.monotonic()
                 raise ConnectionLost(
