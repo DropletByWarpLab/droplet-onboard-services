@@ -58,6 +58,10 @@ const WRITE_TOOLS = new Set([
   "unblock_device",
   "accept_discovered_camera",
   "scan_for_cameras",
+  // PR #5: restart_service hits the host Docker daemon — restart_service is
+  // gated, list_services and get_service_logs are read-only and OK for any
+  // authenticated user.
+  "restart_service",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {

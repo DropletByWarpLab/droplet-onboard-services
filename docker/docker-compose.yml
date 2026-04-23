@@ -73,6 +73,14 @@ services:
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://localhost:8082}
     volumes:
       - matter-data:/data/matter-storage
+      # PR #5: Service-control LLM tools talk to the host Docker daemon over
+      # the Unix socket so the model can `restart frigate`, fetch logs, etc.
+      # SECURITY: Docker socket access = root on host. The orchestrator's
+      # docker-control.service.ts enforces a strict whitelist (the orchestrator
+      # itself, gateway, db, cache, broker can never be restarted via this
+      # path) and the LLM tool surface is role-gated to owner/admin in
+      # WRITE_TOOLS. Mounted read-write because restart needs POST.
+      - /var/run/docker.sock:/var/run/docker.sock
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.

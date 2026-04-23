@@ -31,6 +31,7 @@ import * as openwrt from "./openwrt.client.js";
 import * as nc from "./nextcloud.client.js";
 import * as frigate from "./frigate.client.js";
 import * as healthMonitor from "./health-monitor.service.js";
+import * as docker from "./docker-control.service.js";
 import { config } from "../config.js";
 import type { ToolDefinition } from "../types/index.js";
 
@@ -476,6 +477,97 @@ const list_drives: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// Service control + logs (PR #5)
+// ---------------------------------------------------------------------------
+//
+// These let the LLM help the user diagnose and bounce misbehaving services.
+// restart_service is guarded by a denylist that EXCLUDES the orchestrator
+// itself (would kill the in-flight LLM call), gateway/db/cache/broker (would
+// cut off the user's session), and ai-gateway. See docker-control.service.ts.
+
+const list_services: Tool = {
+  name: "list_services",
+  description:
+    "List every Docker container on the Droplet with its current state and " +
+    "status. Each result has `name`, `service` (compose service name), " +
+    "`state` ('running'/'exited'/etc.), human-readable `status`, and a " +
+    "`restartable` flag — if false, the model should NOT call restart_service " +
+    "because it's in the denylist (orchestrator / gateway / db / cache / " +
+    "broker / ai-gateway — restarting those would break this chat).",
+  parameters: { type: "object", properties: {} },
+  handler: async (_args, _ctx) => {
+    try {
+      const containers = await docker.listContainers();
+      return {
+        count: containers.length,
+        services: containers.map((c) => ({
+          name: c.name,
+          service: c.service,
+          state: c.state,
+          status: c.status,
+          image: c.image,
+          restartable: c.restartable,
+        })),
+      };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const restart_service: Tool = {
+  name: "restart_service",
+  description:
+    "Restart a Droplet service by compose service name (e.g. 'frigate', " +
+    "'homeassistant', 'file-indexer'). Sends SIGTERM then SIGKILL after 10s, " +
+    "then starts the container again. Refuses to restart gateway, " +
+    "orchestrator, ai-gateway, db, cache, broker — those are in the denylist. " +
+    "Confirm with the user before calling; service bounces can take 30-60s.",
+  parameters: {
+    type: "object",
+    properties: {
+      service: { type: "string", description: "Compose service name (e.g. 'frigate')." },
+    },
+    required: ["service"],
+  },
+  handler: async (args, _ctx) => {
+    try {
+      const result = await docker.restartContainer(String(args.service ?? ""));
+      return result;
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const get_service_logs: Tool = {
+  name: "get_service_logs",
+  description:
+    "Fetch the last N lines of a service's combined stdout+stderr. Useful " +
+    "when the user asks 'why is frigate not detecting anything' or 'show me " +
+    "the last errors from file-indexer'. Tail capped at 2000 lines / 256 KB.",
+  parameters: {
+    type: "object",
+    properties: {
+      service: { type: "string", description: "Compose service name." },
+      tail: { type: "integer", minimum: 1, maximum: 2000, description: "Default 200." },
+    },
+    required: ["service"],
+  },
+  handler: async (args, _ctx) => {
+    try {
+      const result = await docker.containerLogs(
+        String(args.service ?? ""),
+        Number(args.tail) || 200,
+      );
+      return result;
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -496,5 +588,9 @@ export const TOOL_REGISTRY: Record<string, Tool> = Object.fromEntries(
     accept_discovered_camera,
     get_system_health,
     list_drives,
+    // Service control + logs (PR #5)
+    list_services,
+    restart_service,
+    get_service_logs,
   ].map((t) => [t.name, t]),
 );
