@@ -101,6 +101,12 @@ const envSchema = z.object({
   // the host gateway.
   SWITCH_SERVICE_URL: z.string().default("http://host.docker.internal:8081"),
 
+  // --- OLED / TFT Display ---
+  // Same rationale again: the display service runs with `network_mode: host`
+  // on the Jetson (uvicorn on :8082). `localhost` inside the orchestrator
+  // container would never resolve to it, so default to the host gateway.
+  DISPLAY_SERVICE_URL: z.string().default("http://host.docker.internal:8082"),
+
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
 });

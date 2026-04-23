@@ -2,7 +2,12 @@
  * HTTP client for the OLED Display Service.
  */
 
-const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://localhost:8082";
+// Match the schema default in config.ts. The display service runs with
+// `network_mode: host` on the Jetson, so `localhost` from inside the
+// orchestrator container would never resolve to it — the host gateway
+// alias must be used. Compose sets DISPLAY_SERVICE_URL explicitly; this
+// fallback only trips in local/unit-test contexts where the env isn't set.
+const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://host.docker.internal:8082";
 const SERVICE_SECRET = process.env.DEVICE_SECRET_KEY || "";
 
 async function displayFetch(path: string, options: RequestInit = {}): Promise<Response> {

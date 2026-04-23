@@ -90,7 +90,7 @@ npm run test:ai-gateway     # ai-gateway only
 | `PORT`               | Server listen port                                   |
 | `DEVICE_SECRET`      | Device authentication secret                         |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit in MB                              |
-| `ROUTING_SERVICE_URL`| Routing service endpoint (default `http://localhost:8080`) |
+| `ROUTING_SERVICE_URL`| Routing service endpoint (default `http://host.docker.internal:8080` — routing uses `network_mode: host`, so orchestrator reaches it via the host gateway) |
 | `OPENWRT_HOST`       | OpenWrt router IP (default `192.168.50.1`)           |
 | `OPENWRT_USERNAME`   | OpenWrt rpcd user (default `droplet-ai`)             |
 | `OPENWRT_PASSWORD`   | OpenWrt rpcd password                                |
@@ -110,7 +110,8 @@ npm run test:ai-gateway     # ai-gateway only
 | `SWITCH_USERNAME`    | Switch admin username (default `admin`)                |
 | `SWITCH_PASSWORD`    | Switch admin password                                  |
 | `SWITCH_DRIVER`      | Switch driver: `lantronix` (default) or `asic` (future) |
-| `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://localhost:8081`) |
+| `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://host.docker.internal:8081` — same host-mode rationale as `ROUTING_SERVICE_URL`) |
+| `DISPLAY_SERVICE_URL`| OLED/TFT display service endpoint (default `http://host.docker.internal:8082` — display runs host-mode on the Jetson) |
 | `ROUTING_MODE`       | `real` (default) / `mock` (fixture-driven, no OpenWrt needed) / `disabled` (orchestrator skips router calls). See WARP-44. |
 
 ## GTM Alignment (April 2026)
