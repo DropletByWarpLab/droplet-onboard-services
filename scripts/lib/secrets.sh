@@ -299,26 +299,84 @@ MQTTCONF
   log_success "Mosquitto configured with authentication"
 }
 
+# DNS names every Droplet TLS cert must cover. These are the friendly host-
+# names the local-DNS layer registers (droplet-ai.local via mDNS,
+# droplet-ai.lan via OpenWrt dnsmasq) plus legacy variants users might type
+# from muscle memory. A cert missing any of these will cause a browser
+# hostname-mismatch warning even after the user installs it as trusted, so
+# they're all mandatory — we regenerate the cert if any are absent.
+_REQUIRED_DNS_SANS=(
+  localhost
+  droplet
+  droplet.local
+  droplet.lan
+  droplet-ai
+  droplet-ai.local
+  droplet-ai.lan
+)
+
+_cert_has_all_required_sans() {
+  local cert_file="$1"
+  local dns_list
+  # `openssl x509 -ext subjectAltName` prints e.g.:
+  #   X509v3 Subject Alternative Name:
+  #       DNS:localhost, DNS:droplet-AI, IP Address:192.168.50.197
+  # Extract every DNS: entry and lowercase for case-insensitive comparison
+  # (DNS name matching is case-insensitive per RFC 6125).
+  dns_list="$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null \
+              | grep -oE 'DNS:[^,[:space:]]+' \
+              | sed 's/^DNS://' \
+              | tr '[:upper:]' '[:lower:]')"
+
+  local required
+  for required in "${_REQUIRED_DNS_SANS[@]}"; do
+    # Compare against the lowercased list — if we can't find an exact match,
+    # the cert is incomplete and must be regenerated.
+    if ! printf '%s\n' "$dns_list" | grep -qxF "$(printf '%s' "$required" | tr '[:upper:]' '[:lower:]')"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 _generate_tls_cert() {
   local cert_dir="$REPO_ROOT/docker/certs"
   local cert_file="$cert_dir/droplet.crt"
   local key_file="$cert_dir/droplet.key"
 
-  # Skip if cert already exists and is still valid
+  # Skip only if the cert is both still valid AND covers every required DNS
+  # name. A SAN-complete check was added after the local-DNS feature landed;
+  # without it, installs upgrading from an older setup still served a cert
+  # without droplet-ai.lan / droplet.local etc. in the SAN, forcing a
+  # hostname-mismatch error even after the user trusted the cert.
   if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
-    if openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
-      log_success "TLS certificate already exists and is valid — skipping"
+    if openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+       && _cert_has_all_required_sans "$cert_file"; then
+      log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
       return 0
     fi
-    log_warn "TLS certificate expired or invalid — regenerating"
+    if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
+      log_warn "TLS certificate expired or invalid — regenerating"
+    else
+      log_warn "TLS certificate is missing one or more required DNS SANs — regenerating"
+    fi
   fi
 
   log_info "Generating self-signed TLS certificate (valid 10 years)..."
   mkdir -p "$cert_dir"
 
-  # Collect Subject Alternative Names: localhost + all local IPv4 addresses
-  local san="DNS:localhost"
-  # Add the hostname
+  # Start with the fixed list of friendly hostnames the local-DNS layer
+  # registers (mDNS + router DNS + legacy variants). This set is stable
+  # across devices so every Droplet cert trusts the same names.
+  local san=""
+  local dns
+  for dns in "${_REQUIRED_DNS_SANS[@]}"; do
+    san="${san:+$san,}DNS:$dns"
+  done
+
+  # Also add the system hostname (and hostname.local) in case it differs
+  # from the friendly names above — e.g. Ubuntu's `droplet-AI` hostname.
+  # Duplicates are harmless.
   local hn
   hn=$(hostname 2>/dev/null || echo "droplet")
   san="$san,DNS:$hn,DNS:${hn}.local"
@@ -351,4 +409,22 @@ _generate_tls_cert() {
   log_info "  Cert: $cert_file"
   log_info "  Key:  $key_file"
   log_info "  SANs: $san"
+
+  # If the gateway container is already running (setup.sh re-run or
+  # --sync-secrets flow), ask nginx to reload so the new cert is served
+  # immediately. On a fresh install this is a no-op because gateway isn't
+  # up yet — nginx will just pick up the cert on first start.
+  if command -v docker >/dev/null 2>&1; then
+    local compose_file="$REPO_ROOT/docker/docker-compose.yml"
+    if [ -f "$compose_file" ] && \
+       docker compose -f "$compose_file" ps --services --filter status=running 2>/dev/null \
+         | grep -qx gateway; then
+      if docker compose -f "$compose_file" exec -T gateway nginx -s reload 2>/dev/null; then
+        log_info "  Hot-reloaded gateway nginx with the new cert"
+      else
+        log_warn "  Could not nginx -s reload the gateway container — restart it manually:"
+        log_warn "    docker compose -f docker/docker-compose.yml restart gateway"
+      fi
+    fi
+  fi
 }
