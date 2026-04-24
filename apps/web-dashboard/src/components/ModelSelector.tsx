@@ -7,10 +7,10 @@ interface ModelSelectorProps {
   onChange: (model: string) => void;
 }
 
-const providerBadge: Record<string, string> = {
-  ollama: "bg-system-green/15 text-system-green",
-  anthropic: "bg-system-orange/15 text-system-orange",
-  openai: "bg-system-blue/15 text-system-blue",
+const providerBadge: Record<string, { className: string; label: string }> = {
+  ollama: { className: "bg-system-green/15 text-system-green", label: "Local" },
+  anthropic: { className: "bg-system-orange/15 text-system-orange", label: "Anthropic" },
+  openai: { className: "bg-system-blue/15 text-system-blue", label: "OpenAI" },
 };
 
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
@@ -35,7 +35,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
         )}
         {models.map((m) => (
           <option key={m.id} value={m.id}>
-            {m.name} ({m.provider})
+            {m.name}
           </option>
         ))}
       </select>
@@ -43,10 +43,10 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
       {provider && (
         <span
           className={`px-2 py-0.5 rounded-full type-caption-2 font-medium ${
-            providerBadge[provider] ?? "bg-surface-tertiary text-label-secondary"
+            providerBadge[provider]?.className ?? "bg-surface-tertiary text-label-secondary"
           }`}
         >
-          {provider}
+          {providerBadge[provider]?.label ?? provider}
         </span>
       )}
     </div>
