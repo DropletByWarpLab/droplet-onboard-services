@@ -1,6 +1,8 @@
 # Droplet OpenWrt Build System
 
-Custom OpenWrt image for the Droplet router — Raspberry Pi 5 (bcm2712) with Intel BE200 WiFi 7 and TP-Link UE306 USB NIC.
+Custom OpenWrt image for the Droplet router — Raspberry Pi 5 (bcm2712) with **MediaTek MT7922 WiFi 6** (PCIe over FPC) and TP-Link UE306 USB NIC.
+
+> **WiFi card history:** This build was originally targeted at the Intel BE200 WiFi 7. The BE200 was a client-mode-only card on the Pi 5 — `iwlwifi` AP mode failed ACS ("Unable to collect survey data"). Swapped to the MT7922 in PR `feat/openwrt-mt7922-support`, validated live on hardware.
 
 ## Network Topology
 
@@ -10,13 +12,14 @@ ISP / Upstream         Pi 5 (OpenWrt)                  Jetson (AI)
      +--- cable -------+                                |
                        |-- ETH1 (USB RTL8153B) --+      |
                        |                         |-- br-lan -- 192.168.50.0/24
-                       +-- WiFi BE200 -----------+      |
-                            2.4G / 5G / 6G              +--- 192.168.50.x
+                       +-- WiFi MT7922 ----------+      |
+                            5 GHz Wi-Fi 6 (HE80)        +--- 192.168.50.x
                                                          ubus JSON-RPC -> 192.168.50.1/ubus
 ```
 
 - **WAN**: ETH0 (onboard BCM54213PE) — DHCP client from upstream
 - **LAN**: ETH1 (TP-Link UE306 USB) + WiFi radios bridged as `br-lan` at `192.168.50.1/24`
+- **WiFi**: MediaTek MT7922 on the FPC PCIe lane (`pcie@110000`), 5 GHz channel 149, HE80, WPA2 (`psk2` for Apple-device compatibility)
 - **DHCP range**: `192.168.50.100` - `192.168.50.249`
 - **API endpoint**: `http://192.168.50.1/ubus` (ubus JSON-RPC)
 
@@ -180,8 +183,27 @@ openwrt/
 | Component | Model | Driver | Notes |
 |-----------|-------|--------|-------|
 | SBC | Raspberry Pi 5 (bcm2712) | Built-in | 4GB+ RAM |
-| WiFi | Intel BE200 (M.2) | `kmod-iwlwifi` | WiFi 7 tri-band |
+| WiFi | MediaTek MT7922 (M.2 → FPC PCIe) | `kmod-mt7921e` | Wi-Fi 6, dual-band capable, 5 GHz primary |
 | USB NIC | TP-Link UE306 | `kmod-usb-net-rtl8152` | RTL8153B, Gigabit |
+
+## MT7922 — required boot configuration
+
+The MT7922 on the Pi 5's FPC PCIe lane will not enumerate without **all three** of the following. The first-boot script (`files/etc/uci-defaults/99-droplet-setup`) and the package list in `build.sh` handle them automatically — this section documents the *why* for anyone debugging:
+
+1. **`dtoverlay=pcie-32bit-dma-pi5` in `/boot/config.txt`**
+   Forces 32-bit DMA addressing on the external PCIe lane. The MT7922's mt7921e probe path allocates DMA-coherent ring buffers; without 32-bit-DMA bouncing through SWIOTLB, the chip can't address the buffers and the probe fails with `mt7921e: probe of 0000:01:00.0 failed with error -12` (`-ENOMEM`). The first-boot script appends this line idempotently.
+
+2. **`mt7921e disable_aspm=1` in `/etc/modules.d/mt7921e`**
+   Disables PCIe Active State Power Management L0s/L1 negotiation on this device. ASPM negotiation between mt7921e and the Pi 5's `brcm-pcie` host bridge is unreliable and can stall the probe. Per-device, no effect on RP1 or other PCIe devices.
+
+3. **`kmod-mt7921e` + `kmod-mt7922-firmware` baked into the image** (`build.sh` package list)
+   The driver and the MT7922-specific firmware blobs (`WIFI_MT7922_patch_mcu_1_1_hdr.bin` + `WIFI_RAM_CODE_MT7922_1.bin`) must be present at boot.
+
+### MT7922 known limitations
+
+- **TX power capped at ~3 dBm** on the in-image OpenWrt 24.10 mt76 driver. Channel 149 in US allows 30 dBm but the firmware regulatory state defaults to a conservative cap that doesn't lift even with `country=US` set in UCI. Coverage is room-scale; long-range clients should bridge through a downstream AP. Tracking as a follow-up — likely needs a newer mt76 driver via custom OpenWrt build.
+- **WPA3 transition mode (`sae-mixed`) breaks Apple devices.** iPhones/iPads fail association in mixed mode. Stay on `psk2` (WPA2) for production; revisit when iOS WPA3 transition handling improves.
+- **2.4 GHz radio is disabled by default** in `etc/config/wireless`. The MT7922 supports simultaneous dual-band but enabling 2.4 GHz adds beacon airtime; flip `wireless.radio3_2g.disabled=0` if you need a 2.4 GHz AP for legacy IoT devices.
 
 ## OpenWrt Version
 

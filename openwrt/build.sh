@@ -7,10 +7,18 @@
 # Builds a custom OpenWrt SD-card image with:
 #   - ETH0 (onboard) → WAN (DHCP client from upstream)
 #   - ETH1 (TP-Link UE306 USB NIC, RTL8153B) → LAN bridge
-#   - Intel BE200 WiFi 7 → Tri-band AP (2.4/5/6 GHz) on LAN bridge
+#   - MediaTek MT7922 WiFi 6 (PCIe over FPC) → 5 GHz AP on LAN bridge
 #   - LAN subnet: 192.168.50.1/24
 #   - ubus JSON-RPC API preconfigured for Jetson AI control
 #   - All drivers and firmware baked in
+#
+# WiFi note: this build was previously targeted at the Intel BE200 WiFi 7,
+# but that card consistently failed AP-mode ACS on the Pi 5 brcm-pcie.
+# Swapped to MT7922 (also PCIe FPC) which works reliably with the
+# pcie-32bit-dma-pi5 device-tree overlay applied at first boot. See
+# openwrt/files/etc/uci-defaults/99-droplet-setup for the dtoverlay
+# install and openwrt/files/etc/modules.d/mt7921e for the disable_aspm=1
+# module option that's also required.
 #
 # Usage:
 #   chmod +x build.sh
@@ -64,8 +72,17 @@ PACKAGES+=" kmod-usb-net-aqc111"
 PACKAGES+=" kmod-usb-storage kmod-usb-storage-uas"
 PACKAGES+=" kmod-mii"
 
-# --- Intel BE200 WiFi 7 ---
-PACKAGES+=" kmod-iwlwifi iwlwifi-firmware-be200"
+# --- MediaTek MT7922 (Wi-Fi 6, PCIe over FPC) ---
+# kmod-mt7921e is the PCIe variant of the mt76 driver and handles BOTH
+# MT7921 and MT7922 chips (same driver, different firmware blob).
+# kmod-mt7922-firmware ships the MT7922-specific patch + RAM-code
+# binaries the chip needs (WIFI_MT7922_patch_mcu_1_1_hdr.bin and
+# WIFI_RAM_CODE_MT7922_1.bin under /lib/firmware/mediatek/).
+#
+# Without the dtoverlay=pcie-32bit-dma-pi5 from 99-droplet-setup, the
+# probe will fail with -ENOMEM (error -12) on this Pi 5 build — see the
+# wiki entry in openwrt/README.md for the diagnosis.
+PACKAGES+=" kmod-mt7921e kmod-mt7922-firmware"
 PACKAGES+=" kmod-mac80211 kmod-cfg80211"
 PACKAGES+=" hostapd-openssl wpad-openssl -wpad-basic-mbedtls -wpad-basic-wolfssl"
 
