@@ -102,7 +102,12 @@ _install_avahi_linux() {
 }
 
 _write_avahi_service_file() {
-  local service_path="/etc/avahi/services/droplet.service"
+  local service_dir="/etc/avahi/services"
+  local service_path="${service_dir}/droplet.service"
+  # Minimal avahi installs (e.g. --no-install-recommends on a very slim base)
+  # can ship without the services/ dir. Create it defensively so the tee
+  # below doesn't fail on a missing parent.
+  sudo mkdir -p "$service_dir"
   # Writing atomically via tee-from-stdin so we don't need a temp file and
   # partial writes are impossible.
   sudo tee "$service_path" >/dev/null <<'XML'
@@ -261,6 +266,21 @@ setup_router_dns() {
       ;;
     401|403)
       log_warn "Routing service rejected auth (HTTP ${http_code}) — ROUTING_SERVICE_TOKEN may be stale"
+      ;;
+    500)
+      # The routing service surfaces the underlying ubus error in `detail`.
+      # 'Access denied' almost always means the droplet-ai rpcd ACL on the
+      # running router is older than openwrt/files/usr/share/rpcd/acl.d/
+      # droplet-ai.json — push that file to /usr/share/rpcd/acl.d/ on the
+      # router (as root) and run `/etc/init.d/rpcd restart`.
+      if printf '%s' "$body" | grep -qi 'Access denied'; then
+        log_warn "Router DNS registration failed: rpcd ACL on the router is out of date"
+        log_warn "  Fix (as router root): scp openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json \\"
+        log_warn "         root@${OPENWRT_HOST:-192.168.50.1}:/usr/share/rpcd/acl.d/ && \\"
+        log_warn "       ssh root@${OPENWRT_HOST:-192.168.50.1} /etc/init.d/rpcd restart"
+      else
+        log_warn "Router DNS registration returned HTTP 500: ${body}"
+      fi
       ;;
     000)
       log_warn "Could not reach routing service — skipping router DNS registration"

@@ -232,7 +232,11 @@ class TestDnsHostnameEndpoints:
             ]
         }
 
-    def test_upsert_restarts_dnsmasq(self, connected_client, mock_router):
+    def test_upsert_triggers_uci_apply(self, connected_client, mock_router):
+        """Reload must use uci.apply — NOT file.exec via exec_service — because
+        the droplet-ai rpcd ACL grants uci.apply but denies file.exec. Using
+        exec_service here would cause every POST to return 'Access denied' on
+        production routers (this was the original bug)."""
         mock_router.dhcp.set_domain_entry.return_value = {
             "section": "cfg03domain",
             "hostname": "droplet.lan",
@@ -252,7 +256,8 @@ class TestDnsHostnameEndpoints:
         mock_router.dhcp.set_domain_entry.assert_called_once_with(
             "droplet.lan", "192.168.50.197",
         )
-        mock_router.exec_service.assert_called_once_with("dnsmasq", "restart")
+        mock_router.uci.apply.assert_called_once()
+        mock_router.exec_service.assert_not_called()
 
     def test_delete_missing_hostname_is_404(self, connected_client, mock_router):
         mock_router.dhcp.delete_domain_entry.return_value = 0
@@ -261,6 +266,17 @@ class TestDnsHostnameEndpoints:
             headers={"authorization": "Bearer pytest-fake-token"},
         )
         assert resp.status_code == 404
+        mock_router.uci.apply.assert_not_called()
+        mock_router.exec_service.assert_not_called()
+
+    def test_delete_triggers_uci_apply(self, connected_client, mock_router):
+        mock_router.dhcp.delete_domain_entry.return_value = 1
+        resp = connected_client.delete(
+            "/dhcp/hostnames/droplet.lan",
+            headers={"authorization": "Bearer pytest-fake-token"},
+        )
+        assert resp.status_code == 200
+        mock_router.uci.apply.assert_called_once()
         mock_router.exec_service.assert_not_called()
 
     def test_delete_rejects_invalid_hostname(self, connected_client, mock_router):

@@ -486,12 +486,24 @@ def list_dns_hostnames():
         handle_router_error(exc)
 
 
+# Why `uci.apply` instead of `exec_service("dnsmasq", "restart")` here:
+# the `droplet-ai` rpcd ACL grants `uci.{set,add,delete,commit,apply}` but
+# does NOT grant `file.exec` — so calling `/etc/init.d/dnsmasq restart`
+# over ubus returns "Access denied". `uci apply dhcp` triggers the same
+# reload via OpenWrt's ucitrack hooks (`procd_add_reload_trigger "dhcp"`
+# in /etc/init.d/dnsmasq), and stays inside the existing ACL surface.
+# rollback=False + timeout=0 = fire-and-forget, no confirm dance needed
+# for a DNS config that can't break reachability.
+def _reload_dnsmasq_via_uci_apply(router) -> None:
+    router.uci.apply(timeout=0, rollback=False)
+
+
 @app.post("/dhcp/hostnames")
 def upsert_dns_hostname(req: DnsHostnameRequest):
     try:
         r = get_router()
         result = r.dhcp.set_domain_entry(req.hostname, req.ip)
-        r.exec_service("dnsmasq", "restart")
+        _reload_dnsmasq_via_uci_apply(r)
         return {"status": "ok", **result}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
@@ -506,7 +518,7 @@ def delete_dns_hostname(hostname: str):
         removed = r.dhcp.delete_domain_entry(hostname)
         if removed == 0:
             raise HTTPException(status_code=404, detail="Hostname not found")
-        r.exec_service("dnsmasq", "restart")
+        _reload_dnsmasq_via_uci_apply(r)
         return {"status": "ok", "hostname": hostname, "removed": removed}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
