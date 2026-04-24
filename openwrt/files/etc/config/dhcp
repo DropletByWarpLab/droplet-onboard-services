@@ -50,11 +50,17 @@ config odhcpd 'odhcpd'
     option loglevel '4'
 
 # --- Camera subnet DHCP pool (192.168.100.100 — 192.168.100.249) ---
+# The dhcpv4/dhcpv6/ra flags are required: without them, a 'config dhcp'
+# section is treated as an ignore-interface entry and no leases are issued
+# on the cameras subnet, so ONVIF discovery never sees the cameras.
 config dhcp 'cameras'
     option interface 'cameras'
     option start '100'
     option limit '150'
     option leasetime '12h'
+    option dhcpv4 'server'
+    option dhcpv6 'server'
+    option ra 'server'
 
 # --- Static lease: Jetson AI module ---
 # Uncomment and set the MAC address of the Jetson's Ethernet port
