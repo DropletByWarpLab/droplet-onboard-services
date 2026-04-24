@@ -194,6 +194,24 @@ export interface StorageStats {
   percentage: number; // 0-100
 }
 
+export interface DriveInfo {
+  device: string;
+  mount: string;
+  label: string;
+  uuid: string;
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  mounted: boolean;
+}
+
+export interface DrivesResponse {
+  drives: DriveInfo[];
+  count: number;
+  snapshot_at?: string;
+  error?: string;
+}
+
 // --- Health types ---
 
 export interface HealthResponse {

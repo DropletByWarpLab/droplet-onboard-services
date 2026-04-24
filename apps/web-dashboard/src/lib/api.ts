@@ -21,6 +21,7 @@ import type {
   SessionDetail,
   SessionInfo,
   StorageStats,
+  DrivesResponse,
   WirelessScanResult,
   AuthUser,
   ShareInfo,
@@ -116,6 +117,12 @@ export async function deleteUser(username: string): Promise<void> {
 export async function fetchStorage(): Promise<StorageStats> {
   const res = await authFetch(`${BASE}/api/storage`);
   if (!res.ok) throw new Error(`Failed to fetch storage: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDrives(): Promise<DrivesResponse> {
+  const res = await authFetch(`${BASE}/api/storage/drives`);
+  if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
   return res.json();
 }
 
