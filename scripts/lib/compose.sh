@@ -110,27 +110,40 @@ prepare_and_build() {
   fi
 
   # --- Build application images ---
+  # Every service with a `build:` section in docker-compose.yml needs to
+  # land here, including profile-gated ones. Previously this listed only
+  # orchestrator / web-dashboard / ai-gateway, so a fresh install where
+  # the user later did `COMPOSE_PROFILES=full docker compose up -d` hit
+  #   "No such image: docker-file-indexer:latest"
+  # because file-indexer / switch / camera-discovery / routing were
+  # never built. `--profile full` makes profile-gated services visible
+  # to compose; routing is default-profile but was also missing.
+  #
+  # Keep this list in sync with the `build:` sections in
+  # docker/docker-compose.yml. If you add a new buildable service,
+  # add it here too. (Frigate ships as a pulled image, not a local
+  # build — don't list it.)
   log_info "Building application containers..."
-  if ! run_with_spinner "Building orchestrator" \
-    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" build orchestrator; then
-    log_error "Failed to build orchestrator"
-    _suggest_build_fix
-    return 1
-  fi
-
-  if ! run_with_spinner "Building web-dashboard" \
-    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" build web-dashboard; then
-    log_error "Failed to build web-dashboard"
-    _suggest_build_fix
-    return 1
-  fi
-
-  if ! run_with_spinner "Building ai-gateway" \
-    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" build ai-gateway; then
-    log_error "Failed to build ai-gateway"
-    _suggest_build_fix
-    return 1
-  fi
+  local build_services=(
+    # default profile
+    orchestrator
+    web-dashboard
+    ai-gateway
+    routing
+    # full profile (hardware-facing services)
+    file-indexer
+    switch
+    camera-discovery
+  )
+  for svc in "${build_services[@]}"; do
+    if ! run_with_spinner "Building $svc" \
+      run_docker_compose --profile full -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+        build "$svc"; then
+      log_error "Failed to build $svc"
+      _suggest_build_fix
+      return 1
+    fi
+  done
 
   log_success "All images built"
   log_divider

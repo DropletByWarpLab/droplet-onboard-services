@@ -36,7 +36,7 @@ Installs Docker, generates unique device secrets, builds all containers, starts 
 | **1. Preflight** | Validates OS, architecture (ARM64/x86_64), disk (>= 8 GB), memory (>= 2 GB), internet |
 | **2. Docker** | Installs Docker Engine 25+ and Compose v2 if not present |
 | **3. Secrets** | Generates unique-per-device passwords and encryption keys, writes `.env` (chmod 600) |
-| **4. Build** | Pulls 7 base images, builds orchestrator, web-dashboard, and ai-gateway |
+| **4. Build** | Pulls 7 base images, builds every service with a `Dockerfile` — orchestrator, web-dashboard, ai-gateway, routing, file-indexer, switch, camera-discovery |
 | **5. Start** | Starts the Docker Compose stack with health-check waits |
 | **6. Verify** | Runs smoke tests against all services |
 

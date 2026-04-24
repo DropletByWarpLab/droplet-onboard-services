@@ -183,7 +183,8 @@ if [ "$DRY_RUN" = "true" ]; then
   if [ "$SKIP_BUILD" = "true" ]; then
     log_info "  SKIPPED (--skip-build)"
   else
-    log_info "  Would pull 7 base images and build 3 app images"
+    log_info "  Would pull 7 base images and build 7 app images (orchestrator, web-dashboard,"
+    log_info "                  ai-gateway, routing, file-indexer, switch, camera-discovery)"
   fi
 
   log_step 6 $TOTAL_STEPS "Start stack"
