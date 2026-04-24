@@ -202,7 +202,7 @@ if [ "$DRY_RUN" = "true" ]; then
 
   log_step 7 $TOTAL_STEPS "Verify"
   log_info "  Would run ./scripts/verify.sh"
-  log_info "  Would configure local DNS: mDNS (droplet.local via host avahi)"
+  log_info "  Would configure local DNS: mDNS (droplet-ai.local via host avahi)"
   log_info "                              + droplet.lan via OpenWrt dnsmasq (if reachable)"
 
   if [ "$INSTALL_SYSTEMD" = "true" ]; then
@@ -325,7 +325,7 @@ main() {
   printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
   printf "\n"
   printf "  Dashboard:     ${_CYAN}http://localhost${_RESET}\n"
-  printf "  Local DNS:     ${_CYAN}http://droplet.local${_RESET} (mDNS) or ${_CYAN}http://droplet.lan${_RESET} (router)\n"
+  printf "  Local DNS:     ${_CYAN}http://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}http://droplet.lan${_RESET} (router DNS)\n"
   printf "  API:           ${_CYAN}http://localhost/api/health${_RESET}\n"
   printf "\n"
   printf "  Open the dashboard to complete setup — a guided wizard\n"

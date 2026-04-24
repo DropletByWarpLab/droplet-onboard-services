@@ -19,9 +19,16 @@
 
 # --- Config ---
 # DROPLET_MDNS_HOSTNAME drives Avahi's host-name *and* the service file.
-# DROPLET_LAN_HOSTNAME is the router-DNS entry (unicast DNS). Defaults are
-# intentionally different (`.local` vs `.lan`) — see note above.
-DROPLET_MDNS_HOSTNAME="${DROPLET_MDNS_HOSTNAME:-droplet}"
+# DROPLET_LAN_HOSTNAME is the router-DNS entry (unicast DNS).
+#
+# Why `droplet-ai` for mDNS but `droplet.lan` for router DNS:
+#   OpenWrt (the upstream router) publishes `droplet.local` itself via umdns
+#   on the same LAN. If we also claim `droplet.local` from the Jetson, Avahi
+#   detects the collision and falls back to `droplet-2.local` — defeating the
+#   whole point. `droplet-ai` avoids the clash while still matching the
+#   Jetson's own hostname (`droplet-AI`). Router DNS has no such conflict so
+#   `droplet.lan` stays short and memorable there.
+DROPLET_MDNS_HOSTNAME="${DROPLET_MDNS_HOSTNAME:-droplet-ai}"
 DROPLET_LAN_HOSTNAME="${DROPLET_LAN_HOSTNAME:-droplet.lan}"
 
 # Reject anything that isn't a plain RFC-1123 hostname before we pass the

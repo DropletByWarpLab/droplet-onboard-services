@@ -101,10 +101,12 @@ services:
       - POSTGRES_DB=nextcloud
       - REDIS_HOST=cache
       # Nextcloud rejects requests whose Host header isn't in this list with
-      # "Access through untrusted domain". droplet.local (mDNS) and droplet.lan
-      # (OpenWrt dnsmasq) are registered by scripts/lib/local-dns.sh — list
-      # them here so /nextcloud/ works when the dashboard is reached by name.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet.local droplet.lan
+      # "Access through untrusted domain". droplet-ai.local (mDNS) and
+      # droplet.lan (OpenWrt dnsmasq) are registered by scripts/lib/local-dns.sh.
+      # `droplet.local` is also accepted — OpenWrt already publishes it via
+      # umdns, and if a user ever reconciles the collision in the Jetson's
+      # favour it should keep working.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet.local droplet.lan
       - OVERWRITEPROTOCOL=https
     volumes:
       - nextcloud-data:/var/www/html
