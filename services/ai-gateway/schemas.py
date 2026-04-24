@@ -54,6 +54,15 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=4096)
     provider: str | None = None  # explicit provider override
     tools: list[ToolDefinition] | None = None
+    # When True (default, preserves existing behaviour) the gateway runs
+    # its own ReAct loop — dispatching tool_calls via HTTP back to the
+    # orchestrator and re-prompting until the model emits a final
+    # text answer. When False the gateway forwards tools to the model
+    # once and returns the raw response (tool_calls included), leaving
+    # dispatch to the caller. The orchestrator's /api/llm/agent uses
+    # False because it has direct service-layer access to run tools
+    # without an auth round-trip.
+    execute_tools: bool = True
 
     @model_validator(mode="after")
     def _validate_total_content(self) -> "ChatRequest":
