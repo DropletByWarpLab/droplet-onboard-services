@@ -68,6 +68,9 @@ services:
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
+      # Display service runs with network_mode: host, so orchestrator reaches
+      # it over localhost rather than the compose network.
+      - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://localhost:8082}
     volumes:
       - matter-data:/data/matter-storage
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
@@ -361,6 +364,49 @@ services:
     # frigate as best-effort over its localhost HTTP client.
     depends_on:
       - broker
+    profiles: ["full"]
+    restart: always
+
+  # --- TFT Display (3.5" front-panel) ---
+  # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
+  # accepts: auto (probe PyPortal, fall back to sim), pyportal, or sim.
+  # The direct-SPI / fbtft-framebuffer / GPIO paths were removed; the
+  # PyPortal's own SAMD51 handles rendering, so we just stream JSON
+  # commands over /dev/ttyACM* — no privileged access or GPIO needed.
+  # Service name stays `oled-display` for backwards-compatibility with the
+  # orchestrator's display.client.ts and existing env wiring.
+  oled-display:
+    build:
+      context: ../services/oled-display
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      # Same token — the container talks to host-side device-bridge.
+      - BRIDGE_AUTH_TOKEN=${DEVICE_SECRET_KEY:-}
+      - PORT=8082
+      - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
+      - LCD_WIDTH=480
+      - LCD_HEIGHT=320
+      - PYPORTAL_TTY=${PYPORTAL_TTY:-/dev/ttyACM1}
+      - PYPORTAL_BAUD=${PYPORTAL_BAUD:-115200}
+    volumes:
+      # Bind /dev so /dev/ttyACM* is visible in the container and survives
+      # PyPortal re-enumeration (USB hotplug changes the minor number).
+      - /dev:/dev:rw
+    # Scoped device access — just the USB ACM class (major 166) instead of
+    # full `privileged: true`. Without the cgroup rule the kernel refuses
+    # open() on /dev/ttyACM* with EPERM and the service falls back to sim
+    # mode; with it, and only it, nothing else in the container can touch
+    # arbitrary host devices. `c 166:* rmw` = character device, major 166,
+    # any minor, read/write/mknod.
+    device_cgroup_rules:
+      - "c 166:* rmw"
+    # Don't let the container escalate beyond whatever cap-bag it launched
+    # with. Belt-and-braces — device_cgroup_rules above is the actual
+    # access control; this just blocks setuid binaries from flipping.
+    security_opt:
+      - no-new-privileges:true
     profiles: ["full"]
     restart: always
 

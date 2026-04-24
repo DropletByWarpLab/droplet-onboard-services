@@ -38,3 +38,6 @@ docker/secrets/
 * [0-9].*
 * [0-9][0-9]
 * [0-9][0-9].*
+# device-bridge runtime env (live credentials). Only .example is tracked.
+services/oled-display/device-bridge.env
+/etc/droplet/device-bridge.env

@@ -1,0 +1,65 @@
+[Unit]
+Description=Droplet device-bridge (wifi scan + drives + QR for on-device screen)
+# The bridge shells out to docker for Nextcloud/Frigate queries and to
+# nmcli/ssh for wifi. It's useless before docker + network are up.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=droplet
+Group=droplet
+# Runtime config is loaded from an operator-managed env file. The file
+# is created by `setup.sh` with 0600 perms and holds the OpenWrt SSH
+# password, Frigate URL, etc. Keeping these out of the committed unit
+# file so git history never carries live credentials.
+EnvironmentFile=-/etc/droplet/device-bridge.env
+# Sensible defaults for endpoints that are always the same on a Droplet
+# deployment. Credentials come from EnvironmentFile above.
+Environment=OPENWRT_HOST=192.168.50.1
+Environment=OPENWRT_USER=root
+Environment=OPENWRT_IFACE=wlan0
+# Reach docker-hosted services on loopback so we don't bind to Docker
+# bridge IPs that drift every time Docker reshuffles its subnet. Frigate
+# publishes port 5000 on 127.0.0.1 via docker-compose. The orchestrator
+# goes through the nginx gateway on port 80 (path-based proxy to
+# orchestrator:3000) — its port 3000 is not host-published.
+Environment=FRIGATE_URL=http://127.0.0.1:5000
+Environment=ORCHESTRATOR_URL=http://127.0.0.1
+Environment=BRIDGE_PORT=9090
+Environment=BRIDGE_BIND=127.0.0.1
+Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
+ExecStart=/usr/bin/python3 /home/droplet/Documents/droplet-pi-platform/services/oled-display/device-bridge.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/droplet-device-bridge.log
+StandardError=append:/var/log/droplet-device-bridge.log
+
+# --- Hardening ---
+# StateDirectory creates /var/lib/droplet-bridge owned by droplet:droplet
+# with 0700 perms on every start, even after a factory-reset wipes it.
+# The bridge writes rotation timestamps + a key digest there; cleartext
+# keys never hit disk.
+StateDirectory=droplet-bridge
+StateDirectoryMode=0700
+# Lock down the filesystem view: readonly rootfs, private /tmp, mask
+# /proc so other users' details aren't visible.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+NoNewPrivileges=true
+# The bridge only needs IPv4/IPv6 + Unix sockets (SSH, curl, HTTP server).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Writable paths the bridge actually touches. Log file is per-unit so
+# append:/var/log/... needs that path writable; StateDirectory above is
+# handled automatically.
+ReadWritePaths=/var/log/droplet-device-bridge.log
+# Allow reading by-label/by-uuid for drive enumeration, and /proc/mounts.
+# Those are under /dev and /proc respectively — both readable by default.
+
+[Install]
+WantedBy=multi-user.target
