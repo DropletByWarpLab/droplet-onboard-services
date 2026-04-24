@@ -704,7 +704,7 @@ def _storage_card(g, x, y, w, h):
 
 def _cameras_card(g, x, y, w, h):
     _card(g, x, y, w, h)
-    g.append(_text("CAMERAS", x=x + 10, y=y + 10, scale=1, color=LABEL_3))
+    g.append(_text("CAMERAS", x=x + 12, y=y + 12, scale=1, color=LABEL_3))
     cams = state.get("cameras") or {}
     online = cams.get("online") or 0
     total = cams.get("total") or 0
@@ -716,24 +716,40 @@ def _cameras_card(g, x, y, w, h):
         col = RED
     else:
         col = ORANGE
-    _status_dot(g, x + w - 14, y + 13, col)
+    _status_dot(g, x + w - 16, y + 15, col)
     g.append(_text("{}/{} online".format(online, total),
-                   x=x + w - 22, y=y + 13, scale=1,
+                   x=x + w - 24, y=y + 15, scale=1,
                    color=col, anchor=(1.0, 0.5)))
     evs = cams.get("events") or []
     if evs:
+        # Hero — most recent event (camera + label + confidence)
         ev = evs[0]
-        g.append(_text(str(ev.get("camera") or "")[:14], x=x + 10, y=y + 30,
-                       scale=2, color=TEXT))
+        cam_name = str(ev.get("camera") or "cam")[:14]
+        g.append(_text(cam_name, x=x + 12, y=y + 34, scale=2, color=TEXT))
         score = ev.get("score")
-        score_s = " " + "{:.0%}".format(score) if isinstance(score, (int, float)) else ""
-        g.append(_text(str(ev.get("label") or "event")[:10] + score_s,
-                       x=x + 10, y=y + 54, scale=1, color=ACCENT))
-    else:
-        g.append(_text("No events", x=x + 10, y=y + 34, scale=2, color=LABEL_3))
-        if cams.get("error"):
-            g.append(_text("Frigate unreachable", x=x + 10, y=y + 58,
+        score_s = " {:.0%}".format(score) if isinstance(score, (int, float)) else ""
+        g.append(_text(str(ev.get("label") or "event")[:12] + score_s,
+                       x=x + 12, y=y + 58, scale=1, color=ACCENT))
+        # Secondary — previous 2 events as tight lines (if any), keeps
+        # the card useful at a glance without being a full event log.
+        for i, prev in enumerate(evs[1:3]):
+            line_y = y + 78 + i * 14
+            if line_y + 10 > y + h - 8:
+                break
+            detail = "{} · {}".format(
+                str(prev.get("camera") or "-")[:10],
+                str(prev.get("label") or "event")[:10])
+            g.append(_text(detail, x=x + 12, y=line_y,
                            scale=1, color=LABEL_3))
+    else:
+        g.append(_text("No events", x=x + 12, y=y + 40,
+                       scale=2, color=LABEL_3))
+        if cams.get("error"):
+            g.append(_text("Frigate unreachable", x=x + 12, y=y + 66,
+                           scale=1, color=RED))
+        elif total == 0:
+            g.append(_text("No cameras paired yet",
+                           x=x + 12, y=y + 66, scale=1, color=LABEL_3))
 
 
 def _wifi_card(g, x, y, w, h):
@@ -792,16 +808,18 @@ def render_stats():
         cx = col_w * i + col_w // 2
         _dial(g, cx, row1_y, col_w, 72, lbl, val, pct, spark_key=key)
 
-    # Row 2: single row of two wider cards — less busy than the old 2x2.
-    # Storage (left) + Network/Wi-Fi combined (right). Cameras info is
-    # surfaced via the red alert bubble in the header so it doesn't need
-    # a permanent card here.
+    # Row 2: single row of two wider cards. Cameras (left) — latest event
+    # + two older ones so the NVR side of the appliance has a permanent
+    # at-a-glance surface. Network+Wi-Fi merged (right). Storage was the
+    # previous left card but wasn't carrying its weight; drive counts
+    # still show up on the storage gauge in the dial row and cameras is
+    # more actionable on an edge NVR.
     pad = 10
     cw = (DISPLAY_W - 3 * pad) // 2
     nav_h = 44
     top = row1_y + 60
     ch = DISPLAY_H - nav_h - top - 12
-    _storage_card(g, pad, top, cw, ch)
+    _cameras_card(g, pad, top, cw, ch)
     _network_card(g, 2 * pad + cw, top, cw, ch)
 
     # Bottom nav
