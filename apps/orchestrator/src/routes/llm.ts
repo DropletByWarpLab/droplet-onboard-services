@@ -51,13 +51,20 @@ const agentRequestSchema = z.object({
 
 // Which tool names require the caller to have owner/admin role. Read-only
 // tools (list_*, get_*, search_*) are fine for any authenticated user; write
-// tools (block/unblock/accept/scan) must be gated because the LLM is driven
-// by user-controlled prompt text and will happily call them on request.
+// tools (block/unblock/accept/scan, file mutations) must be gated because
+// the LLM is driven by user-controlled prompt text and will happily call
+// them on request.
 const WRITE_TOOLS = new Set([
   "block_device",
   "unblock_device",
   "accept_discovered_camera",
   "scan_for_cameras",
+  "write_file",
+  "delete_file",
+  "create_directory",
+  "rename_file",
+  "move_file",
+  "copy_file",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {
