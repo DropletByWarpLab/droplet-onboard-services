@@ -1,73 +1,109 @@
 # =============================================================================
-# Droplet Wireless Configuration — Intel BE200 Tri-Band
+# Droplet Wireless Configuration — MediaTek MT7922 (PCIe over FPC)
 # =============================================================================
-# The BE200 exposes up to 3 radios in OpenWrt:
-#   radio0 → 2.4 GHz (802.11ax, HE20/HE40) — legacy IoT devices
-#   radio1 → 5 GHz   (802.11ax, HE80/HE160) — backward compatibility
-#   radio2 → 6 GHz   (802.11be, EHT320) — WiFi 7 high performance
+# Hardware swap from Intel BE200 to MT7922 in PR feat/openwrt-mt7922-support.
+# The BE200 worked as a client but failed AP-mode ACS ("Unable to collect
+# survey data") and was replaced. The MT7922 is dual-band (2.4 + 5 GHz),
+# Wi-Fi 6, and works as an AP on the Pi 5 *only* when:
 #
-# All radios are bridged into br-lan (192.168.50.0/24)
+#   1. The `pcie-32bit-dma-pi5` device-tree overlay is loaded at boot
+#      (forces 32-bit DMA addressing — without this the mt7921e probe
+#      fails with -ENOMEM / error -12). See uci-defaults/99-droplet-setup.
+#   2. The `mt7921e` driver is loaded with `disable_aspm=1` (avoids ASPM
+#      L0s/L1 power-state-related probe stalls on brcm-pcie). See
+#      etc/modules.d/mt7921e.
+#   3. The `kmod-mt7921e` driver and `kmod-mt7922-firmware` blob are
+#      installed (both baked into the image via openwrt/build.sh).
+#
+# Path string `axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0`
+# is the FPC PCIe x1 slot on the Pi 5 (NOT the RP1 controller at
+# 1000120000 — that's the Pi's own I/O hub and must not be touched here).
+#
+# All radios are bridged into br-lan (192.168.50.0/24).
 # =============================================================================
 
-# --- 2.4 GHz Radio ---
-config wifi-device 'radio0'
+# --- 5 GHz — primary AP (Wi-Fi 6, channel 149, HE80) ---
+#
+# Channel 149 is UNII-3 in the US (5725-5850 MHz), no DFS, broad device
+# support. iPhones / iPads connect cleanly with WPA2-only encryption
+# (WPA3 transition mode caused association failures on older iOS).
+#
+# Known limitation: the chip's TX power on this build is currently capped
+# at ~3 dBm by the firmware regardless of the in-kernel regdomain saying
+# 30 dBm is allowed on this channel. Coverage is room-scale; long-range
+# clients should use a downstream AP. Tracking as a follow-up — likely
+# needs a newer mt76 driver via custom OpenWrt build.
+config wifi-device 'radio3'
     option type 'mac80211'
-    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0'
-    option band '2g'
-    option channel 'auto'
-    option htmode 'HE40'
-    option cell_density '0'
-    option country 'US'
-    option disabled '0'
-
-config wifi-iface 'default_radio0'
-    option device 'radio0'
-    option network 'lan'
-    option mode 'ap'
-    option ssid 'Droplet'
-    option encryption 'sae-mixed'
-    option key 'ChangeMe!2024'
-    option ieee80211w '1'
-    option disabled '0'
-
-# --- 5 GHz Radio ---
-config wifi-device 'radio1'
-    option type 'mac80211'
-    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0+1'
+    option path 'axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
     option band '5g'
-    option channel 'auto'
-    option htmode 'HE160'
-    option cell_density '0'
+    option channel '149'
+    option htmode 'HE80'
     option country 'US'
+    option cell_density '0'
+    option noscan '1'
     option disabled '0'
 
-config wifi-iface 'default_radio1'
-    option device 'radio1'
+config wifi-iface 'default_radio3'
+    option device 'radio3'
     option network 'lan'
     option mode 'ap'
-    option ssid 'Droplet'
-    option encryption 'sae-mixed'
+    option ssid 'Droplet-AI'
+    option encryption 'psk2'
     option key 'ChangeMe!2024'
-    option ieee80211w '1'
+    option ieee80211w '0'
     option disabled '0'
 
-# --- 6 GHz Radio (WiFi 7) ---
-config wifi-device 'radio2'
+# --- 2.4 GHz — disabled by default ---
+#
+# MT7922 supports simultaneous dual-band operation but enabling 2.4 GHz
+# adds beacon airtime and IoT-device support overhead. Left disabled until
+# the operator decides they want a 2.4 GHz AP (some legacy IoT devices
+# can't see 5 GHz). To enable: `uci set wireless.radio3_2g.disabled=0;
+# uci set wireless.default_radio3_2g.disabled=0; uci commit; wifi reload`.
+config wifi-device 'radio3_2g'
     option type 'mac80211'
-    option path 'platform/axi/1000120000.pcie/pci0000:01/0000:01:00.0+2'
-    option band '6g'
-    option channel 'auto'
-    option htmode 'EHT320'
-    option cell_density '0'
+    option path 'axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0'
+    option band '2g'
+    option channel '6'
+    option htmode 'HE40'
     option country 'US'
-    option disabled '0'
+    option cell_density '0'
+    option disabled '1'
 
-config wifi-iface 'default_radio2'
-    option device 'radio2'
+config wifi-iface 'default_radio3_2g'
+    option device 'radio3_2g'
     option network 'lan'
     option mode 'ap'
-    option ssid 'Droplet-6G'
-    option encryption 'sae'
+    option ssid 'Droplet-AI-2G'
+    option encryption 'psk2'
     option key 'ChangeMe!2024'
-    option ieee80211w '2'
-    option disabled '0'
+    option ieee80211w '0'
+    option disabled '1'
+
+# --- BCM4345/6 onboard (SDIO) — DISABLED ---
+#
+# The Pi 5's onboard Cypress/Broadcom BCM4345/6 (brcmfmac via SDIO) was
+# the previous fallback AP while the BE200 was being debugged. Now that
+# MT7922 is the production chip, the onboard radio is disabled to free
+# CPU/memory and avoid SSID confusion. Re-enable by setting disabled=0 if
+# the MT7922 needs to be swapped out.
+config wifi-device 'radio4'
+    option type 'mac80211'
+    option path 'platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'
+    option band '2g'
+    option channel '6'
+    option htmode 'HE40'
+    option country 'US'
+    option cell_density '0'
+    option disabled '1'
+
+config wifi-iface 'default_radio4'
+    option device 'radio4'
+    option network 'lan'
+    option mode 'ap'
+    option ssid 'Droplet-AI-Onboard'
+    option encryption 'psk2'
+    option key 'ChangeMe!2024'
+    option ieee80211w '0'
+    option disabled '1'
