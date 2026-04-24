@@ -20,6 +20,7 @@ import { PreviewPane } from "@/components/FileManager/PreviewPane";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
+import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
 import { useFiles } from "@/lib/hooks/useFiles";
 import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
@@ -443,6 +444,9 @@ export default function FilesPage() {
       <div className="mb-4">
         <BreadcrumbNav path={currentPath} onNavigate={setCurrentPath} />
       </div>
+
+      {/* Volumes — only on root so it doesn't dominate deep folder views */}
+      {currentPath === "/" && <VolumesPanel />}
 
       {/* New folder dialog */}
       {showNewFolder && (
