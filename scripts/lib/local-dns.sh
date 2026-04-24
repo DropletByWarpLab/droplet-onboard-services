@@ -24,6 +24,26 @@
 DROPLET_MDNS_HOSTNAME="${DROPLET_MDNS_HOSTNAME:-droplet}"
 DROPLET_LAN_HOSTNAME="${DROPLET_LAN_HOSTNAME:-droplet.lan}"
 
+# Reject anything that isn't a plain RFC-1123 hostname before we pass the
+# value to sed / printf / curl. This closes the door on metacharacters that
+# could break /etc/avahi/avahi-daemon.conf or inject into the JSON payload,
+# even though the env var is operator-controlled.
+_valid_hostname() {
+  local name="$1"
+  # Single label (mDNS host-name) or dotted FQDN, 1-253 chars, no leading/
+  # trailing hyphen per label, lowercase ASCII only.
+  printf '%s' "$name" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+}
+
+if ! _valid_hostname "$DROPLET_MDNS_HOSTNAME"; then
+  log_error "DROPLET_MDNS_HOSTNAME='${DROPLET_MDNS_HOSTNAME}' is not a valid hostname — refusing to configure mDNS"
+  DROPLET_MDNS_HOSTNAME=""
+fi
+if ! _valid_hostname "$DROPLET_LAN_HOSTNAME"; then
+  log_error "DROPLET_LAN_HOSTNAME='${DROPLET_LAN_HOSTNAME}' is not a valid hostname — refusing to register with dnsmasq"
+  DROPLET_LAN_HOSTNAME=""
+fi
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -141,6 +161,11 @@ _restart_avahi() {
 }
 
 setup_mdns() {
+  if [ -z "$DROPLET_MDNS_HOSTNAME" ]; then
+    log_warn "Skipping mDNS bootstrap (hostname validation failed above)"
+    return 0
+  fi
+
   local os
   os="$(uname)"
   if [ "$os" != "Linux" ]; then
@@ -163,6 +188,11 @@ setup_mdns() {
 # Router DNS (OpenWrt dnsmasq via routing service)
 # =============================================================================
 setup_router_dns() {
+  if [ -z "$DROPLET_LAN_HOSTNAME" ]; then
+    log_warn "Skipping router-DNS registration (hostname validation failed above)"
+    return 0
+  fi
+
   local ip
   ip="$(_discover_host_lan_ip)"
   if [ -z "$ip" ]; then
@@ -198,16 +228,21 @@ setup_router_dns() {
   local payload
   payload=$(printf '{"hostname":"%s","ip":"%s"}' "$DROPLET_LAN_HOSTNAME" "$ip")
 
-  local response http_code
-  response="$(curl -sS --max-time 10 -o /tmp/droplet-dns-resp.$$ -w "%{http_code}" \
-                -X POST "${routing_url}/dhcp/hostnames" \
-                -H "Content-Type: application/json" \
-                "${auth_header[@]}" \
-                --data "$payload" 2>>"$LOG_FILE" || echo "000")"
-  http_code="$response"
+  # mktemp (not /tmp/$$.xxx) so the response file can't be a dangling symlink
+  # pre-planted by another user on the host. `trap` guarantees cleanup even if
+  # the script is interrupted mid-curl.
+  local resp_file
+  resp_file="$(mktemp -t droplet-dns-resp.XXXXXX 2>/dev/null || mktemp)"
+  trap 'rm -f "$resp_file"' RETURN
+
+  local http_code
+  http_code="$(curl -sS --max-time 10 -o "$resp_file" -w "%{http_code}" \
+                 -X POST "${routing_url}/dhcp/hostnames" \
+                 -H "Content-Type: application/json" \
+                 "${auth_header[@]}" \
+                 --data "$payload" 2>>"$LOG_FILE" || echo "000")"
   local body
-  body="$(cat /tmp/droplet-dns-resp.$$ 2>/dev/null || true)"
-  rm -f /tmp/droplet-dns-resp.$$
+  body="$(cat "$resp_file" 2>/dev/null || true)"
 
   case "$http_code" in
     200)
