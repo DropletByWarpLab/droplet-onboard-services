@@ -95,6 +95,8 @@ source "$SCRIPT_DIR/lib/compose.sh"
 source "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/camera-drivers.sh
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
+# shellcheck source=lib/local-dns.sh
+source "$SCRIPT_DIR/lib/local-dns.sh"
 
 # --- Sync-secrets short-circuit ---
 # Runs the secret-file materializer without touching .env, Docker, or any
@@ -200,6 +202,8 @@ if [ "$DRY_RUN" = "true" ]; then
 
   log_step 7 $TOTAL_STEPS "Verify"
   log_info "  Would run ./scripts/verify.sh"
+  log_info "  Would configure local DNS: mDNS (droplet.local via host avahi)"
+  log_info "                              + droplet.lan via OpenWrt dnsmasq (if reachable)"
 
   if [ "$INSTALL_SYSTEMD" = "true" ]; then
     printf "\n"
@@ -290,6 +294,22 @@ main() {
     log_info "Skipping verification (stack not started or verify.sh not found)"
   fi
 
+  # --- Local DNS (mDNS + router dnsmasq) ---
+  # Runs after the stack is up so the routing service is ready to accept the
+  # `droplet.lan` registration. Non-fatal: a missing router or mDNS failure
+  # only downgrades discovery, it doesn't break the install.
+  if [ "$SKIP_START" != "true" ]; then
+    # Source the materialized .env so ROUTING_SERVICE_URL / ROUTING_SERVICE_TOKEN
+    # / OPENWRT_HOST / ROUTING_MODE are in scope for setup_local_dns.
+    if [ -f "$REPO_ROOT/.env" ]; then
+      set -a
+      # shellcheck disable=SC1091
+      . "$REPO_ROOT/.env"
+      set +a
+    fi
+    setup_local_dns || log_warn "Local DNS bootstrap had issues — see above"
+  fi
+
   # --- Systemd (optional) ---
   if [ "$INSTALL_SYSTEMD" = "true" ]; then
     printf "\n"
@@ -305,6 +325,7 @@ main() {
   printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
   printf "\n"
   printf "  Dashboard:     ${_CYAN}http://localhost${_RESET}\n"
+  printf "  Local DNS:     ${_CYAN}http://droplet.local${_RESET} (mDNS) or ${_CYAN}http://droplet.lan${_RESET} (router)\n"
   printf "  API:           ${_CYAN}http://localhost/api/health${_RESET}\n"
   printf "\n"
   printf "  Open the dashboard to complete setup — a guided wizard\n"

@@ -31,6 +31,7 @@ from schemas import (
     CreateGuestNetworkRequest,
     StaticLeaseRequest,
     SetDnsRequest,
+    DnsHostnameRequest,
     BlockDeviceRequest,
     UnblockDeviceRequest,
     PortForwardRequest,
@@ -41,6 +42,7 @@ from schemas import (
     FirewallRuleCollection,
     FirewallRedirectCollection,
 )
+import re
 
 logger = logging.getLogger("droplet.routing")
 logging.basicConfig(level=logging.INFO)
@@ -463,6 +465,49 @@ def set_dns(req: SetDnsRequest):
         r.dhcp.set_dns_servers(req.servers)
         r.apply_changes("network")
         return {"status": "ok", "servers": req.servers}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# DNS hostname entries (dnsmasq static name → IP)
+# ---------------------------------------------------------------------------
+# Same grammar as schemas._HOSTNAME_PATTERN, compiled once for path validation.
+_HOSTNAME_PATH_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+@app.get("/dhcp/hostnames")
+def list_dns_hostnames():
+    try:
+        return {"entries": get_router().dhcp.list_domain_entries()}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/dhcp/hostnames")
+def upsert_dns_hostname(req: DnsHostnameRequest):
+    try:
+        r = get_router()
+        result = r.dhcp.set_domain_entry(req.hostname, req.ip)
+        r.exec_service("dnsmasq", "restart")
+        return {"status": "ok", **result}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.delete("/dhcp/hostnames/{hostname}")
+def delete_dns_hostname(hostname: str):
+    if not _HOSTNAME_PATH_RE.fullmatch(hostname):
+        raise HTTPException(status_code=400, detail="Invalid hostname")
+    try:
+        r = get_router()
+        removed = r.dhcp.delete_domain_entry(hostname)
+        if removed == 0:
+            raise HTTPException(status_code=404, detail="Hostname not found")
+        r.exec_service("dnsmasq", "restart")
+        return {"status": "ok", "hostname": hostname, "removed": removed}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

@@ -173,6 +173,15 @@ class _MockWireless:
 
 
 class _MockDhcp:
+    # In-memory store of static hostname entries so upsert + list round-trips
+    # feel realistic to the dashboard / setup script.
+    _domain_entries: list[dict[str, Any]]
+
+    def __init__(self) -> None:
+        self._domain_entries = [
+            {"section": "cfg01domain", "hostname": "droplet.lan", "ip": "10.0.0.1"},
+        ]
+
     def get_leases(self) -> dict[str, Any]:
         # Shape matches the real SDK response (wrap list in 'leases').
         return {"leases": _DHCP_LEASES}
@@ -188,6 +197,25 @@ class _MockDhcp:
 
     def set_dns_servers(self, servers: list[str]) -> None:
         logger.info("mock: set_dns_servers %s — no-op", servers)
+
+    def list_domain_entries(self) -> list[dict[str, Any]]:
+        return list(self._domain_entries)
+
+    def set_domain_entry(self, hostname: str, ip: str) -> dict[str, Any]:
+        for entry in self._domain_entries:
+            if entry["hostname"].lower() == hostname.lower():
+                entry["ip"] = ip
+                entry["hostname"] = hostname
+                return {"section": entry["section"], "hostname": hostname, "ip": ip, "action": "updated"}
+        section = f"cfgmock{len(self._domain_entries) + 1:02d}domain"
+        self._domain_entries.append({"section": section, "hostname": hostname, "ip": ip})
+        return {"section": section, "hostname": hostname, "ip": ip, "action": "created"}
+
+    def delete_domain_entry(self, hostname: str) -> int:
+        target = hostname.lower()
+        before = len(self._domain_entries)
+        self._domain_entries = [e for e in self._domain_entries if e["hostname"].lower() != target]
+        return before - len(self._domain_entries)
 
 
 class _MockFirewall:
@@ -261,6 +289,13 @@ class MockRouter:
 
     def disconnect(self) -> None:
         pass
+
+    def exec_service(self, service: str, action: str) -> dict[str, Any]:
+        logger.info("mock: exec_service %s %s — no-op", service, action)
+        return {"code": 0}
+
+    def apply_changes(self, config: str, timeout: int = 30) -> None:
+        logger.info("mock: apply_changes config=%s — no-op", config)
 
     # Some SDK call sites use safe_apply as a context manager.
     from contextlib import contextmanager

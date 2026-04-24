@@ -461,6 +461,57 @@ class DHCPApi:
         })
         self._r.uci.commit("network")
 
+    def list_domain_entries(self) -> list[dict]:
+        """Return dnsmasq static hostname → IP entries (UCI `config domain`)."""
+        result = self._r.uci.get("dhcp", type="domain")
+        values = result.get("values", {}) if isinstance(result, dict) else {}
+        entries = []
+        for section_name, section in values.items():
+            if not isinstance(section, dict):
+                continue
+            name = section.get("name")
+            ip = section.get("ip")
+            if name and ip:
+                entries.append({"section": section_name, "hostname": name, "ip": ip})
+        return entries
+
+    def set_domain_entry(self, hostname: str, ip: str) -> dict:
+        """Idempotently register a static hostname → IP in dnsmasq.
+
+        Creates a `config domain` section if none exists for this hostname,
+        otherwise updates the first match and prunes any duplicates so the
+        result is exactly one section per hostname. Returns the resulting
+        entry with an `action` field of `created` or `updated`.
+
+        The caller is responsible for restarting dnsmasq (or letting the
+        routing layer do it) — this method only stages UCI.
+        """
+        existing = [e for e in self.list_domain_entries()
+                    if e["hostname"].lower() == hostname.lower()]
+        if existing:
+            first = existing[0]
+            self._r.uci.set("dhcp", first["section"], {"name": hostname, "ip": ip})
+            for dup in existing[1:]:
+                self._r.uci.delete("dhcp", dup["section"])
+            self._r.uci.commit("dhcp")
+            return {"section": first["section"], "hostname": hostname, "ip": ip, "action": "updated"}
+
+        added = self._r.uci.add("dhcp", "domain", {"name": hostname, "ip": ip})
+        self._r.uci.commit("dhcp")
+        section = added.get("section") if isinstance(added, dict) else None
+        return {"section": section, "hostname": hostname, "ip": ip, "action": "created"}
+
+    def delete_domain_entry(self, hostname: str) -> int:
+        """Remove all dnsmasq static entries for hostname. Returns count deleted."""
+        removed = 0
+        for entry in self.list_domain_entries():
+            if entry["hostname"].lower() == hostname.lower():
+                self._r.uci.delete("dhcp", entry["section"])
+                removed += 1
+        if removed:
+            self._r.uci.commit("dhcp")
+        return removed
+
     def reload(self):
         """Restart dnsmasq to apply DHCP/DNS changes."""
         self._r.exec_service("dnsmasq", "restart")
