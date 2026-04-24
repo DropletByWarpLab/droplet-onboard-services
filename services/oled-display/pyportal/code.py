@@ -152,6 +152,25 @@ def _circle(cx, cy, r, color):
     )
 
 
+def _rounded_rect(g, x, y, w, h, r, color):
+    """Filled rounded rect via a cross of two rects + 4 corner circles.
+
+    vectorio has no rounded primitive, but this composition is cheap
+    (6 primitives per rect) and the seams line up perfectly because the
+    circles sit at the corners of the inset region.
+    """
+    r = max(0, min(r, min(w, h) // 2))
+    # Horizontal band (full width, shorter height)
+    g.append(_rect(x, y + r, w, h - 2 * r, color))
+    # Vertical band (full height, shorter width)
+    g.append(_rect(x + r, y, w - 2 * r, h, color))
+    # Corner circles
+    g.append(_circle(x + r, y + r, r, color))
+    g.append(_circle(x + w - r, y + r, r, color))
+    g.append(_circle(x + r, y + h - r, r, color))
+    g.append(_circle(x + w - r, y + h - r, r, color))
+
+
 # vectorio has no arc primitive, so half-donuts are drawn as a 2*N-vertex
 # Polygon (outer sweep + inner sweep back). Circle end-caps round the tips
 # for the "rounded half donut" look requested — cheap heap-wise because
@@ -1004,28 +1023,31 @@ def _pill_button(g, label_str, x, y, w, h, color, action,
 
 def _render_qr_matrix(g, matrix, ox, oy, module_px):
     size = len(matrix)
-    pad = module_px * 3   # roomier quiet zone + reads as a card border
+    # Tight quiet zone — QR spec asks for 4 modules but 2 is fine for
+    # phone cameras at arm's length. Keeps the card visibly compact so
+    # the sleek border stands out.
+    pad = module_px * 2
+    border_w = 2
     frame_w = size * module_px + pad * 2
-    # White card behind the QR — pad-rounded corners using four circles
-    # at the corners + a cross of rects. Gives the QR a tactile "card"
-    # feel instead of a harsh white square against the dark bg.
-    corner_r = pad
-    g.append(_rect(ox - pad + corner_r, oy - pad, frame_w - corner_r * 2,
-                   frame_w, WHITE))
-    g.append(_rect(ox - pad, oy - pad + corner_r, frame_w,
-                   frame_w - corner_r * 2, WHITE))
-    g.append(_circle(ox - pad + corner_r, oy - pad + corner_r, corner_r, WHITE))
-    g.append(_circle(ox + size * module_px + pad - corner_r,
-                     oy - pad + corner_r, corner_r, WHITE))
-    g.append(_circle(ox - pad + corner_r,
-                     oy + size * module_px + pad - corner_r, corner_r, WHITE))
-    g.append(_circle(ox + size * module_px + pad - corner_r,
-                     oy + size * module_px + pad - corner_r, corner_r, WHITE))
+    corner_r = min(pad, 10)
+
+    # Slightly larger ACCENT rounded rect behind = the thin border.
+    _rounded_rect(g, ox - pad - border_w, oy - pad - border_w,
+                  frame_w + border_w * 2, frame_w + border_w * 2,
+                  corner_r + border_w, ACCENT)
+    # White card on top, inset by border_w on each side so the ACCENT
+    # shows as a 2 px frame around the card.
+    _rounded_rect(g, ox - pad, oy - pad, frame_w, frame_w, corner_r, WHITE)
+
+    # QR modules use a very dark indigo (not pure black) for a subtle
+    # brand tint that's still ~19:1 contrast against white — phone
+    # scanners read it identically to black.
+    module_color = 0x0A0A1E
     for row_idx, row in enumerate(matrix):
         bmp = displayio.Bitmap(size * module_px, module_px, 2)
         pal = displayio.Palette(2)
         pal[0] = WHITE
-        pal[1] = 0x000000
+        pal[1] = module_color
         for col_idx, v in enumerate(row):
             if v:
                 for dx in range(module_px):
