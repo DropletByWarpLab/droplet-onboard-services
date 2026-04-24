@@ -70,6 +70,13 @@ prepare_and_build() {
   # --- Ensure mosquitto passwd dir exists for compose mount ---
   mkdir -p "$REPO_ROOT/docker/mosquitto_passwd_dir"
 
+  # --- Make `.env` discoverable to bare `docker compose -f docker/…` calls ---
+  # Compose resolves `.env` relative to the compose file's directory, not the
+  # repo root. Without this symlink, invocations that don't pass
+  # `--env-file .env` (e.g. ad-hoc `docker compose -f docker/docker-compose.yml
+  # logs`) silently default secrets to empty strings and break auth services.
+  ln -sfn ../.env "$REPO_ROOT/docker/.env"
+
   # --- Pull base images (sequential for slow Pi connections) ---
   log_info "Pulling base container images..."
   local images=(

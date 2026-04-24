@@ -267,13 +267,33 @@ _generate_mosquitto_passwd() {
     -v "$passwd_dir:/tmp/mqtt" \
     eclipse-mosquitto:2 \
     sh -c "mosquitto_passwd -b -c /tmp/mqtt/mosquitto_passwd '$mqtt_user' '$mqtt_password'"; then
-    chmod 600 "$passwd_file"
+    # 0644 — the runtime mosquitto container runs as uid 1883, not the host
+    # user (1000) that generated the file, so 0600 made the file unreadable
+    # and mosquitto crash-looped with "Unable to open pwfile". The bytes on
+    # disk are a bcrypt hash, not the plaintext; .env holds the plaintext
+    # at 0600 already.
+    chmod 644 "$passwd_file"
     log_success "MQTT password file generated"
   else
-    # Fallback: create a plaintext file (no Docker needed)
+    # Fallback: create a plaintext file (no Docker needed).
+    # IMPORTANT: the bytes here are the PLAINTEXT password, not a bcrypt
+    # hash. The 0644 justification on the success branch above applies
+    # only to hashed output; leaving a plaintext MQTT credential
+    # world-readable on the host would be a real regression. Keep this
+    # file at 0600 and try to hand ownership to the mosquitto UID (1883)
+    # so the runtime container can still read it. If chown fails (no
+    # sudo, not root, non-POSIX fs) we warn loudly — the operator needs
+    # to rerun once Docker is available so the hashed path takes over.
     log_warn "Could not generate hashed MQTT password — using plaintext fallback"
     printf "%s:%s\n" "$mqtt_user" "$mqtt_password" > "$passwd_file"
     chmod 600 "$passwd_file"
+    if [ "$(id -u)" = "0" ]; then
+      chown 1883:1883 "$passwd_file" 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      sudo chown 1883:1883 "$passwd_file" 2>/dev/null || true
+    else
+      log_warn "plaintext passwd_file left owned by $(id -un); mosquitto (uid 1883) may not be able to read it — install Docker and rerun to generate the hashed version"
+    fi
   fi
 
   # Clean up stale intermediate file from old code path. The parent directory
