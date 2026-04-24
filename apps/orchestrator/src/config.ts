@@ -31,8 +31,27 @@ const envSchema = z.object({
   HOMEASSISTANT_TOKEN: z.string().default(""),
 
   // --- Matter (native controller) ---
+  // DO NOT ADD NEW `MATTER_*` ENV VARS HERE.
+  //
+  // matter.js scans the entire process.env for `MATTER_*` at startup
+  // (NodeJsEnvironment.js → vars.addUnixEnvStyle(process.env)) and folds
+  // each one into its internal VariableService under a dot-namespaced
+  // key. For example, `MATTER_CONTROLLER_NAME=Droplet` becomes the var
+  // `controller.name`. When matter.js later activates an endpoint's
+  // behavior whose id matches that namespace — e.g. the root node's
+  // internal `controller` behavior — it merges those vars into the
+  // behavior's defaults and casts them against the behavior's schema.
+  // Any key the schema doesn't declare (like `name`) throws
+  //   UnsupportedCastError: Property "name" is unsupported
+  // and the whole controller init fails.
+  //
+  // Use a non-`MATTER_` prefix for anything we want to configure
+  // ourselves. `MATTER_STORAGE_PATH` below predates this rule and
+  // currently does not collide (no root-node behavior has id
+  // `storage`), so leaving it in place to avoid churning existing
+  // .env files — but prefer `DROPLET_MATTER_*` for new additions.
   MATTER_STORAGE_PATH: z.string().default(defaultMatterStorage),
-  MATTER_CONTROLLER_NAME: z.string().default("Droplet"),
+  DROPLET_MATTER_CONTROLLER_NAME: z.string().default("Droplet"),
 
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.

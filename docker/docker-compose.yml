@@ -57,7 +57,14 @@ services:
       - HOMEASSISTANT_URL=http://homeassistant:8123
       - NEXTCLOUD_URL=http://nextcloud:80
       - MATTER_STORAGE_PATH=/data/matter-storage
-      - MATTER_CONTROLLER_NAME=${MATTER_CONTROLLER_NAME:-Droplet}
+      # DROPLET_-prefixed, NOT MATTER_-prefixed. matter.js scans the process
+      # env for MATTER_* at startup and injects each one into its internal
+      # VariableService — `MATTER_CONTROLLER_NAME` used to land as the var
+      # `controller.name`, which collides with the root-node `controller`
+      # behavior's schema and crashes controller init with "Property \"name\"
+      # is unsupported". See apps/orchestrator/src/config.ts for the full
+      # explanation.
+      - DROPLET_MATTER_CONTROLLER_NAME=${DROPLET_MATTER_CONTROLLER_NAME:-Droplet}
       # NOTE: Uses localhost because the routing service runs with network_mode: host.
       # If routing moves to bridge networking, change to http://routing:8080.
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
