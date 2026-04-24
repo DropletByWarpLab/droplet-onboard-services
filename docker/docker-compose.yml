@@ -272,6 +272,12 @@ services:
       - "5000"
       - "8554"
       - "8555"
+    # Publish the unauthenticated internal API on the host's loopback so
+    # host-network services (device-bridge, camera-discovery) can reach it
+    # at http://127.0.0.1:5000. Do NOT bind to 0.0.0.0 — external access
+    # must go through the gateway /frigate/ route, which is auth-gated.
+    ports:
+      - "127.0.0.1:5000:5000"
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
       - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
