@@ -19,8 +19,13 @@ EnvironmentFile=-/etc/droplet/device-bridge.env
 Environment=OPENWRT_HOST=192.168.50.1
 Environment=OPENWRT_USER=root
 Environment=OPENWRT_IFACE=wlan0
-Environment=FRIGATE_URL=http://172.18.0.11:5000
-Environment=ORCHESTRATOR_URL=http://172.18.0.2:3000
+# Reach docker-hosted services on loopback so we don't bind to Docker
+# bridge IPs that drift every time Docker reshuffles its subnet. Frigate
+# publishes port 5000 on 127.0.0.1 via docker-compose. The orchestrator
+# goes through the nginx gateway on port 80 (path-based proxy to
+# orchestrator:3000) — its port 3000 is not host-published.
+Environment=FRIGATE_URL=http://127.0.0.1:5000
+Environment=ORCHESTRATOR_URL=http://127.0.0.1
 Environment=BRIDGE_PORT=9090
 Environment=BRIDGE_BIND=127.0.0.1
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
