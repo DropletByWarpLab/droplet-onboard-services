@@ -283,6 +283,24 @@ def _mark_tg(size, x, y):
     return displayio.TileGrid(bmp, pixel_shader=pal, x=x, y=y)
 
 
+# Vector version of the mark — cheap for any size, no bitmap cache. Used
+# when we want a hero-scale logo (idle screen) without paying the
+# bitmap-rasterisation heap cost at init. Geometry mirrors
+# _make_mark_bmp exactly (52x60 source coordinate space).
+def _mark_poly(g, size, x, y):
+    w = int(size * 52 / 60)
+    h = size
+    sx = lambda px: x + int(px / 52 * w)  # noqa: E731
+    sy = lambda py: y + int(py / 60 * h)  # noqa: E731
+    outer = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(36), sy(48)),
+             (sx(16), sy(48)), (sx(8), sy(28))]
+    inner = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(26), sy(36))]
+    g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT_PRI),
+                              points=outer, x=0, y=0))
+    g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT_LIGHT),
+                              points=inner, x=0, y=0))
+
+
 # ---------------------------------------------------------------------------
 # Local clock — anchor the host-pushed HH:MM against monotonic time so the
 # idle screen can tick seconds between pushes instead of sitting on a stale
@@ -864,52 +882,56 @@ _idle_refs = {"clock": None, "colon_on": True}
 
 
 def render_idle():
-    """Logo-first sleep screen: big droplet mark front and center, tiny
-    clock tucked in the top-right, subtle footer metadata. Static HH:MM
-    (no colon blink) — the minute rolls over via the idle tick loop.
+    """Hero composition: huge off-centre droplet mark on the left paired
+    with a large HH:MM inline on its right. The mark fills most of the
+    vertical space (no black bars top/bottom), both pieces are biased
+    left-of-centre so the layout feels intentional. Clock is scale=5
+    (~40 px tall) — readable from across the room.
+
+    Uses the vector mark (_mark_poly) so we can scale the logo without
+    rasterising a new bitmap each time / blowing the heap.
     """
     global touch_regions
     touch_regions = []
     g = displayio.Group()
-
-    # Soft indigo panel band behind the mark — gives the logo a subtle
-    # stage without drawing attention away from it.
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
-    band_h = 220
-    band_y = (DISPLAY_H - band_h) // 2
-    g.append(_rect(0, band_y, DISPLAY_W, band_h, PANEL))
 
-    # Top-right clock — small, muted, static colon. No tick-driven blink.
+    # Mark sized to fill most of the display height. Bias left so there's
+    # room for the inline clock + a secondary line of metadata.
+    mark_size = 260
+    mark_w = int(mark_size * 52 / 60)           # ~225 px at size=260
+    mark_x = 20
+    mark_y = (DISPLAY_H - mark_size) // 2        # vertically centred
+    mark_cy = mark_y + mark_size // 2
+    _mark_poly(g, mark_size, mark_x, mark_y)
+
+    # Clock inline to the right of the mark. scale=5 gives ~40 px char
+    # height — comfortably readable from 6–8 ft away. Anchored so the
+    # baseline matches the mark's vertical centre minus a small optical
+    # adjustment.
+    clock_x = mark_x + mark_w + 28
     clock_lbl = _text(_local_hhmm(),
-                      x=DISPLAY_W - 16, y=20, scale=2, color=LABEL_2,
-                      anchor=(1.0, 0.5))
+                      x=clock_x, y=mark_cy - 14, scale=5, color=TEXT,
+                      anchor=(0.0, 0.5))
     g.append(clock_lbl)
     _idle_refs["clock"] = clock_lbl
 
-    # Top-left date, same restraint as the clock
+    # Date directly under the clock, same left edge — small, muted.
     date_str = _clock.get("date_str") or ""
     if date_str:
-        g.append(_text(date_str, x=16, y=20, scale=1, color=LABEL_3,
-                       anchor=(0.0, 0.5)))
+        g.append(_text(date_str, x=clock_x, y=mark_cy + 24,
+                       scale=2, color=LABEL_3, anchor=(0.0, 0.5)))
 
-    # Hero: big centered droplet mark. _MARK_LARGE is pre-baked at 160 px
-    # in _make_mark_bmp — reusing the cached bitmap keeps heap quiet.
-    mark_size = 160
-    mark_w = int(mark_size * 52 / 60)
-    mx = (DISPLAY_W - mark_w) // 2
-    my = (DISPLAY_H - mark_size) // 2 - 14
-    g.append(_mark_tg(mark_size, mx, my))
-
-    # Footer: single line of info, centered. Degrades gracefully when the
-    # host hasn't pushed state yet.
+    # Metadata line under the date — hostname · ip · ssid. Degrades to a
+    # "syncing..." hint when the host hasn't pushed yet.
     host = str(state.get("hostname") or "").strip()
     ip = str(state.get("ip") or "").strip()
     wifi = state.get("wifi") or {}
     ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "").strip()
     parts = [p for p in (host, ip, ssid) if p and p != "-"]
     footer = "  ·  ".join(parts) if parts else "syncing..."
-    g.append(_text(footer[:60], x=DISPLAY_W // 2, y=DISPLAY_H - 22,
-                   scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
+    g.append(_text(footer[:36], x=clock_x, y=mark_cy + 56,
+                   scale=1, color=LABEL_4, anchor=(0.0, 0.5)))
 
     # Tap anywhere wakes to stats.
     _region("idle_wake", 0, 0, DISPLAY_W, DISPLAY_H,
