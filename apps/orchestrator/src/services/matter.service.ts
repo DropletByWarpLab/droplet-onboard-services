@@ -99,7 +99,7 @@ export async function initMatterService(): Promise<void> {
       id: "droplet-controller",
     },
     autoConnect: true,
-    adminFabricLabel: config.MATTER_CONTROLLER_NAME,
+    adminFabricLabel: config.DROPLET_MATTER_CONTROLLER_NAME,
   });
 
   await controller.start();
