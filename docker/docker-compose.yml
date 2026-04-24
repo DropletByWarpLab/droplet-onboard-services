@@ -100,7 +100,13 @@ services:
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
       - REDIS_HOST=cache
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway
+      # Nextcloud rejects requests whose Host header isn't in this list with
+      # "Access through untrusted domain". droplet-ai.local (mDNS) and
+      # droplet-ai.lan (OpenWrt dnsmasq) are the primary names registered by
+      # scripts/lib/local-dns.sh; droplet.local / droplet.lan are accepted too
+      # so OpenWrt's own umdns/expand_hosts entries keep working if a user
+      # ever points them at the Jetson directly.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan
       - OVERWRITEPROTOCOL=https
     volumes:
       - nextcloud-data:/var/www/html

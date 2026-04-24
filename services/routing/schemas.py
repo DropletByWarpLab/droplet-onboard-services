@@ -41,6 +41,27 @@ class SetDnsRequest(BaseModel):
     servers: list[str] = Field(..., min_length=1, description="List of DNS server IPs")
 
 
+# Hostname grammar: lowercase labels, up to 253 chars total, no trailing dot.
+# The label regex rejects leading/trailing hyphens per RFC 1123. We keep it
+# lowercase because dnsmasq treats hostnames case-insensitively anyway and
+# normalizing on the way in avoids duplicate-section edge cases.
+_HOSTNAME_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+_IPV4_PATTERN = r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$"
+
+
+class DnsHostnameRequest(BaseModel):
+    """Register (or update) a static hostname → IP in dnsmasq.
+
+    Used to make the Droplet reachable at e.g. `droplet.lan` from any device
+    using the OpenWrt router as its DNS server. Writes a UCI `config domain`
+    section which dnsmasq reads as an `address=/host/ip` rule.
+    """
+
+    hostname: str = Field(..., min_length=1, max_length=253, pattern=_HOSTNAME_PATTERN,
+                          description="Hostname to resolve (lowercase, e.g. 'droplet.lan')")
+    ip: str = Field(..., pattern=_IPV4_PATTERN, description="IPv4 address the hostname should resolve to")
+
+
 class BlockDeviceRequest(BaseModel):
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address to block")
     name: Optional[str] = Field(default=None, description="Optional rule name")

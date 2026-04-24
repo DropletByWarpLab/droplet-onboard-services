@@ -31,6 +31,7 @@ from schemas import (
     CreateGuestNetworkRequest,
     StaticLeaseRequest,
     SetDnsRequest,
+    DnsHostnameRequest,
     BlockDeviceRequest,
     UnblockDeviceRequest,
     PortForwardRequest,
@@ -41,6 +42,7 @@ from schemas import (
     FirewallRuleCollection,
     FirewallRedirectCollection,
 )
+import re
 
 logger = logging.getLogger("droplet.routing")
 logging.basicConfig(level=logging.INFO)
@@ -463,6 +465,70 @@ def set_dns(req: SetDnsRequest):
         r.dhcp.set_dns_servers(req.servers)
         r.apply_changes("network")
         return {"status": "ok", "servers": req.servers}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# DNS hostname entries (dnsmasq static name → IP)
+# ---------------------------------------------------------------------------
+# Same grammar as schemas._HOSTNAME_PATTERN, compiled once for path validation.
+_HOSTNAME_PATH_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+@app.get("/dhcp/hostnames")
+def list_dns_hostnames():
+    try:
+        return {"entries": get_router().dhcp.list_hostrecords()}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# Why this specific reload path:
+#   1. `exec_service("dnsmasq","restart")` → `file.exec` — denied by the
+#      droplet-ai rpcd ACL (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json
+#      deliberately does NOT grant `file.exec`).
+#   2. `service.signal` with SIGHUP — permitted, but dnsmasq reads its config
+#      from /var/etc/dnsmasq.conf.cfg*, which is *generated* from /etc/config/
+#      dhcp by the init script at start/reload time. SIGHUP reloads hostnames
+#      from /etc/hosts but NOT the UCI-derived host-records, so our change
+#      would persist in UCI but never reach live DNS.
+#   3. `uci.apply` with pending (uncommitted) changes — permitted, and this
+#      IS what triggers /sbin/reload_config → ucitrack → dnsmasq reload,
+#      which regenerates /var/etc/dnsmasq.conf.*. This is why the SDK's
+#      set_hostrecord deliberately does NOT pre-commit: apply only emits
+#      the reload event when there's something still pending.
+# rollback=False so apply doesn't start a rollback timer (there's nothing to
+# rollback against — a bad DNS entry can't partition the router). timeout=5
+# is well under the 30s default and keeps the HTTP response snappy.
+def _commit_and_reload_dhcp(router) -> None:
+    router.uci.apply(timeout=5, rollback=False)
+
+
+@app.post("/dhcp/hostnames")
+def upsert_dns_hostname(req: DnsHostnameRequest):
+    try:
+        r = get_router()
+        result = r.dhcp.set_hostrecord(req.hostname, req.ip)
+        _commit_and_reload_dhcp(r)
+        return {"status": "ok", **result}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.delete("/dhcp/hostnames/{hostname}")
+def delete_dns_hostname(hostname: str):
+    if not _HOSTNAME_PATH_RE.fullmatch(hostname):
+        raise HTTPException(status_code=400, detail="Invalid hostname")
+    try:
+        r = get_router()
+        removed = r.dhcp.delete_hostrecord(hostname)
+        if removed == 0:
+            raise HTTPException(status_code=404, detail="Hostname not found")
+        _commit_and_reload_dhcp(r)
+        return {"status": "ok", "hostname": hostname, "removed": removed}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

@@ -95,6 +95,8 @@ source "$SCRIPT_DIR/lib/compose.sh"
 source "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/camera-drivers.sh
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
+# shellcheck source=lib/local-dns.sh
+source "$SCRIPT_DIR/lib/local-dns.sh"
 
 # --- Sync-secrets short-circuit ---
 # Runs the secret-file materializer without touching .env, Docker, or any
@@ -200,6 +202,8 @@ if [ "$DRY_RUN" = "true" ]; then
 
   log_step 7 $TOTAL_STEPS "Verify"
   log_info "  Would run ./scripts/verify.sh"
+  log_info "  Would configure local DNS: mDNS (droplet-ai.local via host avahi)"
+  log_info "                              + droplet-ai.lan via OpenWrt dnsmasq (if reachable)"
 
   if [ "$INSTALL_SYSTEMD" = "true" ]; then
     printf "\n"
@@ -290,6 +294,22 @@ main() {
     log_info "Skipping verification (stack not started or verify.sh not found)"
   fi
 
+  # --- Local DNS (mDNS + router dnsmasq) ---
+  # Runs after the stack is up so the routing service is ready to accept the
+  # `droplet.lan` registration. Non-fatal: a missing router or mDNS failure
+  # only downgrades discovery, it doesn't break the install.
+  if [ "$SKIP_START" != "true" ]; then
+    # Source the materialized .env so ROUTING_SERVICE_URL / ROUTING_SERVICE_TOKEN
+    # / OPENWRT_HOST / ROUTING_MODE are in scope for setup_local_dns.
+    if [ -f "$REPO_ROOT/.env" ]; then
+      set -a
+      # shellcheck disable=SC1091
+      . "$REPO_ROOT/.env"
+      set +a
+    fi
+    setup_local_dns || log_warn "Local DNS bootstrap had issues — see above"
+  fi
+
   # --- Systemd (optional) ---
   if [ "$INSTALL_SYSTEMD" = "true" ]; then
     printf "\n"
@@ -304,8 +324,16 @@ main() {
   printf "\n"
   printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
   printf "\n"
-  printf "  Dashboard:     ${_CYAN}http://localhost${_RESET}\n"
-  printf "  API:           ${_CYAN}http://localhost/api/health${_RESET}\n"
+  printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
+  printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
+  printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
+  printf "\n"
+  printf "  ${_BOLD}To silence the browser \"Not secure\" warning${_RESET} (one-time, per client):\n"
+  printf "    macOS / Linux: ${_CYAN}./scripts/trust-droplet-cert.sh${_RESET}\n"
+  printf "    Windows:       ${_CYAN}powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}  ${_DIM}(run as Administrator)${_RESET}\n"
+  printf "  The script downloads the Droplet's self-signed cert and installs it\n"
+  printf "  into your OS trust store — the Droplet signs for droplet-ai.local,\n"
+  printf "  droplet-ai.lan, droplet.local, droplet.lan, localhost, and LAN IPs.\n"
   printf "\n"
   printf "  Open the dashboard to complete setup — a guided wizard\n"
   printf "  will walk you through creating your admin account.\n"
