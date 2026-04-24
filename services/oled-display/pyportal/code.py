@@ -362,7 +362,12 @@ state = {
     "qr": None,   # {matrix, ssid, security, payload, version, ok, ttl_seconds}
     "alerts": [],  # [{type, title, detail, time, cleared}]
     "events_open": False,
+    # Rolling sparkline history for the gauges. Each list is a ring buffer
+    # capped at _SPARK_LEN; _record_sparks appends on every stats push.
+    "sparks": {"cpu": [], "mem": [], "disk": [], "temp": []},
 }
+
+_SPARK_LEN = 24  # ~3 min of history at the host's 8s stats cadence
 
 touch_regions = []
 _nav_debounce_until = 0.0
@@ -494,21 +499,20 @@ _NAV_LABELS = {
 
 
 def _nav_bar(g):
-    """Realtime bottom nav — one pill per active screen, current one
-    highlighted. Taps jump directly; no need to swipe through.
-
-    Lives on every active screen (not the idle splash) so the carousel
-    layout is discoverable instead of hidden."""
-    h = 28
+    """Bottom nav — big rounded pills, one per active screen, current one
+    highlighted. Comfortable finger targets (~50 px tall) and soft round
+    endcaps so it reads modern instead of dated."""
+    h = 44
     y = DISPLAY_H - h
-    g.append(_rect(0, y, DISPLAY_W, h, PANEL))
-    g.append(_rect(0, y, DISPLAY_W, 1, SEPARATOR))
+    # No hard separator — the pills float on BG for a cleaner look.
+    g.append(_rect(0, y, DISPLAY_W, h, BG))
 
     pills = len(SCREENS)
-    pad = 10
-    gap = 8
+    pad = 14
+    gap = 12
     pw = (DISPLAY_W - pad * 2 - gap * (pills - 1)) // pills
-    ph = h - 10
+    ph = h - 16  # pill height (~28)
+    pr = ph // 2  # end-cap radius
 
     current = state.get("screen")
     for i, name in enumerate(SCREENS):
@@ -516,15 +520,21 @@ def _nav_bar(g):
         py = y + (h - ph) // 2
         is_cur = (name == current)
         fill = ACCENT_SUBTLE if is_cur else SURFACE
-        border = ACCENT if is_cur else SEPARATOR
-        color = ACCENT if is_cur else LABEL_2
+        color = ACCENT_LIGHT if is_cur else LABEL_2
+        # Rounded pill: center rect + two circles for the endcaps.
         g.append(_rect(px, py, pw, ph, fill))
-        g.append(_stroked_rect(px, py, pw, ph, border, 1))
+        g.append(_circle(px, py + ph // 2, pr, fill))
+        g.append(_circle(px + pw, py + ph // 2, pr, fill))
+        if is_cur:
+            # Soft indigo halo dot below the active pill (the "you are here"
+            # indicator — takes the place of an underline on sharp-corner
+            # designs).
+            g.append(_circle(px + pw // 2, py + ph + 4, 2, ACCENT))
         g.append(_text(_NAV_LABELS.get(name, name.upper()),
                        x=px + pw // 2, y=py + ph // 2,
-                       scale=1, color=color, anchor=(0.5, 0.5)))
-        # Tappable always — even the current pill; a no-op feels fine.
-        _region("nav_{}".format(name), px, py, pw, ph,
+                       scale=2, color=color, anchor=(0.5, 0.5)))
+        # Tappable target extends to the pill caps.
+        _region("nav_{}".format(name), px - pr, py, pw + pr * 2, ph,
                 (lambda n=name: set_screen(n)))
 
 
@@ -532,9 +542,35 @@ def _nav_bar(g):
 # Stats (overview)
 # ---------------------------------------------------------------------------
 
-def _dial(g, cx, cy, w, h, lbl, value_str, pct, warn=80, crit=95):
+def _sparkline(g, x, y, w, h, series, color, baseline=None):
+    """Tiny bar-chart sparkline — one thin vertical rect per datapoint.
+
+    vectorio has no line primitive, so we fake a sparkline with narrow
+    rectangles. Reads as a dense bar chart at this resolution and keeps
+    heap bounded (one rect per point, no polygon). Points are drawn from
+    right → left so the newest value sits on the right edge.
+    """
+    if not series:
+        return
+    n = len(series)
+    lo = min(series)
+    hi = max(series)
+    span = max(1, hi - lo)
+    # Reserve a 1px base strip so a flat series still reads
+    base = baseline if baseline is not None else SEPARATOR
+    g.append(_rect(x, y + h - 1, w, 1, base))
+    bar_w = max(1, w // max(n, 1))
+    for i, v in enumerate(series[-n:]):
+        bh = max(1, int((v - lo) / span * (h - 1)))
+        bx = x + i * bar_w
+        by = y + h - bh
+        g.append(_rect(bx, by, max(1, bar_w - 1), bh, color))
+
+
+def _dial(g, cx, cy, w, h, lbl, value_str, pct, warn=80, crit=95, spark_key=None):
     """Half-donut gauge: rounded 180° arc with track + colored fill, value
-    text inside the arc, label underneath.
+    text inside the arc, label underneath, and an optional sparkline band
+    below showing recent history.
 
     Reads sleeker than a flat bar at normal viewing distance and matches
     the modern dashboard aesthetic the user asked for.
@@ -550,26 +586,43 @@ def _dial(g, cx, cy, w, h, lbl, value_str, pct, warn=80, crit=95):
     # Big value centered inside the arc
     g.append(_text(value_str, x=cx, y=arc_cy - r_outer // 2 + 4, scale=2,
                    color=TEXT, anchor=(0.5, 0.5)))
-    # Small uppercase label under the arc
-    g.append(_text(lbl, x=cx, y=arc_cy + 10, scale=1, color=LABEL_3,
+    # Sparkline band under the arc (if a history series is available),
+    # then the label sits just under the sparkline.
+    spark_drawn = False
+    if spark_key:
+        series = state.get("sparks", {}).get(spark_key) or []
+        if len(series) >= 2:
+            spark_w = min(70, r_outer * 2 - 4)
+            _sparkline(g, cx - spark_w // 2, arc_cy + 3, spark_w, 8,
+                       series, color)
+            spark_drawn = True
+    label_y = arc_cy + (18 if spark_drawn else 10)
+    g.append(_text(lbl, x=cx, y=label_y, scale=1, color=LABEL_3,
                    anchor=(0.5, 0.5)))
 
 
 def _network_card(g, x, y, w, h):
     _card(g, x, y, w, h)
-    g.append(_text("NETWORK", x=x + 10, y=y + 10, scale=1, color=LABEL_3))
-    # Status dot top-right
+    g.append(_text("NETWORK", x=x + 12, y=y + 12, scale=1, color=LABEL_3))
     wifi = state.get("wifi") or {}
     up = bool(wifi.get("connected_to")) or (state.get("ip") not in (None, "-", ""))
-    _status_dot(g, x + w - 14, y + 13, GREEN if up else RED)
-    g.append(_text("UP" if up else "DOWN", x=x + w - 22, y=y + 13, scale=1,
+    _status_dot(g, x + w - 16, y + 15, GREEN if up else RED)
+    g.append(_text("UP" if up else "DOWN", x=x + w - 24, y=y + 15, scale=1,
                    color=GREEN if up else RED, anchor=(1.0, 0.5)))
-    g.append(_text(str(state.get("ip") or "-")[:16], x=x + 10, y=y + 30,
+    # IP is the hero — full scale=2
+    g.append(_text(str(state.get("ip") or "-")[:16], x=x + 12, y=y + 34,
                    scale=2, color=TEXT))
-    g.append(_text("host " + str(state.get("hostname") or "droplet")[:14],
-                   x=x + 10, y=y + 56, scale=1, color=LABEL_2))
+    # Wi-Fi row — ssid + client count + band/channel chip, compact
+    ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "-")[:14]
+    clients = wifi.get("clients") or 0
+    band = wifi.get("band") or ""
+    g.append(_text("Wi-Fi " + ssid, x=x + 12, y=y + 58,
+                   scale=1, color=LABEL_2))
+    g.append(_text("{} client{} · {}".format(
+                       clients, "" if clients == 1 else "s", band or "-"),
+                   x=x + 12, y=y + 72, scale=1, color=LABEL_3))
     g.append(_text("up " + str(state.get("uptime") or "-")[:14],
-                   x=x + 10, y=y + 68, scale=1, color=LABEL_3))
+                   x=x + 12, y=y + 86, scale=1, color=LABEL_3))
 
 
 def _fmt_bytes(n):
@@ -688,29 +741,31 @@ def render_stats():
                  sub="{} · {}".format(state.get("ip") or "-",
                                       state.get("uptime") or "-"))
 
-    # Row 1: 4 dials
-    row1_y = y0 + 32
+    # Row 1: 4 half-donut gauges with sparkline history bands under each.
+    # Gauges span the full width, generous breathing room above and below.
+    row1_y = y0 + 28
     col_w = DISPLAY_W // 4
     dials = (
-        ("CPU",  state["cpu"],  "{}%".format(int(state["cpu"]))),
-        ("MEM",  state["mem"],  "{}%".format(int(state["mem"]))),
-        ("DISK", state["disk"], "{}%".format(int(state["disk"]))),
-        ("TEMP", state["temp"], "{}C".format(int(state["temp"]))),
+        ("CPU",  state["cpu"],  "{}%".format(int(state["cpu"])),  "cpu"),
+        ("MEM",  state["mem"],  "{}%".format(int(state["mem"])),  "mem"),
+        ("DISK", state["disk"], "{}%".format(int(state["disk"])), "disk"),
+        ("TEMP", state["temp"], "{}C".format(int(state["temp"])), "temp"),
     )
-    for i, (lbl, pct, val) in enumerate(dials):
+    for i, (lbl, pct, val, key) in enumerate(dials):
         cx = col_w * i + col_w // 2
-        _dial(g, cx, row1_y, col_w, 64, lbl, val, pct)
+        _dial(g, cx, row1_y, col_w, 72, lbl, val, pct, spark_key=key)
 
-    # Rows 2+3: 2x2 cards — sized to leave 28px at the bottom for the nav.
-    pad = 8
+    # Row 2: single row of two wider cards — less busy than the old 2x2.
+    # Storage (left) + Network/Wi-Fi combined (right). Cameras info is
+    # surfaced via the red alert bubble in the header so it doesn't need
+    # a permanent card here.
+    pad = 10
     cw = (DISPLAY_W - 3 * pad) // 2
-    ch = 70
-    r2y = row1_y + 34
-    _network_card(g, pad, r2y, cw, ch)
-    _storage_card(g, 2 * pad + cw, r2y, cw, ch)
-    r3y = r2y + ch + pad
-    _cameras_card(g, pad, r3y, cw, ch)
-    _wifi_card(g, 2 * pad + cw, r3y, cw, ch)
+    nav_h = 44
+    top = row1_y + 60
+    ch = DISPLAY_H - nav_h - top - 12
+    _storage_card(g, pad, top, cw, ch)
+    _network_card(g, 2 * pad + cw, top, cw, ch)
 
     # Bottom nav
     _nav_bar(g)
@@ -809,51 +864,54 @@ _idle_refs = {"clock": None, "colon_on": True}
 
 
 def render_idle():
+    """Logo-first sleep screen: big droplet mark front and center, tiny
+    clock tucked in the top-right, subtle footer metadata. Static HH:MM
+    (no colon blink) — the minute rolls over via the idle tick loop.
+    """
     global touch_regions
     touch_regions = []
     g = displayio.Group()
+
+    # Soft indigo panel band behind the mark — gives the logo a subtle
+    # stage without drawing attention away from it.
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+    band_h = 220
+    band_y = (DISPLAY_H - band_h) // 2
+    g.append(_rect(0, band_y, DISPLAY_W, band_h, PANEL))
 
-    # Small droplet mark up top — no "Droplet" wordmark under it. The
-    # clock is the hero now; the mark just anchors the brand.
-    mark_size = 68
-    mark_w = int(mark_size * 52 / 60)
-    mx = (DISPLAY_W - mark_w) // 2
-    my = 30
-    g.append(_mark_tg(mark_size, mx, my))
-
-    # Huge HH:MM clock, centered. Store ref so the tick loop can mutate
-    # the text in place — cheaper than rebuilding the group.
-    clock_y = my + mark_size + 70
-    clock_lbl = _text(_fmt_clock(_local_hhmm(), colon_on=True),
-                      x=DISPLAY_W // 2, y=clock_y, scale=6, color=TEXT,
-                      anchor=(0.5, 0.5))
+    # Top-right clock — small, muted, static colon. No tick-driven blink.
+    clock_lbl = _text(_local_hhmm(),
+                      x=DISPLAY_W - 16, y=20, scale=2, color=LABEL_2,
+                      anchor=(1.0, 0.5))
     g.append(clock_lbl)
     _idle_refs["clock"] = clock_lbl
-    _idle_refs["colon_on"] = True
 
-    # Date under the clock (subtle)
+    # Top-left date, same restraint as the clock
     date_str = _clock.get("date_str") or ""
     if date_str:
-        g.append(_text(date_str, x=DISPLAY_W // 2, y=clock_y + 42,
-                       scale=2, color=LABEL_3, anchor=(0.5, 0.5)))
+        g.append(_text(date_str, x=16, y=20, scale=1, color=LABEL_3,
+                       anchor=(0.0, 0.5)))
 
-    # Bottom row: info chips (IP on left, Wi-Fi SSID on right) — keeps
-    # the idle screen useful as an at-a-glance status panel instead of
-    # just a logo screensaver.
-    chip_y = DISPLAY_H - 30
+    # Hero: big centered droplet mark. _MARK_LARGE is pre-baked at 160 px
+    # in _make_mark_bmp — reusing the cached bitmap keeps heap quiet.
+    mark_size = 160
+    mark_w = int(mark_size * 52 / 60)
+    mx = (DISPLAY_W - mark_w) // 2
+    my = (DISPLAY_H - mark_size) // 2 - 14
+    g.append(_mark_tg(mark_size, mx, my))
+
+    # Footer: single line of info, centered. Degrades gracefully when the
+    # host hasn't pushed state yet.
+    host = str(state.get("hostname") or "").strip()
     ip = str(state.get("ip") or "").strip()
-    if ip and ip != "-":
-        _chip(g, 16, chip_y, ip[:18], LABEL_2)
     wifi = state.get("wifi") or {}
-    ssid = wifi.get("ssid") or wifi.get("connected_to")
-    if ssid:
-        _chip(g, DISPLAY_W - 16, chip_y, str(ssid)[:18], ACCENT,
-              anchor_right=True)
+    ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "").strip()
+    parts = [p for p in (host, ip, ssid) if p and p != "-"]
+    footer = "  ·  ".join(parts) if parts else "syncing..."
+    g.append(_text(footer[:60], x=DISPLAY_W // 2, y=DISPLAY_H - 22,
+                   scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
 
-    # Any tap wakes to stats. Kept the whole-screen region; removed the
-    # explicit "swipe" caption because the tick chip + clock already make
-    # it feel live (and the user asked for a cleaner look).
+    # Tap anywhere wakes to stats.
     _region("idle_wake", 0, 0, DISPLAY_W, DISPLAY_H,
             lambda: set_screen("stats"))
     board.DISPLAY.root_group = g
@@ -960,57 +1018,54 @@ def render_qr():
 
     matrix = qr["matrix"]
     size = len(matrix)
-    # Fit QR on the left — reserve 28px at bottom for the nav bar.
-    nav_h = 28
-    avail_h = DISPLAY_H - y0 - nav_h - 8
+    # Reserve 44 px at the bottom for the new taller nav bar.
+    nav_h = 44
+    avail_h = DISPLAY_H - y0 - nav_h - 10
     module_px = max(2, min(7, avail_h // size))
     qr_px = size * module_px
-    ox = 20
-    oy = y0 + (avail_h - qr_px) // 2 + 4
+    ox = 24
+    oy = y0 + (avail_h - qr_px) // 2 + 2
     _render_qr_matrix(g, matrix, ox, oy, module_px)
 
-    # Right sidebar: SSID / security / band / rotate
-    side_x = ox + qr_px + 26
-    side_w = DISPLAY_W - side_x - 16
-    g.append(_text("SSID", x=side_x, y=y0 + 12, scale=1, color=LABEL_3))
-    g.append(_text(str(ssid)[:20], x=side_x, y=y0 + 32, scale=2, color=TEXT))
+    # Right sidebar: SSID / security / password / rotate. Same info density
+    # as before but with tighter label pairs and the new ACCENT_LIGHT for
+    # the SSID value to match the refreshed palette.
+    side_x = ox + qr_px + 30
+    side_w = DISPLAY_W - side_x - 18
+    g.append(_text("NETWORK", x=side_x, y=y0 + 10, scale=1, color=LABEL_3))
+    g.append(_text(str(ssid)[:20], x=side_x, y=y0 + 30, scale=2, color=ACCENT_LIGHT))
 
     sec = (qr.get("security") or "WPA2")
-    g.append(_text("SECURITY", x=side_x, y=y0 + 62, scale=1, color=LABEL_3))
-    g.append(_text(str(sec)[:20], x=side_x, y=y0 + 82, scale=2, color=ACCENT))
+    g.append(_text("SECURITY", x=side_x, y=y0 + 58, scale=1, color=LABEL_3))
+    g.append(_text(str(sec)[:20], x=side_x, y=y0 + 76, scale=2, color=TEXT))
 
     # Cleartext password for users whose phone won't scan the QR (or who
-    # just want to type it into a laptop / a second device). Shown at
-    # scale=2 so it's legible from arm's length; breaks into two lines if
-    # longer than 12 chars (the current generator emits exactly 16).
+    # just want to type it into a laptop / a second device).
     key = qr.get("key") or ""
     if key:
-        g.append(_text("PASSWORD", x=side_x, y=y0 + 112, scale=1,
+        g.append(_text("PASSWORD", x=side_x, y=y0 + 104, scale=1,
                        color=LABEL_3))
-        # Split into 8+8 for legibility; terminalio at scale=2 renders
-        # ~12 px/char so 8 chars fits comfortably in the sidebar.
         half = len(key) // 2 + (len(key) % 2)
-        g.append(_text(key[:half], x=side_x, y=y0 + 132, scale=2,
-                       color=TEXT))
+        g.append(_text(key[:half], x=side_x, y=y0 + 124, scale=2, color=TEXT))
         if len(key) > half:
-            g.append(_text(key[half:], x=side_x, y=y0 + 156, scale=2,
-                           color=TEXT))
-        g.append(_text("all lowercase", x=side_x, y=y0 + 180, scale=1,
+            g.append(_text(key[half:], x=side_x, y=y0 + 146, scale=2, color=TEXT))
+        g.append(_text("all lowercase", x=side_x, y=y0 + 168, scale=1,
                        color=LABEL_3))
 
-    # Rotate button only present if the bridge actually supports rotation
-    # (deployment has WIFI_KEY_ROTATION_ENABLED=true). With it off the
-    # button would 410 — cleaner to hide it entirely.
+    # Rotate button only shows when the bridge has rotation enabled.
+    # Pill-shaped to match the new nav-bar language.
     if rotation_on:
         bw = side_w
-        bh = 32
+        bh = 30
         bx = side_x
-        by = DISPLAY_H - nav_h - bh - 6
+        by = DISPLAY_H - nav_h - bh - 8
+        pr = bh // 2
         g.append(_rect(bx, by, bw, bh, ACCENT_SUBTLE))
-        g.append(_stroked_rect(bx, by, bw, bh, ACCENT, 1))
+        g.append(_circle(bx, by + pr, pr, ACCENT_SUBTLE))
+        g.append(_circle(bx + bw, by + pr, pr, ACCENT_SUBTLE))
         g.append(_text("Rotate now", x=bx + bw // 2, y=by + bh // 2,
-                       scale=1, color=ACCENT, anchor=(0.5, 0.5)))
-        _region("qr_rotate", bx, by, bw, bh, _rotate_key)
+                       scale=1, color=ACCENT_LIGHT, anchor=(0.5, 0.5)))
+        _region("qr_rotate", bx - pr, by, bw + 2 * pr, bh, _rotate_key)
 
     _nav_bar(g)
 
@@ -1203,6 +1258,17 @@ def handle(msg):
         for k in ("cpu", "mem", "disk", "temp", "ip", "uptime", "hostname", "now"):
             if k in data and data[k] is not None:
                 state[k] = data[k]
+        # Append latest cpu/mem/disk/temp values to the sparkline rings so
+        # the dashboard can draw tiny history bars under each gauge.
+        sparks = state["sparks"]
+        for k in ("cpu", "mem", "disk", "temp"):
+            try:
+                v = float(state.get(k) or 0)
+            except (TypeError, ValueError):
+                continue
+            sparks[k].append(v)
+            if len(sparks[k]) > _SPARK_LEN:
+                del sparks[k][0:len(sparks[k]) - _SPARK_LEN]
         # Re-anchor the local clock whenever the host pushes a fresh "now"
         # so idle-screen seconds can tick between pushes without drift.
         # Optional "date" field feeds the idle-screen date line.
@@ -1263,26 +1329,34 @@ def handle(msg):
 def main():
     set_screen("idle")
     _send("READY")
+    # Ask the host to (re-)push its full state. Host may or may not honour
+    # it — if it doesn't, we just fall through to normal steady-state pushes.
+    # Critical for firmware-reload recovery: without this, the device sits
+    # with empty stats/wifi/drives until something upstream changes.
+    _send("REQUEST_STATE")
     buf = b""
     last_touch = None
     press_start = None          # (x, y) — where the finger first landed
     last_activity = time.monotonic()
     last_idle_tick = 0.0
 
+    last_idle_hhmm = ""
     while True:
         # Idle clock tick — only runs while the idle screen is up. Updates
-        # the HH:MM label and toggles the colon on a 1 Hz cadence so the
-        # clock feels live between host pushes. Cheap: just mutates one
-        # label's text attr, no group rebuild.
+        # the HH:MM label *only when the minute changes* (no per-second
+        # colon blink — too distracting for a sleep screen). Checks once
+        # a second but the label.text write is skipped unless the digits
+        # actually moved.
         now_mono = time.monotonic()
         if (state["screen"] == "idle"
                 and _idle_refs.get("clock") is not None
                 and now_mono - last_idle_tick >= 1.0):
             last_idle_tick = now_mono
-            _idle_refs["colon_on"] = not _idle_refs.get("colon_on", True)
             try:
-                _idle_refs["clock"].text = _fmt_clock(
-                    _local_hhmm(), _idle_refs["colon_on"])
+                cur = _local_hhmm()
+                if cur != last_idle_hhmm:
+                    _idle_refs["clock"].text = cur
+                    last_idle_hhmm = cur
             except Exception:
                 pass
 

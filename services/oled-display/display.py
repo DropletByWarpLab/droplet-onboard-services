@@ -1496,7 +1496,42 @@ class TFTDisplay:
                 while b"\n" in serial_buf:
                     line, _, serial_buf = serial_buf.partition(b"\n")
                     txt = line.decode("utf-8", errors="ignore").strip()
-                    if txt == "REQUEST_QR":
+                    if txt in ("READY", "REQUEST_STATE"):
+                        # Full-snapshot resync: fired when the firmware boots
+                        # (READY) or explicitly asks for state (REQUEST_STATE,
+                        # which our firmware sends right after READY). Without
+                        # this, a code.py auto-reload leaves the PyPortal
+                        # rendering empty screens until each periodic push
+                        # cycle ticks over (up to 30s worst-case). Push every
+                        # data-bearing mode in one burst so data lands in
+                        # <1s of the reboot. fetch_* calls that error out
+                        # return None and are skipped — the periodic loop
+                        # will catch up on the next tick.
+                        logger.info("pyportal: %s — resyncing full state", txt)
+                        try:
+                            self._pyportal_send("stats", self._gather_stats())
+                        except Exception as e:
+                            logger.warning("resync stats failed: %s", e)
+                        for mode, fetch in (
+                            ("wifi", self.fetch_wifi),
+                            ("drives", self.fetch_drives),
+                            ("cameras", self.fetch_cameras),
+                            ("files", self.fetch_files),
+                        ):
+                            try:
+                                snap = fetch()
+                                if snap is not None:
+                                    self._pyportal_send(mode, snap)
+                            except Exception as e:
+                                logger.warning("resync %s failed: %s", mode, e)
+                        # Reset periodic-push anchors so we don't double-send
+                        # in the next loop iteration.
+                        last_stats_push = now
+                        last_wifi_push = now
+                        last_files_push = now
+                        last_cams_push = now
+                        self._last_drives_push = now
+                    elif txt == "REQUEST_QR":
                         qr = self.fetch_qr()
                         if qr is not None:
                             self._pyportal_send("qr", qr)
