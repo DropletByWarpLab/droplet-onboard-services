@@ -49,9 +49,9 @@ Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).
 |--------|------|-------------|
 | GET  | `/health`              | Health check (reports backend + resolution) |
 | GET  | `/display/status`      | Current mode, brightness, cycling state, backend |
-| POST | `/display/home`        | Show the home tile grid |
-| POST | `/display/stats`       | Show the 4-card device-stats dashboard |
-| POST | `/display/logo`        | Show the full-screen Droplet logo |
+| POST | `/display/home`        | Navigate to the Stats screen |
+| POST | `/display/stats`       | Navigate to the Stats screen (4 half-donut gauges + rollup cards) |
+| POST | `/display/logo`        | Navigate to the Idle screen (clock + mark + info chips) |
 | POST | `/display/message`     | Custom text `{title, lines[]}` — up to 10 lines |
 | POST | `/display/custom`      | Upload image (multipart, max 8 MB) |
 | POST | `/display/brightness`  | Set brightness `{value: 0–255}` (PyPortal only) |

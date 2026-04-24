@@ -458,22 +458,19 @@ def _header(g, title, sub=None, show_bubble=True):
     if show_bubble:
         n = _open_alerts_count()
         if n > 0:
-            bx, by, br = DISPLAY_W - 32, 10, 22
-            # Red rounded rect stands in for a circle — PyPortal can't do arcs
-            g.append(_rect(bx, by, br, br, RED))
-            g.append(_rect(bx - 2, by + 3, br + 4, br - 6, RED))
-            g.append(_rect(bx + 3, by - 2, br - 6, br + 4, RED))
-            g.append(_text("!", x=bx + br // 2, y=by + br // 2, scale=2,
-                           color=WHITE, anchor=(0.5, 0.5)))
+            cx, cy, r = DISPLAY_W - 22, 21, 11
+            g.append(_circle(cx, cy, r, RED))
+            g.append(_text("!", x=cx, y=cy, scale=2, color=WHITE,
+                           anchor=(0.5, 0.5)))
             if n > 1:
-                g.append(_rect(bx + br - 6, by - 3, 16, 12, WHITE))
-                g.append(_text(str(n)[:2], x=bx + br + 2, y=by + 3, scale=1,
-                               color=RED, anchor=(0.5, 0.5)))
-            _region("alert_bubble", bx - 6, by - 4, br + 22, br + 10,
-                    _open_alerts_drawer)
+                g.append(_circle(cx + r - 2, cy - r + 2, 7, WHITE))
+                g.append(_text(str(n)[:2], x=cx + r - 2, y=cy - r + 2,
+                               scale=1, color=RED, anchor=(0.5, 0.5)))
+            _region("alert_bubble", cx - r - 6, cy - r - 6,
+                    (r + 6) * 2, (r + 6) * 2, _open_alerts_drawer)
         else:
             # All clear — small green dot + "OK"
-            g.append(_rect(DISPLAY_W - 34, 18, 6, 6, GREEN))
+            g.append(_circle(DISPLAY_W - 34, 21, 3, GREEN))
             g.append(_text("OK", x=DISPLAY_W - 24, y=21, scale=1,
                            color=GREEN, anchor=(0.0, 0.5)))
 
