@@ -77,6 +77,10 @@ const WRITE_TOOLS = new Set([
   "create_reminder",
   "complete_reminder",
   "send_notification",
+  // Clip export writes to Nextcloud + creates a Files entry; share_clip
+  // emits a token that grants public read access until expiry.
+  "export_clip",
+  "share_clip",
 ]);
 
 export function createLlmRouter(prisma: PrismaClient): Router {
