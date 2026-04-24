@@ -7,6 +7,30 @@ import type { StorageStats } from "../types/index.js";
 const logger = pino({ name: "storage-route" });
 
 /**
+ * The device-bridge runs on the Jetson host and exposes auto-mounted
+ * USB drives at /drives. The orchestrator reads through so the
+ * dashboard doesn't need to know about host-side plumbing.
+ */
+const BRIDGE_URL = process.env.BRIDGE_URL || "http://172.17.0.1:9090";
+
+interface BridgeDrive {
+  device: string;
+  mount: string;
+  label: string;
+  uuid: string;
+  size_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  mounted: boolean;
+}
+
+interface BridgeDrivesSnapshot {
+  drives: BridgeDrive[];
+  count: number;
+  snapshot_at: string;
+}
+
+/**
  * GET /api/storage — return the authenticated user's Nextcloud storage quota.
  *
  * Nextcloud enforces per-user quotas via OCS `/cloud/user`. We proxy that
@@ -39,6 +63,34 @@ export function createStorageRouter(): Router {
     } catch (err) {
       logger.warn({ err }, "Failed to fetch Nextcloud quota");
       next(err);
+    }
+  });
+
+  /**
+   * GET /api/storage/drives — USB drives auto-mounted on the Jetson host.
+   *
+   * Reads from the device-bridge (services/oled-display/device-bridge.py)
+   * running on the host at :9090. Bridge reads from the automount
+   * state file, so the mount set here matches what the on-screen UI
+   * and Nextcloud show.
+   */
+  router.get("/storage/drives", async (_req, res) => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${BRIDGE_URL}/drives`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!r.ok) {
+        res.status(502).json({ drives: [], count: 0,
+          error: `bridge returned ${r.status}` });
+        return;
+      }
+      const snap = (await r.json()) as BridgeDrivesSnapshot;
+      res.json(snap);
+    } catch (err) {
+      logger.warn({ err }, "Failed to fetch drives from device-bridge");
+      res.json({ drives: [], count: 0,
+        error: (err as Error).message || "bridge unreachable" });
     }
   });
 
