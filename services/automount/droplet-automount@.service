@@ -1,0 +1,19 @@
+[Unit]
+Description=Droplet USB auto-mount for %I
+Requires=docker.service
+After=docker.service local-fs.target
+# We depend on udisks staying out of our way — but don't hard-require it
+# off, since many user-space apps want it running for other purposes.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/droplet-automount.sh add   /dev/%I
+ExecStop=/usr/local/bin/droplet-automount.sh remove /dev/%I
+TimeoutStartSec=30
+TimeoutStopSec=30
+# Pass known-good PATH so docker/blkid/mount are found when run from udev.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

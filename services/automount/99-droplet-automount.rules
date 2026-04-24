@@ -1,0 +1,41 @@
+# Droplet auto-mount udev rules.
+#
+# Fire droplet-automount@<partition>.service when a mountable partition
+# appears or disappears. We target user-facing storage:
+#   * M.2 NVMe drives (the expansion slot)
+#   * SATA / SAS drives (future modular bays)
+#   * USB mass-storage drives (external drives)
+#
+# Explicitly excluded:
+#   * The boot eMMC (mmcblk*)
+#   * The PyPortal Titano screen's CIRCUITPY firmware volume
+#     (Adafruit VID 239a) — it's a display, not a drive
+#   * Anything already labeled CIRCUITPY / BOOT / SYSTEM / EFI
+#   * Tiny volumes (<100 MiB) — typically firmware / ESP, not storage
+
+ACTION!="add|remove", GOTO="droplet_automount_end"
+SUBSYSTEM!="block", GOTO="droplet_automount_end"
+
+# Accept NVMe partitions (M.2) and SCSI-style partitions (SATA + USB).
+KERNEL!="nvme[0-9]n[0-9]p[0-9]*|sd[a-z][0-9]*", GOTO="droplet_automount_end"
+
+# Reject the boot medium outright.
+KERNEL=="mmcblk*", GOTO="droplet_automount_end"
+
+# Reject Adafruit devices — the PyPortal's CIRCUITPY volume lives here.
+ENV{ID_VENDOR_ID}=="239a", GOTO="droplet_automount_end"
+
+# Reject known firmware / boot labels even if the vendor check missed.
+ENV{ID_FS_LABEL}=="CIRCUITPY",   GOTO="droplet_automount_end"
+ENV{ID_FS_LABEL}=="BOOT",        GOTO="droplet_automount_end"
+ENV{ID_FS_LABEL}=="EFI",         GOTO="droplet_automount_end"
+ENV{ID_FS_LABEL}=="SYSTEM",      GOTO="droplet_automount_end"
+
+# Keep udisks from racing our mount.
+ENV{UDISKS_IGNORE}="1"
+ENV{UDISKS_AUTO}="0"
+
+ACTION=="add",    ENV{SYSTEMD_WANTS}+="droplet-automount@$kernel.service"
+ACTION=="remove", RUN+="/usr/bin/systemctl --no-block stop droplet-automount@$kernel.service"
+
+LABEL="droplet_automount_end"
