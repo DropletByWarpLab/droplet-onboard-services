@@ -32,8 +32,21 @@ import * as openwrt from "./openwrt.client.js";
 import * as nc from "./nextcloud.client.js";
 import * as frigate from "./frigate.client.js";
 import * as healthMonitor from "./health-monitor.service.js";
+import * as calendarSvc from "./calendar.service.js";
+import { sendNotification, listRecentNotifications } from "./notifications.service.js";
 import { config } from "../config.js";
 import type { ToolDefinition } from "../types/index.js";
+
+// Parse a date string from the model into a Date. Accepts ISO-8601 (the
+// preferred form) and a few looser shapes the model emits when it forgets
+// the time zone. Returns null on garbage so the tool can return a clean
+// error instead of persisting an Invalid Date.
+function parseModelDate(input: unknown): Date | null {
+  if (typeof input !== "string" || input.length === 0) return null;
+  const d = new Date(input);
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
 
 // ---------------------------------------------------------------------------
 // Path validation for Nextcloud-scoped write tools
@@ -868,6 +881,307 @@ const list_drives: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// Calendar / Reminders / Notifications (PR #2)
+// ---------------------------------------------------------------------------
+
+const create_event: Tool = {
+  name: "create_event",
+  description:
+    "Create a calendar event on the user's local Droplet calendar. Times are " +
+    "ISO-8601 strings (UTC preferred, e.g. '2026-04-23T14:00:00Z'). For all-day " +
+    "events pass allDay=true and use date-only strings. The event will appear " +
+    "in the dashboard Calendar tab and in any external calendar app subscribed " +
+    "to the user's webcal:// publish URL.",
+  parameters: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Event title (1-500 chars)." },
+      description: { type: "string", description: "Optional longer notes." },
+      location: { type: "string", description: "Optional location string." },
+      starts_at: { type: "string", description: "ISO-8601 start time." },
+      ends_at: { type: "string", description: "ISO-8601 end time (must be after starts_at)." },
+      all_day: { type: "boolean", description: "True for all-day events. Default false." },
+    },
+    required: ["title", "starts_at", "ends_at"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const startsAt = parseModelDate(args.starts_at);
+    const endsAt = parseModelDate(args.ends_at);
+    if (!startsAt) return { error: "invalid starts_at — expected ISO-8601 timestamp" };
+    if (!endsAt) return { error: "invalid ends_at — expected ISO-8601 timestamp" };
+    try {
+      const ev = await calendarSvc.createEvent(ctx.prisma, ctx.userId, {
+        title: String(args.title ?? ""),
+        description: args.description as string | undefined,
+        location: args.location as string | undefined,
+        startsAt,
+        endsAt,
+        allDay: args.all_day === true,
+      });
+      return { id: ev.id, title: ev.title, starts_at: ev.startsAt.toISOString() };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const list_events: Tool = {
+  name: "list_events",
+  description:
+    "List the user's calendar events in a time range. Defaults to the next 30 " +
+    "days from now if no range is given. Returns local + externally-synced " +
+    "events together. Use this for 'what's on my calendar today', 'find my next " +
+    "meeting with Bob', etc.",
+  parameters: {
+    type: "object",
+    properties: {
+      from: { type: "string", description: "ISO-8601 lower bound (default: now)." },
+      to: { type: "string", description: "ISO-8601 upper bound (default: 30 days from now)." },
+      limit: { type: "integer", minimum: 1, maximum: 200, description: "Max results (default 50)." },
+    },
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const from = parseModelDate(args.from) ?? new Date();
+    const to = parseModelDate(args.to) ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
+    const events = await calendarSvc.listEvents(ctx.prisma, ctx.userId, { from, to, limit });
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      count: events.length,
+      events: events.map((e) => ({
+        id: e.id,
+        title: e.title,
+        starts_at: e.startsAt.toISOString(),
+        ends_at: e.endsAt.toISOString(),
+        all_day: e.allDay,
+        location: e.location,
+        source: e.source,
+      })),
+    };
+  },
+};
+
+const update_event: Tool = {
+  name: "update_event",
+  description:
+    "Update an existing calendar event. Only fields you pass are changed. " +
+    "Cannot edit events that came from an external sync source — the LLM " +
+    "should explain that to the user and offer to make a local override.",
+  parameters: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Event UUID." },
+      title: { type: "string" },
+      description: { type: "string" },
+      location: { type: "string" },
+      starts_at: { type: "string" },
+      ends_at: { type: "string" },
+      all_day: { type: "boolean" },
+    },
+    required: ["id"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const startsAt = args.starts_at ? parseModelDate(args.starts_at) : undefined;
+    const endsAt = args.ends_at ? parseModelDate(args.ends_at) : undefined;
+    if (args.starts_at && !startsAt) return { error: "invalid starts_at" };
+    if (args.ends_at && !endsAt) return { error: "invalid ends_at" };
+    try {
+      const ev = await calendarSvc.updateEvent(ctx.prisma, ctx.userId, String(args.id), {
+        title: args.title as string | undefined,
+        description: args.description as string | undefined,
+        location: args.location as string | undefined,
+        startsAt: startsAt ?? undefined,
+        endsAt: endsAt ?? undefined,
+        allDay: args.all_day as boolean | undefined,
+      });
+      return { id: ev.id, updated: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const delete_event: Tool = {
+  name: "delete_event",
+  description:
+    "Delete a local calendar event by id. Cannot delete externally-synced " +
+    "events — remove the calendar source instead. Always confirm with the " +
+    "user before calling.",
+  parameters: {
+    type: "object",
+    properties: { id: { type: "string", description: "Event UUID." } },
+    required: ["id"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    try {
+      await calendarSvc.deleteEvent(ctx.prisma, ctx.userId, String(args.id));
+      return { id: args.id, deleted: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const create_reminder: Tool = {
+  name: "create_reminder",
+  description:
+    "Create a reminder. The Droplet will fire a notification at due_at " +
+    "(toast in the dashboard, plus HA notify if configured). Pass " +
+    "calendar_event_id to link the reminder to an event for context.",
+  parameters: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Short reminder text." },
+      body: { type: "string", description: "Optional longer body." },
+      due_at: { type: "string", description: "ISO-8601 due time." },
+      calendar_event_id: { type: "string", description: "Optional event UUID to link to." },
+    },
+    required: ["title", "due_at"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const dueAt = parseModelDate(args.due_at);
+    if (!dueAt) return { error: "invalid due_at — expected ISO-8601 timestamp" };
+    const reminder = await ctx.prisma.reminder.create({
+      data: {
+        userId: ctx.userId,
+        title: String(args.title ?? ""),
+        body: args.body as string | undefined,
+        dueAt,
+        calendarEventId: (args.calendar_event_id as string | undefined) ?? null,
+      },
+    });
+    return { id: reminder.id, due_at: reminder.dueAt.toISOString() };
+  },
+};
+
+const list_reminders: Tool = {
+  name: "list_reminders",
+  description:
+    "List the user's reminders. By default returns active (uncompleted) " +
+    "reminders sorted by due time. Pass include_completed=true to see all.",
+  parameters: {
+    type: "object",
+    properties: {
+      include_completed: { type: "boolean", description: "Default false." },
+      due_before: { type: "string", description: "ISO-8601 cutoff." },
+      limit: { type: "integer", minimum: 1, maximum: 200 },
+    },
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
+    const dueBefore = args.due_before ? parseModelDate(args.due_before) : null;
+    const rows = await ctx.prisma.reminder.findMany({
+      where: {
+        userId: ctx.userId,
+        ...(args.include_completed === true ? {} : { completedAt: null }),
+        ...(dueBefore ? { dueAt: { lte: dueBefore } } : {}),
+      },
+      orderBy: [{ completedAt: "asc" }, { dueAt: "asc" }],
+      take: limit,
+    });
+    return {
+      count: rows.length,
+      reminders: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        body: r.body,
+        due_at: r.dueAt.toISOString(),
+        completed: r.completedAt !== null,
+      })),
+    };
+  },
+};
+
+const complete_reminder: Tool = {
+  name: "complete_reminder",
+  description:
+    "Mark a reminder as completed (or un-complete with completed=false). " +
+    "Completed reminders stop firing notifications.",
+  parameters: {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      completed: { type: "boolean", description: "Default true." },
+    },
+    required: ["id"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const existing = await ctx.prisma.reminder.findUnique({ where: { id: String(args.id) } });
+    if (!existing) return { error: "reminder_not_found" };
+    if (existing.userId !== ctx.userId) return { error: "forbidden" };
+    const completed = args.completed !== false;
+    await ctx.prisma.reminder.update({
+      where: { id: String(args.id) },
+      data: { completedAt: completed ? new Date() : null },
+    });
+    return { id: args.id, completed };
+  },
+};
+
+const send_notification_tool: Tool = {
+  name: "send_notification",
+  description:
+    "Send an immediate notification to the user. Always appears as an in-app " +
+    "toast on any open dashboard tab; if ha_target is set, also routes through " +
+    "the named Home Assistant notify service (e.g. 'notify.mobile_app_alice').",
+  parameters: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Headline (1-500 chars)." },
+      body: { type: "string", description: "Optional longer message." },
+      ha_target: { type: "string", description: "Optional HA notify target." },
+    },
+    required: ["title"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const result = await sendNotification(ctx.prisma, {
+      userId: ctx.userId,
+      kind: "ai",
+      title: String(args.title ?? ""),
+      body: args.body as string | undefined,
+      haTarget: args.ha_target as string | undefined,
+    });
+    return result;
+  },
+};
+
+const list_notifications: Tool = {
+  name: "list_notifications",
+  description:
+    "List recent notifications sent to the user. Useful for 'what reminders " +
+    "did I get today?' or auditing what was dispatched.",
+  parameters: {
+    type: "object",
+    properties: { limit: { type: "integer", minimum: 1, maximum: 200 } },
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const limit = Math.max(1, Math.min(200, Number(args.limit) || 30));
+    const rows = await listRecentNotifications(ctx.prisma, ctx.userId, limit);
+    return {
+      count: rows.length,
+      notifications: rows.map((n) => ({
+        id: n.id,
+        kind: n.kind,
+        title: n.title,
+        body: n.body,
+        delivered: n.deliveredAt !== null,
+        at: n.createdAt.toISOString(),
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -895,5 +1209,15 @@ export const TOOL_REGISTRY: Record<string, Tool> = Object.fromEntries(
     accept_discovered_camera,
     get_system_health,
     list_drives,
+    // Calendar / Reminders / Notifications (PR #2)
+    create_event,
+    list_events,
+    update_event,
+    delete_event,
+    create_reminder,
+    list_reminders,
+    complete_reminder,
+    send_notification_tool,
+    list_notifications,
   ].map((t) => [t.name, t]),
 );

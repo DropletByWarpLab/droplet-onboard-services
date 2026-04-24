@@ -98,6 +98,9 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       `droplet/files/${user.username}/#`,
       `droplet/devices/${user.username}/#`,
       `droplet/index/${user.username}/#`,
+      // Calendar/reminder/system toast notifications (PR #2). The
+      // notifications service publishes here from sendNotification().
+      `droplet/notifications/${user.username}`,
     ];
 
     const unsubscribes = topics.map((t) =>

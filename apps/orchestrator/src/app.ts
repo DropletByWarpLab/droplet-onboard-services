@@ -19,6 +19,10 @@ import { createNetworkRouter } from "./routes/network.js";
 import { createCamerasRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
+import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
+import { createRemindersRouter } from "./routes/reminders.js";
+import { createNotificationsRouter } from "./routes/notifications.js";
+import { startRemindersPoller } from "./services/reminders-poller.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -35,6 +39,12 @@ export function createApp(prisma: PrismaClient) {
 
   // Public auth routes (setup + login) — no authentication required
   app.use("/api", createPublicAuthRouter());
+
+  // Public calendar ICS publish endpoint — phones subscribe via webcal://
+  // without a session cookie. Token in the query string is the auth (HMAC
+  // of DEVICE_SECRET + username, see routes/calendar.ts publishToken).
+  // Mount BEFORE the auth middleware so it doesn't require a session.
+  app.use("/api", createCalendarPublicRouter(prisma));
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
@@ -53,6 +63,13 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
+  app.use("/api", createCalendarRouter(prisma));
+  app.use("/api", createRemindersRouter(prisma));
+  app.use("/api", createNotificationsRouter(prisma));
+
+  // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
+  // to dispatch due-time notifications and re-sync calendar sources.
+  startRemindersPoller(prisma);
 
   // Error handling
   app.use(errorHandler);

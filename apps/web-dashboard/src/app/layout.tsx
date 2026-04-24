@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/lib/theme";
 import { AuthProvider } from "@/lib/auth";
 import { AuthGate } from "@/components/AuthGate";
 import { ToastProvider } from "@/components/Toast";
+import { NotificationToaster } from "@/components/NotificationToaster";
 import "./globals.css";
 
 const inter = Inter({
@@ -58,6 +59,7 @@ export default function RootLayout({
         <ThemeProvider>
           <AuthProvider>
             <ToastProvider>
+              <NotificationToaster />
               <AuthGate>{children}</AuthGate>
             </ToastProvider>
           </AuthProvider>

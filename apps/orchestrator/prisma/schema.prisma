@@ -286,3 +286,98 @@ model ScheduleEvent {
 
   @@index([occurredAt])
 }
+
+// ── Calendar / Reminders / Notifications (PR #2) ──
+//
+// One canonical calendar per user lives in CalendarEvent. External calendars
+// (iCloud, Fastmail, any CalDAV/ICS feed) are pulled in via CalendarSource +
+// the periodic ingest job — those events have `source = "external"` and
+// `externalUid` set so re-sync is idempotent. The user's own events have
+// `source = "local"` and are publishable via the /api/calendar/publish/... ICS
+// feed, so phones can subscribe without needing OAuth.
+
+model CalendarEvent {
+  id           String   @id @default(uuid())
+  userId       String                                       // Nextcloud username
+  title        String
+  description  String?
+  location     String?
+  startsAt     DateTime
+  endsAt       DateTime
+  allDay       Boolean  @default(false)
+  // "local" — created in the Droplet UI/LLM. Mutable.
+  // "external" — ingested from a CalendarSource. Read-only locally; updates
+  //   come from the next sync. Deleting a local copy doesn't remove the
+  //   upstream event (only un-ingest does).
+  source       String   @default("local")
+  sourceId     String?                                       // FK to CalendarSource.id (when source="external")
+  externalUid  String?                                       // iCalendar UID — used as idempotency key on re-sync
+  externalEtag String?                                       // CalDAV ETag for change detection
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([sourceId, externalUid])                          // a given upstream event appears at most once locally
+  @@index([userId, startsAt])
+  @@index([userId, source])
+}
+
+// External CalDAV / ICS feeds the user has subscribed to. The ingest job
+// fetches each one on its own interval and upserts events into CalendarEvent
+// keyed by externalUid.
+model CalendarSource {
+  id              String   @id @default(uuid())
+  userId          String
+  name            String                                     // "Personal iCloud"
+  url             String                                     // CalDAV calendar URL OR public ICS URL
+  // basic|none. CalDAV usually basic. ICS feeds usually none.
+  authMode        String   @default("basic")
+  username        String?
+  // Encrypted with the same aes-256-gcm key as DeviceClient.ncAppPassword.
+  // Format: iv||tag||ciphertext, base64-encoded. Never returned to clients.
+  passwordEnc     String?
+  syncIntervalSec Int      @default(900)                    // 15 minutes default
+  lastSyncAt      DateTime?
+  lastSyncError   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Reminder {
+  id              String   @id @default(uuid())
+  userId          String
+  title           String
+  body            String?
+  dueAt           DateTime
+  // null = not yet completed. When set, the dispatcher stops sending reminders.
+  completedAt     DateTime?
+  // Optional link to the event this reminder is for.
+  calendarEventId String?
+  // Tracks whether the dispatcher has fired the due-time notification for
+  // this reminder. Prevents double-fire when the poller re-runs.
+  notifiedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId, dueAt])
+  @@index([completedAt])
+}
+
+// Append-only log of every notification dispatched. Powers the in-app
+// "recent notifications" panel and helps debug missing pushes.
+model NotificationLog {
+  id          String   @id @default(cuid())
+  userId      String
+  // "reminder" | "event" | "system" | "ai"
+  kind        String
+  title       String
+  body        String?
+  // Comma-separated channels actually attempted: "toast,ha"
+  channels    String
+  deliveredAt DateTime?
+  error       String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
