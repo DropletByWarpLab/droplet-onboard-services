@@ -1,0 +1,16 @@
+# CI coverage exemptions — services/apps intentionally without a CI workflow.
+#
+# Format: one relative path per line (matching scripts/check-ci-coverage.sh
+# output), blank lines and # comments ignored.
+#
+# Prefer adding tests over exempting. Exempt only when the code is pure
+# hardware glue or generated assets that can't be exercised off-device.
+
+# Hardware display service + PyPortal firmware. display.py drives an SPI
+# TFT through a vendored pygame renderer and USB-serial to the PyPortal's
+# CircuitPython firmware; both require physical hardware to meaningfully
+# exercise. The logic-only bits (color palette, frame throttling) are
+# small enough that unit tests would mostly be mocking the serial layer.
+# Revisit when the renderer grows enough non-hardware logic to justify a
+# test surface.
+services/oled-display
