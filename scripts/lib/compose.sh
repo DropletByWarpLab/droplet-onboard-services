@@ -137,8 +137,8 @@ prepare_and_build() {
   )
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full -f "$COMPOSE_FILE" \
-        --env-file "$COMPOSE_ENV_FILE" build "$svc"; then
+      run_docker_compose --profile full -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+        build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix
       return 1
