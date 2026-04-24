@@ -14,29 +14,44 @@ serial endpoints:
 
 A three-screen swipe UI:
 
-- **Idle (screensaver)** — large live clock (HH:MM with blinking colon), small
-  Droplet mark, date line, and IP + Wi-Fi SSID info chips at the bottom.
-  Auto-engages after 30 s of no touch. Any tap wakes to Stats.
-- **Stats** — hostname/IP/uptime header with a live clock; 4 half-donut gauges
-  for CPU / MEM / DISK / TEMP; rolled-up cards for Network / Storage / Cameras /
-  Wi-Fi. A red `!` bubble in the top-right opens the alerts drawer when there
-  are unresolved Frigate or system alerts.
-- **QR (Join Wi-Fi)** — WPA QR for the `Droplet-AI` SSID + cleartext password.
-  Only shows a rotation TTL chip + "Rotate now" button when key rotation is
-  enabled on the bridge.
+- **Idle (sleep screen)** — big centered Droplet mark with a tiny HH:MM
+  in the top-right corner, date in the top-left, and a subtle footer
+  `hostname · ip · ssid`. Static colon (no per-second blink) — reads calm
+  instead of busy. Auto-engages after 30 s of no touch; any tap wakes to
+  Stats.
+- **Stats** — hostname/IP/uptime header with a live clock; 4 half-donut
+  gauges (CPU / MEM / DISK / TEMP) each with a short sparkline history
+  band; two wider summary cards (Storage, Network+Wi-Fi). Camera health
+  surfaces as a red `!` bubble in the header — tap it to open the alerts
+  drawer with per-row clear + Clear-all.
+- **QR (Join Wi-Fi)** — WPA QR for the `Droplet-AI` SSID + cleartext
+  password. Rotation TTL chip + pill-shaped "Rotate now" button appear
+  only when key rotation is enabled on the bridge.
 
-Navigation: swipe left/right between Stats and QR; tap the bottom nav pills to
-jump directly; any tap on the idle screen wakes to Stats; 30 s of inactivity
-returns to Idle.
+Navigation at the bottom is a row of big rounded pills (active one
+highlighted with an indigo halo dot). Swipe left/right between Stats and
+QR, or tap a pill to jump; 30 s of inactivity returns to Idle.
 
 ## Clock behavior
 
-The idle screen has a large HH:MM clock that ticks once per second locally.
-The host pushes `now` (HH:MM, optionally `date`) as part of every stats frame;
-the firmware anchors that against `time.monotonic()` and derives the current
-time between pushes, so the colon blinks and minutes roll over even if the
-bridge is paused. Drift stays bounded because every new `stats` push resets
-the anchor.
+The idle screen's HH:MM clock is anchored against `time.monotonic()` when
+the host pushes `now` (and optionally `date`) on a stats frame. Between
+pushes, the firmware derives the current minute from the anchor + elapsed
+monotonic time, so the clock rolls over correctly even if the bridge
+pauses. Drift stays bounded because every new `stats` push resets the
+anchor. The idle tick loop writes the clock label *only when the minute
+changes* — no per-second updates, no distracting blink.
+
+## Resilience — boot-time resync
+
+When `code.py` auto-reloads or the board reboots for any reason, the
+firmware sends `READY` followed immediately by `REQUEST_STATE` on the data
+serial channel. The host-side `display.py` reader loop reacts to either
+message by pushing a full snapshot (stats + wifi + drives + cameras +
+files) in a single burst instead of waiting for the next periodic tick.
+That cuts post-reboot resync time from the worst-case periodic cadence
+(up to ~30 s) down to well under a second — so the device never sits with
+empty screens after a firmware drop.
 
 ## One-time setup — flash the PyPortal
 
