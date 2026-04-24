@@ -94,7 +94,13 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="flex h-screen">
+    // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
+    // pins just above the tab bar with no gap. Matches AuthGate main's padding.
+    // Desktop: fill dynamic viewport (lg:pb-0 on main).
+    // dvh (not vh) absorbs iOS Safari's collapsing URL bar.
+    // overflow-x-hidden: guard against horizontal overflow on narrow phones.
+    // Underscores inside calc() are Tailwind's whitespace marker (CSS spec requires spaces around -).
+    <div className="flex h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden">
       {/* Session sidebar */}
       {showSidebar && (
         <div className="hidden md:flex w-64 flex-shrink-0 flex-col border-r border-separator bg-surface-secondary">
@@ -151,7 +157,7 @@ export default function ChatPage() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
         <header className="flex items-center justify-between px-4 h-14 border-b border-separator bg-[var(--color-toolbar-bg)] dp-material">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <button
               onClick={() => setShowSidebar(!showSidebar)}
               className="hidden md:flex p-1.5 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
@@ -180,7 +186,7 @@ export default function ChatPage() {
                 disabled:cursor-not-allowed transition-colors duration-200 ease-smooth"
             >
               <RotateCcw size={14} />
-              New chat
+              <span className="hidden sm:inline">New chat</span>
             </button>
           </div>
         </header>

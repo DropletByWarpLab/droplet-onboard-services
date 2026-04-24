@@ -71,7 +71,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return (
     <>
       <Sidebar />
-      <main className="lg:ml-[260px] pb-[84px] lg:pb-0 min-h-screen">
+      <main className="lg:ml-[260px] pb-[calc(56px_+_env(safe-area-inset-bottom))] lg:pb-0 min-h-dvh">
         {children}
       </main>
     </>
