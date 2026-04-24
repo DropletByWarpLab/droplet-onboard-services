@@ -173,13 +173,13 @@ class _MockWireless:
 
 
 class _MockDhcp:
-    # In-memory store of static hostname entries so upsert + list round-trips
+    # In-memory store of static hostrecord entries so upsert + list round-trips
     # feel realistic to the dashboard / setup script.
-    _domain_entries: list[dict[str, Any]]
+    _hostrecords: list[dict[str, Any]]
 
     def __init__(self) -> None:
-        self._domain_entries = [
-            {"section": "cfg01domain", "hostname": "droplet.lan", "ip": "10.0.0.1"},
+        self._hostrecords = [
+            {"section": "cfg01hostrecord", "hostname": "droplet-ai.lan", "ip": "10.0.0.1"},
         ]
 
     def get_leases(self) -> dict[str, Any]:
@@ -198,24 +198,24 @@ class _MockDhcp:
     def set_dns_servers(self, servers: list[str]) -> None:
         logger.info("mock: set_dns_servers %s — no-op", servers)
 
-    def list_domain_entries(self) -> list[dict[str, Any]]:
-        return list(self._domain_entries)
+    def list_hostrecords(self) -> list[dict[str, Any]]:
+        return list(self._hostrecords)
 
-    def set_domain_entry(self, hostname: str, ip: str) -> dict[str, Any]:
-        for entry in self._domain_entries:
+    def set_hostrecord(self, hostname: str, ip: str) -> dict[str, Any]:
+        for entry in self._hostrecords:
             if entry["hostname"].lower() == hostname.lower():
                 entry["ip"] = ip
                 entry["hostname"] = hostname
                 return {"section": entry["section"], "hostname": hostname, "ip": ip, "action": "updated"}
-        section = f"cfgmock{len(self._domain_entries) + 1:02d}domain"
-        self._domain_entries.append({"section": section, "hostname": hostname, "ip": ip})
+        section = f"cfgmock{len(self._hostrecords) + 1:02d}hostrecord"
+        self._hostrecords.append({"section": section, "hostname": hostname, "ip": ip})
         return {"section": section, "hostname": hostname, "ip": ip, "action": "created"}
 
-    def delete_domain_entry(self, hostname: str) -> int:
+    def delete_hostrecord(self, hostname: str) -> int:
         target = hostname.lower()
-        before = len(self._domain_entries)
-        self._domain_entries = [e for e in self._domain_entries if e["hostname"].lower() != target]
-        return before - len(self._domain_entries)
+        before = len(self._hostrecords)
+        self._hostrecords = [e for e in self._hostrecords if e["hostname"].lower() != target]
+        return before - len(self._hostrecords)
 
 
 class _MockFirewall:

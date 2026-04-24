@@ -84,7 +84,7 @@ class _FakeUci:
     """Minimal UCI stand-in with in-memory `dhcp` config and a type filter.
 
     Real ubus returns `{"values": {<section>: {<kv>}}}` from `uci get`. We
-    match that shape so DHCPApi.list_domain_entries works without mocking it.
+    match that shape so DHCPApi.list_hostrecords works without mocking it.
     """
 
     def __init__(self):
@@ -138,35 +138,38 @@ def dhcp_api():
 class TestDHCPApiDomainEntries:
     def test_set_creates_new_entry(self, dhcp_api):
         api, router = dhcp_api
-        result = api.set_domain_entry("droplet.lan", "192.168.50.197")
+        result = api.set_hostrecord("droplet-ai.lan", "192.168.50.197")
         assert result["action"] == "created"
-        assert result["hostname"] == "droplet.lan"
+        assert result["hostname"] == "droplet-ai.lan"
         assert result["ip"] == "192.168.50.197"
-        assert router.uci.commits == ["dhcp"]
+        # SDK must NOT commit here — commit happens at the endpoint via uci.apply,
+        # which is what triggers dnsmasq reload. Pre-committing would turn the
+        # apply into a no-op and break live DNS updates.
+        assert router.uci.commits == []
 
-        listed = api.list_domain_entries()
+        listed = api.list_hostrecords()
         assert len(listed) == 1
-        assert listed[0]["hostname"] == "droplet.lan"
+        assert listed[0]["hostname"] == "droplet-ai.lan"
         assert listed[0]["ip"] == "192.168.50.197"
 
     def test_set_updates_existing_entry_in_place(self, dhcp_api):
         api, router = dhcp_api
-        first = api.set_domain_entry("droplet.lan", "192.168.50.10")
-        second = api.set_domain_entry("droplet.lan", "192.168.50.197")
+        first = api.set_hostrecord("droplet.lan", "192.168.50.10")
+        second = api.set_hostrecord("droplet.lan", "192.168.50.197")
 
         assert second["action"] == "updated"
         assert second["section"] == first["section"], \
             "upsert must reuse the original UCI section so IDs are stable"
 
-        listed = api.list_domain_entries()
+        listed = api.list_hostrecords()
         assert [e["ip"] for e in listed] == ["192.168.50.197"]
 
     def test_set_is_case_insensitive_on_hostname(self, dhcp_api):
         api, _ = dhcp_api
-        api.set_domain_entry("droplet.lan", "192.168.50.10")
-        api.set_domain_entry("Droplet.LAN", "192.168.50.197")
+        api.set_hostrecord("droplet.lan", "192.168.50.10")
+        api.set_hostrecord("Droplet.LAN", "192.168.50.197")
 
-        listed = api.list_domain_entries()
+        listed = api.list_hostrecords()
         assert len(listed) == 1
         # Stored hostname reflects the latest write — consistent with dnsmasq's
         # case-insensitive matching, so we keep whatever the caller sent last.
@@ -174,42 +177,42 @@ class TestDHCPApiDomainEntries:
         assert listed[0]["ip"] == "192.168.50.197"
 
     def test_set_prunes_duplicate_sections(self, dhcp_api):
-        """If someone manually added two `config domain` entries for the same
-        host, upsert should normalize to one."""
+        """If someone manually added two `config hostrecord` entries for the
+        same host, upsert should normalize to one."""
         api, router = dhcp_api
         # Seed two raw duplicates (simulating a hand-edited /etc/config/dhcp).
-        router.uci.add("dhcp", "domain", {"name": "droplet.lan", "ip": "1.1.1.1"})
-        router.uci.add("dhcp", "domain", {"name": "droplet.lan", "ip": "2.2.2.2"})
-        assert len(api.list_domain_entries()) == 2
+        router.uci.add("dhcp", "hostrecord", {"name": "droplet.lan", "ip": "1.1.1.1"})
+        router.uci.add("dhcp", "hostrecord", {"name": "droplet.lan", "ip": "2.2.2.2"})
+        assert len(api.list_hostrecords()) == 2
 
-        api.set_domain_entry("droplet.lan", "192.168.50.197")
+        api.set_hostrecord("droplet.lan", "192.168.50.197")
 
-        listed = api.list_domain_entries()
+        listed = api.list_hostrecords()
         assert len(listed) == 1
         assert listed[0]["ip"] == "192.168.50.197"
 
     def test_list_ignores_malformed_sections(self, dhcp_api):
         api, router = dhcp_api
-        router.uci.add("dhcp", "domain", {"name": "droplet.lan", "ip": "10.0.0.1"})
-        router.uci.add("dhcp", "domain", {"name": "no-ip-here"})         # missing ip
-        router.uci.add("dhcp", "domain", {"ip": "10.0.0.2"})              # missing name
+        router.uci.add("dhcp", "hostrecord", {"name": "droplet.lan", "ip": "10.0.0.1"})
+        router.uci.add("dhcp", "hostrecord", {"name": "no-ip-here"})         # missing ip
+        router.uci.add("dhcp", "hostrecord", {"ip": "10.0.0.2"})              # missing name
 
-        listed = api.list_domain_entries()
+        listed = api.list_hostrecords()
         assert len(listed) == 1
         assert listed[0]["hostname"] == "droplet.lan"
 
     def test_delete_returns_count(self, dhcp_api):
         api, _ = dhcp_api
-        api.set_domain_entry("droplet.lan", "192.168.50.197")
-        api.set_domain_entry("printer.lan", "192.168.50.50")
+        api.set_hostrecord("droplet.lan", "192.168.50.197")
+        api.set_hostrecord("printer.lan", "192.168.50.50")
 
-        removed = api.delete_domain_entry("droplet.lan")
+        removed = api.delete_hostrecord("droplet.lan")
         assert removed == 1
-        assert [e["hostname"] for e in api.list_domain_entries()] == ["printer.lan"]
+        assert [e["hostname"] for e in api.list_hostrecords()] == ["printer.lan"]
 
     def test_delete_missing_returns_zero(self, dhcp_api):
         api, _ = dhcp_api
-        assert api.delete_domain_entry("nobody.lan") == 0
+        assert api.delete_hostrecord("nobody.lan") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +221,7 @@ class TestDHCPApiDomainEntries:
 
 class TestDnsHostnameEndpoints:
     def test_list_returns_entries_from_router(self, connected_client, mock_router):
-        mock_router.dhcp.list_domain_entries.return_value = [
+        mock_router.dhcp.list_hostrecords.return_value = [
             {"section": "cfg01domain", "hostname": "droplet.lan", "ip": "192.168.50.197"},
         ]
         resp = connected_client.get(
@@ -237,7 +240,7 @@ class TestDnsHostnameEndpoints:
         the droplet-ai rpcd ACL grants uci.apply but denies file.exec. Using
         exec_service here would cause every POST to return 'Access denied' on
         production routers (this was the original bug)."""
-        mock_router.dhcp.set_domain_entry.return_value = {
+        mock_router.dhcp.set_hostrecord.return_value = {
             "section": "cfg03domain",
             "hostname": "droplet.lan",
             "ip": "192.168.50.197",
@@ -253,14 +256,14 @@ class TestDnsHostnameEndpoints:
         assert body["status"] == "ok"
         assert body["action"] == "created"
 
-        mock_router.dhcp.set_domain_entry.assert_called_once_with(
+        mock_router.dhcp.set_hostrecord.assert_called_once_with(
             "droplet.lan", "192.168.50.197",
         )
         mock_router.uci.apply.assert_called_once()
         mock_router.exec_service.assert_not_called()
 
     def test_delete_missing_hostname_is_404(self, connected_client, mock_router):
-        mock_router.dhcp.delete_domain_entry.return_value = 0
+        mock_router.dhcp.delete_hostrecord.return_value = 0
         resp = connected_client.delete(
             "/dhcp/hostnames/ghost.lan",
             headers={"authorization": "Bearer pytest-fake-token"},
@@ -270,7 +273,7 @@ class TestDnsHostnameEndpoints:
         mock_router.exec_service.assert_not_called()
 
     def test_delete_triggers_uci_apply(self, connected_client, mock_router):
-        mock_router.dhcp.delete_domain_entry.return_value = 1
+        mock_router.dhcp.delete_hostrecord.return_value = 1
         resp = connected_client.delete(
             "/dhcp/hostnames/droplet.lan",
             headers={"authorization": "Bearer pytest-fake-token"},
@@ -285,7 +288,7 @@ class TestDnsHostnameEndpoints:
             headers={"authorization": "Bearer pytest-fake-token"},
         )
         assert resp.status_code == 400
-        mock_router.dhcp.delete_domain_entry.assert_not_called()
+        mock_router.dhcp.delete_hostrecord.assert_not_called()
 
     def test_upsert_without_router_returns_503(self, disconnected_client):
         resp = disconnected_client.post(

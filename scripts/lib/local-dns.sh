@@ -9,7 +9,7 @@
 #      file describing the Droplet's HTTP/HTTPS endpoints. macOS hosts already
 #      run mDNSResponder — we log a skip.
 #
-#   2. OpenWrt dnsmasq: posts a `droplet.lan` → Droplet-IP entry to the routing
+#   2. OpenWrt dnsmasq: posts a `droplet-ai.lan` → Droplet-IP entry to the routing
 #      service so any device using the router's DNS (phones, IoT, TVs that
 #      don't speak mDNS) resolves the Droplet too. We use `.lan` (not `.local`)
 #      to avoid the unicast-vs-mDNS collision that breaks some resolvers when
@@ -21,15 +21,18 @@
 # DROPLET_MDNS_HOSTNAME drives Avahi's host-name *and* the service file.
 # DROPLET_LAN_HOSTNAME is the router-DNS entry (unicast DNS).
 #
-# Why `droplet-ai` for mDNS but `droplet.lan` for router DNS:
-#   OpenWrt (the upstream router) publishes `droplet.local` itself via umdns
-#   on the same LAN. If we also claim `droplet.local` from the Jetson, Avahi
-#   detects the collision and falls back to `droplet-2.local` — defeating the
-#   whole point. `droplet-ai` avoids the clash while still matching the
-#   Jetson's own hostname (`droplet-AI`). Router DNS has no such conflict so
-#   `droplet.lan` stays short and memorable there.
+# Both default to `droplet-ai*` to avoid collisions with the OpenWrt router:
+#   - mDNS: OpenWrt's umdns publishes `droplet.local` for the router itself,
+#     so an Avahi claim of `droplet.local` on the Jetson loses the tiebreak
+#     and falls back to `droplet-2.local` — defeating the whole point.
+#   - Router DNS: dnsmasq's `expand_hosts=1` makes the router's own hostname
+#     (`Droplet`) resolve as `droplet.lan`, so a static hostrecord on
+#     `droplet.lan` competes with it (round-robin) — clients land on the
+#     router's web UI half the time instead of the dashboard.
+# `droplet-ai*` matches the Jetson's system hostname (`droplet-AI`) and has
+# no such collision from anything else on the LAN.
 DROPLET_MDNS_HOSTNAME="${DROPLET_MDNS_HOSTNAME:-droplet-ai}"
-DROPLET_LAN_HOSTNAME="${DROPLET_LAN_HOSTNAME:-droplet.lan}"
+DROPLET_LAN_HOSTNAME="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
 
 # Reject anything that isn't a plain RFC-1123 hostname before we pass the
 # value to sed / printf / curl. This closes the door on metacharacters that

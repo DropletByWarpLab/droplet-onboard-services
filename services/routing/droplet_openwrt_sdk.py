@@ -461,9 +461,17 @@ class DHCPApi:
         })
         self._r.uci.commit("network")
 
-    def list_domain_entries(self) -> list[dict]:
-        """Return dnsmasq static hostname → IP entries (UCI `config domain`)."""
-        result = self._r.uci.get("dhcp", type="domain")
+    def list_hostrecords(self) -> list[dict]:
+        """Return dnsmasq static hostname → IP entries (UCI `config hostrecord`).
+
+        Must be `hostrecord` (NOT `domain`). OpenWrt 24.10's /etc/init.d/dnsmasq
+        only processes `config hostrecord` sections into dnsmasq `--host-record=`
+        flags (see `config_foreach filter_dnsmasq hostrecord dhcp_hostrecord_add`);
+        `config domain` sections exist in the UCI schema but are silently ignored
+        by the init script, so entries written there never reach the live
+        dnsmasq config file and no DNS answers are served.
+        """
+        result = self._r.uci.get("dhcp", type="hostrecord")
         values = result.get("values", {}) if isinstance(result, dict) else {}
         entries = []
         for section_name, section in values.items():
@@ -475,41 +483,45 @@ class DHCPApi:
                 entries.append({"section": section_name, "hostname": name, "ip": ip})
         return entries
 
-    def set_domain_entry(self, hostname: str, ip: str) -> dict:
+    def set_hostrecord(self, hostname: str, ip: str) -> dict:
         """Idempotently register a static hostname → IP in dnsmasq.
 
-        Creates a `config domain` section if none exists for this hostname,
+        Creates a `config hostrecord` section if none exists for this hostname,
         otherwise updates the first match and prunes any duplicates so the
         result is exactly one section per hostname. Returns the resulting
         entry with an `action` field of `created` or `updated`.
 
-        The caller is responsible for restarting dnsmasq (or letting the
-        routing layer do it) — this method only stages UCI.
+        IMPORTANT: does NOT commit. The caller must call `uci.apply` after,
+        which both commits to disk AND triggers /sbin/reload_config (which
+        is what regenerates /var/etc/dnsmasq.conf.* and signals dnsmasq).
+        Calling `uci.commit` here and `uci.apply` after makes apply a no-op
+        (NO_DATA) because apply's reload-trigger logic only runs when there
+        are *pending* (uncommitted) changes — pre-committing breaks the
+        reload path without any compensating benefit.
         """
-        existing = [e for e in self.list_domain_entries()
+        existing = [e for e in self.list_hostrecords()
                     if e["hostname"].lower() == hostname.lower()]
         if existing:
             first = existing[0]
             self._r.uci.set("dhcp", first["section"], {"name": hostname, "ip": ip})
             for dup in existing[1:]:
                 self._r.uci.delete("dhcp", dup["section"])
-            self._r.uci.commit("dhcp")
             return {"section": first["section"], "hostname": hostname, "ip": ip, "action": "updated"}
 
-        added = self._r.uci.add("dhcp", "domain", {"name": hostname, "ip": ip})
-        self._r.uci.commit("dhcp")
+        added = self._r.uci.add("dhcp", "hostrecord", {"name": hostname, "ip": ip})
         section = added.get("section") if isinstance(added, dict) else None
         return {"section": section, "hostname": hostname, "ip": ip, "action": "created"}
 
-    def delete_domain_entry(self, hostname: str) -> int:
-        """Remove all dnsmasq static entries for hostname. Returns count deleted."""
+    def delete_hostrecord(self, hostname: str) -> int:
+        """Stage deletion of all static entries for hostname; return count.
+
+        Stages only — caller must `uci.apply` to commit + reload dnsmasq.
+        """
         removed = 0
-        for entry in self.list_domain_entries():
+        for entry in self.list_hostrecords():
             if entry["hostname"].lower() == hostname.lower():
                 self._r.uci.delete("dhcp", entry["section"])
                 removed += 1
-        if removed:
-            self._r.uci.commit("dhcp")
         return removed
 
     def reload(self):
