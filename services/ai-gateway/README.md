@@ -107,6 +107,7 @@ services/ai-gateway/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `JETSON_OLLAMA_URL` | `http://inference-engine.local:11434` | Local Ollama endpoint |
+| `OLLAMA_READ_TIMEOUT` | `300` | Read timeout (s) for Ollama HTTP calls. Cold-loading a model on the Jetson can take 30-90s; long completions stream for minutes. Bump if a larger model on slower hardware times out during load. |
 | `REDIS_URL` | `redis://localhost:6379` | Response caching |
 | `MQTT_BROKER` | `mqtt://localhost:1883` | Event bus |
 | `DEVICE_SECRET` | (required) | Device auth secret |

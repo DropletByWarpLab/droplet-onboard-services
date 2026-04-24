@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 
 JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://jetson-ai.local:11434")
 
+# Cold-loading a model on the Jetson can take 30-90s (8B Q4 with partial GPU offload),
+# and long completions can stream for minutes. The previous flat 60s timeout aborted
+# the request mid-load, returning HTTP 499 to the user and an apparent "slow" chat.
+# Override via OLLAMA_READ_TIMEOUT for slower hardware or larger models.
+_READ_TIMEOUT_S = float(os.getenv("OLLAMA_READ_TIMEOUT", "300"))
+_OLLAMA_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=_READ_TIMEOUT_S,
+    write=30.0,
+    pool=10.0,
+)
+
 
 def prettify_ollama_name(raw: str) -> str:
     """Turn an Ollama tag like 'llama3.1:8b' into a display name 'Llama 3.1 8B'.
@@ -44,7 +56,7 @@ class OllamaLocalProvider(BaseProvider):
 
     def __init__(self, base_url: str | None = None):
         self.base_url = (base_url or JETSON_OLLAMA_URL).rstrip("/")
-        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=60.0)
+        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=_OLLAMA_TIMEOUT)
 
     async def list_models(self) -> list[ModelInfo]:
         try:
