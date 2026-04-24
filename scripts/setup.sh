@@ -192,7 +192,7 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  SKIPPED (--skip-start)"
   else
     log_info "  Would start: db, cache, broker, gateway, orchestrator, web-dashboard,"
-    log_info "               ai-gateway, nextcloud, homeassistant, routing"
+    log_info "               ai-gateway, nextcloud, routing"
     if [ "$(uname)" = "Linux" ]; then
       log_info "               + frigate (linux profile)"
     else

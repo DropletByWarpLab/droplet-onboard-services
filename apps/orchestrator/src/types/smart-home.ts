@@ -1,4 +1,11 @@
-// --- Smart Home types ---
+// --- Device categories (used by the Matter controller) ---
+//
+// The Home Assistant bridge has been removed from this control plane;
+// Matter is the only smart-home path now. The `SmartHomeCategory` name is
+// kept for the category enum because the dashboard UI and the Matter
+// service both reference it directly — renaming it to `MatterCategory`
+// would ripple across DeviceCard.tsx, matter.service.ts, and stored
+// attribute maps, without any real clarity gain.
 
 export type SmartHomeCategory =
   | "light"
@@ -12,38 +19,6 @@ export type SmartHomeCategory =
   | "lock"
   | "camera"
   | "vacuum";
-
-export interface SmartHomeDevice {
-  entityId: string;
-  category: SmartHomeCategory;
-  name: string;
-  state: string;
-  attributes: Record<string, unknown>;
-  lastChanged: string;
-  lastUpdated: string;
-}
-
-export interface SmartHomeGrouped {
-  lights: SmartHomeDevice[];
-  switches: SmartHomeDevice[];
-  sensors: SmartHomeDevice[];
-  climate: SmartHomeDevice[];
-  media: SmartHomeDevice[];
-  covers: SmartHomeDevice[];
-  other: SmartHomeDevice[];
-}
-
-export interface SmartHomeCommand {
-  service: string;
-  data?: Record<string, unknown>;
-}
-
-export interface DiscoveredDevice {
-  flowId: string;
-  handler: string;
-  name: string;
-  description: string;
-}
 
 // --- Matter types ---
 

@@ -92,7 +92,7 @@ Ships before any new features are built on the router surface.
 
 8. **Rolled-up health endpoint.** `GET /orchestrator/health` aggregates routing, ai-gateway, nextcloud, postgres into `{ status: 'ok' | 'degraded' | 'down', components: [...] }`. Dashboard Overview card reads this. Docker healthcheck uses it.
 
-9. **Make routing a default dependency.** Remove `profiles: ["full"]` from routing in `docker/docker-compose.yml`. Keep `full` for Frigate, Home Assistant, camera-discovery. Dev laptops without a router set `OPENWRT_HOST` to a mock or skip via env flag.
+9. **Make routing a default dependency.** Remove `profiles: ["full"]` from routing in `docker/docker-compose.yml`. Keep `full` for Frigate and camera-discovery. Dev laptops without a router set `OPENWRT_HOST` to a mock or skip via env flag.
 
 ### Phase 1 — Device intelligence (config-first)
 

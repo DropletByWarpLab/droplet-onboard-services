@@ -179,7 +179,7 @@ Wipes **all** user data, credentials, and configuration — returning the device
 
 ### What gets deleted
 
-- Docker volumes: database, uploaded files, Nextcloud data, AI keys, Home Assistant config
+- Docker volumes: database, uploaded files, Nextcloud data, AI keys, Matter fabric state
 - Device secrets (`.env`)
 - TLS certificates and MQTT credentials
 - Setup logs

@@ -106,7 +106,7 @@ Wipes **all** user data, credentials, and configuration — returning the device
 | Uploaded files | `filedata` volume |
 | Nextcloud data | `nextcloud-data` volume — app state + user files |
 | LLM provider API keys | `aikeys` volume — Fernet-encrypted keys + salt |
-| Home Assistant config | `ha-config` volume — automations, devices, history |
+| Matter fabric state | `matter-data` volume — commissioning secrets, paired node list |
 | NVR recordings | `nvrdata` volume |
 | Device secrets | `.env` — all 5 generated passwords/keys |
 | TLS certificates | `docker/certs/` — self-signed cert + key |
@@ -350,7 +350,8 @@ All services run as Docker Compose containers behind an Nginx reverse proxy.
 | **cache** | `redis:7-alpine` | — | Internal. Token cache + response cache (auth required) |
 | **broker** | `eclipse-mosquitto:2` | — | Internal. MQTT bus for orchestrator ↔ file-sync |
 | **file-sync** | local build | — | Background daemon |
-| **homeassistant** | `ghcr.io/home-assistant/...` | :8123 | Optional (profile: `full`) |
+
+Smart-home control runs through the orchestrator's native Matter controller (`apps/orchestrator/src/services/matter.service.ts`) — there is no Home Assistant bridge.
 
 App services (orchestrator, web-dashboard, ai-gateway) are **not exposed to the host** — all traffic goes through Nginx on port 80. This avoids conflicts with local dev servers running on the same ports.
 
@@ -456,7 +457,6 @@ npm run test:integration       # Full stack integration (Docker Compose)
 | Feature | Status |
 |---------|--------|
 | Device inventory (`/api/devices`) | Endpoint exists; service logic is a stub — returns empty list |
-| Home Assistant integration | Included in Docker Compose behind `profile: full`; no orchestrator wiring yet |
 | OTA update automation | Release manifests + delta configs exist; no automated update pipeline yet |
 
 ---

@@ -13,7 +13,6 @@ import { createFilesRouter } from "./routes/files.js";
 import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
-import { createSmartHomeRouter } from "./routes/smart-home.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
@@ -61,7 +60,6 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter());
-  app.use("/api", createSmartHomeRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));

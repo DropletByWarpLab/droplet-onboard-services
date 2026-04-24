@@ -44,7 +44,7 @@ Options:
   -h, --help       Show this help message
 
 What gets deleted:
-  - All Docker volumes (database, files, AI keys, Home Assistant config)
+  - All Docker volumes (database, files, AI keys, Matter fabric state)
   - Generated secrets (.env)
   - TLS certificates
   - MQTT credentials
