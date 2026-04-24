@@ -34,6 +34,7 @@ import * as frigate from "./frigate.client.js";
 import * as healthMonitor from "./health-monitor.service.js";
 import * as calendarSvc from "./calendar.service.js";
 import { sendNotification, listRecentNotifications } from "./notifications.service.js";
+import { exportClip as exportClipSvc, signShareUrl } from "./clips.service.js";
 import { config } from "../config.js";
 import type { ToolDefinition } from "../types/index.js";
 
@@ -1182,6 +1183,127 @@ const list_notifications: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// Camera clips + live URLs
+// ---------------------------------------------------------------------------
+
+const list_clips: Tool = {
+  name: "list_clips",
+  description:
+    "List recent camera clips (Frigate events with a recorded video). Each " +
+    "result includes the camera, label (person/car/animal/etc.), confidence " +
+    "score, time range, and a thumbnail URL the user can open in the dashboard.",
+  parameters: {
+    type: "object",
+    properties: {
+      camera: { type: "string", description: "Optional camera name to filter by." },
+      limit: { type: "integer", minimum: 1, maximum: 200, description: "Default 30." },
+    },
+  },
+  handler: async (args, _ctx) => {
+    const limit = Math.max(1, Math.min(200, Number(args.limit) || 30));
+    const camera = args.camera as string | undefined;
+    const events = (await frigate.fetchEvents(limit, camera)) as Array<Record<string, unknown>>;
+    return {
+      count: events.length,
+      clips: events
+        .filter((e) => e.has_clip === true)
+        .map((e) => ({
+          id: e.id,
+          camera: e.camera,
+          label: e.label,
+          score: e.score,
+          start_time: e.start_time,
+          end_time: e.end_time,
+          thumbnail_url: `/api/cameras/events/${e.id}/thumbnail`,
+          clip_url: `/api/cameras/clips/event/${e.id}`,
+        })),
+    };
+  },
+};
+
+const export_clip: Tool = {
+  name: "export_clip",
+  description:
+    "Render a custom-range clip from a camera's recordings and save it to " +
+    "the user's Nextcloud at /Clips/<camera>/<timestamp>.mp4. Useful when " +
+    "the user asks 'save the last 5 minutes from the front door'. Times are " +
+    "ISO-8601. Max 30 minutes per export. Returns the Nextcloud path so the " +
+    "model can also surface it in the Files app.",
+  parameters: {
+    type: "object",
+    properties: {
+      camera: { type: "string" },
+      starts_at: { type: "string", description: "ISO-8601." },
+      ends_at: { type: "string", description: "ISO-8601 (must be after starts_at)." },
+    },
+    required: ["camera", "starts_at", "ends_at"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId || !ctx.ncToken) return { error: "auth_required" };
+    const startsAt = parseModelDate(args.starts_at);
+    const endsAt = parseModelDate(args.ends_at);
+    if (!startsAt || !endsAt) return { error: "invalid_iso8601" };
+    try {
+      const result = await exportClipSvc(ctx.ncToken, ctx.userId, {
+        camera: String(args.camera ?? ""),
+        startsAt,
+        endsAt,
+      });
+      return result;
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+};
+
+const get_camera_live_url: Tool = {
+  name: "get_camera_live_url",
+  description:
+    "Return the dashboard URL for a live camera view. The user opens this " +
+    "in their browser; playback uses their existing session. For shareable " +
+    "links use share_clip on a saved clip instead.",
+  parameters: {
+    type: "object",
+    properties: { camera: { type: "string" } },
+    required: ["camera"],
+  },
+  handler: async (args, _ctx) => {
+    const name = String(args.camera ?? "");
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) return { error: "invalid_camera_name" };
+    return {
+      live_url: `/cameras/${encodeURIComponent(name)}`,
+      snapshot_url: `/api/cameras/${encodeURIComponent(name)}/snapshot`,
+    };
+  },
+};
+
+const share_clip: Tool = {
+  name: "share_clip",
+  description:
+    "Generate a short-lived signed URL for a saved clip in the user's " +
+    "Nextcloud (e.g. result of export_clip). Anyone with the link can " +
+    "watch the clip until it expires. Default TTL 60 minutes; max 24 hours.",
+  parameters: {
+    type: "object",
+    properties: {
+      nc_path: { type: "string", description: "Path returned by export_clip (e.g. /Clips/front/20260423-140000Z.mp4)." },
+      ttl_minutes: { type: "integer", minimum: 1, maximum: 1440 },
+    },
+    required: ["nc_path"],
+  },
+  handler: async (args, ctx) => {
+    if (!ctx.userId) return { error: "auth_required" };
+    const ttlMin = Math.max(1, Math.min(1440, Number(args.ttl_minutes) || 60));
+    const token = signShareUrl(ctx.userId, String(args.nc_path), ttlMin * 60);
+    const filename = String(args.nc_path).split("/").pop() ?? "clip.mp4";
+    return {
+      url: `/api/cameras/clips/share/${encodeURIComponent(filename)}?t=${encodeURIComponent(token)}`,
+      expires_at: new Date(Date.now() + ttlMin * 60 * 1000).toISOString(),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -1219,5 +1341,10 @@ export const TOOL_REGISTRY: Record<string, Tool> = Object.fromEntries(
     complete_reminder,
     send_notification_tool,
     list_notifications,
+    // Camera clips + live URLs
+    list_clips,
+    export_clip,
+    get_camera_live_url,
+    share_clip,
   ].map((t) => [t.name, t]),
 );

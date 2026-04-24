@@ -27,9 +27,14 @@ import {
   disableDetection,
   deleteCamera,
   addCamera,
+  fetchEvents,
 } from "../services/frigate.client.js";
 import { config } from "../config.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import { ncDownloadFile } from "../services/nextcloud.client.js";
+import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
 
@@ -64,6 +69,96 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // ==========================================================================
   // FIXED-PATH ROUTES (must be registered before :name parameterized routes)
   // ==========================================================================
+
+  // --- Clips (PR #3) ---
+  //
+  // These MUST come before /cameras/:name. Otherwise Express routes
+  // GET /cameras/clips to the :name handler with name="clips" and the LLM
+  // tool list_clips silently returns a single "camera" record.
+
+  router.get("/cameras/clips", async (req, res, next) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const camera = req.query.camera as string | undefined;
+      if (camera && !isValidCameraName(camera)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const events = (await fetchEvents(limit, camera)) as Array<Record<string, unknown>>;
+      const clips = events
+        .filter((e) => e.has_clip === true)
+        .map((e) => ({
+          id: e.id,
+          camera: e.camera,
+          label: e.label,
+          score: e.score,
+          start_time: e.start_time,
+          end_time: e.end_time,
+          thumbnail_url: `/api/cameras/events/${encodeURIComponent(String(e.id))}/thumbnail`,
+          clip_url: `/api/cameras/clips/event/${encodeURIComponent(String(e.id))}`,
+        }));
+      res.json({ clips });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/cameras/clips/event/:eventId", async (req, res, next) => {
+    try {
+      if (!isValidEventId(req.params.eventId)) {
+        return res.status(400).json({ error: "Invalid event id" });
+      }
+      const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(req.params.eventId)}/clip.mp4`;
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
+      }
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+      const len = upstream.headers.get("content-length");
+      if (len) res.setHeader("Content-Length", len);
+      if (upstream.body) {
+        const { Readable } = await import("node:stream");
+        Readable.fromWeb(upstream.body as never).pipe(res);
+      } else {
+        res.end();
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/clips/share", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        nc_path: z.string().min(1).max(2048),
+        ttl_minutes: z.number().int().min(1).max(1440).optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      }
+      const userId = req.user?.username;
+      if (!userId) return res.status(401).json({ error: "unauthenticated" });
+
+      // Defense-in-depth path check — mirrors PR #1's validateNcPath logic so
+      // a caller can't sign a token whose ncPath traverses out of their own
+      // Nextcloud namespace. Whether Sabre/DAV would also reject is immaterial
+      // — we don't want to rely on it.
+      const pathValid = isSafeNcPath(parsed.data.nc_path);
+      if (!pathValid.ok) {
+        return res.status(400).json({ error: pathValid.error });
+      }
+
+      const ttlSec = (parsed.data.ttl_minutes ?? 60) * 60;
+      const token = signShareUrl(userId, pathValid.path, ttlSec);
+      const filename = pathValid.path.split("/").pop() ?? "clip.mp4";
+      res.json({
+        url: `/api/cameras/clips/share/${encodeURIComponent(filename)}?t=${encodeURIComponent(token)}`,
+        expires_at: new Date(Date.now() + ttlSec * 1000).toISOString(),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // --- List all cameras ---
   router.get("/cameras", async (_req, res, next) => {
@@ -602,5 +697,140 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // ==========================================================================
+  // CLIP EXPORT + SHARE URLS (PR #3)
+  // ==========================================================================
+  //
+  // POST /cameras/:name/clips/export and GET /cameras/:name/live-url stay
+  // here because the extra path segments after :name disambiguate them from
+  // the bare /cameras/:name handler. The bare-prefix routes
+  // (/cameras/clips, /cameras/clips/event/:eventId, /cameras/clips/share)
+  // are defined at the TOP of this function above /cameras/:name to avoid
+  // the route-shadowing trap documented in the file header.
+
+  /**
+   * POST /cameras/:name/clips/export
+   *   Export a time-range clip and stash it in /Clips/<camera>/<ts>.mp4 in
+   *   the user's Nextcloud. Returns the resulting Nextcloud path so the
+   *   dashboard can deep-link into the Files app.
+   */
+  router.post("/cameras/:name/clips/export", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const schema = z.object({
+        starts_at: z.string().datetime(),
+        ends_at: z.string().datetime(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+      }
+      const ncToken = await resolveNcToken(req);
+      if (!ncToken) return res.status(401).json({ error: "nextcloud_session_missing" });
+      const userId = req.user?.username;
+      if (!userId) return res.status(401).json({ error: "unauthenticated" });
+
+      const result = await exportClip(ncToken, userId, {
+        camera: req.params.name,
+        startsAt: new Date(parsed.data.starts_at),
+        endsAt: new Date(parsed.data.ends_at),
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "invalid_camera_name") return void res.status(400).json({ error: msg });
+      if (msg.includes("must be after")) return void res.status(400).json({ error: msg });
+      if (msg.includes("duration capped")) return void res.status(400).json({ error: msg });
+      if (msg.includes("clip too large")) return void res.status(413).json({ error: msg });
+      if (msg.includes("frigate_export_failed")) return void res.status(502).json({ error: msg });
+      next(err);
+    }
+  });
+
+  /**
+   * GET /cameras/:name/live-url
+   *   Returns the dashboard URL the user can open to see a live view.
+   *   Intentionally NOT a signed URL — the dashboard handles the playback
+   *   via the existing snapshot polling endpoint, which is already
+   *   session-authenticated.
+   */
+  router.get("/cameras/:name/live-url", (req, res) => {
+    if (!isValidCameraName(req.params.name)) {
+      return res.status(400).json({ error: "Invalid camera name" });
+    }
+    res.json({
+      live_url: `/cameras/${encodeURIComponent(req.params.name)}`,
+      snapshot_url: `/api/cameras/${encodeURIComponent(req.params.name)}/snapshot`,
+    });
+  });
+
+  return router;
+}
+
+/** Defense-in-depth path validation mirroring PR #1's validateNcPath
+ *  logic. Reject traversal markers (raw and percent-decoded) so a caller
+ *  can't sign a share URL whose ncPath escapes their Nextcloud namespace. */
+function isSafeNcPath(input: string): { ok: true; path: string } | { ok: false; error: string } {
+  if (input.length > 4096) return { ok: false, error: "nc_path too long" };
+  if (input.includes("\0")) return { ok: false, error: "null byte in nc_path" };
+  let decoded = input;
+  for (let i = 0; i < 4 && decoded.includes("%"); i++) {
+    let next: string;
+    try { next = decodeURIComponent(decoded); } catch { return { ok: false, error: "malformed percent-encoding in nc_path" }; }
+    if (next === decoded) break;
+    decoded = next;
+  }
+  for (const candidate of [input, decoded]) {
+    if (candidate.split(/[\\/]/).some((seg) => seg === "..")) {
+      return { ok: false, error: "nc_path traversal not allowed" };
+    }
+  }
+  const normalized = decoded.startsWith("/") ? decoded : "/" + decoded;
+  return { ok: true, path: normalized };
+}
+
+/**
+ * Public router for the share endpoint — no auth, signed token in query is
+ * the authorization. Mounted in app.ts BEFORE the auth middleware so a
+ * forwarded link works without a Droplet session. The Nextcloud token used
+ * to actually fetch the file isn't the recipient's — it's an admin-scoped
+ * fetch, so the recipient never gets implicit access to anything else.
+ */
+export function createCameraSharePublicRouter(): Router {
+  const router = Router();
+  router.get("/cameras/clips/share/:filename", async (req, res, next) => {
+    try {
+      const token = req.query.t as string | undefined;
+      if (!token) return res.status(403).json({ error: "missing_token" });
+      const verified = verifyShareUrl(token);
+      if (!verified) return res.status(403).json({ error: "invalid_or_expired_token" });
+
+      // Resolve the file via the SAME user's Nextcloud namespace. We don't
+      // have their cookie here — a long-lived service-account NC token
+      // would be required for true zero-recipient-context fetch, which is
+      // a deployment concern. For v1 we return a clear error if the
+      // service account isn't configured; the share URL still won't leak
+      // because the token verification already passed.
+      const ncToken = process.env.NEXTCLOUD_SERVICE_TOKEN;
+      if (!ncToken) {
+        return res.status(503).json({
+          error: "share_service_not_configured",
+          hint: "Set NEXTCLOUD_SERVICE_TOKEN to enable cross-session clip sharing.",
+        });
+      }
+
+      const stream = await ncDownloadFile(ncToken, verified.userId, verified.ncPath);
+      if (!stream) return res.status(404).json({ error: "clip_not_found" });
+
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Disposition", `inline; filename="${req.params.filename.replace(/[^a-zA-Z0-9._-]/g, "_")}"`);
+      const { Readable } = await import("node:stream");
+      Readable.fromWeb(stream as never).pipe(res);
+    } catch (err) {
+      next(err);
+    }
+  });
   return router;
 }
