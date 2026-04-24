@@ -6,27 +6,28 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
-    --bg: #0a0a0c;
-    --panel: #111114;
-    --card: #16161a;
-    --card-2: #1c1c22;
-    --sep: #2a2a31;
-    --sep-2: #3a3a44;
+    --bg: #050507;
+    --panel: #0d0d12;
+    --card: #141420;
+    --card-2: #1d1d2e;
+    --sep: #2a2a38;
+    --sep-2: #3a3a4a;
     --label: #ffffff;
-    --label-2: #c4c4cc;
-    --label-3: #8b8b96;
-    --label-4: #545461;
-    --accent: #818cf8;
-    --accent-primary: #6366f1;
-    --accent-light: #a5b4fc;
-    --accent-subtle: rgba(99,102,241,0.16);
-    --accent-glow: rgba(99,102,241,0.30);
-    --green: #30d158;
-    --green-soft: rgba(48,209,88,0.18);
-    --orange: #ff9f0a;
-    --orange-soft: rgba(255,159,10,0.20);
-    --red: #ff453a;
-    --red-soft: rgba(255,69,58,0.22);
+    --label-2: #c8c8d4;
+    --label-3: #8b8b9c;
+    --label-4: #545466;
+    --accent: #8b93ff;
+    --accent-primary: #7c7fff;
+    --accent-light: #b4baff;
+    --accent-subtle: rgba(124,127,255,0.18);
+    --accent-glow: rgba(124,127,255,0.38);
+    --gauge-track: #24243a;
+    --green: #3dff9f;
+    --green-soft: rgba(61,255,159,0.20);
+    --orange: #ffb347;
+    --orange-soft: rgba(255,179,71,0.22);
+    --red: #ff5c7a;
+    --red-soft: rgba(255,92,122,0.24);
     --blue: #0a84ff;
   }
   html, body {
@@ -232,27 +233,28 @@
 // Design tokens — mirror apps/web-dashboard dark mode
 // ============================================================
 const C = {
-  bg: '#0a0a0c',
-  panel: '#111114',
-  card: '#16161a',
-  card2: '#1c1c22',
-  sep: '#2a2a31',
-  sep2: '#3a3a44',
+  bg: '#050507',
+  panel: '#0d0d12',
+  card: '#141420',
+  card2: '#1d1d2e',
+  sep: '#2a2a38',
+  sep2: '#3a3a4a',
   text: '#ffffff',
-  label2: '#c4c4cc',
-  label3: '#8b8b96',
-  label4: '#545461',
-  accent: '#818cf8',
-  accentPrimary: '#6366f1',
-  accentLight: '#a5b4fc',
-  accentSubtle: 'rgba(99,102,241,0.16)',
-  accentGlow: 'rgba(99,102,241,0.30)',
-  green: '#30d158',
-  greenSoft: 'rgba(48,209,88,0.18)',
-  orange: '#ff9f0a',
-  orangeSoft: 'rgba(255,159,10,0.20)',
-  red: '#ff453a',
-  redSoft: 'rgba(255,69,58,0.22)',
+  label2: '#c8c8d4',
+  label3: '#8b8b9c',
+  label4: '#545466',
+  accent: '#8b93ff',
+  accentPrimary: '#7c7fff',
+  accentLight: '#b4baff',
+  accentSubtle: 'rgba(124,127,255,0.18)',
+  accentGlow: 'rgba(124,127,255,0.38)',
+  gaugeTrack: '#24243a',
+  green: '#3dff9f',
+  greenSoft: 'rgba(61,255,159,0.20)',
+  orange: '#ffb347',
+  orangeSoft: 'rgba(255,179,71,0.22)',
+  red: '#ff5c7a',
+  redSoft: 'rgba(255,92,122,0.24)',
   blue: '#0a84ff',
 };
 
@@ -430,35 +432,53 @@ function colorFor(pct, warn=80, crit=95) {
 // ============================================================
 // Reusable widgets
 // ============================================================
+// Half-donut gauge: 180° arc with rounded caps, value inside, label under.
+// Mirrors _half_donut in code.py so the preview matches the device.
 function radialGauge(cx, cy, r, pct, label, valueStr, sparks) {
   const color = colorFor(pct);
-  const startA = Math.PI * 0.75;
-  const endA   = Math.PI * 2.25;
-  const sweep  = endA - startA;
+  const startA = Math.PI;       // left
+  const endA   = 0;             // right
+  const p = Math.max(0, Math.min(100, pct)) / 100;
+  const thickness = Math.max(8, Math.round(r / 3));
+
+  // Subtle outer glow on the fill color for the "vibrant on dark" feel.
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
 
   // Track
-  ctx.strokeStyle = C.sep;
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, startA, endA);
-  ctx.stroke();
-
-  // Fill
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 5;
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = C.gaugeTrack;
+  ctx.lineWidth = thickness;
   ctx.lineCap = 'round';
   ctx.beginPath();
-  ctx.arc(cx, cy, r, startA, startA + sweep * Math.max(0, Math.min(100, pct))/100);
+  ctx.arc(cx, cy, r, startA, endA, true);
   ctx.stroke();
+
+  // Fill — counter-clockwise from left to (1-p)*π
+  if (p > 0) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = thickness;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, startA, startA - Math.PI * p, true);
+    ctx.stroke();
+  }
+  ctx.restore();
   ctx.lineCap = 'butt';
 
-  // Center text
-  text(valueStr, cx, cy-2, {size:16, weight:700, align:'center', baseline:'middle'});
-  text(label, cx, cy+13, {size:9, weight:700, color:C.label3, align:'center', baseline:'middle', letter:0.6});
+  // Value text — sits inside the arc (above the flat edge)
+  text(valueStr, cx, cy - Math.round(r * 0.35),
+       {size:18, weight:700, align:'center', baseline:'middle'});
+  // Label under the flat edge
+  text(label, cx, cy + 14,
+       {size:10, weight:700, color:C.label3, align:'center', baseline:'middle', letter:0.8});
 
-  // Mini sparkline beneath the dial
+  // Mini sparkline — keep it under the label, unchanged vibe
   if (sparks && sparks.length > 1) {
-    const sx = cx - r, sy = cy + r + 4, sw = r*2, sh = 10;
+    const sx = cx - r, sy = cy + 22, sw = r*2, sh = 8;
     const lo = Math.min(...sparks), hi = Math.max(...sparks);
     const span = Math.max(1, hi - lo);
     ctx.strokeStyle = color + 'cc';
@@ -501,31 +521,70 @@ function drawIdle(offsetX=0) {
   ctx.fillStyle = C.bg;
   ctx.fillRect(0, 0, W, H);
 
-  // Subtle radial glow
-  const grd = ctx.createRadialGradient(W/2, H/2, 20, W/2, H/2, 240);
-  grd.addColorStop(0, 'rgba(99,102,241,0.12)');
+  // Soft indigo radial glow behind the clock — sells the "vibrant on dark"
+  // look the user asked for without washing out the contrast.
+  const grd = ctx.createRadialGradient(W/2, H/2 + 10, 40, W/2, H/2 + 10, 280);
+  grd.addColorStop(0, 'rgba(124,127,255,0.18)');
   grd.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = grd;
   ctx.fillRect(0, 0, W, H);
 
-  // Breath animation — tiny scale + brightness pulse
-  const t = (Date.now() % 4000) / 4000;
-  const pulse = 1 + 0.02 * Math.sin(t * Math.PI * 2);
-  const size = 150 * pulse;
-  const mx = (W - size*52/60) / 2;
-  const my = (H - size) / 2 - 16;
-  drawMark(mx, my, size, C.accentPrimary, C.accentLight, true);
+  // Small droplet mark up top — no "Droplet" wordmark. The clock is
+  // the hero now.
+  const markSize = 60;
+  const mx = (W - markSize*52/60) / 2;
+  const my = 24;
+  drawMark(mx, my, markSize, C.accentPrimary, C.accentLight, true);
 
-  // Wordmark
-  text('Droplet', W/2, my + size + 36, {size:28, weight:700, align:'center', baseline:'middle', letter:0.5});
+  // Live clock — HH:MM with a soft-blinking colon. seconds tick locally
+  // off Date.now() so the preview mirrors the on-device local-RTC tick.
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const colonOn = (now.getSeconds() % 2) === 0;
+  const clockY = my + markSize + 82;
 
-  // Hints
-  ctx.globalAlpha = 0.6;
-  text('‹ swipe      tap to wake      swipe ›', W/2, H - 20,
-    {size:10, weight:500, color:C.label3, align:'center', baseline:'middle', letter:1.2});
-  ctx.globalAlpha = 1;
+  // Subtle drop-shadow glow so the clock reads as the focal point
+  ctx.save();
+  ctx.shadowColor = 'rgba(124,127,255,0.35)';
+  ctx.shadowBlur = 18;
+  text(hh, W/2 - 48, clockY, {size:68, weight:800, align:'center', baseline:'middle', letter:-1.5});
+  text(mm, W/2 + 48, clockY, {size:68, weight:800, align:'center', baseline:'middle', letter:-1.5});
+  ctx.restore();
+  // Colon separately so we can blink it
+  text(colonOn ? ':' : ' ', W/2, clockY - 4,
+    {size:64, weight:800, color:C.accentLight, align:'center', baseline:'middle'});
+
+  // Date line under the clock
+  const dateStr = now.toLocaleDateString(undefined, {
+    weekday: 'short', month: 'short', day: 'numeric'
+  });
+  text(dateStr, W/2, clockY + 46,
+    {size:14, weight:600, color:C.label3, align:'center', baseline:'middle', letter:0.6});
+
+  // Bottom info chips — IP on the left, Wi-Fi SSID on the right.
+  drawChip(16, H - 34, data.ip || '—', C.label2);
+  drawChip(W - 16, H - 34, (data.wifi && data.wifi.ssid) || 'Droplet-AI',
+           C.accent, {anchorRight: true});
 
   ctx.restore();
+}
+
+function drawChip(x, y, str, color, {anchorRight = false} = {}) {
+  // Approximate width from character count — matches the firmware's
+  // terminalio sizing approach.
+  const padX = 10;
+  const th = 22;
+  ctx.save();
+  ctx.font = '600 11px -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif';
+  const tw = Math.ceil(ctx.measureText(str).width) + padX * 2;
+  const cx = anchorRight ? x - tw : x;
+  // pill
+  rrect(cx, y, tw, th, th/2, C.card);
+  rrect(cx, y, tw, th, th/2, null, C.sep, 1);
+  ctx.restore();
+  text(str, cx + tw/2, y + th/2,
+    {size:11, weight:600, color, align:'center', baseline:'middle'});
 }
 
 // ---------- Stats (Ubiquiti-style) ----------
@@ -582,10 +641,12 @@ function drawStats(offsetX=0) {
     ['DISK', data.disk, data.disk.toFixed(0) + '%', data.sparks.disk],
     ['TEMP', data.temp, data.temp.toFixed(0) + '°', data.sparks.temp],
   ];
-  const gRowY = 82;
+  // Half-donuts hang off their flat edge, so cy is the baseline. Nudge
+  // down a few px so the arc sits cleanly in the dial row.
+  const gRowY = 90;
   const gGap = W / 4;
   dials.forEach(([lbl, pct, val, sp], i) => {
-    radialGauge(gGap * (i + 0.5), gRowY, 26, pct, lbl, val, sp);
+    radialGauge(gGap * (i + 0.5), gRowY, 30, pct, lbl, val, sp);
   });
 
   // --- Row 2: Network + Storage (2 cards) ---

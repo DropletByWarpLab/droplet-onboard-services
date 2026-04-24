@@ -47,6 +47,7 @@ PyPortal → Host
 """
 
 import gc
+import math
 import time
 import json
 
@@ -80,24 +81,27 @@ def _palette(color):
 
 # ---------------------------------------------------------------------------
 # Design tokens (mirror web-dashboard dark mode + preview.html)
+# Deeper near-black background + indigo-tinted surfaces + punchier accents
+# for a modern OLED-style look that matches the web dashboard.
 # ---------------------------------------------------------------------------
-BG            = 0x0A0A0C
-PANEL         = 0x111114
-SURFACE       = 0x16161A
-SURFACE_2     = 0x1C1C22
-SEPARATOR     = 0x2A2A31
-SEPARATOR_2   = 0x3A3A44
+BG            = 0x050507
+PANEL         = 0x0D0D12
+SURFACE       = 0x141420
+SURFACE_2     = 0x1D1D2E
+SEPARATOR     = 0x2A2A38
+SEPARATOR_2   = 0x3A3A4A
 TEXT          = 0xFFFFFF
-LABEL_2       = 0xC4C4CC
-LABEL_3       = 0x8B8B96
-LABEL_4       = 0x545461
-ACCENT        = 0x818CF8
-ACCENT_PRI    = 0x6366F1
-ACCENT_LIGHT  = 0xA5B4FC
-ACCENT_SUBTLE = 0x1B1B3B
-GREEN         = 0x30D158
-ORANGE        = 0xFF9F0A
-RED           = 0xFF453A
+LABEL_2       = 0xC8C8D4
+LABEL_3       = 0x8B8B9C
+LABEL_4       = 0x545466
+ACCENT        = 0x8B93FF
+ACCENT_PRI    = 0x7C7FFF
+ACCENT_LIGHT  = 0xB4BAFF
+ACCENT_SUBTLE = 0x1E1E3E
+GAUGE_TRACK   = 0x24243A
+GREEN         = 0x3DFF9F
+ORANGE        = 0xFFB347
+RED           = 0xFF5C7A
 WHITE         = 0xFFFFFF
 
 DISPLAY_W = board.DISPLAY.width
@@ -138,6 +142,82 @@ def _text(s, *, x, y, scale=2, color=TEXT, anchor=None):
         lbl.x = x
         lbl.y = y
     return lbl
+
+
+def _circle(cx, cy, r, color):
+    return vectorio.Circle(
+        pixel_shader=_palette(color),
+        radius=max(1, int(r)),
+        x=int(cx), y=int(cy),
+    )
+
+
+# vectorio has no arc primitive, so half-donuts are drawn as a 2*N-vertex
+# Polygon (outer sweep + inner sweep back). Circle end-caps round the tips
+# for the "rounded half donut" look requested — cheap heap-wise because
+# vectorio stores just the vertex list, not a rasterised bitmap.
+def _half_donut(g, cx, cy, r_outer, thickness, pct, fill_color,
+                track_color=GAUGE_TRACK, segments=28):
+    """Draw a 180° half-donut gauge, flat edge facing down.
+
+    Args:
+        cx, cy: center of the flat edge (the donut curves *up* from here)
+        r_outer: outer radius
+        thickness: band thickness; inner radius = r_outer - thickness
+        pct: 0..100 fill percentage (fills left-to-right along the arc)
+        fill_color, track_color: palette entries
+        segments: polygon tessellation — 28 reads smooth at r=40
+    """
+    r_inner = max(2, r_outer - thickness)
+    pct = max(0.0, min(100.0, float(pct)))
+
+    def arc_ring(start_frac, end_frac):
+        # Build a polygon ring between start_frac..end_frac of the 180° sweep.
+        # 0 = left (angle pi), 1 = right (angle 0).
+        pts = []
+        n = max(2, int(segments * abs(end_frac - start_frac) + 0.5))
+        # Outer: start -> end
+        for i in range(n + 1):
+            frac = start_frac + (end_frac - start_frac) * (i / n)
+            a = math.pi * (1.0 - frac)
+            pts.append((int(cx + r_outer * math.cos(a)),
+                        int(cy - r_outer * math.sin(a))))
+        # Inner: end -> start (reverse)
+        for i in range(n + 1):
+            frac = end_frac - (end_frac - start_frac) * (i / n)
+            a = math.pi * (1.0 - frac)
+            pts.append((int(cx + r_inner * math.cos(a)),
+                        int(cy - r_inner * math.sin(a))))
+        return pts
+
+    # Track (full 180°)
+    g.append(vectorio.Polygon(
+        pixel_shader=_palette(track_color),
+        points=arc_ring(0.0, 1.0),
+        x=0, y=0,
+    ))
+    # Rounded caps on the track ends
+    cap_r = thickness // 2
+    g.append(_circle(cx - (r_outer + r_inner) // 2, cy, cap_r, track_color))
+    g.append(_circle(cx + (r_outer + r_inner) // 2, cy, cap_r, track_color))
+
+    if pct <= 0.5:
+        return
+
+    # Fill (0..pct of 180°)
+    end_frac = pct / 100.0
+    g.append(vectorio.Polygon(
+        pixel_shader=_palette(fill_color),
+        points=arc_ring(0.0, end_frac),
+        x=0, y=0,
+    ))
+    # Rounded caps on fill: left start + head of the fill arc
+    g.append(_circle(cx - (r_outer + r_inner) // 2, cy, cap_r, fill_color))
+    ang = math.pi * (1.0 - end_frac)
+    head_r = (r_outer + r_inner) // 2
+    g.append(_circle(int(cx + head_r * math.cos(ang)),
+                     int(cy - head_r * math.sin(ang)),
+                     cap_r, fill_color))
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +281,45 @@ def _mark_tg(size, x, y):
     else:
         bmp, pal = _MARK_SMALL
     return displayio.TileGrid(bmp, pixel_shader=pal, x=x, y=y)
+
+
+# ---------------------------------------------------------------------------
+# Local clock — anchor the host-pushed HH:MM against monotonic time so the
+# idle screen can tick seconds between pushes instead of sitting on a stale
+# minute until the next stats frame arrives. The host typically pushes every
+# few seconds, but each push resets the anchor so drift stays bounded.
+# ---------------------------------------------------------------------------
+_clock = {"mono": None, "total_sec": 0, "date_str": ""}
+
+
+def _set_clock(now_str, date_str=None):
+    if not now_str or ":" not in now_str:
+        return
+    try:
+        parts = now_str.split(":")
+        hh = int(parts[0]); mm = int(parts[1])
+        ss = int(parts[2]) if len(parts) > 2 else 0
+    except (ValueError, IndexError):
+        return
+    _clock["total_sec"] = (hh * 3600 + mm * 60 + ss) % 86400
+    _clock["mono"] = time.monotonic()
+    if date_str:
+        _clock["date_str"] = date_str
+
+
+def _local_hhmm():
+    if _clock["mono"] is None:
+        return state.get("now") or "--:--"
+    elapsed = int(time.monotonic() - _clock["mono"])
+    t = (_clock["total_sec"] + elapsed) % 86400
+    return "{:02d}:{:02d}".format(t // 3600, (t % 3600) // 60)
+
+
+def _local_ss():
+    if _clock["mono"] is None:
+        return 0
+    elapsed = int(time.monotonic() - _clock["mono"])
+    return (_clock["total_sec"] + elapsed) % 60
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +451,7 @@ def _header(g, title, sub=None, show_bubble=True):
     if sub:
         g.append(_text(str(sub)[:40], x=44, y=28, scale=1, color=LABEL_3))
 
-    clock = state.get("now") or "--:--"
+    clock = _local_hhmm()
     g.append(_text(clock, x=DISPLAY_W - 52, y=21, scale=2, color=LABEL_2,
                    anchor=(1.0, 0.5)))
 
@@ -417,26 +536,26 @@ def _nav_bar(g):
 # ---------------------------------------------------------------------------
 
 def _dial(g, cx, cy, w, h, lbl, value_str, pct, warn=80, crit=95):
-    """Faux-radial "dial": big value number + segmented bar + label.
+    """Half-donut gauge: rounded 180° arc with track + colored fill, value
+    text inside the arc, label underneath.
 
-    PyPortal vectorio can't do arcs; a clean segmented bar under the
-    value reads just as well on a small screen and keeps heap low.
+    Reads sleeker than a flat bar at normal viewing distance and matches
+    the modern dashboard aesthetic the user asked for.
     """
     color = ACCENT if pct < warn else (ORANGE if pct < crit else RED)
-    # Label centered above value
-    g.append(_text(lbl, x=cx, y=cy - 20, scale=1, color=LABEL_3,
+    r_outer = min(w // 2 - 6, 40)
+    thickness = max(8, r_outer // 4)
+    # The donut is anchored so its flat edge sits just below the value
+    # text; bump the center down slightly so the arc visually frames
+    # rather than floats above the number.
+    arc_cy = cy + 12
+    _half_donut(g, cx, arc_cy, r_outer, thickness, pct, color)
+    # Big value centered inside the arc
+    g.append(_text(value_str, x=cx, y=arc_cy - r_outer // 2 + 4, scale=2,
+                   color=TEXT, anchor=(0.5, 0.5)))
+    # Small uppercase label under the arc
+    g.append(_text(lbl, x=cx, y=arc_cy + 10, scale=1, color=LABEL_3,
                    anchor=(0.5, 0.5)))
-    # Big value centered
-    g.append(_text(value_str, x=cx, y=cy, scale=3, color=TEXT,
-                   anchor=(0.5, 0.5)))
-    # Segmented progress bar under
-    bar_y = cy + 22
-    bar_w = w - 20
-    bar_x = cx - bar_w // 2
-    g.append(_rect(bar_x, bar_y, bar_w, 4, SURFACE_2))
-    fw = int(bar_w * max(0, min(100, pct)) / 100)
-    if fw > 0:
-        g.append(_rect(bar_x, bar_y, fw, 4, color))
 
 
 def _network_card(g, x, y, w, h):
@@ -687,24 +806,87 @@ def _close_alerts_drawer():
 # Idle (screensaver)
 # ---------------------------------------------------------------------------
 
+# Refs for the idle tick loop so the clock/colon update cheaply without
+# rebuilding the entire display tree every second.
+_idle_refs = {"clock": None, "colon_on": True}
+
+
 def render_idle():
     global touch_regions
     touch_regions = []
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
-    size = 160
-    mx = (DISPLAY_W - int(size * 52 / 60)) // 2
-    my = (DISPLAY_H - size) // 2 - 20
-    g.append(_mark_tg(size, mx, my))
-    g.append(_text("Droplet", x=DISPLAY_W // 2, y=my + size + 30,
-                   scale=4, color=TEXT, anchor=(0.5, 0.5)))
-    g.append(_text("swipe to stats  *  swipe to wifi",
-                   x=DISPLAY_W // 2, y=DISPLAY_H - 18,
-                   scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
-    # Any tap wakes to stats
+
+    # Small droplet mark up top — no "Droplet" wordmark under it. The
+    # clock is the hero now; the mark just anchors the brand.
+    mark_size = 68
+    mark_w = int(mark_size * 52 / 60)
+    mx = (DISPLAY_W - mark_w) // 2
+    my = 30
+    g.append(_mark_tg(mark_size, mx, my))
+
+    # Huge HH:MM clock, centered. Store ref so the tick loop can mutate
+    # the text in place — cheaper than rebuilding the group.
+    clock_y = my + mark_size + 70
+    clock_lbl = _text(_fmt_clock(_local_hhmm(), colon_on=True),
+                      x=DISPLAY_W // 2, y=clock_y, scale=6, color=TEXT,
+                      anchor=(0.5, 0.5))
+    g.append(clock_lbl)
+    _idle_refs["clock"] = clock_lbl
+    _idle_refs["colon_on"] = True
+
+    # Date under the clock (subtle)
+    date_str = _clock.get("date_str") or ""
+    if date_str:
+        g.append(_text(date_str, x=DISPLAY_W // 2, y=clock_y + 42,
+                       scale=2, color=LABEL_3, anchor=(0.5, 0.5)))
+
+    # Bottom row: info chips (IP on left, Wi-Fi SSID on right) — keeps
+    # the idle screen useful as an at-a-glance status panel instead of
+    # just a logo screensaver.
+    chip_y = DISPLAY_H - 30
+    ip = str(state.get("ip") or "").strip()
+    if ip and ip != "-":
+        _chip(g, 16, chip_y, ip[:18], LABEL_2)
+    wifi = state.get("wifi") or {}
+    ssid = wifi.get("ssid") or wifi.get("connected_to")
+    if ssid:
+        _chip(g, DISPLAY_W - 16, chip_y, str(ssid)[:18], ACCENT,
+              anchor_right=True)
+
+    # Any tap wakes to stats. Kept the whole-screen region; removed the
+    # explicit "swipe" caption because the tick chip + clock already make
+    # it feel live (and the user asked for a cleaner look).
     _region("idle_wake", 0, 0, DISPLAY_W, DISPLAY_H,
             lambda: set_screen("stats"))
     board.DISPLAY.root_group = g
+
+
+def _fmt_clock(hhmm, colon_on=True):
+    """HH:MM with a soft-blinking colon — the colon toggles every second
+    on the idle tick, giving the clock a subtle sign of life without a
+    full re-render."""
+    if not hhmm or len(hhmm) < 4:
+        return hhmm or "--:--"
+    if ":" not in hhmm:
+        return hhmm
+    a, b = hhmm.split(":", 1)
+    sep = ":" if colon_on else " "
+    return a + sep + b
+
+
+def _chip(g, x, y, text_str, color, anchor_right=False):
+    """Low-key rounded info chip for the idle screen footer."""
+    # Approximate chip width from char count — terminalio scale=1 is ~6 px/char.
+    pad_x = 10
+    tw = len(text_str) * 6 + pad_x * 2
+    th = 18
+    cx = x - tw if anchor_right else x
+    g.append(_rect(cx, y, tw, th, SURFACE))
+    g.append(_circle(cx, y + th // 2, th // 2, SURFACE))
+    g.append(_circle(cx + tw, y + th // 2, th // 2, SURFACE))
+    g.append(_text(text_str, x=cx + tw // 2, y=y + th // 2,
+                   scale=1, color=color, anchor=(0.5, 0.5)))
 
 
 # ---------------------------------------------------------------------------
@@ -1024,8 +1206,18 @@ def handle(msg):
         for k in ("cpu", "mem", "disk", "temp", "ip", "uptime", "hostname", "now"):
             if k in data and data[k] is not None:
                 state[k] = data[k]
+        # Re-anchor the local clock whenever the host pushes a fresh "now"
+        # so idle-screen seconds can tick between pushes without drift.
+        # Optional "date" field feeds the idle-screen date line.
+        if data.get("now"):
+            _set_clock(data.get("now"), data.get("date"))
         if state["screen"] == "stats":
             _render_with_gc("stats")
+        elif state["screen"] == "idle" and _idle_refs.get("clock") is not None:
+            # Keep the idle clock in sync with the latest push without a
+            # full re-render.
+            _idle_refs["clock"].text = _fmt_clock(
+                _local_hhmm(), _idle_refs.get("colon_on", True))
     elif mode == "wifi":
         # Merge — the old fields (networks, adapter, etc.) live alongside
         # new ones (ssid, clients, channel, band, key_ttl_seconds).
@@ -1078,8 +1270,25 @@ def main():
     last_touch = None
     press_start = None          # (x, y) — where the finger first landed
     last_activity = time.monotonic()
+    last_idle_tick = 0.0
 
     while True:
+        # Idle clock tick — only runs while the idle screen is up. Updates
+        # the HH:MM label and toggles the colon on a 1 Hz cadence so the
+        # clock feels live between host pushes. Cheap: just mutates one
+        # label's text attr, no group rebuild.
+        now_mono = time.monotonic()
+        if (state["screen"] == "idle"
+                and _idle_refs.get("clock") is not None
+                and now_mono - last_idle_tick >= 1.0):
+            last_idle_tick = now_mono
+            _idle_refs["colon_on"] = not _idle_refs.get("colon_on", True)
+            try:
+                _idle_refs["clock"].text = _fmt_clock(
+                    _local_hhmm(), _idle_refs["colon_on"])
+            except Exception:
+                pass
+
         if serial is not None and serial.in_waiting:
             chunk = serial.read(serial.in_waiting)
             buf += chunk
