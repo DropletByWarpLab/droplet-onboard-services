@@ -5,19 +5,25 @@ mqtt:
   user: "{FRIGATE_MQTT_USER}"
   password: "{FRIGATE_MQTT_PASSWORD}"
 
+# Frigate 0.15+ dropped the `tensorrt` detector type in favor of `onnx`
+# (ONNX Runtime with TensorRT execution provider). Switching to onnx requires
+# a user-supplied model at /config/model_cache/... so we default to cpu here
+# to keep the stack valid out of the box. Jetson GPU acceleration should be
+# restored in a follow-up that also provisions a model file.
 detectors:
-  tensorrt:
-    type: tensorrt
-    device: 0
+  cpu:
+    type: cpu
 
 record:
   enabled: true
-  retain:
-    days: 7
-    mode: motion
-  events:
+  alerts:
     retain:
-      default: 14
+      days: 14
+      mode: motion
+  detections:
+    retain:
+      days: 14
+      mode: motion
 
 snapshots:
   enabled: true
