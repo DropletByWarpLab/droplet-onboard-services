@@ -2,22 +2,40 @@ mqtt:
   enabled: true
   host: broker
   port: 1883
-  user: "{FRIGATE_MQTT_USER}"
-  password: "{FRIGATE_MQTT_PASSWORD}"
+  user: '{FRIGATE_MQTT_USER}'
+  password: '{FRIGATE_MQTT_PASSWORD}'
 
+# Detector:
+#   type: cpu                 — works on every image variant, 10-20 FPS
+#                               on the Orin. Safe default while the JP6
+#                               ONNX model cache is being provisioned.
+#   type: onnx (JP6)          — NVIDIA TensorRT execution provider. On
+#                               first boot the image downloads + compiles
+#                               yolov9-s.onnx into /config/model_cache/
+#                               (set YOLO_MODELS=yolov9-s in .env). Until
+#                               that compile finishes Frigate stays in
+#                               safe_mode and falls back to CPU.
+#
+# TODO(detection-gpu): Once the JP6 model_cache is populated, flip this
+# to ``type: onnx`` and add a matching ``model:`` block
+# (path: /config/model_cache/yolov9-s.onnx, width/height: 320, etc.).
 detectors:
-  tensorrt:
-    type: tensorrt
-    device: 0
+  cpu:
+    type: cpu
 
 record:
   enabled: true
-  retain:
-    days: 7
-    mode: motion
-  events:
+  # Frigate 0.17 split the old ``record.retain`` + ``record.events`` block
+  # into separate ``alerts`` (user-surfaced events) and ``detections``
+  # (continuous lower-confidence track). Both retain independently.
+  alerts:
     retain:
-      default: 14
+      days: 14
+      mode: motion
+  detections:
+    retain:
+      days: 14
+      mode: motion
 
 snapshots:
   enabled: true
@@ -30,16 +48,20 @@ detect:
   height: 720
   fps: 5
 
+# ``package`` is intentionally absent — the default yolov9 model shipped
+# with the JP6 image doesn't know that class and Frigate warns about
+# unsupported labels on every camera load. Re-add it once the model ships
+# with package support or a custom model is mounted.
 objects:
   track:
     - person
     - car
     - dog
     - cat
-    - package
 
-# Cameras are added dynamically by the camera-discovery service.
-# You can also add cameras manually here using the Frigate camera config format:
+# Cameras are added dynamically by the camera-discovery service via
+# PUT /api/config/set. You can also add cameras manually here using the
+# Frigate camera config format:
 # cameras:
 #   front_door:
 #     ffmpeg:

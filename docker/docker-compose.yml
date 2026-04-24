@@ -267,10 +267,16 @@ services:
   # neither of which exist in Docker Desktop on macOS. Setup writes
   # COMPOSE_PROFILES=linux to .env on Linux so this starts automatically;
   # macOS dev installs skip it and reach the dashboard via the gateway only.
-  # Override FRIGATE_IMAGE in .env for GPU-accelerated variant:
-  #   FRIGATE_IMAGE=ghcr.io/blakeblackshear/frigate:stable-tensorrt
+  # Image variants (override FRIGATE_IMAGE in .env):
+  #   stable              — default; CPU detector only (works everywhere)
+  #   stable-tensorrt     — x86_64 hosts with NVIDIA discrete GPUs
+  #   stable-tensorrt-jp6 — Jetson Orin on JetPack 6 (pair with
+  #                          FRIGATE_RUNTIME=nvidia + YOLO_MODELS=yolov9-s)
+  # FRIGATE_RUNTIME lets the Jetson scripts set `nvidia` without forcing
+  # macOS / Docker Desktop (which has no nvidia runtime) to fail validation.
   frigate:
     image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
+    runtime: ${FRIGATE_RUNTIME:-runc}
     profiles: ["linux"]
     shm_size: "256mb"
     expose:
@@ -278,14 +284,38 @@ services:
       - "5000"
       - "8554"
       - "8555"
+    # Bind the API on host loopback only so the camera-discovery service
+    # (network_mode: host — can't resolve compose service DNS) can POST
+    # config updates. Not exposed off-host: the nginx gateway at
+    # /frigate/ remains the canonical outside entry point.
+    ports:
+      - "127.0.0.1:5000:5000"
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
       - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
     volumes:
       - frigate-config:/config
-      - nvrdata:/media/frigate
+      # NVR recordings default to the `nvrdata` named volume so every fresh
+      # deployment works out of the box. On Jetson lab hosts the operator
+      # can redirect this to a dedicated NVMe partition by overriding
+      # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
+      # once the partition is provisioned. See docs/STATUS.md.
+      - ${NVR_MEDIA_SOURCE:-nvrdata}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
-      - ../docker/frigate/config.yml:/config/config.yml:ro
+      # Writable: Frigate 0.17 persists API-driven config changes
+      # (camera-discovery auto-adoption PUTs to /api/config/set) by
+      # rewriting this file on disk. A :ro mount silently reverts every
+      # auto-added camera on restart and trips "Config file is read-only,
+      # unable to migrate" on version bumps.
+      - ../docker/frigate/config.yml:/config/config.yml
+      # Jetson Orin TensorRT + NVMM libraries. The JP6 TensorRT image
+      # calls into libnvdla_compiler.so / libnvmedia* which live in
+      # /usr/lib/aarch64-linux-gnu/tegra on the host; without this
+      # bind-mount the ONNX→TensorRT model compilation falls back to
+      # CPU detection. Harmless on x86/macOS because the path is missing
+      # and docker-compose skips the mount with a warning.
+      - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro
+      - /usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/nvidia:ro
     env_file:
       - path: ../.env
         required: false
@@ -295,6 +325,13 @@ services:
       - FRIGATE_MQTT_PORT=1883
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      # JP6 image only: ``YOLO_MODELS`` triggers the ``trt-model-prepare``
+      # s6-overlay service which still expects legacy ``.cfg`` inputs and
+      # fails with "file (yolov9-s.cfg) not found!" on the 0.17.1 image.
+      # Leave empty to keep the s6 service a no-op; hand-drop the ONNX
+      # model into the ``frigate-config`` volume and set ``detectors.onnx``
+      # in config.yml when you want GPU detection.
+      - YOLO_MODELS=${YOLO_MODELS:-}
     depends_on:
       - broker
     restart: always
