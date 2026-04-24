@@ -1,0 +1,42 @@
+name: camera-discovery-tests
+
+# Pytest for services/camera-discovery. Path-filtered.
+
+on:
+  pull_request:
+    paths:
+      - "services/camera-discovery/**"
+      - ".github/workflows/camera-discovery-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/camera-discovery/**"
+      - ".github/workflows/camera-discovery-tests.yml"
+
+concurrency:
+  group: camera-discovery-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/camera-discovery
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/camera-discovery/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v

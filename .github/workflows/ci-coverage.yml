@@ -1,0 +1,31 @@
+name: ci-coverage
+
+# Enforces that every service and app has a matching CI test workflow and a
+# test suite. Fires on every PR and main push — intentionally NOT path-filtered
+# so nobody can add a new service without tests by dodging the filter.
+#
+# To add a new service:
+#   1. Ship a `services/<name>/tests/` directory with at least one test.
+#   2. Add `.github/workflows/<name>-tests.yml` that runs pytest (or vitest /
+#      jest / npm test).
+#   3. Point its `paths:` filter at `services/<name>/**`.
+#
+# Exemptions (rare): add the path one per line to `.github/ci-coverage-exempt`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Every service and app has a test workflow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run CI coverage audit
+        run: bash scripts/check-ci-coverage.sh

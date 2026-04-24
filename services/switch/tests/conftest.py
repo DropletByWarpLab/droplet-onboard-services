@@ -1,0 +1,23 @@
+"""Shared pytest fixtures for services/switch.
+
+Seed test infrastructure for the CI coverage guard (scripts/check-ci-coverage.sh).
+Sets safe env-var defaults before the switch `main` module is imported so tests
+can be collected without a real switch configured.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("SWITCH_HOST", "127.0.0.1")
+os.environ.setdefault("SWITCH_PORT", "443")
+os.environ.setdefault("SWITCH_DRIVER", "lantronix")
+os.environ.setdefault("SWITCH_USERNAME", "admin")
+os.environ.setdefault("SWITCH_PASSWORD", "pytest-fake-pw")
+os.environ.setdefault("SERVICE_SECRET", "pytest-fake-secret")
+
+_SERVICE_DIR = Path(__file__).resolve().parent.parent
+if str(_SERVICE_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVICE_DIR))
