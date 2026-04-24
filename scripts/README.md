@@ -27,7 +27,7 @@ The script runs six phases, each idempotent (safe to re-run):
 | **2. Docker** | Installs Docker Engine 25+ and Compose v2 if not present. Adds user to `docker` group |
 | **3. Camera Drivers** | Installs UVC/V4L2 kernel modules, v4l-utils, ffmpeg, udev rules for USB cameras |
 | **4. Secrets** | Generates unique-per-device passwords and encryption keys. Writes `.env` (chmod 600) |
-| **5. Build** | Pulls 7 base images, builds orchestrator, web-dashboard, and ai-gateway containers |
+| **5. Build** | Pulls 7 base images, builds every service with a local `Dockerfile` — orchestrator, web-dashboard, ai-gateway, routing, plus the profile-gated file-indexer, switch, and camera-discovery. Previously the `full`-profile images were skipped, so `COMPOSE_PROFILES=full docker compose up -d` on a fresh install would fail with "No such image". |
 | **6. Start** | Starts the full Docker Compose stack with health-check waits |
 | **7. Verify** | Runs `verify.sh` smoke tests against all services |
 
