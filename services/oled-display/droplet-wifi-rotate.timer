@@ -1,0 +1,18 @@
+[Unit]
+Description=Rotate Droplet-AI Wi-Fi WPA key every 24h
+Documentation=file:///home/droplet/Documents/droplet-pi-platform/services/oled-display/device-bridge.py
+
+[Timer]
+# Fire once at boot (catches the "we've been off for days" case), then
+# every 24h thereafter. Persistent=true = if the machine was off when a
+# firing was scheduled, run it as soon as we boot.
+OnBootSec=5min
+OnUnitActiveSec=24h
+Persistent=true
+# Random 10-min jitter so a rack of Droplets doesn't all rotate at
+# exactly the same wall-clock minute. Nice-to-have for fleet deploys.
+RandomizedDelaySec=10min
+Unit=droplet-wifi-rotate.service
+
+[Install]
+WantedBy=timers.target
