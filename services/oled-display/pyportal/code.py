@@ -966,16 +966,61 @@ def _chip(g, x, y, text_str, color, anchor_right=False):
                    scale=1, color=color, anchor=(0.5, 0.5)))
 
 
+def _mini_chip(g, x, y, text_str, color):
+    """Small uppercase metadata pill (used e.g. for WPA2, key TTL).
+
+    Returns the right-edge x so callers can stack chips horizontally.
+    """
+    pad_x = 8
+    tw = len(text_str) * 6 + pad_x * 2
+    th = 16
+    pr = th // 2
+    g.append(_rect(x, y, tw, th, ACCENT_SUBTLE))
+    g.append(_circle(x, y + pr, pr, ACCENT_SUBTLE))
+    g.append(_circle(x + tw, y + pr, pr, ACCENT_SUBTLE))
+    g.append(_text(text_str.upper(), x=x + tw // 2, y=y + pr,
+                   scale=1, color=color, anchor=(0.5, 0.5)))
+    return x + tw + pr
+
+
+def _pill_button(g, label_str, x, y, w, h, color, action,
+                 region_name=None):
+    """Pill-shaped tappable button. `color` sets the text + matches the
+    nav-bar language; fill stays ACCENT_SUBTLE for low visual weight.
+    """
+    pr = h // 2
+    g.append(_rect(x, y, w, h, ACCENT_SUBTLE))
+    g.append(_circle(x, y + pr, pr, ACCENT_SUBTLE))
+    g.append(_circle(x + w, y + pr, pr, ACCENT_SUBTLE))
+    g.append(_text(label_str, x=x + w // 2, y=y + h // 2,
+                   scale=2, color=color, anchor=(0.5, 0.5)))
+    if region_name:
+        _region(region_name, x - pr, y, w + 2 * pr, h, action)
+
+
 # ---------------------------------------------------------------------------
 # QR (Join Droplet-AI)
 # ---------------------------------------------------------------------------
 
 def _render_qr_matrix(g, matrix, ox, oy, module_px):
     size = len(matrix)
-    pad = module_px * 2
-    g.append(_rect(ox - pad, oy - pad,
-                   size * module_px + pad * 2,
-                   size * module_px + pad * 2, WHITE))
+    pad = module_px * 3   # roomier quiet zone + reads as a card border
+    frame_w = size * module_px + pad * 2
+    # White card behind the QR — pad-rounded corners using four circles
+    # at the corners + a cross of rects. Gives the QR a tactile "card"
+    # feel instead of a harsh white square against the dark bg.
+    corner_r = pad
+    g.append(_rect(ox - pad + corner_r, oy - pad, frame_w - corner_r * 2,
+                   frame_w, WHITE))
+    g.append(_rect(ox - pad, oy - pad + corner_r, frame_w,
+                   frame_w - corner_r * 2, WHITE))
+    g.append(_circle(ox - pad + corner_r, oy - pad + corner_r, corner_r, WHITE))
+    g.append(_circle(ox + size * module_px + pad - corner_r,
+                     oy - pad + corner_r, corner_r, WHITE))
+    g.append(_circle(ox - pad + corner_r,
+                     oy + size * module_px + pad - corner_r, corner_r, WHITE))
+    g.append(_circle(ox + size * module_px + pad - corner_r,
+                     oy + size * module_px + pad - corner_r, corner_r, WHITE))
     for row_idx, row in enumerate(matrix):
         bmp = displayio.Bitmap(size * module_px, module_px, 2)
         pal = displayio.Palette(2)
@@ -997,97 +1042,89 @@ def render_qr():
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
 
-    y0 = _header(g, "Join Wi-Fi", sub="Scan with your phone camera",
-                 show_bubble=False)
+    # Simpler header — just "Join Wi-Fi" as the title, no sub. Keeps the
+    # eye on the QR card below.
+    y0 = _header(g, "Join Wi-Fi", show_bubble=False)
 
     qr = state.get("qr") or {}
     wifi = state.get("wifi") or {}
     ssid = (qr.get("ssid") if qr else None) or wifi.get("ssid") or "Droplet-AI"
-    # Rotation TTL chip only shows up when the bridge reports the key
-    # rotates. In the default static-password deployment rotation is off
-    # and the chip disappears — no misleading "--:--" countdown.
     rotation_on = bool(qr.get("rotation_enabled"))
     ttl = (qr.get("ttl_seconds") or 0) if rotation_on else 0
-    if rotation_on:
-        chip_w = 92
-        chip_x = DISPLAY_W - chip_w - 10
-        chip_y = 8
-        chip_col = ORANGE if ttl and ttl < 60 else ACCENT
-        g.append(_rect(chip_x, chip_y, chip_w, 22, ACCENT_SUBTLE))
-        g.append(_stroked_rect(chip_x, chip_y, chip_w, 22, chip_col, 1))
-        ttl_str = _fmt_short_ttl(ttl) if ttl else "--:--"
-        g.append(_text("KEY " + ttl_str, x=chip_x + chip_w // 2,
-                       y=chip_y + 11, scale=1, color=chip_col,
-                       anchor=(0.5, 0.5)))
 
+    # Empty / error state: one centered message + pill-shaped Retry. Same
+    # language as the rotate button so it feels like a family.
     if not qr or not qr.get("ok") or not qr.get("matrix"):
         msg = "Waiting for router..."
         if qr and qr.get("error"):
             msg = str(qr["error"])[:50]
-        g.append(_text(msg, x=DISPLAY_W // 2, y=(DISPLAY_H - 28) // 2,
+        g.append(_text(msg, x=DISPLAY_W // 2, y=(DISPLAY_H - 44) // 2,
                        scale=2, color=LABEL_3, anchor=(0.5, 0.5)))
-        bw, bh = 160, 36
-        bx = (DISPLAY_W - bw) // 2
-        by = DISPLAY_H - 28 - bh - 10
-        g.append(_rect(bx, by, bw, bh, ACCENT_SUBTLE))
-        g.append(_stroked_rect(bx, by, bw, bh, ACCENT, 1))
-        g.append(_text("Retry", x=bx + bw // 2, y=by + bh // 2,
-                       scale=2, color=ACCENT, anchor=(0.5, 0.5)))
-        _region("qr_retry", bx, by, bw, bh, _request_qr)
+        _pill_button(g, "Retry", (DISPLAY_W - 160) // 2,
+                     DISPLAY_H - 44 - 44, 160, 34, ACCENT_LIGHT, _request_qr,
+                     region_name="qr_retry")
         _nav_bar(g)
         board.DISPLAY.root_group = g
         return
 
     matrix = qr["matrix"]
     size = len(matrix)
-    # Reserve 44 px at the bottom for the new taller nav bar.
     nav_h = 44
-    avail_h = DISPLAY_H - y0 - nav_h - 10
-    module_px = max(2, min(7, avail_h // size))
+
+    # QR card: fills the left ~half. Larger modules than before so it's
+    # easier to scan at arm's length.
+    avail_h = DISPLAY_H - y0 - nav_h - 16
+    module_px = max(3, min(8, avail_h // size))
     qr_px = size * module_px
-    ox = 24
-    oy = y0 + (avail_h - qr_px) // 2 + 2
+    ox = 22
+    oy = y0 + (avail_h - qr_px) // 2 + 4
     _render_qr_matrix(g, matrix, ox, oy, module_px)
 
-    # Right sidebar: SSID / security / password / rotate. Same info density
-    # as before but with tighter label pairs and the new ACCENT_LIGHT for
-    # the SSID value to match the refreshed palette.
-    side_x = ox + qr_px + 30
+    # Right panel: hero SSID, small security chip, single-line password,
+    # muted instruction. All left-aligned on a shared column.
+    card_right = ox + qr_px + module_px * 3  # right edge of QR card + padding
+    side_x = card_right + 22
     side_w = DISPLAY_W - side_x - 18
-    g.append(_text("NETWORK", x=side_x, y=y0 + 10, scale=1, color=LABEL_3))
-    g.append(_text(str(ssid)[:20], x=side_x, y=y0 + 30, scale=2, color=ACCENT_LIGHT))
 
+    # Hero SSID (scale=3) in accent_light
+    g.append(_text(str(ssid)[:14], x=side_x, y=y0 + 24, scale=3,
+                   color=ACCENT_LIGHT))
+
+    # Security + key-rotation TTL as two inline chips under the SSID
+    chip_y = y0 + 56
     sec = (qr.get("security") or "WPA2")
-    g.append(_text("SECURITY", x=side_x, y=y0 + 58, scale=1, color=LABEL_3))
-    g.append(_text(str(sec)[:20], x=side_x, y=y0 + 76, scale=2, color=TEXT))
+    chip_x = _mini_chip(g, side_x, chip_y, str(sec)[:8], ACCENT)
+    if rotation_on:
+        ttl_col = ORANGE if ttl and ttl < 60 else LABEL_2
+        ttl_str = _fmt_short_ttl(ttl) if ttl else "--:--"
+        _mini_chip(g, chip_x + 8, chip_y, "key " + ttl_str, ttl_col)
 
-    # Cleartext password for users whose phone won't scan the QR (or who
-    # just want to type it into a laptop / a second device).
+    # Password — single line if it fits at scale=2; otherwise fall back
+    # to a compact scale=1 single line. No split, no "all lowercase" tip
+    # line — if you can see the chars, you already know the case.
     key = qr.get("key") or ""
     if key:
-        g.append(_text("PASSWORD", x=side_x, y=y0 + 104, scale=1,
+        g.append(_text("PASSWORD", x=side_x, y=y0 + 90, scale=1,
                        color=LABEL_3))
-        half = len(key) // 2 + (len(key) % 2)
-        g.append(_text(key[:half], x=side_x, y=y0 + 124, scale=2, color=TEXT))
-        if len(key) > half:
-            g.append(_text(key[half:], x=side_x, y=y0 + 146, scale=2, color=TEXT))
-        g.append(_text("all lowercase", x=side_x, y=y0 + 168, scale=1,
-                       color=LABEL_3))
+        # scale=2 terminalio is ~12 px/char. If the key fits, use scale=2.
+        if len(key) * 12 <= side_w:
+            g.append(_text(key, x=side_x, y=y0 + 112, scale=2, color=TEXT))
+        else:
+            g.append(_text(key, x=side_x, y=y0 + 108, scale=1, color=TEXT))
 
-    # Rotate button only shows when the bridge has rotation enabled.
-    # Pill-shaped to match the new nav-bar language.
+    # Muted instruction — tells the user exactly what to do with the
+    # card on the left.
+    g.append(_text("Scan with camera, or type",
+                   x=side_x, y=y0 + 140, scale=1, color=LABEL_3))
+    g.append(_text("the password manually.",
+                   x=side_x, y=y0 + 154, scale=1, color=LABEL_3))
+
+    # Rotate button, pill-shaped, sized to the sidebar width.
     if rotation_on:
-        bw = side_w
-        bh = 30
-        bx = side_x
-        by = DISPLAY_H - nav_h - bh - 8
-        pr = bh // 2
-        g.append(_rect(bx, by, bw, bh, ACCENT_SUBTLE))
-        g.append(_circle(bx, by + pr, pr, ACCENT_SUBTLE))
-        g.append(_circle(bx + bw, by + pr, pr, ACCENT_SUBTLE))
-        g.append(_text("Rotate now", x=bx + bw // 2, y=by + bh // 2,
-                       scale=1, color=ACCENT_LIGHT, anchor=(0.5, 0.5)))
-        _region("qr_rotate", bx - pr, by, bw + 2 * pr, bh, _rotate_key)
+        bh = 32
+        by = DISPLAY_H - nav_h - bh - 10
+        _pill_button(g, "Rotate key", side_x, by, side_w, bh,
+                     ACCENT_LIGHT, _rotate_key, region_name="qr_rotate")
 
     _nav_bar(g)
 
