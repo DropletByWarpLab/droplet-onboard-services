@@ -1027,7 +1027,7 @@ def _render_qr_matrix(g, matrix, ox, oy, module_px):
     # phone cameras at arm's length. Keeps the card visibly compact so
     # the sleek border stands out.
     pad = module_px * 2
-    border_w = 2
+    border_w = 1
     frame_w = size * module_px + pad * 2
     corner_r = min(pad, 10)
 
