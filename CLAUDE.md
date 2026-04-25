@@ -77,6 +77,8 @@ npm run test:ai-gateway     # ai-gateway only
 
 ## Environment variables
 
+> ⚠ **Never add new `MATTER_*` env vars.** matter.js scans `process.env` at startup and auto-imports every `MATTER_*` variable into its internal `VariableService`, dot-namespacing each one. Collisions with root-node behavior ids throw `UnsupportedCastError: Property "X" is unsupported` and break controller init. Use a `DROPLET_MATTER_*` prefix for our own env vars instead. `MATTER_STORAGE_PATH` is the only surviving `MATTER_*` name and is allow-listed by `scripts/test-security.sh`. Full rationale: [`apps/orchestrator/src/config.ts`](apps/orchestrator/src/config.ts) — the block comment above the `Matter` schema section.
+
 | Variable             | Description                                          |
 |----------------------|------------------------------------------------------|
 | `DATABASE_URL`       | PostgreSQL connection string                         |

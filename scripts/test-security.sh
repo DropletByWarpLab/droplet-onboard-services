@@ -169,6 +169,75 @@ else
 fi
 
 # =============================================================================
+# Test 7: No new MATTER_* env vars outside the narrow allowlist
+# =============================================================================
+# matter.js (@matter/nodejs) auto-imports every process env var starting
+# with `MATTER_` into its internal VariableService under a dot-namespaced
+# key: `MATTER_FOO_BAR` becomes the var `foo.bar`. If the first segment
+# matches a root-node behavior id, matter.js merges that subtree into the
+# behavior's default state at activation time and throws
+#     UnsupportedCastError: Property "<leaf>" is unsupported
+# if the schema doesn't declare the key — at which point the whole Matter
+# controller fails to initialize with a message that points nowhere near
+# the real cause.
+#
+# Known collision we've already paid for:
+#   MATTER_CONTROLLER_NAME → var `controller.name` → collides with the
+#   root-node `controller` behavior. Fixed by renaming to
+#   DROPLET_MATTER_CONTROLLER_NAME. See the full block comment in
+#   apps/orchestrator/src/config.ts.
+#
+# Only MATTER_STORAGE_PATH is allow-listed (no root-node behavior has id
+# `storage`, so the var subtree is visible to matter.js but never
+# merged). Every new Droplet env var that needs to reach the orchestrator
+# should use a `DROPLET_MATTER_*` prefix instead — that stays outside
+# matter.js's auto-import scope entirely.
+
+MATTER_ENV_ALLOWLIST="MATTER_STORAGE_PATH"
+
+_scan_matter_env() {
+  local file="$1" pattern="$2"
+  [ -f "$file" ] || return 0
+  local hits
+  hits=$(grep -nE "$pattern" "$file" 2>/dev/null || true)
+  [ -z "$hits" ] && return 0
+  local line var found=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    var=$(printf '%s' "$line" | grep -oE "MATTER_[A-Z_]+" | head -1)
+    [ -n "$var" ] || continue
+    case " $MATTER_ENV_ALLOWLIST " in
+      *" $var "*) continue ;;
+    esac
+    found+="    ${file#$REPO_ROOT/}:$line"$'\n'
+  done <<< "$hits"
+  printf '%s' "$found"
+}
+
+matter_env_violations=""
+# Compose env lines:        `      - MATTER_FOO=...`
+matter_env_violations+=$(_scan_matter_env "$COMPOSE_FILE" \
+  '^[[:space:]]*-[[:space:]]*MATTER_[A-Z_]+=')
+# Zod schema keys:           `  MATTER_FOO: z.string()...`
+matter_env_violations+=$(_scan_matter_env "$REPO_ROOT/apps/orchestrator/src/config.ts" \
+  '^[[:space:]]*MATTER_[A-Z_]+[[:space:]]*:')
+# Example env file:          `MATTER_FOO=change-me`
+matter_env_violations+=$(_scan_matter_env "$REPO_ROOT/.env.example" \
+  '^MATTER_[A-Z_]+=')
+# Secrets heredoc in setup:  `MATTER_FOO=$value`
+matter_env_violations+=$(_scan_matter_env "$REPO_ROOT/scripts/lib/secrets.sh" \
+  '^[[:space:]]*MATTER_[A-Z_]+=')
+
+if [ -z "$matter_env_violations" ]; then
+  pass "no MATTER_* env vars outside allowlist { $MATTER_ENV_ALLOWLIST }"
+else
+  fail "MATTER_* env var not in allowlist (collides with matter.js VariableService)"
+  printf "${_RED}%s${_RESET}" "$matter_env_violations" >&2
+  printf "    Use DROPLET_MATTER_* prefix for new env vars.\n" >&2
+  printf "    See apps/orchestrator/src/config.ts for the full explanation.\n\n" >&2
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
