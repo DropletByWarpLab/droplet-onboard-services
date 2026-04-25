@@ -26,7 +26,7 @@ const envSchema = z.object({
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
 
-  // --- Matter (native controller, replaces Home Assistant) ---
+  // --- Matter (native controller) ---
   //
   // DO NOT ADD NEW `MATTER_*` ENV VARS HERE.
   //

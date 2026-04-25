@@ -185,9 +185,8 @@ export interface HealthResponse {
 }
 
 // --- Smart Home / Matter (re-export) ---
-// Home Assistant is no longer part of the control plane — Matter is the
-// only smart-home integration. The category enum stays shared because
-// the dashboard UI uses it verbatim.
+// Matter is the smart-home integration. The category enum stays shared
+// because the dashboard UI uses it verbatim.
 export type { SmartHomeCategory } from "./smart-home.js";
 
 // --- Camera / Frigate (re-export) ---

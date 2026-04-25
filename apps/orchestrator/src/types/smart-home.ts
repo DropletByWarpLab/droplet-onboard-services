@@ -1,11 +1,11 @@
 // --- Device categories (used by the Matter controller) ---
 //
-// The Home Assistant bridge has been removed from this control plane;
-// Matter is the only smart-home path now. The `SmartHomeCategory` name is
-// kept for the category enum because the dashboard UI and the Matter
-// service both reference it directly — renaming it to `MatterCategory`
-// would ripple across DeviceCard.tsx, matter.service.ts, and stored
-// attribute maps, without any real clarity gain.
+// `SmartHomeCategory` is the device-category enum used across the
+// dashboard UI, the Matter service, and stored attribute maps. The name
+// stays generic ("smart-home") rather than collapsing to `MatterCategory`
+// because the same enum is what DeviceCard.tsx / DeviceGroup.tsx render
+// against — a rename would ripple across the frontend without any real
+// clarity gain.
 
 export type SmartHomeCategory =
   | "light"

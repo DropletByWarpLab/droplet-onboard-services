@@ -29,7 +29,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 - **Switch service:** Python, FastAPI, abstract driver interface (Lantronix SM8TAT2SA / future ASIC)
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Frigate
-- **Smart home:** Native Matter controller in the orchestrator (`matter.service.ts`). Home Assistant was removed — the dashboard always talked to Matter directly, and the HA container/bridge were dead weight.
+- **Smart home:** Native Matter controller in the orchestrator (`matter.service.ts`). The dashboard talks to Matter directly via `/api/matter/*`.
 
 ## Device setup
 

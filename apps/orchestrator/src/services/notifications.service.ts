@@ -12,9 +12,8 @@
  * the LLM `list_notifications` tool both read from this log so the user
  * has a single source of truth.
  *
- * (Home Assistant notify routing was removed when HA itself was removed —
- * Matter is the only smart-home path now. Push / phone routing will come
- * back via a dedicated notifier service, not via HA.)
+ * (Push / phone routing will land later through a dedicated notifier
+ * service — for now the in-app toast is the only delivery channel.)
  */
 
 import type { PrismaClient } from "@prisma/client";
