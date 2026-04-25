@@ -26,11 +26,8 @@ const envSchema = z.object({
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
 
-  // --- Home Assistant (optional fallback for non-Matter integrations) ---
-  HOMEASSISTANT_URL: z.string().default("http://localhost:8123"),
-  HOMEASSISTANT_TOKEN: z.string().default(""),
-
   // --- Matter (native controller) ---
+  //
   // DO NOT ADD NEW `MATTER_*` ENV VARS HERE.
   //
   // matter.js scans the entire process.env for `MATTER_*` at startup

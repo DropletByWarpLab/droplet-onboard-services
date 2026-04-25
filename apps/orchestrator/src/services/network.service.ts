@@ -2,7 +2,7 @@
  * Network service — business logic over the OpenWrt client.
  *
  * Fetches router state, caches in Redis, and provides a clean API
- * for the routes layer. Follows the same pattern as smart-home.service.ts.
+ * for the routes layer. Follows the same pattern as matter.service.ts.
  */
 
 import pino from "pino";

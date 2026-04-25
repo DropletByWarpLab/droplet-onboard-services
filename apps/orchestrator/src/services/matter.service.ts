@@ -1,8 +1,7 @@
 /**
  * Matter controller service — native Matter device discovery, commissioning, and control.
  *
- * Embeds matter.js directly in the orchestrator process. Replaces the
- * the Home Assistant dependency for Matter-protocol devices. Handles:
+ * Embeds matter.js directly in the orchestrator process. Handles:
  *  - mDNS-SD discovery of uncommissioned devices
  *  - PASE commissioning via pairing codes
  *  - Cluster-based device control (OnOff, LevelControl, Thermostat, etc.)

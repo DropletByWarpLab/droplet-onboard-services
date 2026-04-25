@@ -1,4 +1,11 @@
-// --- Smart Home types ---
+// --- Device categories (used by the Matter controller) ---
+//
+// `SmartHomeCategory` is the device-category enum used across the
+// dashboard UI, the Matter service, and stored attribute maps. The name
+// stays generic ("smart-home") rather than collapsing to `MatterCategory`
+// because the same enum is what DeviceCard.tsx / DeviceGroup.tsx render
+// against — a rename would ripple across the frontend without any real
+// clarity gain.
 
 export type SmartHomeCategory =
   | "light"
@@ -12,38 +19,6 @@ export type SmartHomeCategory =
   | "lock"
   | "camera"
   | "vacuum";
-
-export interface SmartHomeDevice {
-  entityId: string;
-  category: SmartHomeCategory;
-  name: string;
-  state: string;
-  attributes: Record<string, unknown>;
-  lastChanged: string;
-  lastUpdated: string;
-}
-
-export interface SmartHomeGrouped {
-  lights: SmartHomeDevice[];
-  switches: SmartHomeDevice[];
-  sensors: SmartHomeDevice[];
-  climate: SmartHomeDevice[];
-  media: SmartHomeDevice[];
-  covers: SmartHomeDevice[];
-  other: SmartHomeDevice[];
-}
-
-export interface SmartHomeCommand {
-  service: string;
-  data?: Record<string, unknown>;
-}
-
-export interface DiscoveredDevice {
-  flowId: string;
-  handler: string;
-  name: string;
-  description: string;
-}
 
 // --- Matter types ---
 

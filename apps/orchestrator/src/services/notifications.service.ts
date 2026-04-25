@@ -1,32 +1,24 @@
 /**
  * Notification dispatcher.
  *
- * One in-process function — `sendNotification()` — that fans a single
- * notification out to two channels:
- *
- *  1. **Toast (in-app)** — published as MQTT on `droplet/notifications/{user}`.
- *     The ws-bridge service already forwards user-scoped MQTT topics over
- *     the dashboard's WebSocket, so any open browser tab receives the toast
- *     in real time without polling.
- *  2. **Home Assistant notify** — calls the HA `notify` domain's
- *     `send_message` service if a target is configured. This lets the user
- *     route reminders to their phone, an Echo, etc., via whatever HA
- *     notify integrations they already have set up.
+ * One in-process function — `sendNotification()` — that publishes a
+ * notification to the in-app toast channel (MQTT on
+ * `droplet/notifications/{user}`). The ws-bridge service forwards
+ * user-scoped MQTT topics over the dashboard's WebSocket, so any open
+ * browser tab receives the toast in real time without polling.
  *
  * Every dispatch is logged in the NotificationLog table (kind, title,
- * channels attempted, delivery status, error). The in-app "Recent
- * notifications" panel + the LLM `list_notifications` tool both read from
- * this log so the user has a single source of truth.
+ * delivery status, error). The in-app "Recent notifications" panel +
+ * the LLM `list_notifications` tool both read from this log so the user
+ * has a single source of truth.
  *
- * Failures on one channel don't block the other. The function returns the
- * NotificationLog row so callers can surface the result in their HTTP
- * response if they want.
+ * (Push / phone routing will land later through a dedicated notifier
+ * service — for now the in-app toast is the only delivery channel.)
  */
 
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { publish } from "./mqtt.service.js";
-import * as ha from "./home-assistant.client.js";
 
 const logger = pino({ name: "notifications" });
 
@@ -37,9 +29,6 @@ export interface DispatchInput {
   kind: NotificationKind;
   title: string;
   body?: string | null;
-  /** HA notify target entity (e.g. "notify.mobile_app_alice_phone"). When
-   *  omitted, the HA channel is skipped. */
-  haTarget?: string | null;
 }
 
 export interface DispatchResult {
@@ -79,28 +68,6 @@ export async function sendNotification(
   });
   if (toastOk) channels.push("toast");
   else errors.push("toast: mqtt_unavailable");
-
-  // Channel 2: HA notify. Only if the caller specified a target. Treat HA
-  // failures as non-fatal so a misconfigured target doesn't suppress the
-  // toast/log path.
-  if (input.haTarget) {
-    try {
-      // HA's notify services accept `{ message, title, target? }`. Service
-      // name is the bit after `notify.`, e.g. `mobile_app_alice_phone`.
-      const service = input.haTarget.startsWith("notify.")
-        ? input.haTarget.slice("notify.".length)
-        : input.haTarget;
-      await ha.callService("notify", service, "", {
-        title: input.title,
-        message: input.body ?? input.title,
-      });
-      channels.push("ha");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.warn({ err, target: input.haTarget }, "HA notification call failed");
-      errors.push(`ha: ${msg}`);
-    }
-  }
 
   const delivered = channels.length > 0;
   const log = await prisma.notificationLog.create({

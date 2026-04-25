@@ -178,21 +178,16 @@ export interface HealthResponse {
     redis: boolean;
     aiGateway: boolean;
     matter: boolean;
-    homeAssistant: boolean;
     router: boolean;
     frigate: boolean;
     switch: boolean;
   };
 }
 
-// --- Smart Home (re-export) ---
-export type {
-  SmartHomeCategory,
-  SmartHomeDevice,
-  SmartHomeGrouped,
-  SmartHomeCommand,
-  DiscoveredDevice,
-} from "./smart-home.js";
+// --- Smart Home / Matter (re-export) ---
+// Matter is the smart-home integration. The category enum stays shared
+// because the dashboard UI uses it verbatim.
+export type { SmartHomeCategory } from "./smart-home.js";
 
 // --- Camera / Frigate (re-export) ---
 export type {

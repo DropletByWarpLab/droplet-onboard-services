@@ -20,7 +20,6 @@ const sendSchema = z.object({
   kind: z.enum(["reminder", "event", "system", "ai"]).default("system"),
   title: z.string().min(1).max(500),
   body: z.string().max(2000).optional(),
-  ha_target: z.string().max(200).optional(),
 });
 
 export function createNotificationsRouter(prisma: PrismaClient): Router {
@@ -48,7 +47,6 @@ export function createNotificationsRouter(prisma: PrismaClient): Router {
         kind: parsed.data.kind,
         title: parsed.data.title,
         body: parsed.data.body,
-        haTarget: parsed.data.ha_target,
       });
       res.status(202).json(result);
     } catch (err) {

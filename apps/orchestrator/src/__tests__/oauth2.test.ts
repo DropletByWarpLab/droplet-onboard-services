@@ -21,8 +21,6 @@ vi.mock("../config.js", () => ({
     FILES_ROOT: ".data/files",
     MAX_UPLOAD_SIZE_MB: 100,
     STORAGE_BACKEND: "legacy",
-    HOMEASSISTANT_URL: "http://localhost:8123",
-    HOMEASSISTANT_TOKEN: "",
     AI_GATEWAY_GRPC_URL: "localhost:50051",
     JWT_SECRET: "test-jwt-secret-for-oauth2-tests",
   },

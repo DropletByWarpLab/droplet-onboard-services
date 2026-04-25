@@ -37,7 +37,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 ### Infrastructure
 - **Unified Docker Compose stack** — 20 services in a single file (`docker/docker-compose.yml`).
 - Nginx reverse proxy terminating on `:80` and `:443` (`docker/nginx.conf`, `docker/certs/`).
-- PostgreSQL 16, Redis 7, Mosquitto 2 MQTT broker, Nextcloud 29 (apache), Home Assistant, Frigate NVR (`docker/docker-compose.yml`, `docker/frigate/config.yml`, `docker/mosquitto.conf`, `docker/nextcloud-skeleton/`, `docker/init-nextcloud-db.sh`, `docker/nextcloud-init.sh`).
+- PostgreSQL 16, Redis 7, Mosquitto 2 MQTT broker, Nextcloud 29 (apache), Frigate NVR (`docker/docker-compose.yml`, `docker/frigate/config.yml`, `docker/mosquitto.conf`, `docker/nextcloud-skeleton/`, `docker/init-nextcloud-db.sh`, `docker/nextcloud-init.sh`). Smart-home devices are controlled by the orchestrator's native Matter service (`apps/orchestrator/src/services/matter.service.ts`).
 - OpenWrt router image builder (`openwrt/build.sh`, `openwrt/files/`, `openwrt/scripts/`, `openwrt/README.md`).
 - Setup + factory-reset scripts with flags for `--dry-run`, `--systemd`, `--regenerate-env`, etc. (`scripts/setup.sh`, `scripts/factory-reset.sh`, `scripts/README.md`).
 - Turbo 2.0 monorepo pipeline (`turbo.json`, `package.json`).

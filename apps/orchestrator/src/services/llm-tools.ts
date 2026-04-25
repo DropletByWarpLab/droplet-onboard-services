@@ -1032,8 +1032,8 @@ const create_reminder: Tool = {
   name: "create_reminder",
   description:
     "Create a reminder. The Droplet will fire a notification at due_at " +
-    "(toast in the dashboard, plus HA notify if configured). Pass " +
-    "calendar_event_id to link the reminder to an event for context.",
+    "(in-app toast in the dashboard). Pass calendar_event_id to link the " +
+    "reminder to an event for context.",
   parameters: {
     type: "object",
     properties: {
@@ -1130,15 +1130,13 @@ const complete_reminder: Tool = {
 const send_notification_tool: Tool = {
   name: "send_notification",
   description:
-    "Send an immediate notification to the user. Always appears as an in-app " +
-    "toast on any open dashboard tab; if ha_target is set, also routes through " +
-    "the named Home Assistant notify service (e.g. 'notify.mobile_app_alice').",
+    "Send an immediate in-app toast notification to the user. Appears on " +
+    "any open dashboard tab via the WebSocket bridge.",
   parameters: {
     type: "object",
     properties: {
       title: { type: "string", description: "Headline (1-500 chars)." },
       body: { type: "string", description: "Optional longer message." },
-      ha_target: { type: "string", description: "Optional HA notify target." },
     },
     required: ["title"],
   },
@@ -1149,7 +1147,6 @@ const send_notification_tool: Tool = {
       kind: "ai",
       title: String(args.title ?? ""),
       body: args.body as string | undefined,
-      haTarget: args.ha_target as string | undefined,
     });
     return result;
   },

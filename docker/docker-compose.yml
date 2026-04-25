@@ -62,7 +62,6 @@ services:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
-      - HOMEASSISTANT_URL=http://homeassistant:8123
       - NEXTCLOUD_URL=http://nextcloud:80
       - MATTER_STORAGE_PATH=/data/matter-storage
       # DROPLET_-prefixed, NOT MATTER_-prefixed. matter.js scans the process
@@ -202,17 +201,6 @@ services:
       - cache
       - broker
       - orchestrator
-    restart: always
-
-  # --- Home Assistant ---
-  homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:stable
-    ports:
-      - "8123:8123"
-    volumes:
-      - ha-config:/config
-    environment:
-      - TZ=UTC
     restart: always
 
   # --- File indexer (Phase 4: AI content search) ---
@@ -448,5 +436,4 @@ volumes:
   frigate-config:
   aikeys:
   nextcloud-data:
-  ha-config:
   matter-data:

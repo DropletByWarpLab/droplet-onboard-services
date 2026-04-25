@@ -15,7 +15,7 @@ services/file-indexer/  Python watchdog — filesystem indexer + embedder (forme
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
 services/switch/        FastAPI — Managed switch control (Lantronix/ASIC driver)
 openwrt/                OpenWrt image builder + config overlay for Pi 5 router
-docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home Assistant, Frigate NVR
+docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Frigate NVR
 ```
 
 ## Tech stack
@@ -28,7 +28,8 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Home 
 - **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
 - **Switch service:** Python, FastAPI, abstract driver interface (Lantronix SM8TAT2SA / future ASIC)
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
-- **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Home Assistant, Frigate
+- **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Frigate
+- **Smart home:** Native Matter controller in the orchestrator (`matter.service.ts`). The dashboard talks to Matter directly via `/api/matter/*`.
 
 ## Device setup
 
@@ -67,13 +68,12 @@ npm run test:ai-gateway     # ai-gateway only
 | cache          | —     | Redis 7, internal only                    |
 | broker         | —     | MQTT, internal only                       |
 | ai-gateway     | —     | Proxied at `/ai/`                         |
-| homeassistant  | :8123 |                                           |
 | frigate        | —     | NVR + AI detection, profile `linux` (needs `/dev/dri/renderD128`) |
 | switch         | :8081 | Managed switch control, profile `full`    |
 | camera-discovery | —   | ONVIF/RTSP scanner, profile `full`        |
 | routing        | :8080 | OpenWrt control, host network             |
 
-`COMPOSE_PROFILES=linux` is set in `.env` automatically by `setup.sh` on Linux so Frigate starts with the default stack; on macOS it's empty so the GPU device mount never trips. Add `full` to opt into HA/switch/camera-discovery on either OS.
+`COMPOSE_PROFILES=linux` is set in `.env` automatically by `setup.sh` on Linux so Frigate starts with the default stack; on macOS it's empty so the GPU device mount never trips. Add `full` to opt into switch/camera-discovery on either OS.
 
 ## Environment variables
 
