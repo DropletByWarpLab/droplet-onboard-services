@@ -23,12 +23,14 @@ import {
 import {
   fetchSnapshot,
   fetchEventThumbnail,
+  openMjpegStream,
   enableDetection,
   disableDetection,
   deleteCamera,
   addCamera,
   fetchEvents,
 } from "../services/frigate.client.js";
+import { Readable } from "node:stream";
 import { config } from "../config.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
@@ -514,6 +516,42 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       const events = await getRecentEvents(5, req.params.name);
       res.json({ ...camera, recentEvents: events });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Camera live MJPEG stream (proxied from Frigate — auth-gated) ---
+  //
+  // Frigate serves a multipart `Content-Type: multipart/x-mixed-replace`
+  // stream at `/api/{name}` that any browser will render natively in an
+  // <img> as a continuous video feed. Snapshots are good enough for the
+  // grid-card thumbnails; this is the path the detail panel uses to give
+  // the user a real live view without leaving the Droplet UI.
+  //
+  // The body has to be piped, not buffered — the stream never EOFs while
+  // the camera is up. We hook AbortController to req.close so closing the
+  // browser tab unwinds the upstream fetch instead of leaking sockets.
+  router.get("/cameras/:name/live", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const ctrl = new AbortController();
+      req.on("close", () => ctrl.abort());
+      const frigateResp = await openMjpegStream(req.params.name, ctrl.signal);
+      const contentType =
+        frigateResp.headers.get("content-type") ||
+        "multipart/x-mixed-replace;boundary=frame";
+      res.setHeader("Content-Type", contentType);
+      // The stream is live — never let an intermediate cache (browser or
+      // upstream proxy) hold a "frame" and replay it.
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Connection", "close");
+      if (!frigateResp.body) {
+        return res.status(502).json({ error: "Frigate returned no body" });
+      }
+      Readable.fromWeb(frigateResp.body as never).pipe(res);
     } catch (err) {
       next(err);
     }
