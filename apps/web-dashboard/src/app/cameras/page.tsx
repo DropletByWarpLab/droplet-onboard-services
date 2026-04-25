@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { RefreshCw, Video, ExternalLink, Plus, Radar } from "lucide-react";
+import { RefreshCw, Video, Plus, Radar } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
@@ -123,15 +123,6 @@ export default function CamerasPage() {
             <Radar size={16} className={scanning ? "animate-pulse" : ""} />
             <span className="type-subheadline">Scan</span>
           </button>
-          <a
-            href="/frigate/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <ExternalLink size={16} />
-            <span className="type-subheadline">Advanced</span>
-          </a>
           <button
             onClick={refresh}
             disabled={isRefreshing}
