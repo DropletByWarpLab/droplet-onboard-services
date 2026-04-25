@@ -38,7 +38,7 @@ export function useCalendarEvents(opts: { from?: Date; to?: Date } = {}) {
   const url = `/api/calendar/events${params.toString() ? `?${params}` : ""}`;
   const { data, error, isLoading, mutate } = useSWR<{ events: CalendarEvent[] }>(
     url,
-    (u) => apiFetch(u, { credentials: "same-origin" }),
+    (u: string) => apiFetch<{ events: CalendarEvent[] }>(u, { credentials: "same-origin" }),
   );
   return { events: data?.events ?? [], error, isLoading, refresh: mutate };
 }
@@ -46,7 +46,7 @@ export function useCalendarEvents(opts: { from?: Date; to?: Date } = {}) {
 export function useCalendarSources() {
   const { data, error, isLoading, mutate } = useSWR<{ sources: CalendarSource[] }>(
     "/api/calendar/sources",
-    (u) => apiFetch(u, { credentials: "same-origin" }),
+    (u: string) => apiFetch<{ sources: CalendarSource[] }>(u, { credentials: "same-origin" }),
   );
   return { sources: data?.sources ?? [], error, isLoading, refresh: mutate };
 }

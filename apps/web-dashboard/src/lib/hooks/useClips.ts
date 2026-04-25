@@ -21,7 +21,7 @@ export function useClips(opts: { camera?: string; limit?: number } = {}) {
   const url = `/api/cameras/clips${params.toString() ? `?${params}` : ""}`;
   const { data, error, isLoading, mutate } = useSWR<{ clips: Clip[] }>(
     url,
-    (u) => apiFetch(u, { credentials: "same-origin" }),
+    (u: string) => apiFetch<{ clips: Clip[] }>(u, { credentials: "same-origin" }),
     { refreshInterval: 30_000 },
   );
   return { clips: data?.clips ?? [], error, isLoading, refresh: mutate };

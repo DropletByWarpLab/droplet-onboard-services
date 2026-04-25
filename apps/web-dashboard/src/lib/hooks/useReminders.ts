@@ -26,7 +26,7 @@ export function useReminders(opts: { includeCompleted?: boolean } = {}) {
   const url = `/api/reminders${params.toString() ? `?${params}` : ""}`;
   const { data, error, isLoading, mutate } = useSWR<{ reminders: Reminder[] }>(
     url,
-    (u) => apiFetch(u, { credentials: "same-origin" }),
+    (u: string) => apiFetch<{ reminders: Reminder[] }>(u, { credentials: "same-origin" }),
     // Refresh every 30s so a reminder that just fired updates its
     // notifiedAt without a manual reload.
     { refreshInterval: 30_000 },
