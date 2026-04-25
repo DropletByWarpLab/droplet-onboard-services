@@ -49,21 +49,30 @@ async def ws_discovery_scan(timeout: float = 5.0) -> list[dict]:
     devices: list[dict] = []
 
     try:
-        from wsdiscovery import WSDiscovery
+        from wsdiscovery import WSDiscovery, QName
 
         wsd = WSDiscovery()
         wsd.start()
         try:
-            # Search for ONVIF network video transmitter devices
+            # Search for ONVIF network video transmitter devices.
+            # wsdiscovery 2.0.x expects QName objects here, not strings —
+            # threaded._sendPendingMessages calls `type.getNamespace()` on
+            # each element. Passing strings crashes the internal sender
+            # thread every probe cycle with:
+            #     AttributeError: 'str' object has no attribute 'getNamespace'
+            # The ONVIF namespaces below come from the ONVIF Core Specification
+            # (`dn` = network/wsdl, `tds` = device/wsdl).
+            onvif_types = [
+                QName("http://www.onvif.org/ver10/network/wsdl",
+                      "NetworkVideoTransmitter"),
+                QName("http://www.onvif.org/ver10/device/wsdl", "Device"),
+            ]
             services = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: wsd.searchServices(
                     timeout=int(timeout),
                     scopes=[],
-                    types=[
-                        "dn:NetworkVideoTransmitter",
-                        "tds:Device",
-                    ],
+                    types=onvif_types,
                 ),
             )
 

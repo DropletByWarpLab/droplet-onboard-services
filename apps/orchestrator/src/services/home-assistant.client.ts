@@ -76,11 +76,16 @@ export async function acceptDiscoveryFlow(flowId: string): Promise<void> {
 }
 
 export async function healthCheck(): Promise<boolean> {
+  // Use an unauthenticated endpoint so we're testing *reachability*, not
+  // whether HOMEASSISTANT_TOKEN is valid. `/api/` requires a Bearer token —
+  // if the token is unset or stale, HA returns 401 and the old probe
+  // incorrectly reported HA as down. `/manifest.json` is served before the
+  // auth layer (status 200 in all configured states) and only fails if HA
+  // is genuinely unreachable.
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${BASE_URL}/api/`, {
-      headers: headers(),
+    const res = await fetch(`${BASE_URL}/manifest.json`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);
