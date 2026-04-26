@@ -112,9 +112,14 @@ export function PushSubscriptionCard() {
       if (!reg.active) await navigator.serviceWorker.ready;
 
       const publicKey = await fetchVapidPublicKey();
+      // Cast to BufferSource — newer TS lib.dom typings narrowed
+      // applicationServerKey to BufferSource which doesn't accept the
+      // generic Uint8Array<ArrayBufferLike> our helper returns. The
+      // underlying byte sequence is what pushManager.subscribe wants;
+      // the cast is correctness-preserving.
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey),
+        applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
       });
       await registerPushSubscription(sub);
       setEndpoint(sub.endpoint);
