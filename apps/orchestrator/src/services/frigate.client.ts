@@ -133,6 +133,82 @@ export async function fetchVersion(): Promise<string> {
   return resp.text();
 }
 
+// --- PTZ control (Phase 6.1) ---
+//
+// Frigate exposes PTZ via /api/<camera>/ptz?action=...
+// The action set we proxy: MOVE_*, ZOOM_IN, ZOOM_OUT, STOP, preset.
+// Frigate also has a "FOCUS_*" set (focus-assist on supporting
+// cameras); we leave that out for now — most home cameras autofocus.
+
+export type PtzAction =
+  | "MOVE_UP"
+  | "MOVE_DOWN"
+  | "MOVE_LEFT"
+  | "MOVE_RIGHT"
+  | "ZOOM_IN"
+  | "ZOOM_OUT"
+  | "STOP";
+
+export async function ptzMove(
+  cameraName: string,
+  action: PtzAction,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/ptz?action=${action}`,
+    { method: "PUT", signal: timeout() },
+  );
+  if (!resp.ok) throw new Error(`PTZ ${action}: ${resp.status}`);
+}
+
+export async function ptzGoToPreset(
+  cameraName: string,
+  preset: string,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/ptz?action=preset&preset=${encodeURIComponent(preset)}`,
+    { method: "PUT", signal: timeout() },
+  );
+  if (!resp.ok) throw new Error(`PTZ preset: ${resp.status}`);
+}
+
+/** Look up which PTZ features the camera supports — Frigate exposes
+ *  this on the per-camera config (`onvif.autotracking`, plus
+ *  `support_*` flags Frigate computes from the ONVIF probe). */
+export async function fetchPtzCapabilities(
+  cameraName: string,
+): Promise<{
+  supportsPanTilt: boolean;
+  supportsZoom: boolean;
+  presets: string[];
+}> {
+  // The capabilities live under /api/config/cameras/<name>/onvif/info or
+  // similar in newer Frigate. The simpler probe is /api/<name>/ptz/info
+  // which returns { features: [...], presets: [...] } when supported.
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/ptz/info`,
+    { signal: timeout() },
+  );
+  if (!resp.ok) {
+    // 404 = no PTZ on this camera. That's a normal answer, not an error.
+    if (resp.status === 404) {
+      return { supportsPanTilt: false, supportsZoom: false, presets: [] };
+    }
+    throw new Error(`PTZ info: ${resp.status}`);
+  }
+  const data = (await resp.json()) as Record<string, unknown>;
+  const features = Array.isArray(data.features)
+    ? (data.features as unknown[]).map(String)
+    : [];
+  const presets = Array.isArray(data.presets)
+    ? (data.presets as unknown[]).map(String)
+    : [];
+  return {
+    supportsPanTilt: features.includes("pt") || features.includes("pan-tilt"),
+    supportsZoom: features.includes("zoom"),
+    presets,
+  };
+}
+
 // --- Snapshots & Streams ---
 
 export async function fetchSnapshot(
@@ -164,6 +240,20 @@ export async function openMjpegStream(
     { signal },
   );
   if (!resp.ok) throw new Error(`Frigate MJPEG: ${resp.status}`);
+  return resp;
+}
+
+/**
+ * Frigate's auto-composited "birdseye" view — every active camera in
+ * one MJPEG stream, with motion-active cameras brought to the front.
+ * Same multipart MIME as a single-camera stream, so the browser plays
+ * it as a live `<img>`.
+ */
+export async function openBirdseyeStream(
+  signal?: AbortSignal,
+): Promise<Response> {
+  const resp = await fetch(`${FRIGATE_URL}/api/birdseye`, { signal });
+  if (!resp.ok) throw new Error(`Birdseye MJPEG: ${resp.status}`);
   return resp;
 }
 

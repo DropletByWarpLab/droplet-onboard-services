@@ -445,6 +445,23 @@ export interface MotionMaskPolygon {
   coordinates: number[];
 }
 
+// --- PTZ (Phase 6.1) ---
+
+export type PtzAction =
+  | "MOVE_UP"
+  | "MOVE_DOWN"
+  | "MOVE_LEFT"
+  | "MOVE_RIGHT"
+  | "ZOOM_IN"
+  | "ZOOM_OUT"
+  | "STOP";
+
+export interface PtzCapabilities {
+  supportsPanTilt: boolean;
+  supportsZoom: boolean;
+  presets: string[];
+}
+
 // --- Camera system status (Phase 5) ---
 
 export interface DetectorStat {

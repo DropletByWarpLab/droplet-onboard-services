@@ -8,6 +8,8 @@ import type {
   EventDetail,
   EventFilter,
   FilteredEventsResult,
+  PtzAction,
+  PtzCapabilities,
   RecordingDay,
   RecordingSegment,
   ReviewFilter,
@@ -541,6 +543,54 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   return body.status;
 }
 
+// --- PTZ (Phase 6.1) ---
+
+export async function fetchPtzCapabilities(
+  cameraName: string,
+): Promise<PtzCapabilities> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/ptz`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch PTZ caps: ${res.status}`);
+  return res.json();
+}
+
+export async function ptzMove(
+  cameraName: string,
+  action: PtzAction,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/ptz`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `PTZ failed: ${res.status}`);
+  }
+}
+
+export async function ptzGoToPreset(
+  cameraName: string,
+  preset: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/ptz/preset`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preset }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Preset failed: ${res.status}`);
+  }
+}
+
 /** Restart Frigate. Returns the orchestrator's response which may
  *  include a confirmation token (tier-2 confirmation flow). */
 export async function restartFrigate(
@@ -651,6 +701,13 @@ export function getCameraSnapshotUrl(name: string): string {
  */
 export function getCameraLiveUrl(name: string): string {
   return `${BASE}/api/cameras/${encodeURIComponent(name)}/live`;
+}
+
+/** Frigate's auto-composited birdseye MJPEG. Same `<img src=>` pattern
+ *  as a single-camera feed. Returns 404 from the orchestrator if Frigate
+ *  doesn't have birdseye configured. */
+export function getBirdseyeLiveUrl(): string {
+  return `${BASE}/api/cameras/birdseye/live`;
 }
 
 // --- Camera groups ---
