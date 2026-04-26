@@ -4,6 +4,7 @@ import type {
   CameraPinInfo,
   CameraSettings,
   CameraSettingsPatch,
+  CameraSystemStatus,
   EventDetail,
   EventFilter,
   FilteredEventsResult,
@@ -529,6 +530,34 @@ export async function fetchCameraSettings(
   }
   const body = (await res.json()) as { settings: CameraSettings };
   return body.settings;
+}
+
+// --- Camera system status (Phase 5) ---
+
+export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
+  const res = await authFetch(`${BASE}/api/cameras/system`);
+  if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
+  const body = (await res.json()) as { status: CameraSystemStatus };
+  return body.status;
+}
+
+/** Restart Frigate. Returns the orchestrator's response which may
+ *  include a confirmation token (tier-2 confirmation flow). */
+export async function restartFrigate(
+  confirmationToken?: string,
+): Promise<{ status: string; confirmationToken?: string; reason?: string }> {
+  const res = await authFetch(`${BASE}/api/cameras/system/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(confirmationToken ? { confirmationToken } : {}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok && res.status !== 202) {
+    throw new Error(
+      (body as { error?: string }).error || `Failed: ${res.status}`,
+    );
+  }
+  return body as { status: string; confirmationToken?: string; reason?: string };
 }
 
 export async function patchCameraSettings(

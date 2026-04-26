@@ -116,6 +116,23 @@ export async function fetchStats(): Promise<Record<string, unknown>> {
   return resp.json();
 }
 
+/** Trigger a full Frigate restart. Use sparingly — every camera goes
+ *  dark for 5–15 seconds while go2rtc + the detector re-init. */
+export async function restartFrigate(): Promise<void> {
+  const resp = await fetch(`${FRIGATE_URL}/api/restart`, {
+    method: "POST",
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new Error(`Frigate restart: ${resp.status}`);
+}
+
+/** Fetch Frigate's version string. Cheap; used by the system page. */
+export async function fetchVersion(): Promise<string> {
+  const resp = await fetch(`${FRIGATE_URL}/api/version`, { signal: timeout() });
+  if (!resp.ok) throw new Error(`Frigate version: ${resp.status}`);
+  return resp.text();
+}
+
 // --- Snapshots & Streams ---
 
 export async function fetchSnapshot(
