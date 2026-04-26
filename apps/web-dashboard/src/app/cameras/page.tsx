@@ -2,13 +2,13 @@
 
 import { useState } from "react";
 import useSWR from "swr";
+import { useRouter } from "next/navigation";
 import { RefreshCw, Video, Plus, Radar } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
 import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { CameraDiscoveryBanner } from "@/components/cameras/CameraDiscoveryBanner";
-import { CameraDetailPanel } from "@/components/cameras/CameraDetailPanel";
 import { CameraNotificationToast } from "@/components/cameras/CameraNotificationToast";
 import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
 import { AddCameraModal } from "@/components/cameras/AddCameraModal";
@@ -28,9 +28,6 @@ export default function CamerasPage() {
     refresh,
     acceptCamera,
     rejectCamera,
-    enableCam,
-    disableCam,
-    removeCam,
   } = useCameras();
 
   const { notifications, dismissNotification } = useCameraEvents();
@@ -45,9 +42,17 @@ export default function CamerasPage() {
     { refreshInterval: 30_000 }
   );
 
-  const [selectedCamera, setSelectedCamera] = useState<CameraInfo | null>(null);
+  const router = useRouter();
   const [showAddModal, setShowAddModal] = useState(false);
   const [scanning, setScanning] = useState(false);
+
+  // Click on a card → navigate to the dedicated fullscreen page at
+  // /cameras/[name]. The dialog-style CameraDetailPanel that we used
+  // before is intentionally retired here in favour of a real route, so
+  // back/forward, deep links from the LLM tool surface, and external
+  // notification links all land on the same view.
+  const openCamera = (cam: CameraInfo) =>
+    router.push(`/cameras/${encodeURIComponent(cam.name)}`);
 
   if (isLoading) {
     return (
@@ -186,24 +191,13 @@ export default function CamerasPage() {
       )}
 
       {/* Camera grid */}
-      <CameraGrid cameras={cameras} onCameraClick={setSelectedCamera} />
+      <CameraGrid cameras={cameras} onCameraClick={openCamera} />
 
       {/* Recent events */}
       {recentEvents.length > 0 && (
         <div className="mt-8">
           <CameraEvents events={recentEvents} />
         </div>
-      )}
-
-      {/* Detail panel */}
-      {selectedCamera && (
-        <CameraDetailPanel
-          camera={selectedCamera}
-          onEnable={enableCam}
-          onDisable={disableCam}
-          onRemove={removeCam}
-          onClose={() => setSelectedCamera(null)}
-        />
       )}
 
       {/* Add Camera Modal */}

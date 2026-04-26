@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Video, VideoOff, Eye, Circle } from "lucide-react";
-import { getCameraSnapshotUrl } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { VideoOff, Circle } from "lucide-react";
+import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import type { CameraInfo } from "@/lib/types";
 
 interface CameraCardProps {
@@ -10,11 +10,21 @@ interface CameraCardProps {
   onClick: (camera: CameraInfo) => void;
 }
 
-// Bucket Date.now() into 5-second windows so the <img> URL changes every
-// 5s and the browser can't pin a stale 401/500 response under HTTP cache.
-// The orchestrator already sets max-age=5 on the snapshot, so this matches
-// its freshness window — refresh = one network request, not a thrash.
-function useSnapshotKey(intervalMs = 5000) {
+// 1-second cache bucket: short enough to feel "near-live" on the grid, long
+// enough that the browser still hits its HTTP cache between paint cycles
+// rather than thrashing a fresh request every animation frame. Pairs with
+// the orchestrator's `max-age=5` Cache-Control on /snapshot — overlapping
+// short freshness windows let any transient 401/500/Frigate-restart unstick
+// itself within a second instead of pinning the broken image forever.
+const SNAPSHOT_BUCKET_MS = 1000;
+
+// Switch to MJPEG only on hover/focus so the grid stays cheap by default.
+// 6 cards in MJPEG would burn 30–90 Mbps; 6 cards on 1 s snapshots is
+// ~480 kbps. The hovered card is the one the operator actually wants
+// motion in.
+const HOVER_LATENCY_DELAY_MS = 250;
+
+function useSnapshotKey(intervalMs: number) {
   const [key, setKey] = useState(() => Math.floor(Date.now() / intervalMs));
   useEffect(() => {
     const id = window.setInterval(
@@ -35,32 +45,67 @@ const STATUS_CONFIG = {
 
 export function CameraCard({ camera, onClick }: CameraCardProps) {
   const [imgError, setImgError] = useState(false);
-  const snapshotKey = useSnapshotKey();
-  const statusCfg = STATUS_CONFIG[camera.status];
+  const [hovering, setHovering] = useState(false);
+  const snapshotKey = useSnapshotKey(SNAPSHOT_BUCKET_MS);
 
-  // Reset the imgError flag whenever the cache-bucket flips so a transient
-  // failure (camera briefly unreachable, Frigate restart, etc.) doesn't
-  // pin the card on the offline icon forever.
+  // Slight pointer-enter delay so a quick mouse-over while scrolling doesn't
+  // open MJPEG streams on every card the cursor passes through. The viewer
+  // has to actually rest on a card for ~250 ms before we light up the feed.
+  const hoverTimer = useRef<number | undefined>(undefined);
+  function startHover() {
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => setHovering(true), HOVER_LATENCY_DELAY_MS);
+  }
+  function endHover() {
+    window.clearTimeout(hoverTimer.current);
+    setHovering(false);
+  }
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
+
+  // Reset imgError on bucket flip so a transient failure (camera briefly
+  // unreachable, Frigate restart, etc.) doesn't pin the card on the offline
+  // icon forever.
   useEffect(() => {
     setImgError(false);
   }, [snapshotKey]);
 
+  const statusCfg = STATUS_CONFIG[camera.status];
+  const showImage = camera.status !== "offline" && !imgError;
+  const useLive = showImage && hovering;
+
   return (
     <button
       onClick={() => onClick(camera)}
+      onMouseEnter={startHover}
+      onMouseLeave={endHover}
+      onFocus={startHover}
+      onBlur={endHover}
       className="dp-card overflow-hidden text-left w-full transition-all duration-200 ease-smooth hover:shadow-md"
     >
-      {/* Snapshot thumbnail */}
       <div className="relative aspect-video bg-surface-secondary">
-        {camera.status !== "offline" && !imgError ? (
-          <img
-            key={snapshotKey}
-            src={`${getCameraSnapshotUrl(camera.name)}?t=${snapshotKey}`}
-            alt={camera.displayName}
-            className="w-full h-full object-cover"
-            onError={() => setImgError(true)}
-            loading="lazy"
-          />
+        {showImage ? (
+          // The MJPEG <img> on hover and the snapshot <img> at rest are
+          // separate elements so React unmounts the multipart connection
+          // cleanly the moment the operator moves the cursor away — keeps
+          // open MJPEG streams to one at a time across the whole grid.
+          useLive ? (
+            <img
+              key={`live-${camera.name}`}
+              src={getCameraLiveUrl(camera.name)}
+              alt={`${camera.displayName} live preview`}
+              className="w-full h-full object-cover"
+              onError={() => setImgError(true)}
+            />
+          ) : (
+            <img
+              key={`snap-${snapshotKey}`}
+              src={`${getCameraSnapshotUrl(camera.name)}?t=${snapshotKey}`}
+              alt={camera.displayName}
+              className="w-full h-full object-cover"
+              onError={() => setImgError(true)}
+              loading="lazy"
+            />
+          )
         ) : (
           <div className="w-full h-full flex items-center justify-center">
             <VideoOff size={32} className="text-label-quaternary" />
@@ -75,6 +120,14 @@ export function CameraCard({ camera, onClick }: CameraCardProps) {
           />
           <span className="type-caption-2 text-white">{statusCfg.label}</span>
         </div>
+
+        {/* LIVE pip — only while the MJPEG stream is actually open. */}
+        {useLive && (
+          <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red/90 backdrop-blur-sm">
+            <Circle size={8} className="text-white fill-current animate-pulse" />
+            <span className="type-caption-2 text-white font-medium tracking-wide">LIVE</span>
+          </div>
+        )}
       </div>
 
       {/* Info */}
