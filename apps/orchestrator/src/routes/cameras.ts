@@ -30,6 +30,7 @@ import {
 import {
   fetchSnapshot,
   fetchEventThumbnail,
+  openBirdseyeStream,
   openMjpegStream,
   enableDetection,
   disableDetection,
@@ -40,7 +41,11 @@ import {
   buildVodMasterUrl,
   buildVodSegmentUrl,
   fetchHlsPlaylist,
+  fetchPtzCapabilities,
+  ptzGoToPreset,
+  ptzMove,
   restartFrigate,
+  type PtzAction,
 } from "../services/frigate.client.js";
 import { getCameraSystemStatus } from "../services/camera-system.service.js";
 import { Readable } from "node:stream";
@@ -399,6 +404,46 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         expires_at: new Date(Date.now() + ttlSec * 1000).toISOString(),
       });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Birdseye live (Phase 6.2) ---
+  //
+  // Frigate's auto-composited multi-camera MJPEG stream. Cameras with
+  // current motion get foregrounded automatically; the operator gets
+  // a single "what's happening anywhere?" feed without paying for
+  // every camera's bandwidth.
+  //
+  // Fixed path because /cameras/birdseye/live has 3 segments — adding
+  // it here keeps it next to the system route which has the same
+  // ordering rationale.
+
+  router.get("/cameras/birdseye/live", async (req, res, next) => {
+    try {
+      const ctrl = new AbortController();
+      req.on("close", () => ctrl.abort());
+      const upstream = await openBirdseyeStream(ctrl.signal);
+      const contentType =
+        upstream.headers.get("content-type") ||
+        "multipart/x-mixed-replace;boundary=frame";
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Connection", "close");
+      if (!upstream.body) {
+        return res.status(502).json({ error: "Frigate returned no body" });
+      }
+      Readable.fromWeb(upstream.body as never).pipe(res);
+    } catch (err) {
+      // Birdseye is optional — Frigate returns 404 if no camera is
+      // configured for birdseye output. Surface that as a clean 404
+      // so the dashboard can show "Birdseye not configured."
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("404")) {
+        return res
+          .status(404)
+          .json({ error: "Birdseye not enabled in Frigate config" });
+      }
       next(err);
     }
   });
@@ -1791,6 +1836,77 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (msg.includes("duration capped")) return void res.status(400).json({ error: msg });
       if (msg.includes("clip too large")) return void res.status(413).json({ error: msg });
       if (msg.includes("frigate_export_failed")) return void res.status(502).json({ error: msg });
+      next(err);
+    }
+  });
+
+  // ==========================================================================
+  // PTZ (Phase 6.1)
+  // ==========================================================================
+  //
+  // GET /cameras/:name/ptz returns capabilities + preset list (or
+  // {supportsPanTilt: false, ...} when the camera isn't a PTZ).
+  // POST /cameras/:name/ptz body { action } moves the camera. Each
+  // action runs Frigate's continuous-motion API — the dashboard sends
+  // a STOP after the operator releases the button, otherwise the
+  // camera will keep moving.
+  // POST /cameras/:name/ptz/preset body { preset } recalls a saved
+  // preset by name.
+
+  router.get("/cameras/:name/ptz", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const caps = await fetchPtzCapabilities(req.params.name);
+      res.json(caps);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/:name/ptz", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const allowed: PtzAction[] = [
+        "MOVE_UP",
+        "MOVE_DOWN",
+        "MOVE_LEFT",
+        "MOVE_RIGHT",
+        "ZOOM_IN",
+        "ZOOM_OUT",
+        "STOP",
+      ];
+      const action = String((req.body ?? {}).action ?? "");
+      if (!allowed.includes(action as PtzAction)) {
+        return res.status(400).json({
+          error: `action must be one of: ${allowed.join(", ")}`,
+        });
+      }
+      await ptzMove(req.params.name, action as PtzAction);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/:name/ptz/preset", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const preset = String((req.body ?? {}).preset ?? "").trim();
+      // Frigate preset names are alphanumeric-with-spaces in practice.
+      // Tighten to the same character class we use for camera names so
+      // a malicious caller can't slip path-traversal through.
+      if (!/^[a-zA-Z0-9 _-]{1,64}$/.test(preset)) {
+        return res.status(400).json({ error: "Invalid preset name" });
+      }
+      await ptzGoToPreset(req.params.name, preset);
+      res.status(204).end();
+    } catch (err) {
       next(err);
     }
   });

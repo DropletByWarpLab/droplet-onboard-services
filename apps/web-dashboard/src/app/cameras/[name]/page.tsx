@@ -7,6 +7,7 @@ import {
   Circle,
   Film,
   Maximize2,
+  Move,
   Pin,
   PinOff,
   Power,
@@ -18,9 +19,10 @@ import {
 import useSWR from "swr";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraPins } from "@/lib/hooks/useCameraPins";
-import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
+import { fetchPtzCapabilities, getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
-import type { CameraInfo, DetectionEvent } from "@/lib/types";
+import { PtzOverlay } from "@/components/ptz/PtzOverlay";
+import type { CameraInfo, DetectionEvent, PtzCapabilities } from "@/lib/types";
 
 const STATUS_COLORS: Record<CameraInfo["status"], string> = {
   recording: "text-system-green",
@@ -53,6 +55,18 @@ export default function CameraFullscreenPage() {
 
   const { cameras, isLoading, enableCam, disableCam, removeCam } = useCameras();
   const camera = cameras.find((c) => c.name === name);
+
+  // PTZ capabilities — fetched once per camera, cheap. Drives whether
+  // the "PTZ" button shows up in the toolbar at all.
+  const { data: ptzCaps } = useSWR<PtzCapabilities>(
+    name ? `/api/cameras/${encodeURIComponent(name)}/ptz` : null,
+    () => fetchPtzCapabilities(name),
+    { revalidateOnFocus: false },
+  );
+  const hasPtz =
+    !!ptzCaps &&
+    (ptzCaps.supportsPanTilt || ptzCaps.supportsZoom || ptzCaps.presets.length > 0);
+  const [ptzOpen, setPtzOpen] = useState(false);
 
   // Pin state for the toolbar toggle. Mirrors the grid affordance so the
   // operator can pin/unpin without backing out to the cards page.
@@ -188,6 +202,21 @@ export default function CameraFullscreenPage() {
               <span className="type-subheadline hidden sm:inline">Enable</span>
             </button>
           )}
+          {hasPtz && (
+            <button
+              onClick={() => setPtzOpen((o) => !o)}
+              aria-pressed={ptzOpen}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                ptzOpen
+                  ? "bg-accent/15 text-accent"
+                  : "text-white/90 hover:bg-white/10"
+              }`}
+              title="Pan / tilt / zoom controls"
+            >
+              <Move size={16} />
+              <span className="type-subheadline hidden sm:inline">PTZ</span>
+            </button>
+          )}
           <button
             onClick={() => router.push(`/cameras/${encodeURIComponent(camera.name)}/recordings`)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
@@ -299,6 +328,16 @@ export default function CameraFullscreenPage() {
                 LIVE
               </span>
             </div>
+          )}
+
+          {/* PTZ overlay floats over the feed. Mounted on demand so a
+              non-PTZ camera doesn't pay for the network probe. */}
+          {ptzOpen && hasPtz && ptzCaps && (
+            <PtzOverlay
+              cameraName={camera.name}
+              caps={ptzCaps}
+              onClose={() => setPtzOpen(false)}
+            />
           )}
         </div>
 

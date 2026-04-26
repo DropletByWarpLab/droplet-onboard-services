@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Video, Plus, Radar, Server } from "lucide-react";
+import { RefreshCw, Video, Plus, Radar, Server, LayoutGrid } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
@@ -194,6 +194,14 @@ export default function CamerasPage() {
           >
             <Radar size={16} className={scanning ? "animate-pulse" : ""} />
             <span className="type-subheadline">Scan</span>
+          </button>
+          <button
+            onClick={() => router.push("/cameras/birdseye")}
+            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+            title="Auto-composited multi-camera view"
+          >
+            <LayoutGrid size={16} />
+            <span className="type-subheadline">Birdseye</span>
           </button>
           <button
             onClick={() => router.push("/cameras/system")}
