@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { RefreshCw, Wifi } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { RefreshCw, Smartphone, Wifi } from "lucide-react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
@@ -10,6 +11,7 @@ import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
 import type { MatterDevice } from "@/lib/types";
 
 export default function DevicesPage() {
+  const router = useRouter();
   const {
     grouped,
     discovered,
@@ -51,17 +53,27 @@ export default function DevicesPage() {
               : "No devices found"}
           </p>
         </div>
-        <button
-          onClick={refresh}
-          disabled={isRefreshing}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw
-            size={16}
-            className={isRefreshing ? "animate-spin" : ""}
-          />
-          <span className="type-subheadline">Refresh</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => router.push("/devices/clients")}
+            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+            title="Paired phones + laptops"
+          >
+            <Smartphone size={16} />
+            <span className="type-subheadline">Paired apps</span>
+          </button>
+          <button
+            onClick={refresh}
+            disabled={isRefreshing}
+            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+          >
+            <RefreshCw
+              size={16}
+              className={isRefreshing ? "animate-spin" : ""}
+            />
+            <span className="type-subheadline">Refresh</span>
+          </button>
+        </div>
       </div>
 
       {/* Content with refresh fade */}
