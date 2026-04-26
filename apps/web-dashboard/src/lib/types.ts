@@ -445,6 +445,24 @@ export interface MotionMaskPolygon {
   coordinates: number[];
 }
 
+// --- Face recognition + LPR (Phase 7.5/7.6) ---
+
+export interface FaceImage {
+  name: string;
+  imageUrl: string;
+}
+
+export interface KnownFace {
+  name: string;
+  images: FaceImage[];
+}
+
+export interface KnownPlate {
+  plate: string;
+  name: string | null;
+  eventCount: number;
+}
+
 // --- Notification preferences (Phase 6.3) ---
 //
 // Per-camera + per-user notification toggles. The orchestrator

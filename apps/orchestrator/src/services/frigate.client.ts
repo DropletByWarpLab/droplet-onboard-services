@@ -480,6 +480,180 @@ export function buildRecordingClipUrl(
   return `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/start/${start}/end/${end}/clip.mp4`;
 }
 
+// --- Face recognition + LPR (Phase 7.5/7.6) ---
+//
+// Frigate 0.14+ ships a face_recognition feature that stores training
+// images per person and an LPR feature that catalogs detected plates.
+// Both expose REST endpoints we proxy so the dashboard can manage the
+// known-set without giving the browser direct Frigate access.
+
+export interface FaceImage {
+  name: string;
+  /** Authenticated proxy URL pointing at our orchestrator. */
+  imageUrl: string;
+}
+
+export interface KnownFace {
+  name: string;
+  images: FaceImage[];
+}
+
+/** Lists every known face Frigate has training images for. Returns
+ *  empty array (not error) when the feature isn't enabled. */
+export async function fetchKnownFaces(): Promise<KnownFace[]> {
+  const resp = await fetch(`${FRIGATE_URL}/api/faces`, { signal: timeout() });
+  if (!resp.ok) {
+    if (resp.status === 404 || resp.status === 501) return [];
+    throw new Error(`Frigate faces: ${resp.status}`);
+  }
+  const data = (await resp.json()) as Record<string, unknown>;
+  // Frigate returns either {name: [imageNames]} or {name: [{name: ...}]}
+  // depending on version. Normalise to the structured shape; we don't
+  // bake in the proxy URL here — the route layer does that since it
+  // owns the URL space.
+  const out: KnownFace[] = [];
+  for (const [personName, raw] of Object.entries(data)) {
+    if (!Array.isArray(raw)) continue;
+    const images: FaceImage[] = (raw as unknown[]).map((img) => {
+      if (typeof img === "string") {
+        return { name: img, imageUrl: "" };
+      }
+      const o = img as Record<string, unknown>;
+      const name = String(o.name ?? o.image_name ?? "");
+      return { name, imageUrl: "" };
+    }).filter((img) => img.name.length > 0);
+    out.push({ name: personName, images });
+  }
+  return out;
+}
+
+/** Proxy a single face training image. Frigate hosts at
+ *  /clips/faces/<name>/<image>; we go through our auth gate. */
+export async function fetchFaceImage(
+  personName: string,
+  imageName: string,
+): Promise<Response> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/clips/faces/${encodeURIComponent(personName)}/${encodeURIComponent(imageName)}`,
+    { signal: timeout(SNAPSHOT_TIMEOUT) },
+  );
+  if (!resp.ok) throw new Error(`Frigate face image: ${resp.status}`);
+  return resp;
+}
+
+/** Delete an entire known person. Cascades all training images. */
+export async function deleteKnownFace(personName: string): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/faces/${encodeURIComponent(personName)}`,
+    { method: "DELETE", signal: timeout() },
+  );
+  if (!resp.ok && resp.status !== 404) {
+    throw new Error(`Frigate face delete: ${resp.status}`);
+  }
+}
+
+/** Delete a single training image but keep the person. */
+export async function deleteFaceImage(
+  personName: string,
+  imageName: string,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/faces/${encodeURIComponent(personName)}/${encodeURIComponent(imageName)}`,
+    { method: "DELETE", signal: timeout() },
+  );
+  if (!resp.ok && resp.status !== 404) {
+    throw new Error(`Frigate face image delete: ${resp.status}`);
+  }
+}
+
+/** Tag an event's snapshot as a training image for `personName`. The
+ *  operator's "this person is Alice" flow in the event modal calls
+ *  this to feed the recogniser. */
+export async function tagEventAsFace(
+  eventId: string,
+  personName: string,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/sub_label`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subLabel: personName, subLabelScore: 1.0 }),
+      signal: timeout(),
+    },
+  );
+  if (!resp.ok) throw new Error(`Frigate tag face: ${resp.status}`);
+}
+
+// --- License plate recognition ---
+
+export interface KnownPlate {
+  /** The plate text Frigate read off images (e.g. "ABC-1234"). */
+  plate: string;
+  /** Operator-assigned name ("Alice's Civic"). May be null when the
+   *  plate is detected but unmapped. */
+  name: string | null;
+  /** Number of events this plate has appeared in (lifetime). */
+  eventCount: number;
+}
+
+export async function fetchKnownPlates(): Promise<KnownPlate[]> {
+  const resp = await fetch(`${FRIGATE_URL}/api/license_plates`, { signal: timeout() });
+  if (!resp.ok) {
+    if (resp.status === 404 || resp.status === 501) return [];
+    throw new Error(`Frigate plates: ${resp.status}`);
+  }
+  const data = await resp.json();
+  // Frigate returns either an array of {plate, name, count} objects
+  // or {plate: {name, count}} keyed map depending on version.
+  const out: KnownPlate[] = [];
+  if (Array.isArray(data)) {
+    for (const p of data as Array<Record<string, unknown>>) {
+      out.push({
+        plate: String(p.plate ?? p.value ?? ""),
+        name: p.name ? String(p.name) : null,
+        eventCount: Number(p.count ?? p.event_count ?? 0),
+      });
+    }
+  } else if (data && typeof data === "object") {
+    for (const [plate, raw] of Object.entries(data as Record<string, unknown>)) {
+      const r = raw as Record<string, unknown>;
+      out.push({
+        plate,
+        name: r.name ? String(r.name) : null,
+        eventCount: Number(r.count ?? r.event_count ?? 0),
+      });
+    }
+  }
+  return out.filter((p) => p.plate.length > 0);
+}
+
+export async function nameKnownPlate(
+  plate: string,
+  name: string,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/license_plates/${encodeURIComponent(plate)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+      signal: timeout(),
+    },
+  );
+  if (!resp.ok) throw new Error(`Frigate plate rename: ${resp.status}`);
+}
+
+export async function deleteKnownPlate(plate: string): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/license_plates/${encodeURIComponent(plate)}`,
+    { method: "DELETE", signal: timeout() },
+  );
+  if (!resp.ok && resp.status !== 404) {
+    throw new Error(`Frigate plate delete: ${resp.status}`);
+  }
+}
+
 // --- HLS VOD playback (Phase 3.2) ---
 //
 // Frigate exposes a VOD endpoint at `/vod/<camera>/start/<s>/end/<e>/`

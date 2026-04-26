@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Bookmark, Download, ExternalLink, Loader2, X } from "lucide-react";
+import {
+  Bookmark,
+  Download,
+  ExternalLink,
+  Loader2,
+  Tag,
+  X,
+} from "lucide-react";
+import { tagEventAsFace } from "@/lib/api";
 import type { EventDetail } from "@/lib/types";
 
 interface Props {
@@ -57,6 +65,30 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
       alert(e instanceof Error ? e.message : "Failed to update Saved state");
     } finally {
       setRetainBusy(false);
+    }
+  };
+
+  // "Tag as person" — feeds Frigate's face recogniser. Only meaningful
+  // for person-labeled events; we render the button conditionally
+  // below to avoid suggesting "tag this car as Alice."
+  const [tagging, setTagging] = useState(false);
+  const handleTag = async () => {
+    const name = window
+      .prompt("Tag this person — letters, numbers, spaces, hyphens, underscores")
+      ?.trim();
+    if (!name) return;
+    if (!/^[a-zA-Z0-9_ -]{1,40}$/.test(name)) {
+      alert("Invalid name — keep it under 40 chars, no special characters.");
+      return;
+    }
+    setTagging(true);
+    try {
+      await tagEventAsFace(event.id, name);
+      alert(`Tagged as ${name}. Frigate will use this snapshot for future recognition.`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Tag failed");
+    } finally {
+      setTagging(false);
     }
   };
 
@@ -126,6 +158,21 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
             )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {event.label === "person" && (
+              <button
+                onClick={handleTag}
+                disabled={tagging}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 text-white hover:bg-white/20 type-subheadline transition-colors disabled:opacity-50"
+                title="Tag this person for face recognition"
+              >
+                {tagging ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Tag size={14} />
+                )}
+                <span className="hidden sm:inline">Tag person</span>
+              </button>
+            )}
             {onToggleRetain && (
               <button
                 onClick={handleToggleRetain}
