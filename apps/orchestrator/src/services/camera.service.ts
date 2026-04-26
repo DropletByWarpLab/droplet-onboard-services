@@ -21,9 +21,11 @@ import {
   fetchStats,
   fetchTimeline,
   markReviewViewed,
+  searchEventsSemantic,
   setEventRetain,
   type FrigateEventFilter,
   type FrigateReviewFilter,
+  type FrigateSearchFilter,
 } from "./frigate.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { config } from "../config.js";
@@ -466,6 +468,66 @@ export async function getReviewsFiltered(
 
 export async function setReviewViewed(reviewId: string): Promise<void> {
   await markReviewViewed(reviewId);
+}
+
+/**
+ * Semantic event search — same DTO shape as `getEventsFiltered` so
+ * the dashboard can swap implementations without re-mapping rows.
+ * Returns results in Frigate's similarity order; the `score` field
+ * on each event reflects the embedding similarity, not the detection
+ * confidence (Frigate puts both in the same wire field — we keep
+ * its convention to avoid two parallel score fields the UI would
+ * have to disambiguate).
+ *
+ * Frigate's 0.14+ `/api/events/search` requires the optional
+ * embeddings stack to be installed; older builds return 404/501.
+ * We surface that as a typed "semantic_search_disabled" error which
+ * the route translates to 503 + a hint for the operator.
+ */
+export async function searchEventsSemanticTyped(
+  filter: FrigateSearchFilter,
+): Promise<FilteredEventsResult> {
+  const limit = filter.limit ?? 50;
+  const raw = (await searchEventsSemantic(filter)) as Array<Record<string, unknown>>;
+  const events: EventDetail[] = raw.map((e) => {
+    const id = String(e.id);
+    const camera = String(e.camera ?? "");
+    const hasClip = Boolean(e.has_clip);
+    const hasSnapshot = Boolean(e.has_snapshot);
+    return {
+      id,
+      camera,
+      label: String(e.label ?? ""),
+      score: Number(e.top_score ?? e.score ?? 0),
+      startTime: Number(e.start_time ?? 0),
+      endTime: e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null,
+      thumbnail: `/api/cameras/events/${encodeURIComponent(id)}/thumbnail`,
+      hasClip,
+      hasSnapshot,
+      subLabel: e.sub_label ? String(e.sub_label) : null,
+      subLabelScore:
+        e.sub_label_score !== null && e.sub_label_score !== undefined
+          ? Number(e.sub_label_score)
+          : null,
+      zones: Array.isArray(e.zones) ? (e.zones as string[]).map(String) : [],
+      retainIndefinitely: Boolean(e.retain_indefinitely),
+      clipUrl: hasClip
+        ? `/api/cameras/clips/event/${encodeURIComponent(id)}`
+        : null,
+      snapshotUrl: hasSnapshot
+        ? `/api/cameras/events/${encodeURIComponent(id)}/snapshot`
+        : null,
+    };
+  });
+  // Search results aren't time-ordered (similarity rank), so the
+  // start_time-based cursor we use for /events doesn't apply here.
+  // We just return the page; if the operator wants more, they'll
+  // narrow the query.
+  const nextCursor =
+    events.length === limit && events.length > 0
+      ? Math.min(...events.map((ev) => ev.startTime))
+      : null;
+  return { events, nextCursor };
 }
 
 // --- Recordings + timeline ---

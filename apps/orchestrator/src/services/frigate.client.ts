@@ -86,6 +86,52 @@ export interface FrigateEventFilter {
   limit?: number;
 }
 
+/**
+ * Semantic event search (Frigate 0.14+). Wraps `/api/events/search`,
+ * which uses CLIP embeddings indexed in chromadb to rank events by
+ * similarity to a natural-language query string. Same filter params
+ * as /api/events; the search query is what differentiates this from
+ * the regular listing.
+ *
+ * Frigate returns 404 / 501 if the semantic-search dependency
+ * (chromadb + the genai/embeddings stack) isn't enabled — the route
+ * layer above translates that into a 503 with a config hint.
+ */
+export interface FrigateSearchFilter extends FrigateEventFilter {
+  query: string;
+  /** "thumbnail" | "description" — which embedding to query against.
+   *  thumbnail = visual similarity, description = textual. */
+  searchType?: "thumbnail" | "description";
+}
+
+export async function searchEventsSemantic(
+  filter: FrigateSearchFilter,
+): Promise<unknown[]> {
+  const params = new URLSearchParams();
+  params.set("query", filter.query);
+  if (filter.searchType) params.set("search_type", filter.searchType);
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.labels?.length) params.set("labels", filter.labels.join(","));
+  if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
+  if (filter.before !== undefined) params.set("before", String(filter.before));
+  if (filter.after !== undefined) params.set("after", String(filter.after));
+  if (filter.hasClip !== undefined) params.set("has_clip", filter.hasClip ? "1" : "0");
+  if (filter.hasSnapshot !== undefined) params.set("has_snapshot", filter.hasSnapshot ? "1" : "0");
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  params.set("include_thumbnails", "0");
+
+  const resp = await fetch(`${FRIGATE_URL}/api/events/search?${params}`, {
+    signal: timeout(20_000), // semantic search is slower than the bare list
+  });
+  if (!resp.ok) {
+    if (resp.status === 404 || resp.status === 501) {
+      throw new Error("semantic_search_disabled");
+    }
+    throw new Error(`Frigate search: ${resp.status}`);
+  }
+  return resp.json();
+}
+
 export async function fetchEventsFiltered(
   filter: FrigateEventFilter,
 ): Promise<unknown[]> {
