@@ -262,7 +262,7 @@ The mcp-server implements these standard MCP methods:
 
 `ToolResult.ok = false`, `status = "confirmation_required"` → MCP content block: `{type: "text", text: JSON.stringify({status: "confirmation_required", message, ...})}` plus `isError: false`. The model sees a normal tool result that explicitly says "user must confirm in the dashboard."
 
-`ToolResult.ok = false`, `status = "error"` → MCP content block with `isError: true`, body is `{code, message}`.
+`ToolResult.ok = false`, `status = "error"` → MCP content block with `isError: true`, body is `{code, message, details?}`. The optional `details` field carries structured payload from the underlying service (e.g. the routing service's 202 confirmation body) without forcing handlers to stringify it into `message`.
 
 ### 7.2 Auth
 

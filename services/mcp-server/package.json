@@ -13,7 +13,8 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "postinstall": "node -e \"try { require('@prisma/client').PrismaClient; } catch (e) { console.warn('[@droplet/mcp-server] Prisma client not generated yet — run `npm run -w @droplet/orchestrator db:generate` from the repo root before starting the MCP server.'); }\""
   },
   "dependencies": {
     "@droplet/tools-core": "0.1.0",
