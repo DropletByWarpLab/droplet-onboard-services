@@ -327,6 +327,49 @@ export function buildRecordingClipUrl(
   return `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/start/${start}/end/${end}/clip.mp4`;
 }
 
+// --- HLS VOD playback (Phase 3.2) ---
+//
+// Frigate exposes a VOD endpoint at `/vod/<camera>/start/<s>/end/<e>/`
+// that serves an HLS master playlist + media playlist + .ts segments.
+// HLS lifts the 30-minute cap that the synthesised clip.mp4 endpoint
+// imposes — the browser fetches segments lazily as the operator
+// scrubs, so an hour or more of video plays without a server-side
+// stitching round-trip.
+//
+// We expose three routes from cameras.ts that proxy this surface so
+// the camera URL stays LAN-side:
+//   1. /playback.m3u8 → fetch Frigate's master, follow to the media
+//      playlist, rewrite .ts segment refs to point at the segment
+//      proxy below.
+//   2. /playback.segment?seg=N.ts&after=…&before=… → proxy a single
+//      .ts file from Frigate.
+
+/** Build the upstream Frigate URL for the master playlist of a VOD range. */
+export function buildVodMasterUrl(
+  cameraName: string,
+  start: number,
+  end: number,
+): string {
+  return `${FRIGATE_URL}/vod/${encodeURIComponent(cameraName)}/start/${start}/end/${end}/master.m3u8`;
+}
+
+/** Build the upstream Frigate URL for a specific segment of a VOD range. */
+export function buildVodSegmentUrl(
+  cameraName: string,
+  start: number,
+  end: number,
+  segmentName: string,
+): string {
+  return `${FRIGATE_URL}/vod/${encodeURIComponent(cameraName)}/start/${start}/end/${end}/${encodeURIComponent(segmentName)}`;
+}
+
+/** Fetch and return the body of an HLS playlist (master or media). */
+export async function fetchHlsPlaylist(url: string): Promise<string> {
+  const resp = await fetch(url, { signal: timeout(15_000) });
+  if (!resp.ok) throw new Error(`HLS playlist: ${resp.status}`);
+  return resp.text();
+}
+
 // --- Camera control ---
 
 export async function enableDetection(cameraName: string): Promise<void> {
