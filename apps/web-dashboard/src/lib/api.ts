@@ -430,6 +430,17 @@ export function getCameraSnapshotUrl(name: string): string {
   return `${BASE}/api/cameras/${encodeURIComponent(name)}/snapshot`;
 }
 
+/**
+ * Long-lived MJPEG live feed. Drop the URL into an <img src=> and the
+ * browser will render it as a continuous stream — Frigate serves
+ * `multipart/x-mixed-replace` and modern browsers handle it natively.
+ * The orchestrator proxies Frigate's `/api/{name}` so the camera IP is
+ * never exposed to the browser and auth is enforced.
+ */
+export function getCameraLiveUrl(name: string): string {
+  return `${BASE}/api/cameras/${encodeURIComponent(name)}/live`;
+}
+
 export async function addCameraManual(
   name: string,
   rtspUrl: string,

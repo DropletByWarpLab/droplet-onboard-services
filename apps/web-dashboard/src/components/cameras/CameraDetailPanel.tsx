@@ -1,17 +1,15 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   X,
-  Video,
   VideoOff,
   Power,
   PowerOff,
   Trash2,
-  ExternalLink,
   Circle,
 } from "lucide-react";
-import { getCameraSnapshotUrl } from "@/lib/api";
+import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import type { CameraInfo } from "@/lib/types";
 
 interface CameraDetailPanelProps {
@@ -29,12 +27,12 @@ export function CameraDetailPanel({
   onRemove,
   onClose,
 }: CameraDetailPanelProps) {
-  // Refresh snapshot every 5 seconds
-  const [snapshotKey, setSnapshotKey] = useState(0);
-  useEffect(() => {
-    const interval = setInterval(() => setSnapshotKey((k) => k + 1), 5000);
-    return () => clearInterval(interval);
-  }, []);
+  // The detail panel runs the live MJPEG feed (multipart/x-mixed-replace
+  // proxied through /api/cameras/:name/live). If it fails to load — Frigate
+  // restarting, network blip, etc. — fall back to the periodic snapshot
+  // grid so the operator still sees the most recent frame instead of a
+  // dead `<img>`.
+  const [liveError, setLiveError] = useState(false);
 
   const statusColors = {
     recording: "text-system-green",
@@ -85,21 +83,36 @@ export function CameraDetailPanel({
           </button>
         </div>
 
-        {/* Live snapshot */}
+        {/* Live MJPEG (Frigate multipart/x-mixed-replace stream proxied by
+            the orchestrator). Falls back to the periodic snapshot if the
+            live feed errors. */}
         <div className="relative aspect-video bg-black">
-          {camera.status !== "offline" ? (
-            <img
-              key={snapshotKey}
-              src={`${getCameraSnapshotUrl(camera.name)}?t=${snapshotKey}`}
-              alt={camera.displayName}
-              className="w-full h-full object-contain"
-            />
-          ) : (
+          {camera.status === "offline" ? (
             <div className="w-full h-full flex items-center justify-center">
               <VideoOff size={48} className="text-label-quaternary" />
               <p className="type-subheadline text-label-tertiary ml-3">
                 Camera offline
               </p>
+            </div>
+          ) : !liveError ? (
+            <img
+              src={getCameraLiveUrl(camera.name)}
+              alt={`${camera.displayName} live feed`}
+              className="w-full h-full object-contain"
+              onError={() => setLiveError(true)}
+            />
+          ) : (
+            <img
+              src={`${getCameraSnapshotUrl(camera.name)}?t=${Math.floor(Date.now() / 5000)}`}
+              alt={`${camera.displayName} latest frame`}
+              className="w-full h-full object-contain"
+            />
+          )}
+          {/* LIVE badge */}
+          {camera.status !== "offline" && !liveError && (
+            <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red/90 backdrop-blur-sm">
+              <Circle size={8} className="text-white fill-current animate-pulse" />
+              <span className="type-caption-2 text-white font-medium tracking-wide">LIVE</span>
             </div>
           )}
         </div>
@@ -153,16 +166,6 @@ export function CameraDetailPanel({
                 <span className="type-subheadline">Enable</span>
               </button>
             )}
-
-            <a
-              href="/frigate/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            >
-              <ExternalLink size={16} />
-              <span className="type-subheadline">Frigate UI</span>
-            </a>
 
             <button
               onClick={() => {

@@ -81,6 +81,26 @@ export async function fetchSnapshot(
   return resp;
 }
 
+/**
+ * Open a long-lived MJPEG stream for `cameraName`. Frigate serves it at
+ * `/api/{name}` with `Content-Type: multipart/x-mixed-replace;boundary=frame`,
+ * which any modern browser will render natively in an `<img>`. We don't
+ * apply the snapshot timeout here — the caller is expected to consume the
+ * response as a stream and close it when the consumer disconnects, so a
+ * 5 s budget would just kill the feed mid-frame.
+ */
+export async function openMjpegStream(
+  cameraName: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}`,
+    { signal },
+  );
+  if (!resp.ok) throw new Error(`Frigate MJPEG: ${resp.status}`);
+  return resp;
+}
+
 export async function fetchEventThumbnail(eventId: string): Promise<Response> {
   const resp = await fetch(
     `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/thumbnail.jpg`,
