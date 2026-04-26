@@ -17,7 +17,10 @@ import {
   getCameras,
   getEventsFiltered,
   getRecentEvents,
+  getReviewsFiltered,
   getStats,
+  setEventRetention,
+  setReviewViewed,
   subscribeCameraEvents,
   isInitialized,
 } from "../services/camera.service.js";
@@ -534,6 +537,149 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         limit,
       });
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Retain-indefinitely toggle (Phase 2.2) ---
+  //
+  // POST { retain: boolean } — sets or clears the Frigate-side
+  // `retain_indefinitely` flag on an event. Operators use this to mark
+  // an event "Saved" so the cluster doesn't get swept during the next
+  // retention pass. Idempotent on Frigate's end. Returns 204 since the
+  // dashboard already has the event DTO and just needs to flip the
+  // boolean locally on success.
+  router.post("/cameras/events/:eventId/retain", async (req, res, next) => {
+    try {
+      if (!isValidEventId(req.params.eventId)) {
+        return res.status(400).json({ error: "Invalid event ID format" });
+      }
+      const retain = req.body?.retain;
+      if (typeof retain !== "boolean") {
+        return res.status(400).json({ error: "retain must be a boolean" });
+      }
+      await setEventRetention(req.params.eventId, retain);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Reviews (Frigate 0.13+ severity-grouped clusters) ---
+  //
+  // Same filter shape as /cameras/events but the unit is a Review item
+  // (cluster) rather than an event. Severity values are validated to a
+  // small allow-list — Frigate's wire string is mirrored back, but
+  // anything outside `alert | detection | significant_motion` is
+  // treated as a 400 to keep us from silently dropping unknown
+  // severities into the SQL filter.
+  //
+  // Cursor pagination is identical to the events route (`before` =
+  // smallest start_time of the previous page).
+  router.get("/cameras/reviews", async (req, res, next) => {
+    try {
+      const q = req.query as Record<string, string | undefined>;
+
+      let cameras: string[] | undefined;
+      if (q.cameras) {
+        cameras = q.cameras.split(",").map((s) => s.trim()).filter(Boolean);
+        if (cameras.some((c) => !isValidCameraName(c))) {
+          return res.status(400).json({ error: "Invalid camera name in cameras param" });
+        }
+      }
+
+      let severity: string[] | undefined;
+      if (q.severity) {
+        severity = q.severity.split(",").map((s) => s.trim()).filter(Boolean);
+        const allowed = new Set(["alert", "detection", "significant_motion"]);
+        if (severity.some((s) => !allowed.has(s))) {
+          return res.status(400).json({ error: "Invalid severity (allowed: alert, detection, significant_motion)" });
+        }
+      }
+
+      const numOrUndef = (v: string | undefined): number | undefined => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const boolOrUndef = (v: string | undefined): boolean | undefined => {
+        if (v === undefined) return undefined;
+        if (v === "1" || v === "true") return true;
+        if (v === "0" || v === "false") return false;
+        return undefined;
+      };
+
+      const limitRaw = parseInt(q.limit || "50", 10);
+      const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
+
+      const result = await getReviewsFiltered({
+        cameras,
+        severity,
+        before: numOrUndef(q.before),
+        after: numOrUndef(q.after),
+        reviewed: boolOrUndef(q.reviewed),
+        limit,
+      });
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** Frigate review IDs are UUID-ish — looser than event IDs but bound
+   *  to the same character class. Same regex serves both. */
+  router.post("/cameras/reviews/:reviewId/viewed", async (req, res, next) => {
+    try {
+      if (!isValidEventId(req.params.reviewId)) {
+        return res.status(400).json({ error: "Invalid review ID format" });
+      }
+      await setReviewViewed(req.params.reviewId);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Review preview clip (Frigate-rendered cluster summary mp4).
+  router.get("/cameras/reviews/:reviewId/preview", async (req, res, next) => {
+    try {
+      if (!isValidEventId(req.params.reviewId)) {
+        return res.status(400).json({ error: "Invalid review ID format" });
+      }
+      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/preview.mp4`;
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
+      }
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+      const len = upstream.headers.get("content-length");
+      if (len) res.setHeader("Content-Length", len);
+      if (upstream.body) {
+        Readable.fromWeb(upstream.body as never).pipe(res);
+      } else {
+        res.end();
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Review thumbnail.
+  router.get("/cameras/reviews/:reviewId/thumbnail", async (req, res, next) => {
+    try {
+      if (!isValidEventId(req.params.reviewId)) {
+        return res.status(400).json({ error: "Invalid review ID format" });
+      }
+      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/thumbnail.jpg`;
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
+      }
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      res.send(buffer);
     } catch (err) {
       next(err);
     }

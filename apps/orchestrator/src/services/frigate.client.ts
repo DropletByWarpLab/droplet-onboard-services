@@ -159,6 +159,79 @@ export async function fetchEventThumbnail(eventId: string): Promise<Response> {
   return resp;
 }
 
+/**
+ * Toggle the `retain_indefinitely` flag on a Frigate event. When set,
+ * Frigate exempts the event's clip + snapshot from the normal
+ * retention sweep — the operator's way of saying "save this, I want
+ * to keep it." Frigate exposes POST /api/events/<id>/retain to set
+ * and DELETE /api/events/<id>/retain to clear.
+ *
+ * Idempotent at the wire level: setting an already-retained event is
+ * a no-op, clearing an already-clear event is a no-op.
+ */
+export async function setEventRetain(
+  eventId: string,
+  retain: boolean,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/retain`,
+    { method: retain ? "POST" : "DELETE", signal: timeout() },
+  );
+  if (!resp.ok) throw new Error(`Frigate retain: ${resp.status}`);
+}
+
+// --- Reviews (Frigate 0.13+) ---
+//
+// "Review items" are Frigate's higher-level abstraction over events:
+// each review groups sequential events on the same camera into a
+// single timeline entry with a severity (alert | detection |
+// significant_motion). The dashboard's Events page surfaces these as
+// the default view in the "Alerts" tab — operators usually want to
+// triage clusters, not individual frames.
+
+export interface FrigateReviewFilter {
+  cameras?: string[];
+  /** Severities to include — "alert" | "detection" | "significant_motion". */
+  severity?: string[];
+  before?: number;
+  after?: number;
+  /** Frigate also accepts `reviewed` (0/1) to filter by viewed state. */
+  reviewed?: boolean;
+  limit?: number;
+}
+
+export async function fetchReviews(
+  filter: FrigateReviewFilter,
+): Promise<unknown[]> {
+  const params = new URLSearchParams();
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.severity?.length) params.set("severity", filter.severity.join(","));
+  if (filter.before !== undefined) params.set("before", String(filter.before));
+  if (filter.after !== undefined) params.set("after", String(filter.after));
+  if (filter.reviewed !== undefined)
+    params.set("reviewed", filter.reviewed ? "1" : "0");
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+
+  const resp = await fetch(`${FRIGATE_URL}/api/review?${params}`, {
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new Error(`Frigate review: ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * Mark a review item as viewed (Frigate's "I've looked at this"
+ * state). Frigate uses `POST /api/review/<id>/viewed` for this.
+ * Idempotent.
+ */
+export async function markReviewViewed(reviewId: string): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/review/${encodeURIComponent(reviewId)}/viewed`,
+    { method: "POST", signal: timeout() },
+  );
+  if (!resp.ok) throw new Error(`Frigate review viewed: ${resp.status}`);
+}
+
 // --- Camera control ---
 
 export async function enableDetection(cameraName: string): Promise<void> {
