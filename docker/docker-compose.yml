@@ -36,8 +36,12 @@ services:
 
   orchestrator:
     build:
-      context: ../apps/orchestrator
-      dockerfile: Dockerfile
+      # Build context is the repo root so the orchestrator's workspace
+      # deps (@droplet/tools-core, @droplet/mcp-server) resolve via npm
+      # workspaces. Runtime spawns the mcp-server's dist as a stdio
+      # child, so it ships inside the same image — see Dockerfile.
+      context: ..
+      dockerfile: apps/orchestrator/Dockerfile
     expose:
       - "3000"
     depends_on:
@@ -64,6 +68,10 @@ services:
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - NEXTCLOUD_URL=http://nextcloud:80
       - MATTER_STORAGE_PATH=/data/matter-storage
+      # WARP-101: the orchestrator's MCP client spawns the mcp-server's
+      # dist as a stdio child. Pin the path explicitly so we don't rely
+      # on the singleton's process.cwd()-relative fallback.
+      - MCP_SERVER_BIN=/app/services/mcp-server/dist/index.js
       # DROPLET_-prefixed, NOT MATTER_-prefixed. matter.js scans the process
       # env for MATTER_* at startup and injects each one into its internal
       # VariableService — `MATTER_CONTROLLER_NAME` used to land as the var
