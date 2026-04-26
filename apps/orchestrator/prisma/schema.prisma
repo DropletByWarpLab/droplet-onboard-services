@@ -117,6 +117,7 @@ model Camera {
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
   notifications  CameraNotificationPref[]
+  groupMembers   CameraGroupMember[]
 }
 
 model CameraNotificationPref {
@@ -130,6 +131,44 @@ model CameraNotificationPref {
   onMotion  Boolean @default(false)
 
   @@unique([userId, cameraId])
+}
+
+// ── Camera groups ──
+//
+// Operator-defined logical groupings rendered as a navigation rail above
+// the cameras grid (e.g. "Front of house", "Backyard", "Inside"). A camera
+// can belong to multiple groups; a group can contain zero cameras (so a
+// freshly-created group survives until the operator populates it).
+//
+// Membership is its own row rather than a ManyMany list so we can carry
+// per-group sortOrder and so deletion of either side cascades cleanly.
+model CameraGroup {
+  id        String              @id @default(uuid())
+  name      String              @unique
+  // Optional emoji or short string the dashboard renders in the rail
+  // tile. Kept as plain text so the operator can use any character set
+  // their keyboard supports — no fixed icon-set lock-in.
+  icon      String?
+  // Display order across the rail, lower = earlier. Mutable via PATCH.
+  sortOrder Int                 @default(0)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  members   CameraGroupMember[]
+}
+
+model CameraGroupMember {
+  id        String      @id @default(uuid())
+  groupId   String
+  cameraId  String
+  // Display order within the group, lower = earlier.
+  sortOrder Int         @default(0)
+  createdAt DateTime    @default(now())
+  group     CameraGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  camera    Camera      @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, cameraId])
+  @@index([groupId])
+  @@index([cameraId])
 }
 
 // ── Phase 4: AI file content indexing (pgvector) ──

@@ -324,6 +324,25 @@ export interface DiscoveredCamera {
   discoveredAt: string;
 }
 
+// --- Camera groups ---
+
+export interface CameraGroupMember {
+  /** Frigate-key for the camera; matches CameraInfo.name. */
+  cameraName: string;
+  cameraDisplayName: string;
+  sortOrder: number;
+}
+
+export interface CameraGroupInfo {
+  id: string;
+  name: string;
+  icon: string | null;
+  sortOrder: number;
+  members: CameraGroupMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CameraSSEEvent {
   type: "connected" | "detection" | "camera_discovered" | "camera_online" | "camera_offline";
   camera?: string;

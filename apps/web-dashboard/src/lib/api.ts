@@ -1,5 +1,6 @@
 import type {
   CameraInfo,
+  CameraGroupInfo,
   ChatRequest,
   ConnectedDevice,
   DetectionEvent,
@@ -439,6 +440,90 @@ export function getCameraSnapshotUrl(name: string): string {
  */
 export function getCameraLiveUrl(name: string): string {
   return `${BASE}/api/cameras/${encodeURIComponent(name)}/live`;
+}
+
+// --- Camera groups ---
+
+export async function fetchCameraGroups(): Promise<CameraGroupInfo[]> {
+  const res = await authFetch(`${BASE}/api/cameras/groups`);
+  if (!res.ok) throw new Error(`Failed to fetch camera groups: ${res.status}`);
+  const body = (await res.json()) as { groups: CameraGroupInfo[] };
+  return body.groups;
+}
+
+export async function createCameraGroup(input: {
+  name: string;
+  icon?: string | null;
+  /** Frigate camera names (CameraInfo.name) to seed as initial members. */
+  cameraNames?: string[];
+}): Promise<CameraGroupInfo> {
+  const res = await authFetch(`${BASE}/api/cameras/groups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { group: CameraGroupInfo };
+  return body.group;
+}
+
+export async function updateCameraGroup(
+  id: string,
+  patch: { name?: string; icon?: string | null; sortOrder?: number },
+): Promise<CameraGroupInfo> {
+  const res = await authFetch(`${BASE}/api/cameras/groups/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { group: CameraGroupInfo };
+  return body.group;
+}
+
+export async function deleteCameraGroup(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/groups/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Failed to delete group: ${res.status}`);
+  }
+}
+
+export async function addCameraGroupMembers(
+  groupId: string,
+  cameraNames: string[],
+): Promise<CameraGroupInfo> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/groups/${encodeURIComponent(groupId)}/members`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cameraNames }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to add members: ${res.status}`);
+  const body = (await res.json()) as { group: CameraGroupInfo };
+  return body.group;
+}
+
+export async function removeCameraGroupMember(
+  groupId: string,
+  cameraName: string,
+): Promise<CameraGroupInfo> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(cameraName)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(`Failed to remove member: ${res.status}`);
+  const body = (await res.json()) as { group: CameraGroupInfo };
+  return body.group;
 }
 
 export async function addCameraManual(
