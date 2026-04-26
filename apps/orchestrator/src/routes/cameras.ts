@@ -1610,6 +1610,41 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         }
         patch.snapshotRetainDays = body.snapshotRetainDays;
       }
+      if ("zones" in body) {
+        if (!Array.isArray(body.zones)) {
+          return res.status(400).json({ error: "zones must be an array" });
+        }
+        const zones: typeof patch.zones = [];
+        for (const raw of body.zones) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            return res.status(400).json({ error: "Each zone must be an object" });
+          }
+          const z = raw as Record<string, unknown>;
+          if (typeof z.name !== "string") {
+            return res.status(400).json({ error: "Zone name must be a string" });
+          }
+          if (
+            !Array.isArray(z.coordinates) ||
+            z.coordinates.some((c) => typeof c !== "number")
+          ) {
+            return res
+              .status(400)
+              .json({ error: `Zone ${z.name} coordinates must be a number array` });
+          }
+          if (z.objects !== undefined && !Array.isArray(z.objects)) {
+            return res
+              .status(400)
+              .json({ error: `Zone ${z.name} objects must be an array` });
+          }
+          zones.push({
+            name: z.name,
+            coordinates: z.coordinates as number[],
+            objects: Array.isArray(z.objects) ? (z.objects as string[]) : [],
+            inertia: typeof z.inertia === "number" ? z.inertia : 3,
+          });
+        }
+        patch.zones = zones;
+      }
 
       const settings = await updateCameraSettings(req.params.name, patch);
       res.json({ settings });
