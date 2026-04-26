@@ -15,8 +15,11 @@ import {
   fetchConfig,
   fetchEvents,
   fetchEventsFiltered,
+  fetchRecordings,
+  fetchRecordingsSummary,
   fetchReviews,
   fetchStats,
+  fetchTimeline,
   markReviewViewed,
   setEventRetain,
   type FrigateEventFilter,
@@ -30,7 +33,11 @@ import type {
   DiscoveredCamera,
   CameraSSEEvent,
   EventDetail,
+  RecordingDay,
+  RecordingHour,
+  RecordingSegment,
   ReviewItem,
+  TimelineEntry,
 } from "../types/camera.js";
 
 const logger = pino({ name: "camera-service" });
@@ -459,6 +466,94 @@ export async function getReviewsFiltered(
 
 export async function setReviewViewed(reviewId: string): Promise<void> {
   await markReviewViewed(reviewId);
+}
+
+// --- Recordings + timeline ---
+
+/**
+ * Per-day + per-hour recording summary. The dashboard's date picker
+ * uses this to grey out days with no recordings, and the timeline
+ * scrubber paints hour bands using the motion + event counts.
+ *
+ * Frigate's wire shape is loose — `motion` may be a number, an
+ * object, or absent depending on version. We normalise to a flat
+ * RecordingHour shape so the frontend doesn't need to know.
+ */
+export async function getRecordingsSummary(
+  cameraName: string,
+): Promise<RecordingDay[]> {
+  const raw = (await fetchRecordingsSummary(cameraName)) as Array<Record<string, unknown>>;
+  return raw.map((d) => {
+    const day = String(d.day ?? "");
+    const events = Number(d.events ?? 0);
+    const duration = Number(d.duration ?? 0);
+    const hoursSrc = (d.hours as Record<string, Record<string, unknown>> | undefined) ?? {};
+    const hours: RecordingHour[] = [];
+    for (const [hourKey, h] of Object.entries(hoursSrc)) {
+      const hour = Number(hourKey);
+      if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+      // Some Frigate versions emit `motion: { value, ... }`; some emit
+      // a flat number; some omit it. Coerce to a flat 0-100.
+      let motion = 0;
+      const m = h.motion;
+      if (typeof m === "number") motion = m;
+      else if (m && typeof m === "object" && "value" in m) {
+        const v = (m as { value: unknown }).value;
+        motion = typeof v === "number" ? v : 0;
+      }
+      hours.push({
+        hour,
+        events: Number(h.events ?? 0),
+        duration: Number(h.duration ?? 0),
+        motion: Math.max(0, Math.min(100, motion)),
+      });
+    }
+    hours.sort((a, b) => a.hour - b.hour);
+    return { day, events, duration, hours };
+  });
+}
+
+export async function getRecordings(
+  cameraName: string,
+  after: number,
+  before: number,
+): Promise<RecordingSegment[]> {
+  const raw = (await fetchRecordings(cameraName, after, before)) as Array<Record<string, unknown>>;
+  return raw.map((s) => {
+    const start = Number(s.start_time ?? 0);
+    const end = Number(s.end_time ?? 0);
+    return {
+      id: String(s.id ?? `${start}-${end}`),
+      startTime: start,
+      endTime: end,
+      duration: Number(s.duration ?? Math.max(0, end - start)),
+      motion: Math.max(0, Math.min(100, Number(s.motion ?? 0))),
+      objects: Number(s.objects ?? 0),
+    };
+  });
+}
+
+export async function getTimelineEntries(
+  cameraName: string,
+  after: number,
+  before: number,
+): Promise<TimelineEntry[]> {
+  const raw = (await fetchTimeline(cameraName, after, before)) as Array<Record<string, unknown>>;
+  return raw.map((t) => {
+    const data = (t.data as Record<string, unknown> | undefined) ?? {};
+    const region = data.region as Record<string, unknown> | undefined;
+    const _region = region; // reserved for a future "show region overlay" feature
+    return {
+      timestamp: Number(t.timestamp ?? 0),
+      sourceId: String(t.source_id ?? ""),
+      classType: String(t.class_type ?? "external"),
+      label: String(data.label ?? data.sub_label ?? ""),
+      zone: data.zones && Array.isArray(data.zones) && data.zones.length > 0
+        ? String((data.zones as unknown[])[0])
+        : null,
+      score: Number(data.score ?? 0),
+    };
+  });
 }
 
 // --- Stats ---

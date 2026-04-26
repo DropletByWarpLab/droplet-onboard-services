@@ -232,6 +232,101 @@ export async function markReviewViewed(reviewId: string): Promise<void> {
   if (!resp.ok) throw new Error(`Frigate review viewed: ${resp.status}`);
 }
 
+// --- Recordings + timeline (Phase 3) ---
+//
+// Frigate keeps per-camera recordings as 10s mp4 segments on disk. The
+// dashboard's Recordings page wants three things:
+//   1. A daily/hourly summary so the timeline scrubber can paint
+//      activity bands without fetching every segment.
+//   2. The actual segment list for the chosen range so we can build a
+//      contiguous playback URL.
+//   3. The timeline activity stream — Frigate's per-event "started in
+//      zone X / lost in zone Y" trail — so the scrubber can dot the
+//      bar where things happened.
+
+/**
+ * Daily + hourly recording summary for one camera. Frigate returns
+ * objects keyed by `day` (YYYY-MM-DD) with an `hours` map of bucket
+ * summaries (motion %, event count). Useful to colour the timeline
+ * scrubber without paying for the full segment list.
+ */
+export async function fetchRecordingsSummary(
+  cameraName: string,
+): Promise<unknown[]> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings/summary`,
+    { signal: timeout() },
+  );
+  if (!resp.ok) throw new Error(`Frigate recordings summary: ${resp.status}`);
+  const data = await resp.json();
+  // Frigate sometimes returns {summary: [...]}, sometimes a bare array
+  // depending on version. Normalise.
+  return Array.isArray(data) ? data : Array.isArray(data?.summary) ? data.summary : [];
+}
+
+/**
+ * Recording segments for a camera in a time range. Each entry is a
+ * 10-second mp4 segment with start/end Unix timestamps. The dashboard
+ * uses these to know what's playable and to compute gaps.
+ */
+export async function fetchRecordings(
+  cameraName: string,
+  after: number,
+  before: number,
+): Promise<unknown[]> {
+  const params = new URLSearchParams({
+    after: String(after),
+    before: String(before),
+  });
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings?${params}`,
+    { signal: timeout() },
+  );
+  if (!resp.ok) throw new Error(`Frigate recordings: ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * Timeline activity stream for a camera in a time range. Frigate
+ * returns one entry per object/zone transition with a `class_type`
+ * ("visible", "entered_zone", "attribute", "gone"…) plus a `data`
+ * blob containing label + score + region. The dashboard pins these
+ * as dots on the scrubber.
+ */
+export async function fetchTimeline(
+  cameraName: string,
+  after: number,
+  before: number,
+): Promise<unknown[]> {
+  const params = new URLSearchParams({
+    cameras: cameraName,
+    after: String(after),
+    before: String(before),
+    limit: "1000",
+  });
+  const resp = await fetch(`${FRIGATE_URL}/api/timeline?${params}`, {
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new Error(`Frigate timeline: ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * Construct the proxied URL for a recording-range mp4. Frigate
+ * synthesises this on demand for ranges up to ~10 minutes; longer
+ * windows need HLS (deferred to Phase 3.2).
+ *
+ * Returns just the URL — the route handler streams the upstream
+ * response so we never buffer the full mp4.
+ */
+export function buildRecordingClipUrl(
+  cameraName: string,
+  start: number,
+  end: number,
+): string {
+  return `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/start/${start}/end/${end}/clip.mp4`;
+}
+
 // --- Camera control ---
 
 export async function enableDetection(cameraName: string): Promise<void> {
