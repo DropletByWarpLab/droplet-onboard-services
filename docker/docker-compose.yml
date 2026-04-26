@@ -303,8 +303,9 @@ services:
       - "8555"
     # Bind the API on host loopback only so the camera-discovery service
     # (network_mode: host — can't resolve compose service DNS) can POST
-    # config updates. Not exposed off-host: the nginx gateway at
-    # /frigate/ remains the canonical outside entry point.
+    # config updates. Not exposed off-host: the orchestrator's
+    # /api/cameras/* surface is the only external entry point — there
+    # is no /frigate/ route by design. See docs/FRIGATE_PARITY.md.
     ports:
       - "127.0.0.1:5000:5000"
     devices:
