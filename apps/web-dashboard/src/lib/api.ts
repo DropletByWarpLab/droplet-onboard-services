@@ -2,6 +2,8 @@ import type {
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
+  CameraSettings,
+  CameraSettingsPatch,
   EventDetail,
   EventFilter,
   FilteredEventsResult,
@@ -511,6 +513,42 @@ export function getRecordingHlsUrl(
   before: number,
 ): string {
   return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback.m3u8?after=${after}&before=${before}`;
+}
+
+// --- Per-camera settings (Phase 4.1) ---
+
+export async function fetchCameraSettings(
+  cameraName: string,
+): Promise<CameraSettings> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/settings`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { settings: CameraSettings };
+  return body.settings;
+}
+
+export async function patchCameraSettings(
+  cameraName: string,
+  patch: CameraSettingsPatch,
+): Promise<CameraSettings> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/settings`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { settings: CameraSettings };
+  return body.settings;
 }
 
 /**
