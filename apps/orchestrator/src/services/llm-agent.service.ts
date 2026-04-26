@@ -32,7 +32,10 @@ export interface AgentDeps {
       messages: ChatMessage[];
       stream?: boolean;
       temperature?: number;
-      tools?: { type: "function"; function: { name: string; description: string; parameters: object } }[];
+      tools?: {
+        type: "function";
+        function: { name: string; description: string; parameters: Record<string, unknown> };
+      }[];
       tool_choice?: "auto" | "none";
     }) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
   };
@@ -84,7 +87,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     function: {
       name: t.name,
       description: t.description,
-      parameters: t.inputSchema,
+      parameters: t.inputSchema as Record<string, unknown>,
     },
   }));
 

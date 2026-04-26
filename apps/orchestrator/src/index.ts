@@ -22,6 +22,7 @@ import {
   startHealthMonitor,
   stopHealthMonitor,
 } from "./services/health-monitor.service.js";
+import { ensureMcpStarted, stopMcp } from "./services/mcp-client.singleton.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
@@ -92,6 +93,17 @@ async function main() {
   // WARP-43: begin background polling of component health. Non-blocking —
   // the first snapshot is seeded immediately and the poller keeps running.
   startHealthMonitor(prisma);
+
+  // WARP-101: spawn the MCP stdio child so /api/llm/chat can drive the
+  // orchestrator agent loop. Non-fatal: if the child crashes the chat
+  // route falls through to "no tools available" and surfaces the error
+  // to the model. SIGTERM/SIGINT below stops the child on shutdown.
+  try {
+    await ensureMcpStarted();
+    logger.info("MCP stdio child started");
+  } catch (err) {
+    logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
+  }
 
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
   // at startup (best-effort — missing file is logged, lookups degrade to
@@ -183,6 +195,13 @@ async function main() {
     shutdownDeviceRegistration();
     await shutdownMatterService();
     await shutdownCameraService();
+    // Stop the MCP stdio child first so it doesn't keep its Prisma
+    // connection pool alive past our $disconnect below. stopMcp() is
+    // best-effort; even if the SDK close hangs we time out via
+    // process.exit(0) regardless.
+    await stopMcp().catch((err) => {
+      logger.warn("MCP stdio child stop failed: %s", (err as Error).message);
+    });
     await prisma.$disconnect();
     process.exit(0);
   };
