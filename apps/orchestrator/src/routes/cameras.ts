@@ -36,6 +36,11 @@ import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncDownloadFile } from "../services/nextcloud.client.js";
+import * as groupsSvc from "../services/camera-groups.service.js";
+import {
+  isValidGroupName,
+  isValidGroupIcon,
+} from "../services/camera-groups.service.js";
 import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
@@ -71,6 +76,139 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // ==========================================================================
   // FIXED-PATH ROUTES (must be registered before :name parameterized routes)
   // ==========================================================================
+
+  // --- Camera groups ---
+  //
+  // Operator-defined logical groupings rendered as a navigation rail above
+  // the cameras grid. Membership is many-to-many via CameraGroupMember;
+  // see services/camera-groups.service.ts for the data model + DTO shape.
+  //
+  // Routes are registered before /cameras/:name for the same reason as the
+  // clips routes below: parameterized :name would otherwise shadow
+  // /cameras/groups and resolve as a camera literally named "groups".
+
+  router.get("/cameras/groups", async (_req, res, next) => {
+    try {
+      const groups = await groupsSvc.listGroups(prisma);
+      res.json({ groups });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/groups", async (req, res, next) => {
+    try {
+      const { name, icon, cameraNames } = req.body ?? {};
+      if (!isValidGroupName(name)) {
+        return res.status(400).json({ error: "Invalid group name" });
+      }
+      if (!isValidGroupIcon(icon)) {
+        return res.status(400).json({ error: "Invalid group icon" });
+      }
+      if (
+        cameraNames !== undefined &&
+        (!Array.isArray(cameraNames) ||
+          cameraNames.some((s) => typeof s !== "string" || !isValidCameraName(s)))
+      ) {
+        return res.status(400).json({ error: "cameraNames must be a list of camera names" });
+      }
+      const group = await groupsSvc.createGroup(prisma, {
+        name,
+        icon: icon ?? null,
+        cameraNames: cameraNames as string[] | undefined,
+      });
+      res.status(201).json({ group });
+    } catch (err) {
+      // Unique constraint on name → 409 with a friendly message
+      if ((err as { code?: string })?.code === "P2002") {
+        return res.status(409).json({ error: "A group with that name already exists" });
+      }
+      next(err);
+    }
+  });
+
+  router.patch("/cameras/groups/:id", async (req, res, next) => {
+    try {
+      const { name, icon, sortOrder } = req.body ?? {};
+      if (name !== undefined && !isValidGroupName(name)) {
+        return res.status(400).json({ error: "Invalid group name" });
+      }
+      if (icon !== undefined && !isValidGroupIcon(icon)) {
+        return res.status(400).json({ error: "Invalid group icon" });
+      }
+      if (
+        sortOrder !== undefined &&
+        (typeof sortOrder !== "number" || !Number.isFinite(sortOrder))
+      ) {
+        return res.status(400).json({ error: "sortOrder must be a number" });
+      }
+      const group = await groupsSvc.updateGroup(prisma, req.params.id, {
+        name,
+        icon,
+        sortOrder,
+      });
+      if (!group) return res.status(404).json({ error: "Group not found" });
+      res.json({ group });
+    } catch (err) {
+      if ((err as { code?: string })?.code === "P2002") {
+        return res.status(409).json({ error: "A group with that name already exists" });
+      }
+      next(err);
+    }
+  });
+
+  router.delete("/cameras/groups/:id", async (req, res, next) => {
+    try {
+      const ok = await groupsSvc.deleteGroup(prisma, req.params.id);
+      if (!ok) return res.status(404).json({ error: "Group not found" });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/groups/:id/members", async (req, res, next) => {
+    try {
+      const { cameraNames } = req.body ?? {};
+      if (
+        !Array.isArray(cameraNames) ||
+        cameraNames.some((s) => typeof s !== "string" || !isValidCameraName(s))
+      ) {
+        return res
+          .status(400)
+          .json({ error: "cameraNames must be a list of camera names" });
+      }
+      const group = await groupsSvc.addMembers(
+        prisma,
+        req.params.id,
+        cameraNames,
+      );
+      if (!group) return res.status(404).json({ error: "Group not found" });
+      res.json({ group });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete(
+    "/cameras/groups/:id/members/:cameraName",
+    async (req, res, next) => {
+      try {
+        if (!isValidCameraName(req.params.cameraName)) {
+          return res.status(400).json({ error: "Invalid camera name" });
+        }
+        const group = await groupsSvc.removeMember(
+          prisma,
+          req.params.id,
+          req.params.cameraName,
+        );
+        if (!group) return res.status(404).json({ error: "Group not found" });
+        res.json({ group });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // --- Clips (PR #3) ---
   //

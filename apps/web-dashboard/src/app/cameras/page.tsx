@@ -1,20 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
 import { RefreshCw, Video, Plus, Radar } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
+import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
 import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { CameraDiscoveryBanner } from "@/components/cameras/CameraDiscoveryBanner";
 import { CameraNotificationToast } from "@/components/cameras/CameraNotificationToast";
 import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
 import { AddCameraModal } from "@/components/cameras/AddCameraModal";
+import { CameraGroupNav } from "@/components/cameras/CameraGroupNav";
+import { CameraGroupEditor } from "@/components/cameras/CameraGroupEditor";
 import { authFetch } from "@/lib/auth";
 import { triggerCameraScan } from "@/lib/api";
-import type { CameraInfo } from "@/lib/types";
+import type { CameraGroupInfo, CameraInfo } from "@/lib/types";
 
 export default function CamerasPage() {
   const {
@@ -46,6 +49,22 @@ export default function CamerasPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [scanning, setScanning] = useState(false);
 
+  // Camera-group state. Selected pill drives the grid filter; null = "All
+  // cameras" pseudo-group. Editor modal opens with either the group being
+  // edited or null when creating a new one.
+  const groupsHook = useCameraGroups();
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorGroup, setEditorGroup] = useState<CameraGroupInfo | null>(null);
+
+  const filteredCameras = useMemo(() => {
+    if (!selectedGroupId) return cameras;
+    const group = groupsHook.groups.find((g) => g.id === selectedGroupId);
+    if (!group) return cameras; // group disappeared mid-render — fall back to All
+    const memberSet = new Set(group.members.map((m) => m.cameraName));
+    return cameras.filter((c) => memberSet.has(c.name));
+  }, [cameras, groupsHook.groups, selectedGroupId]);
+
   // Click on a card → navigate to the dedicated fullscreen page at
   // /cameras/[name]. The dialog-style CameraDetailPanel that we used
   // before is intentionally retired here in favour of a real route, so
@@ -53,6 +72,25 @@ export default function CamerasPage() {
   // notification links all land on the same view.
   const openCamera = (cam: CameraInfo) =>
     router.push(`/cameras/${encodeURIComponent(cam.name)}`);
+
+  const openNewGroup = () => {
+    setEditorGroup(null);
+    setEditorOpen(true);
+  };
+  const openEditGroup = (group: CameraGroupInfo) => {
+    setEditorGroup(group);
+    setEditorOpen(true);
+  };
+  const handleDeleteGroup = async (group: CameraGroupInfo) => {
+    if (!confirm(`Delete group "${group.name}"? Cameras themselves are not removed.`)) return;
+    try {
+      await groupsHook.remove(group.id);
+      // If the deleted group was selected, snap back to All.
+      if (selectedGroupId === group.id) setSelectedGroupId(null);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to delete group");
+    }
+  };
 
   if (isLoading) {
     return (
@@ -145,6 +183,23 @@ export default function CamerasPage() {
       {/* Network isolation */}
       <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />
 
+      {/* Group navigation rail — sits above the grid so the operator can
+          slice their cameras by location/role without losing the page
+          context. */}
+      {totalCameras > 0 && (
+        <div className="mb-4">
+          <CameraGroupNav
+            groups={groupsHook.groups}
+            cameras={cameras}
+            selectedGroupId={selectedGroupId}
+            onSelect={setSelectedGroupId}
+            onNewGroup={openNewGroup}
+            onEditGroup={openEditGroup}
+            onDeleteGroup={handleDeleteGroup}
+          />
+        </div>
+      )}
+
       {/* Discovery banner */}
       <CameraDiscoveryBanner
         cameras={discovered}
@@ -190,8 +245,16 @@ export default function CamerasPage() {
         </div>
       )}
 
-      {/* Camera grid */}
-      <CameraGrid cameras={cameras} onCameraClick={openCamera} />
+      {/* Camera grid — filtered by the selected group. */}
+      {selectedGroupId && filteredCameras.length === 0 ? (
+        <div className="dp-card text-center py-10">
+          <p className="type-subheadline text-label-tertiary">
+            No cameras in this group yet. Edit the group to add some.
+          </p>
+        </div>
+      ) : (
+        <CameraGrid cameras={filteredCameras} onCameraClick={openCamera} />
+      )}
 
       {/* Recent events */}
       {recentEvents.length > 0 && (
@@ -205,6 +268,39 @@ export default function CamerasPage() {
         <AddCameraModal
           onClose={() => setShowAddModal(false)}
           onAdded={refresh}
+        />
+      )}
+
+      {/* Group editor — handles both create + edit flows. */}
+      {editorOpen && (
+        <CameraGroupEditor
+          group={editorGroup}
+          cameras={cameras}
+          onClose={() => setEditorOpen(false)}
+          onCreate={async (input) => {
+            const created = await groupsHook.create(input);
+            setSelectedGroupId(created.id);
+          }}
+          onSaveMeta={async (id, patch) => {
+            const updated = await (
+              patch.name !== undefined
+                ? groupsHook.rename(id, patch.name)
+                : patch.icon !== undefined
+                  ? groupsHook.setIcon(id, patch.icon)
+                  : Promise.resolve(null)
+            );
+            // Keep the in-modal group in sync so subsequent edits see the
+            // latest server state.
+            if (updated) setEditorGroup(updated);
+          }}
+          onAddMember={async (id, cameraName) => {
+            const updated = await groupsHook.addMembers(id, [cameraName]);
+            if (updated) setEditorGroup(updated);
+          }}
+          onRemoveMember={async (id, cameraName) => {
+            const updated = await groupsHook.removeMember(id, cameraName);
+            if (updated) setEditorGroup(updated);
+          }}
         />
       )}
     </div>
