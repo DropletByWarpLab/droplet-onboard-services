@@ -11,6 +11,7 @@ import {
   PinOff,
   Power,
   PowerOff,
+  Settings,
   Trash2,
   VideoOff,
 } from "lucide-react";
@@ -194,6 +195,14 @@ export default function CameraFullscreenPage() {
           >
             <Film size={16} />
             <span className="type-subheadline hidden sm:inline">Recordings</span>
+          </button>
+          <button
+            onClick={() => router.push(`/cameras/${encodeURIComponent(camera.name)}/settings`)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
+            title="Detection, recording, and zone settings"
+          >
+            <Settings size={16} />
+            <span className="type-subheadline hidden sm:inline">Settings</span>
           </button>
           <button
             onClick={handleTogglePin}

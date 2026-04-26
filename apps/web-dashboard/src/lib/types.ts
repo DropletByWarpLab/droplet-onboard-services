@@ -424,6 +424,37 @@ export interface TimelineEntry {
   score: number;
 }
 
+// --- Per-camera settings (Phase 4.1) ---
+
+export interface ObjectFilter {
+  threshold: number;
+  minScore: number;
+}
+
+export interface CameraSettings {
+  detectEnabled: boolean;
+  detectFps: number;
+  trackedLabels: string[];
+  objectFilters: Record<string, ObjectFilter>;
+  recordEnabled: boolean;
+  recordRetainDays: number;
+  snapshotsEnabled: boolean;
+  snapshotRetainDays: number;
+  zoneNames: string[];
+  hasMotionMask: boolean;
+}
+
+export interface CameraSettingsPatch {
+  detectEnabled?: boolean;
+  detectFps?: number;
+  trackedLabels?: string[];
+  objectFilters?: Record<string, Partial<ObjectFilter>>;
+  recordEnabled?: boolean;
+  recordRetainDays?: number;
+  snapshotsEnabled?: boolean;
+  snapshotRetainDays?: number;
+}
+
 export interface DiscoveredCamera {
   id: string;
   name: string;

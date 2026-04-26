@@ -53,6 +53,11 @@ import {
   isValidGroupIcon,
 } from "../services/camera-groups.service.js";
 import * as pinsSvc from "../services/camera-pins.service.js";
+import {
+  getCameraSettings,
+  updateCameraSettings,
+  type CameraSettingsPatch,
+} from "../services/camera-settings.service.js";
 import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
@@ -1456,6 +1461,169 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         res.end();
       }
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // ==========================================================================
+  // PER-CAMERA SETTINGS (Phase 4.1)
+  // ==========================================================================
+  //
+  // GET returns a typed slice of Frigate's per-camera config that the
+  // dashboard's settings page edits. PATCH accepts a partial update,
+  // merges it into Frigate's full config, and POSTs back via
+  // /api/config/save?save_option=restart so the change takes effect.
+  //
+  // The PATCH body is validated structurally here (types) and
+  // semantically in the service (ranges). 4xx is preferred over 500
+  // for bad input, so we surface the service's `Error.message` when
+  // it shape-mismatches obvious things like "threshold > 1".
+
+  router.get("/cameras/:name/settings", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const settings = await getCameraSettings(req.params.name);
+      res.json({ settings });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return void res.status(404).json({ error: msg });
+      next(err);
+    }
+  });
+
+  router.patch("/cameras/:name/settings", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const patch: CameraSettingsPatch = {};
+
+      // Per-field structural validation. The service does range +
+      // semantic checks; we just keep obviously-wrong shapes out of
+      // the YAML write path.
+      const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+      const isFiniteNum = (v: unknown): v is number =>
+        typeof v === "number" && Number.isFinite(v);
+
+      if ("detectEnabled" in body) {
+        if (!isBool(body.detectEnabled)) {
+          return res.status(400).json({ error: "detectEnabled must be boolean" });
+        }
+        patch.detectEnabled = body.detectEnabled;
+      }
+      if ("detectFps" in body) {
+        if (!isFiniteNum(body.detectFps)) {
+          return res.status(400).json({ error: "detectFps must be a number" });
+        }
+        patch.detectFps = body.detectFps;
+      }
+      if ("trackedLabels" in body) {
+        if (
+          !Array.isArray(body.trackedLabels) ||
+          body.trackedLabels.some(
+            (s) => typeof s !== "string" || !/^[a-z0-9_-]{1,32}$/i.test(s),
+          )
+        ) {
+          return res.status(400).json({
+            error: "trackedLabels must be a list of label strings",
+          });
+        }
+        patch.trackedLabels = body.trackedLabels as string[];
+      }
+      if ("objectFilters" in body) {
+        if (
+          !body.objectFilters ||
+          typeof body.objectFilters !== "object" ||
+          Array.isArray(body.objectFilters)
+        ) {
+          return res.status(400).json({
+            error: "objectFilters must be an object",
+          });
+        }
+        const filters: Record<string, { threshold?: number; minScore?: number }> = {};
+        for (const [label, raw] of Object.entries(
+          body.objectFilters as Record<string, unknown>,
+        )) {
+          if (!/^[a-z0-9_-]{1,32}$/i.test(label)) {
+            return res
+              .status(400)
+              .json({ error: `Invalid label in objectFilters: ${label}` });
+          }
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            return res
+              .status(400)
+              .json({ error: `objectFilters.${label} must be an object` });
+          }
+          const r = raw as Record<string, unknown>;
+          const entry: { threshold?: number; minScore?: number } = {};
+          if ("threshold" in r) {
+            if (!isFiniteNum(r.threshold)) {
+              return res.status(400).json({
+                error: `objectFilters.${label}.threshold must be a number`,
+              });
+            }
+            entry.threshold = r.threshold;
+          }
+          if ("minScore" in r) {
+            if (!isFiniteNum(r.minScore)) {
+              return res.status(400).json({
+                error: `objectFilters.${label}.minScore must be a number`,
+              });
+            }
+            entry.minScore = r.minScore;
+          }
+          filters[label] = entry;
+        }
+        patch.objectFilters = filters;
+      }
+      if ("recordEnabled" in body) {
+        if (!isBool(body.recordEnabled)) {
+          return res.status(400).json({ error: "recordEnabled must be boolean" });
+        }
+        patch.recordEnabled = body.recordEnabled;
+      }
+      if ("recordRetainDays" in body) {
+        if (!isFiniteNum(body.recordRetainDays)) {
+          return res
+            .status(400)
+            .json({ error: "recordRetainDays must be a number" });
+        }
+        patch.recordRetainDays = body.recordRetainDays;
+      }
+      if ("snapshotsEnabled" in body) {
+        if (!isBool(body.snapshotsEnabled)) {
+          return res
+            .status(400)
+            .json({ error: "snapshotsEnabled must be boolean" });
+        }
+        patch.snapshotsEnabled = body.snapshotsEnabled;
+      }
+      if ("snapshotRetainDays" in body) {
+        if (!isFiniteNum(body.snapshotRetainDays)) {
+          return res
+            .status(400)
+            .json({ error: "snapshotRetainDays must be a number" });
+        }
+        patch.snapshotRetainDays = body.snapshotRetainDays;
+      }
+
+      const settings = await updateCameraSettings(req.params.name, patch);
+      res.json({ settings });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return void res.status(404).json({ error: msg });
+      // Surface range/threshold errors as 400 so the dashboard can
+      // render them inline next to the offending control.
+      if (
+        msg.includes("must be between") ||
+        msg.includes("Frigate rejected")
+      ) {
+        return void res.status(400).json({ error: msg });
+      }
       next(err);
     }
   });
