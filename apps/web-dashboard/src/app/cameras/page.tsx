@@ -7,6 +7,7 @@ import { RefreshCw, Video, Plus, Radar } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
+import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
 import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { CameraDiscoveryBanner } from "@/components/cameras/CameraDiscoveryBanner";
@@ -57,6 +58,10 @@ export default function CamerasPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorGroup, setEditorGroup] = useState<CameraGroupInfo | null>(null);
 
+  // Per-user pinned cameras. The set drives the star icon on each card;
+  // the array drives the order of the "Pinned" rail above the grid.
+  const pinsHook = useCameraPins();
+
   const filteredCameras = useMemo(() => {
     if (!selectedGroupId) return cameras;
     const group = groupsHook.groups.find((g) => g.id === selectedGroupId);
@@ -64,6 +69,30 @@ export default function CamerasPage() {
     const memberSet = new Set(group.members.map((m) => m.cameraName));
     return cameras.filter((c) => memberSet.has(c.name));
   }, [cameras, groupsHook.groups, selectedGroupId]);
+
+  // Pinned + unpinned split for the visible grid. Pinned cameras render
+  // in pin sortOrder (server-controlled — most-recently-pinned first by
+  // default; reorder endpoint exists for an explicit drag UI later).
+  // Unpinned cameras keep their existing order. Dangling pins (camera
+  // disappeared from Frigate) silently drop here so we don't crash on a
+  // tombstoned name.
+  const { pinnedCameras, unpinnedCameras } = useMemo(() => {
+    const byName = new Map(filteredCameras.map((c) => [c.name, c]));
+    const pinned = pinsHook.pins
+      .map((p) => byName.get(p.cameraName))
+      .filter((c): c is CameraInfo => Boolean(c));
+    const pinnedNames = new Set(pinned.map((c) => c.name));
+    const unpinned = filteredCameras.filter((c) => !pinnedNames.has(c.name));
+    return { pinnedCameras: pinned, unpinnedCameras: unpinned };
+  }, [filteredCameras, pinsHook.pins]);
+
+  const handleTogglePin = async (cam: CameraInfo) => {
+    try {
+      await pinsHook.toggle(cam.name);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to toggle pin");
+    }
+  };
 
   // Click on a card → navigate to the dedicated fullscreen page at
   // /cameras/[name]. The dialog-style CameraDetailPanel that we used
@@ -245,7 +274,10 @@ export default function CamerasPage() {
         </div>
       )}
 
-      {/* Camera grid — filtered by the selected group. */}
+      {/* Camera grid — filtered by the selected group, then split into a
+          "Pinned" section above and the rest below so an operator can
+          float their priority cameras. The Pinned section is hidden if
+          empty. */}
       {selectedGroupId && filteredCameras.length === 0 ? (
         <div className="dp-card text-center py-10">
           <p className="type-subheadline text-label-tertiary">
@@ -253,7 +285,42 @@ export default function CamerasPage() {
           </p>
         </div>
       ) : (
-        <CameraGrid cameras={filteredCameras} onCameraClick={openCamera} />
+        <>
+          {pinnedCameras.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-center gap-2 mb-3">
+                <h2 className="type-title-3 text-label-primary">Pinned</h2>
+                <span className="type-caption-2 text-label-tertiary">
+                  {pinnedCameras.length}
+                </span>
+              </div>
+              <CameraGrid
+                cameras={pinnedCameras}
+                onCameraClick={openCamera}
+                pinnedSet={pinsHook.pinnedSet}
+                onTogglePin={handleTogglePin}
+              />
+            </div>
+          )}
+          {unpinnedCameras.length > 0 && (
+            <>
+              {pinnedCameras.length > 0 && (
+                <div className="flex items-center gap-2 mb-3">
+                  <h2 className="type-title-3 text-label-primary">All cameras</h2>
+                  <span className="type-caption-2 text-label-tertiary">
+                    {unpinnedCameras.length}
+                  </span>
+                </div>
+              )}
+              <CameraGrid
+                cameras={unpinnedCameras}
+                onCameraClick={openCamera}
+                pinnedSet={pinsHook.pinnedSet}
+                onTogglePin={handleTogglePin}
+              />
+            </>
+          )}
+        </>
       )}
 
       {/* Recent events */}

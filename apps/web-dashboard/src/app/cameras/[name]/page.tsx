@@ -6,6 +6,8 @@ import {
   ArrowLeft,
   Circle,
   Maximize2,
+  Pin,
+  PinOff,
   Power,
   PowerOff,
   Trash2,
@@ -13,6 +15,7 @@ import {
 } from "lucide-react";
 import useSWR from "swr";
 import { useCameras } from "@/lib/hooks/useCameras";
+import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import type { CameraInfo, DetectionEvent } from "@/lib/types";
@@ -48,6 +51,23 @@ export default function CameraFullscreenPage() {
 
   const { cameras, isLoading, enableCam, disableCam, removeCam } = useCameras();
   const camera = cameras.find((c) => c.name === name);
+
+  // Pin state for the toolbar toggle. Mirrors the grid affordance so the
+  // operator can pin/unpin without backing out to the cards page.
+  const { pinnedSet, toggle: togglePin } = useCameraPins();
+  const [pinBusy, setPinBusy] = useState(false);
+  const isPinned = camera ? pinnedSet.has(camera.name) : false;
+  const handleTogglePin = async () => {
+    if (!camera || pinBusy) return;
+    setPinBusy(true);
+    try {
+      await togglePin(camera.name);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to toggle pin");
+    } finally {
+      setPinBusy(false);
+    }
+  };
 
   // Per-camera recent events for the side rail. We hit the existing
   // `/api/cameras/:name/events` route instead of the global recent feed so
@@ -166,6 +186,26 @@ export default function CameraFullscreenPage() {
               <span className="type-subheadline hidden sm:inline">Enable</span>
             </button>
           )}
+          <button
+            onClick={handleTogglePin}
+            disabled={pinBusy}
+            aria-pressed={isPinned}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+              isPinned
+                ? "bg-accent/15 text-accent hover:bg-accent/25"
+                : "text-white/90 hover:bg-white/10"
+            } ${pinBusy ? "opacity-50 cursor-wait" : ""}`}
+            title={isPinned ? "Unpin from grid" : "Pin to top of grid"}
+          >
+            {isPinned ? (
+              <Pin size={16} className="fill-current" />
+            ) : (
+              <PinOff size={16} />
+            )}
+            <span className="type-subheadline hidden sm:inline">
+              {isPinned ? "Pinned" : "Pin"}
+            </span>
+          </button>
           <button
             onClick={async () => {
               try {

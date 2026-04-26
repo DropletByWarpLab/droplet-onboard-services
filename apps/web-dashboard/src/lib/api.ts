@@ -1,6 +1,7 @@
 import type {
   CameraInfo,
   CameraGroupInfo,
+  CameraPinInfo,
   ChatRequest,
   ConnectedDevice,
   DetectionEvent,
@@ -524,6 +525,56 @@ export async function removeCameraGroupMember(
   if (!res.ok) throw new Error(`Failed to remove member: ${res.status}`);
   const body = (await res.json()) as { group: CameraGroupInfo };
   return body.group;
+}
+
+// --- Camera pins (per-user prefs) ---
+
+export async function fetchCameraPins(): Promise<CameraPinInfo[]> {
+  const res = await authFetch(`${BASE}/api/cameras/pins`);
+  if (!res.ok) throw new Error(`Failed to fetch camera pins: ${res.status}`);
+  const body = (await res.json()) as { pins: CameraPinInfo[] };
+  return body.pins;
+}
+
+export async function addCameraPin(cameraName: string): Promise<CameraPinInfo> {
+  const res = await authFetch(`${BASE}/api/cameras/pins`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cameraName }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { pin: CameraPinInfo };
+  return body.pin;
+}
+
+export async function removeCameraPin(cameraName: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/pins/${encodeURIComponent(cameraName)}`,
+    { method: "DELETE" },
+  );
+  // 204 has no body; 404 is treated as already-unpinned (idempotent).
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Failed to unpin camera: ${res.status}`);
+  }
+}
+
+export async function reorderCameraPins(
+  cameraNames: string[],
+): Promise<CameraPinInfo[]> {
+  const res = await authFetch(`${BASE}/api/cameras/pins/reorder`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cameraNames }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { pins: CameraPinInfo[] };
+  return body.pins;
 }
 
 export async function addCameraManual(
