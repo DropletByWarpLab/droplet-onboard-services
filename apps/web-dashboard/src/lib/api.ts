@@ -8,6 +8,8 @@ import type {
   EventDetail,
   EventFilter,
   FilteredEventsResult,
+  KnownFace,
+  KnownPlate,
   NotificationPrefs,
   PtzAction,
   PtzCapabilities,
@@ -542,6 +544,73 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
+}
+
+// --- Face recognition + LPR (Phase 7.5 / 7.6) ---
+
+export async function fetchKnownFaces(): Promise<KnownFace[]> {
+  const res = await authFetch(`${BASE}/api/cameras/faces`);
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  const body = (await res.json()) as { faces: KnownFace[] };
+  return body.faces;
+}
+
+export async function deleteKnownFace(name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/faces/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) throw new Error(`Failed: ${res.status}`);
+}
+
+export async function deleteFaceImage(
+  name: string,
+  imageName: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/faces/${encodeURIComponent(name)}/images/${encodeURIComponent(imageName)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) throw new Error(`Failed: ${res.status}`);
+}
+
+export async function tagEventAsFace(
+  eventId: string,
+  faceName: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/faces/${encodeURIComponent(faceName)}/from-event/${encodeURIComponent(eventId)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+}
+
+export async function fetchKnownPlates(): Promise<KnownPlate[]> {
+  const res = await authFetch(`${BASE}/api/cameras/plates`);
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  const body = (await res.json()) as { plates: KnownPlate[] };
+  return body.plates;
+}
+
+export async function nameKnownPlate(plate: string, name: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/plates/${encodeURIComponent(plate)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+}
+
+export async function deleteKnownPlate(plate: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/plates/${encodeURIComponent(plate)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) throw new Error(`Failed: ${res.status}`);
 }
 
 // --- Notification prefs (Phase 6.3) ---

@@ -3,7 +3,17 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Video, Plus, Radar, Server, LayoutGrid, Bell } from "lucide-react";
+import {
+  RefreshCw,
+  Video,
+  Plus,
+  Radar,
+  Server,
+  LayoutGrid,
+  Bell,
+  User,
+  Car,
+} from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
@@ -202,6 +212,22 @@ export default function CamerasPage() {
           >
             <LayoutGrid size={16} />
             <span className="type-subheadline">Birdseye</span>
+          </button>
+          <button
+            onClick={() => router.push("/cameras/people")}
+            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+            title="Known faces (face recognition)"
+          >
+            <User size={16} />
+            <span className="type-subheadline hidden lg:inline">People</span>
+          </button>
+          <button
+            onClick={() => router.push("/cameras/plates")}
+            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
+            title="Detected license plates"
+          >
+            <Car size={16} />
+            <span className="type-subheadline hidden lg:inline">Plates</span>
           </button>
           <button
             onClick={() => router.push("/cameras/notifications")}

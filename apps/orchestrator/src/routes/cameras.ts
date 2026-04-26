@@ -31,6 +31,14 @@ import {
 import {
   fetchSnapshot,
   fetchEventThumbnail,
+  fetchKnownFaces,
+  fetchKnownPlates,
+  fetchFaceImage,
+  deleteKnownFace,
+  deleteFaceImage,
+  deleteKnownPlate,
+  nameKnownPlate,
+  tagEventAsFace,
   openBirdseyeStream,
   openMjpegStream,
   enableDetection,
@@ -404,6 +412,150 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         url: `/api/cameras/clips/share/${encodeURIComponent(filename)}?t=${encodeURIComponent(token)}`,
         expires_at: new Date(Date.now() + ttlSec * 1000).toISOString(),
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Face recognition (Phase 7.5) ---
+  //
+  // GET /cameras/faces — list known people + thumbnail URLs
+  // GET /cameras/faces/:name/images/:image — proxy a training image
+  // DELETE /cameras/faces/:name — remove a person + all their images
+  // DELETE /cameras/faces/:name/images/:image — remove one training image
+  // POST /cameras/faces/:name/from-event/:eventId — tag an event's
+  //   detected face as this person (uses Frigate's sub_label endpoint
+  //   which adds the snapshot to the recogniser)
+  //
+  // Names + image filenames are tightened past Frigate's anything-goes
+  // because we splice them straight into upstream URLs.
+
+  const FACE_NAME_RE = /^[a-zA-Z0-9_ -]{1,40}$/;
+  const FACE_IMAGE_RE = /^[a-zA-Z0-9._-]{1,100}\.(jpg|jpeg|png|webp)$/i;
+
+  router.get("/cameras/faces", async (_req, res, next) => {
+    try {
+      const faces = await fetchKnownFaces();
+      // Rewrite image URLs to point at our proxy.
+      const out = faces.map((f) => ({
+        name: f.name,
+        images: f.images.map((img) => ({
+          name: img.name,
+          imageUrl: `/api/cameras/faces/${encodeURIComponent(f.name)}/images/${encodeURIComponent(img.name)}`,
+        })),
+      }));
+      res.json({ faces: out });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/cameras/faces/:name/images/:image", async (req, res, next) => {
+    try {
+      if (!FACE_NAME_RE.test(req.params.name)) {
+        return res.status(400).json({ error: "Invalid face name" });
+      }
+      if (!FACE_IMAGE_RE.test(req.params.image)) {
+        return res.status(400).json({ error: "Invalid image name" });
+      }
+      const upstream = await fetchFaceImage(req.params.name, req.params.image);
+      res.setHeader(
+        "Content-Type",
+        upstream.headers.get("content-type") || "image/jpeg",
+      );
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      res.send(buffer);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/cameras/faces/:name", async (req, res, next) => {
+    try {
+      if (!FACE_NAME_RE.test(req.params.name)) {
+        return res.status(400).json({ error: "Invalid face name" });
+      }
+      await deleteKnownFace(req.params.name);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete(
+    "/cameras/faces/:name/images/:image",
+    async (req, res, next) => {
+      try {
+        if (!FACE_NAME_RE.test(req.params.name)) {
+          return res.status(400).json({ error: "Invalid face name" });
+        }
+        if (!FACE_IMAGE_RE.test(req.params.image)) {
+          return res.status(400).json({ error: "Invalid image name" });
+        }
+        await deleteFaceImage(req.params.name, req.params.image);
+        res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/cameras/faces/:name/from-event/:eventId",
+    async (req, res, next) => {
+      try {
+        if (!FACE_NAME_RE.test(req.params.name)) {
+          return res.status(400).json({ error: "Invalid face name" });
+        }
+        if (!isValidEventId(req.params.eventId)) {
+          return res.status(400).json({ error: "Invalid event ID" });
+        }
+        await tagEventAsFace(req.params.eventId, req.params.name);
+        res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // --- License plates (Phase 7.6) ---
+
+  const PLATE_RE = /^[A-Z0-9 -]{1,16}$/i;
+  const PLATE_NAME_RE = /^[a-zA-Z0-9_ '.-]{1,60}$/;
+
+  router.get("/cameras/plates", async (_req, res, next) => {
+    try {
+      const plates = await fetchKnownPlates();
+      res.json({ plates });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/cameras/plates/:plate", async (req, res, next) => {
+    try {
+      if (!PLATE_RE.test(req.params.plate)) {
+        return res.status(400).json({ error: "Invalid plate format" });
+      }
+      const name = String((req.body ?? {}).name ?? "").trim();
+      if (!PLATE_NAME_RE.test(name)) {
+        return res.status(400).json({ error: "Invalid plate name" });
+      }
+      await nameKnownPlate(req.params.plate, name);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/cameras/plates/:plate", async (req, res, next) => {
+    try {
+      if (!PLATE_RE.test(req.params.plate)) {
+        return res.status(400).json({ error: "Invalid plate format" });
+      }
+      await deleteKnownPlate(req.params.plate);
+      res.status(204).end();
     } catch (err) {
       next(err);
     }
