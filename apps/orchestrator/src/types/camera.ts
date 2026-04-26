@@ -51,6 +51,11 @@ export interface EventDetail extends DetectionEvent {
   clipUrl: string | null;
   /** Authenticated snapshot URL, only set when hasSnapshot is true. */
   snapshotUrl: string | null;
+  /** Frigate-genai-generated natural-language description of the
+   *  event. Null when the genai feature is off or the description
+   *  hasn't been generated yet (Frigate generates async on event
+   *  end). Phase 7.7. */
+  description: string | null;
 }
 
 /**

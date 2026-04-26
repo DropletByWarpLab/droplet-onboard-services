@@ -573,6 +573,20 @@ export async function deleteFaceImage(
   if (!res.ok && res.status !== 404) throw new Error(`Failed: ${res.status}`);
 }
 
+/** Ask Frigate to (re)generate a GenAI description for an event. */
+export async function regenerateEventDescription(
+  eventId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/events/${encodeURIComponent(eventId)}/regenerate-description`,
+    { method: "POST" },
+  );
+  if (!res.ok && res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+}
+
 export async function tagEventAsFace(
   eventId: string,
   faceName: string,
