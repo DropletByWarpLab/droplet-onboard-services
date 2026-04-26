@@ -475,6 +475,24 @@ npm run test:integration       # Full stack integration (Docker Compose)
 
 ---
 
+## Third-party services + licensing
+
+Everything Droplet runs on-device is open-source and free. No paid subscriptions, no cloud accounts, no per-device licensing. The major upstream components and their licenses:
+
+| Component | License | Notes |
+|-----------|---------|-------|
+| Frigate NVR | MIT | OSS models only — no Frigate Plus / paid model subscription |
+| Nextcloud | AGPLv3 | Self-hosted; no Nextcloud paid hub or remote cloud |
+| Matter (matter.js) | Apache 2.0 | Native controller in the orchestrator — no Home Assistant, no Nabu Casa |
+| OpenWrt | GPLv2 | Routes the cameras VLAN; runs on the user's own Pi |
+| FastAPI / Express / Next.js / Prisma / SWR / lucide-react / hls.js / web-push | MIT or Apache 2.0 | All OSS, all free |
+| LiteLLM | MIT | Multi-provider LLM proxy. The operator brings their own LLM API keys (BYOK) — no Droplet-side subscription |
+| PostgreSQL / Redis / Mosquitto | OSS (PostgreSQL / BSD / EPL) | Self-hosted infra |
+
+**The operator's only out-of-pocket cost is their own LLM provider key** (OpenAI / Anthropic / Gemini etc.) if they want cloud LLMs — and that's optional, since the bundled inference engine runs Ollama locally.
+
+---
+
 ## License
 
 Proprietary. All rights reserved.
