@@ -73,8 +73,12 @@ export async function exportClip(
   const endEpoch = Math.floor(input.endsAt.getTime() / 1000);
   if (endEpoch <= startEpoch) throw new Error("endsAt must be after startsAt");
   const durationSec = endEpoch - startEpoch;
-  // Frigate is not the place to render hour-long exports — cap aggressively.
-  if (durationSec > 30 * 60) throw new Error("clip duration capped at 30 minutes");
+  // Cap export duration. The byte cap below is the real safety; this is
+  // a "don't make Frigate work for 10 minutes synthesising one mp4"
+  // policy. Lifted from 30 → 60 in Phase 3.2A when the recordings page
+  // started exporting full-hour windows by default. Anything longer
+  // should be done as a chunked job (deferred to Phase 5).
+  if (durationSec > 60 * 60) throw new Error("clip duration capped at 60 minutes");
 
   // Frigate exposes export at /api/<camera>/recordings/<start>/<end>/clip.mp4
   // (epoch seconds). It returns the rendered MP4 directly.
