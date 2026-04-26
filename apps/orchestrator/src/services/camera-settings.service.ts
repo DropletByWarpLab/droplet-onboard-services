@@ -55,6 +55,13 @@ export interface CameraZone {
   inertia: number;
 }
 
+/** A single motion-mask polygon. Same coordinate convention as zones —
+ *  flat normalised [x1, y1, x2, y2, …]. Masks have no name + no per-mask
+ *  metadata; they're just regions Frigate ignores for motion. */
+export interface MotionMaskPolygon {
+  coordinates: number[];
+}
+
 export interface CameraSettings {
   /** Whether detection is enabled at all on this camera. */
   detectEnabled: boolean;
@@ -73,11 +80,10 @@ export interface CameraSettings {
   snapshotsEnabled: boolean;
   /** How long event snapshots are kept (days). */
   snapshotRetainDays: number;
-  /** Defined zones (full coords, not just names — the polygon editor
-   *  needs them). Phase 4.2 added these. */
+  /** Defined zones (full coords). Phase 4.2 surfaced these. */
   zones: CameraZone[];
-  /** Whether a motion mask is configured (still read-only — Phase 4.3). */
-  hasMotionMask: boolean;
+  /** Motion-mask polygons. Empty array = no mask. Phase 4.3 added these. */
+  motionMasks: MotionMaskPolygon[];
 }
 
 export interface CameraSettingsPatch {
@@ -94,6 +100,9 @@ export interface CameraSettingsPatch {
    *  the full zone list each save so we don't have to track per-zone
    *  add/remove diffs. */
   zones?: CameraZone[];
+  /** Replace the camera's motion-mask polygons wholesale. Same
+   *  whole-list-on-save semantics as zones. */
+  motionMasks?: MotionMaskPolygon[];
 }
 
 // --- Read ---
@@ -170,6 +179,25 @@ export async function getCameraSettings(
     },
   );
 
+  // Frigate's motion.mask is loose: missing, a single comma-joined
+  // string ("0.1,0.2,0.5,0.6,..."), or an array of such strings (one
+  // entry per mask polygon). Normalise to a flat list of coord arrays.
+  const motionMasks: MotionMaskPolygon[] = [];
+  const rawMaskList: unknown[] = motion.mask === undefined
+    ? []
+    : Array.isArray(motion.mask)
+      ? (motion.mask as unknown[])
+      : [motion.mask];
+  for (const entry of rawMaskList) {
+    const coords = String(entry ?? "")
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
+    if (coords.length >= 6 && coords.length % 2 === 0) {
+      motionMasks.push({ coordinates: coords });
+    }
+  }
+
   return {
     detectEnabled: Boolean(detect.enabled ?? true),
     detectFps: Number(detect.fps ?? 5),
@@ -180,12 +208,7 @@ export async function getCameraSettings(
     snapshotsEnabled: Boolean(snapshots.enabled ?? false),
     snapshotRetainDays: Number(snapshotRetain.default ?? 10),
     zones: zoneList,
-    hasMotionMask: Boolean(
-      motion.mask &&
-        (Array.isArray(motion.mask)
-          ? (motion.mask as unknown[]).length > 0
-          : String(motion.mask).length > 0),
-    ),
+    motionMasks,
   };
 }
 
@@ -331,6 +354,32 @@ export async function updateCameraSettings(
       newZones[z.name] = entry;
     }
     camera.zones = newZones;
+  }
+
+  if (patch.motionMasks !== undefined) {
+    // Validate each polygon, then write back as Frigate's wire shape.
+    // We always write an array (even single-entry) so a future
+    // polygon append doesn't have to special-case the string form.
+    const masks: string[] = [];
+    for (const m of patch.motionMasks) {
+      if (m.coordinates.length < 6 || m.coordinates.length % 2 !== 0) {
+        throw new Error("Each motion mask needs at least 3 (x, y) points");
+      }
+      for (const c of m.coordinates) {
+        if (!Number.isFinite(c) || c < 0 || c > 1) {
+          throw new Error("Motion mask coordinates must be normalised [0, 1]");
+        }
+      }
+      const rounded = m.coordinates.map((c) => Math.round(c * 10000) / 10000);
+      masks.push(rounded.join(","));
+    }
+    const motion = (camera.motion ?? {}) as Record<string, unknown>;
+    if (masks.length === 0) {
+      delete motion.mask;
+    } else {
+      motion.mask = masks;
+    }
+    camera.motion = motion;
   }
 
   await saveFrigateConfig(config);
