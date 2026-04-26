@@ -3611,6 +3611,68 @@ git add CLAUDE.md README.md services/ai-gateway/README.md
 git commit -m "docs: MCP server is the canonical tool surface (WARP-104)"
 ```
 
+### Task 5.4b: Switch dashboard chat hook to the MCP-backed route
+
+WARP-101 deliberately left the dashboard's chat UI on the legacy ai-gateway session route so the back-end rewire could land hermetically. WARP-104 finishes that cut by switching `apps/web-dashboard/src/lib/hooks/useChat.ts` from `sendSessionChat()` (→ `/api/llm/sessions/:id/chat`) to `sendChat()` (→ `/api/llm/chat`), which is the MCP-backed path.
+
+**Files:**
+- Modify: `apps/web-dashboard/src/lib/hooks/useChat.ts`
+- Modify: `apps/web-dashboard/src/lib/api.ts` (if `sendChat` doesn't already exist or doesn't yet return a streaming reader compatible with the new SSE event shape)
+- Test: `apps/web-dashboard/src/__tests__/useChat.test.ts` (new or modify)
+
+- [ ] **Step 1: Inspect the current `useChat` hook**
+
+  Read `apps/web-dashboard/src/lib/hooks/useChat.ts`. Identify:
+  - Where it calls `sendSessionChat(sessionId, message, ...)`.
+  - What state it maintains for "session" (history list, session ID, multi-session UI).
+  - Whether the dashboard exposes session switching (e.g. a sidebar of past chats) or only a single rolling thread.
+
+- [ ] **Step 2: Decide UX delta scope**
+
+  `/api/llm/chat` is stateless — the orchestrator does not persist message history. The dashboard has two reasonable paths:
+
+  - **2a. Pure switch:** drop session features. The chat page becomes a single rolling thread held in React state; on refresh, history is gone. Smallest diff.
+  - **2b. Preserve sessions via orchestrator:** add lightweight server-side history persistence in the orchestrator (a `ChatSession` Prisma model + `/api/llm/sessions` proxied to it) so the new MCP path keeps the existing UX. Larger diff, may itself want a follow-up ticket.
+
+  Pick **2a** unless the project lead has explicitly said otherwise during WARP-104 planning. Document the choice + UX delta in the PR body.
+
+- [ ] **Step 3: Write a failing test (or update the existing one)**
+
+  Mock `sendChat` to return a `ReadableStream` that emits the four SSE event types (`content_delta`, `tool_call`, `tool_result`, `done`). Assert the hook surfaces the assistant content + tool-call chips correctly.
+
+  Run:
+  ```bash
+  cd apps/web-dashboard && npx vitest run src/__tests__/useChat.test.ts
+  ```
+  Expected: FAIL.
+
+- [ ] **Step 4: Implement the switch**
+
+  In `useChat.ts`, replace the `sendSessionChat` call site with `sendChat({ model, messages, stream: true })`. Parse the streaming response per the SSE event shape (`apps/orchestrator/src/types/sse-events.ts` is the contract; mirror the discriminated union on the dashboard side). Drop or stub the session-switching state per the 2a/2b choice from Step 2.
+
+  If `apps/web-dashboard/src/lib/api.ts` doesn't already expose a streaming-aware `sendChat`, add it. The function returns either the parsed `AgentResult` (non-streaming) or yields an `AsyncIterable<SSEEvent>` (streaming) — pick whichever shape the rest of the dashboard's data layer prefers.
+
+- [ ] **Step 5: Run dashboard tests + tsc**
+
+  ```bash
+  cd apps/web-dashboard && npm test && npx tsc --noEmit
+  ```
+  Expected: green. The 182 baseline grows by however many new test cases you added.
+
+- [ ] **Step 6: Manual smoke test against the live stack**
+
+  ```bash
+  npm run dev:docker
+  ```
+  Open `http://localhost/chat`, ask "what's connected to my network?". Confirm: (a) the chat works end-to-end, (b) `gh` orchestrator logs show MCP `tools/call list_network_devices`, (c) the dashboard renders the assistant response. Then ask "block AA:BB:CC:DD:EE:FF" and confirm the dashboard surfaces the `confirmation_required` chip from the existing Tier 2 modal.
+
+- [ ] **Step 7: Commit**
+
+  ```bash
+  git add apps/web-dashboard/src/lib/hooks/useChat.ts apps/web-dashboard/src/lib/api.ts apps/web-dashboard/src/__tests__/useChat.test.ts
+  git commit -m "feat(dashboard): switch chat hook to /api/llm/chat (MCP path) (WARP-104)"
+  ```
+
 ### Task 5.5: Final dead-code sweep
 
 - [ ] **Step 1: Run the sweep**

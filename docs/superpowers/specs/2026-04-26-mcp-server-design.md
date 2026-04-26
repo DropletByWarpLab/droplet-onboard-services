@@ -379,6 +379,7 @@ Files removed or moved:
 | `services/ai-gateway/tests/test_tools.py` | DELETE | WARP-104 |
 | `services/ai-gateway/router.py` | TRIM (remove tool-loop branch) | WARP-104 |
 | `services/ai-gateway/schemas.py` | TRIM (remove ToolDefinition/Function/Call if unused) | WARP-104 |
+| `apps/web-dashboard/src/lib/hooks/useChat.ts` | SWITCH chat hook from `sendSessionChat()` (→ `/api/llm/sessions/:id/chat`, ai-gateway) to `sendChat()` (→ `/api/llm/chat`, orchestrator agent). Required so the MCP-backed agent loop is reachable from the dashboard UI; the WARP-101 rewire was deliberately back-end-only. May require trimming session UX (history, multi-session) since `/api/llm/chat` is stateless — re-evaluate at WARP-104 implementation time and either preserve session features via a thin orchestrator-side persistence layer or document the UX delta. | WARP-104 |
 | `docker/docker-compose.yml` | ADD mcp-server service + ENV wiring | WARP-103 |
 | `CLAUDE.md` | UPDATE tooling section | WARP-104 |
 | `README.md` | UPDATE architecture diagram | WARP-104 |
@@ -462,6 +463,7 @@ All vitest, pytest, and supertest suites must remain green at every ticket bound
 - [ ] `/api/llm/agent` route deleted from `apps/orchestrator/src/routes/llm.ts`. Agent request schema deleted.
 - [ ] `/api/llm/tools` route refactored to proxy `mcp-client.service.ts` `listTools()`.
 - [ ] `CLAUDE.md` LLM tooling section updated. `README.md` architecture diagram updated. `services/ai-gateway/README.md` updated to reflect "no longer the tool dispatch surface".
+- [ ] `apps/web-dashboard/src/lib/hooks/useChat.ts` switched from `sendSessionChat()` to `sendChat()` so the dashboard UI reaches the MCP-backed agent loop. UX delta from losing session-based chat history is either restored via orchestrator-side persistence OR documented in the PR body with sign-off from the project lead.
 - [ ] `services/ai-gateway/tests/` pytest suite passes after edits.
 - [ ] No references to deleted code remain (verified by `grep -r "executor\.py\|tools\.executor\|TOOL_HANDLERS\|llm-tools" apps services` returning zero hits).
 
