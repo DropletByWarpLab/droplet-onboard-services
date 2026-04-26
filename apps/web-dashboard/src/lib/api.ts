@@ -663,6 +663,34 @@ export async function patchCameraSettings(
 }
 
 /**
+ * Semantic search over events (Frigate 0.14+ embeddings). Returns the
+ * same FilteredEventsResult shape as fetchEventsFiltered so the
+ * Events page can swap data sources without re-mapping rows. Throws
+ * with the orchestrator's hint message if the embeddings stack isn't
+ * enabled.
+ */
+export async function searchEventsSemantic(
+  query: string,
+  filter: EventFilter & { searchType?: "thumbnail" | "description" } = {},
+): Promise<FilteredEventsResult> {
+  const params = new URLSearchParams();
+  params.set("query", query);
+  if (filter.searchType) params.set("search_type", filter.searchType);
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.labels?.length) params.set("labels", filter.labels.join(","));
+  if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
+  if (filter.before !== undefined) params.set("before", String(filter.before));
+  if (filter.after !== undefined) params.set("after", String(filter.after));
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  const res = await authFetch(`${BASE}/api/cameras/events/search?${params.toString()}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * Filtered + paginated events fetch for the Events page. Mirrors the
  * GET /api/cameras/events query surface — pass through whatever the
  * caller has set in the EventFilter and let the route validate. The

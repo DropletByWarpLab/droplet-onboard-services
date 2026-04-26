@@ -1,11 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { AlertTriangle, Eye, Film, Layers, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  Eye,
+  Film,
+  Layers,
+  RefreshCw,
+  Search,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useEvents } from "@/lib/hooks/useEvents";
 import { useReviews } from "@/lib/hooks/useReviews";
-import { setEventRetain } from "@/lib/api";
+import { searchEventsSemantic, setEventRetain } from "@/lib/api";
 import { EventCard } from "@/components/events/EventCard";
 import { EventClipModal } from "@/components/events/EventClipModal";
 import { EventFilterBar } from "@/components/events/EventFilterBar";
@@ -15,6 +24,7 @@ import { ReviewFilterBar } from "@/components/events/ReviewFilterBar";
 import type {
   EventDetail,
   EventFilter,
+  FilteredEventsResult,
   ReviewFilter,
   ReviewItem,
 } from "@/lib/types";
@@ -56,6 +66,59 @@ export default function EventsPage() {
   const eventsHook = useEvents(eventFilter);
   const alertsHook = useReviews(alertsFilter);
   const detectionsHook = useReviews(detectionsFilter);
+
+  // Semantic search state — only active on the "All events" tab.
+  // Local input bound to a debounced query so we don't fire on every
+  // keystroke. The result fetch runs in an effect; null = "no search
+  // active, render the regular events list."
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<FilteredEventsResult | null>(
+    null,
+  );
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Debounce: 350ms after the operator stops typing, kick a search.
+  // We don't fire if the input is empty — empty means "go back to
+  // the default events list."
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (!trimmed) {
+      setSearchQuery("");
+      setSearchResults(null);
+      setSearchError(null);
+      return;
+    }
+    const t = window.setTimeout(() => setSearchQuery(trimmed), 350);
+    return () => window.clearTimeout(t);
+  }, [searchInput]);
+
+  // Fire the search whenever the debounced query OR the events filter
+  // changes (so e.g. "person near front door" + camera=front_door
+  // filter compose correctly).
+  useEffect(() => {
+    if (!searchQuery) return;
+    let cancelled = false;
+    setSearching(true);
+    setSearchError(null);
+    searchEventsSemantic(searchQuery, { ...eventFilter, limit: 60 })
+      .then((res) => {
+        if (cancelled) return;
+        setSearchResults(res);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setSearchError(e instanceof Error ? e.message : "Search failed");
+        setSearchResults({ events: [], nextCursor: null });
+      })
+      .finally(() => {
+        if (!cancelled) setSearching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery, eventFilter]);
 
   const [playingEvent, setPlayingEvent] = useState<EventDetail | null>(null);
   const [playingReview, setPlayingReview] = useState<ReviewItem | null>(null);
@@ -153,6 +216,41 @@ export default function EventsPage() {
         })}
       </div>
 
+      {/* Semantic search input — only on the All events tab. Frigate's
+          embeddings stack must be enabled; we surface a clear error
+          inline when it isn't. */}
+      {tab === "events" && (
+        <div className="dp-card p-3 mb-4 flex items-center gap-2">
+          <Search
+            size={14}
+            className={searching ? "text-accent animate-pulse" : "text-label-tertiary"}
+          />
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Find events by description — e.g. “blue car at night”, “dog in driveway”"
+            className="flex-1 h-8 bg-transparent type-subheadline text-label-primary focus:outline-none placeholder:text-label-tertiary"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              className="p-1 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+              title="Clear search"
+            >
+              <X size={12} />
+            </button>
+          )}
+          {searchQuery && !searchError && (
+            <span className="flex items-center gap-1 type-caption-2 text-accent px-2 py-0.5 rounded-full bg-accent/10">
+              <Sparkles size={10} />
+              Semantic
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Filter rail — events tab gets the full bar, review tabs get the
           trimmed-down camera+time+reviewed bar. */}
       {tab === "events" ? (
@@ -171,7 +269,18 @@ export default function EventsPage() {
       )}
 
       {/* Body */}
-      {tab === "events" ? (
+      {tab === "events" && searchQuery ? (
+        <EventsBody
+          events={searchResults?.events ?? []}
+          isLoading={searching && !searchResults}
+          isLoadingMore={false}
+          hasMore={false}
+          loadMore={() => {}}
+          error={searchError}
+          onOpen={setPlayingEvent}
+          searchMode
+        />
+      ) : tab === "events" ? (
         <EventsBody
           events={eventsHook.events}
           isLoading={eventsHook.isLoading}
@@ -224,6 +333,7 @@ function EventsBody({
   loadMore,
   error,
   onOpen,
+  searchMode,
 }: {
   events: EventDetail[];
   isLoading: boolean;
@@ -232,6 +342,9 @@ function EventsBody({
   loadMore: () => void;
   error: unknown;
   onOpen: (e: EventDetail) => void;
+  /** When true, the empty-state copy reflects a no-results-for-query
+   *  state instead of the default "no events yet." */
+  searchMode?: boolean;
 }) {
   if (error) {
     return (
@@ -259,10 +372,13 @@ function EventsBody({
     return (
       <div className="dp-card text-center py-16">
         <Film size={32} className="mx-auto text-label-quaternary mb-3" />
-        <h2 className="type-title-3 text-label-primary mb-1">No events yet</h2>
+        <h2 className="type-title-3 text-label-primary mb-1">
+          {searchMode ? "Nothing matched that query" : "No events yet"}
+        </h2>
         <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-          As cameras detect motion or objects, the events will show up here.
-          Try widening the filters above.
+          {searchMode
+            ? "Try a different phrasing, drop a filter, or pick a wider time range."
+            : "As cameras detect motion or objects, the events will show up here. Try widening the filters above."}
         </p>
       </div>
     );

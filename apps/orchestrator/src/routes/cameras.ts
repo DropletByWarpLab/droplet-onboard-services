@@ -22,6 +22,7 @@ import {
   getReviewsFiltered,
   getStats,
   getTimelineEntries,
+  searchEventsSemanticTyped,
   setEventRetention,
   setReviewViewed,
   subscribeCameraEvents,
@@ -793,6 +794,89 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       res.setHeader("Cache-Control", "public, max-age=3600");
       const buffer = Buffer.from(await upstream.arrayBuffer());
       res.send(buffer);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Semantic event search (Phase 7.4) ---
+  //
+  // Frigate 0.14+ exposes /api/events/search with CLIP embeddings.
+  // Same filter surface as /cameras/events but ranked by similarity
+  // to a natural-language query. The search type ("thumbnail" vs
+  // "description") picks which embedding to query. We default to
+  // "thumbnail" — visual similarity matches operator intuition for
+  // "find me events that look like this."
+  //
+  // Frigate returns 404/501 if the embeddings stack isn't enabled
+  // in the YAML; we map that to 503 + a hint so the dashboard can
+  // surface it inline.
+  //
+  // Registered before /cameras/events/:eventId/snapshot so the
+  // literal "search" path matches first; the param-suffix route is
+  // 4 segments anyway (events/<id>/snapshot) so they don't actually
+  // collide, but ordering keeps the diff readable.
+  router.get("/cameras/events/search", async (req, res, next) => {
+    try {
+      const q = req.query as Record<string, string | undefined>;
+      const query = String(q.query ?? "").trim();
+      if (!query) {
+        return res.status(400).json({ error: "query is required" });
+      }
+      if (query.length > 500) {
+        return res.status(400).json({ error: "query too long (max 500 chars)" });
+      }
+
+      let cameras: string[] | undefined;
+      if (q.cameras) {
+        cameras = q.cameras.split(",").map((s) => s.trim()).filter(Boolean);
+        if (cameras.some((c) => !isValidCameraName(c))) {
+          return res.status(400).json({ error: "Invalid camera name" });
+        }
+      }
+      let labels: string[] | undefined;
+      if (q.labels) {
+        labels = q.labels.split(",").map((s) => s.trim()).filter(Boolean);
+        if (labels.some((l) => !/^[a-z0-9_-]{1,32}$/i.test(l))) {
+          return res.status(400).json({ error: "Invalid label" });
+        }
+      }
+      const numOrUndef = (v: string | undefined) => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const minScore = numOrUndef(q.min_score);
+      if (minScore !== undefined && (minScore < 0 || minScore > 1)) {
+        return res.status(400).json({ error: "min_score must be 0..1" });
+      }
+      const limitRaw = parseInt(q.limit || "50", 10);
+      const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
+
+      const searchType = q.search_type === "description" ? "description" : "thumbnail";
+
+      try {
+        const result = await searchEventsSemanticTyped({
+          query,
+          searchType,
+          cameras,
+          labels,
+          minScore,
+          before: numOrUndef(q.before),
+          after: numOrUndef(q.after),
+          limit,
+        });
+        res.json(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "semantic_search_disabled") {
+          return res.status(503).json({
+            error:
+              "Semantic search isn't enabled on this Frigate. Add `semantic_search.enabled: true` to config.yml under your model section, save from the System page, and try again.",
+          });
+        }
+        throw err;
+      }
     } catch (err) {
       next(err);
     }
