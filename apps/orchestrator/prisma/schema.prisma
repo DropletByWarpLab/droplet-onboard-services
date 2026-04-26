@@ -192,6 +192,37 @@ model CameraPin {
   @@index([userId])
 }
 
+// ── Web Push subscriptions ──
+//
+// One row per browser/PWA install that's subscribed to push. The
+// dashboard's service worker calls `pushManager.subscribe()` and POSTs
+// the resulting endpoint + keys here. Push dispatch reads from this
+// table and fans out via the web-push library.
+//
+// Endpoint is unique because the same browser can only be subscribed
+// once per VAPID public key. If a subscription returns 410 Gone on a
+// dispatch, we delete it (the browser is uninstalled or the user
+// revoked permission).
+model PushSubscription {
+  id              String   @id @default(uuid())
+  userId          String                                       // Nextcloud username
+  endpoint        String   @unique
+  // Push payload encryption keys, base64url. Required by Web Push protocol.
+  p256dhKey       String
+  authKey         String
+  // Optional FK to a paired DeviceClient — lets the operator see
+  // which paired device a subscription belongs to. Nullable because
+  // dashboard browsers subscribe without going through the pairing
+  // flow.
+  deviceClientId  String?
+  createdAt       DateTime @default(now())
+  // Updated on every successful push so we can age out stale entries.
+  lastFiredAt     DateTime?
+
+  @@index([userId])
+  @@index([deviceClientId])
+}
+
 // ── Phase 4: AI file content indexing (pgvector) ──
 // Stores chunked text + embeddings for semantic file search.
 // Requires CREATE EXTENSION IF NOT EXISTS vector; in the db.

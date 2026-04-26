@@ -627,6 +627,55 @@ export async function deleteKnownPlate(plate: string): Promise<void> {
   if (!res.ok && res.status !== 404) throw new Error(`Failed: ${res.status}`);
 }
 
+// --- Web Push subscription (Phase 7.2 / 7.3) ---
+
+export async function fetchVapidPublicKey(): Promise<string> {
+  const res = await authFetch(`${BASE}/api/devices/push/vapid-public-key`);
+  if (!res.ok) throw new Error(`Push not configured (${res.status})`);
+  const body = (await res.json()) as { publicKey: string };
+  return body.publicKey;
+}
+
+export async function registerPushSubscription(
+  sub: PushSubscription,
+  deviceClientId?: string,
+): Promise<void> {
+  const json = sub.toJSON();
+  const res = await authFetch(`${BASE}/api/devices/push/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      endpoint: json.endpoint,
+      keys: json.keys,
+      deviceClientId,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+}
+
+export async function unregisterPushSubscription(endpoint: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/devices/push/subscribe`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint }),
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Failed to unsubscribe: ${res.status}`);
+  }
+}
+
+export async function sendTestPush(): Promise<{ sent: number; pruned: number }> {
+  const res = await authFetch(`${BASE}/api/devices/push/test`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Notification prefs (Phase 6.3) ---
 
 export async function fetchCameraNotifications(

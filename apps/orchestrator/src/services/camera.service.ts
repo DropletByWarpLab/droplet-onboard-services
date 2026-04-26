@@ -28,6 +28,7 @@ import {
   type FrigateSearchFilter,
 } from "./frigate.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
+import { dispatchDetectionEvent } from "./push-dispatch.service.js";
 import { config } from "../config.js";
 import type {
   CameraInfo,
@@ -156,6 +157,25 @@ function handleMqttMessage(
     };
     broadcastSSE(event);
     cacheDel(CACHE_KEY_EVENTS);
+
+    // Web Push fan-out (Phase 7.3). Frigate's `type` field on an
+    // event update is one of "new" | "update" | "end"; we only push
+    // on "new" so the operator gets one notification per event, not
+    // a stream of updates as the tracker refines its score. Failure
+    // is silent — push is best-effort and shouldn't block the SSE
+    // broadcast above.
+    const evType = String(data.type ?? "new");
+    if (evType === "new" && eventId && event.camera && event.label) {
+      void dispatchDetectionEvent(prisma, {
+        eventId,
+        cameraName: event.camera,
+        label: event.label,
+        score: event.score ?? 0,
+        thumbnailUrl,
+      }).catch((err) =>
+        logger.warn({ err, eventId }, "push dispatch failed"),
+      );
+    }
   } else if (topic === "droplet/cameras/discovered") {
     const camData = data.camera as Record<string, unknown> | undefined;
     const event: CameraSSEEvent = {

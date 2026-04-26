@@ -1,0 +1,308 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { AlertTriangle, Bell, BellOff, Check, Loader2, Send } from "lucide-react";
+import {
+  fetchVapidPublicKey,
+  registerPushSubscription,
+  sendTestPush,
+  unregisterPushSubscription,
+} from "@/lib/api";
+
+type Status = "checking" | "unsupported" | "denied" | "subscribed" | "ready" | "configured-off";
+
+/**
+ * VAPID public keys arrive base64url-encoded; pushManager.subscribe
+ * needs a Uint8Array. The conversion is the standard MDN snippet.
+ */
+function urlBase64ToUint8Array(b64: string): Uint8Array {
+  const padding = "=".repeat((4 - (b64.length % 4)) % 4);
+  const base64 = (b64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Web Push subscribe/unsubscribe/test card. Renders inside the
+ * /cameras/notifications page above the per-camera prefs grid so the
+ * operator hits the "give the browser push permission" affordance
+ * before tuning what triggers it.
+ *
+ * State machine:
+ *   - checking   → on mount, while we probe permission + service worker
+ *   - unsupported → no Notification API or no PushManager (older
+ *     browsers, secure-context-required-but-not-met edge cases)
+ *   - denied      → permission was denied; can't recover without
+ *     OS-level permission reset
+ *   - configured-off → orchestrator returns 503 from /vapid-public-key
+ *     because VAPID keys aren't set
+ *   - ready       → permission granted but no active subscription
+ *   - subscribed  → permission granted + active subscription on file
+ */
+export function PushSubscriptionCard() {
+  const [status, setStatus] = useState<Status>("checking");
+  const [busy, setBusy] = useState<"subscribe" | "unsubscribe" | "test" | null>(null);
+  const [endpoint, setEndpoint] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    void probe();
+  }, []);
+
+  async function probe() {
+    setStatus("checking");
+    setMsg(null);
+    if (
+      typeof window === "undefined" ||
+      !("serviceWorker" in navigator) ||
+      !("Notification" in window) ||
+      !("PushManager" in window)
+    ) {
+      setStatus("unsupported");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setStatus("denied");
+      return;
+    }
+    // Probe the orchestrator — 503 means VAPID isn't configured, which
+    // is its own state (not a transient error).
+    try {
+      await fetchVapidPublicKey();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes("not configured")) {
+        setStatus("configured-off");
+        return;
+      }
+      setMsg(message);
+    }
+    // Already subscribed?
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      if (sub) {
+        setEndpoint(sub.endpoint);
+        setStatus("subscribed");
+        return;
+      }
+    } catch {
+      /* best-effort */
+    }
+    setStatus("ready");
+  }
+
+  async function handleSubscribe() {
+    setBusy("subscribe");
+    setMsg(null);
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") {
+        setStatus(perm === "denied" ? "denied" : "ready");
+        return;
+      }
+      const reg =
+        (await navigator.serviceWorker.getRegistration()) ??
+        (await navigator.serviceWorker.register("/sw.js"));
+      // Wait until the SW is the active controller — pushManager
+      // refuses to subscribe against a registration that hasn't
+      // installed yet.
+      if (!reg.active) await navigator.serviceWorker.ready;
+
+      const publicKey = await fetchVapidPublicKey();
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+      await registerPushSubscription(sub);
+      setEndpoint(sub.endpoint);
+      setStatus("subscribed");
+      setMsg("Push notifications enabled.");
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Subscribe failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleUnsubscribe() {
+    setBusy("unsubscribe");
+    setMsg(null);
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      if (sub) {
+        const ep = sub.endpoint;
+        await sub.unsubscribe();
+        await unregisterPushSubscription(ep);
+      }
+      setEndpoint(null);
+      setStatus("ready");
+      setMsg("Push notifications disabled.");
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Unsubscribe failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleTest() {
+    setBusy("test");
+    setMsg(null);
+    try {
+      const r = await sendTestPush();
+      if (r.sent === 0) {
+        setMsg("Test queued — but no active subscription. Re-subscribe?");
+      } else {
+        setMsg(`Test sent (${r.sent} subscription${r.sent === 1 ? "" : "s"}). Check your OS notification tray.`);
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Test failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Render
+  if (status === "checking") {
+    return (
+      <div className="dp-card p-4 mb-4 flex items-center gap-2 text-label-tertiary">
+        <Loader2 size={14} className="animate-spin" />
+        <span className="type-caption-1">Checking push status…</span>
+      </div>
+    );
+  }
+  if (status === "unsupported") {
+    return (
+      <div className="dp-card p-4 mb-4">
+        <div className="flex items-center gap-2 mb-1">
+          <AlertTriangle size={14} className="text-system-orange" />
+          <h3 className="type-subheadline text-label-primary font-medium">
+            Push not supported here
+          </h3>
+        </div>
+        <p className="type-caption-1 text-label-tertiary">
+          This browser doesn&apos;t support the Web Push API. Open the
+          dashboard in a recent Chrome, Firefox, Edge, or Safari (16.4+).
+        </p>
+      </div>
+    );
+  }
+  if (status === "configured-off") {
+    return (
+      <div className="dp-card p-4 mb-4">
+        <div className="flex items-center gap-2 mb-1">
+          <AlertTriangle size={14} className="text-system-orange" />
+          <h3 className="type-subheadline text-label-primary font-medium">
+            Push not configured
+          </h3>
+        </div>
+        <p className="type-caption-1 text-label-tertiary">
+          The orchestrator has no VAPID keys. Restart it once and look for the
+          generated keys in the orchestrator log, then pin them in{" "}
+          <span className="font-mono">.env</span> as{" "}
+          <span className="font-mono">VAPID_PUBLIC_KEY</span> +{" "}
+          <span className="font-mono">VAPID_PRIVATE_KEY</span>.
+        </p>
+      </div>
+    );
+  }
+  if (status === "denied") {
+    return (
+      <div className="dp-card p-4 mb-4">
+        <div className="flex items-center gap-2 mb-1">
+          <BellOff size={14} className="text-system-red" />
+          <h3 className="type-subheadline text-label-primary font-medium">
+            Notifications blocked
+          </h3>
+        </div>
+        <p className="type-caption-1 text-label-tertiary">
+          You denied notification permission for this site. Re-enable it in
+          your browser&apos;s site settings to receive push alerts.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dp-card p-4 mb-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            {status === "subscribed" ? (
+              <Check size={14} className="text-system-green" />
+            ) : (
+              <Bell size={14} className="text-label-tertiary" />
+            )}
+            <h3 className="type-subheadline text-label-primary font-medium">
+              {status === "subscribed"
+                ? "Push notifications on"
+                : "Push notifications off"}
+            </h3>
+          </div>
+          <p className="type-caption-1 text-label-tertiary">
+            {status === "subscribed"
+              ? "This browser will get push alerts for any camera + label combination toggled below."
+              : "Enable to receive OS-level push for the events toggled below — works even when the dashboard isn't focused."}
+          </p>
+          {msg && (
+            <p
+              className={`type-caption-1 mt-2 ${
+                msg.toLowerCase().includes("fail") || msg.toLowerCase().includes("denied")
+                  ? "text-system-red"
+                  : "text-system-green"
+              }`}
+            >
+              {msg}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-col items-end gap-2 flex-shrink-0">
+          {status === "subscribed" ? (
+            <>
+              <button
+                onClick={handleTest}
+                disabled={!!busy}
+                className="dp-btn-secondary flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-caption-1 disabled:opacity-50"
+              >
+                {busy === "test" ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Send size={12} />
+                )}
+                Send test
+              </button>
+              <button
+                onClick={handleUnsubscribe}
+                disabled={!!busy}
+                className="dp-btn-secondary flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-caption-1 disabled:opacity-50"
+              >
+                {busy === "unsubscribe" ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <BellOff size={12} />
+                )}
+                Disable
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={handleSubscribe}
+              disabled={!!busy}
+              className="dp-btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-subheadline disabled:opacity-50"
+            >
+              {busy === "subscribe" ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Bell size={14} />
+              )}
+              Enable push
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
