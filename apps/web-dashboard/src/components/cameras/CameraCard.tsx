@@ -1,13 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Maximize2, VideoOff, Circle } from "lucide-react";
+import { Maximize2, Pin, PinOff, VideoOff, Circle } from "lucide-react";
 import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import type { CameraInfo } from "@/lib/types";
 
 interface CameraCardProps {
   camera: CameraInfo;
   onClick: (camera: CameraInfo) => void;
+  /** When true, the card renders the filled-pin affordance and lives in
+   *  the "Pinned" section. Optional — pin support is a per-user pref the
+   *  caller wires in if it has a useCameraPins hook handy. */
+  isPinned?: boolean;
+  /** Toggle handler. Receives the camera so the page can dispatch
+   *  add/remove without re-deriving from the click target. */
+  onTogglePin?: (camera: CameraInfo) => void | Promise<void>;
 }
 
 // Snapshot refresh interval. The previous 1 s bucket was too short — every
@@ -33,9 +40,15 @@ const STATUS_CONFIG = {
   offline: { label: "Offline", color: "bg-system-red", pulse: false },
 } as const;
 
-export function CameraCard({ camera, onClick }: CameraCardProps) {
+export function CameraCard({
+  camera,
+  onClick,
+  isPinned = false,
+  onTogglePin,
+}: CameraCardProps) {
   const [imgError, setImgError] = useState(false);
   const [hovering, setHovering] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
   // The src on the visible <img>. We update this ONLY after the next
   // snapshot has decoded successfully — that's what eliminates the blink.
   const [snapshotSrc, setSnapshotSrc] = useState(() =>
@@ -99,14 +112,41 @@ export function CameraCard({ camera, onClick }: CameraCardProps) {
   const showImage = camera.status !== "offline" && !imgError;
   const useLive = showImage && hovering;
 
+  // The card wrapper is a `<div role="button">` rather than a real
+  // `<button>` so the pin-toggle <button> can nest inside without
+  // emitting the invalid-HTML "<button> in <button>" React warning.
+  // We forward Enter/Space to onClick to keep keyboard activation
+  // identical to the previous semantics.
+  const handleKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return; // child handled it
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick(camera);
+    }
+  };
+
+  const handlePinClick = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // don't open detail page when toggling pin
+    if (!onTogglePin || pinBusy) return;
+    setPinBusy(true);
+    try {
+      await onTogglePin(camera);
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => onClick(camera)}
+      onKeyDown={handleKey}
       onMouseEnter={startHover}
       onMouseLeave={endHover}
       onFocus={startHover}
       onBlur={endHover}
-      className="dp-card overflow-hidden text-left w-full transition-all duration-200 ease-smooth hover:shadow-md group"
+      className="dp-card overflow-hidden text-left w-full transition-all duration-200 ease-smooth hover:shadow-md group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
       <div className="relative aspect-video bg-surface-secondary">
         {showImage ? (
@@ -148,9 +188,39 @@ export function CameraCard({ camera, onClick }: CameraCardProps) {
           <span className="type-caption-2 text-white">{statusCfg.label}</span>
         </div>
 
-        {/* LIVE pip — only visible while the MJPEG stream is actually open. */}
+        {/* Pin toggle — top-left. Always rendered (so the operator can pin
+            from the grid without opening the detail page) but partially
+            faded at rest until hover so it doesn't compete with the
+            thumbnail. Only mounted if a parent wired onTogglePin. */}
+        {onTogglePin && (
+          <button
+            type="button"
+            onClick={handlePinClick}
+            disabled={pinBusy}
+            aria-label={isPinned ? "Unpin camera" : "Pin camera"}
+            aria-pressed={isPinned}
+            className={`absolute top-2 left-2 p-1.5 rounded-full backdrop-blur-sm transition-all ${
+              isPinned
+                ? "bg-accent/90 text-white opacity-100"
+                : "bg-black/60 text-white opacity-70 hover:opacity-100 group-hover:opacity-100"
+            } ${pinBusy ? "opacity-50 cursor-wait" : ""}`}
+          >
+            {isPinned ? (
+              <Pin size={14} className="fill-current" />
+            ) : (
+              <PinOff size={14} />
+            )}
+          </button>
+        )}
+
+        {/* LIVE pip — only visible while the MJPEG stream is actually open.
+            Sits to the right of the pin so they don't overlap. */}
         {useLive && (
-          <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red/90 backdrop-blur-sm">
+          <div
+            className={`absolute top-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red/90 backdrop-blur-sm ${
+              onTogglePin ? "left-12" : "left-2"
+            }`}
+          >
             <Circle
               size={8}
               className="text-white fill-current animate-pulse"
@@ -190,6 +260,6 @@ export function CameraCard({ camera, onClick }: CameraCardProps) {
           )}
         </div>
       </div>
-    </button>
+    </div>
   );
 }

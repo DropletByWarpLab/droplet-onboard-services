@@ -343,6 +343,23 @@ export interface CameraGroupInfo {
   updatedAt: string;
 }
 
+// --- Camera pins (per-user prefs; not shared across operators) ---
+
+/**
+ * Per-user "pinned" camera. Operators pin the cameras they actually
+ * watch so they float to the top of the grid above the alphabetical
+ * default order. Pins are keyed on Frigate camera NAME — not a Camera
+ * FK — because they're a low-stakes pref. Dangling pins (camera was
+ * removed) are filtered on the dashboard before render.
+ */
+export interface CameraPinInfo {
+  cameraName: string;
+  /** Lower sortOrder renders first. Negative numbers are normal — newly
+   *  pinned cameras get `min - 1` so they jump above existing pins. */
+  sortOrder: number;
+  createdAt: string;
+}
+
 export interface CameraSSEEvent {
   type: "connected" | "detection" | "camera_discovered" | "camera_online" | "camera_offline";
   camera?: string;

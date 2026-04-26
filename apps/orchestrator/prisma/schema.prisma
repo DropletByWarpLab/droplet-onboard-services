@@ -171,6 +171,27 @@ model CameraGroupMember {
   @@index([cameraId])
 }
 
+// ── Camera pins ──
+//
+// Per-user "pinned to top" preferences for the cameras grid. Operators
+// pin the cameras they actually watch (porch, baby monitor) so they
+// always sit at the top of the grid even after dozens of cameras are
+// added. Pins are pure preference data — we key them by Frigate camera
+// NAME (not a Camera FK) to avoid the upsert dance for a feature that
+// doesn't need referential integrity. If a camera is removed, the pin
+// becomes a tombstone that the read-side filters out.
+model CameraPin {
+  id         String   @id @default(uuid())
+  userId     String
+  cameraName String
+  // Order within this user's pin list, lower = earlier.
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, cameraName])
+  @@index([userId])
+}
+
 // ── Phase 4: AI file content indexing (pgvector) ──
 // Stores chunked text + embeddings for semantic file search.
 // Requires CREATE EXTENSION IF NOT EXISTS vector; in the db.

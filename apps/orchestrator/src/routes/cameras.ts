@@ -41,6 +41,7 @@ import {
   isValidGroupName,
   isValidGroupIcon,
 } from "../services/camera-groups.service.js";
+import * as pinsSvc from "../services/camera-pins.service.js";
 import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
@@ -209,6 +210,90 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  // --- Camera pins ---
+  //
+  // Per-user "pinned" cameras — an operator preference that lifts the
+  // cameras they actually watch above the alphabetical grid. Pins are
+  // keyed on userId + cameraName (Frigate camera name) rather than a
+  // Camera FK because they're pure prefs: if the underlying camera
+  // disappears we filter the dangling pin on read instead of cascading
+  // deletes. See services/camera-pins.service.ts for rationale.
+  //
+  // Route ordering: /cameras/pins/reorder is registered before
+  // /cameras/pins/:cameraName so the literal path matches first; both
+  // also live above /cameras/:name for the standard fixed-vs-param
+  // shadowing reason called out in the file header.
+
+  router.get("/cameras/pins", async (req, res, next) => {
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      const pins = await pinsSvc.listPins(prisma, req.user.id);
+      res.json({ pins });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/pins", async (req, res, next) => {
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      const { cameraName } = req.body ?? {};
+      if (typeof cameraName !== "string" || !isValidCameraName(cameraName)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const pin = await pinsSvc.addPin(prisma, req.user.id, cameraName);
+      res.status(201).json({ pin });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch("/cameras/pins/reorder", async (req, res, next) => {
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      const { cameraNames } = req.body ?? {};
+      if (
+        !Array.isArray(cameraNames) ||
+        cameraNames.some(
+          (s) => typeof s !== "string" || !isValidCameraName(s),
+        )
+      ) {
+        return res
+          .status(400)
+          .json({ error: "cameraNames must be a list of camera names" });
+      }
+      const pins = await pinsSvc.reorderPins(
+        prisma,
+        req.user.id,
+        cameraNames,
+      );
+      res.json({ pins });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/cameras/pins/:cameraName", async (req, res, next) => {
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      if (!isValidCameraName(req.params.cameraName)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      await pinsSvc.removePin(prisma, req.user.id, req.params.cameraName);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // --- Clips (PR #3) ---
   //

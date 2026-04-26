@@ -6,9 +6,20 @@ import type { CameraInfo } from "@/lib/types";
 interface CameraGridProps {
   cameras: CameraInfo[];
   onCameraClick: (camera: CameraInfo) => void;
+  /** Optional pin set + toggle handler. When both are wired, every card
+   *  renders the pin affordance and reflects its pinned state. Kept
+   *  optional so existing callers (e.g. the camera detail page rail) can
+   *  still drop the grid in without taking on pin state. */
+  pinnedSet?: Set<string>;
+  onTogglePin?: (camera: CameraInfo) => void | Promise<void>;
 }
 
-export function CameraGrid({ cameras, onCameraClick }: CameraGridProps) {
+export function CameraGrid({
+  cameras,
+  onCameraClick,
+  pinnedSet,
+  onTogglePin,
+}: CameraGridProps) {
   if (cameras.length === 0) return null;
 
   return (
@@ -18,6 +29,8 @@ export function CameraGrid({ cameras, onCameraClick }: CameraGridProps) {
           key={camera.name}
           camera={camera}
           onClick={onCameraClick}
+          isPinned={pinnedSet?.has(camera.name) ?? false}
+          onTogglePin={onTogglePin}
         />
       ))}
     </div>
