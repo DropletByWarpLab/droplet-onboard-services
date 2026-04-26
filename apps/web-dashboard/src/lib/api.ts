@@ -5,8 +5,11 @@ import type {
   EventDetail,
   EventFilter,
   FilteredEventsResult,
+  RecordingDay,
+  RecordingSegment,
   ReviewFilter,
   FilteredReviewsResult,
+  TimelineEntry,
   ChatRequest,
   ConnectedDevice,
   DetectionEvent,
@@ -447,6 +450,58 @@ export async function markReviewViewed(reviewId: string): Promise<void> {
     { method: "POST" },
   );
   if (!res.ok) throw new Error(`Failed to mark review viewed: ${res.status}`);
+}
+
+// --- Recordings + timeline (Phase 3.1) ---
+
+export async function fetchRecordingsSummary(
+  cameraName: string,
+): Promise<RecordingDay[]> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/recordings/summary`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch recording summary: ${res.status}`);
+  const body = (await res.json()) as { days: RecordingDay[] };
+  return body.days;
+}
+
+export async function fetchRecordingSegments(
+  cameraName: string,
+  after: number,
+  before: number,
+): Promise<RecordingSegment[]> {
+  const params = new URLSearchParams({ after: String(after), before: String(before) });
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/recordings?${params}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch recordings: ${res.status}`);
+  const body = (await res.json()) as { segments: RecordingSegment[] };
+  return body.segments;
+}
+
+export async function fetchTimeline(
+  cameraName: string,
+  after: number,
+  before: number,
+): Promise<TimelineEntry[]> {
+  const params = new URLSearchParams({ after: String(after), before: String(before) });
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/timeline?${params}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch timeline: ${res.status}`);
+  const body = (await res.json()) as { entries: TimelineEntry[] };
+  return body.entries;
+}
+
+/** Returns the proxied playback URL for a time range. The browser
+ *  fetches it directly via `<video src=...>`, so this is a URL
+ *  builder, not a fetcher. */
+export function getRecordingPlaybackUrl(
+  cameraName: string,
+  after: number,
+  before: number,
+): string {
+  return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback?after=${after}&before=${before}`;
 }
 
 /**

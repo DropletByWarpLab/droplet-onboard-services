@@ -85,6 +85,65 @@ export interface ReviewItem {
   thumbnailUrl: string;
 }
 
+// --- Recordings + timeline (Phase 3) ---
+
+/**
+ * One day's worth of recording activity for a camera, with hourly
+ * buckets. The dashboard's date picker keys off these — disabled
+ * dates have no `RecordingDay` entry, hovered dates show their
+ * `events` count.
+ */
+export interface RecordingDay {
+  /** YYYY-MM-DD */
+  day: string;
+  /** Total event count across the day. */
+  events: number;
+  /** Total recording duration covered (seconds). Some hours may be
+   *  empty if Frigate was offline. */
+  duration: number;
+  /** Per-hour summary, indexed by hour-of-day [0, 23]. */
+  hours: RecordingHour[];
+}
+
+export interface RecordingHour {
+  hour: number; // 0-23
+  events: number;
+  duration: number;
+  /** 0–100 motion score for the hour — drives the timeline heat-map. */
+  motion: number;
+}
+
+/**
+ * A single recording segment (Frigate stores ~10s segments on disk).
+ * Used by the playback layer to know what's actually contiguous and
+ * to compute gaps that should be skipped on a scrub.
+ */
+export interface RecordingSegment {
+  id: string;
+  startTime: number; // Unix seconds
+  endTime: number;
+  duration: number;
+  motion: number;   // 0-100
+  objects: number;  // count of detected objects in this segment
+}
+
+/**
+ * One Frigate timeline entry — an object's transition through a
+ * camera (entered zone, became visible, lost). The dashboard pins a
+ * dot on the timeline at `timestamp` so the operator can jump to
+ * "where the person walked into frame."
+ */
+export interface TimelineEntry {
+  timestamp: number;
+  /** Source event ID — usually corresponds to a Frigate event. */
+  sourceId: string;
+  /** "visible" | "entered_zone" | "attribute" | "gone" | "external" … */
+  classType: string;
+  label: string;
+  zone: string | null;
+  score: number;
+}
+
 export interface DiscoveredCamera {
   id: string;           // MAC or generated key
   name: string;

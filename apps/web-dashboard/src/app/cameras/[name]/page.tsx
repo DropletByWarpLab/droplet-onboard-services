@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Circle,
+  Film,
   Maximize2,
   Pin,
   PinOff,
@@ -186,6 +187,14 @@ export default function CameraFullscreenPage() {
               <span className="type-subheadline hidden sm:inline">Enable</span>
             </button>
           )}
+          <button
+            onClick={() => router.push(`/cameras/${encodeURIComponent(camera.name)}/recordings`)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
+            title="Browse recordings + timeline"
+          >
+            <Film size={16} />
+            <span className="type-subheadline hidden sm:inline">Recordings</span>
+          </button>
           <button
             onClick={handleTogglePin}
             disabled={pinBusy}

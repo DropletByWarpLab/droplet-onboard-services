@@ -17,8 +17,11 @@ import {
   getCameras,
   getEventsFiltered,
   getRecentEvents,
+  getRecordings,
+  getRecordingsSummary,
   getReviewsFiltered,
   getStats,
+  getTimelineEntries,
   setEventRetention,
   setReviewViewed,
   subscribeCameraEvents,
@@ -33,6 +36,7 @@ import {
   deleteCamera,
   addCamera,
   fetchEvents,
+  buildRecordingClipUrl,
 } from "../services/frigate.client.js";
 import { Readable } from "node:stream";
 import { config } from "../config.js";
@@ -1202,6 +1206,129 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // ==========================================================================
+  // RECORDINGS + TIMELINE (Phase 3.1)
+  // ==========================================================================
+  //
+  // The Recordings page hits these in sequence on load:
+  //   1. summary → paint the date picker + hourly heatmap on the
+  //      timeline scrubber.
+  //   2. recordings → list the actual segments for the chosen window
+  //      so we can compute gaps + render a contiguous progress bar.
+  //   3. timeline → dot the scrubber where things happened.
+  //   4. playback (mp4 range) → the <video> source for the chosen
+  //      time slice. Mp4 is sufficient for windows up to ~10 minutes;
+  //      Phase 3.2 will add HLS via hls.js for longer scrubs.
+  //
+  // All routes register under `/cameras/:name/...` because the
+  // suffix discriminates them from the bare `/cameras/:name` route
+  // (different segment count → no shadowing). Camera name is
+  // validated; `before`/`after` are coerced to finite numbers and
+  // sanity-bounded to a 31-day window so a malformed request can't
+  // make Frigate scan its whole archive.
+
+  router.get("/cameras/:name/recordings/summary", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const days = await getRecordingsSummary(req.params.name);
+      res.json({ days });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/cameras/:name/recordings", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const range = parseRecordingRange(req);
+      if ("error" in range) {
+        return res.status(400).json({ error: range.error });
+      }
+      const segments = await getRecordings(
+        req.params.name,
+        range.after,
+        range.before,
+      );
+      res.json({ segments });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/cameras/:name/timeline", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const range = parseRecordingRange(req);
+      if ("error" in range) {
+        return res.status(400).json({ error: range.error });
+      }
+      const entries = await getTimelineEntries(
+        req.params.name,
+        range.after,
+        range.before,
+      );
+      res.json({ entries });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Range-mp4 playback. Streams Frigate's synthesised clip.mp4 for
+   * the requested window. Cap at 30 minutes so a misbehaving caller
+   * can't pin a Frigate worker for an hour synthesising one mp4.
+   * Long-window playback comes in Phase 3.2 via HLS.
+   */
+  router.get("/cameras/:name/playback", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const range = parseRecordingRange(req);
+      if ("error" in range) {
+        return res.status(400).json({ error: range.error });
+      }
+      const span = range.before - range.after;
+      if (span > 30 * 60) {
+        return res.status(400).json({
+          error: "Playback range exceeds 30 minutes — pick a smaller window or use the export endpoint",
+        });
+      }
+
+      const url = buildRecordingClipUrl(req.params.name, range.after, range.before);
+      const ctrl = new AbortController();
+      req.on("close", () => ctrl.abort());
+      // Recording mp4 synthesis can take a few seconds for longer ranges.
+      // Set a generous timeout but still bounded so a stuck request
+      // eventually frees the connection.
+      const upstream = await fetch(url, {
+        signal: AbortSignal.any
+          ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(60_000)])
+          : ctrl.signal,
+      });
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
+      }
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+      const len = upstream.headers.get("content-length");
+      if (len) res.setHeader("Content-Length", len);
+      res.setHeader("Cache-Control", "private, max-age=300");
+      if (upstream.body) {
+        Readable.fromWeb(upstream.body as never).pipe(res);
+      } else {
+        res.end();
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ==========================================================================
   // CLIP EXPORT + SHARE URLS (PR #3)
   // ==========================================================================
   //
@@ -1271,6 +1398,37 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   return router;
+}
+
+/**
+ * Parse + sanity-check a recording range from query params (`after`,
+ * `before` in Unix seconds). Returns `{ after, before }` on success or
+ * `{ error }` for the caller to surface as 400.
+ *
+ * Both bounds must be positive finite numbers, after must be earlier
+ * than before, and the total span is capped at 31 days so a careless
+ * `?before=0&after=2000000000` doesn't make Frigate scan its whole
+ * archive (and our timeline endpoint return 1000s of rows).
+ */
+function parseRecordingRange(req: import("express").Request):
+  | { after: number; before: number }
+  | { error: string } {
+  const q = req.query as Record<string, string | undefined>;
+  const a = Number(q.after);
+  const b = Number(q.before);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) {
+    return { error: "after and before must be Unix-second timestamps" };
+  }
+  if (a <= 0 || b <= 0) {
+    return { error: "after and before must be positive" };
+  }
+  if (a >= b) {
+    return { error: "after must be earlier than before" };
+  }
+  if (b - a > 31 * 24 * 60 * 60) {
+    return { error: "range exceeds 31 days" };
+  }
+  return { after: a, before: b };
 }
 
 /** Defense-in-depth path validation mirroring PR #1's validateNcPath

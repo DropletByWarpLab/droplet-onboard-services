@@ -390,6 +390,40 @@ export interface FilteredReviewsResult {
   nextCursor: number | null;
 }
 
+// --- Recordings + timeline (Phase 3) ---
+
+export interface RecordingHour {
+  hour: number;
+  events: number;
+  duration: number;
+  motion: number;
+}
+
+export interface RecordingDay {
+  day: string;
+  events: number;
+  duration: number;
+  hours: RecordingHour[];
+}
+
+export interface RecordingSegment {
+  id: string;
+  startTime: number;
+  endTime: number;
+  duration: number;
+  motion: number;
+  objects: number;
+}
+
+export interface TimelineEntry {
+  timestamp: number;
+  sourceId: string;
+  classType: string;
+  label: string;
+  zone: string | null;
+  score: number;
+}
+
 export interface DiscoveredCamera {
   id: string;
   name: string;
