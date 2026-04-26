@@ -59,6 +59,55 @@ export async function fetchEvents(
   return resp.json();
 }
 
+/**
+ * Filtered + paginated event fetch — wraps Frigate's full /api/events query
+ * surface for the dashboard's Events page. Frigate paginates by `before`
+ * timestamp (events ordered by start_time DESC); the caller treats the
+ * oldest event's start_time in the previous page as the next page's
+ * `before`. CSV-encoded `cameras` and `labels` match Frigate's wire
+ * format. Limits are clamped at the route layer.
+ */
+export interface FrigateEventFilter {
+  /** Comma-separated list of camera names (no spaces). */
+  cameras?: string[];
+  /** Comma-separated list of label strings (person, car, dog…). */
+  labels?: string[];
+  /** Min top_score, [0, 1]. */
+  minScore?: number;
+  /** Unix-seconds upper bound (exclusive) — fetch events earlier than this. */
+  before?: number;
+  /** Unix-seconds lower bound (inclusive) — fetch events at or later. */
+  after?: number;
+  /** If true, only events with a saved clip. */
+  hasClip?: boolean;
+  /** If true, only events with a saved snapshot. */
+  hasSnapshot?: boolean;
+  /** Page size — Frigate caps at 1000. The route validates a tighter cap. */
+  limit?: number;
+}
+
+export async function fetchEventsFiltered(
+  filter: FrigateEventFilter,
+): Promise<unknown[]> {
+  const params = new URLSearchParams();
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.labels?.length) params.set("labels", filter.labels.join(","));
+  if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
+  if (filter.before !== undefined) params.set("before", String(filter.before));
+  if (filter.after !== undefined) params.set("after", String(filter.after));
+  if (filter.hasClip !== undefined) params.set("has_clip", filter.hasClip ? "1" : "0");
+  if (filter.hasSnapshot !== undefined) params.set("has_snapshot", filter.hasSnapshot ? "1" : "0");
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  // Frigate's response includes a `thumbnail` blob field by default which
+  // bloats the payload; the dashboard fetches the thumbnail through our
+  // proxied /api/cameras/events/:id/thumbnail anyway.
+  params.set("include_thumbnails", "0");
+
+  const resp = await fetch(`${FRIGATE_URL}/api/events?${params}`, { signal: timeout() });
+  if (!resp.ok) throw new Error(`Frigate events: ${resp.status}`);
+  return resp.json();
+}
+
 // --- Stats ---
 
 export async function fetchStats(): Promise<Record<string, unknown>> {

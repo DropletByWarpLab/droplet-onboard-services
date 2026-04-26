@@ -26,6 +26,33 @@ export interface DetectionEvent {
   hasSnapshot: boolean;
 }
 
+/**
+ * Richer event payload for the dedicated Events page. Extends the
+ * lightweight DetectionEvent with the metadata needed to drive the
+ * filter rail and per-event detail panel: zone hits, sub-label
+ * (Frigate's secondary classifier — license plate text, recognised
+ * person name, etc.), and the retain-indefinitely flag that backs the
+ * "Saved" badge.
+ *
+ * `clipUrl` is an authenticated proxy URL — never the bare Frigate
+ * media URL, so camera streams stay LAN-side.
+ */
+export interface EventDetail extends DetectionEvent {
+  /** Frigate sub-label (e.g. detected person name from face recogniser). */
+  subLabel: string | null;
+  /** Highest-confidence sub-label score, [0, 1]. */
+  subLabelScore: number | null;
+  /** Zone names this event entered, in entry order. */
+  zones: string[];
+  /** True if the operator marked this event for indefinite retention.
+   *  Toggling lives behind a separate route — see Phase 2.2. */
+  retainIndefinitely: boolean;
+  /** Authenticated clip download URL, only set when hasClip is true. */
+  clipUrl: string | null;
+  /** Authenticated snapshot URL, only set when hasSnapshot is true. */
+  snapshotUrl: string | null;
+}
+
 export interface DiscoveredCamera {
   id: string;           // MAC or generated key
   name: string;

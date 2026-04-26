@@ -40,7 +40,10 @@ const primaryNav: NavItem[] = [
 
 const secondaryNav: NavItem[] = [
   { href: "/cameras", label: "Cameras", icon: Video },
-  { href: "/clips", label: "Clips", icon: Film },
+  // Events replaces the old "Clips" entry — same icon, expanded UX. The
+  // /clips route still resolves (kept as a redirect) so external links
+  // and the LLM tool list_clips don't 404.
+  { href: "/events", label: "Events", icon: Film },
   { href: "/network", label: "Network", icon: Network },
   { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
