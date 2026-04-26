@@ -445,6 +445,20 @@ export interface MotionMaskPolygon {
   coordinates: number[];
 }
 
+// --- Notification preferences (Phase 6.3) ---
+//
+// Per-camera + per-user notification toggles. The orchestrator
+// returns the literal { onPerson, onVehicle, onAnimal, onMotion }
+// flags from the CameraNotificationPref table; the global page
+// aggregates these across cameras.
+
+export interface NotificationPrefs {
+  onPerson: boolean;
+  onVehicle: boolean;
+  onAnimal: boolean;
+  onMotion: boolean;
+}
+
 // --- PTZ (Phase 6.1) ---
 
 export type PtzAction =

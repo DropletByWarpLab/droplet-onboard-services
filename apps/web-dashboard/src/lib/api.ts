@@ -8,6 +8,7 @@ import type {
   EventDetail,
   EventFilter,
   FilteredEventsResult,
+  NotificationPrefs,
   PtzAction,
   PtzCapabilities,
   RecordingDay,
@@ -541,6 +542,37 @@ export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
+}
+
+// --- Notification prefs (Phase 6.3) ---
+
+export async function fetchCameraNotifications(
+  cameraName: string,
+): Promise<NotificationPrefs> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/notifications`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch notifications: ${res.status}`);
+  return res.json();
+}
+
+export async function updateCameraNotifications(
+  cameraName: string,
+  prefs: NotificationPrefs,
+): Promise<NotificationPrefs> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/notifications`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(prefs),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 // --- PTZ (Phase 6.1) ---
