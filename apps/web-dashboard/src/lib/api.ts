@@ -2,6 +2,9 @@ import type {
   CameraInfo,
   CameraGroupInfo,
   CameraPinInfo,
+  EventDetail,
+  EventFilter,
+  FilteredEventsResult,
   ChatRequest,
   ConnectedDevice,
   DetectionEvent,
@@ -395,6 +398,33 @@ export async function fetchCameraEvents(limit = 20, camera?: string): Promise<De
   if (!res.ok) throw new Error(`Failed to fetch camera events: ${res.status}`);
   const data = await res.json();
   return data.events ?? [];
+}
+
+/**
+ * Filtered + paginated events fetch for the Events page. Mirrors the
+ * GET /api/cameras/events query surface — pass through whatever the
+ * caller has set in the EventFilter and let the route validate. The
+ * response carries `nextCursor` (or null at end-of-data) which feeds
+ * back as `before` on the next call.
+ */
+export async function fetchEventsFiltered(
+  filter: EventFilter,
+): Promise<FilteredEventsResult> {
+  const params = new URLSearchParams();
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.labels?.length) params.set("labels", filter.labels.join(","));
+  if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
+  if (filter.before !== undefined) params.set("before", String(filter.before));
+  if (filter.after !== undefined) params.set("after", String(filter.after));
+  if (filter.hasClip !== undefined) params.set("has_clip", filter.hasClip ? "1" : "0");
+  if (filter.hasSnapshot !== undefined) params.set("has_snapshot", filter.hasSnapshot ? "1" : "0");
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  const res = await authFetch(`${BASE}/api/cameras/events?${params.toString()}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function fetchDiscoveredCameras(): Promise<DiscoveredCamera[]> {

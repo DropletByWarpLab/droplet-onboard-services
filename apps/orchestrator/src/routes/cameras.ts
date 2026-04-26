@@ -15,6 +15,7 @@ import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import {
   getCameras,
+  getEventsFiltered,
   getRecentEvents,
   getStats,
   subscribeCameraEvents,
@@ -464,6 +465,102 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         status: "scan_unavailable",
         message: "Camera discovery service is not running. Start it with: docker compose --profile full up camera-discovery",
       });
+    }
+  });
+
+  // --- Filtered events listing (Events page, Phase 2) ---
+  //
+  // Cursor pagination: the dashboard passes back the smallest
+  // `start_time` from the previous page as `before`. The route returns
+  // `nextCursor` (number | null) so the client doesn't have to recompute
+  // it. Limit is clamped at 200; Frigate accepts up to 1000 but the
+  // dashboard's grid renders ~50 comfortably.
+  //
+  // Filters: `cameras` (csv), `labels` (csv), `min_score`, `before`,
+  // `after`, `has_clip`, `has_snapshot`. Anything not supplied is
+  // ignored. Camera names + label strings are validated; numeric fields
+  // are checked for finiteness.
+  router.get("/cameras/events", async (req, res, next) => {
+    try {
+      const q = req.query as Record<string, string | undefined>;
+
+      // Validate cameras csv
+      let cameras: string[] | undefined;
+      if (q.cameras) {
+        cameras = q.cameras.split(",").map((s) => s.trim()).filter(Boolean);
+        if (cameras.some((c) => !isValidCameraName(c))) {
+          return res.status(400).json({ error: "Invalid camera name in cameras param" });
+        }
+      }
+
+      // Validate labels csv (Frigate labels are lowercase alphanumeric +
+      // underscore; cap length defensively).
+      let labels: string[] | undefined;
+      if (q.labels) {
+        labels = q.labels.split(",").map((s) => s.trim()).filter(Boolean);
+        if (labels.some((l) => !/^[a-z0-9_-]{1,32}$/i.test(l))) {
+          return res.status(400).json({ error: "Invalid label in labels param" });
+        }
+      }
+
+      const numOrUndef = (v: string | undefined): number | undefined => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const boolOrUndef = (v: string | undefined): boolean | undefined => {
+        if (v === undefined) return undefined;
+        if (v === "1" || v === "true") return true;
+        if (v === "0" || v === "false") return false;
+        return undefined;
+      };
+
+      const minScore = numOrUndef(q.min_score);
+      if (minScore !== undefined && (minScore < 0 || minScore > 1)) {
+        return res.status(400).json({ error: "min_score must be between 0 and 1" });
+      }
+
+      const limitRaw = parseInt(q.limit || "50", 10);
+      const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
+
+      const result = await getEventsFiltered({
+        cameras,
+        labels,
+        minScore,
+        before: numOrUndef(q.before),
+        after: numOrUndef(q.after),
+        hasClip: boolOrUndef(q.has_clip),
+        hasSnapshot: boolOrUndef(q.has_snapshot),
+        limit,
+      });
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Event snapshot (proxied from Frigate) ---
+  //
+  // Companion to the existing thumbnail route — returns the full-resolution
+  // saved snapshot for events with `has_snapshot=true`. The events page
+  // shows this in the playback modal alongside the clip when no clip was
+  // recorded.
+  router.get("/cameras/events/:eventId/snapshot", async (req, res, next) => {
+    try {
+      if (!isValidEventId(req.params.eventId)) {
+        return res.status(400).json({ error: "Invalid event ID format" });
+      }
+      const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(req.params.eventId)}/snapshot.jpg`;
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
+      }
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      res.send(buffer);
+    } catch (err) {
+      next(err);
     }
   });
 

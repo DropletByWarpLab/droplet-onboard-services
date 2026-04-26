@@ -14,7 +14,9 @@ import {
   fetchCameras,
   fetchConfig,
   fetchEvents,
+  fetchEventsFiltered,
   fetchStats,
+  type FrigateEventFilter,
 } from "./frigate.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { config } from "../config.js";
@@ -23,6 +25,7 @@ import type {
   DetectionEvent,
   DiscoveredCamera,
   CameraSSEEvent,
+  EventDetail,
 } from "../types/camera.js";
 
 const logger = pino({ name: "camera-service" });
@@ -301,6 +304,73 @@ export async function getRecentEvents(
 
   await cacheSet(cacheKey, events, CACHE_TTL);
   return events;
+}
+
+/**
+ * Filtered event listing for the Events page. Cursor is the oldest
+ * event's `start_time` from the previous page; the dashboard passes it
+ * back as `before` to step into the next batch. Returns `nextCursor:
+ * null` when fewer than `limit` rows came back (i.e. end of data with
+ * the current filter).
+ *
+ * Not cached — filter cardinality is unbounded and Frigate's events
+ * endpoint is fast (it's just a SQLite scan on its end). Adding a
+ * cache here would also make the "newly recorded events appear" UX
+ * laggy.
+ */
+export interface FilteredEventsResult {
+  events: EventDetail[];
+  nextCursor: number | null;
+}
+
+export async function getEventsFiltered(
+  filter: FrigateEventFilter,
+): Promise<FilteredEventsResult> {
+  const limit = filter.limit ?? 50;
+  const rawEvents = (await fetchEventsFiltered(filter)) as Array<Record<string, unknown>>;
+
+  const events: EventDetail[] = rawEvents.map((e) => {
+    const id = String(e.id);
+    const camera = String(e.camera ?? "");
+    const hasClip = Boolean(e.has_clip);
+    const hasSnapshot = Boolean(e.has_snapshot);
+    return {
+      id,
+      camera,
+      label: String(e.label ?? ""),
+      score: Number(e.top_score ?? e.score ?? 0),
+      startTime: Number(e.start_time ?? 0),
+      endTime: e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null,
+      thumbnail: `/api/cameras/events/${encodeURIComponent(id)}/thumbnail`,
+      hasClip,
+      hasSnapshot,
+      subLabel: e.sub_label ? String(e.sub_label) : null,
+      subLabelScore: e.sub_label_score !== null && e.sub_label_score !== undefined
+        ? Number(e.sub_label_score)
+        : null,
+      zones: Array.isArray(e.zones) ? (e.zones as string[]).map(String) : [],
+      // Frigate stores retention as `retain_indefinitely`. Default false.
+      retainIndefinitely: Boolean(e.retain_indefinitely),
+      clipUrl: hasClip
+        ? `/api/cameras/clips/event/${encodeURIComponent(id)}`
+        : null,
+      snapshotUrl: hasSnapshot
+        ? `/api/cameras/events/${encodeURIComponent(id)}/snapshot`
+        : null,
+    };
+  });
+
+  // If Frigate returned a full page, the next call should fetch events
+  // strictly older than the oldest one we just got. Subtract a tiny
+  // epsilon (1ms in seconds) so we don't double-include the boundary
+  // event — Frigate's `before` is exclusive but only on whole-second
+  // precision, and start_times can collide.
+  const nextCursor =
+    events.length === limit && events.length > 0
+      ? Math.min(...events.map((ev) => ev.startTime))
+      : null;
+
+  return { events, nextCursor };
 }
 
 // --- Stats ---

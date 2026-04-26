@@ -314,6 +314,43 @@ export interface DetectionEvent {
   hasSnapshot: boolean;
 }
 
+/** Richer event payload returned by GET /api/cameras/events for the
+ *  dedicated Events page. Mirrors EventDetail in the orchestrator. */
+export interface EventDetail extends DetectionEvent {
+  subLabel: string | null;
+  subLabelScore: number | null;
+  zones: string[];
+  retainIndefinitely: boolean;
+  /** Authenticated proxy URL for the .mp4 clip; null if has_clip=false. */
+  clipUrl: string | null;
+  /** Authenticated proxy URL for the saved snapshot; null if has_snapshot=false. */
+  snapshotUrl: string | null;
+}
+
+/** Filter shape for the Events page UI — mirrored 1:1 onto the
+ *  /api/cameras/events query string by `fetchEvents`. All fields
+ *  optional; the rail starts empty (= "anything"). */
+export interface EventFilter {
+  cameras?: string[];
+  labels?: string[];
+  /** [0, 1] */
+  minScore?: number;
+  /** Unix-seconds upper bound (exclusive). Used as the cursor. */
+  before?: number;
+  /** Unix-seconds lower bound (inclusive). Used by the "since" preset. */
+  after?: number;
+  hasClip?: boolean;
+  hasSnapshot?: boolean;
+  /** Page size, [1, 200]. Defaults to 50 server-side. */
+  limit?: number;
+}
+
+export interface FilteredEventsResult {
+  events: EventDetail[];
+  /** start_time of the oldest event returned, or null if no more pages. */
+  nextCursor: number | null;
+}
+
 export interface DiscoveredCamera {
   id: string;
   name: string;
