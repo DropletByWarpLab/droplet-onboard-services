@@ -188,7 +188,7 @@ Frigate's recordings live on disk under `${NVR_MEDIA_SOURCE}` (default `nvrdata`
 
 ## Out of scope (explicitly)
 
-- **Frigate Plus** custom-model integration — the operator handles model files outside the UI for now.
+- **Paid Frigate model subscriptions** — Droplet stays on the OSS Frigate models that ship with the container (yolov9-s and friends). No paid model service is wired up or planned.
 - **ONNX model upload** via UI — env var + bind-mount path, not an upload endpoint.
 - **Cluster / multi-host Frigate** — single Frigate per Droplet.
 - **Replacing Frigate** — we're skinning it, not forking it. If Frigate ships a new feature we want, it's a small PR to surface, not a rewrite.
