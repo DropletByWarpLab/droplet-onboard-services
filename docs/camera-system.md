@@ -134,11 +134,12 @@ All camera access works through the authenticated Nginx HTTPS gateway. The same 
 |------|-----|------|
 | Camera list | `GET /api/cameras` | Session cookie or Bearer token |
 | Live snapshot | `GET /api/cameras/{name}/snapshot` | Session cookie or Bearer token |
+| Live MJPEG stream | `GET /api/cameras/{name}/live` | Session cookie or Bearer token |
+| HLS recording playback | `GET /api/cameras/{name}/playback.m3u8` | Session cookie or Bearer token |
 | Detection events | `GET /api/cameras/events/recent` | Session cookie or Bearer token |
 | Real-time alerts | `GET /api/cameras/events/sse` | Session cookie or Bearer token |
-| Frigate UI | `/frigate/` | Nginx auth_request validation |
 
-**Security:** Camera IPs and RTSP URLs are never exposed to clients. The orchestrator proxies all snapshots and streams through authenticated endpoints.
+**Security:** Camera IPs and RTSP URLs are never exposed to clients. The orchestrator proxies all snapshots and streams through authenticated endpoints. Frigate's bundled UI on `:8971` is reachable only on the internal Docker network — there is no `/frigate/` gateway route by design (see `docs/FRIGATE_PARITY.md`).
 
 ## Frigate Configuration
 

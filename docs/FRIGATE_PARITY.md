@@ -30,7 +30,7 @@ The dashboard is a strict superset of Frigate's UI. All phases shipped:
 | 7.7 | GenAI event descriptions | #122 |
 | 7.2 + 7.3 | Web Push pipeline | #123, #124 |
 
-Frigate runs with its built-in UI disabled at `/frigate/`. Camera IPs and the Frigate `:5000` socket never leak to the browser — every read or write goes through the orchestrator's auth-gated proxy.
+There is no `/frigate/` gateway route. Frigate's bundled UI binary still ships in the upstream container, but the gateway never proxies to it — Frigate's `:8971` (UI) and `:5000` (API) are only reachable from sibling Docker containers (the orchestrator + camera-discovery), and the orchestrator's `/api/cameras/*` is the sole external surface. Camera IPs never leak to the browser.
 
 The "Where we are now" section below is the original snapshot from the planning phase, kept for context.
 
