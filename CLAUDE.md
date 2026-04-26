@@ -75,6 +75,21 @@ npm run test:ai-gateway     # ai-gateway only
 
 `COMPOSE_PROFILES=linux` is set in `.env` automatically by `setup.sh` on Linux so Frigate starts with the default stack; on macOS it's empty so the GPU device mount never trips. Add `full` to opt into switch/camera-discovery on either OS.
 
+## Updating `.env` on a running stack
+
+`docker restart <container>` does **not** re-read the env_file. Containers
+keep the env they were originally booted with. After editing `.env`, recreate
+the affected services:
+
+```bash
+docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate <service>
+```
+
+This caught us once on `FRIGATE_CAMERA_*_PASSWORD` — `.env` had the right
+value but Frigate's container still had the stale one. `scripts/test-security.sh`
+now also blocks URL-encoded camera passwords (Frigate ffmpeg doesn't decode
+percent-escapes; store raw `Droplet123!`, not `Droplet123%21`).
+
 ## Environment variables
 
 > ⚠ **Never add new `MATTER_*` env vars.** matter.js scans `process.env` at startup and auto-imports every `MATTER_*` variable into its internal `VariableService`, dot-namespacing each one. Collisions with root-node behavior ids throw `UnsupportedCastError: Property "X" is unsupported` and break controller init. Use a `DROPLET_MATTER_*` prefix for our own env vars instead. `MATTER_STORAGE_PATH` is the only surviving `MATTER_*` name and is allow-listed by `scripts/test-security.sh`. Full rationale: [`apps/orchestrator/src/config.ts`](apps/orchestrator/src/config.ts) — the block comment above the `Matter` schema section.

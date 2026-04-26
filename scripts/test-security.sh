@@ -130,6 +130,32 @@ if [ "$missing_verify" = false ]; then
 fi
 
 # =============================================================================
+# Test 4b: FRIGATE_CAMERA_*_PASSWORD must NOT be URL-encoded
+# =============================================================================
+# Frigate substitutes env vars into the RTSP URL via Python str.format —
+# the value lands in the URL VERBATIM. The bundled jetson ffmpeg does NOT
+# URL-decode userinfo before authenticating, so a `%21` goes on the wire as
+# three literal characters (`%`, `2`, `1`), the camera returns 401, and after
+# ~5 retries the firmware locks the admin account (HTTP 490 Account Blocked)
+# for several minutes. We've shipped this exact mistake in production once
+# already (see the front_door comment in docker/frigate/config.yml); guard
+# against it before another fresh `.env` ships with `Droplet123%21`.
+ENV_FILE="$REPO_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+  encoded_pw_violations=$(grep -E '^FRIGATE_CAMERA_[A-Z0-9_]+_PASSWORD=' "$ENV_FILE" | grep -E '%[0-9A-Fa-f]{2}' || true)
+  if [ -z "$encoded_pw_violations" ]; then
+    pass ".env: no URL-encoded FRIGATE_CAMERA_*_PASSWORD values"
+  else
+    fail ".env: FRIGATE_CAMERA_*_PASSWORD contains URL-encoded chars (%XX)"
+    printf "${_RED}%s${_RESET}\n" "$encoded_pw_violations" >&2
+    printf "    Frigate substitutes env vars verbatim. Store the RAW password —\n" >&2
+    printf "    e.g. \`Droplet123!\` not \`Droplet123%%21\` — and recreate Frigate\n" >&2
+    printf "    with \`docker compose up -d --force-recreate frigate\` so it picks\n" >&2
+    printf "    up the new env (\`docker restart\` keeps the old env baked in).\n\n" >&2
+  fi
+fi
+
+# =============================================================================
 # Test 5: .env.example exists with placeholder values
 # =============================================================================
 
