@@ -1,7 +1,16 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RecordingDay, TimelineEntry } from "@/lib/types";
+
+/** A range selected by the operator, expressed in seconds-since-midnight
+ *  on the visible day. Resolution is minute-grained — the timeline
+ *  caller computes the absolute Unix timestamp by pairing this with
+ *  `day`. */
+export interface TimelineSelection {
+  startSec: number;
+  endSec: number;
+}
 
 interface Props {
   /** YYYY-MM-DD selected date — drives which row of the summary we render. */
@@ -16,6 +25,10 @@ interface Props {
    *  (0..1). Drives the orange playhead line. */
   playheadFraction?: number;
   onSelectHour: (hour: number) => void;
+  /** Operator's drag selection over the timeline (minute-precision).
+   *  null when nothing is selected. */
+  selection?: TimelineSelection | null;
+  onSelectionChange?: (next: TimelineSelection | null) => void;
 }
 
 /**
@@ -36,11 +49,107 @@ export function RecordingsTimeline({
   selectedHour,
   playheadFraction,
   onSelectHour,
+  selection,
+  onSelectionChange,
 }: Props) {
   const dayEntry = useMemo(
     () => summary.find((d) => d.day === day) ?? null,
     [summary, day],
   );
+
+  // ---------- Drag-to-select state ----------
+  //
+  // We track two things separately to keep clicks and drags from
+  // fighting each other:
+  //
+  //   1. `dragOrigin` — set on pointerdown, cleared on pointerup. As
+  //      long as movement stays under DRAG_THRESHOLD_PX we treat the
+  //      gesture as a "potential click" and let the cell button's
+  //      onClick handler fire naturally (no pointer capture, no
+  //      preventDefault).
+  //   2. `dragState` — set once movement crosses the threshold. From
+  //      that point on the gesture is a drag: pointer capture goes
+  //      live, the selection band tracks the cursor, and the cell
+  //      button's click is suppressed.
+  //
+  // The selection mapping uses the grid's live bounding rect so a
+  // window resize mid-render still picks the right second.
+  const DRAG_THRESHOLD_PX = 4;
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const dragOriginRef = useRef<{ x: number; startSec: number; pointerId: number } | null>(null);
+  const [dragState, setDragState] = useState<TimelineSelection | null>(null);
+
+  const xToSec = (clientX: number): number | null => {
+    const grid = gridRef.current;
+    if (!grid) return null;
+    const rect = grid.getBoundingClientRect();
+    const fraction = (clientX - rect.left) / rect.width;
+    if (fraction < 0 || fraction > 1) return null;
+    const sec = Math.round(fraction * 24 * 60 * 60);
+    // Snap to the nearest minute — sub-minute precision would be jitter
+    // for an operator dragging with a mouse.
+    return Math.round(sec / 60) * 60;
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onSelectionChange) return;
+    if (e.button !== 0) return;
+    const sec = xToSec(e.clientX);
+    if (sec === null) return;
+    dragOriginRef.current = {
+      x: e.clientX,
+      startSec: sec,
+      pointerId: e.pointerId,
+    };
+  };
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const origin = dragOriginRef.current;
+    if (!origin) return;
+    const dx = Math.abs(e.clientX - origin.x);
+    if (!dragState && dx < DRAG_THRESHOLD_PX) return;
+    const sec = xToSec(e.clientX);
+    if (sec === null) return;
+    if (!dragState) {
+      // Crossed the threshold — promote to a real drag.
+      e.currentTarget.setPointerCapture(origin.pointerId);
+      setDragState({ startSec: origin.startSec, endSec: sec });
+      return;
+    }
+    setDragState({ startSec: origin.startSec, endSec: sec });
+  };
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const origin = dragOriginRef.current;
+    dragOriginRef.current = null;
+    if (!dragState) return; // never crossed threshold → it was a click
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    const startSec = Math.min(dragState.startSec, dragState.endSec);
+    const endSec = Math.max(dragState.startSec, dragState.endSec);
+    setDragState(null);
+    if (!onSelectionChange || endSec - startSec < 60) return;
+    onSelectionChange({ startSec, endSec });
+    void origin; // referenced via closure capture above
+  };
+
+  // Esc clears an in-progress drag without committing it.
+  useEffect(() => {
+    if (!dragState) return;
+    function onKey(ev: KeyboardEvent) {
+      if (ev.key === "Escape") {
+        setDragState(null);
+        dragOriginRef.current = null;
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dragState]);
+
+  const visibleSelection = dragState ?? selection ?? null;
+  const selectionLeftFraction = visibleSelection
+    ? Math.min(visibleSelection.startSec, visibleSelection.endSec) / (24 * 60 * 60)
+    : null;
+  const selectionWidthFraction = visibleSelection
+    ? Math.abs(visibleSelection.endSec - visibleSelection.startSec) / (24 * 60 * 60)
+    : null;
 
   // Build a 24-slot array with the hour data merged in (or zeros).
   const hours = useMemo(() => {
@@ -96,10 +205,18 @@ export function RecordingsTimeline({
       </div>
 
       {/* Hour cells. Tailwind doesn't ship grid-cols-24 by default — we
-          fall back to inline-grid + a custom template via style. */}
+          fall back to inline-grid + a custom template via style.
+          The grid is the drag surface; pointer handlers are scoped to
+          the wrapper so hover-over-cell still routes to the cell button
+          for keyboard accessibility. */}
       <div
-        className="grid gap-px relative"
+        ref={gridRef}
+        className="grid gap-px relative touch-none"
         style={{ gridTemplateColumns: "repeat(24, minmax(0, 1fr))" }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={() => setDragState(null)}
       >
         {hours.map((h) => {
           const isSelected = selectedHour === h.hour;
@@ -166,12 +283,37 @@ export function RecordingsTimeline({
               }}
             />
           )}
+
+        {/* Selection band — operator's drag highlight. Lives above the
+            cells so the accent fill reads against any motion shading
+            below. Pointer-events-none so it doesn't capture move events
+            mid-drag. */}
+        {selectionLeftFraction !== null &&
+          selectionWidthFraction !== null &&
+          selectionWidthFraction > 0 && (
+            <div
+              className="absolute top-0 bottom-0 bg-system-orange/30 ring-2 ring-system-orange pointer-events-none z-15"
+              style={{
+                left: `${selectionLeftFraction * 100}%`,
+                width: `${selectionWidthFraction * 100}%`,
+              }}
+            />
+          )}
       </div>
 
       <p className="type-caption-1 text-label-tertiary mt-3">
-        Click an hour to jump to it. Each cell shades by motion intensity;
-        orange dots mark detected activity.
+        Click an hour to jump to it. Drag across the timeline to select a
+        precise range to export. Esc cancels an in-progress drag.
       </p>
     </div>
   );
+}
+
+/** Format a seconds-since-midnight value as HH:MM. Useful for the
+ *  parent's selection chip. */
+export function fmtSecOfDay(sec: number): string {
+  const total = Math.max(0, Math.min(24 * 60 * 60, Math.round(sec)));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }

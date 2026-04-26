@@ -18,8 +18,13 @@ import {
 import { authFetch } from "@/lib/auth";
 import { getRecordingHlsUrl } from "@/lib/api";
 import { HlsPlayer, type HlsPlayerHandle } from "@/components/recordings/HlsPlayer";
-import { RecordingsTimeline } from "@/components/recordings/RecordingsTimeline";
+import {
+  RecordingsTimeline,
+  fmtSecOfDay,
+  type TimelineSelection,
+} from "@/components/recordings/RecordingsTimeline";
 import type { CameraInfo } from "@/lib/types";
+import { X } from "lucide-react";
 
 /** Playback window — one full hour. With HLS the orchestrator no
  *  longer caps the range, but the per-hour granularity matches the
@@ -70,6 +75,16 @@ export default function RecordingsPage() {
 
   const [day, setDay] = useState<string>(() => localDayString(new Date()));
   const [hour, setHour] = useState<number | null>(null);
+  // Operator-drawn range over the timeline — minute precision in
+  // seconds-since-midnight on the visible day. Drives the export
+  // button when set; null falls back to the current hour.
+  const [selection, setSelection] = useState<TimelineSelection | null>(null);
+
+  // Selection is per-day — switching days clears it so an operator
+  // doesn't accidentally export Tuesday's range from Wednesday.
+  useEffect(() => {
+    setSelection(null);
+  }, [day]);
 
   const summaryHook = useRecordingsSummary(name || null);
 
@@ -117,10 +132,35 @@ export default function RecordingsPage() {
   }, [hour, currentTime, range.after]);
 
   // ---------- Export ----------
+  //
+  // Export prefers the operator's drag selection (minute precision)
+  // when one is set; otherwise it falls back to the current hour.
+  // The selection is in seconds-since-midnight on `day`, so we add
+  // the day's epoch start to convert to absolute Unix seconds.
+  const exportRange = useMemo(() => {
+    if (selection) {
+      const [y, m, d] = day.split("-").map(Number);
+      const dayStart = Math.floor(new Date(y, m - 1, d, 0, 0, 0).getTime() / 1000);
+      return {
+        after: dayStart + selection.startSec,
+        before: dayStart + selection.endSec,
+      };
+    }
+    return range;
+  }, [selection, day, range]);
+
+  const exportSpanLabel = useMemo(() => {
+    if (selection) {
+      return `${fmtSecOfDay(selection.startSec)} – ${fmtSecOfDay(selection.endSec)}`;
+    }
+    if (hour === null) return null;
+    return `${String(hour).padStart(2, "0")}:00 – ${String((hour + 1) % 24).padStart(2, "0")}:00`;
+  }, [selection, hour]);
+
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const handleExport = async () => {
-    if (range.after === null || range.before === null) return;
+    if (exportRange.after === null || exportRange.before === null) return;
     setExporting(true);
     setExportMsg(null);
     try {
@@ -128,8 +168,8 @@ export default function RecordingsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          starts_at: new Date(range.after * 1000).toISOString(),
-          ends_at: new Date(range.before * 1000).toISOString(),
+          starts_at: new Date(exportRange.after * 1000).toISOString(),
+          ends_at: new Date(exportRange.before * 1000).toISOString(),
         }),
       });
       if (!res.ok) {
@@ -278,6 +318,8 @@ export default function RecordingsPage() {
             selectedHour={hour}
             playheadFraction={playheadFraction}
             onSelectHour={setHour}
+            selection={selection}
+            onSelectionChange={setSelection}
           />
         </div>
 
@@ -285,16 +327,35 @@ export default function RecordingsPage() {
         <div className="space-y-4">
           {/* Export */}
           <div className="dp-card p-4">
-            <h3 className="type-subheadline text-label-primary font-medium mb-1">
-              Export current hour
-            </h3>
+            <div className="flex items-start justify-between gap-2 mb-1">
+              <h3 className="type-subheadline text-label-primary font-medium">
+                {selection ? "Export selection" : "Export current hour"}
+              </h3>
+              {selection && (
+                <button
+                  type="button"
+                  onClick={() => setSelection(null)}
+                  className="flex items-center gap-1 type-caption-2 text-label-tertiary hover:text-label-primary"
+                  aria-label="Clear selection"
+                >
+                  <X size={12} />
+                  Clear
+                </button>
+              )}
+            </div>
             <p className="type-caption-1 text-label-tertiary mb-3">
-              Saves the visible 1-hour clip to your Nextcloud
-              under <span className="font-mono">/Clips</span>.
+              {exportSpanLabel ? (
+                <>
+                  Saves <span className="font-mono">{exportSpanLabel}</span> to
+                  your Nextcloud under <span className="font-mono">/Clips</span>.
+                </>
+              ) : (
+                <>Pick an hour or drag a range on the timeline first.</>
+              )}
             </p>
             <button
               onClick={handleExport}
-              disabled={exporting || range.after === null}
+              disabled={exporting || exportRange.after === null}
               className="dp-btn-primary w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg disabled:opacity-60"
             >
               {exporting ? (
