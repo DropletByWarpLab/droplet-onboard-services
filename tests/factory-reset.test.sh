@@ -54,7 +54,7 @@ echo "--- Phase 2: Verify clean state ---"
 
 # Check volumes are gone
 COMPOSE_PROJECT=$(basename "$(dirname "$COMPOSE_FILE")")
-for vol in pgdata filedata nextcloud-data aikeys ha-config; do
+for vol in pgdata filedata nextcloud-data aikeys nvrdata; do
   full_name="${COMPOSE_PROJECT}_${vol}"
   if docker volume inspect "$full_name" >/dev/null 2>&1; then
     fail "Volume ${full_name} still exists"

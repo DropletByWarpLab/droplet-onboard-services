@@ -38,9 +38,9 @@ Each device gets its own random secrets — no two devices share credentials:
 | Secret | Used by | Purpose |
 |--------|---------|---------|
 | `DEVICE_SECRET` | ai-gateway | Fernet encryption key for BYOK API keys |
-| `POSTGRES_PASSWORD` | db, orchestrator, nextcloud, file-sync | PostgreSQL authentication |
+| `POSTGRES_PASSWORD` | db, orchestrator, nextcloud, file-indexer | PostgreSQL authentication |
 | `REDIS_PASSWORD` | cache, orchestrator, ai-gateway, nextcloud | Redis authentication |
-| `MQTT_PASSWORD` | broker, orchestrator, file-sync | Mosquitto MQTT authentication |
+| `MQTT_PASSWORD` | broker, orchestrator, file-indexer | Mosquitto MQTT authentication |
 | `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
 
 ---

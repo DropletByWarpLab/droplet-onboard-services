@@ -36,7 +36,7 @@ import {
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
 
-const logger = pino({ name: "api-server" });
+const logger = pino({ name: "orchestrator" });
 
 async function main() {
   // Initialize Prisma

@@ -41,9 +41,9 @@ services:
       - default
       - droplet-e2e
 
-  api-server:
+  orchestrator:
     build:
-      context: ../apps/api-server
+      context: ../apps/orchestrator
       dockerfile: Dockerfile
     depends_on:
       db:
@@ -67,12 +67,12 @@ services:
       context: .
       dockerfile: Dockerfile.test
     depends_on:
-      api-server:
+      orchestrator:
         condition: service_started
       ai-gateway:
         condition: service_started
     environment:
-      - API_URL=http://api-server:3000
+      - API_URL=http://orchestrator:3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
 
 networks:

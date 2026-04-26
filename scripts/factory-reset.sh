@@ -164,8 +164,9 @@ VOLUMES=(
   "filedata"
   "nextcloud-data"
   "aikeys"
-  "ha-config"
   "nvrdata"
+  "matter-data"
+  "frigate-config"
 )
 
 removed=0

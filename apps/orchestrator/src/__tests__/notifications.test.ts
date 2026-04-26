@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 
-// Mock MQTT before importing the SUT. The HA mock is gone with HA itself —
-// Matter is the only smart-home path now, and phone/push routing will come
-// back via a dedicated notifier, not via HA.
+// Mock MQTT before importing the SUT. The smart-home surface is Matter
+// (matter.service.ts); push delivery to phones rides on the Web Push
+// pipeline in services/push-dispatch.service.ts.
 const mqttPublish = vi.fn();
 vi.mock("../services/mqtt.service.js", () => ({
   publish: (...a: unknown[]) => mqttPublish(...a),
