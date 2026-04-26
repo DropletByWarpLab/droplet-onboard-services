@@ -5,6 +5,8 @@ import type {
   EventDetail,
   EventFilter,
   FilteredEventsResult,
+  ReviewFilter,
+  FilteredReviewsResult,
   ChatRequest,
   ConnectedDevice,
   DetectionEvent,
@@ -398,6 +400,53 @@ export async function fetchCameraEvents(limit = 20, camera?: string): Promise<De
   if (!res.ok) throw new Error(`Failed to fetch camera events: ${res.status}`);
   const data = await res.json();
   return data.events ?? [];
+}
+
+/** Toggle the retain-indefinitely flag on an event ("Saved" in the UI). */
+export async function setEventRetain(
+  eventId: string,
+  retain: boolean,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/events/${encodeURIComponent(eventId)}/retain`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retain }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+}
+
+// --- Reviews (Frigate 0.13+) ---
+
+export async function fetchReviewsFiltered(
+  filter: ReviewFilter,
+): Promise<FilteredReviewsResult> {
+  const params = new URLSearchParams();
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.severity?.length) params.set("severity", filter.severity.join(","));
+  if (filter.before !== undefined) params.set("before", String(filter.before));
+  if (filter.after !== undefined) params.set("after", String(filter.after));
+  if (filter.reviewed !== undefined) params.set("reviewed", filter.reviewed ? "1" : "0");
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  const res = await authFetch(`${BASE}/api/cameras/reviews?${params.toString()}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function markReviewViewed(reviewId: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/reviews/${encodeURIComponent(reviewId)}/viewed`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`Failed to mark review viewed: ${res.status}`);
 }
 
 /**

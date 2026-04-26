@@ -53,6 +53,38 @@ export interface EventDetail extends DetectionEvent {
   snapshotUrl: string | null;
 }
 
+/**
+ * Frigate review item (0.13+). Reviews group sequential events on the
+ * same camera into a single timeline entry — the operator triages
+ * clusters, not individual detections. Severity is Frigate's
+ * classification of how urgent the cluster is: "alert" surfaces in
+ * the operator's notifications, "detection" is below the fold,
+ * "significant_motion" is non-object motion that crossed a zone.
+ */
+export interface ReviewItem {
+  id: string;
+  camera: string;
+  /** Unix timestamp seconds — start of the cluster. */
+  startTime: number;
+  /** Unix timestamp seconds — null while the cluster is still active. */
+  endTime: number | null;
+  severity: "alert" | "detection" | "significant_motion";
+  /** Whether the operator has marked this review as viewed. */
+  hasBeenReviewed: boolean;
+  /** Object labels seen across the underlying events (person, car…). */
+  objects: string[];
+  /** Audio labels Frigate detected (speech, scream…). May be empty. */
+  audio: string[];
+  /** Zones the activity entered. */
+  zones: string[];
+  /** Underlying event IDs feeding this review item. */
+  detectionIds: string[];
+  /** Authenticated proxy URL for the Frigate-rendered preview clip. */
+  previewUrl: string | null;
+  /** Authenticated proxy URL for the cluster thumbnail. */
+  thumbnailUrl: string;
+}
+
 export interface DiscoveredCamera {
   id: string;           // MAC or generated key
   name: string;

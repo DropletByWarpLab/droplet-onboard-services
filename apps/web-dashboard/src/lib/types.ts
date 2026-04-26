@@ -351,6 +351,45 @@ export interface FilteredEventsResult {
   nextCursor: number | null;
 }
 
+// --- Reviews (Frigate 0.13+) ---
+
+export type ReviewSeverity = "alert" | "detection" | "significant_motion";
+
+/**
+ * A Frigate review item — a cluster of sequential events on the same
+ * camera, classified by severity. Reviews are the operator's primary
+ * triage unit on the Events page's "Alerts" + "Detections" tabs.
+ */
+export interface ReviewItem {
+  id: string;
+  camera: string;
+  startTime: number;
+  endTime: number | null;
+  severity: ReviewSeverity;
+  hasBeenReviewed: boolean;
+  objects: string[];
+  audio: string[];
+  zones: string[];
+  detectionIds: string[];
+  previewUrl: string | null;
+  thumbnailUrl: string;
+}
+
+export interface ReviewFilter {
+  cameras?: string[];
+  severity?: ReviewSeverity[];
+  before?: number;
+  after?: number;
+  /** When set, only reviewed (true) or unreviewed (false) items. */
+  reviewed?: boolean;
+  limit?: number;
+}
+
+export interface FilteredReviewsResult {
+  reviews: ReviewItem[];
+  nextCursor: number | null;
+}
+
 export interface DiscoveredCamera {
   id: string;
   name: string;

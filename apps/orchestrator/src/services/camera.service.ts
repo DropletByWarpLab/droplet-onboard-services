@@ -15,8 +15,12 @@ import {
   fetchConfig,
   fetchEvents,
   fetchEventsFiltered,
+  fetchReviews,
   fetchStats,
+  markReviewViewed,
+  setEventRetain,
   type FrigateEventFilter,
+  type FrigateReviewFilter,
 } from "./frigate.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { config } from "../config.js";
@@ -26,6 +30,7 @@ import type {
   DiscoveredCamera,
   CameraSSEEvent,
   EventDetail,
+  ReviewItem,
 } from "../types/camera.js";
 
 const logger = pino({ name: "camera-service" });
@@ -371,6 +376,89 @@ export async function getEventsFiltered(
       : null;
 
   return { events, nextCursor };
+}
+
+/**
+ * Toggle the retain-indefinitely flag on an event. Thin pass-through
+ * to the Frigate client; we expose it as a service function so the
+ * route layer doesn't import the client directly (consistent with
+ * how the rest of the camera surface is structured).
+ */
+export async function setEventRetention(
+  eventId: string,
+  retain: boolean,
+): Promise<void> {
+  await setEventRetain(eventId, retain);
+}
+
+// --- Reviews ---
+
+export interface FilteredReviewsResult {
+  reviews: ReviewItem[];
+  nextCursor: number | null;
+}
+
+export async function getReviewsFiltered(
+  filter: FrigateReviewFilter,
+): Promise<FilteredReviewsResult> {
+  const limit = filter.limit ?? 50;
+  const raw = (await fetchReviews(filter)) as Array<Record<string, unknown>>;
+
+  const reviews: ReviewItem[] = raw.map((r) => {
+    const id = String(r.id);
+    // Frigate nests the cluster's detection list + zones + objects + audio
+    // inside `data`. Older payloads leak some fields to the top level —
+    // we read both spots so a future Frigate version doesn't break us.
+    const data = (r.data as Record<string, unknown> | undefined) ?? {};
+    const detectionIds = Array.isArray(data.detections)
+      ? (data.detections as unknown[]).map(String)
+      : [];
+    const objects = Array.isArray(data.objects)
+      ? (data.objects as unknown[]).map(String)
+      : [];
+    const audio = Array.isArray(data.audio)
+      ? (data.audio as unknown[]).map(String)
+      : [];
+    const zones = Array.isArray(data.zones)
+      ? (data.zones as unknown[]).map(String)
+      : Array.isArray(r.zones)
+        ? (r.zones as unknown[]).map(String)
+        : [];
+    const severity = String(r.severity ?? "detection");
+    return {
+      id,
+      camera: String(r.camera ?? ""),
+      startTime: Number(r.start_time ?? 0),
+      endTime:
+        r.end_time !== null && r.end_time !== undefined
+          ? Number(r.end_time)
+          : null,
+      severity:
+        severity === "alert" || severity === "detection" || severity === "significant_motion"
+          ? severity
+          : "detection",
+      hasBeenReviewed: Boolean(r.has_been_reviewed),
+      objects,
+      audio,
+      zones,
+      detectionIds,
+      // Frigate serves preview clips at /api/review/<id>/preview.{mp4,gif}.
+      // We proxy through the orchestrator so camera/file URLs stay LAN-side.
+      previewUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/preview`,
+      thumbnailUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/thumbnail`,
+    };
+  });
+
+  const nextCursor =
+    reviews.length === limit && reviews.length > 0
+      ? Math.min(...reviews.map((rv) => rv.startTime))
+      : null;
+
+  return { reviews, nextCursor };
+}
+
+export async function setReviewViewed(reviewId: string): Promise<void> {
+  await markReviewViewed(reviewId);
 }
 
 // --- Stats ---

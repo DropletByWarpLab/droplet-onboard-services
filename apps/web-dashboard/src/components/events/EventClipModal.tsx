@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Download, ExternalLink, X } from "lucide-react";
+import { Bookmark, Download, ExternalLink, Loader2, X } from "lucide-react";
 import type { EventDetail } from "@/lib/types";
 
 interface Props {
   event: EventDetail;
   onClose: () => void;
+  /** Toggle the retain-indefinitely flag. When wired, the modal
+   *  renders a "Save / Saved" button. The handler should call the
+   *  /retain route and invalidate the events SWR cache so the badge on
+   *  the underlying card flips on close. */
+  onToggleRetain?: (event: EventDetail, retain: boolean) => Promise<void>;
 }
 
 /**
@@ -21,7 +26,7 @@ interface Props {
  * handles the save dialog. We don't add an explicit "Save" toggle
  * here yet; that's Phase 2.2 (retain_indefinitely).
  */
-export function EventClipModal({ event, onClose }: Props) {
+export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
   useEffect(() => {
     function onKey(ev: KeyboardEvent) {
       if (ev.key === "Escape") onClose();
@@ -29,6 +34,31 @@ export function EventClipModal({ event, onClose }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Local optimistic state for the Save toggle so the button flips
+  // immediately on click. Reset whenever the modal switches to a new
+  // event (operator clicked through to a different one).
+  const [retained, setRetained] = useState(event.retainIndefinitely);
+  const [retainBusy, setRetainBusy] = useState(false);
+  useEffect(() => {
+    setRetained(event.retainIndefinitely);
+  }, [event.id, event.retainIndefinitely]);
+
+  const handleToggleRetain = async () => {
+    if (!onToggleRetain || retainBusy) return;
+    const next = !retained;
+    setRetainBusy(true);
+    setRetained(next); // optimistic
+    try {
+      await onToggleRetain(event, next);
+    } catch (e) {
+      // Roll back on failure — leave the operator with an accurate state.
+      setRetained(!next);
+      alert(e instanceof Error ? e.message : "Failed to update Saved state");
+    } finally {
+      setRetainBusy(false);
+    }
+  };
 
   const cameraDisplay = event.camera.replace(/_/g, " ");
   const startedAt = new Date(event.startTime * 1000);
@@ -96,6 +126,31 @@ export function EventClipModal({ event, onClose }: Props) {
             )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {onToggleRetain && (
+              <button
+                onClick={handleToggleRetain}
+                disabled={retainBusy}
+                aria-pressed={retained}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg type-subheadline transition-colors ${
+                  retained
+                    ? "bg-system-yellow/20 text-system-yellow hover:bg-system-yellow/30"
+                    : "bg-white/10 text-white hover:bg-white/20"
+                } ${retainBusy ? "opacity-60 cursor-wait" : ""}`}
+                title={retained ? "Unsave (allow normal retention)" : "Save (retain indefinitely)"}
+              >
+                {retainBusy ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Bookmark
+                    size={14}
+                    className={retained ? "fill-current" : ""}
+                  />
+                )}
+                <span className="hidden sm:inline">
+                  {retained ? "Saved" : "Save"}
+                </span>
+              </button>
+            )}
             <Link
               href={`/cameras/${encodeURIComponent(event.camera)}`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white type-subheadline transition-colors"
