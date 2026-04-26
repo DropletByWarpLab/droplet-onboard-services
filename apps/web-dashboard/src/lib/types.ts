@@ -440,6 +440,11 @@ export interface CameraZone {
   inertia: number;
 }
 
+/** A single motion-mask polygon. Same coord convention as zones. */
+export interface MotionMaskPolygon {
+  coordinates: number[];
+}
+
 export interface CameraSettings {
   detectEnabled: boolean;
   detectFps: number;
@@ -450,7 +455,7 @@ export interface CameraSettings {
   snapshotsEnabled: boolean;
   snapshotRetainDays: number;
   zones: CameraZone[];
-  hasMotionMask: boolean;
+  motionMasks: MotionMaskPolygon[];
 }
 
 export interface CameraSettingsPatch {
@@ -463,6 +468,7 @@ export interface CameraSettingsPatch {
   snapshotsEnabled?: boolean;
   snapshotRetainDays?: number;
   zones?: CameraZone[];
+  motionMasks?: MotionMaskPolygon[];
 }
 
 export interface DiscoveredCamera {

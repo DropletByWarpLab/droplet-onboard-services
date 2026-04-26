@@ -1645,6 +1645,30 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         }
         patch.zones = zones;
       }
+      if ("motionMasks" in body) {
+        if (!Array.isArray(body.motionMasks)) {
+          return res.status(400).json({ error: "motionMasks must be an array" });
+        }
+        const masks: typeof patch.motionMasks = [];
+        for (const raw of body.motionMasks) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            return res
+              .status(400)
+              .json({ error: "Each motion mask must be an object" });
+          }
+          const m = raw as Record<string, unknown>;
+          if (
+            !Array.isArray(m.coordinates) ||
+            m.coordinates.some((c) => typeof c !== "number")
+          ) {
+            return res.status(400).json({
+              error: "Motion mask coordinates must be a number array",
+            });
+          }
+          masks.push({ coordinates: m.coordinates as number[] });
+        }
+        patch.motionMasks = masks;
+      }
 
       const settings = await updateCameraSettings(req.params.name, patch);
       res.json({ settings });

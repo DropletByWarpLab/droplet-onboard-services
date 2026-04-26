@@ -18,11 +18,13 @@ import {
 import { useCameras } from "@/lib/hooks/useCameras";
 import { fetchCameraSettings, patchCameraSettings } from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
+import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
 import type {
   CameraInfo,
   CameraSettings,
   CameraSettingsPatch,
   CameraZone,
+  MotionMaskPolygon,
   ObjectFilter,
 } from "@/lib/types";
 
@@ -166,6 +168,11 @@ export default function CameraSettingsPage() {
     }
     if (JSON.stringify(draft.zones) !== JSON.stringify(fetched.zones)) {
       patch.zones = draft.zones;
+    }
+    if (
+      JSON.stringify(draft.motionMasks) !== JSON.stringify(fetched.motionMasks)
+    ) {
+      patch.motionMasks = draft.motionMasks;
     }
 
     if (Object.keys(patch).length === 0) {
@@ -421,19 +428,26 @@ export default function CameraSettingsPage() {
             />
           </div>
 
-          {/* Motion mask — still read-only, slated for Phase 4.3. */}
-          <div className="dp-card p-4 space-y-2 lg:col-span-2">
-            <div className="flex items-center gap-2">
+          {/* Motion mask — interactive editor (Phase 4.3) */}
+          <div className="dp-card p-4 space-y-3 lg:col-span-2">
+            <div className="flex items-center justify-between">
               <h2 className="type-headline text-label-primary">Motion mask</h2>
-              <span className="type-caption-2 px-1.5 py-0.5 rounded-full bg-system-yellow/20 text-system-yellow">
-                Read-only
+              <span className="type-caption-2 text-label-tertiary">
+                {draft.motionMasks.length} mask
+                {draft.motionMasks.length === 1 ? "" : "s"}
               </span>
             </div>
             <p className="type-caption-1 text-label-tertiary">
-              Motion mask:{" "}
-              {draft.hasMotionMask ? "configured" : "none"}. The mask painter
-              ships in Phase 4.3.
+              Areas Frigate ignores for motion — masking out a tree branch
+              that triggers in wind, or a busy street corner.
             </p>
+            <MotionMaskEditor
+              cameraName={name}
+              masks={draft.motionMasks}
+              onChange={(next: MotionMaskPolygon[]) =>
+                setDraft((d) => (d ? { ...d, motionMasks: next } : d))
+              }
+            />
           </div>
         </div>
       )}
