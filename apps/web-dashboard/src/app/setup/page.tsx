@@ -117,7 +117,7 @@ export default function SetupPage() {
           setDiscoveredDevices((prev) => [...prev, ...newDevices]);
         }
       } catch {
-        // HA may not be ready yet — keep polling
+        // Matter controller may still be booting — keep polling.
       }
     }, 3000);
 

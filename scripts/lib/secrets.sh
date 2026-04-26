@@ -102,8 +102,8 @@ MAX_UPLOAD_SIZE_MB=100
 # Linux: include "linux" so Frigate (which needs /dev/dri/renderD128 and
 # /dev/bus/usb) is part of the default \`docker compose up\`.
 # macOS: leave empty — Frigate is skipped, dashboard remains reachable via
-# the gateway. Add "full" by hand to opt into HA/file-indexer/switch/camera-
-# discovery on either OS.
+# the gateway. Add "full" by hand to opt into the switch + camera-discovery
+# services on either OS.
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux' || printf '')
 EOF
 

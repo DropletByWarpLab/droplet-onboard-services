@@ -4,6 +4,38 @@
 
 ---
 
+## Status: COMPLETE (April 2026)
+
+The dashboard is a strict superset of Frigate's UI. All phases shipped:
+
+| Phase | Feature | PRs |
+|---|---|---|
+| 1.1 + 1.2 | Multi-camera live grid + fullscreen detail | #104 |
+| 1.3 | Camera groups | #106 |
+| 1.4 | Pinned cameras | #107 |
+| 2.1 | Events listing + clip playback | #108 |
+| 2.2 | Retain toggle + Reviews tabs (Alerts / Detections) | #109 |
+| 3.1 | Recordings page + 24-hour timeline scrubber | #110 |
+| 3.2A | HLS playback (lifts the mp4 30-min cap) | #111 |
+| 3.2B | Drag-to-select range + minute-precise export | #112 |
+| 4.1 | Per-camera settings (detection / objects / retention) | #113 |
+| 4.2 | Zone polygon editor | #114 |
+| 4.3 | Motion mask painter | #115 |
+| 5 | System health + restart | #116 |
+| 6.1 + 6.2 | PTZ overlay + Birdseye | #117 |
+| 6.3 | Global notifications preferences | #118 |
+| 7.1 | Mobile pairing UI (QR + status polling) | #119 |
+| 7.4 | Semantic search (Frigate 0.14+ embeddings) | #120 |
+| 7.5 + 7.6 | Face recognition + LPR management | #121 |
+| 7.7 | GenAI event descriptions | #122 |
+| 7.2 + 7.3 | Web Push pipeline | #123, #124 |
+
+Frigate runs with its built-in UI disabled at `/frigate/`. Camera IPs and the Frigate `:5000` socket never leak to the browser — every read or write goes through the orchestrator's auth-gated proxy.
+
+The "Where we are now" section below is the original snapshot from the planning phase, kept for context.
+
+---
+
 ## Where we are now (April 2026)
 
 Already on `main`:

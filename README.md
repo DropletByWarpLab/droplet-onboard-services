@@ -83,7 +83,7 @@ Each device gets its own random credentials — no two devices share secrets:
 | `DEVICE_SECRET` | ai-gateway | Fernet encryption key for BYOK API keys |
 | `POSTGRES_PASSWORD` | db, orchestrator, nextcloud | PostgreSQL authentication |
 | `REDIS_PASSWORD` | cache, orchestrator, ai-gateway | Redis authentication |
-| `MQTT_PASSWORD` | broker, orchestrator, file-sync | MQTT authentication |
+| `MQTT_PASSWORD` | broker, orchestrator, file-indexer | MQTT authentication |
 | `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
 
 Secrets are stored in `.env` (chmod 600) at the repo root.
@@ -155,7 +155,10 @@ edge-platform/
 │   └── web-dashboard/       Admin UI (Next.js 14.2 + React 18.3 + Tailwind CSS 3.4)
 ├── services/
 │   ├── ai-gateway/          AI inference router (FastAPI 0.110 + LiteLLM 1.30 + Python 3.12)
-│   └── file-sync/           File indexing daemon (watchdog 4.0 + paho-mqtt 2.0 + Python 3.12)
+│   ├── camera-discovery/    ONVIF/RTSP camera auto-discovery (FastAPI + Python 3.12)
+│   ├── file-indexer/        File indexer + embedder (watchdog 4.0 + paho-mqtt 2.0 + Python 3.12)
+│   ├── routing/             OpenWrt router control (FastAPI + ubus JSON-RPC)
+│   └── switch/              Managed-switch control (FastAPI + abstract driver)
 ├── docker/                  Docker Compose + Nginx + Mosquitto configs
 ├── tests/                   Integration test suite
 ├── turbo.json               Turbo 2.0 monorepo build pipeline

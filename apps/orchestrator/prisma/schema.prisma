@@ -464,7 +464,7 @@ model NotificationLog {
   kind        String
   title       String
   body        String?
-  // Comma-separated channels actually attempted: "toast,ha"
+  // Comma-separated channels actually attempted: "toast,push"
   channels    String
   deliveredAt DateTime?
   error       String?
