@@ -40,7 +40,9 @@ import {
   buildVodMasterUrl,
   buildVodSegmentUrl,
   fetchHlsPlaylist,
+  restartFrigate,
 } from "../services/frigate.client.js";
+import { getCameraSystemStatus } from "../services/camera-system.service.js";
 import { Readable } from "node:stream";
 import { config } from "../config.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
@@ -396,6 +398,60 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         url: `/api/cameras/clips/share/${encodeURIComponent(filename)}?t=${encodeURIComponent(token)}`,
         expires_at: new Date(Date.now() + ttlSec * 1000).toISOString(),
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- System status (Phase 5) ---
+  //
+  // Typed wrapper around Frigate's /api/stats + /api/version. The raw
+  // /cameras/stats route below stays — it's the LLM tool's escape
+  // hatch for the full payload. This one is what the dashboard's
+  // /cameras/system page renders.
+  //
+  // Registered in the fixed-path section because `/cameras/system`
+  // (2 path segments after /api) would otherwise be matched by
+  // `/cameras/:name` with name="system".
+
+  router.get("/cameras/system", async (_req, res, next) => {
+    try {
+      const status = await getCameraSystemStatus();
+      res.json({ status });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/cameras/system/restart", async (req, res, next) => {
+    try {
+      // Restart is destructive (every camera goes dark for ~10s) so we
+      // gate it behind the network-command tier-2 confirmation flow.
+      // Same pattern as camera disable/delete.
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma,
+        "frigate.system",
+        "restart_frigate",
+        {},
+        userId,
+      );
+      if ("blocked" in result && result.blocked) {
+        return res
+          .status(429)
+          .json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      }
+      await restartFrigate();
+      res.json({ status: "restarting" });
     } catch (err) {
       next(err);
     }

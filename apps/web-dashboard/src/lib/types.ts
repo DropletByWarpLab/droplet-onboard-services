@@ -445,6 +445,46 @@ export interface MotionMaskPolygon {
   coordinates: number[];
 }
 
+// --- Camera system status (Phase 5) ---
+
+export interface DetectorStat {
+  name: string;
+  inferenceSpeedMs: number;
+  pid: number | null;
+}
+
+export interface GpuStat {
+  name: string;
+  gpuPct: number;
+  memPct: number | null;
+  tempC: number | null;
+}
+
+export interface StorageStat {
+  path: string;
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  mountType: string;
+}
+
+export interface CameraSystemStatus {
+  version: string;
+  uptimeSec: number;
+  cameraCount: number;
+  camerasLive: number;
+  cameraFps: Array<{
+    name: string;
+    cameraFps: number;
+    detectionFps: number;
+    skippedFps: number;
+  }>;
+  detectors: DetectorStat[];
+  gpus: GpuStat[];
+  storage: StorageStat[];
+  cpuPct: number;
+}
+
 export interface CameraSettings {
   detectEnabled: boolean;
   detectFps: number;
