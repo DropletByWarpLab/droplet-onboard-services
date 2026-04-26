@@ -37,6 +37,24 @@ export interface ObjectFilter {
   minScore: number;
 }
 
+/**
+ * Frigate zone definition. Coordinates are stored as a flat list of
+ * normalised [0, 1] (x, y) pairs in image space — Frigate's wire
+ * shape is the comma-joined string ("0.1,0.2,0.5,0.6,0.4,0.9"); we
+ * surface it as a structured array so the polygon editor can map
+ * directly to SVG points.
+ */
+export interface CameraZone {
+  name: string;
+  /** Flat array of normalised coordinates: [x1, y1, x2, y2, ...]. */
+  coordinates: number[];
+  /** Object labels that trigger this zone — empty = any tracked label. */
+  objects: string[];
+  /** Pixel-distance an object must move while inside the zone before
+   *  it counts as "in" the zone. Lower = trigger faster. */
+  inertia: number;
+}
+
 export interface CameraSettings {
   /** Whether detection is enabled at all on this camera. */
   detectEnabled: boolean;
@@ -55,10 +73,10 @@ export interface CameraSettings {
   snapshotsEnabled: boolean;
   /** How long event snapshots are kept (days). */
   snapshotRetainDays: number;
-  /** Whether this camera has any zones defined (read-only here —
-   *  the polygon editor in Phase 4.2 will manage them). */
-  zoneNames: string[];
-  /** Whether a motion mask is configured (read-only for now). */
+  /** Defined zones (full coords, not just names — the polygon editor
+   *  needs them). Phase 4.2 added these. */
+  zones: CameraZone[];
+  /** Whether a motion mask is configured (still read-only — Phase 4.3). */
   hasMotionMask: boolean;
 }
 
@@ -71,6 +89,11 @@ export interface CameraSettingsPatch {
   recordRetainDays?: number;
   snapshotsEnabled?: boolean;
   snapshotRetainDays?: number;
+  /** Replace the camera's zone set wholesale. Empty array deletes all
+   *  zones; omitted leaves zones untouched. The polygon editor sends
+   *  the full zone list each save so we don't have to track per-zone
+   *  add/remove diffs. */
+  zones?: CameraZone[];
 }
 
 // --- Read ---
@@ -121,6 +144,32 @@ export async function getCameraSettings(
     };
   }
 
+  // Map each zone definition to a structured shape. Frigate stores
+  // coordinates as a comma-joined string of normalised numbers; the
+  // dashboard wants them as a flat array so the polygon editor can
+  // map straight to SVG points. Bad/unparseable coords are dropped
+  // for the affected zone (we'd rather show a slightly wrong polygon
+  // than crash the page on a malformed config).
+  const zoneList: CameraZone[] = Object.entries(zones).map(
+    ([zoneName, raw]) => {
+      const z = (raw ?? {}) as Record<string, unknown>;
+      const coordsStr = String(z.coordinates ?? "");
+      const coordinates = coordsStr
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n));
+      const objs = Array.isArray(z.objects)
+        ? (z.objects as unknown[]).map(String)
+        : [];
+      return {
+        name: zoneName,
+        coordinates,
+        objects: objs,
+        inertia: Number(z.inertia ?? 3),
+      };
+    },
+  );
+
   return {
     detectEnabled: Boolean(detect.enabled ?? true),
     detectFps: Number(detect.fps ?? 5),
@@ -130,7 +179,7 @@ export async function getCameraSettings(
     recordRetainDays: Number(recordRetain.days ?? 0),
     snapshotsEnabled: Boolean(snapshots.enabled ?? false),
     snapshotRetainDays: Number(snapshotRetain.default ?? 10),
-    zoneNames: Object.keys(zones),
+    zones: zoneList,
     hasMotionMask: Boolean(
       motion.mask &&
         (Array.isArray(motion.mask)
@@ -139,6 +188,11 @@ export async function getCameraSettings(
     ),
   };
 }
+
+/** Frigate's zone-name regex is loose (any string). We tighten to a
+ *  safer subset so a malicious caller can't smuggle YAML metacharacters
+ *  through the config write path. */
+const ZONE_NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
 // --- Write ---
 
@@ -230,6 +284,53 @@ export async function updateCameraSettings(
       snapshots.retain = retain;
     }
     camera.snapshots = snapshots;
+  }
+
+  if (patch.zones !== undefined) {
+    // Wholesale-replace the camera's zones map. The editor sends the
+    // full list each save so the diff lives in the UI, not here.
+    const newZones: Record<string, unknown> = {};
+    const seen = new Set<string>();
+    for (const z of patch.zones) {
+      if (!ZONE_NAME_RE.test(z.name)) {
+        throw new Error(`Invalid zone name: ${z.name}`);
+      }
+      if (seen.has(z.name)) {
+        throw new Error(`Duplicate zone name: ${z.name}`);
+      }
+      seen.add(z.name);
+      // Polygons need at least 3 points → 6 coordinates.
+      if (z.coordinates.length < 6 || z.coordinates.length % 2 !== 0) {
+        throw new Error(`Zone ${z.name} needs at least 3 (x, y) points`);
+      }
+      for (const c of z.coordinates) {
+        if (!Number.isFinite(c) || c < 0 || c > 1) {
+          throw new Error(
+            `Zone ${z.name} coordinates must be normalised [0, 1]`,
+          );
+        }
+      }
+      // Validate object labels structurally — each must be a non-empty
+      // alphanumeric string. Empty list = "any tracked label."
+      for (const obj of z.objects) {
+        if (!/^[a-z0-9_-]{1,32}$/i.test(obj)) {
+          throw new Error(`Zone ${z.name} has invalid object label: ${obj}`);
+        }
+      }
+      if (!Number.isFinite(z.inertia) || z.inertia < 1 || z.inertia > 50) {
+        throw new Error(`Zone ${z.name} inertia must be between 1 and 50`);
+      }
+      // Round coords to 4 decimals so the YAML writes are stable
+      // across re-saves (avoids float-formatting noise diffs).
+      const rounded = z.coordinates.map((c) => Math.round(c * 10000) / 10000);
+      const entry: Record<string, unknown> = {
+        coordinates: rounded.join(","),
+        inertia: z.inertia,
+      };
+      if (z.objects.length > 0) entry.objects = z.objects;
+      newZones[z.name] = entry;
+    }
+    camera.zones = newZones;
   }
 
   await saveFrigateConfig(config);

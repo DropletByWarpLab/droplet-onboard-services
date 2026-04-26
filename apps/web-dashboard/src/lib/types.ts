@@ -431,6 +431,15 @@ export interface ObjectFilter {
   minScore: number;
 }
 
+/** Frigate zone in the dashboard's structured shape. Coordinates are
+ *  flat normalised [x1, y1, x2, y2, …] in [0, 1] image space. */
+export interface CameraZone {
+  name: string;
+  coordinates: number[];
+  objects: string[];
+  inertia: number;
+}
+
 export interface CameraSettings {
   detectEnabled: boolean;
   detectFps: number;
@@ -440,7 +449,7 @@ export interface CameraSettings {
   recordRetainDays: number;
   snapshotsEnabled: boolean;
   snapshotRetainDays: number;
-  zoneNames: string[];
+  zones: CameraZone[];
   hasMotionMask: boolean;
 }
 
@@ -453,6 +462,7 @@ export interface CameraSettingsPatch {
   recordRetainDays?: number;
   snapshotsEnabled?: boolean;
   snapshotRetainDays?: number;
+  zones?: CameraZone[];
 }
 
 export interface DiscoveredCamera {

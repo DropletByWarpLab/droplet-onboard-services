@@ -17,10 +17,12 @@ import {
 } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { fetchCameraSettings, patchCameraSettings } from "@/lib/api";
+import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import type {
   CameraInfo,
   CameraSettings,
   CameraSettingsPatch,
+  CameraZone,
   ObjectFilter,
 } from "@/lib/types";
 
@@ -161,6 +163,9 @@ export default function CameraSettingsPage() {
     }
     if (draft.snapshotRetainDays !== fetched.snapshotRetainDays) {
       patch.snapshotRetainDays = draft.snapshotRetainDays;
+    }
+    if (JSON.stringify(draft.zones) !== JSON.stringify(fetched.zones)) {
+      patch.zones = draft.zones;
     }
 
     if (Object.keys(patch).length === 0) {
@@ -398,38 +403,36 @@ export default function CameraSettingsPage() {
             )}
           </div>
 
-          {/* Zones + motion mask — read-only for Phase 4.1 */}
+          {/* Zones — interactive polygon editor (Phase 4.2) */}
+          <div className="dp-card p-4 space-y-3 lg:col-span-2">
+            <div className="flex items-center justify-between">
+              <h2 className="type-headline text-label-primary">Zones</h2>
+              <span className="type-caption-2 text-label-tertiary">
+                {draft.zones.length} zone{draft.zones.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <ZoneEditor
+              cameraName={name}
+              zones={draft.zones}
+              trackedLabels={draft.trackedLabels}
+              onChange={(next: CameraZone[]) =>
+                setDraft((d) => (d ? { ...d, zones: next } : d))
+              }
+            />
+          </div>
+
+          {/* Motion mask — still read-only, slated for Phase 4.3. */}
           <div className="dp-card p-4 space-y-2 lg:col-span-2">
             <div className="flex items-center gap-2">
-              <h2 className="type-headline text-label-primary">Zones &amp; motion mask</h2>
+              <h2 className="type-headline text-label-primary">Motion mask</h2>
               <span className="type-caption-2 px-1.5 py-0.5 rounded-full bg-system-yellow/20 text-system-yellow">
                 Read-only
               </span>
             </div>
             <p className="type-caption-1 text-label-tertiary">
-              The polygon editor lands in Phase 4.2. For now you can see what
-              zones Frigate is using; edit them via the Frigate config file
-              if you must.
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {draft.zoneNames.length === 0 ? (
-                <span className="type-caption-1 text-label-tertiary">
-                  No zones defined.
-                </span>
-              ) : (
-                draft.zoneNames.map((z) => (
-                  <span
-                    key={z}
-                    className="px-2.5 py-1 rounded-full type-caption-1 bg-surface-secondary text-label-secondary"
-                  >
-                    {z}
-                  </span>
-                ))
-              )}
-            </div>
-            <p className="type-caption-1 text-label-tertiary">
               Motion mask:{" "}
-              {draft.hasMotionMask ? "configured" : "none"}.
+              {draft.hasMotionMask ? "configured" : "none"}. The mask painter
+              ships in Phase 4.3.
             </p>
           </div>
         </div>
