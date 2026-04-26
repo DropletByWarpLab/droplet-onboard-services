@@ -16,14 +16,16 @@ import {
   useRecordingsSummary,
 } from "@/lib/hooks/useRecordings";
 import { authFetch } from "@/lib/auth";
-import { getRecordingPlaybackUrl } from "@/lib/api";
+import { getRecordingHlsUrl } from "@/lib/api";
+import { HlsPlayer, type HlsPlayerHandle } from "@/components/recordings/HlsPlayer";
 import { RecordingsTimeline } from "@/components/recordings/RecordingsTimeline";
 import type { CameraInfo } from "@/lib/types";
 
-/** Half-hour playback window (in seconds). The orchestrator caps the
- *  range-mp4 endpoint at 30 minutes; we lock the window size to that
- *  cap so the operator can't construct an over-long range. */
-const PLAYBACK_WINDOW_SEC = 30 * 60;
+/** Playback window — one full hour. With HLS the orchestrator no
+ *  longer caps the range, but the per-hour granularity matches the
+ *  scrubber UX (one cell = one hour) and keeps the segment list
+ *  readable. */
+const PLAYBACK_WINDOW_SEC = 60 * 60;
 
 function localDayString(date: Date): string {
   const y = date.getFullYear();
@@ -40,21 +42,20 @@ function dayPlusOffset(day: string, offsetDays: number): string {
 }
 
 /**
- * Recordings + timeline page for a single camera (Phase 3.1).
+ * Recordings + timeline page for a single camera.
+ *
+ * Phase 3.2A: swap mp4 for HLS so the player can scrub a full hour
+ * (or more) without a synthesised stitch on the orchestrator side.
+ * Removes the half-hour navigation that mp4's 30-min cap forced.
  *
  * Compose:
- *   - Header: back to camera, date picker (yesterday / today / +1 / +7),
- *     refresh.
- *   - Player: <video> sourced from /api/cameras/:name/playback?after=&before=,
- *     auto-loaded on every (day, hour, halfHour) change. Time updates
- *     drive the playhead on the timeline.
- *   - Timeline: 24 hour cells, click-to-navigate.
- *   - Side rail: segment list (clickable to seek), Export-to-Nextcloud
- *     for the current visible window (reuses the existing clip-export
- *     route from PR #3 — no new backend needed).
- *
- * Phase 3.2 will swap mp4 for HLS so longer scrubs work without the
- * 30-min hard cap, and add a drag-to-select range on the timeline.
+ *   - Header: back, date stepper, refresh.
+ *   - Player: HLS via HlsPlayer (Safari uses native HLS; everywhere
+ *     else uses hls.js, dynamic-imported so it only loads on this
+ *     route).
+ *   - Sub-hour nav under the player: prev/next hour.
+ *   - Timeline: 24-hour scrubber with motion heat-map + playhead.
+ *   - Right rail: segment list (clickable to seek), Save-to-Nextcloud.
  */
 export default function RecordingsPage() {
   const params = useParams<{ name: string }>();
@@ -69,14 +70,10 @@ export default function RecordingsPage() {
 
   const [day, setDay] = useState<string>(() => localDayString(new Date()));
   const [hour, setHour] = useState<number | null>(null);
-  /** 0 = first 30 min of the hour, 1 = second 30 min. Operator advances
-   *  through with the chevron buttons under the player. */
-  const [halfHour, setHalfHour] = useState<0 | 1>(0);
 
   const summaryHook = useRecordingsSummary(name || null);
 
-  // Snap to the most recent hour with activity on first load (or when
-  // switching days). Avoids dropping the operator on an empty 00:00.
+  // Snap to the most recent hour with activity on first load.
   useEffect(() => {
     if (hour !== null) return;
     if (summaryHook.isLoading) return;
@@ -86,43 +83,38 @@ export default function RecordingsPage() {
     if (withEvents.length === 0) return;
     const latest = withEvents.reduce((acc, h) => (h.hour > acc.hour ? h : acc));
     setHour(latest.hour);
-    setHalfHour(0);
   }, [day, summaryHook.days, summaryHook.isLoading, hour]);
 
-  // Compute the [after, before] window for the current selection.
+  // [after, before] for the currently-selected hour.
   const range = useMemo(() => {
     if (hour === null) return { after: null as number | null, before: null as number | null };
     const [y, m, d] = day.split("-").map(Number);
-    const baseStart = new Date(y, m - 1, d, hour, halfHour === 0 ? 0 : 30, 0).getTime() / 1000;
-    return {
-      after: Math.floor(baseStart),
-      before: Math.floor(baseStart) + PLAYBACK_WINDOW_SEC,
-    };
-  }, [day, hour, halfHour]);
+    const start = Math.floor(new Date(y, m - 1, d, hour, 0, 0).getTime() / 1000);
+    return { after: start, before: start + PLAYBACK_WINDOW_SEC };
+  }, [day, hour]);
 
   const rangeHook = useRecordingsRange(name || null, range.after, range.before);
 
   const playbackUrl =
     range.after !== null && range.before !== null
-      ? getRecordingPlaybackUrl(name, range.after, range.before)
+      ? getRecordingHlsUrl(name, range.after, range.before)
       : null;
 
-  // Track the <video>'s current time so the scrubber playhead can move
-  // smoothly. We just compute a fraction over the 24-hour day.
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Track the player's current time so the scrubber playhead can move.
+  const playerRef = useRef<HlsPlayerHandle | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
+  const [playerError, setPlayerError] = useState<string | null>(null);
   useEffect(() => {
     setCurrentTime(0);
+    setPlayerError(null);
   }, [playbackUrl]);
 
   const playheadFraction = useMemo(() => {
     if (hour === null || range.after === null) return undefined;
-    // Where the playhead sits in the day, expressed as offset within
-    // the selected hour cell (0..1).
-    const offsetWithinHour =
-      ((halfHour === 0 ? 0 : 30 * 60) + currentTime) / (60 * 60);
-    return Math.min(1, Math.max(0, offsetWithinHour));
-  }, [hour, halfHour, currentTime, range.after]);
+    // Within the selected hour cell, where are we (0..1)?
+    const offset = currentTime / PLAYBACK_WINDOW_SEC;
+    return Math.min(1, Math.max(0, offset));
+  }, [hour, currentTime, range.after]);
 
   // ---------- Export ----------
   const [exporting, setExporting] = useState(false);
@@ -153,7 +145,6 @@ export default function RecordingsPage() {
     }
   };
 
-  // ---------- Render ----------
   if (!name) return null;
 
   return (
@@ -172,8 +163,7 @@ export default function RecordingsPage() {
             {camera?.displayName ?? name} · Recordings
           </h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
-            Browse the past 7 days of recordings. Click an hour on the
-            timeline to jump in.
+            Browse the past 7 days. Click an hour on the timeline to jump in.
           </p>
         </div>
         <button
@@ -188,7 +178,7 @@ export default function RecordingsPage() {
         </button>
       </div>
 
-      {/* Date picker + day/hour controls */}
+      {/* Date picker */}
       <div className="dp-card p-3 mb-4 flex items-center gap-2">
         <button
           onClick={() => {
@@ -228,13 +218,11 @@ export default function RecordingsPage() {
         <div className="space-y-4">
           <div className="dp-card overflow-hidden bg-black aspect-video relative">
             {playbackUrl ? (
-              <video
-                ref={videoRef}
-                key={playbackUrl}
+              <HlsPlayer
                 src={playbackUrl}
-                controls
-                autoPlay
-                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                onTimeUpdate={setCurrentTime}
+                onError={setPlayerError}
+                ref={playerRef}
                 className="w-full h-full object-contain"
               />
             ) : (
@@ -246,42 +234,38 @@ export default function RecordingsPage() {
                 </p>
               </div>
             )}
+            {playerError && (
+              <div className="absolute inset-x-0 bottom-0 bg-system-red/90 text-white p-2 text-center type-caption-1">
+                {playerError}
+              </div>
+            )}
           </div>
 
-          {/* Sub-hour navigation under the player. */}
+          {/* Hour navigation under the player. */}
           {hour !== null && (
             <div className="flex items-center justify-between dp-card px-3 py-2">
               <button
                 onClick={() => {
-                  if (halfHour === 1) setHalfHour(0);
-                  else if (hour > 0) {
-                    setHour(hour - 1);
-                    setHalfHour(1);
-                  }
+                  if (hour > 0) setHour(hour - 1);
                 }}
-                disabled={hour === 0 && halfHour === 0}
+                disabled={hour === 0}
                 className="dp-btn-secondary flex items-center gap-1 px-2 py-1 rounded-lg disabled:opacity-50"
               >
                 <ChevronLeft size={14} />
-                <span className="type-caption-1">Earlier 30 min</span>
+                <span className="type-caption-1">Earlier hour</span>
               </button>
               <span className="type-subheadline text-label-primary font-mono">
-                {String(hour).padStart(2, "0")}:{halfHour === 0 ? "00" : "30"} —{" "}
-                {String(halfHour === 0 ? hour : (hour + 1) % 24).padStart(2, "0")}:
-                {halfHour === 0 ? "30" : "00"}
+                {String(hour).padStart(2, "0")}:00 —{" "}
+                {String((hour + 1) % 24).padStart(2, "0")}:00
               </span>
               <button
                 onClick={() => {
-                  if (halfHour === 0) setHalfHour(1);
-                  else if (hour < 23) {
-                    setHour(hour + 1);
-                    setHalfHour(0);
-                  }
+                  if (hour < 23) setHour(hour + 1);
                 }}
-                disabled={hour === 23 && halfHour === 1}
+                disabled={hour === 23}
                 className="dp-btn-secondary flex items-center gap-1 px-2 py-1 rounded-lg disabled:opacity-50"
               >
-                <span className="type-caption-1">Later 30 min</span>
+                <span className="type-caption-1">Later hour</span>
                 <ChevronRight size={14} />
               </button>
             </div>
@@ -293,10 +277,7 @@ export default function RecordingsPage() {
             timeline={rangeHook.timeline}
             selectedHour={hour}
             playheadFraction={playheadFraction}
-            onSelectHour={(h) => {
-              setHour(h);
-              setHalfHour(0);
-            }}
+            onSelectHour={setHour}
           />
         </div>
 
@@ -305,10 +286,10 @@ export default function RecordingsPage() {
           {/* Export */}
           <div className="dp-card p-4">
             <h3 className="type-subheadline text-label-primary font-medium mb-1">
-              Export current window
+              Export current hour
             </h3>
             <p className="type-caption-1 text-label-tertiary mb-3">
-              Saves the visible 30-minute clip to your Nextcloud
+              Saves the visible 1-hour clip to your Nextcloud
               under <span className="font-mono">/Clips</span>.
             </p>
             <button
@@ -358,10 +339,10 @@ export default function RecordingsPage() {
                       key={s.id}
                       className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-surface-secondary cursor-pointer"
                       onClick={() => {
-                        if (!videoRef.current || range.after === null) return;
+                        if (range.after === null) return;
                         const offset = s.startTime - range.after;
                         if (offset >= 0 && offset <= PLAYBACK_WINDOW_SEC) {
-                          videoRef.current.currentTime = offset;
+                          playerRef.current?.seek(offset);
                         }
                       }}
                     >

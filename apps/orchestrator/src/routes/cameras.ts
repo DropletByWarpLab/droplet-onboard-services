@@ -37,6 +37,9 @@ import {
   addCamera,
   fetchEvents,
   buildRecordingClipUrl,
+  buildVodMasterUrl,
+  buildVodSegmentUrl,
+  fetchHlsPlaylist,
 } from "../services/frigate.client.js";
 import { Readable } from "node:stream";
 import { config } from "../config.js";
@@ -1318,6 +1321,135 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       res.setHeader("Cache-Control", "private, max-age=300");
+      if (upstream.body) {
+        Readable.fromWeb(upstream.body as never).pipe(res);
+      } else {
+        res.end();
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- HLS playback (Phase 3.2) ---
+  //
+  // Returns the media playlist for a VOD time range, with segment refs
+  // rewritten to point at our segment proxy so .ts files stay LAN-side.
+  // Lifts the 30-minute cap of the mp4 playback route — operators can
+  // scrub a full hour (or more) without a synthesised stitch.
+  //
+  // The route resolves Frigate's master playlist, follows it to the
+  // first media playlist, then rewrites that playlist's segment refs.
+  // A master that's already a media playlist (no #EXT-X-STREAM-INF
+  // entries, just segments) is detected and rewritten in place.
+  router.get("/cameras/:name/playback.m3u8", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const range = parseRecordingRange(req);
+      if ("error" in range) {
+        return res.status(400).json({ error: range.error });
+      }
+
+      const masterUrl = buildVodMasterUrl(
+        req.params.name,
+        range.after,
+        range.before,
+      );
+      let playlistText = await fetchHlsPlaylist(masterUrl);
+
+      // If the master references a sub-playlist (most common Frigate
+      // shape), follow the first non-comment .m3u8 reference. Otherwise
+      // we treat the response as already-a-media-playlist.
+      const lines = playlistText.split(/\r?\n/);
+      const subRel = lines.find(
+        (line) =>
+          !line.startsWith("#") &&
+          line.trim() !== "" &&
+          line.trim().endsWith(".m3u8"),
+      );
+      if (subRel) {
+        const subUrl = new URL(subRel.trim(), masterUrl).href;
+        playlistText = await fetchHlsPlaylist(subUrl);
+      }
+
+      // Rewrite each segment line to point at our proxy. We pass the
+      // range params back through so the segment route knows which VOD
+      // window to fetch from. URL-encoding handles segment names with
+      // weird characters even though Frigate's emit boring "0.ts".
+      const segPrefix = `/api/cameras/${encodeURIComponent(req.params.name)}/playback.segment?after=${range.after}&before=${range.before}&seg=`;
+      const rewritten = playlistText
+        .split(/\r?\n/)
+        .map((line) => {
+          if (line.startsWith("#") || line.trim() === "") return line;
+          // It's a URL line. Leave absolute URLs alone (defense — Frigate
+          // doesn't usually emit them, but a future version might). Otherwise
+          // route through our segment proxy.
+          if (/^https?:\/\//i.test(line)) return line;
+          return `${segPrefix}${encodeURIComponent(line.trim())}`;
+        })
+        .join("\n");
+
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+      res.setHeader("Cache-Control", "no-store");
+      res.send(rewritten);
+    } catch (err) {
+      // hls.js retries on transient errors, but a clean 502 is the
+      // signal that the upstream is broken (vs 4xx for "you sent us a
+      // bad range").
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("HLS playlist")) {
+        return res.status(502).json({ error: msg });
+      }
+      next(err);
+    }
+  });
+
+  /** Single-segment proxy. Validates `seg` looks like a Frigate segment
+   *  name (alphanumeric + .ts/.m4s) so a malicious caller can't slip a
+   *  traversal path through. */
+  router.get("/cameras/:name/playback.segment", async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const range = parseRecordingRange(req);
+      if ("error" in range) {
+        return res.status(400).json({ error: range.error });
+      }
+      const seg = String(req.query.seg ?? "");
+      // Allow only the segment shapes Frigate emits — alphanumeric +
+      // single-segment filename + an extension we expect.
+      if (!/^[a-zA-Z0-9_-]{1,64}\.(ts|m4s|mp4)$/.test(seg)) {
+        return res.status(400).json({ error: "Invalid segment name" });
+      }
+
+      const url = buildVodSegmentUrl(
+        req.params.name,
+        range.after,
+        range.before,
+        seg,
+      );
+      const ctrl = new AbortController();
+      req.on("close", () => ctrl.abort());
+      const upstream = await fetch(url, {
+        signal: AbortSignal.any
+          ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(30_000)])
+          : ctrl.signal,
+      });
+      if (!upstream.ok) {
+        return res.status(upstream.status).end();
+      }
+      res.setHeader(
+        "Content-Type",
+        upstream.headers.get("content-type") || "video/MP2T",
+      );
+      const len = upstream.headers.get("content-length");
+      if (len) res.setHeader("Content-Length", len);
+      // Each segment is immutable for a given (camera, range, seg)
+      // tuple — long cache keeps repeat scrubs cheap.
+      res.setHeader("Cache-Control", "private, max-age=3600");
       if (upstream.body) {
         Readable.fromWeb(upstream.body as never).pipe(res);
       } else {

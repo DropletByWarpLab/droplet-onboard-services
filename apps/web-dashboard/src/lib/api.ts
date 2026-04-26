@@ -493,15 +493,24 @@ export async function fetchTimeline(
   return body.entries;
 }
 
-/** Returns the proxied playback URL for a time range. The browser
- *  fetches it directly via `<video src=...>`, so this is a URL
- *  builder, not a fetcher. */
+/** Returns the proxied mp4 playback URL for a time range (≤30 min).
+ *  Use the HLS variant for longer scrubs. */
 export function getRecordingPlaybackUrl(
   cameraName: string,
   after: number,
   before: number,
 ): string {
   return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback?after=${after}&before=${before}`;
+}
+
+/** Returns the proxied HLS m3u8 URL for a time range. No 30-min cap;
+ *  the browser fetches segments lazily as the operator scrubs. */
+export function getRecordingHlsUrl(
+  cameraName: string,
+  after: number,
+  before: number,
+): string {
+  return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback.m3u8?after=${after}&before=${before}`;
 }
 
 /**
