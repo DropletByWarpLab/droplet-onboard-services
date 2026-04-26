@@ -18,6 +18,7 @@ import {
   fetchCameraNotifications,
   updateCameraNotifications,
 } from "@/lib/api";
+import { PushSubscriptionCard } from "@/components/notifications/PushSubscriptionCard";
 import type { CameraInfo, NotificationPrefs } from "@/lib/types";
 
 type RowState = NotificationPrefs & {
@@ -175,6 +176,11 @@ export default function NotificationsPage() {
           <span className="type-subheadline">Refresh</span>
         </button>
       </div>
+
+      {/* Push subscription state — handles its own permission flow.
+          Lives above the per-camera prefs grid so the operator
+          enables push first, then dials in what triggers it. */}
+      <PushSubscriptionCard />
 
       {dirtyCount > 0 && (
         <div className="dp-card p-3 mb-3 bg-system-yellow/10 text-system-yellow flex items-center gap-2">

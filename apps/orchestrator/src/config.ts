@@ -106,6 +106,18 @@ const envSchema = z.object({
 
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
+
+  // --- Web Push (VAPID) ---
+  // Pin these in .env after the first orchestrator boot — the push
+  // service will generate ephemeral keys and log them on first run if
+  // absent, but every restart with absent vars rotates the keys and
+  // breaks every existing browser subscription. Generated via
+  // `npx web-push generate-vapid-keys` if you want them ahead of time.
+  VAPID_PUBLIC_KEY: z.string().default(""),
+  VAPID_PRIVATE_KEY: z.string().default(""),
+  // Contact mailto for VAPID's `aud` claim. Some push services (FCM,
+  // Mozilla autopush) reject pushes without a valid contact.
+  VAPID_CONTACT_EMAIL: z.string().default(""),
 });
 
 export const config = envSchema.parse(process.env);

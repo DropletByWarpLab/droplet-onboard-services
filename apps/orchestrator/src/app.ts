@@ -22,6 +22,7 @@ import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calen
 import { createRemindersRouter } from "./routes/reminders.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
+import { initPushDispatch } from "./services/push-dispatch.service.js";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -72,6 +73,10 @@ export function createApp(prisma: PrismaClient) {
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
   startRemindersPoller(prisma);
+
+  // Web Push — initialise VAPID + log keys at startup. Idempotent;
+  // safe to call before any subscribe/push attempt.
+  initPushDispatch();
 
   // Error handling
   app.use(errorHandler);

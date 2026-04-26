@@ -12,6 +12,10 @@ import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encryptSecret, decryptSecret } from "../services/encryption.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { publish } from "../services/mqtt.service.js";
+import {
+  dispatchToUser,
+  getPublicVapidKey,
+} from "../services/push-dispatch.service.js";
 
 const logger = pino({ name: "device-clients-route" });
 
@@ -365,6 +369,104 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       }
 
       res.json({ revoked: row.id });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── Web Push (Phase 7.2 + 7.3) ────────────────────────────────────
+  //
+  // GET  /api/devices/push/vapid-public-key — returns the b64url
+  //   public key the dashboard's serviceWorker.pushManager.subscribe()
+  //   needs. Cheap; no auth-sensitive info.
+  // POST /api/devices/push/subscribe — body { endpoint, keys: { p256dh,
+  //   auth }, deviceClientId? }. Upserts into PushSubscription.
+  // DELETE /api/devices/push/subscribe — body { endpoint }. Removes
+  //   the row so a notification permission revoke doesn't leave dead
+  //   subscriptions piling up.
+  // POST /api/devices/push/test — fires a test notification to every
+  //   subscription owned by the calling user. Useful for verifying
+  //   the service worker is wired up.
+
+  router.get("/devices/push/vapid-public-key", (_req, res) => {
+    try {
+      res.json({ publicKey: getPublicVapidKey() });
+    } catch {
+      res.status(503).json({ error: "Push not configured" });
+    }
+  });
+
+  router.post("/devices/push/subscribe", async (req, res, next) => {
+    try {
+      const schema = z.object({
+        endpoint: z.string().url().max(2048),
+        keys: z.object({
+          p256dh: z.string().min(20).max(200),
+          auth: z.string().min(10).max(100),
+        }),
+        deviceClientId: z.string().uuid().optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ error: "Invalid subscription", details: parsed.error.flatten() });
+      }
+      const userId = getUser(req);
+
+      // Upsert by endpoint so re-subscribing doesn't create duplicates.
+      // We trust the keys to be fresh on every subscribe (browsers
+      // sometimes rotate them when permission is re-granted).
+      const row = await prisma.pushSubscription.upsert({
+        where: { endpoint: parsed.data.endpoint },
+        create: {
+          userId,
+          endpoint: parsed.data.endpoint,
+          p256dhKey: parsed.data.keys.p256dh,
+          authKey: parsed.data.keys.auth,
+          deviceClientId: parsed.data.deviceClientId,
+        },
+        update: {
+          userId,
+          p256dhKey: parsed.data.keys.p256dh,
+          authKey: parsed.data.keys.auth,
+          deviceClientId: parsed.data.deviceClientId,
+        },
+      });
+      res.status(201).json({ id: row.id });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/devices/push/subscribe", async (req, res, next) => {
+    try {
+      const endpoint = String((req.body ?? {}).endpoint ?? "");
+      if (!endpoint || endpoint.length > 2048) {
+        return res.status(400).json({ error: "endpoint required" });
+      }
+      const userId = getUser(req);
+      // Defensive: only delete the operator's own subscriptions, even
+      // if they happened to send someone else's endpoint.
+      await prisma.pushSubscription.deleteMany({
+        where: { endpoint, userId },
+      });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/devices/push/test", async (req, res, next) => {
+    try {
+      const userId = getUser(req);
+      const result = await dispatchToUser(prisma, userId, {
+        title: "Droplet test notification",
+        body: "If you can read this, push is working.",
+        url: "/",
+        tag: "droplet-test",
+      });
+      res.json(result);
     } catch (err) {
       next(err);
     }
