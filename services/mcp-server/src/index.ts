@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { createServer } from "./server.js";
 import { startStdio } from "./transports/stdio.js";
 import type { ContextDeps } from "./context.js";
@@ -11,14 +11,33 @@ function parseTransport(argv: string[]): "stdio" | "http" {
   return "stdio";
 }
 
+/**
+ * Lazy Prisma proxy: do not instantiate `new PrismaClient()` at boot, since the
+ * client is only generated when an orchestrator developer has run
+ * `prisma generate`. WARP-100 is a foundational skeleton and the slice that
+ * actually exercises Prisma (`list_network_devices`) is not invoked over stdio
+ * during the foundation roundtrip test. Real injection lands in WARP-101 when
+ * the orchestrator spawns this binary and supplies its already-initialised
+ * Prisma client via dependency injection.
+ */
+function lazyPrismaProxy(): PrismaClient {
+  return new Proxy({} as PrismaClient, {
+    get(_t, prop) {
+      throw new Error(
+        `Prisma client accessed (.${String(prop)}) but no PrismaClient was injected. ` +
+          "WARP-100 boots without Prisma; WARP-101 wires it in via the orchestrator.",
+      );
+    },
+  });
+}
+
 async function main(): Promise<void> {
   const transport = parseTransport(process.argv.slice(2));
 
   // Build dependencies. For WARP-100 we only support stdio + a minimal Matter
   // stub; HTTP transport + full deps land in WARP-103.
-  const prisma = new PrismaClient();
   const deps: ContextDeps = {
-    prisma,
+    prisma: lazyPrismaProxy(),
     matter: {
       listDevices: async () => ({}),
       getDevice: async () => ({}),
