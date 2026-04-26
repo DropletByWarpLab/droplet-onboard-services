@@ -7,10 +7,12 @@ import {
   Download,
   ExternalLink,
   Loader2,
+  RefreshCw,
+  Sparkles,
   Tag,
   X,
 } from "lucide-react";
-import { tagEventAsFace } from "@/lib/api";
+import { regenerateEventDescription, tagEventAsFace } from "@/lib/api";
 import type { EventDetail } from "@/lib/types";
 
 interface Props {
@@ -92,6 +94,21 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
     }
   };
 
+  // GenAI regenerate-description — explicit "I want a fresh one"
+  // affordance for events whose description is missing or stale.
+  const [regenerating, setRegenerating] = useState(false);
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    try {
+      await regenerateEventDescription(event.id);
+      alert("Frigate is regenerating the description. Refresh the events list in a few seconds to see it.");
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Regenerate failed");
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
   const cameraDisplay = event.camera.replace(/_/g, " ");
   const startedAt = new Date(event.startTime * 1000);
 
@@ -135,6 +152,29 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
             />
           )}
         </div>
+
+        {/* GenAI description (Phase 7.7) — only renders when Frigate's
+            genai feature has produced one for this event. */}
+        {event.description && (
+          <div className="mt-3 p-3 rounded-lg bg-white/10 backdrop-blur-sm flex items-start gap-2.5 text-white">
+            <Sparkles size={14} className="text-accent flex-shrink-0 mt-0.5" />
+            <p className="type-subheadline flex-1 italic leading-snug">
+              &ldquo;{event.description}&rdquo;
+            </p>
+            <button
+              onClick={handleRegenerate}
+              disabled={regenerating}
+              title="Ask Frigate for a fresh description"
+              className="p-1 rounded text-white/60 hover:text-white hover:bg-white/10 flex-shrink-0"
+            >
+              {regenerating ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <RefreshCw size={12} />
+              )}
+            </button>
+          </div>
+        )}
 
         {/* Metadata strip */}
         <div className="mt-3 flex items-start justify-between gap-4 text-white">

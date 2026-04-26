@@ -371,6 +371,18 @@ export async function getEventsFiltered(
       snapshotUrl: hasSnapshot
         ? `/api/cameras/events/${encodeURIComponent(id)}/snapshot`
         : null,
+      // GenAI description lives on Frigate's event payload directly.
+      // Field has appeared as `description` (top-level) in newer
+      // versions and `data.description` in older — read both.
+      description:
+        typeof e.description === "string" && e.description.length > 0
+          ? e.description
+          : (e.data &&
+              typeof e.data === "object" &&
+              "description" in e.data &&
+              typeof (e.data as { description?: unknown }).description === "string")
+            ? String((e.data as { description: string }).description)
+            : null,
     };
   });
 
@@ -517,6 +529,18 @@ export async function searchEventsSemanticTyped(
       snapshotUrl: hasSnapshot
         ? `/api/cameras/events/${encodeURIComponent(id)}/snapshot`
         : null,
+      // GenAI description lives on Frigate's event payload directly.
+      // Field has appeared as `description` (top-level) in newer
+      // versions and `data.description` in older — read both.
+      description:
+        typeof e.description === "string" && e.description.length > 0
+          ? e.description
+          : (e.data &&
+              typeof e.data === "object" &&
+              "description" in e.data &&
+              typeof (e.data as { description?: unknown }).description === "string")
+            ? String((e.data as { description: string }).description)
+            : null,
     };
   });
   // Search results aren't time-ordered (similarity rank), so the

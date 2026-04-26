@@ -38,6 +38,7 @@ import {
   deleteFaceImage,
   deleteKnownPlate,
   nameKnownPlate,
+  regenerateEventDescription,
   tagEventAsFace,
   openBirdseyeStream,
   openMjpegStream,
@@ -807,6 +808,39 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // --- GenAI event description regeneration (Phase 7.7) ---
+  //
+  // Frigate's optional genai feature writes natural-language event
+  // descriptions onto the event payload. The dashboard shows them
+  // in the EventClipModal when present; this endpoint asks Frigate
+  // to (re)generate one if the operator wants a refresh — useful
+  // when an event ended right as the operator opened it and the
+  // description hasn't landed yet.
+  router.post(
+    "/cameras/events/:eventId/regenerate-description",
+    async (req, res, next) => {
+      try {
+        if (!isValidEventId(req.params.eventId)) {
+          return res.status(400).json({ error: "Invalid event ID" });
+        }
+        try {
+          await regenerateEventDescription(req.params.eventId);
+          res.status(202).json({ status: "queued" });
+        } catch (err) {
+          if (err instanceof Error && err.message === "genai_disabled") {
+            return res.status(503).json({
+              error:
+                "GenAI descriptions aren't enabled on this Frigate. Add a `genai` block to config.yml under your camera, save from the System page, and try again.",
+            });
+          }
+          throw err;
+        }
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // --- Retain-indefinitely toggle (Phase 2.2) ---
   //

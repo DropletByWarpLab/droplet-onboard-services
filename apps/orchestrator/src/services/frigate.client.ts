@@ -566,6 +566,26 @@ export async function deleteFaceImage(
   }
 }
 
+/** Ask Frigate to (re)generate a natural-language description for an
+ *  event using its configured GenAI provider. Returns when Frigate has
+ *  enqueued the work; the description appears on the event payload
+ *  shortly after. Frigate uses POST /api/events/<id>/regenerate_description
+ *  to do this. */
+export async function regenerateEventDescription(
+  eventId: string,
+): Promise<void> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/regenerate_description`,
+    { method: "POST", signal: timeout(30_000) },
+  );
+  if (!resp.ok) {
+    if (resp.status === 404 || resp.status === 501) {
+      throw new Error("genai_disabled");
+    }
+    throw new Error(`Frigate regenerate description: ${resp.status}`);
+  }
+}
+
 /** Tag an event's snapshot as a training image for `personName`. The
  *  operator's "this person is Alice" flow in the event modal calls
  *  this to feed the recogniser. */

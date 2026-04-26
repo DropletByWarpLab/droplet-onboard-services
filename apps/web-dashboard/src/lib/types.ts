@@ -325,6 +325,9 @@ export interface EventDetail extends DetectionEvent {
   clipUrl: string | null;
   /** Authenticated proxy URL for the saved snapshot; null if has_snapshot=false. */
   snapshotUrl: string | null;
+  /** Frigate-genai natural-language description; null when feature
+   *  is off or generation hasn't happened yet. */
+  description: string | null;
 }
 
 /** Filter shape for the Events page UI — mirrored 1:1 onto the
