@@ -258,11 +258,13 @@ The mcp-server implements these standard MCP methods:
 
 ### 7.1 `tools/call` result encoding
 
-`ToolResult.ok = true` → MCP content block: `{type: "text", text: JSON.stringify(data)}`.
+`ToolResult.ok = true` → MCP content block: `{type: "text", text: JSON.stringify(data)}` plus `isError: false`.
 
-`ToolResult.ok = false`, `status = "confirmation_required"` → MCP content block: `{type: "text", text: JSON.stringify({status: "confirmation_required", message, ...})}` plus `isError: false`. The model sees a normal tool result that explicitly says "user must confirm in the dashboard."
+`ToolResult.ok = false`, `status = "confirmation_required"` → MCP content block: `{type: "text", text: JSON.stringify({status: "confirmation_required", error: {code, message, details?}})}` plus `isError: false`. The model sees a normal tool result that explicitly says "user must confirm in the dashboard."
 
-`ToolResult.ok = false`, `status = "error"` → MCP content block with `isError: true`, body is `{code, message, details?}`. The optional `details` field carries structured payload from the underlying service (e.g. the routing service's 202 confirmation body) without forcing handlers to stringify it into `message`.
+`ToolResult.ok = false`, `status = "error"` → MCP content block with `isError: true`, body `{type: "text", text: JSON.stringify({status: "error", error: {code, message, details?}})}`. The optional `details` field carries structured payload from the underlying service (e.g. the routing service's 202 confirmation body) without forcing handlers to stringify it into `message`.
+
+Note the asymmetry: `confirmation_required` is **not** an MCP hard error (`isError: false`) so models like Claude / Qwen3 read it as a normal tool result and surface the message to the user, instead of marking the turn failed and abandoning the task. Only genuine handler failures get `isError: true`.
 
 ### 7.2 Auth
 
@@ -310,11 +312,16 @@ event: tool_result
 data: {"id": "call_123", "ok": true, "data": {...}}
 
 event: tool_result
-data: {"id": "call_456", "ok": false, "status": "confirmation_required", "message": "Open the dashboard to approve"}
+data: {"id": "call_456", "ok": true, "status": "confirmation_required", "message": "Open the dashboard to approve"}
+
+event: tool_result
+data: {"id": "call_789", "ok": false, "data": {"status": "error", "error": {"code": "ROUTING_UNAVAILABLE", "message": "routing service returned 503"}}}
 
 event: done
 data: {"iterations": 2, "stop_reason": "model_done"}
 ```
+
+The `ok` field on `tool_result` mirrors MCP's `isError` (inverted), not `ToolResult.ok` from §7.1 — `confirmation_required` is `isError: false` per §7.1, so the SSE event has `ok: true` with `status: "confirmation_required"` and a `message` field surfaced from the wrapped error payload. Genuine handler failures arrive with `ok: false` and the parsed error body in `data`.
 
 Non-streaming requests get the final assistant message + a flat `trace[]` array, matching today's `runAgent()` `AgentResult` shape — preserves consumers that don't want SSE.
 

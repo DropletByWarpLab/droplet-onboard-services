@@ -64,6 +64,57 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   deleteKey: vi.fn(),
 }));
 
+// Supertest stream parser — buffers the full SSE response for offline
+// frame-by-frame assertion. Supertest's `.parse()` overload typings are
+// not exported cleanly, so we cast through `any` at the call site
+// (matching the ad-hoc shape supertest accepts at runtime).
+function sseBufferParser(
+  res: { on(event: string, listener: (chunk: unknown) => void): unknown },
+  cb: (err: Error | null, body: string) => void,
+): void {
+  let data = "";
+  res.on("data", (chunk) => {
+    data += String(chunk);
+  });
+  res.on("end", () => cb(null, data));
+}
+
+function sseText(res: { body?: unknown; text?: string }): string {
+  return typeof res.body === "string" ? res.body : (res.text ?? "");
+}
+
+type SseFrame = { event: string; data: Record<string, unknown> };
+
+// Parse an SSE response body into a sequence of {event, data} frames.
+// Frames are separated by a blank line per the SSE spec; each frame
+// has at most one `event:` line and one `data:` line in our wire format.
+function parseSse(text: string): SseFrame[] {
+  const frames: SseFrame[] = [];
+  for (const block of text.split("\n\n")) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    let event = "message";
+    let data: Record<string, unknown> = {};
+    for (const line of trimmed.split("\n")) {
+      if (line.startsWith("event:")) {
+        event = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        const raw = line.slice("data:".length).trim();
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (parsed && typeof parsed === "object") {
+            data = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // leave data as {} — surfaces as a clear assertion failure
+        }
+      }
+    }
+    frames.push({ event, data });
+  }
+  return frames;
+}
+
 describe("/api/llm/chat (orchestrator agent loop)", () => {
   let app: express.Express;
 
@@ -109,15 +160,18 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
         stream: true,
       })
       .buffer(true)
-      .parse((stream, cb) => {
-        let data = "";
-        stream.on("data", (chunk: Buffer | string) => (data += chunk.toString()));
-        stream.on("end", () => cb(null, data));
-      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .parse(sseBufferParser as any);
     expect(res.status).toBe(200);
-    const text = (res.body as string) ?? res.text ?? "";
-    expect(text).toMatch(/event: content_delta/);
-    expect(text).toMatch(/event: done/);
+    const frames = parseSse(sseText(res));
+
+    // Frame-by-frame: content_delta then done, in that order, nothing else.
+    expect(frames.map((f) => f.event)).toEqual(["content_delta", "done"]);
+    expect(frames[0].data).toEqual({ text: "hi back" });
+    expect(frames[1].data).toMatchObject({
+      iterations: 1,
+      stop_reason: "model_done",
+    });
   });
 
   it("streaming emits tool_call + tool_result events when the model dispatches a tool", async () => {
@@ -156,16 +210,35 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
         stream: true,
       })
       .buffer(true)
-      .parse((stream, cb) => {
-        let data = "";
-        stream.on("data", (chunk: Buffer | string) => (data += chunk.toString()));
-        stream.on("end", () => cb(null, data));
-      });
-    const text = (res.body as string) ?? res.text ?? "";
-    expect(text).toMatch(/event: tool_call/);
-    expect(text).toMatch(/event: tool_result/);
-    expect(text).toMatch(/event: done/);
-    expect(text).toMatch(/"name":"list_network_devices"/);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .parse(sseBufferParser as any);
+    const frames = parseSse(sseText(res));
+
+    // Strict ordering: tool_call → tool_result → content_delta → done.
+    // Tool-call id MUST round-trip into the tool_result so the dashboard
+    // can pair them up; that pairing is the property the regex-only
+    // assertion previously didn't enforce.
+    expect(frames.map((f) => f.event)).toEqual([
+      "tool_call",
+      "tool_result",
+      "content_delta",
+      "done",
+    ]);
+    expect(frames[0].data).toMatchObject({
+      id: "call_abc",
+      name: "list_network_devices",
+      args: {},
+    });
+    expect(frames[1].data).toMatchObject({
+      id: "call_abc",
+      ok: true,
+      data: { devices: [] },
+    });
+    expect(frames[2].data).toEqual({ text: "no devices" });
+    expect(frames[3].data).toMatchObject({
+      iterations: 2,
+      stop_reason: "model_done",
+    });
   });
 
   it("rejects invalid request body with 400", async () => {
