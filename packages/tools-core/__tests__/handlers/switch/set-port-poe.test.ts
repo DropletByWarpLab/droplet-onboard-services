@@ -39,4 +39,18 @@ describe("set_port_poe", () => {
     await setPortPoe.handler({ port: 4, enabled: false }, ctxWithPost(post));
     expect(post).toHaveBeenCalledWith("/poe/4/disable", undefined);
   });
+
+  it("returns confirmation_required when switch service returns 202", async () => {
+    const post = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ reason: "PoE toggle requires confirmation" }), {
+        status: 202,
+      }),
+    );
+    const r = await setPortPoe.handler({ port: 5, enabled: false }, ctxWithPost(post));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe("confirmation_required");
+      expect(r.error.message).toContain("confirmation");
+    }
+  });
 });
