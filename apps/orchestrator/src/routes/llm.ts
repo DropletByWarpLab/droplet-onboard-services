@@ -95,6 +95,61 @@ const WRITE_TOOLS = new Set([
   "share_clip",
 ]);
 
+// RBAC helpers — shared between /api/llm/chat and /api/llm/agent so the
+// two routes can't drift apart on which tools an unprivileged user can
+// drive. Same threat model: the LLM is steered by user-controlled prompt
+// text; only owner/admin sessions are allowed to touch write tools.
+type AuthedRequest = { user?: { username?: string; role?: string } };
+
+function isPrivilegedRole(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+async function narrowAllowedToolsForRole(
+  role: string | undefined,
+  requestedAllowed: string[] | undefined,
+): Promise<string[] | undefined> {
+  if (isPrivilegedRole(role)) {
+    return requestedAllowed;
+  }
+  if (requestedAllowed?.length) {
+    return requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
+  }
+  // Default for unprivileged users: every tool the live MCP server
+  // advertises, minus write tools. listTools() throws if the child
+  // crashed mid-runtime — fall back to an empty allowed set in that case
+  // so the model sees zero tools rather than something privileged.
+  const tools = await mcpClient.listTools().catch(() => []);
+  return tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
+}
+
+// Belt-and-braces: even if the agent loop itself enforces the narrowed
+// list, refuse at request-time if a client has planted tool-call entries
+// invoking a write tool inside replayed assistant history. Spoofed tool
+// results are blocked at the schema level for /agent (role="tool" not
+// allowed); /chat permits role="tool" for resume-session callers but
+// the same spoof-then-bypass risk exists if the planted assistant turn
+// sets `tool_calls`.
+//
+// Takes the RAW request body (not the Zod-parsed shape) because Zod's
+// default object schema strips unrecognized keys, including `tool_calls`
+// — so reading from parsed.data would always be empty.
+function replayedWriteToolAttempt(rawMessages: unknown): boolean {
+  if (!Array.isArray(rawMessages)) return false;
+  return rawMessages
+    .flatMap((m) => {
+      if (!m || typeof m !== "object") return [];
+      const calls = (m as { tool_calls?: unknown }).tool_calls;
+      return Array.isArray(calls) ? calls : [];
+    })
+    .some((c) => {
+      if (!c || typeof c !== "object") return false;
+      const fn = (c as { function?: { name?: unknown } }).function;
+      const name = fn?.name;
+      return typeof name === "string" && WRITE_TOOLS.has(name);
+    });
+}
+
 export function createLlmRouter(_prisma: PrismaClient): Router {
   const router = Router();
 
@@ -132,6 +187,27 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
       }
       const chatReq = parsed.data;
 
+      // RBAC: same gate as /api/llm/agent — write tools require
+      // owner/admin. Lifted up here because /api/llm/chat is the live
+      // route the dashboard will switch to in WARP-104; without this
+      // any authenticated session could drive write tools via curl.
+      // Reads `req.body.messages` (raw) for the spoof check because
+      // Zod strips unrecognized keys (tool_calls) from the parsed shape.
+      const role = (req as AuthedRequest).user?.role;
+      if (
+        !isPrivilegedRole(role) &&
+        replayedWriteToolAttempt(
+          (req.body as { messages?: unknown })?.messages,
+        )
+      ) {
+        res.status(403).json({ error: "forbidden_tool_for_role" });
+        return;
+      }
+      const allowedForUser = await narrowAllowedToolsForRole(
+        role,
+        chatReq.allowed_tools,
+      );
+
       const deps: AgentDeps = {
         mcp: mcpClient,
         aiGateway: { chat: aiGateway.chat },
@@ -160,7 +236,7 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
             messages: chatReq.messages,
             temperature: chatReq.temperature,
             max_iter: chatReq.max_iter,
-            allowed_tools: chatReq.allowed_tools,
+            allowed_tools: allowedForUser,
           });
         } finally {
           res.end();
@@ -173,7 +249,7 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         messages: chatReq.messages,
         temperature: chatReq.temperature,
         max_iter: chatReq.max_iter,
-        allowed_tools: chatReq.allowed_tools,
+        allowed_tools: allowedForUser,
       });
       res.json(result);
     } catch (err) {
@@ -209,37 +285,24 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         });
         return;
       }
-      const user = (req as { user?: { username: string; role?: string } }).user;
-      const role = user?.role;
-      const isPrivileged = role === "owner" || role === "admin";
+      const role = (req as AuthedRequest).user?.role;
 
-      // Narrow the advertised tool set for non-privileged users so the model
-      // never even sees the write tools as an option. Callers can further
-      // restrict via `allowed_tools[]` but not widen past this.
-      const requestedAllowed = parsed.data.allowed_tools;
-      let allowedForUser: string[] | undefined;
-      if (isPrivileged) {
-        allowedForUser = requestedAllowed;
-      } else if (requestedAllowed?.length) {
-        allowedForUser = requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
-      } else {
-        // Default for unprivileged users: everything in the live MCP
-        // registry minus write tools.
-        const tools = await mcpClient.listTools().catch(() => []);
-        allowedForUser = tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
+      // RBAC + replayed-write detection (shared with /api/llm/chat — see
+      // helpers above the router). Reads raw req.body.messages because
+      // Zod strips unrecognized keys (tool_calls) from parsed.data.
+      if (
+        !isPrivilegedRole(role) &&
+        replayedWriteToolAttempt(
+          (req.body as { messages?: unknown })?.messages,
+        )
+      ) {
+        res.status(403).json({ error: "forbidden_tool_for_role" });
+        return;
       }
-
-      // Belt-and-braces: even if the model emits a write-tool call,
-      // refuse at request-time if it landed inside replayed history.
-      if (!isPrivileged) {
-        const writeAttempted = (parsed.data.messages ?? [])
-          .flatMap((m) => (m as { tool_calls?: { function: { name: string } }[] }).tool_calls ?? [])
-          .some((c) => WRITE_TOOLS.has(c.function?.name));
-        if (writeAttempted) {
-          res.status(403).json({ error: "forbidden_tool_for_role" });
-          return;
-        }
-      }
+      const allowedForUser = await narrowAllowedToolsForRole(
+        role,
+        parsed.data.allowed_tools,
+      );
 
       // Nextcloud-scoped tools (list_files / search_files / list_recent_files)
       // need the caller's NC session token. The new MCP-backed agent
