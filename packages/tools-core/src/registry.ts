@@ -56,6 +56,25 @@ import setPortPoe from "./handlers/switch/set-port-poe.js";
 import detectWanPort from "./handlers/switch/detect-wan-port.js";
 import setupCameraPorts from "./handlers/switch/setup-camera-ports.js";
 
+// calendar
+import createEvent from "./handlers/calendar/create-event.js";
+import listEvents from "./handlers/calendar/list-events.js";
+import updateEvent from "./handlers/calendar/update-event.js";
+import deleteEvent from "./handlers/calendar/delete-event.js";
+
+// reminders
+import createReminder from "./handlers/reminders/create-reminder.js";
+import listReminders from "./handlers/reminders/list-reminders.js";
+import completeReminder from "./handlers/reminders/complete-reminder.js";
+
+// notifications
+import sendNotification from "./handlers/notifications/send-notification.js";
+import listNotifications from "./handlers/notifications/list-notifications.js";
+
+// system
+import getSystemHealth from "./handlers/system/get-system-health.js";
+import listDrives from "./handlers/system/list-drives.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -108,6 +127,21 @@ const allTools: Tool[] = [
   setPortPoe,
   detectWanPort,
   setupCameraPorts,
+  // calendar
+  createEvent,
+  listEvents,
+  updateEvent,
+  deleteEvent,
+  // reminders
+  createReminder,
+  listReminders,
+  completeReminder,
+  // notifications
+  sendNotification,
+  listNotifications,
+  // system
+  getSystemHealth,
+  listDrives,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
