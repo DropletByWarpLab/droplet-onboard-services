@@ -47,6 +47,15 @@ import exportClip from "./handlers/cameras/export-clip.js";
 import getCameraLiveUrl from "./handlers/cameras/get-camera-live-url.js";
 import shareClip from "./handlers/cameras/share-clip.js";
 
+// switch
+import getSwitchPorts from "./handlers/switch/get-switch-ports.js";
+import getSwitchVlans from "./handlers/switch/get-switch-vlans.js";
+import setPortVlan from "./handlers/switch/set-port-vlan.js";
+import getSwitchPoe from "./handlers/switch/get-switch-poe.js";
+import setPortPoe from "./handlers/switch/set-port-poe.js";
+import detectWanPort from "./handlers/switch/detect-wan-port.js";
+import setupCameraPorts from "./handlers/switch/setup-camera-ports.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -91,6 +100,14 @@ const allTools: Tool[] = [
   exportClip,
   getCameraLiveUrl,
   shareClip,
+  // switch
+  getSwitchPorts,
+  getSwitchVlans,
+  setPortVlan,
+  getSwitchPoe,
+  setPortPoe,
+  detectWanPort,
+  setupCameraPorts,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
