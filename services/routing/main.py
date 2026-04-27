@@ -41,6 +41,10 @@ from schemas import (
     FirewallZoneCollection,
     FirewallRuleCollection,
     FirewallRedirectCollection,
+    VpnSetupRequest,
+    VpnPeerCreateRequest,
+    VpnPeerDeleteRequest,
+    DuckDnsConfigRequest,
 )
 import re
 
@@ -829,6 +833,299 @@ def teardown_camera_subnet():
             content={"error": "Connectivity lost during teardown", "detail": str(exc)},
         )
     except (UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# VPN (WireGuard)
+# ---------------------------------------------------------------------------
+#
+# Phase 1 of the Remote Access feature. These endpoints wrap VPNApi from the
+# OpenWrt SDK and are consumed by the orchestrator (`/api/vpn/peers`), which
+# layers user identity + IP allocation + QR rendering on top. Nothing here
+# knows about Nextcloud users — peers are anonymous from the router's POV.
+#
+# Setup is idempotent: calling /vpn/setup twice is fine and just returns the
+# existing interface info on the second call. This means the orchestrator can
+# treat "ensure VPN is configured" as a single request without coordination.
+#
+# Server priv keys live in /etc/config/network (uci) — that's how OpenWrt's
+# native luci-proto-wireguard stores them. Client priv keys are returned ONCE
+# in the /vpn/peers POST response and never persisted server-side.
+
+
+@app.post("/vpn/setup")
+def vpn_setup(req: VpnSetupRequest):
+    """Idempotently bring up the WireGuard server interface + firewall.
+
+    First call: generates a fresh server keypair, creates the wg interface,
+    opens the listen port on WAN, allows VPN→LAN forwarding.
+    Subsequent calls: returns the existing interface info untouched.
+    """
+    try:
+        r = get_router()
+
+        if r.vpn.interface_exists(req.interface):
+            info = r.vpn.get_interface_info(req.interface)
+            return {"status": "ok", "created": False, **info}
+
+        # Wrap in safe_apply so a misconfigured firewall change can't lock
+        # the orchestrator out of the router. 60s timeout matches /config/apply.
+        with r.safe_apply(timeout=60):
+            private_key, _public_key = r.vpn.generate_keypair()
+            r.vpn.create_interface(
+                req.interface,
+                private_key=private_key,
+                listen_port=req.listen_port,
+                address=req.address,
+            )
+            r.vpn.setup_firewall(req.interface, listen_port=req.listen_port)
+
+        # OpenWrt 24.10 has an ordering quirk: when both `network` and
+        # `firewall` are committed by the same `uci.apply`, the iface ifup
+        # hotplug fires `firewall reload` *during* network reload, before
+        # the new firewall config has fully landed for fw4. ucitrack does
+        # not always re-fire firewall reload afterward. The narrow fix is
+        # to send a `config.change` service event ourselves once apply has
+        # settled, which is exactly what `/sbin/reload_config` does.
+        try:
+            r._call("service", "event", {
+                "type": "config.change",
+                "data": {"package": "firewall"},
+            })
+        except (ConnectionLost, UbusError) as exc:
+            logger.warning("vpn: firewall reload nudge failed (rule may need manual reload): %s", exc)
+
+        info = r.vpn.get_interface_info(req.interface)
+        return {"status": "ok", "created": True, **info}
+
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost during VPN setup — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except UbusError as exc:
+        handle_router_error(exc)
+
+
+@app.get("/vpn/status")
+def vpn_status(interface: str = "wg0"):
+    """Return server-side info for a WireGuard interface.
+
+    404 when the interface hasn't been bootstrapped yet — the dashboard uses
+    that as the cue to show the "Set up Remote Access" prompt.
+    """
+    try:
+        r = get_router()
+        if not r.vpn.interface_exists(interface):
+            raise HTTPException(status_code=404, detail=f"VPN interface '{interface}' not configured")
+        info = r.vpn.get_interface_info(interface)
+        peers = r.vpn.list_peers(interface)
+        return {**info, "peer_count": len(peers)}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/vpn/peers")
+def vpn_list_peers(interface: str = "wg0"):
+    """List peers configured on the interface. Empty list if none."""
+    try:
+        r = get_router()
+        if not r.vpn.interface_exists(interface):
+            raise HTTPException(status_code=404, detail=f"VPN interface '{interface}' not configured")
+        return {"interface": interface, "peers": r.vpn.list_peers(interface)}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/vpn/peers")
+def vpn_create_peer(req: VpnPeerCreateRequest):
+    """Mint a peer: generate a keypair, install the pubkey on the router,
+    return the priv key + pubkey to the caller.
+
+    The returned `private_key` is one-shot: it's never stored server-side and
+    cannot be re-fetched. If the user loses their config they revoke + re-mint.
+    """
+    try:
+        r = get_router()
+        if not r.vpn.interface_exists(req.interface):
+            raise HTTPException(
+                status_code=409,
+                detail=f"VPN interface '{req.interface}' not configured — POST /vpn/setup first",
+            )
+
+        private_key, public_key = r.vpn.generate_keypair()
+        # uci stores allowed_ips as a single comma-joined string.
+        allowed_ips_uci = ",".join(req.allowed_ips)
+        r.vpn.add_peer(
+            interface=req.interface,
+            public_key=public_key,
+            allowed_ips=allowed_ips_uci,
+            description=req.description,
+            persistent_keepalive=req.persistent_keepalive,
+        )
+
+        # Bring the new peer online without a full network restart by reloading
+        # the wg interface. apply (without rollback timer) is the same path used
+        # by the DNS hostnames endpoint — it triggers ucitrack -> wg reload.
+        try:
+            r.uci.apply(timeout=5, rollback=False)
+        except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
+            logger.warning("vpn: uci.apply after add_peer failed (peer is staged): %s", exc)
+
+        return {
+            "status": "ok",
+            "interface": req.interface,
+            "public_key": public_key,
+            "private_key": private_key,
+            "allowed_ips": list(req.allowed_ips),
+            "description": req.description,
+            "persistent_keepalive": req.persistent_keepalive,
+        }
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.delete("/vpn/peers")
+def vpn_delete_peer(req: VpnPeerDeleteRequest):
+    """Remove every peer matching `public_key` from `interface`.
+
+    404 when there's nothing to remove — the orchestrator treats that as a
+    success-equivalent (peer already gone). Multiple matches are deleted in
+    one shot; the response carries the count.
+    """
+    try:
+        r = get_router()
+        if not r.vpn.interface_exists(req.interface):
+            raise HTTPException(status_code=404, detail=f"VPN interface '{req.interface}' not configured")
+        removed = r.vpn.delete_peer(req.interface, req.public_key)
+        if removed == 0:
+            raise HTTPException(status_code=404, detail="Peer not found")
+        try:
+            r.uci.apply(timeout=5, rollback=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vpn: uci.apply after delete_peer failed: %s", exc)
+        return {"status": "ok", "interface": req.interface, "removed": removed}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# DDNS (DuckDNS)
+# ---------------------------------------------------------------------------
+#
+# Tiny surface — there's only one provider in v1 and one config section.
+# `GET` returns a redacted view (no token); `PUT` upserts the section with
+# the standard DuckDNS template and restarts the ddns service so the
+# rotation kicks in immediately.
+
+DUCKDNS_SECTION = "duckdns"
+
+
+def _read_duckdns(router) -> dict:
+    """Read the duckdns ddns section, returning a redacted view.
+
+    Returns `{"configured": False}` when the section doesn't exist yet,
+    otherwise carries subdomain + enabled + tokenSet (never the token itself).
+    """
+    try:
+        result = router.uci.get("ddns", DUCKDNS_SECTION)
+    except UbusError as exc:
+        if exc.code in (4, 5):  # NOT_FOUND / NO_DATA
+            return {"configured": False}
+        raise
+    if not isinstance(result, dict):
+        return {"configured": False}
+    section = result.get("values", result) if isinstance(result, dict) else {}
+    if not isinstance(section, dict) or not section.get("service_name"):
+        return {"configured": False}
+    return {
+        "configured": True,
+        "subdomain": section.get("domain", ""),
+        "fullDomain": f"{section.get('domain', '')}.duckdns.org" if section.get("domain") else "",
+        "enabled": str(section.get("enabled", "0")) == "1",
+        "tokenSet": bool(section.get("password")),
+        "lastUpdate": section.get("last_update", ""),
+    }
+
+
+@app.get("/ddns/duckdns")
+def ddns_duckdns_status():
+    """Return the DuckDNS section's current config (token redacted)."""
+    try:
+        return _read_duckdns(get_router())
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.put("/ddns/duckdns")
+def ddns_duckdns_set(req: DuckDnsConfigRequest):
+    """Upsert the DuckDNS service section + restart ddns-scripts.
+
+    Idempotent: writes the same set of options every time, so calling this
+    repeatedly with the same inputs is a no-op apart from a service restart.
+    """
+    try:
+        r = get_router()
+
+        # uci.set requires the section to exist; use uci.add(name=...) on first
+        # call (mirrors the same pattern used for the wireguard interface).
+        try:
+            existing = r.uci.get("ddns", DUCKDNS_SECTION)
+            section_exists = isinstance(existing, dict) and bool(
+                existing.get("values") or existing.get(".type")
+            )
+        except UbusError as exc:
+            if exc.code in (4, 5):
+                section_exists = False
+            else:
+                raise
+
+        values = {
+            "service_name": "duckdns.org",
+            "domain": req.subdomain,
+            "password": req.token,
+            "enabled": "1" if req.enabled else "0",
+            # Watch WAN for IP changes; DuckDNS is for IPv4 by default.
+            "interface": "wan",
+            "ip_source": "network",
+            "ip_network": "wan",
+            "use_ipv6": "0",
+            # Honest user-agent so DuckDNS's logs show this Droplet rather
+            # than the generic ddns-scripts default. Helps debugging.
+            "use_https": "1",
+            # Update at most once per 10 minutes when the IP hasn't changed,
+            # plus on every IP change. Default is 72h which is too slow.
+            "check_interval": "10",
+            "check_unit": "minutes",
+            "force_interval": "72",
+            "force_unit": "hours",
+        }
+
+        if section_exists:
+            r.uci.set("ddns", DUCKDNS_SECTION, values)
+        else:
+            r.uci.add("ddns", "service", values=values, name=DUCKDNS_SECTION)
+
+        # uci.apply commits + reloads ddns config (like the DNS hostnames flow).
+        r.uci.apply(timeout=5, rollback=False)
+
+        # Nudge ddns-scripts to pick up the new config without waiting for the
+        # next scheduled run. service_event triggers ucitrack -> /etc/init.d/ddns.
+        try:
+            r._call("service", "event", {
+                "type": "config.change",
+                "data": {"package": "ddns"},
+            })
+        except (ConnectionLost, UbusError) as exc:
+            logger.warning("ddns: reload nudge failed (will pick up on next scheduled run): %s", exc)
+
+        return {"status": "ok", **_read_duckdns(r)}
+    except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
 

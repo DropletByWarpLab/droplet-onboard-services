@@ -1,6 +1,8 @@
 """Pydantic models for the routing service REST API."""
 
-from pydantic import BaseModel, ConfigDict, Field
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, Union
 
 
@@ -102,6 +104,125 @@ class CameraSubnetSetupRequest(BaseModel):
     dhcp_start: int = Field(default=100, ge=2, le=254, description="DHCP pool start")
     dhcp_limit: int = Field(default=150, ge=1, le=253, description="DHCP pool size")
     leasetime: str = Field(default="12h", description="DHCP lease duration")
+
+
+# ---------------------------------------------------------------------------
+# VPN (WireGuard)
+# ---------------------------------------------------------------------------
+#
+# Interface name grammar matches what `uci set network.<name>` accepts: lower
+# alpha first, then alpha/digit/underscore, max 15 chars (Linux IFNAMSIZ - 1).
+# WireGuard public/private keys are 32-byte Curve25519, base64-encoded — exactly
+# 43 chars of `[A-Za-z0-9+/]` followed by a single `=` pad.
+_WG_IFACE_PATTERN = r"^[a-z][a-z0-9_]{0,14}$"
+_WG_KEY_PATTERN = r"^[A-Za-z0-9+/]{43}=$"
+# CIDR like "10.13.13.2/32" — single IPv4 with mask. We don't accept comma-
+# separated lists at the schema layer; callers pass a list of CIDRs and we
+# join with "," before writing to uci. Keeps validation per-element clean.
+_CIDR_PATTERN = (
+    r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)/(?:3[0-2]|[12]?\d)$"
+)
+
+
+class VpnSetupRequest(BaseModel):
+    """One-shot bootstrap of the WireGuard server interface + firewall."""
+
+    interface: str = Field(
+        default="wg0",
+        pattern=_WG_IFACE_PATTERN,
+        description="UCI section name for the wireguard interface (default 'wg0')",
+    )
+    listen_port: int = Field(
+        default=51820, ge=1, le=65535,
+        description="UDP port WireGuard listens on. Forward this from your upstream router.",
+    )
+    address: str = Field(
+        default="10.13.13.1/24",
+        pattern=_CIDR_PATTERN,
+        description="Server's CIDR address inside the VPN subnet (e.g. '10.13.13.1/24').",
+    )
+
+
+class VpnPeerCreateRequest(BaseModel):
+    """Create a new peer; server generates the keypair and returns the priv key
+    in the response body. Caller MUST treat the returned `private_key` as
+    write-once — show it to the user (e.g. via QR) and discard."""
+
+    interface: str = Field(default="wg0", pattern=_WG_IFACE_PATTERN)
+    description: str = Field(
+        default="", max_length=128,
+        description="Free-form label, e.g. \"Alice's iPhone\"",
+    )
+    allowed_ips: list[str] = Field(
+        ..., min_length=1, max_length=8,
+        description=(
+            "List of CIDRs that route to this peer on the server side. For a "
+            "single-device peer this is typically one /32, e.g. ['10.13.13.5/32']."
+        ),
+    )
+    persistent_keepalive: int = Field(
+        default=25, ge=0, le=600,
+        description="Seconds between keepalives. 0 disables.",
+    )
+
+    @field_validator("allowed_ips")
+    @classmethod
+    def _validate_allowed_ips(cls, v: list[str]) -> list[str]:
+        # Per-element CIDR validation. Pydantic's `pattern=` doesn't apply to
+        # list items, so we walk the list ourselves.
+        cidr_re = re.compile(_CIDR_PATTERN)
+        for item in v:
+            if not cidr_re.fullmatch(item):
+                raise ValueError(f"invalid CIDR: {item!r}")
+        return v
+
+
+class VpnPeerDeleteRequest(BaseModel):
+    """Remove all peer sections matching `public_key` from `interface`."""
+
+    interface: str = Field(default="wg0", pattern=_WG_IFACE_PATTERN)
+    public_key: str = Field(
+        ..., pattern=_WG_KEY_PATTERN,
+        description="Peer's WireGuard public key, base64-encoded (43 chars + '=').",
+    )
+
+
+# ---------------------------------------------------------------------------
+# DuckDNS (Dynamic DNS for the WireGuard endpoint hostname)
+# ---------------------------------------------------------------------------
+#
+# DuckDNS is a free dynamic-DNS service. The user picks a subdomain
+# (e.g. `stefan-droplet`), gets a token from duckdns.org, and ddns-scripts
+# pings DuckDNS every few minutes with the WAN IP. From outside the LAN,
+# `stefan-droplet.duckdns.org` then resolves to whatever your home router's
+# public IP is — perfect as the WireGuard `Endpoint`.
+#
+# The token is treated as a secret: PUT writes it, GET returns only
+# whether one is configured. ddns-scripts stores it in cleartext in
+# /etc/config/ddns (the same place as wifi PSKs and OpenVPN secrets,
+# all 0600) so this matches the rest of OpenWrt's secret hygiene.
+_DUCKDNS_SUBDOMAIN_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+
+
+class DuckDnsConfigRequest(BaseModel):
+    """Configure the DuckDNS service section.
+
+    `subdomain` is the part *before* `.duckdns.org` — DuckDNS's url template
+    appends the suffix, so passing the full domain would double it up.
+    """
+
+    subdomain: str = Field(
+        ..., min_length=1, max_length=63, pattern=_DUCKDNS_SUBDOMAIN_PATTERN,
+        description="DuckDNS subdomain, e.g. 'stefan-droplet' (no '.duckdns.org' suffix).",
+    )
+    token: str = Field(
+        ..., min_length=10, max_length=128,
+        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read.",
+    )
+    enabled: bool = Field(
+        default=True,
+        description="Whether ddns-scripts should run this service on the next start. False stages the config without enabling.",
+    )
 
 
 # --- Response models ---

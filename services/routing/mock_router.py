@@ -241,6 +241,96 @@ class _MockFirewall:
         pass
 
 
+class _MockVpn:
+    """In-memory WireGuard state for ROUTING_MODE=mock.
+
+    Mirrors the real `VPNApi` surface so dashboard / orchestrator dev against
+    the mock can drive the full setup → add-peer → list → delete flow without
+    a router. Keys are still real X25519 (we use the same `cryptography` path
+    as the SDK) so a config rendered against the mock would actually work if
+    you piped it into wg-quick.
+    """
+
+    def __init__(self) -> None:
+        # interface_name -> {private_key, public_key, listen_port, addresses[]}
+        self._interfaces: dict[str, dict[str, Any]] = {}
+        # Flat peer list — tagged by interface so list/delete can filter.
+        self._peers: list[dict[str, Any]] = []
+        self._section_counter = 0
+
+    @staticmethod
+    def generate_keypair() -> tuple[str, str]:
+        # Same path as the real SDK so the mock isn't accidentally insecure.
+        from droplet_openwrt_sdk import VPNApi
+        return VPNApi.generate_keypair()
+
+    @staticmethod
+    def derive_public_key(private_key_b64: str) -> str:
+        from droplet_openwrt_sdk import VPNApi
+        return VPNApi.derive_public_key(private_key_b64)
+
+    def interface_exists(self, name: str) -> bool:
+        return name in self._interfaces
+
+    def get_interface_info(self, interface: str = "wg0") -> dict[str, Any]:
+        info = self._interfaces.get(interface)
+        if not info:
+            return {}
+        return {
+            "interface": interface,
+            "public_key": info["public_key"],
+            "listen_port": info["listen_port"],
+            "addresses": list(info["addresses"]),
+        }
+
+    def create_interface(self, name: str, private_key: str,
+                         listen_port: int = 51820, address: str = "10.13.13.1/24") -> None:
+        self._interfaces[name] = {
+            "private_key": private_key,
+            "public_key": self.derive_public_key(private_key),
+            "listen_port": int(listen_port),
+            "addresses": [address],
+        }
+        logger.info("mock: VPN create_interface name=%s port=%s addr=%s", name, listen_port, address)
+
+    def add_peer(self, interface: str, public_key: str, allowed_ips: str,
+                 description: str = "", endpoint: str = "",
+                 persistent_keepalive: int = 25) -> None:
+        self._section_counter += 1
+        section = f"cfg{self._section_counter:02d}wireguard_{interface}"
+        # `allowed_ips` arrives as a comma-joined string from the SDK to match
+        # how OpenWrt stores it on disk; split back to a list for in-memory.
+        ip_list = [s.strip() for s in allowed_ips.split(",") if s.strip()] if allowed_ips else []
+        self._peers.append({
+            "section": section,
+            "interface": interface,
+            "public_key": public_key,
+            "allowed_ips": ip_list,
+            "description": description,
+            "endpoint_host": endpoint,
+            "persistent_keepalive": str(persistent_keepalive),
+        })
+        logger.info("mock: VPN add_peer iface=%s ips=%s desc=%s", interface, ip_list, description)
+
+    def list_peers(self, interface: str = "wg0") -> list[dict[str, Any]]:
+        return [
+            {k: v for k, v in p.items() if k != "interface"}
+            for p in self._peers
+            if p["interface"] == interface
+        ]
+
+    def delete_peer(self, interface: str, public_key: str) -> int:
+        before = len(self._peers)
+        self._peers = [
+            p for p in self._peers
+            if not (p["interface"] == interface and p["public_key"] == public_key)
+        ]
+        return before - len(self._peers)
+
+    def setup_firewall(self, interface: str = "wg0", listen_port: int = 51820) -> None:
+        logger.info("mock: VPN setup_firewall iface=%s port=%s — no-op", interface, listen_port)
+
+
 class _MockUci:
     """Minimal uci mock — safe_apply happy path only."""
 
@@ -286,6 +376,7 @@ class MockRouter:
         self.dhcp = _MockDhcp()
         self.firewall = _MockFirewall()
         self.uci = _MockUci()
+        self.vpn = _MockVpn()
 
     def disconnect(self) -> None:
         pass
@@ -293,6 +384,14 @@ class MockRouter:
     def exec_service(self, service: str, action: str) -> dict[str, Any]:
         logger.info("mock: exec_service %s %s — no-op", service, action)
         return {"code": 0}
+
+    def _call(self, obj: str, method: str, args: Any = None) -> dict[str, Any]:
+        """Catch-all for raw ubus calls (e.g. `service event` reload nudges
+        used by /vpn/setup and /ddns/duckdns). The real SDK exposes this for
+        cases the typed sub-APIs don't cover; the mock returns success so
+        endpoint code paths that depend on a nudge don't blow up."""
+        logger.info("mock: _call %s.%s args=%s — no-op", obj, method, args)
+        return {}
 
     def apply_changes(self, config: str, timeout: int = 30) -> None:
         logger.info("mock: apply_changes config=%s — no-op", config)

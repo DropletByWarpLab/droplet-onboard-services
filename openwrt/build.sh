@@ -92,6 +92,12 @@ PACKAGES+=" iw iwinfo wireless-regdb"
 # --- VPN: WireGuard ---
 PACKAGES+=" wireguard-tools kmod-wireguard luci-proto-wireguard"
 
+# --- Dynamic DNS (DuckDNS for the WireGuard endpoint hostname) ---
+# DuckDNS runs through the generic GET-URL path so no provider-specific
+# extension is required. The routing service writes a `ddns` UCI section
+# pointing at https://www.duckdns.org/update?domains=...&token=...&ip=.
+PACKAGES+=" ddns-scripts luci-app-ddns"
+
 # --- OpenWrt management ---
 PACKAGES+=" opkg luci luci-ssl luci-app-firewall luci-app-opkg"
 PACKAGES+=" luci-theme-openwrt-2020"

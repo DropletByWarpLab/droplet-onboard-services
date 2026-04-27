@@ -49,6 +49,10 @@ import type {
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
+  VpnPeerInfo,
+  VpnStatusInfo,
+  VpnPeerCreatedInfo,
+  DuckDnsStatus,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -1677,3 +1681,68 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
   }
 }
 
+// --- Remote Access (WireGuard VPN) ---
+
+export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
+  const res = await authFetch(`${BASE}/api/vpn/status`);
+  if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchVpnPeers(): Promise<{ peers: VpnPeerInfo[] }> {
+  const res = await authFetch(`${BASE}/api/vpn/peers`);
+  if (!res.ok) throw new Error(`Failed to fetch peers: ${res.status}`);
+  return res.json();
+}
+
+export async function createVpnPeer(deviceLabel: string): Promise<VpnPeerCreatedInfo> {
+  const res = await authFetch(`${BASE}/api/vpn/peers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceLabel }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create peer: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteVpnPeer(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/vpn/peers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to revoke peer: ${res.status}`);
+  }
+}
+
+// --- DuckDNS ---
+
+export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
+  const res = await authFetch(`${BASE}/api/ddns/duckdns`);
+  if (res.status === 403) {
+    // Surface admin-only as a typed condition the page can render specially.
+    throw new Error("403 Admin access required");
+  }
+  if (!res.ok) throw new Error(`Failed to fetch DuckDNS status: ${res.status}`);
+  return res.json();
+}
+
+export async function setDuckDnsConfig(opts: {
+  subdomain: string;
+  token: string;
+  enabled?: boolean;
+}): Promise<DuckDnsStatus> {
+  const res = await authFetch(`${BASE}/api/ddns/duckdns`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update DuckDNS: ${res.status}`);
+  }
+  return res.json();
+}

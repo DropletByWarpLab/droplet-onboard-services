@@ -131,6 +131,55 @@ export interface PairingCodeStatus {
   claimedBy: string | null;
 }
 
+// --- Remote Access (WireGuard VPN) ---
+
+export interface VpnPeerInfo {
+  id: string;
+  userId: string;
+  deviceLabel: string;
+  publicKey: string;
+  assignedIp: string;
+  status: "active" | "revoked";
+  createdAt: string;
+  revokedAt?: string | null;
+}
+
+/** Snapshot the dashboard polls before deciding whether to enable the
+ *  "Add device" button. `endpointConfigured` is the most user-actionable
+ *  signal — when false, the orchestrator will refuse to mint peers. */
+export interface VpnStatusInfo {
+  configured: boolean;
+  endpointConfigured: boolean;
+  endpointHost?: string | null;
+  listenPort?: number;
+  serverPublicKey?: string;
+  addresses?: string[];
+  peerCount?: number;
+  message?: string;
+}
+
+/** Response from POST /api/vpn/peers. The `conf` field is one-shot —
+ *  subsequent GETs do NOT include it. The dashboard renders it as a QR
+ *  and offers a download, then forgets it on dialog close. */
+export interface VpnPeerCreatedInfo {
+  peer: VpnPeerInfo;
+  /** Full WireGuard .conf text. Contains the peer's private key. */
+  conf: string;
+}
+
+/** DuckDNS status. `tokenSet` is the only signal about the token —
+ *  the token itself is never returned by the orchestrator. */
+export type DuckDnsStatus =
+  | { configured: false }
+  | {
+      configured: true;
+      subdomain: string;
+      fullDomain: string;
+      enabled: boolean;
+      tokenSet: boolean;
+      lastUpdate?: string;
+    };
+
 // --- Auth types ---
 
 export interface AuthUser {

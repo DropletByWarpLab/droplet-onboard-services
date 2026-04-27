@@ -455,6 +455,44 @@ model Reminder {
   @@index([completedAt])
 }
 
+// ── Remote Access (WireGuard VPN) ──
+//
+// One row per device a user has provisioned to dial in over WireGuard.
+// `userId` is the Nextcloud username (same convention as DeviceClient,
+// CalendarEvent, FileContentChunk, etc. — we never duplicate the user
+// table; Nextcloud is the source of truth).
+//
+// We store the peer's PUBLIC key (server-side identifier) and the
+// allocated tunnel IP. We DO NOT store the peer's private key — it's
+// shown to the user once at creation time (rendered into a QR / .conf)
+// and discarded. If they lose it they revoke and re-mint.
+//
+// Status drives the IP allocator: `active` rows reserve an IP from the
+// VPN subnet; `revoked` rows are tombstones (kept for audit + so the
+// dashboard can show a recently-removed device for a brief grace
+// period). Re-using a recently-revoked IP is fine — the orchestrator's
+// allocator just picks the next free one in numerical order.
+model VpnPeer {
+  id             String   @id @default(uuid())
+  userId         String                                       // Nextcloud username
+  deviceLabel    String                                       // "Alice's iPhone"
+  // Peer's WireGuard public key (X25519, base64). Unique across all
+  // peers (active + revoked) — pubkey is effectively the peer identity
+  // and reusing one would let a revoked device reauthenticate.
+  publicKey      String   @unique
+  // Tunnel IP assigned from the VPN subnet (e.g. "10.13.13.5"). Unique
+  // across ACTIVE rows; a revoked row's IP can be reissued. Stored
+  // without CIDR mask (mask is implied by the subnet).
+  assignedIp     String
+  status         String   @default("active")                  // "active" | "revoked"
+  createdAt      DateTime @default(now())
+  revokedAt      DateTime?
+
+  @@index([userId])
+  @@index([status])
+  @@index([assignedIp])
+}
+
 // Append-only log of every notification dispatched. Powers the in-app
 // "recent notifications" panel and helps debug missing pushes.
 model NotificationLog {

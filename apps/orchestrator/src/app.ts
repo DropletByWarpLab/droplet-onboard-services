@@ -21,6 +21,8 @@ import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
 import { createRemindersRouter } from "./routes/reminders.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
+import { createVpnRouter } from "./routes/vpn.js";
+import { createDdnsRouter } from "./routes/ddns.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
 
@@ -69,6 +71,8 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createCalendarRouter(prisma));
   app.use("/api", createRemindersRouter(prisma));
   app.use("/api", createNotificationsRouter(prisma));
+  app.use("/api", createVpnRouter(prisma));
+  app.use("/api", createDdnsRouter());
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
