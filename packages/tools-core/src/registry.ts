@@ -35,6 +35,18 @@ import discoverMatterDevices from "./handlers/smart-home/discover-matter-devices
 import commissionDevice from "./handlers/smart-home/commission-device.js";
 import getCommandHistory from "./handlers/smart-home/get-command-history.js";
 
+// cameras
+import listCameras from "./handlers/cameras/list-cameras.js";
+import listDiscoveredCameras from "./handlers/cameras/list-discovered-cameras.js";
+import listCameraEvents from "./handlers/cameras/list-camera-events.js";
+import scanForCameras from "./handlers/cameras/scan-for-cameras.js";
+import acceptDiscoveredCamera from "./handlers/cameras/accept-discovered-camera.js";
+import getCameraSnapshot from "./handlers/cameras/get-camera-snapshot.js";
+import listClips from "./handlers/cameras/list-clips.js";
+import exportClip from "./handlers/cameras/export-clip.js";
+import getCameraLiveUrl from "./handlers/cameras/get-camera-live-url.js";
+import shareClip from "./handlers/cameras/share-clip.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -68,6 +80,17 @@ const allTools: Tool[] = [
   discoverMatterDevices,
   commissionDevice,
   getCommandHistory,
+  // cameras
+  listCameras,
+  listDiscoveredCameras,
+  listCameraEvents,
+  scanForCameras,
+  acceptDiscoveredCamera,
+  getCameraSnapshot,
+  listClips,
+  exportClip,
+  getCameraLiveUrl,
+  shareClip,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
