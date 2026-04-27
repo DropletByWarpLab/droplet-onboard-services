@@ -29,6 +29,11 @@ import copyFile from "./handlers/files/copy-file.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
+import getSmartHomeDevice from "./handlers/smart-home/get-smart-home-device.js";
+import controlDevice from "./handlers/smart-home/control-device.js";
+import discoverMatterDevices from "./handlers/smart-home/discover-matter-devices.js";
+import commissionDevice from "./handlers/smart-home/commission-device.js";
+import getCommandHistory from "./handlers/smart-home/get-command-history.js";
 
 const allTools: Tool[] = [
   // network
@@ -58,6 +63,11 @@ const allTools: Tool[] = [
   copyFile,
   // smart-home
   listSmartHomeDevices,
+  getSmartHomeDevice,
+  controlDevice,
+  discoverMatterDevices,
+  commissionDevice,
+  getCommandHistory,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
