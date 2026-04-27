@@ -25,6 +25,18 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   deleteKey: (...args: any[]) => mockDeleteKey(...args),
 }));
 
+// Stub the MCP singleton so /api/llm/chat can drive the (now in-process)
+// agent loop without spawning the mcp-server child. Since WARP-101 the
+// orchestrator owns the loop and reads tools from this client.
+vi.mock("../services/mcp-client.singleton.js", () => ({
+  mcpClient: {
+    listTools: vi.fn().mockResolvedValue([]),
+    callTool: vi.fn(),
+  },
+  ensureMcpStarted: vi.fn().mockResolvedValue(undefined),
+  stopMcp: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe("LLM routes", () => {
   let app: ReturnType<typeof createApp>;
 
@@ -96,7 +108,11 @@ describe("LLM routes", () => {
       expect(res.status).toBe(400);
     });
 
-    it("forwards valid non-streaming request", async () => {
+    it("returns AgentResult shape for valid non-streaming request", async () => {
+      // /api/llm/chat now drives the orchestrator agent loop. Non-streaming
+      // responses match the AgentResult shape from runAgent (assistant
+      // message + trace + iterations + stop_reason), not the raw OpenAI
+      // chat-completion shape the route used to forward verbatim.
       const mockResponse = {
         ok: true,
         json: vi.fn().mockResolvedValue({
@@ -106,7 +122,6 @@ describe("LLM routes", () => {
             { index: 0, message: { role: "assistant", content: "Hi!" }, finish_reason: "stop" },
           ],
         }),
-        body: null,
       };
       mockChat.mockResolvedValueOnce(mockResponse);
 
@@ -119,7 +134,10 @@ describe("LLM routes", () => {
         });
 
       expect(res.status).toBe(200);
-      expect(res.body.choices).toBeDefined();
+      expect(res.body.message?.role).toBe("assistant");
+      expect(res.body.message?.content).toBe("Hi!");
+      expect(res.body.stop_reason).toBe("model_done");
+      expect(Array.isArray(res.body.trace)).toBe(true);
       expect(mockChat).toHaveBeenCalledOnce();
     });
   });

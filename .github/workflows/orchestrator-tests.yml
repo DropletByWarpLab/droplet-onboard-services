@@ -2,11 +2,18 @@ name: orchestrator-tests
 
 # Vitest for apps/orchestrator. Path-filtered so dashboard-only or service-only
 # PRs don't trigger a Prisma generate + Node install for no reason.
+#
+# Note: the orchestrator depends on @droplet/tools-core and @droplet/mcp-server
+# (workspace packages). The MCP client test (`mcp-client.service.test.ts`)
+# spawns `services/mcp-server/dist/index.js` as a child process, so we build
+# both workspace packages before running vitest.
 
 on:
   pull_request:
     paths:
       - "apps/orchestrator/**"
+      - "packages/tools-core/**"
+      - "services/mcp-server/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -14,6 +21,8 @@ on:
     branches: [main]
     paths:
       - "apps/orchestrator/**"
+      - "packages/tools-core/**"
+      - "services/mcp-server/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/orchestrator-tests.yml"
@@ -39,9 +48,19 @@ jobs:
         run: npm ci
 
       # Vitest imports from @prisma/client; without `prisma generate` the
-      # suite crashes with "Cannot find module .prisma/client".
+      # suite crashes with "Cannot find module .prisma/client". The same
+      # generated client is reused by services/mcp-server (shared
+      # node_modules/.prisma/client).
       - name: Generate Prisma client
         run: npm run -w @droplet/orchestrator db:generate
+
+      # Build the workspace packages the orchestrator depends on. mcp-client
+      # tests spawn services/mcp-server/dist/index.js as a child process.
+      - name: Build @droplet/tools-core
+        run: npm run -w @droplet/tools-core build
+
+      - name: Build @droplet/mcp-server
+        run: npm run -w @droplet/mcp-server build
 
       - name: Run vitest
         run: npm run -w @droplet/orchestrator test

@@ -39,11 +39,11 @@ export interface ChatRequest {
   provider?: string;
   tools?: ToolDefinition[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
-  // Set to false when the caller wants the raw tool_calls response back
-  // (e.g. the orchestrator's /api/llm/agent runs its own loop against the
-  // service layer). Default true preserves the ai-gateway's own ReAct loop
-  // for simple chat callers that don't want to handle tools themselves.
-  execute_tools?: boolean;
+  // Note: `execute_tools` was removed in WARP-101. The orchestrator now
+  // owns the agent loop end-to-end (MCP-backed) and the ai-gateway is a
+  // pure model proxy — see services/ai-gateway/router.py and the spec
+  // §8 (orchestrator agent rewire). Re-introducing this flag would
+  // resurrect the duplicate tool-dispatch path the spec deletes.
 }
 
 export interface ChatChoice {

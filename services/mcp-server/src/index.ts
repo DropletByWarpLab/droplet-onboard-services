@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import type { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
+import type { HttpClient } from "@droplet/tools-core";
 import { createServer } from "./server.js";
 import { startStdio } from "./transports/stdio.js";
 import type { ContextDeps } from "./context.js";
@@ -11,33 +12,97 @@ function parseTransport(argv: string[]): "stdio" | "http" {
   return "stdio";
 }
 
+type HttpTarget = "routing" | "cameras" | "switchSvc" | "fileIndexer" | "nextcloud";
+
+function baseUrlFor(target: HttpTarget): string {
+  switch (target) {
+    case "routing":
+      return process.env.ROUTING_SERVICE_URL ?? "http://host.docker.internal:8080";
+    case "cameras":
+      return process.env.CAMERA_DISCOVERY_URL ?? "http://camera-discovery:8000";
+    case "switchSvc":
+      return process.env.SWITCH_SERVICE_URL ?? "http://host.docker.internal:8081";
+    case "fileIndexer":
+      return process.env.FILE_INDEXER_URL ?? "http://file-indexer:8000";
+    case "nextcloud":
+      return process.env.NEXTCLOUD_URL ?? "http://nextcloud";
+  }
+}
+
+function joinUrl(base: string, path: string, params?: Record<string, unknown>): string {
+  const url = new URL(path.startsWith("/") ? path : `/${path}`, base.endsWith("/") ? base : `${base}/`);
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    }
+  }
+  return url.toString();
+}
+
 /**
- * Lazy Prisma proxy: do not instantiate `new PrismaClient()` at boot, since the
- * client is only generated when an orchestrator developer has run
- * `prisma generate`. WARP-100 is a foundational skeleton and the slice that
- * actually exercises Prisma (`list_network_devices`) is not invoked over stdio
- * during the foundation roundtrip test. Real injection lands in WARP-101 when
- * the orchestrator spawns this binary and supplies its already-initialised
- * Prisma client via dependency injection.
+ * Real fetch-backed HttpClient. The MCP server is the only place that
+ * crosses the orchestrator/service-pod boundary, so we resolve target
+ * base URLs from env at process start.
+ *
+ * Per-call options carry a JSON body; we always set Content-Type when a body
+ * is present to avoid silently sending text/plain to FastAPI services.
  */
-function lazyPrismaProxy(): PrismaClient {
-  return new Proxy({} as PrismaClient, {
-    get(_t, prop) {
-      throw new Error(
-        `Prisma client accessed (.${String(prop)}) but no PrismaClient was injected. ` +
-          "WARP-100 boots without Prisma; WARP-101 wires it in via the orchestrator.",
-      );
+function createHttpClient(target: HttpTarget): HttpClient {
+  const base = baseUrlFor(target);
+  return {
+    async get(path, opts) {
+      return fetch(joinUrl(base, path, opts?.params), {
+        method: "GET",
+        headers: opts?.headers,
+      });
     },
-  });
+    async post(path, body, opts) {
+      const headers: Record<string, string> = { ...(opts?.headers ?? {}) };
+      if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+      return fetch(joinUrl(base, path), {
+        method: "POST",
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    },
+    async patch(path, body, opts) {
+      const headers: Record<string, string> = { ...(opts?.headers ?? {}) };
+      if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+      return fetch(joinUrl(base, path), {
+        method: "PATCH",
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    },
+    async delete(path, opts) {
+      return fetch(joinUrl(base, path), {
+        method: "DELETE",
+        headers: opts?.headers,
+      });
+    },
+  };
 }
 
 async function main(): Promise<void> {
   const transport = parseTransport(process.argv.slice(2));
 
-  // Build dependencies. For WARP-100 we only support stdio + a minimal Matter
-  // stub; HTTP transport + full deps land in WARP-103.
+  // The Prisma client is generated in the orchestrator workspace
+  // (`npm run -w @droplet/orchestrator db:generate`). Both the orchestrator
+  // and mcp-server resolve `@prisma/client` from the shared root
+  // `node_modules`, so a single generation step covers both. The mcp-server
+  // postinstall warns if the client isn't generated yet.
+  const prisma = new PrismaClient();
+
+  // Connect lazily — the stdio child process should not block the parent's
+  // boot path on a database that may not be reachable (in-process orchestrator
+  // tests, dry-run roundtrips). Tools that touch Prisma will trigger the
+  // first connection on demand.
   const deps: ContextDeps = {
-    prisma: lazyPrismaProxy(),
+    prisma,
+    // Matter stub stays minimal until WARP-102 decides whether the
+    // mcp-server hosts its own Matter controller or proxies HTTP back to
+    // the orchestrator. WARP-101 only exercises tools that don't touch
+    // Matter, so a no-op shim is the safest default.
     matter: {
       listDevices: async () => ({}),
       getDevice: async () => ({}),
@@ -46,14 +111,18 @@ async function main(): Promise<void> {
       commission: async () => ({}),
       getAuditLog: async () => ({}),
     },
-    httpFactory: () => ({
-      get: () => Promise.reject(new Error("http transport not configured in WARP-100")),
-      post: () => Promise.reject(new Error("http transport not configured in WARP-100")),
-      patch: () => Promise.reject(new Error("http transport not configured in WARP-100")),
-      delete: () => Promise.reject(new Error("http transport not configured in WARP-100")),
-    }),
+    httpFactory: createHttpClient,
   };
   const server = createServer(deps);
+
+  // Disconnect cleanly when the parent SIGTERMs us. Without this the
+  // PrismaClient connection pool would leak across the stdio child boundary.
+  const shutdown = async () => {
+    await prisma.$disconnect().catch(() => {});
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 
   if (transport === "stdio") {
     await startStdio(server);

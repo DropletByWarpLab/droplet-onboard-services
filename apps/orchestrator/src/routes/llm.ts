@@ -4,10 +4,12 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
-import { runAgent } from "../services/llm-agent.service.js";
+import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { TOOL_REGISTRY } from "../services/llm-tools.js";
+import { mcpClient } from "../services/mcp-client.singleton.js";
+import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
-import type { ModelsResponse, ChatRequest, SessionChatRequest } from "../types/index.js";
+import type { ModelsResponse, SessionChatRequest } from "../types/index.js";
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
@@ -28,13 +30,15 @@ const chatRequestSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   max_tokens: z.number().positive().optional(),
   provider: z.string().optional(),
+  max_iter: z.number().int().min(1).max(10).optional(),
+  allowed_tools: z.array(z.string()).optional(),
 });
 
 // Only system / user / assistant are accepted from the caller — role="tool"
 // is intentionally NOT in the enum to prevent a client from planting a
 // spoofed tool-result message into the conversation (which would bias the
 // next turn toward calling a privileged write tool). Tool-role messages
-// are only appended by the agent loop itself, from actual dispatchTool()
+// are only appended by the agent loop itself, from actual MCP callTool()
 // results. See the security review in PR #66 for the threat model.
 const agentRequestSchema = z.object({
   model: z.string(),
@@ -54,9 +58,17 @@ const agentRequestSchema = z.object({
 // tools (block/unblock/accept/scan, file mutations) must be gated because
 // the LLM is driven by user-controlled prompt text and will happily call
 // them on request.
+//
+// Note: spec §6.2 reconciles legacy names (`block_device` etc.) into the
+// MCP-canonical names. Until WARP-102 ports every handler, both names may
+// be present in the registry; we list the MCP-canonical names here. The
+// in-process /api/llm/agent path still calls into `llm-tools.ts` which
+// uses the legacy names — keep both sides covered.
 const WRITE_TOOLS = new Set([
   "block_device",
+  "block_network_device",
   "unblock_device",
+  "unblock_network_device",
   "accept_discovered_camera",
   "scan_for_cameras",
   // File mutation tools (from the file write/search PR). Write-gated because
@@ -83,7 +95,62 @@ const WRITE_TOOLS = new Set([
   "share_clip",
 ]);
 
-export function createLlmRouter(prisma: PrismaClient): Router {
+// RBAC helpers — shared between /api/llm/chat and /api/llm/agent so the
+// two routes can't drift apart on which tools an unprivileged user can
+// drive. Same threat model: the LLM is steered by user-controlled prompt
+// text; only owner/admin sessions are allowed to touch write tools.
+type AuthedRequest = { user?: { username?: string; role?: string } };
+
+function isPrivilegedRole(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
+async function narrowAllowedToolsForRole(
+  role: string | undefined,
+  requestedAllowed: string[] | undefined,
+): Promise<string[] | undefined> {
+  if (isPrivilegedRole(role)) {
+    return requestedAllowed;
+  }
+  if (requestedAllowed?.length) {
+    return requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
+  }
+  // Default for unprivileged users: every tool the live MCP server
+  // advertises, minus write tools. listTools() throws if the child
+  // crashed mid-runtime — fall back to an empty allowed set in that case
+  // so the model sees zero tools rather than something privileged.
+  const tools = await mcpClient.listTools().catch(() => []);
+  return tools.map((t) => t.name).filter((n) => !WRITE_TOOLS.has(n));
+}
+
+// Belt-and-braces: even if the agent loop itself enforces the narrowed
+// list, refuse at request-time if a client has planted tool-call entries
+// invoking a write tool inside replayed assistant history. Spoofed tool
+// results are blocked at the schema level for /agent (role="tool" not
+// allowed); /chat permits role="tool" for resume-session callers but
+// the same spoof-then-bypass risk exists if the planted assistant turn
+// sets `tool_calls`.
+//
+// Takes the RAW request body (not the Zod-parsed shape) because Zod's
+// default object schema strips unrecognized keys, including `tool_calls`
+// — so reading from parsed.data would always be empty.
+function replayedWriteToolAttempt(rawMessages: unknown): boolean {
+  if (!Array.isArray(rawMessages)) return false;
+  return rawMessages
+    .flatMap((m) => {
+      if (!m || typeof m !== "object") return [];
+      const calls = (m as { tool_calls?: unknown }).tool_calls;
+      return Array.isArray(calls) ? calls : [];
+    })
+    .some((c) => {
+      if (!c || typeof c !== "object") return false;
+      const fn = (c as { function?: { name?: unknown } }).function;
+      const name = fn?.name;
+      return typeof name === "string" && WRITE_TOOLS.has(name);
+    });
+}
+
+export function createLlmRouter(_prisma: PrismaClient): Router {
   const router = Router();
 
   // List available models
@@ -103,7 +170,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // Chat completion
+  // Chat completion — drives the orchestrator agent loop end-to-end.
+  // When stream=true the client receives the four SSE event types
+  // defined in spec §8.2 (content_delta, tool_call, tool_result, done).
+  // Non-streaming returns the AgentResult shape (assistant message +
+  // trace + iterations + stop_reason).
   router.post("/llm/chat", async (req, res, next) => {
     try {
       const parsed = chatRequestSchema.safeParse(req.body);
@@ -114,32 +185,73 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
         return;
       }
+      const chatReq = parsed.data;
 
-      const chatReq: ChatRequest = parsed.data;
-      const gatewayRes = await aiGateway.chat(chatReq);
+      // RBAC: same gate as /api/llm/agent — write tools require
+      // owner/admin. Lifted up here because /api/llm/chat is the live
+      // route the dashboard will switch to in WARP-104; without this
+      // any authenticated session could drive write tools via curl.
+      // Reads `req.body.messages` (raw) for the spoof check because
+      // Zod strips unrecognized keys (tool_calls) from the parsed shape.
+      const role = (req as AuthedRequest).user?.role;
+      if (
+        !isPrivilegedRole(role) &&
+        replayedWriteToolAttempt(
+          (req.body as { messages?: unknown })?.messages,
+        )
+      ) {
+        res.status(403).json({ error: "forbidden_tool_for_role" });
+        return;
+      }
+      const allowedForUser = await narrowAllowedToolsForRole(
+        role,
+        chatReq.allowed_tools,
+      );
 
-      if (chatReq.stream && gatewayRes.body) {
-        // Stream SSE through to the client
+      const deps: AgentDeps = {
+        mcp: mcpClient,
+        aiGateway: { chat: aiGateway.chat },
+      };
+
+      if (chatReq.stream) {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
         });
-
-        const reader = gatewayRes.body as ReadableStream<Uint8Array>;
-        const nodeStream = Readable.fromWeb(reader as any);
-        nodeStream.pipe(res);
-
-        // Clean up on client disconnect
-        req.on("close", () => {
-          nodeStream.destroy();
-        });
-      } else {
-        // Non-streaming: forward JSON response
-        const data = await gatewayRes.json();
-        res.json(data);
+        const onEvent = (e: SSEEvent) => {
+          // Best-effort write — if the client disconnected mid-stream
+          // res.write throws ECONNRESET; swallow because the abort path
+          // (req.on("close")) handles the rest.
+          try {
+            res.write(encodeSSE(e));
+          } catch {
+            /* client gone */
+          }
+        };
+        try {
+          await runAgent({ ...deps, onEvent }, {
+            model: chatReq.model,
+            messages: chatReq.messages,
+            temperature: chatReq.temperature,
+            max_iter: chatReq.max_iter,
+            allowed_tools: allowedForUser,
+          });
+        } finally {
+          res.end();
+        }
+        return;
       }
+
+      const result = await runAgent(deps, {
+        model: chatReq.model,
+        messages: chatReq.messages,
+        temperature: chatReq.temperature,
+        max_iter: chatReq.max_iter,
+        allowed_tools: allowedForUser,
+      });
+      res.json(result);
     } catch (err) {
       next(err);
     }
@@ -147,6 +259,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
   // List every tool the agent can call. Useful for the dashboard to
   // render a "capabilities" pane and for debugging tool schemas.
+  // WARP-104 will refactor this to proxy mcpClient.listTools(); for now
+  // it still surfaces the in-process registry that /api/llm/agent uses.
   router.get("/llm/tools", (_req, res) => {
     res.json({
       tools: Object.values(TOOL_REGISTRY).map((t) => ({
@@ -157,11 +271,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     });
   });
 
-  // Tool-aware agent endpoint. Runs a ReAct-style loop against the local
-  // LLM — on each turn, if the model emits `tool_calls`, we dispatch
-  // them against the registry (network, files, cameras, system) and
-  // feed the results back. Returns the final assistant message plus a
-  // trace of every tool invocation.
+  // Tool-aware agent endpoint. WARP-104 deletes this — it overlaps with
+  // /api/llm/chat now that the chat path drives the orchestrator agent
+  // loop directly. While it lives, route it through the same MCP client
+  // so the two endpoints can't drift out of sync mid-sprint.
   router.post("/llm/agent", async (req, res, next) => {
     try {
       const parsed = agentRequestSchema.safeParse(req.body);
@@ -172,41 +285,41 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
         return;
       }
-      const user = (req as { user?: { username: string; role?: string } }).user;
-      const username = user?.username;
-      const role = user?.role;
-      const isPrivileged = role === "owner" || role === "admin";
+      const role = (req as AuthedRequest).user?.role;
 
-      // Narrow the advertised tool set for non-privileged users so the model
-      // never even sees the write tools as an option. Callers can further
-      // restrict via `allowed_tools[]` but not widen past this.
-      const requestedAllowed = parsed.data.allowed_tools;
-      const allowedForUser = isPrivileged
-        ? requestedAllowed
-        : (requestedAllowed ?? []).filter((n) => !WRITE_TOOLS.has(n)) ||
-          // Implicit allowed set when caller didn't pass one: all read-only.
-          Array.from(Object.keys(TOOL_REGISTRY)).filter((n) => !WRITE_TOOLS.has(n));
-
-      // Also refuse at dispatch time if the model somehow emits a write-tool
-      // call anyway (prompt-injected, hallucination). Belt and braces.
-      if (!isPrivileged) {
-        const writeAttempted = (parsed.data.messages ?? [])
-          .flatMap((m) => (m as { tool_calls?: { function: { name: string } }[] }).tool_calls ?? [])
-          .some((c) => WRITE_TOOLS.has(c.function?.name));
-        if (writeAttempted) {
-          res.status(403).json({ error: "forbidden_tool_for_role" });
-          return;
-        }
+      // RBAC + replayed-write detection (shared with /api/llm/chat — see
+      // helpers above the router). Reads raw req.body.messages because
+      // Zod strips unrecognized keys (tool_calls) from parsed.data.
+      if (
+        !isPrivilegedRole(role) &&
+        replayedWriteToolAttempt(
+          (req.body as { messages?: unknown })?.messages,
+        )
+      ) {
+        res.status(403).json({ error: "forbidden_tool_for_role" });
+        return;
       }
+      const allowedForUser = await narrowAllowedToolsForRole(
+        role,
+        parsed.data.allowed_tools,
+      );
 
       // Nextcloud-scoped tools (list_files / search_files / list_recent_files)
-      // need the caller's NC session token. Other tools ignore it.
-      const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+      // need the caller's NC session token. The new MCP-backed agent
+      // doesn't yet thread ncToken into the stdio child (WARP-103 will);
+      // for now the route resolves it but it's not propagated. Document
+      // the gap so QA doesn't get surprised.
+      await resolveNcToken(req).catch(() => null);
+
       const result = await runAgent(
-        { ...parsed.data, allowed_tools: allowedForUser },
-        prisma,
-        username,
-        ncToken,
+        { mcp: mcpClient, aiGateway: { chat: aiGateway.chat } },
+        {
+          model: parsed.data.model,
+          messages: parsed.data.messages,
+          max_iter: parsed.data.max_iter,
+          temperature: parsed.data.temperature,
+          allowed_tools: allowedForUser,
+        },
       );
       res.json(result);
     } catch (err) {
@@ -249,6 +362,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   });
 
   // --- Sessions ---
+  // Sessions still proxy to the ai-gateway (which owns persistent
+  // conversation state). The dashboard's /chat page goes through these
+  // session routes today, so the SSE shape change on /api/llm/chat
+  // doesn't reach it.
 
   router.post("/llm/sessions", async (req, res, next) => {
     try {
@@ -337,7 +454,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
 
         const reader = gatewayRes.body as ReadableStream<Uint8Array>;
-        const nodeStream = Readable.fromWeb(reader as any);
+        const nodeStream = Readable.fromWeb(reader as never);
         nodeStream.pipe(res);
 
         req.on("close", () => {

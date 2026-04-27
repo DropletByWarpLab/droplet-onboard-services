@@ -1,0 +1,64 @@
+name: mcp-server-tests
+
+# Vitest for packages/tools-core + services/mcp-server. Path-filtered so a
+# pure orchestrator or dashboard PR doesn't pay for these tests.
+#
+# Note: stdio-roundtrip.test.ts spawns the built mcp-server as a child
+# process — the workspace must be built before tests run.
+
+on:
+  pull_request:
+    paths:
+      - "packages/tools-core/**"
+      - "services/mcp-server/**"
+      - "apps/orchestrator/prisma/schema.prisma"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/mcp-server-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/tools-core/**"
+      - "services/mcp-server/**"
+      - "apps/orchestrator/prisma/schema.prisma"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/mcp-server-tests.yml"
+
+concurrency:
+  group: mcp-server-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      # mcp-server's PrismaClient instantiation needs the generated client
+      # (orchestrator's schema is the canonical one; both packages share
+      # node_modules/@prisma/client + node_modules/.prisma/client).
+      - name: Generate Prisma client
+        run: npm run -w @droplet/orchestrator db:generate
+
+      - name: Build @droplet/tools-core
+        run: npm run -w @droplet/tools-core build
+
+      - name: Build @droplet/mcp-server
+        run: npm run -w @droplet/mcp-server build
+
+      - name: Run @droplet/tools-core vitest
+        run: npm run -w @droplet/tools-core test
+
+      - name: Run @droplet/mcp-server vitest
+        run: npm run -w @droplet/mcp-server test

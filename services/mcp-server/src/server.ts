@@ -52,7 +52,7 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
   return server;
 }
 
-function toolResultToContent(result: ToolResult): {
+export function toolResultToContent(result: ToolResult): {
   content: { type: "text"; text: string }[];
   isError: boolean;
 } {

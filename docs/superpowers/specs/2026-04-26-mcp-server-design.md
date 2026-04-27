@@ -258,11 +258,13 @@ The mcp-server implements these standard MCP methods:
 
 ### 7.1 `tools/call` result encoding
 
-`ToolResult.ok = true` → MCP content block: `{type: "text", text: JSON.stringify(data)}`.
+`ToolResult.ok = true` → MCP content block: `{type: "text", text: JSON.stringify(data)}` plus `isError: false`.
 
-`ToolResult.ok = false`, `status = "confirmation_required"` → MCP content block: `{type: "text", text: JSON.stringify({status: "confirmation_required", message, ...})}` plus `isError: false`. The model sees a normal tool result that explicitly says "user must confirm in the dashboard."
+`ToolResult.ok = false`, `status = "confirmation_required"` → MCP content block: `{type: "text", text: JSON.stringify({status: "confirmation_required", error: {code, message, details?}})}` plus `isError: false`. The model sees a normal tool result that explicitly says "user must confirm in the dashboard."
 
-`ToolResult.ok = false`, `status = "error"` → MCP content block with `isError: true`, body is `{code, message}`.
+`ToolResult.ok = false`, `status = "error"` → MCP content block with `isError: true`, body `{type: "text", text: JSON.stringify({status: "error", error: {code, message, details?}})}`. The optional `details` field carries structured payload from the underlying service (e.g. the routing service's 202 confirmation body) without forcing handlers to stringify it into `message`.
+
+Note the asymmetry: `confirmation_required` is **not** an MCP hard error (`isError: false`) so models like Claude / Qwen3 read it as a normal tool result and surface the message to the user, instead of marking the turn failed and abandoning the task. Only genuine handler failures get `isError: true`.
 
 ### 7.2 Auth
 
@@ -310,11 +312,16 @@ event: tool_result
 data: {"id": "call_123", "ok": true, "data": {...}}
 
 event: tool_result
-data: {"id": "call_456", "ok": false, "status": "confirmation_required", "message": "Open the dashboard to approve"}
+data: {"id": "call_456", "ok": true, "status": "confirmation_required", "message": "Open the dashboard to approve"}
+
+event: tool_result
+data: {"id": "call_789", "ok": false, "data": {"status": "error", "error": {"code": "ROUTING_UNAVAILABLE", "message": "routing service returned 503"}}}
 
 event: done
 data: {"iterations": 2, "stop_reason": "model_done"}
 ```
+
+The `ok` field on `tool_result` mirrors MCP's `isError` (inverted), not `ToolResult.ok` from §7.1 — `confirmation_required` is `isError: false` per §7.1, so the SSE event has `ok: true` with `status: "confirmation_required"` and a `message` field surfaced from the wrapped error payload. Genuine handler failures arrive with `ok: false` and the parsed error body in `data`.
 
 Non-streaming requests get the final assistant message + a flat `trace[]` array, matching today's `runAgent()` `AgentResult` shape — preserves consumers that don't want SSE.
 
@@ -379,6 +386,7 @@ Files removed or moved:
 | `services/ai-gateway/tests/test_tools.py` | DELETE | WARP-104 |
 | `services/ai-gateway/router.py` | TRIM (remove tool-loop branch) | WARP-104 |
 | `services/ai-gateway/schemas.py` | TRIM (remove ToolDefinition/Function/Call if unused) | WARP-104 |
+| `apps/web-dashboard/src/lib/hooks/useChat.ts` | SWITCH chat hook from `sendSessionChat()` (→ `/api/llm/sessions/:id/chat`, ai-gateway) to `sendChat()` (→ `/api/llm/chat`, orchestrator agent). Required so the MCP-backed agent loop is reachable from the dashboard UI; the WARP-101 rewire was deliberately back-end-only. May require trimming session UX (history, multi-session) since `/api/llm/chat` is stateless — re-evaluate at WARP-104 implementation time and either preserve session features via a thin orchestrator-side persistence layer or document the UX delta. | WARP-104 |
 | `docker/docker-compose.yml` | ADD mcp-server service + ENV wiring | WARP-103 |
 | `CLAUDE.md` | UPDATE tooling section | WARP-104 |
 | `README.md` | UPDATE architecture diagram | WARP-104 |
@@ -462,6 +470,7 @@ All vitest, pytest, and supertest suites must remain green at every ticket bound
 - [ ] `/api/llm/agent` route deleted from `apps/orchestrator/src/routes/llm.ts`. Agent request schema deleted.
 - [ ] `/api/llm/tools` route refactored to proxy `mcp-client.service.ts` `listTools()`.
 - [ ] `CLAUDE.md` LLM tooling section updated. `README.md` architecture diagram updated. `services/ai-gateway/README.md` updated to reflect "no longer the tool dispatch surface".
+- [ ] `apps/web-dashboard/src/lib/hooks/useChat.ts` switched from `sendSessionChat()` to `sendChat()` so the dashboard UI reaches the MCP-backed agent loop. UX delta from losing session-based chat history is either restored via orchestrator-side persistence OR documented in the PR body with sign-off from the project lead.
 - [ ] `services/ai-gateway/tests/` pytest suite passes after edits.
 - [ ] No references to deleted code remain (verified by `grep -r "executor\.py\|tools\.executor\|TOOL_HANDLERS\|llm-tools" apps services` returning zero hits).
 
