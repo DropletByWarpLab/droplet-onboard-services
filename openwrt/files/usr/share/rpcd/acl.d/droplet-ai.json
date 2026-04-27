@@ -16,21 +16,21 @@
         "hostapd.*": ["get_clients", "get_status"],
         "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices", "getDHCPLeases", "getHostHints"]
       },
-      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
+      "uci": ["network", "wireless", "dhcp", "firewall", "system", "ddns"]
     },
     "write": {
       "ubus": {
         "network": ["restart"],
         "network.interface.*": ["up", "down"],
         "network.wireless": ["up", "down", "reconf", "notify"],
-        "uci": ["set", "add", "delete", "rename", "reorder", "commit", "apply", "rollback", "changes", "revert"],
+        "uci": ["set", "add", "delete", "rename", "reorder", "commit", "apply", "confirm", "rollback", "changes", "revert"],
         "system": ["reboot"],
-        "service": ["set", "delete", "signal"],
+        "service": ["set", "delete", "signal", "event"],
         "session": ["login", "destroy"],
         "hostapd.*": ["del_client"],
         "wireguard": ["*"]
       },
-      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
+      "uci": ["network", "wireless", "dhcp", "firewall", "system", "ddns"]
     }
   }
 }

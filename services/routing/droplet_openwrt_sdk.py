@@ -696,38 +696,148 @@ class SystemApi:
 # High-level API: VPN (WireGuard)
 # ---------------------------------------------------------------------------
 class VPNApi:
-    """WireGuard VPN management."""
+    """WireGuard VPN management.
+
+    All keypair generation happens in Python (Curve25519 via `cryptography`)
+    rather than shelling out to `wg` on the router. The droplet-ai rpcd ACL
+    deliberately does NOT grant `file.exec` (see openwrt/files/usr/share/rpcd/
+    acl.d/droplet-ai.json), so the older shell-based path was unreachable on
+    production. Doing it in Python also keeps client private keys out of any
+    on-router temp file — they live only in the response body and are dropped
+    after the caller renders the QR.
+    """
 
     def __init__(self, router: "DropletRouter"):
         self._r = router
 
-    def generate_keypair(self) -> tuple[str, str]:
-        """Generate a WireGuard keypair on the OpenWrt device."""
-        priv_result = self._r.exec_command("wg", ["genkey"])
-        private_key = priv_result.get("stdout", "").strip()
+    @staticmethod
+    def generate_keypair() -> tuple[str, str]:
+        """Generate a fresh WireGuard X25519 keypair.
 
-        # Write the private key to a temp file to avoid shell injection
-        self._r.file.write("/tmp/.wg_privkey", private_key)
-        pub_result = self._r.exec_command("sh", ["-c", "wg pubkey < /tmp/.wg_privkey && rm -f /tmp/.wg_privkey"])
-        public_key = pub_result.get("stdout", "").strip()
+        Returns `(private_key_b64, public_key_b64)`. Callers MUST treat the
+        private key as one-shot output: hand it to the user (e.g. inside a
+        QR) and discard. We never persist client private keys in uci or in
+        the orchestrator DB.
+        """
+        from base64 import b64encode
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-        return private_key, public_key
+        priv = X25519PrivateKey.generate()
+        priv_bytes = priv.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        pub_bytes = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return b64encode(priv_bytes).decode("ascii"), b64encode(pub_bytes).decode("ascii")
+
+    @staticmethod
+    def derive_public_key(private_key_b64: str) -> str:
+        """Re-derive the public key from a base64-encoded private key.
+
+        Used by `get_interface_info` so we can surface the server pubkey
+        without storing it separately in uci — the priv on disk is the
+        single source of truth and the pub is recomputed on read.
+        """
+        from base64 import b64decode, b64encode
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+        priv = X25519PrivateKey.from_private_bytes(b64decode(private_key_b64))
+        pub_bytes = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return b64encode(pub_bytes).decode("ascii")
+
+    def interface_exists(self, name: str) -> bool:
+        """Return True iff a uci network section with this name already exists.
+
+        Lets the routing-service `/vpn/setup` endpoint be idempotent — calling
+        it twice doesn't try to recreate the interface or stack a second
+        firewall zone.
+        """
+        try:
+            result = self._r.uci.get("network", name)
+        except UbusError as exc:
+            # NOT_FOUND / NO_DATA — section doesn't exist.
+            if exc.code in (4, 5):
+                return False
+            raise
+        if not isinstance(result, dict):
+            return False
+        # `uci.get` on a missing section can also return an empty dict.
+        return bool(result.get("values") or result.get(".type"))
+
+    def get_interface_info(self, interface: str = "wg0") -> dict:
+        """Return server-side info for a WireGuard interface.
+
+        The private key is intentionally redacted from the return value — the
+        REST layer never has a reason to send it back to a caller. Public key
+        is re-derived from the priv on disk so we don't store it twice.
+        """
+        result = self._r.uci.get("network", interface)
+        if not isinstance(result, dict):
+            return {}
+        # Real ubus wraps the section in {"values": {...}}; some shapes return
+        # the section directly. Accept both.
+        section = result.get("values", result) if isinstance(result, dict) else {}
+        if not isinstance(section, dict):
+            return {}
+        priv = section.get("private_key", "")
+        pub = self.derive_public_key(priv) if priv else ""
+        addresses = section.get("addresses", "")
+        if isinstance(addresses, list):
+            addresses_list = list(addresses)
+        elif addresses:
+            addresses_list = [addresses]
+        else:
+            addresses_list = []
+        return {
+            "interface": interface,
+            "public_key": pub,
+            "listen_port": int(section.get("listen_port") or 0) or None,
+            "addresses": addresses_list,
+        }
 
     def create_interface(self, name: str, private_key: str,
                          listen_port: int = 51820, address: str = "10.0.100.1/24"):
-        """Create a WireGuard network interface."""
-        self._r.uci.set("network", name, {
+        """Create a WireGuard network interface.
+
+        Goes through `uci.add` (not `uci.set`) because the OpenWrt ubus uci
+        backend's `set` method requires the section to already exist —
+        creating one returns NOT_FOUND. `add` with `name=...` creates the
+        named `interface` section in one shot, then we set `proto=wireguard`
+        et al as section options.
+
+        DOES NOT commit. Caller wraps this in `safe_apply` (or follows up with
+        `uci.apply`) so commit + reload happen in one ucitrack pass. Pre-
+        committing here would leave nothing pending for `apply`, which then
+        returns NO_DATA. Same convention `set_hostrecord` uses — see the long
+        comment on `_commit_and_reload_dhcp` in `services/routing/main.py`.
+        """
+        self._r.uci.add("network", "interface", values={
             "proto": "wireguard",
             "private_key": private_key,
             "listen_port": str(listen_port),
             "addresses": address,
-        })
-        self._r.uci.commit("network")
+        }, name=name)
 
     def add_peer(self, interface: str, public_key: str, allowed_ips: str,
                  description: str = "", endpoint: str = "",
                  persistent_keepalive: int = 25):
-        """Add a WireGuard peer to an interface."""
+        """Add a WireGuard peer to an interface.
+
+        DOES NOT commit; caller follows up with `uci.apply` (rollback=False is
+        fine — adding a peer can't partition the orchestrator from the
+        router). Pre-committing here would leave apply with nothing to do
+        and the wg interface would not pick up the new peer until the next
+        ucitrack pass.
+        """
         values = {
             "public_key": public_key,
             "allowed_ips": allowed_ips,
@@ -738,28 +848,102 @@ class VPNApi:
         if endpoint:
             values["endpoint_host"] = endpoint
         self._r.uci.add("network", f"wireguard_{interface}", values)
-        self._r.uci.commit("network")
 
-    def setup_firewall(self, interface: str = "wg0"):
-        """Create firewall zone and rules for WireGuard."""
-        self._r.firewall.create_zone(
-            name="wg", input="ACCEPT", output="ACCEPT",
-            forward="ACCEPT", network=interface, masq=True,
-        )
-        self._r.firewall.add_forwarding("wg", "lan")
-        self._r.firewall.add_forwarding("wg", "wan")
+    def list_peers(self, interface: str = "wg0") -> list[dict]:
+        """Return peers attached to an interface as plain dicts.
 
-        # Allow WireGuard port through WAN
+        Filters on the OpenWrt-native section type `wireguard_<interface>`,
+        same shape `add_peer` writes. Each entry carries the section name so
+        callers can match it to a delete.
+        """
+        section_type = f"wireguard_{interface}"
+        result = self._r.uci.get("network", type=section_type)
+        values = result.get("values", {}) if isinstance(result, dict) else {}
+        peers: list[dict] = []
+        for section_name, section in values.items():
+            if not isinstance(section, dict):
+                continue
+            allowed = section.get("allowed_ips", "")
+            if isinstance(allowed, list):
+                allowed_list = list(allowed)
+            elif allowed:
+                allowed_list = [allowed]
+            else:
+                allowed_list = []
+            peers.append({
+                "section": section_name,
+                "public_key": section.get("public_key", ""),
+                "allowed_ips": allowed_list,
+                "description": section.get("description", ""),
+                "endpoint_host": section.get("endpoint_host", ""),
+                "persistent_keepalive": section.get("persistent_keepalive", ""),
+            })
+        return peers
+
+    def delete_peer(self, interface: str, public_key: str) -> int:
+        """Delete every peer section matching `public_key`. Returns the count.
+
+        Walks all `wireguard_<interface>` sections and deletes the ones whose
+        public_key matches. Multiple matches are a misconfiguration but we
+        clean them all up rather than silently leaving duplicates.
+
+        DOES NOT commit; caller follows up with `uci.apply`. See `add_peer`.
+        """
+        section_type = f"wireguard_{interface}"
+        result = self._r.uci.get("network", type=section_type)
+        values = result.get("values", {}) if isinstance(result, dict) else {}
+        removed = 0
+        for section_name, section in values.items():
+            if not isinstance(section, dict):
+                continue
+            if section.get("public_key", "") == public_key:
+                self._r.uci.delete("network", section_name)
+                removed += 1
+        return removed
+
+    def setup_firewall(self, interface: str = "wg0", listen_port: int = 51820):
+        """Stage firewall zone, forwardings, and WAN allow rule for WireGuard.
+
+        `listen_port` plumbs through to the WAN allow rule so a non-default
+        port (e.g. when the upstream home router can only forward 51821) is
+        reflected in the rule we install.
+
+        Bypasses `firewall.create_zone` / `firewall.add_forwarding` because
+        those helpers commit per-call, which would split this work across
+        four separate firewall reloads — and on the third reload the new wg
+        zone might be referenced by a forwarding before the zone itself is
+        committed, leaving the reload partial. Doing it as one staged batch
+        + a single `uci.apply` (in the caller's `safe_apply`) keeps it atomic.
+
+        Note: we don't call `firewall.reload()` here either — that helper
+        shells out via `file.exec` which the droplet-ai rpcd ACL deliberately
+        denies; safe_apply's apply triggers ucitrack -> firewall reload anyway.
+        """
+        # 1. wg zone — permissive in/out/fwd within the VPN, masquerade so
+        #    peers can reach upstream services that don't route the VPN subnet.
+        self._r.uci.add("firewall", "zone", {
+            "name": "wg",
+            "input": "ACCEPT",
+            "output": "ACCEPT",
+            "forward": "ACCEPT",
+            "network": interface,
+            "masq": "1",
+        })
+
+        # 2. Forwardings: wg -> lan (reach NAS, services), wg -> wan (internet).
+        self._r.uci.add("firewall", "forwarding", {"src": "wg", "dest": "lan"})
+        self._r.uci.add("firewall", "forwarding", {"src": "wg", "dest": "wan"})
+
+        # 3. Allow WireGuard listen_port through WAN ingress.
         self._r.uci.add("firewall", "rule", {
             "name": "Allow-WireGuard",
             "src": "wan",
             "proto": "udp",
-            "dest_port": "51820",
+            "dest_port": str(listen_port),
             "target": "ACCEPT",
             "enabled": "1",
         })
-        self._r.uci.commit("firewall")
-        self._r.firewall.reload()
+        # No commit here — safe_apply's uci.apply commits + reloads atomically.
 
 
 # ---------------------------------------------------------------------------

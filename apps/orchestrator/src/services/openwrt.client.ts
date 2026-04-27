@@ -389,6 +389,155 @@ export async function rebootRouter(): Promise<WriteResult> {
   return opFrom(res);
 }
 
+// --- VPN (Remote Access / WireGuard) ---
+//
+// Thin wrappers over the routing service's /vpn/* surface (Phase 1). Higher-
+// level orchestration (IP allocation, DB persistence, .conf rendering) lives
+// in services/vpn.service.ts so this client stays a flat HTTP client.
+
+export type VpnInterfaceInfo = {
+  interface: string;
+  public_key: string;
+  listen_port: number | null;
+  addresses: string[];
+};
+
+export type VpnPeerWire = {
+  section: string;
+  public_key: string;
+  allowed_ips: string[];
+  description: string;
+  endpoint_host: string;
+  persistent_keepalive: string;
+};
+
+export type VpnSetupResponse = VpnInterfaceInfo & {
+  status: "ok";
+  created: boolean;
+};
+
+export type VpnPeerCreateResponse = {
+  status: "ok";
+  interface: string;
+  public_key: string;
+  // ONE-SHOT — never persisted server-side. Caller must hand to user
+  // (rendered into a .conf / QR) and discard.
+  private_key: string;
+  allowed_ips: string[];
+  description: string;
+  persistent_keepalive: number;
+};
+
+export async function vpnSetup(opts?: {
+  interface?: string;
+  listenPort?: number;
+  address?: string;
+}): Promise<VpnSetupResponse> {
+  const body: Record<string, unknown> = {};
+  if (opts?.interface) body.interface = opts.interface;
+  if (opts?.listenPort) body.listen_port = opts.listenPort;
+  if (opts?.address) body.address = opts.address;
+  const res = await postJson("/vpn/setup", body, "VPN setup");
+  return res.json() as Promise<VpnSetupResponse>;
+}
+
+export async function vpnStatus(
+  iface: string = "wg0",
+): Promise<(VpnInterfaceInfo & { peer_count: number }) | null> {
+  try {
+    return await routingFetchJson<VpnInterfaceInfo & { peer_count: number }>(
+      `/vpn/status?interface=${encodeURIComponent(iface)}`,
+      { label: "VPN status" },
+    );
+  } catch (err) {
+    // 404 = interface not configured yet. Distinct from network errors which
+    // we want to bubble up so the caller can decide.
+    if (err instanceof RouterError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function listVpnPeers(
+  iface: string = "wg0",
+): Promise<VpnPeerWire[]> {
+  const data = await routingFetchJson<{ interface: string; peers: VpnPeerWire[] }>(
+    `/vpn/peers?interface=${encodeURIComponent(iface)}`,
+    { label: "VPN peers" },
+  );
+  return data.peers;
+}
+
+export async function createVpnPeer(opts: {
+  interface?: string;
+  description: string;
+  allowedIps: string[];
+  persistentKeepalive?: number;
+}): Promise<VpnPeerCreateResponse> {
+  const body: Record<string, unknown> = {
+    allowed_ips: opts.allowedIps,
+    description: opts.description,
+  };
+  if (opts.interface) body.interface = opts.interface;
+  if (opts.persistentKeepalive !== undefined) body.persistent_keepalive = opts.persistentKeepalive;
+  const res = await postJson("/vpn/peers", body, "VPN create peer");
+  return res.json() as Promise<VpnPeerCreateResponse>;
+}
+
+export async function deleteVpnPeer(opts: {
+  interface?: string;
+  publicKey: string;
+}): Promise<{ status: "ok"; interface: string; removed: number }> {
+  const body: Record<string, unknown> = { public_key: opts.publicKey };
+  if (opts.interface) body.interface = opts.interface;
+  const res = await routingFetch("/vpn/peers", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    label: "VPN delete peer",
+  });
+  return res.json() as Promise<{ status: "ok"; interface: string; removed: number }>;
+}
+
+// --- DDNS (DuckDNS) ---
+//
+// The token is write-only on this client too: the GET return value carries
+// `tokenSet: boolean` rather than the token itself, matching the routing
+// service contract. Dashboard renders a placeholder password input that
+// shows "stored" instead of dots when tokenSet is true.
+
+export type DuckDnsStatus =
+  | { configured: false }
+  | {
+      configured: true;
+      subdomain: string;
+      fullDomain: string;
+      enabled: boolean;
+      tokenSet: boolean;
+      lastUpdate?: string;
+    };
+
+export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
+  return routingFetchJson<DuckDnsStatus>("/ddns/duckdns", { label: "DuckDNS status" });
+}
+
+export async function setDuckDnsConfig(opts: {
+  subdomain: string;
+  token: string;
+  enabled?: boolean;
+}): Promise<DuckDnsStatus & { status: "ok" }> {
+  const res = await routingFetch("/ddns/duckdns", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      subdomain: opts.subdomain,
+      token: opts.token,
+      enabled: opts.enabled ?? true,
+    }),
+    label: "DuckDNS set",
+  });
+  return res.json() as Promise<DuckDnsStatus & { status: "ok" }>;
+}
+
 /** Fetch the state of a previously-started operation (WARP-40). */
 export async function fetchOperation(opId: string): Promise<{
   id: string;

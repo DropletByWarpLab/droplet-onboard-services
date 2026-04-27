@@ -88,6 +88,23 @@ const envSchema = z.object({
   // disabled" banner instead of spamming retries at a non-existent service.
   ROUTING_MODE: z.enum(["real", "mock", "disabled"]).default("real"),
 
+  // --- WireGuard / Remote Access ---
+  // Hostname or IP that peer .conf files use as their `Endpoint`. Should be
+  // reachable from outside the LAN — typically a DuckDNS subdomain (Phase 4)
+  // or your home router's public IP. For inside-LAN testing you can set this
+  // to the OpenWrt LAN IP (192.168.50.1). Empty default makes the orchestrator
+  // refuse to mint peers with a clear error rather than handing out unusable
+  // configs that point at "example.com" or similar.
+  WIREGUARD_ENDPOINT_HOST: z.string().default(""),
+  // VPN tunnel subnet. The server takes .1, peers get .2 through .254. Must
+  // not collide with the LAN (192.168.50.0/24) or cameras (192.168.100.0/24).
+  WIREGUARD_VPN_SUBNET: z.string().default("10.13.13.0/24"),
+  WIREGUARD_LISTEN_PORT: z.coerce.number().default(51820),
+  // CIDR + DNS server that the rendered peer .conf advertises to the client.
+  // Defaults match the OpenWrt LAN. Override if the LAN is reconfigured.
+  WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
+  WIREGUARD_DNS: z.string().default("192.168.50.1"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

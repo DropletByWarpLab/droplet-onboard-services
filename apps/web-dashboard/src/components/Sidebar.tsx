@@ -6,6 +6,7 @@ import {
   Calendar as CalendarIcon,
   Film,
   FolderOpen,
+  Globe,
   Home,
   Laptop,
   LayoutDashboard,
@@ -45,6 +46,7 @@ const secondaryNav: NavItem[] = [
   // and the LLM tool list_clips don't 404.
   { href: "/events", label: "Events", icon: Film },
   { href: "/network", label: "Network", icon: Network },
+  { href: "/remote-access", label: "Remote Access", icon: Globe },
   { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

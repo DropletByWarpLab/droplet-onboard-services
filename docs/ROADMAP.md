@@ -130,11 +130,26 @@ Status legend:
 
 ### M2.6 WireGuard remote access
 - **GTM scope:** Optional VPN for off-LAN access to the assistant and NAS.
-- **This repo's slice:** No WireGuard service present in `docker/docker-compose.yml` today. Likely lives in `openwrt/` as a package once implemented (OpenWrt has first-class WireGuard).
-- **Files involved:** `openwrt/files/etc/` (new wireguard config), `docker/docker-compose.yml` (possible new service), `apps/orchestrator/src/routes/network.ts` (add provisioning endpoint)
-- **Status:** `[ ]` Not started
-- **Blockers:** Architecture call: WireGuard on OpenWrt router side (preferred) vs. as a Docker sidecar.
-- **Next action:** ADR on placement; prototype in `openwrt/files/` first.
+- **This repo's slice:** WireGuard runs on the OpenWrt side (kernel module + uci config). Per-user peers are minted from the dashboard's "Remote Access" page; the orchestrator allocates IPs from `10.13.13.0/24`, calls the routing service to mint a keypair on the router, and renders the resulting `.conf` as a QR. DuckDNS is wired in for the dynamic hostname.
+- **Files involved:**
+  - `openwrt/build.sh` — `wireguard-tools kmod-wireguard luci-proto-wireguard ddns-scripts luci-app-ddns` baked into the image
+  - `openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json` — adds `uci.confirm`, `service.event`, and `uci.ddns` grants needed for safe-apply + reload nudge
+  - `services/routing/droplet_openwrt_sdk.py::VPNApi` — Python X25519 keypair gen, interface + peer + firewall provisioning (no shell-out — `file.exec` is denied by ACL)
+  - `services/routing/main.py` — `/vpn/setup`, `/vpn/status`, `/vpn/peers` (GET/POST/DELETE), `/ddns/duckdns` (GET/PUT)
+  - `services/routing/tests/test_vpn.py` (49 tests), `tests/test_ddns.py` (16 tests)
+  - `apps/orchestrator/prisma/schema.prisma` — `VpnPeer` model + migration `20260426140000_add_vpn_peer`
+  - `apps/orchestrator/src/services/vpn.service.ts` — IP allocator + `.conf` renderer
+  - `apps/orchestrator/src/routes/vpn.ts`, `routes/ddns.ts`
+  - `apps/orchestrator/src/__tests__/vpn.test.ts` (13 tests)
+  - `apps/web-dashboard/src/app/remote-access/page.tsx` — list + Add Device dialog (QR via `qrcode.react`) + DuckDNS card
+  - `apps/web-dashboard/src/components/Sidebar.tsx` — "Remote Access" nav entry (Globe icon)
+- **Status:** `[x]` Done — verified live on the lab Jetson + OpenWrt router (49+16+13 tests pass; full setup + peer mint + nft rules + .conf rendering exercised end-to-end).
+- **Architectural decisions made along the way:**
+  1. **WireGuard on OpenWrt, not Docker.** Aligns with the SDK's existing ubus-based control plane and gives kernel-speed encryption.
+  2. **Server-side keypair generation** (priv returned once in the API response). Client-side keygen would require a multi-step pairing flow; not worth the UX cost for v1.
+  3. **DuckDNS via the generic ddns-scripts template** rather than a custom integration. It's free, works out of the box, and the user provides their own subdomain + token.
+- **Bugs fixed in passing (affect other safe-apply callers too):** `uci.confirm` was missing from the rpcd ACL — every endpoint using `safe_apply` (camera setup, wireless changes) was getting "Access denied" at the confirm step and silently relying on the rollback-window buffer. Adding `confirm` to the ACL fixes them all.
+- **Open follow-ups (not blocking):** reconciliation of router-side peers vs DB on startup; live `wg show` last-handshake info per peer in the dashboard; surface a hint to set `WIREGUARD_ENDPOINT_HOST=<duckdns>` in `.env` automatically when DuckDNS is configured.
 
 ### M2.7 Prompt-injection hardening
 - **GTM scope:** Input sanitization, output schema validation, rate limiting on sensitive tools.
