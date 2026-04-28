@@ -249,9 +249,10 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(res.body.error).toBe("Invalid request");
   });
 
-  // RBAC — same gate as /api/llm/agent. Without this, any authenticated
-  // session could drive write tools via curl. Will become reachable from
-  // the dashboard when WARP-104 flips useChat to /api/llm/chat.
+  // RBAC — write tools must not surface for unprivileged sessions.
+  // Without this, any authenticated session could drive write tools
+  // via curl. WARP-104 flipped useChat to /api/llm/chat so the
+  // dashboard reaches this same gate.
 
   it("filters write tools out of the advertised tool list for unprivileged roles", async () => {
     mockChat.mockImplementationOnce(async (req: { tools?: { function: { name: string } }[] }) => {
