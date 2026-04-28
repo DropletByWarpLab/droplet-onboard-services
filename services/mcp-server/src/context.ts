@@ -1,5 +1,11 @@
 import type { PrismaClient } from "@prisma/client";
-import type { ToolContext, MatterController, HttpClient, Role } from "@droplet/tools-core";
+import type { ToolContext, MatterController, HttpClient } from "@droplet/tools-core";
+// `Claims` is canonically defined in `auth/jwt.ts` (the only place that
+// produces them, by verifying a Bearer JWT). Re-export it from here so
+// the existing `import { type Claims } from "./context.js"` callers
+// (server.ts, transports/*) keep working without duplicating the type.
+import type { Claims } from "./auth/jwt.js";
+export type { Claims } from "./auth/jwt.js";
 
 export interface ContextDeps {
   prisma: PrismaClient;
@@ -11,11 +17,6 @@ export interface ContextDeps {
     | "fileIndexer"
     | "nextcloud"
   ) => HttpClient;
-}
-
-export interface Claims {
-  sub?: string;
-  role?: Role;
 }
 
 export function buildContext(
