@@ -59,26 +59,49 @@ const agentRequestSchema = z.object({
 // the LLM is driven by user-controlled prompt text and will happily call
 // them on request.
 //
-// TODO(WARP-102 follow-up): The canonical source for the write flag is now
-// each tool's `requiresWrite` boolean in `@droplet/tools-core`. We could
-// derive WRITE_TOOLS from `Array.from(TOOLS.values()).filter(t => t.requiresWrite)`
-// to keep them in lockstep, but doing that here would change the role-gate
-// behaviour mid-PR (we'd suddenly start gating tools we don't gate today).
-// Refactoring this set is intentionally deferred to a follow-up so the
-// MCP-canonical-name list grows in one place at a time. Both the legacy
-// names (`block_device`, `unblock_device`) and the canonical names
-// (`block_network_device`, `unblock_network_device`) are kept until that
-// follow-up lands.
+// TODO(WARP-104): The canonical source for the write flag is each tool's
+// `requiresWrite` boolean in `@droplet/tools-core`. Deriving WRITE_TOOLS
+// from `Array.from(TOOLS.values()).filter(t => t.requiresWrite)` is the
+// long-term plan, but for now we keep an explicit set so role-gate
+// behavior is reviewable in one place. Both legacy names (`block_device`,
+// `unblock_device`) and canonical names (`block_network_device`,
+// `unblock_network_device`) are kept here so a client that hasn't
+// migrated still hits the gate.
+//
+// WARP-102 reviewer follow-up: added the 9 newly-write-flagged tools
+// (network/switch/Matter mutations) below. Without these the MCP path
+// would advertise destructive tools to family/guest users since the
+// route-layer RBAC checks this set, not per-tool flags.
 const WRITE_TOOLS = new Set([
+  // Network firewall / device control
   "block_device",
   "block_network_device",
   "unblock_device",
   "unblock_network_device",
+  "add_port_forward",
+  // WiFi config — SSID rename, channel change. Both go through 202
+  // confirmation in the routing service.
+  "set_wifi_ssid",
+  "set_wifi_channel",
+  // Camera discovery — accepting a discovered camera commissions it
+  // onto the LAN; scanning probes the network actively.
   "accept_discovered_camera",
   "scan_for_cameras",
-  // File mutation tools (from the file write/search PR). Write-gated because
-  // the LLM can be steered into creating/deleting/moving user files via
-  // a malicious prompt — only confirmed chat flows should flip the gate.
+  // Managed switch — VLAN reassignment, PoE toggle, WAN detection (which
+  // reconfigures the switch's WAN port), and the one-click camera setup
+  // flow which combines VLAN + PoE + uplink config.
+  "set_port_vlan",
+  "set_port_poe",
+  "detect_wan_port",
+  "setup_camera_ports",
+  // Smart home / Matter — pairing a new device, sending control commands.
+  // commission_device additionally requires user confirmation in the
+  // dashboard (Tier 2 modal); control_device confirmation depends on
+  // the command class (locks/extreme settings escalate per matter.service).
+  "commission_device",
+  "control_device",
+  // File mutation tools. Write-gated because the LLM can be steered into
+  // creating/deleting/moving user files via a malicious prompt.
   "write_file",
   "delete_file",
   "create_directory",
