@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import type { HttpClient } from "@droplet/tools-core";
 import { createServer } from "./server.js";
 import { startStdio } from "./transports/stdio.js";
+import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
 
 function parseTransport(argv: string[]): "stdio" | "http" {
@@ -113,7 +114,6 @@ async function main(): Promise<void> {
     },
     httpFactory: createHttpClient,
   };
-  const server = createServer(deps);
 
   // Disconnect cleanly when the parent SIGTERMs us. Without this the
   // PrismaClient connection pool would leak across the stdio child boundary.
@@ -125,10 +125,29 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
 
   if (transport === "stdio") {
+    // stdio: one server per process, no claims (the orchestrator is the
+    // trusted principal). MCP_TRUSTED=1 is the explicit signal the
+    // orchestrator sets in the spawn env, but functionally we just don't
+    // gate auth on this transport.
+    const server = createServer(deps);
     await startStdio(server);
   } else {
-    console.error("HTTP transport not yet implemented (WARP-103)");
-    process.exit(2);
+    // http: per-request server with JWT-derived claims. JWT_SECRET is
+    // required — without it we can't verify Bearer tokens, and starting
+    // the listener anyway would silently accept everything if the verify
+    // function ever changed.
+    const port = Number(process.env.MCP_PORT ?? 9090);
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) {
+      console.error("JWT_SECRET is required for the http transport");
+      process.exit(2);
+    }
+    startHttp({
+      port,
+      jwtSecret,
+      buildServer: (claims) => createServer(deps, claims),
+    });
+    console.error(`mcp-server listening on :${port} (http, JWT-auth)`);
   }
 }
 
