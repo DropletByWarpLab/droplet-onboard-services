@@ -52,12 +52,14 @@ const STACK_UP = await (async (): Promise<boolean> => {
 })();
 
 function jwtFor(role: "admin" | "family"): string {
-  // Admin-issued JWT shape, mirroring how a real client obtains one via
-  // POST /api/auth/login on the orchestrator. Per spec §13 note 2, v1
-  // does not provide a service-account token endpoint — a long-lived
-  // admin-issued JWT is the documented path, so this `jwt.sign` call is
-  // an analogue of "operator runs login, copies the token".
-  return jwt.sign({ sub: `u-${role}`, role }, SECRET, { expiresIn: "5m" });
+  // Admin-issued access-token shape, mirroring how a real client obtains
+  // one via POST /api/auth/login on the orchestrator. Per spec §13 note
+  // 2, v1 does not provide a service-account token endpoint — a long-
+  // lived admin-issued access JWT is the documented path. The `type:
+  // "access"` claim mirrors apps/orchestrator/src/services/jwt.service.ts;
+  // mcp-server's verifyJwt rejects anything else (WARP-103 reviewer
+  // follow-up).
+  return jwt.sign({ type: "access", sub: `u-${role}`, role }, SECRET, { expiresIn: "5m" });
 }
 
 async function connect(role: "admin" | "family"): Promise<Client> {

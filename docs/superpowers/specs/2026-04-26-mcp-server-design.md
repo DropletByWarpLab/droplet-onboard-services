@@ -270,9 +270,16 @@ Note the asymmetry: `confirmation_required` is **not** an MCP hard error (`isErr
 
 Streamable-HTTP transport requires `Authorization: Bearer <jwt>`. JWT is verified against `JWT_SECRET` (same secret as the orchestrator). The `role` and `sub` claims populate the `ToolContext`.
 
-stdio transport bypasses auth — the orchestrator process is the trusted principal. The orchestrator sets a sentinel env var (`MCP_TRUSTED=1`) in the spawn so the server knows to skip JWT verification on this transport.
+The mcp-server's `verifyJwt` enforces the orchestrator's token-type contract from `apps/orchestrator/src/services/jwt.service.ts`:
+- `type` claim must equal `"access"`. Refresh tokens (`type: "refresh"`, 7-day lifetime, signed with the same `JWT_SECRET`) MUST be rejected at the auth boundary so they cannot be presented as Bearer tokens to the MCP HTTP transport for their full lifetime. Tokens with a missing or non-string `type` claim are also rejected.
+- `sub` claim must be a non-empty string. An empty/missing `sub` would otherwise bind a `ToolContext` with `userId: undefined`, which is the stdio-only shape and would silently grant the in-proc trust path.
+- `role` claim, when present, must be one of the canonical four (`owner | admin | family | guest`). Non-canonical role strings (e.g. `"Admin"`, `"viewer"`, `""`, non-strings) are rejected hard. A missing or `null` `role` claim normalizes to `undefined`, which the RBAC helpers treat as least-privilege on the HTTP path (read-only).
 
-For inference-engine, the orchestrator gains a `/api/auth/service-tokens` endpoint **in a follow-up ticket** (not WARP-103 — out of scope; v1 uses an admin-issued long-lived JWT obtained manually via `/api/auth/login`).
+Trust is structural, not value-based: the stdio-trusted-principal mode is selected ONLY by the absence of any `Claims` argument to `createServer(deps, claims?)`. The HTTP transport always synthesizes a `Claims` object from a verified JWT, so an HTTP request can never reach the trusted code path regardless of role value.
+
+stdio transport bypasses JWT verification entirely — the orchestrator process is the trusted principal. The orchestrator sets a sentinel env var (`MCP_TRUSTED=1`) in the spawn for clarity / future auditing, but functional trust is selected by transport, not env.
+
+For inference-engine, the orchestrator gains a `/api/auth/service-tokens` endpoint **in a follow-up ticket** (not WARP-103 — out of scope; v1 uses an admin-issued long-lived `type: "access"` JWT obtained manually via `/api/auth/login`).
 
 ## 8. Orchestrator agent rewire (WARP-101)
 
