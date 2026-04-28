@@ -35,7 +35,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // someone else's event by id.
   const existing = (await ctx.prisma.calendarEvent.findUnique({
     where: { id },
-  })) as unknown as { userId: string; source: string | null } | null;
+  })) as unknown as
+    | { userId: string; source: string | null; startsAt: Date; endsAt: Date }
+    | null;
   if (!existing) return err("NOT_FOUND", "event_not_found");
   if (existing.userId !== ctx.userId) return err("FORBIDDEN", "forbidden");
   if (existing.source && existing.source !== "local") {
@@ -43,6 +45,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       "EXTERNAL_SOURCE",
       "cannot edit events from an external sync source — make a local override instead",
     );
+  }
+
+  // Range validation against the post-patch state. The legacy
+  // calendar.service patched both fields then checked endsAt > startsAt;
+  // we replicate that here so a partial update (e.g. only ends_at) can't
+  // create a backwards or zero-length range.
+  const effectiveStart = startsAt ?? existing.startsAt;
+  const effectiveEnd = endsAt ?? existing.endsAt;
+  if (effectiveEnd.getTime() <= effectiveStart.getTime()) {
+    return err("INVALID_RANGE", "ends_at must be after starts_at");
   }
 
   const data: Record<string, unknown> = {};

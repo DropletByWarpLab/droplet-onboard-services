@@ -83,12 +83,20 @@ describe("stdio roundtrip", () => {
 
     // Spot-check one tool per WARP-102 domain so the stdio roundtrip
     // confirms the port actually reached the registry-over-the-wire.
+    // Reviewer follow-up: include the three highest-risk destructive
+    // ports (`setup_camera_ports`, `accept_discovered_camera`,
+    // `add_port_forward`) so the live MCP roundtrip exercises high-risk
+    // paths, not just one read tool per domain.
     for (const name of [
       "set_wifi_ssid", // network write
+      "add_port_forward", // network write — port-forward rule (high-risk)
       "write_file", // files write
       "control_device", // smart-home write
+      "commission_device", // smart-home write+confirm (Matter pairing)
       "list_cameras", // cameras read
+      "accept_discovered_camera", // cameras write — commissions onto LAN (high-risk)
       "set_port_poe", // switch write
+      "setup_camera_ports", // switch write+confirm — VLAN+PoE+uplink (high-risk)
       "create_event", // calendar
       "create_reminder", // reminders
       "send_notification", // notifications

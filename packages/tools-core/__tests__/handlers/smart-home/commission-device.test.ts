@@ -19,8 +19,12 @@ function ctxWith(commission: ReturnType<typeof vi.fn>): ToolContext {
 }
 
 describe("commission_device", () => {
-  it("requiresWrite is true", () => {
+  it("flags write+confirmation", () => {
+    // Pairing is a meaningful state change; the dashboard's Tier 2 modal
+    // is the trust anchor for human approval per spec §7. Reviewer-flagged
+    // follow-up from WARP-102.
     expect(commissionDevice.requiresWrite).toBe(true);
+    expect(commissionDevice.requiresConfirmation).toBe(true);
   });
 
   it("rejects missing pairing_code", async () => {
