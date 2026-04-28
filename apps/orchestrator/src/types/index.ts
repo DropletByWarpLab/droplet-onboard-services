@@ -39,11 +39,10 @@ export interface ChatRequest {
   provider?: string;
   tools?: ToolDefinition[];
   tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
-  // Note: `execute_tools` was removed in WARP-101. The orchestrator now
-  // owns the agent loop end-to-end (MCP-backed) and the ai-gateway is a
-  // pure model proxy — see services/ai-gateway/router.py and the spec
-  // §8 (orchestrator agent rewire). Re-introducing this flag would
-  // resurrect the duplicate tool-dispatch path the spec deletes.
+  // The ai-gateway is a pure provider router as of WARP-104 — it never
+  // dispatches tools itself. The orchestrator owns the agent loop
+  // end-to-end (MCP-backed); see services/ai-gateway/router.py and
+  // spec §8 (orchestrator agent rewire) / §9 (ai-gateway slimming).
 }
 
 export interface ChatChoice {

@@ -1,62 +1,79 @@
 # LLM agent and tool registry
 
-The orchestrator exposes a **tool-aware agent endpoint** the local LLM uses to
-read and control the system. This is the execution layer behind "scan for
-cameras and add the new one," "block the iPad on the guest VLAN," and similar
+The orchestrator runs a **tool-aware agent loop** the local LLM uses to read
+and control the system. This is the execution layer behind "scan for cameras
+and add the new one," "block the iPad on the guest VLAN," and similar
 conversational workflows.
+
+> **Updated for WARP-100..104.** Tool dispatch lives in
+> [`services/mcp-server/`](../services/mcp-server/) with handlers in
+> [`packages/tools-core/`](../packages/tools-core/). The orchestrator drives
+> the loop over MCP (stdio child process). External MCP clients
+> (inference-engine, Claude Desktop, …) reach the same server over
+> streamable HTTP with JWT auth and per-tool RBAC. The AI Gateway is a
+> pure provider router and does NOT dispatch tools.
 
 ## Architecture
 
 ```
 dashboard / curl
        │
-       ▼ POST /api/llm/agent  { model, messages, max_iter?, allowed_tools? }
-┌──────────────────────────────────────────────────────────────┐
-│ apps/orchestrator/src/routes/llm.ts                          │
-│   resolveNcToken(req) → ToolContext.ncToken                  │
-│   runAgent()                                                  │
-│     ┌───────── loop up to max_iter (default 5, hard cap 10) ─┐
-│     │                                                         │
-│     │  ai-gateway /ai/chat   (execute_tools: false)           │
-│     │     ↓                                                   │
-│     │  Ollama  qwen2.5:3b-instruct  (tool-calling model)      │
-│     │     ↓                                                   │
-│     │  tool_calls[] ── dispatchTool() → TOOL_REGISTRY         │
-│     │                  ↓                                      │
-│     │     direct service-layer call (no HTTP round-trip)      │
-│     │        openwrt.client   nextcloud.client                │
-│     │        frigate.client   prisma (SQL)                    │
-│     │     ↓                                                   │
-│     │  tool-role messages appended to history                 │
-│     │     ↓                                                   │
-│     └── re-prompt until model emits final text ───────────────┘
-│                           │
-│                           ▼
-│   { message, trace[], iterations, stop_reason }              │
-└──────────────────────────────────────────────────────────────┘
+       ▼ POST /api/llm/chat  { model, messages, max_iter?, allowed_tools?, stream? }
+┌───────────────────────────────────────────────────────────────────┐
+│ apps/orchestrator/src/routes/llm.ts                               │
+│   narrowAllowedToolsForRole(role)  → filter writes for non-admin  │
+│   runAgent(deps, req)                                             │
+│     ┌─── loop up to max_iter (default 5, hard cap 10) ───────────┐│
+│     │                                                             ││
+│     │  ai-gateway /ai/chat       (provider router only)           ││
+│     │      ↓                                                      ││
+│     │  Ollama qwen2.5:3b-instruct (or any tool-calling model)     ││
+│     │      ↓                                                      ││
+│     │  tool_calls[]                                               ││
+│     │      ↓                                                      ││
+│     │  mcpClient.callTool()  ──── stdio ────▶ services/mcp-server ││
+│     │                                          ↓                  ││
+│     │                                  packages/tools-core handlers
+│     │                                  (Prisma + service modules) ││
+│     │      ↓                                                      ││
+│     │  tool-role messages appended to history                     ││
+│     │      ↓                                                      ││
+│     └── re-prompt until model emits final text ──────────────────┘│
+│                              │                                    │
+│                              ▼                                    │
+│   Streaming SSE: content_delta / tool_call / tool_result / done   │
+│   Non-streaming: { message, trace[], iterations, stop_reason }    │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-Key decision: the orchestrator owns tool dispatch, not ai-gateway. ai-gateway
-has its own in-process ReAct loop that HTTP-calls the orchestrator's REST
-endpoints, but that loop can't attach the caller's Nextcloud session cookie,
-so file-scoped tools come back `401`. The orchestrator has direct access to
-service modules, the Prisma client, and the session token — so it does the
-loop, and opts out of ai-gateway's loop with `execute_tools: false`.
+Key decisions:
+
+- **The orchestrator owns the agent loop.** ai-gateway forwards `tools[]`
+  to the model and returns the raw response untouched. Spec §8 / §9.
+- **The MCP server owns tool dispatch.** Handlers are pure functions of
+  `(args, ToolContext)` and live in `packages/tools-core/`. The same
+  registry serves the in-process orchestrator child and external MCP
+  clients (HTTP transport with JWT + per-tool RBAC).
 
 ## Endpoints
 
 ### `GET /api/llm/tools`
 
-Returns the current tool registry with JSON-Schema parameters. Useful for
-the dashboard's "capabilities" pane and for debugging schemas.
+Proxies `mcpClient.listTools()` so the wire shape matches the MCP
+`tools/list` JSON-RPC response. Useful for the dashboard's "capabilities"
+pane and for debugging schemas.
 
 ```json
 { "tools": [ { "name": "list_cameras", "description": "...", "parameters": {…} }, … ] }
 ```
 
-### `POST /api/llm/agent`
+### `POST /api/llm/chat`
 
-Runs the agent loop with the authenticated user's context.
+Drives the orchestrator agent loop with the authenticated user's context.
+When `stream=true`, the response is SSE with the four event types defined
+in `apps/orchestrator/src/types/sse-events.ts`
+(`content_delta`, `tool_call`, `tool_result`, `done`). Non-streaming
+returns the legacy `AgentResult` shape.
 
 Request:
 ```json
@@ -65,13 +82,14 @@ Request:
   "messages": [
     { "role": "user", "content": "How many cameras are online?" }
   ],
-  "max_iter": 5,                       // optional, default 5, max 10
-  "temperature": 0.7,                  // optional
-  "allowed_tools": ["list_cameras"]    // optional — narrow the surface
+  "stream": false,                      // optional, default false
+  "max_iter": 5,                        // optional, default 5, max 10
+  "temperature": 0.7,                   // optional
+  "allowed_tools": ["list_cameras"]     // optional — narrow the surface
 }
 ```
 
-Response:
+Non-streaming response:
 ```json
 {
   "message":     { "role": "assistant", "content": "There are 0 cameras configured." },
@@ -86,29 +104,19 @@ Response:
 - `iteration_limit` — hit `max_iter` without a final answer
 - `error` — ai-gateway call failed
 
+RBAC: write tools (anything with `requiresWrite: true` in
+`packages/tools-core/`) require an `owner` or `admin` session.
+Unprivileged callers get the read-only subset of `tools/list` and any
+spoofed `tool_calls` for write tools in replayed history return 403.
+
 ## Tool registry
 
-Defined in `apps/orchestrator/src/services/llm-tools.ts`. 15 tools today;
-every entry wraps a service-layer function (no HTTP round-trip). Adding a
-tool is one file.
-
-| Category   | Tool                          | What it does |
-|------------|-------------------------------|--------------|
-| Network    | `list_network_devices`        | DB-backed inventory: MAC, IP, hostname, vendor, last-seen, blocked state |
-| Network    | `list_dhcp_leases`            | Live DHCP table from the OpenWrt router |
-| Network    | `get_wifi_info`               | SSID, channel, encryption, associated clients |
-| Network    | `block_device`                | Add MAC-filter rule on the router + mark `isBlocked` in DB |
-| Network    | `unblock_device`              | Inverse |
-| Files      | `list_files`                  | List a Nextcloud folder (auth: caller's NC session) |
-| Files      | `search_files`                | Filename substring search across the caller's drive |
-| Files      | `list_recent_files`           | 30 most-recently-modified files |
-| Cameras    | `list_cameras`                | Configured cameras from Frigate |
-| Cameras    | `list_discovered_cameras`     | ONVIF/RTSP-discovered cameras pending acceptance |
-| Cameras    | `list_recent_camera_events`   | Frigate events (motion/person/…) |
-| Cameras    | `scan_for_cameras`            | Trigger camera-discovery scan on the cameras VLAN |
-| Cameras    | `accept_discovered_camera`    | Flip `enabled=true` on a discovered camera in Frigate |
-| System     | `get_system_health`           | Rolled-up `/orchestrator/health` aggregate |
-| System     | `list_drives`                 | Mounted data drives via the host device-bridge |
+The canonical registry lives in
+[`packages/tools-core/src/registry.ts`](../packages/tools-core/src/registry.ts).
+See [`packages/tools-core/INVENTORY.md`](../packages/tools-core/INVENTORY.md)
+for the authoritative list of tools, domains, and the `requiresWrite` /
+`requiresConfirmation` flags. Every handler wraps a service-layer function
+(no HTTP round-trip when invoked from the orchestrator's stdio child).
 
 ### Tool context
 
@@ -116,53 +124,42 @@ Every handler receives a `ToolContext`:
 
 ```ts
 interface ToolContext {
-  prisma:  PrismaClient;
+  prisma: PrismaClient;
   userId?: string;   // caller's username (from auth cookie)
   ncToken?: string;  // caller's Nextcloud session token
+  // …plus injected service handles per spec §5.4.
 }
 ```
 
-File tools require `ncToken`; they return `{ error: "auth_required" }` when
+File tools require `ncToken`; they return an `auth_required` error when
 it's missing. Network / camera / system tools run without it.
 
 ### Adding a tool
 
-1. Open `apps/orchestrator/src/services/llm-tools.ts` and add a `Tool` entry
-   to the right section.
-2. Write `parameters` as a JSON-Schema object — this is forwarded to the
-   model unchanged (OpenAI function-calling shape).
-3. Implement `handler(args, ctx)` returning JSON-serialisable data. Keep
-   responses compact — every tool result burns context on the next turn.
-4. Append the entry to the `TOOL_REGISTRY` array at the bottom.
-5. Ship. No model retrain, no separate deployment; ai-gateway picks up the
-   new tool on the next `/ai/chat` call.
+1. Add a handler under
+   `packages/tools-core/src/handlers/<domain>/<name>.ts`, exporting a
+   `Tool` with `name`, `description`, JSON-Schema `inputSchema`,
+   `requiresWrite`, `requiresConfirmation`, and the `handler(args, ctx)`
+   function.
+2. Register it in `packages/tools-core/src/registry.ts`.
+3. Add a unit test under
+   `packages/tools-core/src/__tests__/handlers/<domain>/`.
+4. The MCP server picks it up automatically; the orchestrator's
+   `WRITE_TOOLS` set is derived from `requiresWrite` so RBAC is
+   automatic.
 
 ### What's intentionally NOT in the registry
 
-Destructive operations (delete camera, remove user, reset device, drop
-database table). Add these with explicit audit-log and a
-`confirmation_required: true` gate; do not extend the registry blindly.
-
-## How ai-gateway's `execute_tools` flag works
-
-`services/ai-gateway/schemas.py` adds an `execute_tools: bool = True` field
-on `ChatRequest`. When true (default, preserves existing behaviour), the
-gateway runs its own ReAct loop. When false, it forwards `tools[]` to the
-model, returns the raw response (tool_calls included), and lets the caller
-dispatch.
-
-The orchestrator's agent endpoint sets `execute_tools: false`. Plain
-`/api/llm/chat` (the dashboard's streaming chat path) doesn't touch this
-field and gets the default behaviour, so existing dashboard chat continues
-to work unchanged.
+Destructive operations beyond the per-tool `requiresConfirmation` gate
+(factory reset, drop database table, raw SQL). Add these only with an
+explicit audit-log entry; do not extend the registry blindly.
 
 ## Testing
 
-Hit it directly from the Jetson (session cookie required for any non-
-`/health` orchestrator route):
+Hit it directly (session cookie required for any non-`/health`
+orchestrator route):
 
 ```bash
-cd /home/droplet/Documents/droplet-pi-platform
 PW=$(grep '^NEXTCLOUD_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 
 curl -sk -c /tmp/cj.txt -X POST https://127.0.0.1/api/auth/login \
@@ -171,7 +168,7 @@ curl -sk -c /tmp/cj.txt -X POST https://127.0.0.1/api/auth/login \
 
 curl -sk -b /tmp/cj.txt https://127.0.0.1/api/llm/tools | jq '.tools[].name'
 
-curl -sk -b /tmp/cj.txt -X POST https://127.0.0.1/api/llm/agent \
+curl -sk -b /tmp/cj.txt -X POST https://127.0.0.1/api/llm/chat \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen2.5:3b-instruct","messages":[{"role":"user","content":"How many cameras are online?"}]}' \
   | jq '{stop: .stop_reason, trace: [.trace[] | {tool, result}], final: .message.content}'

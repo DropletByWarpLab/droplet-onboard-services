@@ -102,10 +102,9 @@ When the LLM calls a Tier 2 tool, it returns `{"status": "confirmation_required"
 ```
 services/ai-gateway/
 ├── main.py              # FastAPI app with LiteLLM integration
+├── router.py            # Provider router (forwards tools[] verbatim — no dispatch)
 ├── grpc_server.py       # gRPC interface for orchestrator
-├── tools/
-│   ├── definitions.py   # Tool schemas (OpenAI function-calling format)
-│   └── executor.py      # Tool dispatch → orchestrator HTTP calls
+├── schemas.py           # Pydantic request/response models (incl. ToolDefinition for OpenAI passthrough)
 ├── Dockerfile
 ├── requirements.txt
 └── TESTING.md           # Test procedures
@@ -125,33 +124,14 @@ services/ai-gateway/
 
 ## Adding a New Tool
 
-1. **Define the schema** in `tools/definitions.py`:
-   ```python
-   ToolDefinition(
-       function=ToolFunction(
-           name="my_new_tool",
-           description="What this tool does.",
-           parameters={
-               "type": "object",
-               "properties": {
-                   "param1": {"type": "string", "description": "..."},
-               },
-               "required": ["param1"],
-           },
-       )
-   ),
-   ```
-
-2. **Add the handler** in `tools/executor.py`:
-   ```python
-   async def _my_new_tool(args: dict) -> dict:
-       client = _get_client()
-       resp = await client.get("/api/my-endpoint")
-       resp.raise_for_status()
-       return resp.json()
-   ```
-
-3. **Register** in the `TOOL_HANDLERS` dict in `executor.py`.
+LLM-callable tools live in [`packages/tools-core/`](../../packages/tools-core/),
+not in this service. Add a handler under
+`packages/tools-core/src/handlers/<domain>/`, register it in
+`packages/tools-core/src/registry.ts`, set `requiresWrite` and
+`requiresConfirmation`, and add a unit test. The MCP server
+(`services/mcp-server/`) picks it up automatically and the orchestrator's
+agent loop will dispatch it. See the "LLM tool calling" section in the
+repo root [CLAUDE.md](../../CLAUDE.md) for the full walkthrough.
 
 ## Running Locally
 
