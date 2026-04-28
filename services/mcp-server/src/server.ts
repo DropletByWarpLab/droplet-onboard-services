@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { TOOLS, type Tool, type ToolResult } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
+import { canCallTool, filterToolsForRole } from "./rbac.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
@@ -15,8 +16,22 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
     },
   });
 
+  // Trust is derived from transport selection, not from the role value.
+  // `claims === undefined` ONLY happens on the stdio in-proc path — the
+  // orchestrator agent spawning the mcp-server child does not pass any
+  // claims. The HTTP transport always synthesizes a `Claims` object from
+  // the verified JWT (even if `role` is undefined inside it), so an HTTP
+  // request can never set `trustedPrincipal: true`.
+  const trustedPrincipal = claims === undefined;
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = Array.from(TOOLS.values()).map((t) => ({
+    // Per spec §6.3 + §12 (WARP-103): tools/list is filtered by the
+    // caller's role. Trusted principal (stdio in-proc agent) sees every
+    // tool. owner/admin see every tool. family/guest (and any HTTP request
+    // with a missing role) see read-only tools.
+    const tools = filterToolsForRole(TOOLS.values(), claims?.role, {
+      trustedPrincipal,
+    }).map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
@@ -34,6 +49,27 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
         isError: true,
       };
     }
+
+    // Re-check on dispatch — tools/list cache could be stale, or a client
+    // could try to call a write tool by name without listing it first.
+    if (!canCallTool(tool, claims?.role, { trustedPrincipal })) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "forbidden_tool_for_role",
+                message: `role '${claims?.role}' may not call '${tool.name}'`,
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
     const ctx = buildContext(deps, claims, extra.signal);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     let result: ToolResult;
