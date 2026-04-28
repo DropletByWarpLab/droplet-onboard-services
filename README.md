@@ -153,8 +153,11 @@ edge-platform/
 ├── apps/
 │   ├── orchestrator/        REST API (Express 4.19 + TypeScript 5.4 + Prisma 5.14)
 │   └── web-dashboard/       Admin UI (Next.js 14.2 + React 18.3 + Tailwind CSS 3.4)
+├── packages/
+│   └── tools-core/          @droplet/tools-core — canonical LLM tool registry (TypeScript + JSON-Schema)
 ├── services/
-│   ├── ai-gateway/          AI inference router (FastAPI 0.110 + LiteLLM 1.30 + Python 3.12)
+│   ├── ai-gateway/          AI provider router (FastAPI 0.110 + LiteLLM 1.30 + Python 3.12)
+│   ├── mcp-server/          @droplet/mcp-server — MCP tool surface (stdio + streamable-HTTP, TypeScript)
 │   ├── camera-discovery/    ONVIF/RTSP camera auto-discovery (FastAPI + Python 3.12)
 │   ├── file-indexer/        File indexer + embedder (watchdog 4.0 + paho-mqtt 2.0 + Python 3.12)
 │   ├── routing/             OpenWrt router control (FastAPI + ubus JSON-RPC)
@@ -170,32 +173,33 @@ edge-platform/
 ## Architecture
 
 ```
-Browser / Mobile App
-        │
-        ▼
-   ┌─────────┐
+Browser / Mobile App                     External MCP clients
+        │                                (inference-engine, Claude Desktop, …)
+        ▼                                          │
+   ┌─────────┐                                     │
    │  Nginx   │  :80  — reverse proxy (nginx:alpine)
-   └────┬─────┘
-        │
-   ┌────┼─────────────────────────────────┐
-   │    │          Docker Compose          │
-   │    ▼                                 │
-   │  ┌──────────────────┐               │
-   │  │  Web Dashboard    │  :3001        │  Next.js 14.2
-   │  └──────────────────┘               │
-   │  ┌──────────────────┐               │
-   │  │  Orchestrator     │  :3000        │  Express 4.19 + Prisma 5.14
-   │  └────────┬─────────┘               │
-   │           │                          │
-   │  ┌────────┼──────────────┐          │
-   │  │  ┌───────────────┐   │           │
+   └────┬─────┘                                    │
+        │                                          │
+   ┌────┼──────────────────────────────────────────┼─────┐
+   │    │                  Docker Compose          │     │
+   │    ▼                                          ▼     │
+   │  ┌──────────────────┐         ┌──────────────────┐ │
+   │  │  Web Dashboard    │ :3001   │  MCP Server       │ :9090
+   │  └──────────────────┘         │  (HTTP + JWT/RBAC)│ │
+   │           │                    └────────┬─────────┘ │
+   │  ┌────────▼─────────┐                  │           │
+   │  │  Orchestrator     │ :3000  stdio────┘           │  agent loop
+   │  └────────┬─────────┘   (in-process child)         │  uses MCP
+   │           │                                         │
+   │  ┌────────┼──────────────┐                          │
+   │  │  ┌───────────────┐   │                           │
    │  │  │  AI Gateway    │  :8000       │  FastAPI 0.110 + LiteLLM 1.30
-   │  │  └───────────────┘   │           │
+   │  │  └───────────────┘   │           │  (provider router only — no tool dispatch)
    │  │  ┌───────────────┐   │           │
    │  │  │  Nextcloud     │  :8080       │  nextcloud:29-apache
    │  │  └───────────────┘   │           │
    │  │  ┌───────────────┐   │           │
-   │  │  │  File Sync     │  (daemon)    │  watchdog 4.0 + paho-mqtt 2.0
+   │  │  │  File Indexer  │  (daemon)    │  watchdog 4.0 + paho-mqtt 2.0
    │  │  └───────────────┘   │           │
    │  └──────────────────────┘           │
    │                                     │
@@ -205,6 +209,12 @@ Browser / Mobile App
         ▼  (LAN or PCIe)
    inference-engine   — Ollama :11434
 ```
+
+LLM tool dispatch flows through `@droplet/mcp-server` — the orchestrator
+agent loop talks to it over stdio (in-process child), and external MCP
+clients reach the same server over HTTP with JWT + per-tool RBAC.
+Handlers live in `packages/tools-core/`. The AI Gateway is a thin
+provider router and never executes tools.
 
 ---
 
@@ -292,7 +302,7 @@ Next.js 14 App Router admin UI. Requires authentication for all routes; redirect
 
 ### AI Gateway (`services/ai-gateway/`)
 
-FastAPI service that unifies local and cloud AI inference behind a single API. The orchestrator proxies all LLM requests here.
+FastAPI service that unifies local and cloud AI inference behind a single API. The orchestrator proxies all LLM requests here. As of WARP-104 the gateway is a pure provider router — tool dispatch lives in [`services/mcp-server/`](services/mcp-server/) with handlers in [`packages/tools-core/`](packages/tools-core/).
 
 **Stack:** FastAPI 0.110 · uvicorn 0.29 · LiteLLM 1.30 · Pydantic 2.6 · httpx 0.27 · sse-starlette 2.0 · cryptography 42.0 · redis 5.0 · Python 3.12
 

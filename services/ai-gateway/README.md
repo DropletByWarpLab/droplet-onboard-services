@@ -1,6 +1,16 @@
 # AI Gateway
 
-FastAPI + LiteLLM model routing proxy with tool execution. Routes LLM requests to local (Ollama on Jetson) or cloud providers, and executes tool calls against the orchestrator API.
+> **As of WARP-104, ai-gateway is purely a provider router** (LiteLLM proxying
+> to Ollama, Anthropic, OpenAI). Tool dispatch lives in
+> [`services/mcp-server/`](../mcp-server/) with handlers in
+> [`packages/tools-core/`](../../packages/tools-core/). The orchestrator's
+> `llm-agent.service.ts` runs the agent loop and calls MCP for every
+> `tool_calls[]` the model emits — the gateway just forwards the model
+> response (tool calls included) back unchanged. If you're looking to add a
+> new LLM-callable tool, see the "LLM tool calling" section in the repo
+> root [CLAUDE.md](../../CLAUDE.md).
+
+FastAPI + LiteLLM model routing proxy. Routes LLM requests to local (Ollama on Jetson) or cloud providers and forwards model responses verbatim — including any `tool_calls[]` the model produces — to the orchestrator's agent loop.
 
 ## Architecture
 
@@ -8,12 +18,11 @@ FastAPI + LiteLLM model routing proxy with tool execution. Routes LLM requests t
 Dashboard / API client
        │
        ↓
-  Orchestrator (/api/llm/*)
-       │
+  Orchestrator (/api/llm/*) ──── stdio ────▶ MCP Server ──▶ tools-core handlers
+       │                                       (tool dispatch, RBAC)
        ↓
   AI Gateway (FastAPI :8000)
   ├── LiteLLM router (multi-provider)
-  ├── Tool executor (calls orchestrator REST API)
   └── gRPC server (:50051)
        │
        ├──→ Ollama (Jetson local inference)
@@ -22,9 +31,9 @@ Dashboard / API client
        └──→ Other providers
 ```
 
-## Tool System
+## Tool System (historical — see banner above)
 
-The AI assistant can call tools to interact with the Droplet system. Tools are defined as OpenAI function-calling schemas and executed by making HTTP calls back to the orchestrator.
+The AI assistant can call tools to interact with the Droplet system. As of WARP-104, tools are defined and executed in `packages/tools-core/` via the MCP server; this section is preserved for context only and does not describe the current dispatch path.
 
 ### Available Tools
 
