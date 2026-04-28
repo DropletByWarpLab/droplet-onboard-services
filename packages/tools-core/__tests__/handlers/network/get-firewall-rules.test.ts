@@ -1,0 +1,29 @@
+import { describe, it, expect, vi } from "vitest";
+import getFirewallRules from "../../../src/handlers/network/get-firewall-rules.js";
+import type { ToolContext } from "../../../src/types.js";
+
+function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
+  return {
+    http: {
+      routing: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+      cameras: {} as ToolContext["http"]["cameras"],
+      switchSvc: {} as ToolContext["http"]["switchSvc"],
+      fileIndexer: {} as ToolContext["http"]["fileIndexer"],
+      nextcloud: {} as ToolContext["http"]["nextcloud"],
+    },
+    prisma: {} as ToolContext["prisma"],
+    matter: {} as ToolContext["matter"],
+    signal: new AbortController().signal,
+  };
+}
+
+describe("get_firewall_rules", () => {
+  it("returns the routing /firewall body", async () => {
+    const body = { zones: [], rules: [], redirects: [] };
+    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+    const r = await getFirewallRules.handler({}, ctxWithGet(get));
+    expect(get).toHaveBeenCalledWith("/firewall", expect.anything());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.data).toEqual(body);
+  });
+});

@@ -62,16 +62,43 @@ describe("stdio roundtrip", () => {
     await new Promise<void>((r) => routingMock?.close(() => r()));
   });
 
-  it("tools/list returns the 5 vertical-slice tools", async () => {
+  it("tools/list exposes the WARP-100 vertical slice + every WARP-102 port", async () => {
+    // WARP-102 grew the registry from 5 to 56 tools. We assert the original
+    // slice names are still present (the foundation contract) plus a sample
+    // of WARP-102 ports across domains. A full-set equality assertion would
+    // be brittle and re-tested by `packages/tools-core/__tests__/registry.test.ts`.
     const res = await client.listTools();
-    const names = res.tools.map((t) => t.name).sort();
-    expect(names).toEqual([
+    const names = new Set(res.tools.map((t) => t.name));
+
+    // WARP-100 vertical slice — must always be present.
+    for (const name of [
       "block_network_device",
       "get_network_status",
       "list_files",
       "list_network_devices",
       "list_smart_home_devices",
-    ]);
+    ]) {
+      expect(names.has(name), `slice tool missing: ${name}`).toBe(true);
+    }
+
+    // Spot-check one tool per WARP-102 domain so the stdio roundtrip
+    // confirms the port actually reached the registry-over-the-wire.
+    for (const name of [
+      "set_wifi_ssid", // network write
+      "write_file", // files write
+      "control_device", // smart-home write
+      "list_cameras", // cameras read
+      "set_port_poe", // switch write
+      "create_event", // calendar
+      "create_reminder", // reminders
+      "send_notification", // notifications
+      "get_system_health", // system
+    ]) {
+      expect(names.has(name), `WARP-102 port missing: ${name}`).toBe(true);
+    }
+
+    // Sanity: at least 50 tools advertised.
+    expect(res.tools.length).toBeGreaterThanOrEqual(50);
   });
 
   it("tools/call get_network_status proxies to the routing service and returns the payload", async () => {

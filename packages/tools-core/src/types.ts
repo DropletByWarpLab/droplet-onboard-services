@@ -28,6 +28,12 @@ export interface ToolContext {
     nextcloud: HttpClient;
   };
   matter: MatterController;
+  /** Embed one or more texts. Used by `search_content` to vectorize the
+   *  query before the pgvector lookup. The MCP server wires this to the
+   *  orchestrator's gRPC client to ai-gateway; on stdio in-proc this is
+   *  a direct call. May be undefined when the embedder is unavailable —
+   *  handlers should fall through to a clean error in that case. */
+  embedText?: (texts: string[]) => Promise<number[][]>;
   userId?: string;
   role?: Role;
   ncToken?: string;

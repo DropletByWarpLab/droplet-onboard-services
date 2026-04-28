@@ -5,7 +5,7 @@ import type { PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
-import { TOOL_REGISTRY } from "../services/llm-tools.js";
+import { TOOLS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
@@ -59,11 +59,16 @@ const agentRequestSchema = z.object({
 // the LLM is driven by user-controlled prompt text and will happily call
 // them on request.
 //
-// Note: spec §6.2 reconciles legacy names (`block_device` etc.) into the
-// MCP-canonical names. Until WARP-102 ports every handler, both names may
-// be present in the registry; we list the MCP-canonical names here. The
-// in-process /api/llm/agent path still calls into `llm-tools.ts` which
-// uses the legacy names — keep both sides covered.
+// TODO(WARP-102 follow-up): The canonical source for the write flag is now
+// each tool's `requiresWrite` boolean in `@droplet/tools-core`. We could
+// derive WRITE_TOOLS from `Array.from(TOOLS.values()).filter(t => t.requiresWrite)`
+// to keep them in lockstep, but doing that here would change the role-gate
+// behaviour mid-PR (we'd suddenly start gating tools we don't gate today).
+// Refactoring this set is intentionally deferred to a follow-up so the
+// MCP-canonical-name list grows in one place at a time. Both the legacy
+// names (`block_device`, `unblock_device`) and the canonical names
+// (`block_network_device`, `unblock_network_device`) are kept until that
+// follow-up lands.
 const WRITE_TOOLS = new Set([
   "block_device",
   "block_network_device",
@@ -259,14 +264,17 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
 
   // List every tool the agent can call. Useful for the dashboard to
   // render a "capabilities" pane and for debugging tool schemas.
-  // WARP-104 will refactor this to proxy mcpClient.listTools(); for now
-  // it still surfaces the in-process registry that /api/llm/agent uses.
+  // After WARP-102 this surfaces the canonical `@droplet/tools-core` registry
+  // (the single source of truth used by both `/api/llm/chat` and the MCP
+  // server). WARP-104 will refactor this to proxy `mcpClient.listTools()`
+  // so the wire shape matches the JSON-RPC `tools/list` response and the
+  // dashboard sees the same role-filtered set as off-host MCP clients.
   router.get("/llm/tools", (_req, res) => {
     res.json({
-      tools: Object.values(TOOL_REGISTRY).map((t) => ({
+      tools: Array.from(TOOLS.values()).map((t) => ({
         name: t.name,
         description: t.description,
-        parameters: t.parameters,
+        parameters: t.inputSchema,
       })),
     });
   });

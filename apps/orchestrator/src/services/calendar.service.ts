@@ -7,7 +7,8 @@
  *  3. The sync runner that periodically pulls each source, parses ICS/CalDAV,
  *     and upserts events keyed on (sourceId, externalUid).
  *
- * Routes/llm-tools call into this module; nothing here reads `req`.
+ * Routes call into this module; nothing here reads `req`. (LLM tooling
+ * lives in `@droplet/tools-core` and uses Prisma directly per spec §6.)
  */
 
 import type { PrismaClient } from "@prisma/client";

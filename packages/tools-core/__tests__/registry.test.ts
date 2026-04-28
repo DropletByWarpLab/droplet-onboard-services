@@ -1,20 +1,87 @@
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "../src/index.js";
 
+// Authoritative inventory list — must match `INVENTORY.md`. Update both in
+// lockstep when adding/removing handlers.
+const EXPECTED_TOOL_NAMES = [
+  // network
+  "add_port_forward",
+  "block_network_device",
+  "get_firewall_rules",
+  "get_network_status",
+  "get_router_system_info",
+  "get_wifi_settings",
+  "list_dhcp_leases",
+  "list_network_devices",
+  "scan_wifi_networks",
+  "set_wifi_channel",
+  "set_wifi_ssid",
+  "unblock_network_device",
+  // files
+  "copy_file",
+  "create_directory",
+  "delete_file",
+  "list_files",
+  "list_recent_files",
+  "move_file",
+  "read_file",
+  "rename_file",
+  "search_content",
+  "search_files",
+  "write_file",
+  // smart-home
+  "accept_discovered_camera",
+  "commission_device",
+  "control_device",
+  "create_event",
+  "create_reminder",
+  "delete_event",
+  "detect_wan_port",
+  "discover_matter_devices",
+  "export_clip",
+  "get_camera_live_url",
+  "get_camera_snapshot",
+  "get_command_history",
+  "get_smart_home_device",
+  "get_switch_poe",
+  "get_switch_ports",
+  "get_switch_vlans",
+  "get_system_health",
+  "list_camera_events",
+  "list_cameras",
+  "list_clips",
+  "list_discovered_cameras",
+  "list_drives",
+  "list_events",
+  "list_notifications",
+  "list_reminders",
+  "list_smart_home_devices",
+  "scan_for_cameras",
+  "send_notification",
+  "set_port_poe",
+  "set_port_vlan",
+  "setup_camera_ports",
+  "share_clip",
+  "complete_reminder",
+  "update_event",
+];
+
 describe("TOOLS registry", () => {
-  it("exposes the 5 vertical-slice tools by name", () => {
-    expect(Array.from(TOOLS.keys()).sort()).toEqual([
-      "block_network_device",
-      "get_network_status",
-      "list_files",
-      "list_network_devices",
-      "list_smart_home_devices",
-    ]);
+  it("registers every name in INVENTORY.md", () => {
+    const actual = Array.from(TOOLS.keys()).sort();
+    const expected = [...EXPECTED_TOOL_NAMES].sort();
+    // Helpful diff if a name is missing or unexpected.
+    const missing = expected.filter((n) => !actual.includes(n));
+    const extra = actual.filter((n) => !expected.includes(n));
+    expect({ missing, extra }).toEqual({ missing: [], extra: [] });
   });
 
   it("flags write+confirmation correctly per tool", () => {
     expect(TOOLS.get("block_network_device")?.requiresWrite).toBe(true);
     expect(TOOLS.get("block_network_device")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("list_files")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("write_file")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("write_file")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("set_wifi_ssid")?.requiresConfirmation).toBe(true);
   });
 });
