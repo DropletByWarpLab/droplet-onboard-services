@@ -14,6 +14,7 @@ __pycache__/
 .data/
 .claude/
 *.tsbuildinfo
+.DS_Store
 
 # Generated MQTT credentials (device-specific, created by setup.sh)
 docker/mosquitto_passwd_dir/mosquitto_passwd
@@ -24,9 +25,6 @@ docker/certs/
 
 # Device-specific secrets materialized for Docker secret mounts (created by setup.sh)
 docker/secrets/
-
-# Brainstorming companion session state (mockups, event logs)
-.superpowers/
 
 # macOS iCloud Drive conflict copies — when the repo sits under
 # ~/Documents (iCloud-synced) and git worktree operations or rapid file
