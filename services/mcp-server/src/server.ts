@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { TOOLS, type Tool, type ToolResult } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
+import { canCallTool, filterToolsForRole } from "./rbac.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
@@ -16,7 +17,11 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
   });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = Array.from(TOOLS.values()).map((t) => ({
+    // Per spec §6.3 + §12 (WARP-103): tools/list is filtered by the
+    // caller's role. `claims?.role === undefined` is the stdio in-proc
+    // case (the orchestrator agent is the trusted principal) — sees every
+    // tool. owner/admin see every tool. family/guest see read tools only.
+    const tools = filterToolsForRole(TOOLS.values(), claims?.role).map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
@@ -34,6 +39,27 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
         isError: true,
       };
     }
+
+    // Re-check on dispatch — tools/list cache could be stale, or a client
+    // could try to call a write tool by name without listing it first.
+    if (!canCallTool(tool, claims?.role)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "forbidden_tool_for_role",
+                message: `role '${claims?.role}' may not call '${tool.name}'`,
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
     const ctx = buildContext(deps, claims, extra.signal);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     let result: ToolResult;
