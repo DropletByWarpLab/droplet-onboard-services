@@ -1,7 +1,28 @@
+/**
+ * One LLM tool dispatch surfaced inline on an assistant message. Built
+ * from the `tool_call` + `tool_result` SSE events emitted by the
+ * orchestrator's MCP-backed agent loop. `status === "confirmation_required"`
+ * is the Tier-2 confirmation passthrough — the dashboard renders an
+ * approval chip when that lands.
+ */
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  // Result fields — populated when the matching `tool_result` event arrives.
+  // Until then `ok` is undefined and the chip can show a spinner.
+  ok?: boolean;
+  data?: unknown;
+  status?: string;
+  message?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "system" | "user" | "assistant";
   content: string;
+  /** Tool dispatches surfaced on this assistant turn (if any). */
+  toolCalls?: ChatToolCall[];
 }
 
 export interface ChatRequest {

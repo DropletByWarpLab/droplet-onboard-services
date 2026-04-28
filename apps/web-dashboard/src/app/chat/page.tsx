@@ -3,13 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   MessageSquare,
-  Plus,
   RotateCcw,
-  Trash2,
-  PanelLeftClose,
-  PanelLeft,
   Settings2,
-  ChevronDown,
 } from "lucide-react";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
@@ -18,20 +13,14 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 
 export default function ChatPage() {
-  const {
-    messages,
-    isStreaming,
-    sendMessage,
-    clearMessages,
-    sessionId,
-    sessions,
-    refreshSessions,
-    loadSession,
-    deleteSession,
-  } = useChat();
+  // WARP-104: chat is now a single rolling thread held in React state.
+  // Multi-session UX (history sidebar, server-side persistence) was
+  // dropped when /api/llm/chat became the canonical MCP-backed entry
+  // point — it's stateless. Reintroducing sessions needs an
+  // orchestrator-side persistence layer.
+  const { messages, isStreaming, sendMessage, clearMessages } = useChat();
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");
-  const [showSidebar, setShowSidebar] = useState(true);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -63,11 +52,6 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
 
-  // Load sessions on mount
-  useEffect(() => {
-    refreshSessions();
-  }, [refreshSessions]);
-
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -85,14 +69,6 @@ export default function ChatPage() {
     clearMessages();
   }, [clearMessages]);
 
-  const handleSelectSession = useCallback(
-    (session: { id: string; model: string }) => {
-      setSelectedModel(session.model);
-      loadSession(session.id);
-    },
-    [loadSession]
-  );
-
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
     // pins just above the tab bar with no gap. Matches AuthGate main's padding.
@@ -101,69 +77,11 @@ export default function ChatPage() {
     // overflow-x-hidden: guard against horizontal overflow on narrow phones.
     // Underscores inside calc() are Tailwind's whitespace marker (CSS spec requires spaces around -).
     <div className="flex h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden">
-      {/* Session sidebar */}
-      {showSidebar && (
-        <div className="hidden md:flex w-64 flex-shrink-0 flex-col border-r border-separator bg-surface-secondary">
-          <div className="flex items-center justify-between p-3 border-b border-separator">
-            <h2 className="type-headline text-label-primary">Chats</h2>
-            <button
-              onClick={handleNewChat}
-              className="p-1.5 rounded-sm text-accent hover:bg-accent-subtle transition-colors"
-              title="New chat"
-            >
-              <Plus size={18} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto py-1">
-            {sessions.length === 0 ? (
-              <p className="type-caption-1 text-label-tertiary text-center py-8 px-3">
-                No saved conversations yet. Start chatting or create a session to persist your conversations.
-              </p>
-            ) : (
-              sessions.map((session) => (
-                <div
-                  key={session.id}
-                  className={`group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors
-                    ${sessionId === session.id ? "bg-accent-subtle" : "hover:bg-surface-tertiary"}`}
-                  onClick={() => handleSelectSession(session)}
-                >
-                  <MessageSquare size={14} className="text-label-tertiary flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="type-footnote text-label-primary truncate">
-                      {session.title || "Untitled chat"}
-                    </p>
-                    <p className="type-caption-2 text-label-tertiary">
-                      {session.message_count} messages
-                    </p>
-                  </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteSession(session.id);
-                    }}
-                    className="p-1 rounded opacity-0 group-hover:opacity-100 text-label-tertiary hover:text-system-red transition-all"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
         <header className="flex items-center justify-between px-4 h-14 border-b border-separator bg-[var(--color-toolbar-bg)] dp-material">
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            <button
-              onClick={() => setShowSidebar(!showSidebar)}
-              className="hidden md:flex p-1.5 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
-            >
-              {showSidebar ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
-            </button>
             <ModelSelector value={selectedModel} onChange={setSelectedModel} />
           </div>
           <div className="flex items-center gap-2">
