@@ -80,7 +80,7 @@ describe("http roundtrip", () => {
   });
 
   it("rejects request with invalid JWT signature with 401", async () => {
-    const bad = jwt.sign({ sub: "u1", role: "admin" }, "wrong-secret", { expiresIn: "5m" });
+    const bad = jwt.sign({ type: "access", sub: "u1", role: "admin" }, "wrong-secret", { expiresIn: "5m" });
     const res = await fetch(`http://127.0.0.1:${port}/`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bad}` },
@@ -91,7 +91,7 @@ describe("http roundtrip", () => {
   });
 
   it("admin sees write tools in tools/list", async () => {
-    const token = jwt.sign({ sub: "admin1", role: "admin" }, SECRET, { expiresIn: "5m" });
+    const token = jwt.sign({ type: "access", sub: "admin1", role: "admin" }, SECRET, { expiresIn: "5m" });
     const client = await connect(port, token);
     const res = await client.listTools();
     const names = res.tools.map((t) => t.name);
@@ -101,7 +101,7 @@ describe("http roundtrip", () => {
   });
 
   it("family does NOT see write tools in tools/list", async () => {
-    const token = jwt.sign({ sub: "f1", role: "family" }, SECRET, { expiresIn: "5m" });
+    const token = jwt.sign({ type: "access", sub: "f1", role: "family" }, SECRET, { expiresIn: "5m" });
     const client = await connect(port, token);
     const res = await client.listTools();
     const names = res.tools.map((t) => t.name);
@@ -111,7 +111,7 @@ describe("http roundtrip", () => {
   });
 
   it("family calling a write tool is refused with forbidden_tool_for_role", async () => {
-    const token = jwt.sign({ sub: "f1", role: "family" }, SECRET, { expiresIn: "5m" });
+    const token = jwt.sign({ type: "access", sub: "f1", role: "family" }, SECRET, { expiresIn: "5m" });
     const client = await connect(port, token);
     const res = await client.callTool({
       name: "block_network_device",
@@ -130,7 +130,7 @@ describe("http roundtrip", () => {
   // stdio-trusted. Defense in depth against future orchestrator-side
   // typos in token issuance.
   it("rejects JWT with case-mismatched role 'Admin' with 401", async () => {
-    const token = jwt.sign({ sub: "u1", role: "Admin" }, SECRET, { expiresIn: "5m" });
+    const token = jwt.sign({ type: "access", sub: "u1", role: "Admin" }, SECRET, { expiresIn: "5m" });
     const res = await fetch(`http://127.0.0.1:${port}/`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
@@ -141,7 +141,7 @@ describe("http roundtrip", () => {
   });
 
   it("rejects JWT with unknown role string 'viewer' with 401", async () => {
-    const token = jwt.sign({ sub: "u2", role: "viewer" }, SECRET, { expiresIn: "5m" });
+    const token = jwt.sign({ type: "access", sub: "u2", role: "viewer" }, SECRET, { expiresIn: "5m" });
     const res = await fetch(`http://127.0.0.1:${port}/`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
@@ -152,12 +152,42 @@ describe("http roundtrip", () => {
   });
 
   it("accepts JWT with no role claim and treats it as untrusted (sees only read tools)", async () => {
-    const token = jwt.sign({ sub: "anon" }, SECRET, { expiresIn: "5m" });
+    const token = jwt.sign({ type: "access", sub: "anon" }, SECRET, { expiresIn: "5m" });
     const client = await connect(port, token);
     const res = await client.listTools();
     const names = res.tools.map((t) => t.name);
     expect(names).toContain("list_network_devices");
     expect(names).not.toContain("block_network_device");
     await client.close();
+  });
+
+  // WARP-103 reviewer follow-up: token-type confusion. Orchestrator's
+  // jwt.service.ts signs both access and refresh tokens with the same
+  // secret. mcp-server must reject refresh tokens at the auth boundary
+  // even though the signature verifies cleanly.
+  it("rejects refresh token (type='refresh') with 401 even when signature is valid", async () => {
+    const token = jwt.sign(
+      { type: "refresh", sub: "u1", role: "admin" },
+      SECRET,
+      { expiresIn: "7d" },
+    );
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_token");
+  });
+
+  it("rejects token with empty sub with 401", async () => {
+    const token = jwt.sign({ type: "access", sub: "", role: "admin" }, SECRET, { expiresIn: "5m" });
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_token");
   });
 });
