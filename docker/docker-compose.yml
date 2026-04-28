@@ -106,6 +106,48 @@ services:
       retries: 3
     restart: always
 
+  # --- MCP Server (HTTP transport) ---
+  # WARP-103: streamable-HTTP MCP transport for off-process consumers
+  # (inference-engine, Claude Desktop, dev tools). The orchestrator's
+  # in-process agent already talks to the mcp-server over stdio inside
+  # its own container (see apps/orchestrator/Dockerfile + WARP-101); this
+  # service is the JWT-gated network surface.
+  #
+  # Internal-only by default — no `ports:` section. JWT_SECRET must
+  # match the orchestrator so externally-issued admin JWTs verify here.
+  # Add a host port mapping if/when inference-engine runs off-box.
+  mcp-server:
+    build:
+      # Repo root context, mirroring the orchestrator's WARP-101 pattern,
+      # so workspace deps (@droplet/tools-core) resolve via npm workspaces.
+      context: ..
+      dockerfile: services/mcp-server/Dockerfile
+    container_name: droplet-mcp-server
+    restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - MCP_PORT=${MCP_PORT:-9090}
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
+      - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
+      - NEXTCLOUD_URL=http://nextcloud:80
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "9090"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9090/health >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
   # --- Nextcloud (headless backend) ---
   # Not published to host — accessed only via nginx at /nextcloud/.
   # Direct host publish would collide with routing (host-net :8080) and
