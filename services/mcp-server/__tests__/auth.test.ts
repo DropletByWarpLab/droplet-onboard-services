@@ -36,8 +36,35 @@ describe("verifyJwt", () => {
     expect(claims.role).toBeUndefined();
   });
 
-  it("normalizes role to undefined when not in the role enum", () => {
-    const token = jwt.sign({ sub: "u3", role: "stranger" }, SECRET, { expiresIn: "5m" });
+  // WARP-103 reviewer follow-up: an unknown role string must HARD-FAIL,
+  // not silently downgrade to `undefined`. `undefined` is the
+  // stdio-trusted-principal sentinel inside rbac.ts (paired with
+  // `trustedPrincipal: true`); the HTTP path must never pretend an
+  // unknown-role JWT is the trusted in-proc agent.
+  it("throws on case-sensitive role mismatch (e.g. 'Admin')", () => {
+    const token = jwt.sign({ sub: "u3", role: "Admin" }, SECRET, { expiresIn: "5m" });
+    expect(() => verifyJwt(token, SECRET)).toThrow(/unrecognized role/i);
+  });
+
+  it("throws on a non-canonical role string", () => {
+    const token = jwt.sign({ sub: "u4", role: "stranger" }, SECRET, { expiresIn: "5m" });
+    expect(() => verifyJwt(token, SECRET)).toThrow(/unrecognized role/i);
+  });
+
+  it("throws on an empty-string role claim", () => {
+    const token = jwt.sign({ sub: "u5", role: "" }, SECRET, { expiresIn: "5m" });
+    expect(() => verifyJwt(token, SECRET)).toThrow(/unrecognized role/i);
+  });
+
+  it("throws on a non-string role claim (e.g. number)", () => {
+    const token = jwt.sign({ sub: "u6", role: 1 }, SECRET, { expiresIn: "5m" });
+    expect(() => verifyJwt(token, SECRET)).toThrow(/unrecognized role/i);
+  });
+
+  it("normalizes role to undefined when explicitly null", () => {
+    // null is treated like missing — orchestrator's older tokens may
+    // ship `role: null` rather than omitting the key entirely.
+    const token = jwt.sign({ sub: "u7", role: null }, SECRET, { expiresIn: "5m" });
     const claims = verifyJwt(token, SECRET);
     expect(claims.role).toBeUndefined();
   });

@@ -123,4 +123,41 @@ describe("http roundtrip", () => {
     expect(parsed.error.code).toBe("forbidden_tool_for_role");
     await client.close();
   });
+
+  // WARP-103 reviewer follow-up: a JWT with a non-canonical role string
+  // (e.g. "Admin" with a capital A) must be rejected at the auth layer
+  // (401), not silently downgraded to undefined and then up-graded to
+  // stdio-trusted. Defense in depth against future orchestrator-side
+  // typos in token issuance.
+  it("rejects JWT with case-mismatched role 'Admin' with 401", async () => {
+    const token = jwt.sign({ sub: "u1", role: "Admin" }, SECRET, { expiresIn: "5m" });
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_token");
+  });
+
+  it("rejects JWT with unknown role string 'viewer' with 401", async () => {
+    const token = jwt.sign({ sub: "u2", role: "viewer" }, SECRET, { expiresIn: "5m" });
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_token");
+  });
+
+  it("accepts JWT with no role claim and treats it as untrusted (sees only read tools)", async () => {
+    const token = jwt.sign({ sub: "anon" }, SECRET, { expiresIn: "5m" });
+    const client = await connect(port, token);
+    const res = await client.listTools();
+    const names = res.tools.map((t) => t.name);
+    expect(names).toContain("list_network_devices");
+    expect(names).not.toContain("block_network_device");
+    await client.close();
+  });
 });

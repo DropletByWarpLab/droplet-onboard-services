@@ -42,10 +42,30 @@ describe("filterToolsForRole", () => {
     ]);
   });
 
-  it("undefined role (stdio in-process) sees both — fully trusted", () => {
+  it("trustedPrincipal (stdio in-process) sees both — fully trusted", () => {
+    expect(
+      filterToolsForRole(all, undefined, { trustedPrincipal: true }).map(
+        (t) => t.name,
+      ),
+    ).toEqual(["read_one", "write_one"]);
+  });
+
+  it("trustedPrincipal=true wins over a non-privileged role", () => {
+    // Defensive: if the stdio path ever passes a role alongside trust,
+    // the trusted principal still sees everything.
+    expect(
+      filterToolsForRole(all, "family", { trustedPrincipal: true }).map(
+        (t) => t.name,
+      ),
+    ).toEqual(["read_one", "write_one"]);
+  });
+
+  it("undefined role WITHOUT trustedPrincipal (HTTP, missing role claim) sees read-only", () => {
+    // This is the security-critical case: HTTP request whose JWT has no
+    // role claim must NOT be granted full access. WARP-103 reviewer
+    // follow-up.
     expect(filterToolsForRole(all, undefined).map((t) => t.name)).toEqual([
       "read_one",
-      "write_one",
     ]);
   });
 
@@ -73,7 +93,18 @@ describe("canCallTool", () => {
   it("allows read to guest", () => {
     expect(canCallTool(fakeTool("r"), "guest")).toBe(true);
   });
-  it("allows write to undefined role (stdio)", () => {
-    expect(canCallTool(fakeTool("w", true), undefined)).toBe(true);
+  it("allows write to trustedPrincipal (stdio)", () => {
+    expect(
+      canCallTool(fakeTool("w", true), undefined, { trustedPrincipal: true }),
+    ).toBe(true);
+  });
+  it("denies write to undefined role WITHOUT trustedPrincipal (HTTP, missing role)", () => {
+    // WARP-103 reviewer follow-up: do not infer trust from
+    // `role === undefined`; HTTP path must explicitly opt out of trust.
+    expect(canCallTool(fakeTool("w", true), undefined)).toBe(false);
+  });
+  it("allows read to undefined role WITHOUT trustedPrincipal", () => {
+    // Reads stay open for HTTP requests with missing role claims.
+    expect(canCallTool(fakeTool("r"), undefined)).toBe(true);
   });
 });

@@ -31,6 +31,26 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const MCP_BASE = process.env.MCP_BASE_URL ?? "http://localhost:9090/";
 const SECRET = process.env.JWT_SECRET ?? "test-secret";
 
+// Pre-flight at module load: probe /health so we can `describe.skipIf`
+// the entire suite when the stack isn't up. Throwing inside `beforeAll`
+// would mark the suite FAILED rather than SKIPPED, which means
+// `tests/vitest.config.ts`'s `**/*.integration.test.ts` glob would break
+// `npm run test:docker` runs whose rig doesn't include mcp-server.
+//
+// Top-level await is fine here — vitest collection runs each test file
+// in its own worker; this just delays collection of THIS file by up to
+// the smoke-fetch timeout (5s) when the stack is down.
+const STACK_UP = await (async (): Promise<boolean> => {
+  try {
+    const res = await fetch(new URL("/health", MCP_BASE), {
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+})();
+
 function jwtFor(role: "admin" | "family"): string {
   // Admin-issued JWT shape, mirroring how a real client obtains one via
   // POST /api/auth/login on the orchestrator. Per spec §13 note 2, v1
@@ -49,28 +69,11 @@ async function connect(role: "admin" | "family"): Promise<Client> {
   return client;
 }
 
-describe("mcp integration (compose stack)", () => {
+describe.skipIf(!STACK_UP)("mcp integration (compose stack)", () => {
   let admin: Client;
   let family: Client;
 
   beforeAll(async () => {
-    // Smoke check: mcp-server's healthcheck must answer before we trust
-    // the rest of the test run. Skip the suite cleanly if the stack
-    // isn't up — these tests are opt-in (run against a live deploy),
-    // not part of the unit-test default.
-    const healthUrl = new URL("/health", MCP_BASE);
-    try {
-      const res = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
-      if (!res.ok) {
-        throw new Error(`mcp-server /health returned ${res.status}`);
-      }
-    } catch (err) {
-      throw new Error(
-        `mcp-server not reachable at ${MCP_BASE}. Bring the stack up first ` +
-          `(docker compose -f docker/docker-compose.yml up -d mcp-server). ` +
-          `Underlying: ${(err as Error).message}`,
-      );
-    }
     admin = await connect("admin");
     family = await connect("family");
   }, 30_000);

@@ -28,11 +28,18 @@ const VALID_ROLES: ReadonlySet<Role> = new Set([
  *
  * Behavior contract:
  *   - throws on invalid signature, expired token, or any non-object payload
- *   - normalizes a missing or unknown `role` claim to `undefined` so RBAC
- *     treats the caller as an unprivileged unrole-bearing principal
- *   - never throws because of an unexpected `role` value (it just becomes
- *     undefined) so we don't accidentally upgrade a parse error into a
- *     500 in callers
+ *   - throws when the `role` claim is set to a non-canonical string (e.g.
+ *     `"Admin"`, `"viewer"`, `""`). Defense in depth: a typo in the
+ *     orchestrator's token issuer or a future service-account endpoint
+ *     emitting an unrecognized role must NOT silently downgrade to
+ *     `undefined`, because `undefined` is the stdio-trusted-principal
+ *     sentinel in `rbac.ts`. The HTTP path catches this throw and
+ *     returns 401 to the client.
+ *   - normalizes a MISSING `role` claim (no `role` key in the payload at
+ *     all, or explicitly `null`) to `undefined`. The HTTP path treats
+ *     undefined-role-from-HTTP as untrusted+least-privilege via the
+ *     `trustedPrincipal` parameter on the RBAC helpers — so undefined
+ *     here no longer means "trusted" on the HTTP path.
  */
 export function verifyJwt(token: string, secret: string): Claims {
   const decoded = jwt.verify(token, secret);
@@ -41,9 +48,16 @@ export function verifyJwt(token: string, secret: string): Claims {
   }
   const sub = typeof decoded.sub === "string" ? decoded.sub : undefined;
   const roleClaim = (decoded as { role?: unknown }).role;
-  const role =
-    typeof roleClaim === "string" && VALID_ROLES.has(roleClaim as Role)
-      ? (roleClaim as Role)
-      : undefined;
+  let role: Role | undefined;
+  if (roleClaim === undefined || roleClaim === null) {
+    role = undefined;
+  } else if (typeof roleClaim === "string" && VALID_ROLES.has(roleClaim as Role)) {
+    role = roleClaim as Role;
+  } else {
+    // Unknown / non-canonical role string. Reject hard.
+    throw new Error(
+      `unrecognized role claim: ${typeof roleClaim === "string" ? JSON.stringify(roleClaim) : typeof roleClaim}`,
+    );
+  }
   return { sub, role };
 }

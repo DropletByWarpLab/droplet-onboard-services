@@ -76,6 +76,47 @@ describe("server-level RBAC", () => {
     await server.close();
   });
 
+  // WARP-103 reviewer follow-up: an HTTP request whose JWT has no role
+  // claim still arrives at createServer with `claims = {sub, role:
+  // undefined}` (NOT `claims = undefined`). That must NOT be treated as
+  // the trusted-stdio principal — it gets read-only access.
+  it("HTTP-shaped claims with role: undefined sees read-only tools, not writes", async () => {
+    const server = createServer(buildDeps(), { sub: "u-no-role", role: undefined });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    const res = await client.listTools();
+    const names = res.tools.map((t) => t.name);
+    expect(names).toContain("list_network_devices");
+    expect(names).not.toContain("block_network_device");
+    expect(names).not.toContain("write_file");
+    await client.close();
+    await server.close();
+  });
+
+  it("HTTP-shaped claims with role: undefined gets forbidden_tool_for_role on a write call", async () => {
+    const server = createServer(buildDeps(), { sub: "u-no-role", role: undefined });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    const res = await client.callTool({
+      name: "block_network_device",
+      arguments: { mac: "AA:BB:CC:DD:EE:FF" },
+    });
+    expect(res.isError).toBe(true);
+    const blocks = res.content as { type: string; text: string }[];
+    const parsed = JSON.parse(blocks[0].text);
+    expect(parsed.error.code).toBe("forbidden_tool_for_role");
+    await client.close();
+    await server.close();
+  });
+
   it("family role calling a write tool gets forbidden_tool_for_role with isError=true", async () => {
     const { client, server } = await connectClient("family");
     const res = await client.callTool({
