@@ -88,12 +88,41 @@ export class McpClientService {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    context?: McpCallContext,
   ): Promise<ToolCallResult> {
     if (!this.client) throw new Error("MCP client not started");
-    const res = await this.client.callTool({ name, arguments: args });
+    // Per-call session context is plumbed via the MCP `_meta` field
+    // (reserved by the MCP spec for protocol metadata that should NOT
+    // be forwarded to the tool itself). The mcp-server's
+    // `CallToolRequestSchema` handler reads it and attaches the
+    // resulting fields to the per-call `ToolContext`. Today this
+    // carries `ncToken` so file-tool handlers can authenticate to
+    // Nextcloud as the dashboard user. Stdio is in-process trusted, so
+    // passing the user's session token here is safe.
+    const params: {
+      name: string;
+      arguments: Record<string, unknown>;
+      _meta?: Record<string, unknown>;
+    } = { name, arguments: args };
+    if (context && Object.keys(context).length > 0) {
+      params._meta = { ...context };
+    }
+    const res = await this.client.callTool(params);
     return {
       content: (res.content ?? []) as { type: string; text?: string }[],
       isError: Boolean(res.isError),
     };
   }
+}
+
+/**
+ * Per-call session context plumbed through MCP `_meta`. Add fields here
+ * as the agent grows new session-bound credentials (e.g. a future
+ * device-side OAuth bearer for camera ops). Keep this narrow — anything
+ * placed here is reachable by every handler in the registry, so don't
+ * pile on unrelated context.
+ */
+export interface McpCallContext {
+  /** Nextcloud session token for the calling user — required by file-tool handlers. */
+  ncToken?: string;
 }

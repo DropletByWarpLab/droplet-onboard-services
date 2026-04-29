@@ -1,17 +1,27 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
-import {
-  sendChat,
-  sendSessionChat,
-  createSession,
-  getSession,
-  listSessions,
-  deleteSession as apiDeleteSession,
-  updateSessionTitle,
-} from "../api";
-import type { ChatMessage, SessionInfo } from "../types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { sendChat } from "../api";
+import type { ChatMessage, ChatToolCall } from "../types";
 
+/**
+ * Chat hook backed by `POST /api/llm/chat` (the MCP-backed orchestrator
+ * agent loop introduced in WARP-101). The route is stateless: the
+ * full message thread lives in React state and is replayed on every
+ * turn, so refreshing the page wipes history.
+ *
+ * Streaming response: parse the SSE events defined in the orchestrator's
+ * `apps/orchestrator/src/types/sse-events.ts`:
+ *
+ *   - `content_delta` → append text to the streaming assistant message
+ *   - `tool_call`     → record a pending tool dispatch as a chip
+ *   - `tool_result`   → fill in the chip with `ok`/`data`/`status`/`message`
+ *   - `done`          → end of stream
+ *
+ * The session-based UX (server-side history, sidebar of past chats)
+ * went away with WARP-104. If reintroduced it would need an
+ * orchestrator-side persistence layer; see the WARP-104 PR body.
+ */
 
 let messageCounter = 0;
 
@@ -19,69 +29,101 @@ function createId(): string {
   return `msg-${Date.now()}-${++messageCounter}`;
 }
 
+interface SSEEventBase {
+  type: string;
+}
+
+interface ContentDeltaEvent extends SSEEventBase {
+  type: "content_delta";
+  text: string;
+}
+
+interface ToolCallEvent extends SSEEventBase {
+  type: "tool_call";
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+interface ToolResultEvent extends SSEEventBase {
+  type: "tool_result";
+  id: string;
+  ok: boolean;
+  data?: unknown;
+  status?: string;
+  message?: string;
+}
+
+interface DoneEvent extends SSEEventBase {
+  type: "done";
+  iterations: number;
+  stop_reason: "model_done" | "iteration_limit" | "error";
+  error?: string;
+}
+
+type SSEEvent =
+  | ContentDeltaEvent
+  | ToolCallEvent
+  | ToolResultEvent
+  | DoneEvent;
+
+/**
+ * Parses a raw SSE frame block (`event: <type>\ndata: <json>\n\n`).
+ * Returns null on malformed frames so the stream can recover.
+ */
+function parseSseFrame(raw: string): SSEEvent | null {
+  let eventType: string | null = null;
+  let dataLine: string | null = null;
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+    else if (line.startsWith("data: ")) dataLine = line.slice(6).trim();
+  }
+  if (!eventType || !dataLine) return null;
+  try {
+    const payload = JSON.parse(dataLine) as Record<string, unknown>;
+    return { type: eventType, ...payload } as SSEEvent;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Translate a raw fetch / streaming error into copy a non-engineering
+ * user can act on. The original message is logged but never rendered
+ * directly to avoid leaking strings like "Failed to fetch" or "503"
+ * into the chat surface.
+ */
+function friendlyErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  // Keep the raw cause in console for operators / debugging.
+  // eslint-disable-next-line no-console
+  console.error("[chat] turn failed:", raw);
+  if (/network|fetch|ECONNREFUSED|ENOTFOUND/i.test(raw)) {
+    return "I can't reach the Droplet right now. Check the connection and try again.";
+  }
+  if (/timeout|timed out/i.test(raw)) {
+    return "That took too long. Try again, or simplify the request.";
+  }
+  if (/abort/i.test(raw)) {
+    return "The request was cancelled.";
+  }
+  return "Something went wrong on this turn. Try again.";
+}
+
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const sessionIdRef = useRef<string | null>(null);
 
-  const refreshSessions = useCallback(async () => {
-    try {
-      const data = await listSessions();
-      setSessions(data.sessions);
-    } catch {
-      // Silently fail — sessions are a nice-to-have
-    }
-  }, []);
-
-  const loadSession = useCallback(async (id: string) => {
-    try {
-      const detail = await getSession(id);
-      setSessionId(id);
-      sessionIdRef.current = id;
-      setMessages(
-        detail.messages.map((m) => ({
-          id: createId(),
-          role: m.role as "user" | "assistant" | "system",
-          content: m.content,
-        }))
-      );
-    } catch (err) {
-      console.error("Failed to load session:", err);
-    }
-  }, []);
-
-  const deleteSessionById = useCallback(
-    async (id: string) => {
-      try {
-        await apiDeleteSession(id);
-        setSessions((prev) => prev.filter((s) => s.id !== id));
-        if (sessionIdRef.current === id) {
-          setSessionId(null);
-          sessionIdRef.current = null;
-          setMessages([]);
-        }
-      } catch (err) {
-        console.error("Failed to delete session:", err);
-      }
-    },
-    []
-  );
-
-  const renameSession = useCallback(
-    async (id: string, title: string) => {
-      try {
-        const updated = await updateSessionTitle(id, title);
-        setSessions((prev) =>
-          prev.map((s) => (s.id === id ? { ...s, title: updated.title } : s))
-        );
-      } catch (err) {
-        console.error("Failed to rename session:", err);
-      }
-    },
-    []
-  );
+  // Keep a ref-mirror of `messages` so callbacks (especially
+  // `retryMessage`) can read the current snapshot synchronously without
+  // relying on the setMessages updater to run before the surrounding
+  // async code reads back. In test environments React batches updater
+  // execution after the synchronous portion of an async function — the
+  // ref dodges that.
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const sendMessage = useCallback(
     async (content: string, model: string, systemPrompt?: string) => {
@@ -90,43 +132,41 @@ export function useChat() {
         role: "user",
         content,
       };
-
       const assistantMessage: ChatMessage = {
         id: createId(),
         role: "assistant",
         content: "",
       };
 
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      // Snapshot the full thread up to this turn so we can hand it to
+      // /api/llm/chat. The route is stateless; replay is on us.
+      const replayMessages: { role: string; content: string }[] = [];
+      if (systemPrompt) {
+        replayMessages.push({ role: "system", content: systemPrompt });
+      }
+      // Existing messages already in state, plus the user turn we just
+      // built. Don't include the empty assistant placeholder, and drop
+      // any prior assistant turn that ended in an error — replaying
+      // "I can't reach the Droplet…" back to the model would just
+      // confuse it.
+      setMessages((prev) => {
+        for (const m of prev) {
+          if (m.role === "assistant" && !m.content) continue;
+          if (m.role === "assistant" && m.error) continue;
+          replayMessages.push({ role: m.role, content: m.content });
+        }
+        replayMessages.push({ role: "user", content });
+        return [...prev, userMessage, assistantMessage];
+      });
+
       setIsStreaming(true);
 
       try {
-        let response: Response;
-
-        // If we have a session, use session chat (messages are managed server-side)
-        if (sessionIdRef.current) {
-          response = await sendSessionChat(sessionIdRef.current, {
-            message: content,
-            stream: true,
-          });
-        } else {
-          // No session yet — create one, then use session chat
-          const session = await createSession({
-            model,
-            title: content.slice(0, 80),
-            system_prompt: systemPrompt || null,
-          });
-          setSessionId(session.id);
-          sessionIdRef.current = session.id;
-
-          response = await sendSessionChat(session.id, {
-            message: content,
-            stream: true,
-          });
-
-          // Refresh session list
-          refreshSessions();
-        }
+        const response = await sendChat({
+          model,
+          messages: replayMessages,
+          stream: true,
+        });
 
         if (!response.body) {
           throw new Error("No response body");
@@ -141,44 +181,40 @@ export function useChat() {
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
+          // SSE frames are separated by a blank line (\n\n). Anything
+          // after the last separator is a partial frame held over for
+          // the next read.
+          const sep = buffer.lastIndexOf("\n\n");
+          if (sep === -1) continue;
+          const completed = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
 
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const data = line.slice(6).trim();
-            if (data === "[DONE]") continue;
-
-            try {
-              const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta?.content;
-              if (delta) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last && last.role === "assistant") {
-                    updated[updated.length - 1] = {
-                      ...last,
-                      content: last.content + delta,
-                    };
-                  }
-                  return updated;
-                });
-              }
-            } catch {
-              // Skip malformed chunks
-            }
+          for (const frame of completed.split("\n\n")) {
+            if (!frame.trim()) continue;
+            const evt = parseSseFrame(frame);
+            if (!evt) continue;
+            applyEvent(setMessages, assistantMessage.id, evt, content);
           }
         }
+
+        // Flush trailing frame if the stream ended without a final \n\n.
+        if (buffer.trim()) {
+          const evt = parseSseFrame(buffer);
+          if (evt) applyEvent(setMessages, assistantMessage.id, evt, content);
+        }
       } catch (err) {
+        const friendly = friendlyErrorMessage(err);
         setMessages((prev) => {
           const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last && last.role === "assistant" && !last.content) {
-            updated[updated.length - 1] = {
-              ...last,
-              content: `Error: ${err instanceof Error ? err.message : "Unknown error"}`,
-            };
+          const idx = updated.findIndex((m) => m.id === assistantMessage.id);
+          if (idx !== -1) {
+            const last = updated[idx];
+            if (last.role === "assistant" && !last.content) {
+              updated[idx] = {
+                ...last,
+                error: { message: friendly, retryPrompt: content },
+              };
+            }
           }
           return updated;
         });
@@ -186,13 +222,43 @@ export function useChat() {
         setIsStreaming(false);
       }
     },
-    [refreshSessions]
+    [],
+  );
+
+  /**
+   * Re-send the prompt that drove a failed assistant turn. Drops the
+   * failed turn (and the user message that preceded it, since
+   * `sendMessage` will re-append both) so we don't double up.
+   *
+   * Returns a promise so callers can `await retryMessage(...)` — the
+   * test suite relies on this.
+   */
+  const retryMessage = useCallback(
+    async (messageId: string, model: string, systemPrompt?: string) => {
+      // Read the failed message from the ref-mirror — the updater
+      // pattern doesn't work here because in this test/runtime
+      // environment React batches the updater AFTER the surrounding
+      // async code reads back closure-captured state.
+      const target = messagesRef.current.find((m) => m.id === messageId);
+      if (!target?.error) return;
+      const retryPrompt = target.error.retryPrompt;
+
+      // Drop the failed assistant + the user turn immediately before it
+      // so the new turn replays a clean thread.
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx === -1) return prev;
+        const userIdx = idx > 0 && prev[idx - 1].role === "user" ? idx - 1 : idx;
+        return prev.filter((_, i) => i !== idx && i !== userIdx);
+      });
+
+      await sendMessage(retryPrompt, model, systemPrompt);
+    },
+    [sendMessage],
   );
 
   const clearMessages = useCallback(() => {
     setMessages([]);
-    setSessionId(null);
-    sessionIdRef.current = null;
   }, []);
 
   return {
@@ -200,13 +266,84 @@ export function useChat() {
     setMessages,
     isStreaming,
     sendMessage,
+    retryMessage,
     clearMessages,
-    // Session management
-    sessionId,
-    sessions,
-    refreshSessions,
-    loadSession,
-    deleteSession: deleteSessionById,
-    renameSession,
   };
+}
+
+/**
+ * Apply a single SSE event to the streaming assistant message
+ * identified by `assistantId`. Pure state mutation — extracted so
+ * the reader loop reads cleanly. `retryPrompt` is the user prompt
+ * that drove this turn, used to mark error states with a retry
+ * affordance when a `done` event carries `stop_reason: "error"`.
+ */
+function applyEvent(
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
+  assistantId: string,
+  evt: SSEEvent,
+  retryPrompt: string,
+): void {
+  setMessages((prev) => {
+    const idx = prev.findIndex((m) => m.id === assistantId);
+    if (idx === -1) return prev;
+    const last = prev[idx];
+    if (last.role !== "assistant") return prev;
+
+    switch (evt.type) {
+      case "content_delta": {
+        const updated = [...prev];
+        updated[idx] = { ...last, content: last.content + evt.text };
+        return updated;
+      }
+      case "tool_call": {
+        const chip: ChatToolCall = {
+          id: evt.id,
+          name: evt.name,
+          args: evt.args,
+        };
+        const updated = [...prev];
+        updated[idx] = {
+          ...last,
+          toolCalls: [...(last.toolCalls ?? []), chip],
+        };
+        return updated;
+      }
+      case "tool_result": {
+        const calls = last.toolCalls ?? [];
+        const callIdx = calls.findIndex((c) => c.id === evt.id);
+        if (callIdx === -1) return prev;
+        const updatedCalls = [...calls];
+        updatedCalls[callIdx] = {
+          ...calls[callIdx],
+          ok: evt.ok,
+          data: evt.data,
+          status: evt.status,
+          message: evt.message,
+        };
+        const updated = [...prev];
+        updated[idx] = { ...last, toolCalls: updatedCalls };
+        return updated;
+      }
+      case "done": {
+        if (evt.stop_reason === "error" && !last.content) {
+          // eslint-disable-next-line no-console
+          console.error("[chat] agent loop ended with error:", evt.error);
+          const updated = [...prev];
+          updated[idx] = {
+            ...last,
+            error: {
+              message:
+                "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",
+              retryPrompt,
+            },
+          };
+          return updated;
+        }
+        return prev;
+      }
+      default:
+        return prev;
+    }
+  });
 }

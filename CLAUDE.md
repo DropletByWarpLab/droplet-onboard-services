@@ -7,7 +7,9 @@ Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains
 ```
 apps/orchestrator/      Express + Prisma — central API and device control
 apps/web-dashboard/     Next.js 14 — admin UI
-services/ai-gateway/    FastAPI + LiteLLM — model routing proxy
+packages/tools-core/    @droplet/tools-core — single canonical LLM tool registry (TypeScript)
+services/mcp-server/    @droplet/mcp-server — MCP server (stdio + streamable-HTTP)
+services/ai-gateway/    FastAPI + LiteLLM — model routing proxy (no longer dispatches tools)
 services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-indexer/  Python watchdog — filesystem indexer + embedder (formerly `file-sync`)
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
@@ -20,7 +22,9 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 
 - **Orchestrator:** Node.js, Express, Prisma ORM, PostgreSQL
 - **Web dashboard:** Next.js 14, React
-- **AI gateway:** Python, FastAPI, LiteLLM
+- **Tools-core:** TypeScript, JSON-Schema; canonical registry consumed by orchestrator + mcp-server
+- **MCP server:** TypeScript, `@modelcontextprotocol/sdk`; stdio (in-process child) + streamable-HTTP (external clients)
+- **AI gateway:** Python, FastAPI, LiteLLM (provider router only — no tool dispatch)
 - **Routing service:** Python, FastAPI, OpenWrt ubus JSON-RPC SDK
 - **File indexer:** Python, watchdog (was `file-sync`; renamed to reflect its indexer+embedder role)
 - **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
@@ -28,6 +32,27 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Frigate
 - **Smart home:** Native Matter controller in the orchestrator (`matter.service.ts`). The dashboard talks to Matter directly via `/api/matter/*`.
+
+## LLM tool calling
+
+- All LLM-callable tools live in the `@droplet/tools-core` workspace package
+  with a single canonical registry. The orchestrator's `llm-agent.service.ts`
+  runs the agent loop and dispatches tool calls via `@droplet/mcp-server`
+  (MCP, stdio child process). External MCP clients (inference-engine,
+  Claude Desktop, etc.) reach the same server over streamable HTTP with
+  JWT auth and per-tool RBAC. `services/ai-gateway/` is a thin provider
+  router (LiteLLM only); it does NOT dispatch tools.
+- The dashboard's `/chat` page hits `POST /api/llm/chat` which drives the
+  orchestrator's MCP-backed agent loop. `GET /api/llm/tools` proxies
+  `mcp-client.service.ts → listTools()` so the wire shape matches what
+  off-host MCP clients see.
+- **Adding a new tool:** add a handler under
+  `packages/tools-core/src/handlers/<domain>/`, register it in
+  `packages/tools-core/src/registry.ts`, set `requiresWrite` and
+  `requiresConfirmation`, and add a unit test. The MCP server picks it up
+  automatically. The orchestrator's `WRITE_TOOLS` set in
+  `apps/orchestrator/src/routes/llm.ts` is derived from `requiresWrite`,
+  so RBAC tracks per-tool intent without manual sync.
 
 ## Device setup
 

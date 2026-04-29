@@ -7,8 +7,9 @@ import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { TOOLS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
-import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
+import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import type { ModelsResponse, SessionChatRequest } from "../types/index.js";
 
 const MODELS_CACHE_KEY = "llm:models";
@@ -34,99 +35,28 @@ const chatRequestSchema = z.object({
   allowed_tools: z.array(z.string()).optional(),
 });
 
-// Only system / user / assistant are accepted from the caller — role="tool"
-// is intentionally NOT in the enum to prevent a client from planting a
-// spoofed tool-result message into the conversation (which would bias the
-// next turn toward calling a privileged write tool). Tool-role messages
-// are only appended by the agent loop itself, from actual MCP callTool()
-// results. See the security review in PR #66 for the threat model.
-const agentRequestSchema = z.object({
-  model: z.string(),
-  messages: z.array(
-    z.object({
-      role: z.enum(["system", "user", "assistant"]),
-      content: z.string(),
-    }),
-  ),
-  max_iter: z.number().int().min(1).max(10).optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  allowed_tools: z.array(z.string()).optional(),
-});
-
 // Which tool names require the caller to have owner/admin role. Read-only
 // tools (list_*, get_*, search_*) are fine for any authenticated user; write
 // tools (block/unblock/accept/scan, file mutations) must be gated because
 // the LLM is driven by user-controlled prompt text and will happily call
 // them on request.
 //
-// TODO(WARP-104): The canonical source for the write flag is each tool's
-// `requiresWrite` boolean in `@droplet/tools-core`. Deriving WRITE_TOOLS
-// from `Array.from(TOOLS.values()).filter(t => t.requiresWrite)` is the
-// long-term plan, but for now we keep an explicit set so role-gate
-// behavior is reviewable in one place. Both legacy names (`block_device`,
-// `unblock_device`) and canonical names (`block_network_device`,
-// `unblock_network_device`) are kept here so a client that hasn't
-// migrated still hits the gate.
-//
-// WARP-102 reviewer follow-up: added the 9 newly-write-flagged tools
-// (network/switch/Matter mutations) below. Without these the MCP path
-// would advertise destructive tools to family/guest users since the
-// route-layer RBAC checks this set, not per-tool flags.
-const WRITE_TOOLS = new Set([
-  // Network firewall / device control
-  "block_device",
-  "block_network_device",
-  "unblock_device",
-  "unblock_network_device",
-  "add_port_forward",
-  // WiFi config — SSID rename, channel change. Both go through 202
-  // confirmation in the routing service.
-  "set_wifi_ssid",
-  "set_wifi_channel",
-  // Camera discovery — accepting a discovered camera commissions it
-  // onto the LAN; scanning probes the network actively.
-  "accept_discovered_camera",
-  "scan_for_cameras",
-  // Managed switch — VLAN reassignment, PoE toggle, WAN detection (which
-  // reconfigures the switch's WAN port), and the one-click camera setup
-  // flow which combines VLAN + PoE + uplink config.
-  "set_port_vlan",
-  "set_port_poe",
-  "detect_wan_port",
-  "setup_camera_ports",
-  // Smart home / Matter — pairing a new device, sending control commands.
-  // commission_device additionally requires user confirmation in the
-  // dashboard (Tier 2 modal); control_device confirmation depends on
-  // the command class (locks/extreme settings escalate per matter.service).
-  "commission_device",
-  "control_device",
-  // File mutation tools. Write-gated because the LLM can be steered into
-  // creating/deleting/moving user files via a malicious prompt.
-  "write_file",
-  "delete_file",
-  "create_directory",
-  "rename_file",
-  "move_file",
-  "copy_file",
-  // Calendar / Reminders / Notifications. Calendar mutations don't touch
-  // the network or other devices, but they DO modify the user's calendar
-  // — same prompt-injection threat model applies.
-  "create_event",
-  "update_event",
-  "delete_event",
-  "create_reminder",
-  "complete_reminder",
-  "send_notification",
-  // Clip export writes to Nextcloud + creates a Files entry; share_clip
-  // emits a token that grants public read access until expiry.
-  "export_clip",
-  "share_clip",
-]);
+// As of WARP-104 the set is derived directly from each tool's
+// `requiresWrite` boolean in `@droplet/tools-core` so role-gate behaviour
+// can never drift from per-tool intent. Adding a write tool to the
+// registry automatically includes it here. Legacy aliases
+// `block_device` / `unblock_device` are not registered in tools-core —
+// callers must use the canonical `block_network_device` /
+// `unblock_network_device` names.
+const WRITE_TOOLS = new Set(
+  Array.from(TOOLS.values())
+    .filter((t) => t.requiresWrite)
+    .map((t) => t.name),
+);
 
-// RBAC helpers — shared between /api/llm/chat and /api/llm/agent so the
-// two routes can't drift apart on which tools an unprivileged user can
-// drive. Same threat model: the LLM is steered by user-controlled prompt
-// text; only owner/admin sessions are allowed to touch write tools.
+// RBAC helpers for /api/llm/chat. Threat model: the LLM is steered by
+// user-controlled prompt text; only owner/admin sessions are allowed to
+// touch write tools.
 type AuthedRequest = { user?: { username?: string; role?: string } };
 
 function isPrivilegedRole(role: string | undefined): boolean {
@@ -153,11 +83,10 @@ async function narrowAllowedToolsForRole(
 
 // Belt-and-braces: even if the agent loop itself enforces the narrowed
 // list, refuse at request-time if a client has planted tool-call entries
-// invoking a write tool inside replayed assistant history. Spoofed tool
-// results are blocked at the schema level for /agent (role="tool" not
-// allowed); /chat permits role="tool" for resume-session callers but
-// the same spoof-then-bypass risk exists if the planted assistant turn
-// sets `tool_calls`.
+// invoking a write tool inside replayed assistant history. /chat
+// permits role="tool" for resume-session callers but a spoofed
+// assistant turn that sets `tool_calls` would otherwise bypass the
+// narrowed-tool check on the next iteration.
 //
 // Takes the RAW request body (not the Zod-parsed shape) because Zod's
 // default object schema strips unrecognized keys, including `tool_calls`
@@ -215,10 +144,9 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
       }
       const chatReq = parsed.data;
 
-      // RBAC: same gate as /api/llm/agent — write tools require
-      // owner/admin. Lifted up here because /api/llm/chat is the live
-      // route the dashboard will switch to in WARP-104; without this
-      // any authenticated session could drive write tools via curl.
+      // RBAC: write tools require owner/admin. /api/llm/chat is the
+      // live MCP-backed route — without this gate any authenticated
+      // session could drive write tools via curl.
       // Reads `req.body.messages` (raw) for the spoof check because
       // Zod strips unrecognized keys (tool_calls) from the parsed shape.
       const role = (req as AuthedRequest).user?.role;
@@ -235,6 +163,19 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         role,
         chatReq.allowed_tools,
       );
+
+      // Resolve the caller's Nextcloud session token so file-tool
+      // handlers (`list_files`, `read_file`, `write_file`, etc.) can
+      // authenticate to Nextcloud as the dashboard user. Threaded to
+      // the MCP stdio child via `McpCallContext` → `_meta.ncToken` on
+      // every `tools/call`. `resolveNcToken` returns null when the
+      // request has no Nextcloud session (e.g. a direct API caller
+      // without the cookie); file tools will then surface
+      // AUTH_REQUIRED, which is the same behavior as before WARP-104.
+      const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+      const toolCallContext: McpCallContext | undefined = ncToken
+        ? { ncToken }
+        : undefined;
 
       const deps: AgentDeps = {
         mcp: mcpClient,
@@ -265,6 +206,7 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
             temperature: chatReq.temperature,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
+            toolCallContext,
           });
         } finally {
           res.end();
@@ -278,6 +220,7 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         temperature: chatReq.temperature,
         max_iter: chatReq.max_iter,
         allowed_tools: allowedForUser,
+        toolCallContext,
       });
       res.json(result);
     } catch (err) {
@@ -287,72 +230,34 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
 
   // List every tool the agent can call. Useful for the dashboard to
   // render a "capabilities" pane and for debugging tool schemas.
-  // After WARP-102 this surfaces the canonical `@droplet/tools-core` registry
-  // (the single source of truth used by both `/api/llm/chat` and the MCP
-  // server). WARP-104 will refactor this to proxy `mcpClient.listTools()`
-  // so the wire shape matches the JSON-RPC `tools/list` response and the
-  // dashboard sees the same role-filtered set as off-host MCP clients.
-  router.get("/llm/tools", (_req, res) => {
-    res.json({
-      tools: Array.from(TOOLS.values()).map((t) => ({
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema,
-      })),
-    });
-  });
-
-  // Tool-aware agent endpoint. WARP-104 deletes this — it overlaps with
-  // /api/llm/chat now that the chat path drives the orchestrator agent
-  // loop directly. While it lives, route it through the same MCP client
-  // so the two endpoints can't drift out of sync mid-sprint.
-  router.post("/llm/agent", async (req, res, next) => {
+  // Proxies `mcpClient.listTools()` so the wire shape matches the
+  // JSON-RPC `tools/list` response.
+  //
+  // RBAC: the result is filtered to match what `/api/llm/chat` would
+  // actually permit for the caller's role — owner/admin see every
+  // tool, family/guest see read-only. Without this, an unprivileged
+  // user could enumerate `block_network_device`, `write_file`,
+  // `commission_device`, etc. via the capabilities endpoint and use
+  // that list to craft prompt-injection attempts. Execution is gated
+  // independently in `/api/llm/chat`, so this is closing the
+  // information-disclosure gap, not the privilege-escalation one.
+  //
+  // The `inputSchema → parameters` rename mirrors the OpenAI
+  // function-calling shape callers historically expected.
+  router.get("/llm/tools", async (req, res, next) => {
     try {
-      const parsed = agentRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        res.status(400).json({
-          error: "Invalid request",
-          details: parsed.error.flatten(),
-        });
-        return;
-      }
+      const tools = await mcpClient.listTools();
       const role = (req as AuthedRequest).user?.role;
-
-      // RBAC + replayed-write detection (shared with /api/llm/chat — see
-      // helpers above the router). Reads raw req.body.messages because
-      // Zod strips unrecognized keys (tool_calls) from parsed.data.
-      if (
-        !isPrivilegedRole(role) &&
-        replayedWriteToolAttempt(
-          (req.body as { messages?: unknown })?.messages,
-        )
-      ) {
-        res.status(403).json({ error: "forbidden_tool_for_role" });
-        return;
-      }
-      const allowedForUser = await narrowAllowedToolsForRole(
-        role,
-        parsed.data.allowed_tools,
-      );
-
-      // Nextcloud-scoped tools (list_files / search_files / list_recent_files)
-      // need the caller's NC session token. The new MCP-backed agent
-      // doesn't yet thread ncToken into the stdio child (WARP-103 will);
-      // for now the route resolves it but it's not propagated. Document
-      // the gap so QA doesn't get surprised.
-      await resolveNcToken(req).catch(() => null);
-
-      const result = await runAgent(
-        { mcp: mcpClient, aiGateway: { chat: aiGateway.chat } },
-        {
-          model: parsed.data.model,
-          messages: parsed.data.messages,
-          max_iter: parsed.data.max_iter,
-          temperature: parsed.data.temperature,
-          allowed_tools: allowedForUser,
-        },
-      );
-      res.json(result);
+      const filtered = isPrivilegedRole(role)
+        ? tools
+        : tools.filter((t) => !WRITE_TOOLS.has(t.name));
+      res.json({
+        tools: filtered.map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        })),
+      });
     } catch (err) {
       next(err);
     }
@@ -393,10 +298,13 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
   });
 
   // --- Sessions ---
-  // Sessions still proxy to the ai-gateway (which owns persistent
-  // conversation state). The dashboard's /chat page goes through these
-  // session routes today, so the SSE shape change on /api/llm/chat
-  // doesn't reach it.
+  // Session routes still proxy to ai-gateway-owned persistent
+  // conversation state. WARP-104 switched the dashboard's /chat page
+  // to /api/llm/chat (the MCP-backed orchestrator agent loop) — these
+  // session routes are no longer hit by the in-tree dashboard. They
+  // remain available for direct API callers that want server-side
+  // history; deletion is a separate decision once any out-of-tree
+  // consumers have migrated.
 
   router.post("/llm/sessions", async (req, res, next) => {
     try {

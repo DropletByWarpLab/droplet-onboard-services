@@ -1,7 +1,36 @@
+/**
+ * One LLM tool dispatch surfaced inline on an assistant message. Built
+ * from the `tool_call` + `tool_result` SSE events emitted by the
+ * orchestrator's MCP-backed agent loop. `status === "confirmation_required"`
+ * is the Tier-2 confirmation passthrough — the dashboard renders an
+ * approval chip when that lands.
+ */
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  // Result fields — populated when the matching `tool_result` event arrives.
+  // Until then `ok` is undefined and the chip can show a spinner.
+  ok?: boolean;
+  data?: unknown;
+  status?: string;
+  message?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "system" | "user" | "assistant";
   content: string;
+  /** Tool dispatches surfaced on this assistant turn (if any). */
+  toolCalls?: ChatToolCall[];
+  /**
+   * Set on an assistant message when the turn failed (network error,
+   * ai-gateway down, MCP child crashed, model returned `stop_reason:
+   * "error"`). The UI renders a friendly message + retry button rather
+   * than the raw error string. `retryPrompt` is the user prompt that
+   * drove this turn — clicking retry re-sends it.
+   */
+  error?: { message: string; retryPrompt: string };
 }
 
 export interface ChatRequest {
