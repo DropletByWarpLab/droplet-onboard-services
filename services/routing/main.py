@@ -1092,8 +1092,13 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "enabled": "1" if req.enabled else "0",
             # Watch WAN for IP changes; DuckDNS is for IPv4 by default.
             "interface": "wan",
-            "ip_source": "network",
-            "ip_network": "wan",
+            # Use `web` (not `network`): the WAN interface address may itself
+            # be a private IP behind another NAT layer (common when the
+            # Droplet is plugged into a home router as a downstream device).
+            # `web` mode has ddns-scripts query a public checker URL so the
+            # IP we publish to DuckDNS is the actual public-facing one.
+            "ip_source": "web",
+            "ip_url": "https://checkip.amazonaws.com",
             "use_ipv6": "0",
             # Honest user-agent so DuckDNS's logs show this Droplet rather
             # than the generic ddns-scripts default. Helps debugging.
