@@ -216,6 +216,24 @@ class TFTDisplay:
     def __init__(self):
         self._pyportal = None
         self._pyportal_lock = threading.Lock()
+        # Path of the ttyACM the live fd was opened on. Tracked so the cycle
+        # loop can detect a USB re-enumeration: when the kernel renumbers the
+        # CDC interfaces (firmware reset, replug, host-side hub reset) the
+        # original device node disappears but our open fd silently no-ops —
+        # writes succeed without doing anything and reads return zero bytes,
+        # so the existing reconnect-on-IOError path in `_pyportal_send` never
+        # fires. A periodic `os.path.exists(self._pyportal_path)` check is
+        # the cheapest reliable way to spot a dead fd.
+        self._pyportal_path: Optional[str] = None
+        # Set by `_probe_pyportal` on every successful probe; cleared by the
+        # cycle loop after it runs `_push_full_state`. Probe always discards
+        # the firmware's pre-probe READY/REQUEST_STATE handshake (the probe
+        # calls `reset_input_buffer()` before pinging, and only reads enough
+        # bytes to confirm an OK), so we can't rely on the in-loop READY
+        # handler to fire on a fresh probe. Without this flag, the firmware
+        # would sit with empty state until the slowest periodic push tick
+        # (files = 30s) — i.e. "the screen doesn't auto-fill on reboot".
+        self._needs_resync = False
         self._backend = "sim"
         self._current_mode = self.HOME
         self._current_image: Optional[Image.Image] = None
@@ -308,7 +326,15 @@ class TFTDisplay:
                 s.close()
                 return False
             self._pyportal = s
+            self._pyportal_path = path
             self._backend = "pyportal"
+            # Ask the cycle loop to push a full state burst on its next
+            # tick. Necessary because the probe above ran
+            # `reset_input_buffer()` before pinging, which discards the
+            # firmware's READY/REQUEST_STATE handshake — without an
+            # explicit resync, the firmware would render empty fields
+            # until the slowest periodic push tick (30s).
+            self._needs_resync = True
             logger.info("TFT initialised via PyPortal on %s @ %d baud",
                         path, PYPORTAL_BAUD)
             return True
@@ -1234,6 +1260,31 @@ class TFTDisplay:
             "now": (datetime.now(_TZ) if _TZ else datetime.now()).strftime("%H:%M"),
         }
 
+    def _push_full_state(self) -> None:
+        """Send a complete state snapshot to the firmware: stats + wifi +
+        drives + cameras + files. Idempotent; bridge fetch failures are
+        logged and skipped (the periodic loop will catch up on the next
+        tick). Used by the firmware-driven READY/REQUEST_STATE handler
+        and by the host-driven probe-success path — both want the same
+        burst, and both want it to no-op cleanly when an upstream is
+        briefly unreachable."""
+        try:
+            self._pyportal_send("stats", self._gather_stats())
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("resync stats failed: %s", e)
+        for mode, fetch in (
+            ("wifi", self.fetch_wifi),
+            ("drives", self.fetch_drives),
+            ("cameras", self.fetch_cameras),
+            ("files", self.fetch_files),
+        ):
+            try:
+                snap = fetch()
+                if snap is not None:
+                    self._pyportal_send(mode, snap)
+            except Exception as e:                          # noqa: BLE001
+                logger.warning("resync %s failed: %s", mode, e)
+
     # ----- Wi-Fi helper -------------------------------------------------
 
     def _bridge_get(self, path: str, timeout: float = 6.0) -> Optional[dict]:
@@ -1397,8 +1448,41 @@ class TFTDisplay:
         last_files_push = 0.0
         last_cams_push = 0.0
         last_backend_retry = 0.0
+        last_liveness_check = 0.0
         serial_buf = b""
         while self._cycle_running:
+            # Liveness check: detect a stale PyPortal serial fd left behind
+            # by a USB re-enumeration. The kernel renumbers ttyACM* on
+            # firmware reset / replug / hub reset, but our open fd to the
+            # old node doesn't fail — writes silently succeed-with-no-effect
+            # and reads return zero bytes, so the existing reconnect-on-
+            # IOError path in `_pyportal_send` never triggers. If our path
+            # has vanished from /dev, drop the fd and let the promotion
+            # block below re-probe whatever ttyACM* is now live.
+            if (self._backend == "pyportal" and self._pyportal_path
+                    and time.time() - last_liveness_check > 2.0):
+                last_liveness_check = time.time()
+                if not os.path.exists(self._pyportal_path):
+                    logger.warning(
+                        "PyPortal device %s vanished (USB re-enumeration?) "
+                        "— dropping fd and re-probing",
+                        self._pyportal_path)
+                    try:
+                        with self._pyportal_lock:
+                            try:
+                                if self._pyportal is not None:
+                                    self._pyportal.close()
+                            except Exception:
+                                pass
+                            self._pyportal = None
+                            self._pyportal_path = None
+                            self._backend = "sim"
+                    except Exception:
+                        pass
+                    # Force the next iteration's promotion block to retry
+                    # immediately rather than waiting out a fresh 5s window.
+                    last_backend_retry = 0.0
+
             # If we started on sim because USB enumeration hadn't finished
             # yet, keep probing every 5s and promote to pyportal once it
             # appears. Covers the cold-boot race where the Jetson starts
@@ -1408,6 +1492,24 @@ class TFTDisplay:
                     last_backend_retry = time.time()
                     if BACKEND in ("auto", "pyportal") and self._try_pyportal():
                         logger.info("Promoted backend: sim -> pyportal")
+
+            # Probe-driven full-state resync. `_probe_pyportal` sets
+            # `_needs_resync` on every successful probe (initial cold
+            # boot, cycle-loop promotion, `_pyportal_send` reconnect).
+            # Without this burst the firmware's stats / time / wifi /
+            # drives / cameras stay on their initial empty values until
+            # each individual periodic-push timer fires below — up to
+            # 30s for files, which reads as "the screen never auto-fills".
+            if self._backend == "pyportal" and self._needs_resync:
+                self._needs_resync = False
+                logger.info("post-probe resync — pushing full state")
+                self._push_full_state()
+                now_anchor = time.time()
+                last_stats_push = now_anchor
+                last_wifi_push = now_anchor
+                last_files_push = now_anchor
+                last_cams_push = now_anchor
+                self._last_drives_push = now_anchor
             touch = getattr(self, "_touch_source", None)
             if touch is not None:
                 state = touch.get_state()
@@ -1500,30 +1602,15 @@ class TFTDisplay:
                         # Full-snapshot resync: fired when the firmware boots
                         # (READY) or explicitly asks for state (REQUEST_STATE,
                         # which our firmware sends right after READY). Without
-                        # this, a code.py auto-reload leaves the PyPortal
+                        # this, a code.py auto-reload would leave the PyPortal
                         # rendering empty screens until each periodic push
-                        # cycle ticks over (up to 30s worst-case). Push every
-                        # data-bearing mode in one burst so data lands in
-                        # <1s of the reboot. fetch_* calls that error out
-                        # return None and are skipped — the periodic loop
-                        # will catch up on the next tick.
+                        # cycle ticks over (up to 30s worst-case). The
+                        # post-probe resync block above also calls
+                        # `_push_full_state` for the host-side path (fresh
+                        # probe / re-probe after USB re-enumeration); both
+                        # paths converge on the same helper.
                         logger.info("pyportal: %s — resyncing full state", txt)
-                        try:
-                            self._pyportal_send("stats", self._gather_stats())
-                        except Exception as e:
-                            logger.warning("resync stats failed: %s", e)
-                        for mode, fetch in (
-                            ("wifi", self.fetch_wifi),
-                            ("drives", self.fetch_drives),
-                            ("cameras", self.fetch_cameras),
-                            ("files", self.fetch_files),
-                        ):
-                            try:
-                                snap = fetch()
-                                if snap is not None:
-                                    self._pyportal_send(mode, snap)
-                            except Exception as e:
-                                logger.warning("resync %s failed: %s", mode, e)
+                        self._push_full_state()
                         # Reset periodic-push anchors so we don't double-send
                         # in the next loop iteration.
                         last_stats_push = now
