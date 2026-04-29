@@ -15,6 +15,7 @@ interface ProbeValue {
   messages: ReturnType<typeof useChat>["messages"];
   isStreaming: boolean;
   sendMessage: ReturnType<typeof useChat>["sendMessage"];
+  retryMessage: ReturnType<typeof useChat>["retryMessage"];
   clearMessages: ReturnType<typeof useChat>["clearMessages"];
 }
 
@@ -28,6 +29,7 @@ function Probe({
     messages: hook.messages,
     isStreaming: hook.isStreaming,
     sendMessage: hook.sendMessage,
+    retryMessage: hook.retryMessage,
     clearMessages: hook.clearMessages,
   });
   return null;
@@ -153,7 +155,13 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     });
   });
 
-  it("surfaces a confirmation_required tool_result so the dashboard can render the Tier-2 modal", async () => {
+  it("surfaces confirmation_required (per spec §8.2: ok=true, status='confirmation_required') so the dashboard can render the approval chip", async () => {
+    // Spec §7.1 + §8.2: confirmation_required is NOT an MCP hard error
+    // (isError: false), so the SSE wire shape is `ok: true` paired with
+    // `status: "confirmation_required"`. The orchestrator's runAgent at
+    // llm-agent.service.ts:153 emits this exact shape with a comment
+    // "NOT a hard error from the model's perspective". The dashboard
+    // chip's discriminator is `status` only, NOT `ok`.
     mockSendChat.mockResolvedValueOnce(
       sseResponse([
         `event: tool_call\ndata: ${JSON.stringify({
@@ -163,9 +171,9 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
         })}\n\n`,
         `event: tool_result\ndata: ${JSON.stringify({
           id: "call-block",
-          ok: false,
+          ok: true, // ← matches MCP isError:false per spec §7.1
           status: "confirmation_required",
-          message: "Confirm to apply",
+          message: "Open the dashboard to approve",
         })}\n\n`,
         `event: done\ndata: ${JSON.stringify({ iterations: 1, stop_reason: "model_done" })}\n\n`,
       ]),
@@ -180,7 +188,112 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     await waitFor(() => {
       const last = value!.messages.at(-1);
       expect(last?.toolCalls?.[0].status).toBe("confirmation_required");
-      expect(last?.toolCalls?.[0].ok).toBe(false);
+      // The wire shape carries ok:true. The chip uses `status` as the
+      // discriminator so this branch reaches the amber confirmation
+      // visual rather than the green "success" check.
+      expect(last?.toolCalls?.[0].ok).toBe(true);
+      expect(last?.toolCalls?.[0].message).toBe("Open the dashboard to approve");
+    });
+  });
+
+  it("on a fetch failure, marks the assistant turn with an error + retryPrompt (no raw error string in content)", async () => {
+    mockSendChat.mockRejectedValueOnce(new Error("Failed to fetch"));
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      const last = value!.messages.at(-1);
+      expect(last?.role).toBe("assistant");
+      // Friendly copy, not the raw "Failed to fetch" string.
+      expect(last?.content).toBe("");
+      expect(last?.error).toBeDefined();
+      expect(last?.error?.message).toMatch(/Droplet|connection|Try again/i);
+      expect(last?.error?.message).not.toMatch(/Failed to fetch/);
+      expect(last?.error?.retryPrompt).toBe("hello");
+    });
+  });
+
+  it("retryMessage drops the failed turn + its user prompt and re-sends with a clean replay", async () => {
+    // First turn fails.
+    mockSendChat.mockRejectedValueOnce(new Error("Failed to fetch"));
+    // Second turn (the retry) succeeds.
+    mockSendChat.mockResolvedValueOnce(
+      sseResponse([
+        `event: content_delta\ndata: ${JSON.stringify({ text: "Retry succeeded." })}\n\n`,
+        `event: done\ndata: ${JSON.stringify({ iterations: 1, stop_reason: "model_done" })}\n\n`,
+      ]),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      const errorMsg = value!.messages.at(-1);
+      expect(errorMsg?.error).toBeDefined();
+    });
+
+    const failedId = value!.messages.at(-1)!.id;
+
+    // Retry — the page wires retryMessage to onRetry on the chip.
+    await act(async () => {
+      await value!.retryMessage(failedId, "llama3:8b");
+    });
+
+    // After retry settles, sendChat should have been called twice.
+    expect(mockSendChat).toHaveBeenCalledTimes(2);
+
+    await waitFor(() => {
+      const last = value!.messages.at(-1);
+      expect(last?.role).toBe("assistant");
+      expect(last?.content).toBe("Retry succeeded.");
+      expect(last?.error).toBeUndefined();
+    });
+
+    // The replayed thread should NOT include the failed assistant turn —
+    // verify by inspecting the second sendChat call's messages payload.
+    expect(mockSendChat).toHaveBeenCalledTimes(2);
+    const secondCallArgs = mockSendChat.mock.calls[1][0] as {
+      messages: { role: string; content: string }[];
+    };
+    // Should be a single user turn replayed (the retried prompt) — no
+    // empty/error assistant turns sneaking in.
+    expect(secondCallArgs.messages).toEqual([
+      { role: "user", content: "hello" },
+    ]);
+  });
+
+  it("done event with stop_reason='error' marks the assistant turn as an error with retryPrompt", async () => {
+    mockSendChat.mockResolvedValueOnce(
+      sseResponse([
+        `event: done\ndata: ${JSON.stringify({
+          iterations: 5,
+          stop_reason: "error",
+          error: "ai-gateway 503",
+        })}\n\n`,
+      ]),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("show devices", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      const last = value!.messages.at(-1);
+      expect(last?.role).toBe("assistant");
+      expect(last?.content).toBe("");
+      expect(last?.error).toBeDefined();
+      // Friendly copy, not the raw "ai-gateway 503" string.
+      expect(last?.error?.message).not.toMatch(/503|ai-gateway/);
+      expect(last?.error?.retryPrompt).toBe("show devices");
     });
   });
 

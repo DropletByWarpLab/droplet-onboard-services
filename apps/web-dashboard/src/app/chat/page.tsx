@@ -18,7 +18,7 @@ export default function ChatPage() {
   // dropped when /api/llm/chat became the canonical MCP-backed entry
   // point — it's stateless. Reintroducing sessions needs an
   // orchestrator-side persistence layer.
-  const { messages, isStreaming, sendMessage, clearMessages } = useChat();
+  const { messages, isStreaming, sendMessage, retryMessage, clearMessages } = useChat();
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -69,6 +69,14 @@ export default function ChatPage() {
     clearMessages();
   }, [clearMessages]);
 
+  const handleRetry = useCallback(
+    (messageId: string) => {
+      if (!selectedModel) return;
+      retryMessage(messageId, selectedModel, systemPrompt || undefined);
+    },
+    [retryMessage, selectedModel, systemPrompt],
+  );
+
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
     // pins just above the tab bar with no gap. Matches AuthGate main's padding.
@@ -93,8 +101,12 @@ export default function ChatPage() {
                   : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
               }`}
               title="System prompt"
+              aria-label={
+                showSystemPrompt ? "Hide system prompt" : "Show system prompt"
+              }
+              aria-pressed={showSystemPrompt}
             >
-              <Settings2 size={16} />
+              <Settings2 size={16} aria-hidden="true" />
             </button>
             <button
               onClick={handleNewChat}
@@ -102,8 +114,9 @@ export default function ChatPage() {
               className="flex items-center gap-1.5 type-subheadline text-accent
                 hover:text-accent-hover disabled:text-label-quaternary
                 disabled:cursor-not-allowed transition-colors duration-200 ease-smooth"
+              aria-label="Start a new chat"
             >
-              <RotateCcw size={14} />
+              <RotateCcw size={14} aria-hidden="true" />
               <span className="hidden sm:inline">New chat</span>
             </button>
           </div>
@@ -174,6 +187,7 @@ export default function ChatPage() {
               isStreaming={
                 isStreaming && idx === messages.length - 1 && msg.role === "assistant"
               }
+              onRetry={handleRetry}
             />
           ))}
           <div ref={messagesEndRef} />

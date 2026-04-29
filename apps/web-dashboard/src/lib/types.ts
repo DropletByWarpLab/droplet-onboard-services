@@ -23,6 +23,14 @@ export interface ChatMessage {
   content: string;
   /** Tool dispatches surfaced on this assistant turn (if any). */
   toolCalls?: ChatToolCall[];
+  /**
+   * Set on an assistant message when the turn failed (network error,
+   * ai-gateway down, MCP child crashed, model returned `stop_reason:
+   * "error"`). The UI renders a friendly message + retry button rather
+   * than the raw error string. `retryPrompt` is the user prompt that
+   * drove this turn — clicking retry re-sends it.
+   */
+  error?: { message: string; retryPrompt: string };
 }
 
 export interface ChatRequest {

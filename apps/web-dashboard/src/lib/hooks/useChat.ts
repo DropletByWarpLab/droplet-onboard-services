@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { sendChat } from "../api";
 import type { ChatMessage, ChatToolCall } from "../types";
 
@@ -87,9 +87,43 @@ function parseSseFrame(raw: string): SSEEvent | null {
   }
 }
 
+/**
+ * Translate a raw fetch / streaming error into copy a non-engineering
+ * user can act on. The original message is logged but never rendered
+ * directly to avoid leaking strings like "Failed to fetch" or "503"
+ * into the chat surface.
+ */
+function friendlyErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  // Keep the raw cause in console for operators / debugging.
+  // eslint-disable-next-line no-console
+  console.error("[chat] turn failed:", raw);
+  if (/network|fetch|ECONNREFUSED|ENOTFOUND/i.test(raw)) {
+    return "I can't reach the Droplet right now. Check the connection and try again.";
+  }
+  if (/timeout|timed out/i.test(raw)) {
+    return "That took too long. Try again, or simplify the request.";
+  }
+  if (/abort/i.test(raw)) {
+    return "The request was cancelled.";
+  }
+  return "Something went wrong on this turn. Try again.";
+}
+
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+
+  // Keep a ref-mirror of `messages` so callbacks (especially
+  // `retryMessage`) can read the current snapshot synchronously without
+  // relying on the setMessages updater to run before the surrounding
+  // async code reads back. In test environments React batches updater
+  // execution after the synchronous portion of an async function — the
+  // ref dodges that.
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const sendMessage = useCallback(
     async (content: string, model: string, systemPrompt?: string) => {
@@ -111,10 +145,14 @@ export function useChat() {
         replayMessages.push({ role: "system", content: systemPrompt });
       }
       // Existing messages already in state, plus the user turn we just
-      // built. Don't include the empty assistant placeholder.
+      // built. Don't include the empty assistant placeholder, and drop
+      // any prior assistant turn that ended in an error — replaying
+      // "I can't reach the Droplet…" back to the model would just
+      // confuse it.
       setMessages((prev) => {
         for (const m of prev) {
           if (m.role === "assistant" && !m.content) continue;
+          if (m.role === "assistant" && m.error) continue;
           replayMessages.push({ role: m.role, content: m.content });
         }
         replayMessages.push({ role: "user", content });
@@ -155,16 +193,17 @@ export function useChat() {
             if (!frame.trim()) continue;
             const evt = parseSseFrame(frame);
             if (!evt) continue;
-            applyEvent(setMessages, assistantMessage.id, evt);
+            applyEvent(setMessages, assistantMessage.id, evt, content);
           }
         }
 
         // Flush trailing frame if the stream ended without a final \n\n.
         if (buffer.trim()) {
           const evt = parseSseFrame(buffer);
-          if (evt) applyEvent(setMessages, assistantMessage.id, evt);
+          if (evt) applyEvent(setMessages, assistantMessage.id, evt, content);
         }
       } catch (err) {
+        const friendly = friendlyErrorMessage(err);
         setMessages((prev) => {
           const updated = [...prev];
           const idx = updated.findIndex((m) => m.id === assistantMessage.id);
@@ -173,9 +212,7 @@ export function useChat() {
             if (last.role === "assistant" && !last.content) {
               updated[idx] = {
                 ...last,
-                content: `Error: ${
-                  err instanceof Error ? err.message : "Unknown error"
-                }`,
+                error: { message: friendly, retryPrompt: content },
               };
             }
           }
@@ -188,6 +225,38 @@ export function useChat() {
     [],
   );
 
+  /**
+   * Re-send the prompt that drove a failed assistant turn. Drops the
+   * failed turn (and the user message that preceded it, since
+   * `sendMessage` will re-append both) so we don't double up.
+   *
+   * Returns a promise so callers can `await retryMessage(...)` — the
+   * test suite relies on this.
+   */
+  const retryMessage = useCallback(
+    async (messageId: string, model: string, systemPrompt?: string) => {
+      // Read the failed message from the ref-mirror — the updater
+      // pattern doesn't work here because in this test/runtime
+      // environment React batches the updater AFTER the surrounding
+      // async code reads back closure-captured state.
+      const target = messagesRef.current.find((m) => m.id === messageId);
+      if (!target?.error) return;
+      const retryPrompt = target.error.retryPrompt;
+
+      // Drop the failed assistant + the user turn immediately before it
+      // so the new turn replays a clean thread.
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx === -1) return prev;
+        const userIdx = idx > 0 && prev[idx - 1].role === "user" ? idx - 1 : idx;
+        return prev.filter((_, i) => i !== idx && i !== userIdx);
+      });
+
+      await sendMessage(retryPrompt, model, systemPrompt);
+    },
+    [sendMessage],
+  );
+
   const clearMessages = useCallback(() => {
     setMessages([]);
   }, []);
@@ -197,6 +266,7 @@ export function useChat() {
     setMessages,
     isStreaming,
     sendMessage,
+    retryMessage,
     clearMessages,
   };
 }
@@ -204,12 +274,15 @@ export function useChat() {
 /**
  * Apply a single SSE event to the streaming assistant message
  * identified by `assistantId`. Pure state mutation — extracted so
- * the reader loop reads cleanly.
+ * the reader loop reads cleanly. `retryPrompt` is the user prompt
+ * that drove this turn, used to mark error states with a retry
+ * affordance when a `done` event carries `stop_reason: "error"`.
  */
 function applyEvent(
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
   assistantId: string,
   evt: SSEEvent,
+  retryPrompt: string,
 ): void {
   setMessages((prev) => {
     const idx = prev.findIndex((m) => m.id === assistantId);
@@ -253,9 +326,18 @@ function applyEvent(
         return updated;
       }
       case "done": {
-        if (evt.stop_reason === "error" && evt.error && !last.content) {
+        if (evt.stop_reason === "error" && !last.content) {
+          // eslint-disable-next-line no-console
+          console.error("[chat] agent loop ended with error:", evt.error);
           const updated = [...prev];
-          updated[idx] = { ...last, content: `Error: ${evt.error}` };
+          updated[idx] = {
+            ...last,
+            error: {
+              message:
+                "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",
+              retryPrompt,
+            },
+          };
           return updated;
         }
         return prev;
