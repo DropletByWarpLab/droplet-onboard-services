@@ -20,7 +20,10 @@
  * model can't burn unbounded tokens.
  */
 
-import type { McpClientService } from "./mcp-client.service.js";
+import type {
+  McpCallContext,
+  McpClientService,
+} from "./mcp-client.service.js";
 import type { ChatMessage, ChatResponse, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 
@@ -49,6 +52,14 @@ export interface AgentRequest {
   temperature?: number;
   /** If set, restrict the registry to this subset of tool names. */
   allowed_tools?: string[];
+  /**
+   * Per-call session context passed verbatim to every `mcp.callTool`
+   * invocation in this loop. Today the only field is `ncToken` so file
+   * tools can authenticate to Nextcloud as the dashboard user. The
+   * MCP `_meta` channel carries it to the stdio child; stdio is
+   * in-process trusted, so it's safe to plumb session tokens this way.
+   */
+  toolCallContext?: McpCallContext;
 }
 
 export interface AgentTraceEntry {
@@ -139,7 +150,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     for (const call of asst.tool_calls) {
       const args = safeParseArgs(call);
       emit({ type: "tool_call", id: call.id, name: call.function.name, args });
-      const result = await deps.mcp.callTool(call.function.name, args);
+      const result = await deps.mcp.callTool(
+        call.function.name,
+        args,
+        req.toolCallContext,
+      );
       const text = result.content[0]?.text ?? "{}";
       let parsed: unknown;
       try {

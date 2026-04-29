@@ -86,7 +86,10 @@ describe("runAgent", () => {
       model: "ollama/qwen3",
       messages: [{ role: "user", content: "show devices" }],
     });
-    expect(callTool).toHaveBeenCalledWith("list_network_devices", {});
+    // Third arg is the per-call toolCallContext (added in WARP-104
+    // follow-up to plumb ncToken through to file handlers); undefined
+    // here because the test request didn't pass one.
+    expect(callTool).toHaveBeenCalledWith("list_network_devices", {}, undefined);
     expect(result.iterations).toBe(2);
     expect(result.stop_reason).toBe("model_done");
     expect(events.filter((e) => e.type === "tool_call").length).toBe(1);
@@ -193,5 +196,65 @@ describe("runAgent", () => {
     const done = events.find((e) => e.type === "done");
     expect(done).toBeDefined();
     if (done && done.type === "done") expect(done.stop_reason).toBe("error");
+  });
+
+  // WARP-104 reviewer follow-up: verify the per-call session context
+  // (ncToken) is plumbed verbatim through every callTool invocation.
+  it("forwards req.toolCallContext to mcp.callTool on every dispatch", async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ entries: [] }) }],
+        isError: false,
+      });
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c-files",
+                    type: "function",
+                    function: { name: "list_files", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "no files" } }],
+        }),
+      });
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          {
+            name: "list_files",
+            description: "...",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ]),
+        callTool,
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "list my files" }],
+      toolCallContext: { ncToken: "nct-from-route" },
+    });
+    expect(callTool).toHaveBeenCalledWith("list_files", {}, {
+      ncToken: "nct-from-route",
+    });
   });
 });

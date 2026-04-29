@@ -7,6 +7,8 @@ import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { TOOLS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
+import type { McpCallContext } from "../services/mcp-client.service.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import type { ModelsResponse, SessionChatRequest } from "../types/index.js";
 
@@ -162,6 +164,19 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         chatReq.allowed_tools,
       );
 
+      // Resolve the caller's Nextcloud session token so file-tool
+      // handlers (`list_files`, `read_file`, `write_file`, etc.) can
+      // authenticate to Nextcloud as the dashboard user. Threaded to
+      // the MCP stdio child via `McpCallContext` → `_meta.ncToken` on
+      // every `tools/call`. `resolveNcToken` returns null when the
+      // request has no Nextcloud session (e.g. a direct API caller
+      // without the cookie); file tools will then surface
+      // AUTH_REQUIRED, which is the same behavior as before WARP-104.
+      const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
+      const toolCallContext: McpCallContext | undefined = ncToken
+        ? { ncToken }
+        : undefined;
+
       const deps: AgentDeps = {
         mcp: mcpClient,
         aiGateway: { chat: aiGateway.chat },
@@ -191,6 +206,7 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
             temperature: chatReq.temperature,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
+            toolCallContext,
           });
         } finally {
           res.end();
@@ -204,6 +220,7 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         temperature: chatReq.temperature,
         max_iter: chatReq.max_iter,
         allowed_tools: allowedForUser,
+        toolCallContext,
       });
       res.json(result);
     } catch (err) {
@@ -214,15 +231,28 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
   // List every tool the agent can call. Useful for the dashboard to
   // render a "capabilities" pane and for debugging tool schemas.
   // Proxies `mcpClient.listTools()` so the wire shape matches the
-  // JSON-RPC `tools/list` response and the dashboard sees the same set
-  // of tools as off-host MCP clients (after future RBAC filtering in
-  // mcp-server). The `inputSchema → parameters` rename mirrors the
-  // OpenAI function-calling shape callers historically expected.
-  router.get("/llm/tools", async (_req, res, next) => {
+  // JSON-RPC `tools/list` response.
+  //
+  // RBAC: the result is filtered to match what `/api/llm/chat` would
+  // actually permit for the caller's role — owner/admin see every
+  // tool, family/guest see read-only. Without this, an unprivileged
+  // user could enumerate `block_network_device`, `write_file`,
+  // `commission_device`, etc. via the capabilities endpoint and use
+  // that list to craft prompt-injection attempts. Execution is gated
+  // independently in `/api/llm/chat`, so this is closing the
+  // information-disclosure gap, not the privilege-escalation one.
+  //
+  // The `inputSchema → parameters` rename mirrors the OpenAI
+  // function-calling shape callers historically expected.
+  router.get("/llm/tools", async (req, res, next) => {
     try {
       const tools = await mcpClient.listTools();
+      const role = (req as AuthedRequest).user?.role;
+      const filtered = isPrivilegedRole(role)
+        ? tools
+        : tools.filter((t) => !WRITE_TOOLS.has(t.name));
       res.json({
-        tools: tools.map((t) => ({
+        tools: filtered.map((t) => ({
           name: t.name,
           description: t.description,
           parameters: t.inputSchema,
@@ -268,10 +298,13 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
   });
 
   // --- Sessions ---
-  // Sessions still proxy to the ai-gateway (which owns persistent
-  // conversation state). The dashboard's /chat page goes through these
-  // session routes today, so the SSE shape change on /api/llm/chat
-  // doesn't reach it.
+  // Session routes still proxy to ai-gateway-owned persistent
+  // conversation state. WARP-104 switched the dashboard's /chat page
+  // to /api/llm/chat (the MCP-backed orchestrator agent loop) — these
+  // session routes are no longer hit by the in-tree dashboard. They
+  // remain available for direct API callers that want server-side
+  // history; deletion is a separate decision once any out-of-tree
+  // consumers have migrated.
 
   router.post("/llm/sessions", async (req, res, next) => {
     try {

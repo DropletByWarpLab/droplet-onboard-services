@@ -1,6 +1,21 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
+import type { Request, Response, NextFunction } from "express";
+
+// Stub auth middleware — pulls a role from `x-test-role` so RBAC tests
+// can pretend to be different users without rebuilding the middleware
+// chain. Matches the pattern in `llm-chat.integration.test.ts`.
+vi.mock("../middleware/auth.js", () => ({
+  authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
+    const role = req.headers["x-test-role"];
+    if (typeof role === "string" && role.length > 0) {
+      (req as unknown as { user?: { username: string; role: string } }).user =
+        { username: "test", role };
+    }
+    next();
+  },
+}));
 
 // Stub ai-gateway so the orchestrator boots without a live FastAPI process.
 vi.mock("../services/ai-gateway.client.js", () => ({
@@ -74,5 +89,106 @@ describe("GET /api/llm/tools", () => {
 
     const res = await request(app).get("/api/llm/tools");
     expect(res.status).toBe(500);
+  });
+
+  // RBAC: the route filters write tools by role so unprivileged users
+  // can't enumerate the destructive surface (info-disclosure that would
+  // help craft prompt-injection attempts). Execution is gated
+  // separately on `/api/llm/chat`. Both are needed.
+
+  it("filters write tools out of the advertised list for family role", async () => {
+    mockListTools.mockResolvedValueOnce([
+      {
+        name: "list_network_devices",
+        description: "list devices",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "block_network_device",
+        description: "block a device",
+        inputSchema: { type: "object", properties: { mac: { type: "string" } } },
+      },
+      {
+        name: "write_file",
+        description: "write a file",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]);
+
+    const res = await request(app)
+      .get("/api/llm/tools")
+      .set("x-test-role", "family");
+    expect(res.status).toBe(200);
+    const names = (res.body.tools as { name: string }[]).map((t) => t.name);
+    expect(names).toContain("list_network_devices");
+    expect(names).not.toContain("block_network_device");
+    expect(names).not.toContain("write_file");
+  });
+
+  it("filters write tools out for guest role", async () => {
+    mockListTools.mockResolvedValueOnce([
+      {
+        name: "list_files",
+        description: "list",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "delete_file",
+        description: "delete",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]);
+
+    const res = await request(app)
+      .get("/api/llm/tools")
+      .set("x-test-role", "guest");
+    expect(res.status).toBe(200);
+    const names = (res.body.tools as { name: string }[]).map((t) => t.name);
+    expect(names).toEqual(["list_files"]);
+  });
+
+  it("admin role sees write tools advertised", async () => {
+    mockListTools.mockResolvedValueOnce([
+      {
+        name: "list_network_devices",
+        description: "list",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "block_network_device",
+        description: "block",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]);
+
+    const res = await request(app)
+      .get("/api/llm/tools")
+      .set("x-test-role", "admin");
+    expect(res.status).toBe(200);
+    const names = (res.body.tools as { name: string }[]).map((t) => t.name);
+    expect(names).toContain("list_network_devices");
+    expect(names).toContain("block_network_device");
+  });
+
+  it("owner role sees write tools advertised", async () => {
+    mockListTools.mockResolvedValueOnce([
+      {
+        name: "list_files",
+        description: "list",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "send_notification",
+        description: "send",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ]);
+
+    const res = await request(app)
+      .get("/api/llm/tools")
+      .set("x-test-role", "owner");
+    expect(res.status).toBe(200);
+    const names = (res.body.tools as { name: string }[]).map((t) => t.name);
+    expect(names).toContain("send_notification");
   });
 });
