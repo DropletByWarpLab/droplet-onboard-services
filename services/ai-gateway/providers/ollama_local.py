@@ -14,7 +14,7 @@ from schemas import ChatMessage, ModelInfo
 
 logger = logging.getLogger(__name__)
 
-JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://jetson-ai.local:11434")
+JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://host.docker.internal:11434")
 
 # Cold-loading a model on the Jetson can take 30-90s (8B Q4 with partial GPU offload),
 # and long completions can stream for minutes. The previous flat 60s timeout aborted
