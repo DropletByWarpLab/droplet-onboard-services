@@ -11,6 +11,8 @@
   Orchestration, web dashboard, AI routing, file management, and file sync — all on-device.
 </p>
 
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-jetson-ai`](../droplet-jetson-ai). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+
 ![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6?logo=typescript&logoColor=white)

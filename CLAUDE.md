@@ -1,5 +1,7 @@
 # edge-platform
 
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-jetson-ai`](../droplet-jetson-ai). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+
 Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file indexer service, and all supporting Docker infrastructure.
 
 ## Monorepo structure
