@@ -125,6 +125,27 @@ class OllamaLocalProvider(BaseProvider):
         self._sema = asyncio.Semaphore(size)
         self._sema_size = size
 
+    async def _handle_appliance_503(self, retry_after: str, body_preview: str) -> None:
+        """Shared 503 handler for both streaming and non-streaming chat paths.
+
+        The appliance signals overload via 503 (model_loading, circuit_open, or
+        queue full). Refresh ``/health`` so we pick up the current
+        ``num_parallel``, and rebuild the semaphore if it changed so subsequent
+        calls match the appliance's new slot count.
+
+        Both ``chat()`` (non-streaming) and ``_stream_chat()`` MUST go through
+        this so the streaming path doesn't silently miss a scale-up event
+        (silver-tier review issue I-4).
+        """
+        await self._limits.refresh(self.client)
+        if self._sema_size != self._limits.num_parallel:
+            self._build_sema(self._limits.num_parallel)
+        logger.warning(
+            "appliance_503_received: retry_after=%s body=%s",
+            retry_after,
+            body_preview,
+        )
+
     async def _ensure_limits(self) -> None:
         """Lazy first-call refresh of the appliance's limits + semaphore creation."""
         if self._limits._last_refresh > 0:
@@ -184,16 +205,11 @@ class OllamaLocalProvider(BaseProvider):
             async with self._sema:
                 resp = await self.client.post("/v1/chat/completions", json=body)
             if resp.status_code == 503:
-                # The appliance is signaling overload (model_loading or circuit_open).
-                # Refresh limits, resize the semaphore, then bubble up so the caller
-                # can honor Retry-After and decide whether to retry.
-                retry = resp.headers.get("Retry-After", "30")
-                await self._limits.refresh(self.client)
-                if self._sema_size != self._limits.num_parallel:
-                    self._build_sema(self._limits.num_parallel)
-                logger.warning(
-                    "appliance_503_received: retry_after=%s body=%s",
-                    retry,
+                # Appliance overload (model_loading / circuit_open / queue full).
+                # Refresh limits + rebuild sema, then bubble up so the caller can
+                # honor Retry-After and decide whether to retry.
+                await self._handle_appliance_503(
+                    resp.headers.get("Retry-After", "30"),
                     resp.text[:200],
                 )
             resp.raise_for_status()
@@ -209,7 +225,13 @@ class OllamaLocalProvider(BaseProvider):
                 "POST", "/v1/chat/completions", json=body
             ) as resp:
                 if resp.status_code == 503:
-                    await self._limits.refresh(self.client)
+                    # Same handler the non-streaming branch uses, so a scale-up
+                    # signaled via 503 is not silently missed here (I-4).
+                    body_preview = (await resp.aread()).decode(errors="replace")[:200]
+                    await self._handle_appliance_503(
+                        resp.headers.get("Retry-After", "30"),
+                        body_preview,
+                    )
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if line.startswith("data: "):
