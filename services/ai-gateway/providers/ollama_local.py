@@ -14,7 +14,7 @@ from schemas import ChatMessage, ModelInfo
 
 logger = logging.getLogger(__name__)
 
-JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://host.docker.internal:11434")
+JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://host.docker.internal:8002/proxy")
 
 # Cold-loading a model on the Jetson can take 30-90s (8B Q4 with partial GPU offload),
 # and long completions can stream for minutes. The previous flat 60s timeout aborted
@@ -87,12 +87,16 @@ class OllamaLocalProvider(BaseProvider):
             "messages": [m.model_dump(exclude_none=True) for m in messages],
             "stream": stream,
         }
-        # Pass through supported kwargs
+        has_tools = bool(kwargs.get("tools"))
+        # When tools are present, default temperature=0 so tool-call output is stable.
+        if has_tools and kwargs.get("temperature") is None:
+            body["temperature"] = 0.0
+        # Pass through supported kwargs (caller's explicit value overrides our default).
         for k in ("temperature", "max_tokens"):
             if kwargs.get(k) is not None:
                 body[k] = kwargs[k]
         # Pass tools if provided (Ollama supports OpenAI-compatible tool calling)
-        if kwargs.get("tools"):
+        if has_tools:
             body["tools"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in kwargs["tools"]]
 
         if not stream:
