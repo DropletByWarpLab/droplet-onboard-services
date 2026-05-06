@@ -106,6 +106,11 @@ class OllamaLocalProvider(BaseProvider):
         self.base_url = (base_url or JETSON_OLLAMA_URL).rstrip("/")
         self._limits = _LimitsCache(self.base_url)
         self._sema: asyncio.Semaphore | None = None
+        # Track the size used to construct the current `_sema`. asyncio.Semaphore
+        # only exposes the private CPython attr `_value` (current free slots,
+        # not the original size), which can't be relied on for resize decisions
+        # mid-flight or across Python versions. We keep our own copy.
+        self._sema_size: int = 0
         # Outbound connection cap matches the appliance's parallel slot count.
         # Refreshed on first chat via _ensure_limits.
         self.client = httpx.AsyncClient(
@@ -114,15 +119,21 @@ class OllamaLocalProvider(BaseProvider):
             limits=httpx.Limits(max_connections=self._limits.num_parallel),
         )
 
+    def _build_sema(self, num_parallel: int) -> None:
+        """(Re)build the in-flight semaphore at the requested size."""
+        size = max(1, num_parallel)
+        self._sema = asyncio.Semaphore(size)
+        self._sema_size = size
+
     async def _ensure_limits(self) -> None:
         """Lazy first-call refresh of the appliance's limits + semaphore creation."""
         if self._limits._last_refresh > 0:
             if self._sema is None:
-                self._sema = asyncio.Semaphore(max(1, self._limits.num_parallel))
+                self._build_sema(self._limits.num_parallel)
             return
         await self._limits.refresh(self.client)
         if self._sema is None:
-            self._sema = asyncio.Semaphore(max(1, self._limits.num_parallel))
+            self._build_sema(self._limits.num_parallel)
 
     async def list_models(self) -> list[ModelInfo]:
         try:
@@ -178,8 +189,8 @@ class OllamaLocalProvider(BaseProvider):
                 # can honor Retry-After and decide whether to retry.
                 retry = resp.headers.get("Retry-After", "30")
                 await self._limits.refresh(self.client)
-                if self._sema._value != self._limits.num_parallel:
-                    self._sema = asyncio.Semaphore(max(1, self._limits.num_parallel))
+                if self._sema_size != self._limits.num_parallel:
+                    self._build_sema(self._limits.num_parallel)
                 logger.warning(
                     "appliance_503_received: retry_after=%s body=%s",
                     retry,
