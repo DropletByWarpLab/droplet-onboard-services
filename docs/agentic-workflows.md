@@ -20,22 +20,36 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
               │   ─ services/mcp-server/    stdio child, ~50 tools         │
               │   ─ services/ai-gateway/    pure model proxy: routing      │
               │             │                                              │
-              │             │  Ollama native API                           │
-              │             │  (/api/chat, /api/tags, /api/pull, etc.)     │
+              │             │  OpenAI-compat / Ollama-native, via proxy    │
+              │             │  (/v1/chat/completions, /api/chat, etc.)     │
               │             ▼                                              │
-              │   http://jetson-ai.local:11434                             │
+              │   http://host.docker.internal:8002/proxy/{path:path}       │
               │             ▲                                              │
               │             │                                              │
               │   droplet-jetson-ai (this repo — LLM appliance)            │
               │   ─ ollama (Docker container)              :11434         │
               │   ─ ollama-manager (FastAPI sidecar)        :8002         │
-              │       /health   /models/manifest                          │
+              │       /proxy/{path:path}    forwards to Ollama with      │
+              │           tool-call observability + JSON repair          │
+              │           + circuit breaker; chat-shaped paths get       │
+              │           model_loading + circuit_open 503 pre-flights   │
+              │       /health   /metrics                                  │
+              │       /models/manifest                                    │
               │       /models/available  /models/loaded                   │
               │       /models/eligible    (VRAM-gated)                    │
               │       /models/sync         (idempotent pulls)             │
               │       /models/pull         DELETE /models/{name}          │
+              │   ─ ollama-metrics (sidecar)                :9101         │
               └────────────────────────────────────────────────────────────┘
 ```
+
+The orchestrator's ai-gateway calls the Jetson side through `ollama-manager`'s
+`/proxy/{path:path}` router rather than Ollama directly. The proxy observes
+tool-call emissions, repairs malformed argument JSON (best-effort), and
+surfaces a circuit breaker that trips on transport-level failures.
+ai-gateway reads `/health.limits` at provider init to size its outbound
+concurrency to match `OLLAMA_NUM_PARALLEL` on the appliance, and refreshes
+those limits on a 503 from the proxy.
 
 ## Where things live
 
@@ -56,7 +70,7 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
 
 1. **Web dashboard or API client** → `POST /ai/chat` on the orchestrator (port 3000) or directly on ai-gateway (port 8000).
 2. **Orchestrator's agent loop** (`llm-agent.service.ts`) starts: get tools from MCP, send first turn to ai-gateway.
-3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `JETSON_OLLAMA_URL` (`http://jetson-ai.local:11434`).
+3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `JETSON_OLLAMA_URL` (`http://host.docker.internal:8002/proxy`). The request enters `ollama-manager`'s chat proxy, which pre-flights model-loading + circuit-open state and forwards to Ollama.
 4. **Jetson Ollama** (this repo's `ollama` container) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
 6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).

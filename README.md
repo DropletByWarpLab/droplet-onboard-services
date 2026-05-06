@@ -436,7 +436,7 @@ npm run dev
 | `REDIS_URL` | `redis://cache:6379` | Redis 7 connection string |
 | `MQTT_BROKER` | `mqtt://broker:1883` | Mosquitto 2 broker URL |
 | `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway internal URL |
-| `JETSON_OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama endpoint on the inference engine. ai-gateway resolves `host.docker.internal` via the `extra_hosts: host-gateway` mapping in compose. |
+| `JETSON_OLLAMA_URL` | `http://host.docker.internal:8002/proxy` | ollama-manager chat-proxy URL on the Jetson appliance. Provides tool-call observability + JSON repair + circuit breaker; ai-gateway reads `/health.limits` to size outbound concurrency. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. |
 | `FILES_ROOT` | `/data/files` | File storage root |
 | `STORAGE_BACKEND` | `nextcloud` | `nextcloud` (WebDAV) or `legacy` (local filesystem) |
 | `NEXTCLOUD_URL` | `http://nextcloud:80` | Nextcloud 29 internal URL |
