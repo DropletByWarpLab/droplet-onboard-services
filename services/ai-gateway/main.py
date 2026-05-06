@@ -8,6 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -114,6 +115,30 @@ async def health():
     if provider_router:
         jetson_reachable = await provider_router.ollama.is_reachable()
     return {"status": "ok", "jetson_reachable": jetson_reachable}
+
+
+@app.get("/ai/readiness")
+async def readiness():
+    """Reflect the underlying appliance health for orchestration purposes.
+
+    Pulls /health from the Jetson appliance (ollama-manager) so the orchestrator
+    can decide whether to accept inference traffic. Distinct from /ai/health,
+    which only reports gateway-side liveness.
+    """
+    if provider_router is None:
+        return {"status": "starting", "appliance": None}
+    provider = provider_router.ollama
+    appliance: dict | None = None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            root = provider.base_url.removesuffix("/proxy")
+            resp = await c.get(f"{root}/health")
+            if resp.status_code == 200:
+                appliance = resp.json()
+    except Exception as e:
+        appliance = {"status": "unreachable", "error": str(e)}
+    overall = "ok" if appliance and appliance.get("status") == "ok" else "degraded"
+    return {"status": overall, "appliance": appliance}
 
 
 # --- Models ---
