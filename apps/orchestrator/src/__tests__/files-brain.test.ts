@@ -277,15 +277,19 @@ describe("POST /api/files/brain/upload", () => {
   });
 
   it("rejects an unsupported MIME with 415", async () => {
+    // Use an arbitrary MIME the allow-list doesn't recognise.
+    // (video/mp4 was the placeholder before WARP-198 added video to
+    // the allow-list — application/x-tex stays out of any extractor
+    // family we ship today.)
     const res = await request(app)
       .post("/api/files/brain/upload")
       .attach("file", Buffer.from("nope"), {
-        filename: "video.mp4",
-        contentType: "video/mp4",
+        filename: "paper.tex",
+        contentType: "application/x-tex",
       });
     expect(res.status).toBe(415);
     expect(res.body.error).toBe("unsupported_mime");
-    expect(res.body.mimeType).toBe("video/mp4");
+    expect(res.body.mimeType).toBe("application/x-tex");
   });
 
   it("rejects oversized uploads with 413", async () => {
@@ -423,6 +427,26 @@ describe("POST /api/files/brain/upload", () => {
     const res = await request(app)
       .post("/api/files/brain/upload")
       .attach("file", fakeArchive, { filename, contentType: mime });
+    expect(res.status).toBe(202);
+  });
+
+  // WARP-198 — video MIMEs. The file-indexer's video extractor uses
+  // a subtitles-first / audio-fallback strategy; the orchestrator's
+  // upload route just has to accept the MIME. 2 GB byte cap is enforced
+  // by VIDEO_MAX_BYTES in the indexer's registry — multer's 50 MB cap
+  // still applies here for chat attachments.
+  it.each([
+    ["video/mp4", "meeting.mp4"],
+    ["video/quicktime", "demo.mov"],
+    ["video/x-matroska", "talk.mkv"],
+    ["video/webm", "screencast.webm"],
+    ["video/x-msvideo", "old-clip.avi"],
+    ["video/mpeg", "broadcast.mpg"],
+  ])("accepts video uploads: %s (WARP-198)", async (mime, filename) => {
+    const fakeVideo = Buffer.alloc(64);
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", fakeVideo, { filename, contentType: mime });
     expect(res.status).toBe(202);
   });
 });

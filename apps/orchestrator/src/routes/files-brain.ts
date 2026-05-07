@@ -48,6 +48,7 @@ const logger = pino({ name: "files-brain-route" });
  *   audio/*           → audio extractor (ASR)   (WARP-197)
  *   email             → email extractor with recursive attachment dispatch (WARP-199)
  *   archive (zip/tar) → archive extractor with 5-layer bomb defense (WARP-200)
+ *   video/*           → video extractor (subtitles-first, audio-fallback) (WARP-198)
  *
  * The list is intentionally explicit rather than wildcard-driven so a
  * user can't slip in `application/octet-stream` and end up indexing
@@ -93,6 +94,19 @@ const ALLOWED_MIMES = new Set<string>([
   "application/gzip",
   "application/x-gzip",
   "application/x-bzip2",
+  // WARP-198 — video MIMEs. The file-indexer's video extractor takes
+  // a subtitles-first / audio-fallback approach: text-based subtitle
+  // streams (srt/ass/ssa/mov_text/webvtt) are extracted via ffmpeg +
+  // the `srt` library; otherwise the audio track is stripped to a
+  // 16kHz mono WAV and dispatched through the WARP-197 audio
+  // extractor (faster-whisper). 2 GB cap enforced upstream by
+  // VIDEO_MAX_BYTES in the indexer's registry.
+  "video/mp4",
+  "video/quicktime",
+  "video/x-matroska",
+  "video/webm",
+  "video/x-msvideo",
+  "video/mpeg",
 ]);
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
