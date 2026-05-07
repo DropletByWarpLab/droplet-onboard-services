@@ -1,0 +1,303 @@
+/**
+ * WARP-204 — `/knowledge` dashboard view backend.
+ *
+ * This router exposes the two endpoints that drive the dashboard's
+ * `/knowledge` page:
+ *
+ *   GET /api/files/knowledge/recent
+ *     Cursor-paginated list of FileContentChunk rows for the authed
+ *     user, newest first. The dashboard groups the flat list into
+ *     "Today / Yesterday / This week / This month / Earlier" buckets;
+ *     this route stays shape-agnostic so the same data can power a
+ *     mobile client later.
+ *
+ *   GET /api/files/knowledge/search
+ *     Semantic search over the same chunks. Delegates to the shared
+ *     `services/file-search.service.ts` module that WARP-202 introduces.
+ *     Until that lands, this route returns `503 search-not-yet-available`
+ *     so the dashboard can render a graceful "search will be online soon"
+ *     state instead of crashing.
+ *
+ * # Path namespace
+ *
+ * The original spec / plan example used `/api/files/recent` and
+ * `/api/files/search`. Those collide with two long-standing Nextcloud-
+ * filename routes in `routes/files.ts` (`/files/recents` and
+ * `/files/search`) that the dashboard's Recents tab + global file
+ * search bar already consume. To keep both surfaces alive we mount the
+ * new endpoints under `/files/knowledge/*`. The dashboard's `/knowledge`
+ * tabs target this namespace; nothing else should.
+ *
+ * # RBAC
+ *
+ * Both routes pull `userId` from `req.user.username` (populated by the
+ * auth middleware) and pass it as a hard `where.userId = <user>` filter
+ * to every Prisma query. Cross-user retrieval is impossible by
+ * construction. See spec §12.
+ */
+
+import { Router } from "express";
+import { PrismaClient } from "@prisma/client";
+import pino from "pino";
+
+const logger = pino({ name: "files-knowledge-route" });
+
+// Hard upper bounds — keep both routes from being used as a denial-of-
+// service amplifier (large `take` => big Postgres scan + big JSON body).
+const RECENT_LIMIT_MAX = 50;
+const RECENT_LIMIT_DEFAULT = 50;
+const SEARCH_LIMIT_MAX = 20;
+const SEARCH_LIMIT_DEFAULT = 20;
+const SEARCH_MIN_QUERY_LENGTH = 2;
+const SEARCH_MIN_SIMILARITY = 0.25;
+const SNIPPET_MAX_CHARS = 240;
+
+type SourceFilter = "nextcloud" | "brain";
+
+function parseSource(raw: unknown): SourceFilter | undefined {
+  if (raw === "nextcloud" || raw === "brain") return raw;
+  return undefined;
+}
+
+/** Truncate text to a fixed width — cheap snippet for list cards. */
+function snippet(text: string | null | undefined): string {
+  if (!text) return "";
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  return trimmed.length > SNIPPET_MAX_CHARS
+    ? trimmed.slice(0, SNIPPET_MAX_CHARS - 1) + "…"
+    : trimmed;
+}
+
+/**
+ * Coerce BigInt + Date fields into JSON-friendly types. Prisma returns
+ * `id` as `BigInt` (autoincrement column on `FileContentChunk`) and
+ * `JSON.stringify` throws on BigInt — so the route MUST stringify it
+ * explicitly. Same goes for `indexedAt` (Date → ISO string) so the
+ * dashboard's `new Date(...)` in the bucket function works without
+ * further massaging.
+ */
+function serializeChunk(row: any) {
+  return {
+    id: typeof row.id === "bigint" ? row.id.toString() : String(row.id),
+    userId: row.userId,
+    ncFileId: row.ncFileId,
+    path: row.path,
+    chunkIdx: row.chunkIdx,
+    snippet: snippet(row.text),
+    indexedAt:
+      row.indexedAt instanceof Date ? row.indexedAt.toISOString() : row.indexedAt,
+    // Phase-2 columns — present once WARP-203's migration applies. We
+    // surface them when present so the dashboard can render the source
+    // badge without an extra fetch, but never assume they exist.
+    source: row.source ?? "nextcloud",
+    brainItemId: row.brainItemId ?? null,
+    pageNumber: row.pageNumber ?? null,
+  };
+}
+
+/**
+ * Best-effort dynamic import of the shared file-search service. Returns
+ * `null` when the module is missing (e.g. WARP-202 hasn't merged yet) so
+ * the route can return 503 instead of throwing through to a 500.
+ *
+ * The cache prevents repeated `import()` round-trips on hot paths.
+ */
+let searchServiceCache: { mod: any | null; loaded: boolean } | null = null;
+async function loadSearchService(): Promise<any | null> {
+  if (searchServiceCache?.loaded) return searchServiceCache.mod;
+  try {
+    // @ts-ignore — module resolves at runtime once WARP-202 lands.
+    const mod = await import("../services/file-search.service.js");
+    searchServiceCache = { mod, loaded: true };
+    return mod;
+  } catch (err) {
+    logger.info(
+      { err: (err as Error)?.message },
+      "file-search.service not available — search route will return 503"
+    );
+    searchServiceCache = { mod: null, loaded: true };
+    return null;
+  }
+}
+
+/**
+ * Same idea for the embedding client. Different module so a future
+ * WARP-202 split (where embeddings live in a separate file) doesn't
+ * force me to rewrite this.
+ */
+async function loadEmbeddingClient(): Promise<any | null> {
+  try {
+    // @ts-ignore — module resolves at runtime once WARP-202 lands.
+    const mod = await import("../services/embedding.client.js");
+    return mod;
+  } catch {
+    return null;
+  }
+}
+
+export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
+  const router = Router();
+
+  // ─────────────────────────────────────────────────────────────────────
+  // GET /api/files/knowledge/recent
+  // ─────────────────────────────────────────────────────────────────────
+  router.get("/files/knowledge/recent", async (req, res, next) => {
+    try {
+      const user = req.user;
+      if (!user) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+
+      const limitRaw = parseInt(String(req.query.limit ?? RECENT_LIMIT_DEFAULT), 10);
+      const limit =
+        Number.isFinite(limitRaw) && limitRaw > 0
+          ? Math.min(RECENT_LIMIT_MAX, limitRaw)
+          : RECENT_LIMIT_DEFAULT;
+
+      const before = req.query.before ? new Date(String(req.query.before)) : undefined;
+      // Reject obviously bad cursors but don't crash — drop the cursor.
+      const validBefore =
+        before && !Number.isNaN(before.getTime()) ? before : undefined;
+
+      const source = parseSource(req.query.source);
+
+      // Build the `where` defensively. WARP-203 adds `source` (+
+      // `brainItemId`, `pageNumber`) to FileContentChunk; before that
+      // migration applies, Prisma rejects the field with P2009/P2016.
+      // We retry without the column on those errors so the route
+      // degrades gracefully on partial deploys.
+      const baseWhere: Record<string, unknown> = { userId: user.username };
+      if (validBefore) baseWhere.indexedAt = { lt: validBefore };
+      const fullWhere = source ? { ...baseWhere, source } : baseWhere;
+
+      let rows: any[] = [];
+      try {
+        rows = await (prisma as any).fileContentChunk.findMany({
+          where: fullWhere,
+          orderBy: { indexedAt: "desc" },
+          take: limit,
+        });
+      } catch (err: any) {
+        const msg = err?.message || "";
+        const isUnknownArg =
+          err?.code === "P2009" ||
+          err?.code === "P2016" ||
+          /Unknown arg|Unknown field|Unknown column/.test(msg);
+        if (isUnknownArg && source) {
+          // Retry without the source filter — schema column not yet present.
+          logger.warn(
+            { err: msg },
+            "FileContentChunk.source not in schema yet — retrying without filter"
+          );
+          rows = await (prisma as any).fileContentChunk.findMany({
+            where: baseWhere,
+            orderBy: { indexedAt: "desc" },
+            take: limit,
+          });
+        } else {
+          throw err;
+        }
+      }
+
+      const items = rows.map(serializeChunk);
+      // Cursor for the next page — caller passes the last item's `indexedAt`
+      // back as `?before=`. We expose it as `nextBefore` so clients don't
+      // have to reach into the array.
+      const nextBefore =
+        items.length === limit ? items[items.length - 1].indexedAt : null;
+
+      res.json({ items, nextBefore });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // GET /api/files/knowledge/search
+  // ─────────────────────────────────────────────────────────────────────
+  router.get("/files/knowledge/search", async (req, res, next) => {
+    try {
+      const user = req.user;
+      if (!user) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+
+      const q = String(req.query.q ?? "").trim();
+      if (!q) {
+        res.status(400).json({ error: "query_required" });
+        return;
+      }
+      if (q.length < SEARCH_MIN_QUERY_LENGTH) {
+        res.status(400).json({ error: "query_too_short" });
+        return;
+      }
+
+      const limitRaw = parseInt(String(req.query.limit ?? SEARCH_LIMIT_DEFAULT), 10);
+      const limit =
+        Number.isFinite(limitRaw) && limitRaw > 0
+          ? Math.min(SEARCH_LIMIT_MAX, limitRaw)
+          : SEARCH_LIMIT_DEFAULT;
+
+      const since = req.query.since ? new Date(String(req.query.since)) : undefined;
+      const validSince =
+        since && !Number.isNaN(since.getTime()) ? since : undefined;
+      const source = parseSource(req.query.source);
+
+      // WARP-202 dependency. Until both `embedding.client` and
+      // `file-search.service` are in tree, we surface a deterministic
+      // 503 so the dashboard can show "search will be online soon"
+      // without falling into a generic 500.
+      const [embedding, search] = await Promise.all([
+        loadEmbeddingClient(),
+        loadSearchService(),
+      ]);
+      if (!embedding || !search) {
+        res
+          .status(503)
+          .json({ error: "search-not-yet-available", retryAfterSeconds: 30 });
+        return;
+      }
+
+      // WARP-202 exports an `EmbeddingClient` class (not a top-level
+      // `embed()`); instantiate per request — the gRPC channel inside is
+      // lazy so this is effectively free, and it keeps the route
+      // stateless. URL falls back to the same default the MCP server
+      // uses (`ai-gateway:50051`) so dev + Compose stay in sync.
+      const aiGatewayGrpcUrl =
+        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const client = new embedding.EmbeddingClient({ url: aiGatewayGrpcUrl });
+      let vector: number[] | undefined;
+      try {
+        vector = (await client.embed([q]))[0];
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error)?.message },
+          "embedding rpc failed — returning 502"
+        );
+        res.status(502).json({ error: "embedding_failed" });
+        return;
+      }
+      if (!Array.isArray(vector)) {
+        res.status(502).json({ error: "embedding_failed" });
+        return;
+      }
+
+      const hits = await search.searchByVector(prisma, {
+        userId: user.username,
+        vector,
+        limit,
+        minSimilarity: SEARCH_MIN_SIMILARITY,
+        source,
+        since: validSince,
+      });
+
+      res.json({ hits });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  return router;
+}

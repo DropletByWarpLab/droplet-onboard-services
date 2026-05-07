@@ -10,6 +10,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createFilesRouter } from "./routes/files.js";
+import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
 import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
@@ -61,6 +62,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
   app.use("/api", createFilesRouter(prisma));
+  app.use("/api", createFilesKnowledgeRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter());
   app.use("/api", createMatterRouter(prisma));
