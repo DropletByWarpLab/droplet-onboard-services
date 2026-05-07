@@ -46,6 +46,18 @@ def test_unsupported_mime_returns_none():
     assert result is None
 
 
+def test_html_only_eml_strips_html_to_text():
+    """Non-multipart text/html email: HTML must be stripped to text."""
+    result = email_ext.extract(
+        str(FIXTURES / "simple-html-only.eml"), mime="message/rfc822"
+    )
+    assert result is not None
+    assert "Quarterly digest" in result["text"]
+    assert "one hundred thousand" in result["text"]
+    assert "<h1>" not in result["text"]  # HTML stripped
+    assert "<p>" not in result["text"]
+
+
 @pytest.mark.skip(
     reason=(
         "No public-domain .msg fixture committed. extract-msg's own test "

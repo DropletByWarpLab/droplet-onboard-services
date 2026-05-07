@@ -87,6 +87,17 @@ def _extract_body(msg: Message) -> str:
         except (LookupError, KeyError):
             payload = msg.get_payload(decode=True) or b""
             return payload.decode(errors="replace").strip()
+    if msg.get_content_type() == "text/html":
+        try:
+            html = msg.get_content()
+        except (LookupError, KeyError):
+            payload = msg.get_payload(decode=True) or b""
+            html = payload.decode(errors="replace")
+        # Mirrors the multipart HTML→text fallback above; a regex strip
+        # is sufficient for body extraction (no full DOM needed).
+        import re
+
+        return re.sub(r"<[^>]+>", "", html).strip()
     return ""
 
 
