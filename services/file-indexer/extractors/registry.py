@@ -81,6 +81,12 @@ def _route(mime: str) -> Optional[Callable[..., ExtractedDoc]]:
     except ImportError:
         pass
     try:
+        from extractors import video as video_ext  # type: ignore  # noqa: PLC0415
+        if mime in video_ext.SUPPORTED_MIMES:
+            return video_ext.extract
+    except ImportError:
+        pass
+    try:
         from extractors import archive as archive_ext  # type: ignore  # noqa: PLC0415
         if mime in archive_ext.SUPPORTED_MIMES:
             return archive_ext.extract

@@ -140,3 +140,23 @@ def test_archive_handler_resolves_via_route():
     assert registry._route("application/gzip") is archive.extract
     # Non-archive MIME shouldn't resolve to archive.extract.
     assert registry._route("text/plain") is not archive.extract
+
+
+# ── video registration (WARP-198 Task 2.5) ───────────────────────────
+
+
+def test_video_mime_dispatches():
+    """`_route()` returns video.extract for every video MIME (WARP-198)."""
+    from extractors import registry, video
+
+    for mime in video.SUPPORTED_MIMES:
+        assert registry._route(mime) is video.extract, mime
+
+
+def test_video_cap_is_2gb():
+    """Video envelope cap is 2 GB per spec §4.2 / VIDEO_MAX_BYTES default."""
+    from extractors import registry, video
+
+    expected = 2 * 1024 * 1024 * 1024
+    for mime in video.SUPPORTED_MIMES:
+        assert registry._cap_for_mime(mime) == expected, mime
