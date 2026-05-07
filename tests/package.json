@@ -8,6 +8,8 @@
     "test:rag-extractors": "RUN_RAG_INTEGRATION=1 vitest run rag-extractors.integration.test.ts",
     "test:rag-brain-upload": "RUN_RAG_INTEGRATION=1 vitest run rag-brain-upload.integration.test.ts",
     "test:rag-brain-export": "RUN_RAG_INTEGRATION=1 vitest run rag-brain-export.integration.test.ts",
+    "test:rag-end-to-end": "RUN_RAG_INTEGRATION=1 vitest run rag-end-to-end.integration.test.ts",
+    "test:rag": "RUN_RAG_INTEGRATION=1 vitest run --no-file-parallelism rag-extractors.integration.test.ts rag-search.integration.test.ts rag-brain-upload.integration.test.ts rag-knowledge.integration.test.ts rag-brain-export.integration.test.ts rag-end-to-end.integration.test.ts",
     "test:docker": "docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-tests"
   },
   "devDependencies": {
