@@ -38,19 +38,19 @@ def test_dispatch_text_returns_extracted_doc(tmp_path):
 
 
 def test_audio_mime_dispatches_to_audio_handler():
-    """The registry knows audio/wav routes to the audio extractor."""
+    """The registry knows every audio MIME routes to audio.extract.
+
+    WARP-199 unified the dispatch path: instead of a `_HANDLERS` dict,
+    `registry._route(mime)` does lazy try/except imports and returns the
+    target extractor's `extract` function directly. We assert that
+    every MIME in `audio.SUPPORTED_MIMES` resolves to `audio.extract`.
+    """
     from extractors import audio, registry
 
-    handler = registry._route("audio/wav")
-    assert handler is not None
-    # The handler is a one-arg adapter that closes over the MIME and calls
-    # audio.extract(path, mime). We can't assert `is audio.extract` because
-    # of the adapter, but we can assert the audio MIME has *some* handler
-    # registered in _HANDLERS, and that the SUPPORTED_MIMES set lines up.
-    assert "audio/wav" in registry._HANDLERS
-    assert "audio/mpeg" in registry._HANDLERS
-    for m in audio.SUPPORTED_MIMES:
-        assert m in registry._HANDLERS
+    for mime in audio.SUPPORTED_MIMES:
+        handler = registry._route(mime)
+        assert handler is not None, f"_route({mime!r}) returned None"
+        assert handler is audio.extract, f"_route({mime!r}) is not audio.extract"
 
 
 def test_audio_cap_is_500mb():
