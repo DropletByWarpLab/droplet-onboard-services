@@ -23,8 +23,12 @@
  * to validate a path argument resolves below a user's tree.
  */
 
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { join, extname, resolve, sep } from "node:path";
+import type { Response } from "express";
+import type { PrismaClient } from "@prisma/client";
+import archiver from "archiver";
 
 export const BRAIN_ROOT =
   process.env.BRAIN_MEMORY_ROOT ?? "/data/brain-memory";
@@ -123,4 +127,232 @@ export function isPathUnderUser(userId: string, candidate: string): boolean {
   const resolved = resolve(candidate);
   // `resolved + sep` lets us also accept the user's own root dir.
   return (resolved + sep).startsWith(root);
+}
+
+/**
+ * Minimal subset of BrainMemoryItem the manifest consumer needs to
+ * round-trip an item back into the system. Intentionally excludes raw
+ * chunk text — the user can re-extract from the included file in the
+ * zip — and `storagePath`, which would leak host filesystem layout.
+ */
+interface ManifestItem {
+  id: string;
+  filename: string;
+  mimeType: string | null;
+  bytes: number;
+  source: string;
+  originatingChatId: string | null;
+  uploadedAt: string;
+  indexedAt: string | null;
+  chunkCount: number;
+}
+
+interface BrainMemoryItemRow {
+  id: string;
+  userId: string;
+  filename: string;
+  mimeType: string | null;
+  bytes: bigint;
+  storagePath: string;
+  source: string;
+  originatingChatId: string | null;
+  uploadedAt: Date;
+  indexedAt: Date | null;
+}
+
+export interface StreamExportOpts {
+  /** "all" → every item the user owns. "chat" → just one chat's items. */
+  scope: { kind: "all" } | { kind: "chat"; chatId: string };
+}
+
+/**
+ * Stream a zip archive of the user's brain-memory items into `res`.
+ *
+ * Layout of the produced zip:
+ *
+ *   manifest.json           (top-level — see ManifestItem fields above)
+ *   <itemId>/<filename>     (one entry per item; bytes from disk)
+ *
+ * Streams; never buffers. Callers MUST set `Content-Type` +
+ * `Content-Disposition` BEFORE invoking this. Errors during piping
+ * propagate via the promise so the route can `next(err)` them.
+ *
+ * Defense-in-depth: each item's `storagePath` is verified to live
+ * under the caller's `<BRAIN_ROOT>/<userId>/` tree before its bytes
+ * are added to the archive. A row whose path escapes (manual SQL,
+ * legacy data) is silently skipped — the manifest entry remains so
+ * the user can see what was excluded, but the bytes don't leak.
+ */
+export async function streamExportZip(
+  prisma: PrismaClient,
+  userId: string,
+  opts: StreamExportOpts,
+  res: Response,
+): Promise<void> {
+  const where: Record<string, string> = { userId };
+  if (opts.scope.kind === "chat") {
+    where.originatingChatId = opts.scope.chatId;
+  }
+  // Cast through unknown — Prisma's where type is generic but the
+  // shape we pass is the runtime-correct subset.
+  const items = (await (
+    prisma as unknown as {
+      brainMemoryItem: {
+        findMany: (args: {
+          where: Record<string, unknown>;
+          orderBy?: unknown;
+        }) => Promise<BrainMemoryItemRow[]>;
+      };
+    }
+  ).brainMemoryItem.findMany({
+    where,
+    orderBy: { uploadedAt: "desc" },
+  })) as BrainMemoryItemRow[];
+
+  const zip = archiver("zip");
+  // Streaming-only: pipe before any append() so backpressure works.
+  zip.pipe(res);
+  zip.on("warning", (err) => {
+    // ENOENT on a missing per-item file is recoverable (we logged the
+    // skip in the manifest). Other warnings should fail loud.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  });
+
+  const manifestItems: ManifestItem[] = [];
+  try {
+    for (const item of items) {
+      const chunkCount = await (
+        prisma as unknown as {
+          fileContentChunk: {
+            count: (args: { where: { brainItemId: string } }) => Promise<number>;
+          };
+        }
+      ).fileContentChunk.count({ where: { brainItemId: item.id } });
+
+      manifestItems.push({
+        id: item.id,
+        filename: item.filename,
+        mimeType: item.mimeType,
+        bytes: Number(item.bytes),
+        source: item.source,
+        originatingChatId: item.originatingChatId,
+        uploadedAt: item.uploadedAt.toISOString(),
+        indexedAt: item.indexedAt ? item.indexedAt.toISOString() : null,
+        chunkCount,
+      });
+
+      // Path-traversal guard: only stream bytes whose on-disk path
+      // resolves under <BRAIN_ROOT>/<userId>/. Skip otherwise — the
+      // manifest still captures the item so the user can see it.
+      if (!item.storagePath || !isPathUnderUser(userId, item.storagePath)) {
+        continue;
+      }
+      try {
+        await stat(item.storagePath);
+      } catch {
+        // Missing on disk — manifest captured the row, skip the entry.
+        continue;
+      }
+      zip.append(createReadStream(item.storagePath), {
+        name: `${item.id}/${item.filename}`,
+      });
+    }
+
+    const manifest = {
+      userId,
+      generatedAt: new Date().toISOString(),
+      scope:
+        opts.scope.kind === "chat"
+          ? { chatId: opts.scope.chatId }
+          : { all: true },
+      items: manifestItems,
+    };
+    zip.append(JSON.stringify(manifest, null, 2), { name: "manifest.json" });
+  } finally {
+    // archiver MUST be finalized even on error paths so it flushes
+    // any buffered control records and lets the response end cleanly.
+    await zip.finalize();
+  }
+}
+
+/**
+ * Delete a single brain-memory item: cascade chunks → row → on-disk
+ * dir. Returns `false` if the item is missing or owned by another
+ * user (callers should map that to a 404, never a 403, to avoid
+ * leaking row existence).
+ *
+ * The chunk cascade lives here (not in a Prisma `onDelete: Cascade`
+ * relation) because `FileContentChunk.brainItemId` is a nullable
+ * scalar field, not a real FK — kept that way so the indexer can
+ * write chunks before the parent row exists in some race scenarios.
+ */
+export async function deleteItem(
+  prisma: PrismaClient,
+  userId: string,
+  itemId: string,
+): Promise<boolean> {
+  const item = (await (
+    prisma as unknown as {
+      brainMemoryItem: {
+        findUnique: (args: {
+          where: { id: string };
+        }) => Promise<BrainMemoryItemRow | null>;
+      };
+    }
+  ).brainMemoryItem.findUnique({ where: { id: itemId } })) as BrainMemoryItemRow | null;
+  if (!item || item.userId !== userId) {
+    return false;
+  }
+  await (
+    prisma as unknown as {
+      fileContentChunk: {
+        deleteMany: (args: {
+          where: { brainItemId: string };
+        }) => Promise<{ count: number }>;
+      };
+    }
+  ).fileContentChunk.deleteMany({ where: { brainItemId: itemId } });
+  await (
+    prisma as unknown as {
+      brainMemoryItem: {
+        delete: (args: { where: { id: string } }) => Promise<unknown>;
+      };
+    }
+  ).brainMemoryItem.delete({ where: { id: itemId } });
+  await purgeItem(userId, itemId);
+  return true;
+}
+
+/**
+ * Wholesale per-user purge. Wired from `routes/auth.ts` user-delete so
+ * deleting a user removes every brain item, chunk, and on-disk byte
+ * the user owned. Idempotent — safe to call on a user with no items.
+ */
+export async function purgeUserData(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<{ items: number; chunks: number }> {
+  const chunkResult = await (
+    prisma as unknown as {
+      fileContentChunk: {
+        deleteMany: (args: {
+          where: { userId: string; source: "brain" };
+        }) => Promise<{ count: number }>;
+      };
+    }
+  ).fileContentChunk.deleteMany({
+    where: { userId, source: "brain" },
+  });
+  const itemResult = await (
+    prisma as unknown as {
+      brainMemoryItem: {
+        deleteMany: (args: {
+          where: { userId: string };
+        }) => Promise<{ count: number }>;
+      };
+    }
+  ).brainMemoryItem.deleteMany({ where: { userId } });
+  await purgeUser(userId);
+  return { items: itemResult.count, chunks: chunkResult.count };
 }
