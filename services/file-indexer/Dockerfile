@@ -6,10 +6,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps for pdfplumber (poppler) and psycopg2
+# System deps:
+#  - libpq-dev + gcc: psycopg2 build deps
+#  - tesseract-ocr + tesseract-ocr-eng: WARP-201 image OCR extractor
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      libpq-dev gcc && \
+      libpq-dev gcc \
+      tesseract-ocr tesseract-ocr-eng && \
     rm -rf /var/lib/apt/lists/*
 
 COPY services/file-indexer/requirements.txt .
