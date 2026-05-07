@@ -1139,6 +1139,59 @@ export async function sendChat(request: ChatRequest): Promise<Response> {
   });
 }
 
+// --- Brain memory (chat attachments) ---
+
+/** Response shape from POST /api/files/brain/upload. */
+export interface BrainUploadResponse {
+  itemId: string;
+  status: "indexing";
+}
+
+/**
+ * Upload a chat-attached file to the orchestrator. The route writes the
+ * bytes to /data/brain-memory/<userId>/<itemId>/ and publishes
+ * droplet/files/brain/uploaded — the file-indexer picks it up and the
+ * dashboard receives status flips via the WebSocket bridge on
+ * `droplet/files/<userId>/brain/indexed`.
+ *
+ * `chatId` is optional — if set, the orchestrator stamps it onto the
+ * BrainMemoryItem row's `originatingChatId` so a future "scope to this
+ * conversation" filter (Phase 2) can do the join.
+ */
+export async function uploadBrainFile(
+  file: File,
+  chatId?: string,
+): Promise<BrainUploadResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  if (chatId) form.append("chatId", chatId);
+  const res = await authFetch(`${BASE}/api/files/brain/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    let body: { error?: string; mimeType?: string; maxBytes?: number } = {};
+    try {
+      body = await res.json();
+    } catch {
+      // ignore
+    }
+    if (res.status === 413) {
+      const cap = body.maxBytes ? `${Math.round(body.maxBytes / 1024 / 1024)}MB` : "the size limit";
+      throw new Error(`File is too large (over ${cap}).`);
+    }
+    if (res.status === 415) {
+      throw new Error(
+        body.mimeType
+          ? `Unsupported file type: ${body.mimeType}`
+          : "Unsupported file type",
+      );
+    }
+    throw new Error(body.error || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Provider keys ---
 
 export async function saveProviderKey(

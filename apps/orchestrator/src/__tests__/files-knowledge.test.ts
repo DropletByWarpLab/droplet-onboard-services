@@ -32,6 +32,32 @@ vi.mock("../config.js", () => ({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// Mock the WARP-202 modules the search route dynamically imports. We keep
+// the dynamic import surface alive (so loadEmbeddingClient/loadSearchService
+// don't fall through to the 503 path) and inject controllable test
+// doubles. Tests can override these via the hoisted spies.
+// ─────────────────────────────────────────────────────────────────────────
+const { embedSpy, searchByVectorSpy, listRecentSpy } = vi.hoisted(() => ({
+  embedSpy: vi.fn(),
+  searchByVectorSpy: vi.fn(),
+  listRecentSpy: vi.fn(),
+}));
+
+vi.mock("../services/embedding.client.js", () => ({
+  EmbeddingClient: class {
+    constructor(_opts: { url: string }) {}
+    embed(texts: string[]) {
+      return embedSpy(texts);
+    }
+  },
+}));
+
+vi.mock("../services/file-search.service.js", () => ({
+  searchByVector: (...args: unknown[]) => searchByVectorSpy(...args),
+  listRecent: (...args: unknown[]) => listRecentSpy(...args),
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // Mock the FileContentChunk Prisma surface used by the recent route.
 // We replace the whole `@prisma/client` mock from setup.ts so we can
 // inject a `fileContentChunk.findMany` per test.
@@ -200,18 +226,42 @@ describe("files-knowledge routes", () => {
       expect(res.status).toBe(400);
     });
 
-    it("returns 503 when the file-search.service module is not yet available (WARP-202 not merged)", async () => {
-      // This is the documented graceful-fallback path: until WARP-202 lands,
-      // the `services/file-search.service.js` import fails, and the route
-      // returns `{error: "search-not-yet-available"}`.
+    it("returns 502 when the embedding RPC fails (UNAVAILABLE / network error)", async () => {
+      // WARP-202 has landed → embedding.client + file-search.service both
+      // import cleanly. The route catches embed() failures and surfaces
+      // them as a deterministic 502 instead of a generic 500 — the brief
+      // 503 'search-not-yet-available' fallback was retired with the
+      // WARP-203/main merge.
+      embedSpy.mockRejectedValueOnce(
+        Object.assign(new Error("14 UNAVAILABLE: ai-gateway is down"), { code: 14 })
+      );
       const res = await request(app).get(
         "/api/files/knowledge/search?q=hello"
       );
-      // We expect 503 today (module missing). Once WARP-202 lands, this
-      // assertion will need to flip — and the test will fail loudly,
-      // signalling that the fallback path needs to be retired.
-      expect(res.status).toBe(503);
-      expect(res.body.error).toMatch(/search-not-yet-available|unavailable/i);
+      expect(res.status).toBe(502);
+      expect(res.body.error).toMatch(/embedding/i);
+    });
+
+    it("returns hits when embedding + file-search both succeed", async () => {
+      embedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+      searchByVectorSpy.mockResolvedValueOnce([
+        {
+          path: "/Documents/notes.txt",
+          score: 0.92,
+          text: "matching snippet",
+          source: "nextcloud",
+          chunkIdx: 0,
+        },
+      ]);
+      const res = await request(app).get(
+        "/api/files/knowledge/search?q=hello"
+      );
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.hits)).toBe(true);
+      expect(res.body.hits[0].path).toBe("/Documents/notes.txt");
+      // userId must always pin to the authed user (RBAC, spec §12).
+      const callArgs = searchByVectorSpy.mock.calls[0][1];
+      expect(callArgs.userId).toBe("dev");
     });
   });
 });

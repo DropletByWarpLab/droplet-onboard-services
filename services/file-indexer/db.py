@@ -51,26 +51,91 @@ def upsert_chunk(
     chunk_idx: int,
     text: str,
     embedding: list[float],
+    source: str = "nextcloud",
+    brain_item_id: Optional[str] = None,
+    page_number: Optional[int] = None,
+    warnings: Optional[list[str]] = None,
 ) -> None:
     """Insert or update a single chunk + embedding.
 
-    Uses the (ncFileId, chunkIdx) unique constraint for upsert semantics.
+    For Nextcloud watcher chunks the `(ncFileId, chunkIdx)` unique
+    constraint provides upsert semantics. For brain-memory chunks the
+    upload route hands us a fresh BrainMemoryItem row, so we delete the
+    item's existing chunks first (see `delete_chunks_for_brain_item`)
+    rather than trying to multi-key upsert through the same constraint.
+
+    WARP-203 adds the `source`, `brain_item_id`, `page_number`, and
+    `warnings` columns. Default `source="nextcloud"` keeps the existing
+    watcher path untouched. The `nc_file_id` for brain rows is 0 (the
+    column is non-null in the schema; the row's identity comes from
+    `brainItemId` instead).
     """
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO "FileContentChunk"
-                ("userId", "ncFileId", "path", "chunkIdx", "text", "embedding", "indexedAt")
-            VALUES (%s, %s, %s, %s, %s, %s::vector, NOW())
+                ("userId", "ncFileId", "path", "chunkIdx", "text", "embedding",
+                 "indexedAt", "source", "brainItemId", "pageNumber", "warnings")
+            VALUES (%s, %s, %s, %s, %s, %s::vector, NOW(), %s::"FileContentSource",
+                    %s, %s, %s)
             ON CONFLICT ("ncFileId", "chunkIdx")
             DO UPDATE SET
-                "path"      = EXCLUDED."path",
-                "text"      = EXCLUDED."text",
-                "embedding" = EXCLUDED."embedding",
-                "indexedAt"  = NOW()
+                "path"        = EXCLUDED."path",
+                "text"        = EXCLUDED."text",
+                "embedding"   = EXCLUDED."embedding",
+                "indexedAt"   = NOW(),
+                "source"      = EXCLUDED."source",
+                "brainItemId" = EXCLUDED."brainItemId",
+                "pageNumber"  = EXCLUDED."pageNumber",
+                "warnings"    = EXCLUDED."warnings"
             """,
-            (user_id, nc_file_id, path, chunk_idx, text, embedding),
+            (
+                user_id,
+                nc_file_id,
+                path,
+                chunk_idx,
+                text,
+                embedding,
+                source,
+                brain_item_id,
+                page_number,
+                warnings or [],
+            ),
+        )
+
+
+def delete_chunks_for_brain_item(brain_item_id: str) -> None:
+    """Remove all chunks for a single BrainMemoryItem.
+
+    Used before re-indexing a brain item so the chunkIdx unique
+    constraint doesn't collide on the second pass (brain items don't
+    use ncFileId as a stable identity, so we can't lean on the existing
+    unique constraint for upsert).
+    """
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            'DELETE FROM "FileContentChunk" WHERE "brainItemId" = %s',
+            (brain_item_id,),
+        )
+
+
+def mark_brain_item_indexed(brain_item_id: str, warnings: Optional[list[str]] = None) -> None:
+    """Set BrainMemoryItem.indexedAt = NOW() and merge extractor warnings.
+
+    Idempotent — safe to call on items that are already marked indexed.
+    """
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE "BrainMemoryItem"
+            SET "indexedAt"         = NOW(),
+                "extractorWarnings" = %s
+            WHERE "id" = %s
+            """,
+            (warnings or [], brain_item_id),
         )
 
 

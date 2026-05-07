@@ -80,6 +80,10 @@ services:
       # is unsupported". See apps/orchestrator/src/config.ts for the full
       # explanation.
       - DROPLET_MATTER_CONTROLLER_NAME=${DROPLET_MATTER_CONTROLLER_NAME:-Droplet}
+      # WARP-203: chat-attached files land here. Default matches the
+      # volume mount below; override only if you bind-mount a different
+      # host path (e.g. an NVMe partition for backup convenience).
+      - BRAIN_MEMORY_ROOT=${BRAIN_MEMORY_ROOT:-/data/brain-memory}
       # Routing runs with network_mode: host; host.docker.internal is added
       # via the extra_hosts above so the orchestrator can reach it without
       # bridge-network compose DNS.
@@ -95,6 +99,13 @@ services:
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
     volumes:
       - matter-data:/data/matter-storage
+      # WARP-203: chat-attached "brain memory" files. Per-user dirs at
+      # /data/brain-memory/<userId>/<itemId>/ hold the original bytes,
+      # extracted text, and a manifest mirroring the BrainMemoryItem
+      # row. Same volume is bind-mounted into file-indexer (read-write
+      # so it can write extracted.txt + updated manifest) so a single
+      # ingest step covers both write paths.
+      - brain-memory-data:/data/brain-memory
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
@@ -267,6 +278,10 @@ services:
     volumes:
       - nextcloud-data:/data/nextcloud:ro
       - ../proto:/app/proto:ro
+      # WARP-203: brain-memory shared volume — chat-attached files are
+      # written here by the orchestrator and read by file-indexer to
+      # run the extract → embed → upsert pipeline.
+      - brain-memory-data:/data/brain-memory
     env_file:
       - path: ../.env
         required: false
@@ -488,3 +503,4 @@ volumes:
   aikeys:
   nextcloud-data:
   matter-data:
+  brain-memory-data:

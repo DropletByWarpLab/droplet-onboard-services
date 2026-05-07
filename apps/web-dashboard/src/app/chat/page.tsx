@@ -18,7 +18,22 @@ export default function ChatPage() {
   // dropped when /api/llm/chat became the canonical MCP-backed entry
   // point — it's stateless. Reintroducing sessions needs an
   // orchestrator-side persistence layer.
-  const { messages, isStreaming, sendMessage, retryMessage, clearMessages } = useChat();
+  // WARP-203: pass `chatId` so chat-attached files (brain memory) carry the
+  // originating-conversation tag for the future "scope to this conversation"
+  // filter (Phase 2). The id is per-mount; clearing the chat (`handleNewChat`)
+  // mints a fresh one so attachments stay scoped to a single thread.
+  const [chatId, setChatId] = useState(() => `chat-${Date.now()}`);
+  const {
+    messages,
+    isStreaming,
+    sendMessage,
+    retryMessage,
+    clearMessages,
+    attachments,
+    attach,
+    removeAttachment,
+    clearAttachments,
+  } = useChat({ chatId });
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -67,7 +82,9 @@ export default function ChatPage() {
 
   const handleNewChat = useCallback(() => {
     clearMessages();
-  }, [clearMessages]);
+    clearAttachments();
+    setChatId(`chat-${Date.now()}`);
+  }, [clearMessages, clearAttachments]);
 
   const handleRetry = useCallback(
     (messageId: string) => {
@@ -194,7 +211,13 @@ export default function ChatPage() {
         </div>
 
         {/* Input */}
-        <ChatInput onSend={handleSend} disabled={isStreaming || !selectedModel} />
+        <ChatInput
+          onSend={handleSend}
+          disabled={isStreaming || !selectedModel}
+          attachments={attachments}
+          onAttach={attach}
+          onRemoveAttachment={removeAttachment}
+        />
       </div>
     </div>
   );
