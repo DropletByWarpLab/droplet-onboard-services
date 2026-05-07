@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest==8.3.3
+# WARP-201: used to regenerate the test PDF fixture
+reportlab>=4.0
