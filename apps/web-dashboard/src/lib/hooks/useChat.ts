@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { sendChat } from "../api";
-import type { ChatMessage, ChatToolCall } from "../types";
+import { sendChat, uploadBrainFile } from "../api";
+import type { ChatAttachment, ChatMessage, ChatToolCall } from "../types";
 
 /**
  * Chat hook backed by `POST /api/llm/chat` (the MCP-backed orchestrator
@@ -110,9 +110,32 @@ function friendlyErrorMessage(err: unknown): string {
   return "Something went wrong on this turn. Try again.";
 }
 
-export function useChat() {
+let attachmentCounter = 0;
+
+function createAttachmentId(): string {
+  return `att-${Date.now()}-${++attachmentCounter}`;
+}
+
+export interface UseChatOptions {
+  /**
+   * The originating chat id sent up with each brain-memory upload so a
+   * future Phase-2 "scope to this conversation" filter can do the join.
+   * Stable across the lifetime of the chat session — the parent
+   * component owns it.
+   */
+  chatId?: string;
+}
+
+export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  // The chatId can change between renders; freeze the latest value in
+  // a ref so `attach` (a stable callback) reads the current value.
+  const chatIdRef = useRef<string | undefined>(options.chatId);
+  useEffect(() => {
+    chatIdRef.current = options.chatId;
+  }, [options.chatId]);
 
   // Keep a ref-mirror of `messages` so callbacks (especially
   // `retryMessage`) can read the current snapshot synchronously without
@@ -124,6 +147,97 @@ export function useChat() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  // ── MQTT-driven attachment status updates ──
+  //
+  // The orchestrator's WS bridge forwards `droplet/files/<user>/brain/indexed`
+  // messages; we map `{itemId, status: "ready"|"failed", reason?}` onto
+  // the local attachment list, flipping the chip in place. Mounting the
+  // socket here (rather than inside ChatInput) keeps the chip state in
+  // a single owner — the hook — so the Composer can render N chips
+  // from the same source without duplicating the subscription.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let ws: WebSocket | null = null;
+    let closed = false;
+    let attempt = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const apply = (data: { topic?: string; payload?: unknown }) => {
+      if (typeof data.topic !== "string") return;
+      // Match the per-user brain/indexed namespace; `<user>` is variable
+      // so we end-anchor on the suffix.
+      if (!data.topic.endsWith("/brain/indexed")) return;
+      const payload = data.payload as
+        | { itemId?: string; status?: string; reason?: string }
+        | undefined;
+      if (!payload?.itemId || typeof payload.status !== "string") return;
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.itemId === payload.itemId
+            ? {
+                ...a,
+                status:
+                  payload.status === "ready"
+                    ? "ready"
+                    : ("failed" as ChatAttachment["status"]),
+                error:
+                  payload.status === "failed" ? payload.reason : undefined,
+              }
+            : a,
+        ),
+      );
+    };
+
+    const connect = () => {
+      if (closed) return;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${protocol}//${window.location.host}/api/ws/events`;
+      try {
+        ws = new WebSocket(url);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      ws.onopen = () => {
+        attempt = 0;
+      };
+      ws.onmessage = (event) => {
+        try {
+          apply(JSON.parse(typeof event.data === "string" ? event.data : ""));
+        } catch {
+          // Ignore malformed frames — the WS bridge always emits JSON.
+        }
+      };
+      ws.onclose = () => {
+        if (!closed) scheduleReconnect();
+      };
+      ws.onerror = () => {
+        ws?.close();
+      };
+    };
+
+    const scheduleReconnect = () => {
+      if (closed) return;
+      attempt += 1;
+      const base = Math.min(30_000, 500 * 2 ** Math.min(attempt - 1, 6));
+      const jitter = Math.random() * base * 0.25;
+      reconnectTimer = setTimeout(connect, base + jitter);
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws && ws.readyState <= WebSocket.OPEN) {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
 
   const sendMessage = useCallback(
     async (content: string, model: string, systemPrompt?: string) => {
@@ -261,6 +375,56 @@ export function useChat() {
     setMessages([]);
   }, []);
 
+  /**
+   * Upload a chat-attached file. Adds a pending chip immediately so
+   * the user sees feedback within a frame, kicks off the upload, then
+   * flips the chip to "indexing" once the orchestrator returns 202.
+   * The MQTT-driven effect above flips it again to "ready" / "failed"
+   * when extraction completes.
+   *
+   * Returns the `localId` of the chip so callers can track / remove it.
+   */
+  const attach = useCallback(async (file: File): Promise<string> => {
+    const localId = createAttachmentId();
+    const pending: ChatAttachment = {
+      localId,
+      filename: file.name,
+      bytes: file.size,
+      status: "uploading",
+    };
+    setAttachments((prev) => [...prev, pending]);
+
+    try {
+      const res = await uploadBrainFile(file, chatIdRef.current);
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.localId === localId
+            ? { ...a, itemId: res.itemId, status: "indexing" }
+            : a,
+        ),
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Upload failed";
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.localId === localId
+            ? { ...a, status: "failed", error: message }
+            : a,
+        ),
+      );
+    }
+    return localId;
+  }, []);
+
+  const removeAttachment = useCallback((localId: string) => {
+    setAttachments((prev) => prev.filter((a) => a.localId !== localId));
+  }, []);
+
+  const clearAttachments = useCallback(() => {
+    setAttachments([]);
+  }, []);
+
   return {
     messages,
     setMessages,
@@ -268,6 +432,10 @@ export function useChat() {
     sendMessage,
     retryMessage,
     clearMessages,
+    attachments,
+    attach,
+    removeAttachment,
+    clearAttachments,
   };
 }
 

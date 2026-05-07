@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ChatInput } from "@/components/ChatInput";
+import type { ChatAttachment } from "@/lib/types";
 
 describe("ChatInput", () => {
   it("renders textarea and send button", () => {
@@ -67,5 +68,104 @@ describe("ChatInput", () => {
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
 
     expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-203: chat-attached files ──
+
+describe("ChatInput attachments", () => {
+  it("hides paperclip + attachment-row when onAttach is omitted (back-compat)", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    expect(screen.queryByLabelText("Attach a file")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("attachment-row")).not.toBeInTheDocument();
+  });
+
+  it("renders the paperclip + hidden file input when onAttach is provided", () => {
+    render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
+    expect(screen.getByLabelText("Attach a file")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-file-input")).toBeInTheDocument();
+  });
+
+  it("calls onAttach for each file selected through the picker", () => {
+    const onAttach = vi.fn();
+    render(<ChatInput onSend={vi.fn()} onAttach={onAttach} />);
+    const input = screen.getByTestId("chat-file-input") as HTMLInputElement;
+
+    const f1 = new File(["a"], "a.txt", { type: "text/plain" });
+    const f2 = new File(["b"], "b.pdf", { type: "application/pdf" });
+    fireEvent.change(input, { target: { files: [f1, f2] } });
+
+    expect(onAttach).toHaveBeenCalledTimes(2);
+    expect(onAttach).toHaveBeenNthCalledWith(1, f1);
+    expect(onAttach).toHaveBeenNthCalledWith(2, f2);
+  });
+
+  it("calls onAttach for files dropped on the panel", () => {
+    const onAttach = vi.fn();
+    render(<ChatInput onSend={vi.fn()} onAttach={onAttach} />);
+    const panel = screen.getByTestId("chat-input");
+
+    const file = new File(["x"], "drop.txt", { type: "text/plain" });
+    fireEvent.dragOver(panel, { dataTransfer: { files: [file] } });
+    expect(panel).toHaveAttribute("data-dragging", "true");
+    fireEvent.drop(panel, { dataTransfer: { files: [file] } });
+    expect(onAttach).toHaveBeenCalledWith(file);
+    // Drag-state clears after drop.
+    expect(panel).not.toHaveAttribute("data-dragging");
+  });
+
+  it("renders one chip per attachment with status text", () => {
+    const attachments: ChatAttachment[] = [
+      {
+        localId: "a1",
+        itemId: "bmi-1",
+        filename: "notes.md",
+        bytes: 1234,
+        status: "indexing",
+      },
+      {
+        localId: "a2",
+        filename: "broken.pdf",
+        bytes: 5678,
+        status: "failed",
+        error: "extractor_unavailable",
+      },
+    ];
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        onAttach={vi.fn()}
+        attachments={attachments}
+      />,
+    );
+    const chips = screen.getAllByTestId("attachment-chip");
+    expect(chips.length).toBe(2);
+    expect(chips[0].getAttribute("data-status")).toBe("indexing");
+    expect(chips[1].getAttribute("data-status")).toBe("failed");
+    expect(screen.getByText("notes.md")).toBeInTheDocument();
+    expect(screen.getByText(/extractor_unavailable/)).toBeInTheDocument();
+  });
+
+  it("calls onRemoveAttachment when the chip's X button is clicked", () => {
+    const onRemoveAttachment = vi.fn();
+    const attachments: ChatAttachment[] = [
+      {
+        localId: "a1",
+        itemId: "bmi-1",
+        filename: "x.txt",
+        bytes: 12,
+        status: "ready",
+      },
+    ];
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        onAttach={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={onRemoveAttachment}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Remove x.txt"));
+    expect(onRemoveAttachment).toHaveBeenCalledWith("a1");
   });
 });

@@ -33,6 +33,24 @@ export interface ChatMessage {
   error?: { message: string; retryPrompt: string };
 }
 
+/**
+ * One chat-attached file (WARP-203). Backed by a BrainMemoryItem row
+ * on the orchestrator. `status` flips from "pending" → "ready" / "failed"
+ * via the per-user MQTT topic `droplet/files/<user>/brain/indexed` that
+ * the WS bridge forwards to the dashboard.
+ */
+export interface ChatAttachment {
+  /** Locally-generated id used as the React key while the upload is in flight. */
+  localId: string;
+  /** BrainMemoryItem.id once the upload route returns 202. */
+  itemId?: string;
+  filename: string;
+  bytes: number;
+  status: "pending" | "uploading" | "indexing" | "ready" | "failed";
+  /** Error message when status="failed" — surfaced on the chip. */
+  error?: string;
+}
+
 export interface ChatRequest {
   model: string;
   messages: { role: string; content: string }[];
