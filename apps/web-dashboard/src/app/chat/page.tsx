@@ -9,6 +9,7 @@ import {
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
+import { SessionHeader } from "@/components/chat/SessionHeader";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 
@@ -138,6 +139,11 @@ export default function ChatPage() {
             </button>
           </div>
         </header>
+
+        {/* WARP-205: per-chat brain memory export affordance.
+            Hidden when no items are attached to this chat — the
+            component itself returns null in that case. */}
+        <SessionHeader chatId={chatId} attachments={attachments} />
 
         {/* System prompt */}
         {showSystemPrompt && (
