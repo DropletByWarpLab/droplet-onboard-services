@@ -72,17 +72,28 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
 
     // Per-call session context arrives via the MCP `_meta` field
     // (reserved by the spec for protocol metadata that must NOT be
-    // forwarded as tool arguments). Today this carries `ncToken` so
-    // file-tool handlers can authenticate to Nextcloud as the calling
-    // user. On stdio (in-process trusted), the orchestrator passes
-    // the dashboard user's session token; on HTTP, claims-based RBAC
-    // is the auth surface and `_meta.ncToken` is unset.
+    // forwarded as tool arguments). Today this carries:
+    //   - `ncToken` (since WARP-104) — Nextcloud session token for file
+    //     tools to authenticate as the calling user.
+    //   - `userId`  (since WARP-202) — Nextcloud username for tools that
+    //     gate on the per-user RBAC boundary (e.g. `search_content`'s
+    //     pgvector lookup). On the HTTP transport, `claims.sub` is the
+    //     authoritative userId and `_meta.userId` is ignored to keep the
+    //     trust boundary at the JWT.
+    //
+    // On stdio (in-process trusted), the orchestrator passes both. On
+    // HTTP, claims-based RBAC is the auth surface and `_meta.*` carries
+    // only ncToken.
     const meta = (req.params as { _meta?: Record<string, unknown> })._meta;
     const ncToken =
       meta && typeof meta.ncToken === "string" && meta.ncToken.length > 0
         ? meta.ncToken
         : undefined;
-    const ctx = buildContext(deps, claims, extra.signal, ncToken);
+    const metaUserId =
+      meta && typeof meta.userId === "string" && meta.userId.length > 0
+        ? meta.userId
+        : undefined;
+    const ctx = buildContext(deps, claims, extra.signal, ncToken, metaUserId);
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     let result: ToolResult;
     try {

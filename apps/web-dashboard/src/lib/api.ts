@@ -1799,3 +1799,121 @@ export async function setDuckDnsConfig(opts: {
   }
   return res.json();
 }
+
+
+// --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---
+
+/** A row from FileContentChunk shaped for the dashboard. */
+export interface KnowledgeChunkItem {
+  id: string;
+  ncFileId: number;
+  path: string;
+  chunkIdx: number;
+  snippet: string;
+  indexedAt: string;
+  source: "nextcloud" | "brain";
+  brainItemId: string | null;
+  pageNumber: number | null;
+}
+
+export interface RecentKnowledgeResponse {
+  items: KnowledgeChunkItem[];
+  nextBefore: string | null;
+}
+
+/** A semantic-search hit shaped for the dashboard + chat citation chips. */
+export interface KnowledgeSearchHit {
+  source: "nextcloud" | "brain";
+  path: string;
+  brainItemId?: string | null;
+  pageNumber?: number | null;
+  score: number;
+  snippet: string;
+}
+
+export interface SearchKnowledgeResponse {
+  hits: KnowledgeSearchHit[];
+}
+
+/** A brain-memory item — best-effort until WARP-203/205 ship the routes. */
+export interface BrainMemoryItemInfo {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  originatingChatId?: string | null;
+}
+
+/**
+ * Recent indexed chunks for the authed user. The dashboard groups the
+ * flat list by Today/Yesterday/This week/This month/Earlier.
+ */
+export async function getRecentFiles(opts: {
+  limit?: number;
+  before?: string;
+  source?: "nextcloud" | "brain";
+} = {}): Promise<RecentKnowledgeResponse> {
+  const params = new URLSearchParams();
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.before) params.set("before", opts.before);
+  if (opts.source) params.set("source", opts.source);
+  const qs = params.toString();
+  const url = `${BASE}/api/files/knowledge/recent${qs ? `?${qs}` : ""}`;
+  const res = await authFetch(url);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load recent files: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Semantic search over the indexed file chunks. Returns 503 with
+ * `search-not-yet-available` until WARP-202 lands the shared
+ * file-search.service module — callers should surface that as a
+ * graceful "search will be online soon" UI rather than as an error.
+ */
+export async function searchKnowledge(opts: {
+  q: string;
+  limit?: number;
+  source?: "nextcloud" | "brain";
+  since?: string;
+}): Promise<SearchKnowledgeResponse | { unavailable: true; retryAfterSeconds?: number }> {
+  const params = new URLSearchParams({ q: opts.q });
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.source) params.set("source", opts.source);
+  if (opts.since) params.set("since", opts.since);
+  const res = await authFetch(`${BASE}/api/files/knowledge/search?${params.toString()}`);
+  if (res.status === 503) {
+    const body = await res.json().catch(() => ({}));
+    return { unavailable: true, retryAfterSeconds: body.retryAfterSeconds };
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Search failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Brain memory items for the authed user. Best-effort: until WARP-203
+ * ships the `/api/files/brain` route this returns an empty list and
+ * an `unavailable` flag so the dashboard tab can render a friendly
+ * placeholder rather than an error toast.
+ */
+export async function getBrainMemoryItems(): Promise<{
+  items: BrainMemoryItemInfo[];
+  unavailable?: boolean;
+}> {
+  const res = await authFetch(`${BASE}/api/files/brain`);
+  if (res.status === 404) {
+    return { items: [], unavailable: true };
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load brain memory: ${res.status}`);
+  }
+  const data = await res.json();
+  return { items: data.items ?? [] };
+}

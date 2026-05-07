@@ -173,8 +173,14 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
       // without the cookie); file tools will then surface
       // AUTH_REQUIRED, which is the same behavior as before WARP-104.
       const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
-      const toolCallContext: McpCallContext | undefined = ncToken
-        ? { ncToken }
+      // WARP-202: also forward the caller's username so handlers gated
+      // on per-user RBAC (e.g. `search_content`'s pgvector lookup) can
+      // scope queries to this user's chunks. The mcp-server's stdio
+      // path treats `_meta.userId` as authoritative because the
+      // orchestrator IS the trust boundary for that channel.
+      const userId = (req as AuthedRequest).user?.username;
+      const toolCallContext: McpCallContext | undefined = (ncToken || userId)
+        ? { ...(ncToken ? { ncToken } : {}), ...(userId ? { userId } : {}) }
         : undefined;
 
       const deps: AgentDeps = {
