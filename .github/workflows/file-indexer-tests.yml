@@ -33,8 +33,17 @@ jobs:
           cache: pip
           cache-dependency-path: services/file-indexer/requirements-dev.txt
 
-      - name: Install system deps for psycopg2-binary
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+      - name: Install system deps
+        # libpq-dev: psycopg2-binary build fallback
+        # ffmpeg: required by WARP-198 video extractor (subprocess: ffprobe / ffmpeg).
+        #   GitHub's ubuntu-latest currently ships ffmpeg pre-installed, but pin
+        #   it explicitly so a future runner-image change doesn't silently break
+        #   the video tests with a confusing FileNotFoundError on 'ffprobe'.
+        # libmagic1: WARP-199 email + WARP-200 archive extractors use python-magic
+        #   for content sniffing.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev ffmpeg libmagic1
 
       - name: Install dependencies
         run: |
