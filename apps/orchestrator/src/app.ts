@@ -58,7 +58,7 @@ export function createApp(prisma: PrismaClient) {
   app.use(authMiddleware);
 
   // Protected routes — auth middleware has populated req.user
-  app.use("/api", createProtectedAuthRouter());
+  app.use("/api", createProtectedAuthRouter(prisma));
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
