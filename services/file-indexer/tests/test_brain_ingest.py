@@ -98,8 +98,13 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
     assert len(fake_io["marked"]) == 1
     assert fake_io["marked"][0]["item_id"] == "item-A"
 
-    # Published ready status.
-    assert ("droplet/files/brain/indexed", {"itemId": "item-A", "status": "ready"}) in fake_io["published"]
+    # Published ready status — per-user topic so the orchestrator's
+    # WS bridge (subscribed to `droplet/files/<user>/#`) forwards it
+    # to the dashboard's open browser sessions.
+    assert (
+        "droplet/files/alice/brain/indexed",
+        {"itemId": "item-A", "status": "ready"},
+    ) in fake_io["published"]
 
     # Side files written.
     extracted = text_path.parent / "extracted.txt"

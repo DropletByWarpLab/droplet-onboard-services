@@ -39,14 +39,30 @@ from mqtt_client import publish, subscribe
 logger = logging.getLogger(__name__)
 
 BRAIN_UPLOADED_TOPIC = "droplet/files/brain/uploaded"
-BRAIN_INDEXED_TOPIC = "droplet/files/brain/indexed"
 
 
-def _publish_status(item_id: str, status: str, reason: str | None = None) -> None:
+def _indexed_topic(user_id: str) -> str:
+    """Per-user topic for the dashboard's WebSocket bridge.
+
+    Spec §7 names the topic `droplet/files/brain/indexed`, but the
+    orchestrator's WS bridge subscribes per-user to
+    `droplet/files/<user>/#`. Publishing under the per-user namespace
+    routes status flips straight to that user's open browser
+    sessions without expanding the bridge's subscription set.
+    """
+    return f"droplet/files/{user_id}/brain/indexed"
+
+
+def _publish_status(
+    user_id: str,
+    item_id: str,
+    status: str,
+    reason: str | None = None,
+) -> None:
     payload: dict[str, object] = {"itemId": item_id, "status": status}
     if reason:
         payload["reason"] = reason
-    publish(BRAIN_INDEXED_TOPIC, payload)
+    publish(_indexed_topic(user_id), payload)
 
 
 def _extract_text_path(storage_path: str) -> Path:
@@ -87,7 +103,7 @@ def handle_brain_uploaded(payload: dict) -> None:
 
     if not os.path.exists(path):
         logger.warning("brain_ingest: file missing on disk: %s", path)
-        _publish_status(item_id, "failed", reason="file_missing")
+        _publish_status(user_id, item_id, "failed", reason="file_missing")
         return
 
     logger.info(
@@ -101,7 +117,7 @@ def handle_brain_uploaded(payload: dict) -> None:
             "brain_ingest: dispatch returned None (unsupported / oversized) for %s",
             path,
         )
-        _publish_status(item_id, "failed", reason="extractor_unavailable")
+        _publish_status(user_id, item_id, "failed", reason="extractor_unavailable")
         # Mark indexed=NOW with no chunks so the chip doesn't spin
         # forever; the failed status flips the chip to ⚠.
         try:
@@ -115,7 +131,7 @@ def handle_brain_uploaded(payload: dict) -> None:
     if not text or len(text.strip()) < 10:
         logger.info("brain_ingest: extracted text too small for %s", path)
         warnings.append("empty_extraction")
-        _publish_status(item_id, "failed", reason="empty_extraction")
+        _publish_status(user_id, item_id, "failed", reason="empty_extraction")
         try:
             mark_brain_item_indexed(item_id, warnings=warnings)
         except Exception:
@@ -127,7 +143,7 @@ def handle_brain_uploaded(payload: dict) -> None:
     if not chunks:
         logger.info("brain_ingest: chunker produced 0 chunks for %s", path)
         warnings.append("no_chunks")
-        _publish_status(item_id, "failed", reason="no_chunks")
+        _publish_status(user_id, item_id, "failed", reason="no_chunks")
         try:
             mark_brain_item_indexed(item_id, warnings=warnings)
         except Exception:
@@ -138,7 +154,7 @@ def handle_brain_uploaded(payload: dict) -> None:
         vectors = embed_texts(chunks)
     except Exception as e:
         logger.warning("brain_ingest: embedding failed for %s: %s", path, e)
-        _publish_status(item_id, "failed", reason="embed_failed")
+        _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
     if len(vectors) != len(chunks):
         logger.warning(
@@ -147,7 +163,7 @@ def handle_brain_uploaded(payload: dict) -> None:
             len(vectors),
             len(chunks),
         )
-        _publish_status(item_id, "failed", reason="embed_failed")
+        _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
 
     # Upsert (delete-then-insert to keep brain rows independent of the
@@ -175,7 +191,7 @@ def handle_brain_uploaded(payload: dict) -> None:
         mark_brain_item_indexed(item_id, warnings=warnings)
     except Exception as e:
         logger.exception("brain_ingest: db write failed for %s: %s", item_id, e)
-        _publish_status(item_id, "failed", reason="db_failed")
+        _publish_status(user_id, item_id, "failed", reason="db_failed")
         return
 
     # Persist extracted.txt + updated manifest so backups + the
@@ -199,7 +215,7 @@ def handle_brain_uploaded(payload: dict) -> None:
         # for backup convenience, not retrieval correctness.
         logger.warning("brain_ingest: failed to write side files: %s", e)
 
-    _publish_status(item_id, "ready")
+    _publish_status(user_id, item_id, "ready")
     logger.info(
         "brain_ingest: indexed %s -> %d chunks (warnings=%s)",
         item_id,
