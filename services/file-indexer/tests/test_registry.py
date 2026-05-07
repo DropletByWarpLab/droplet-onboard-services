@@ -104,3 +104,39 @@ def test_dispatch_routes_eml_to_email_extractor(tmp_path):
     assert result is not None
     assert "Subject: hi" in result["text"]
     assert "body text" in result["text"]
+
+
+# ── archive registration (WARP-200 Task 4.4) ─────────────────────────
+
+
+def test_archive_cap_is_200mb():
+    """WARP-200 archive cap (200 MB) is what `_cap_for_mime` returns."""
+    from extractors import registry
+
+    assert registry._cap_for_mime("application/zip") == 200 * 1024 * 1024
+    assert registry._cap_for_mime("application/x-tar") == 200 * 1024 * 1024
+    assert registry._cap_for_mime("application/gzip") == 200 * 1024 * 1024
+
+
+def test_archive_mime_dispatches_through_registry(tmp_path):
+    """End-to-end: dispatch() picks the archive handler for application/zip."""
+    from pathlib import Path as _Path
+
+    from extractors import registry
+
+    fixtures = _Path(__file__).parent / "fixtures"
+    result = registry.dispatch(str(fixtures / "simple.zip"), "application/zip")
+    assert result is not None
+    assert "one hundred thousand" in result["text"]
+    assert "--- Member: note.txt ---" in result["text"]
+
+
+def test_archive_handler_resolves_via_route():
+    """`_route()` returns archive.extract for every archive MIME (WARP-199 unified contract)."""
+    from extractors import archive, registry
+
+    assert registry._route("application/zip") is archive.extract
+    assert registry._route("application/x-tar") is archive.extract
+    assert registry._route("application/gzip") is archive.extract
+    # Non-archive MIME shouldn't resolve to archive.extract.
+    assert registry._route("text/plain") is not archive.extract
