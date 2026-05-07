@@ -260,7 +260,25 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const vector = (await embedding.embed([q]))[0];
+      // WARP-202 exports an `EmbeddingClient` class (not a top-level
+      // `embed()`); instantiate per request — the gRPC channel inside is
+      // lazy so this is effectively free, and it keeps the route
+      // stateless. URL falls back to the same default the MCP server
+      // uses (`ai-gateway:50051`) so dev + Compose stay in sync.
+      const aiGatewayGrpcUrl =
+        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const client = new embedding.EmbeddingClient({ url: aiGatewayGrpcUrl });
+      let vector: number[] | undefined;
+      try {
+        vector = (await client.embed([q]))[0];
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error)?.message },
+          "embedding rpc failed — returning 502"
+        );
+        res.status(502).json({ error: "embedding_failed" });
+        return;
+      }
       if (!Array.isArray(vector)) {
         res.status(502).json({ error: "embedding_failed" });
         return;
