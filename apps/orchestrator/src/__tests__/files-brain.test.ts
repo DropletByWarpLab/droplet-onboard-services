@@ -360,6 +360,26 @@ describe("POST /api/files/brain/upload", () => {
       .attach("file", Buffer.from("data"), { filename, contentType: mime });
     expect(res.status).toBe(202);
   });
+
+  // WARP-197 — audio MIMEs are now in the allow-list. The route still
+  // returns 202 because the actual transcription happens out-of-band
+  // (file-indexer consumes the MQTT broadcast and runs faster-whisper).
+  it.each([
+    ["audio/wav", "memo.wav"],
+    ["audio/x-wav", "memo.wav"],
+    ["audio/mpeg", "memo.mp3"],
+    ["audio/mp4", "memo.m4a"],
+    ["audio/ogg", "memo.ogg"],
+    ["audio/flac", "memo.flac"],
+    ["audio/webm", "memo.webm"],
+    ["audio/aac", "memo.aac"],
+  ])("accepts audio %s uploads (WARP-197)", async (mime, filename) => {
+    const fakeBytes = Buffer.alloc(64);
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", fakeBytes, { filename, contentType: mime });
+    expect(res.status).toBe(202);
+  });
 });
 
 describe("GET /api/files/brain", () => {
