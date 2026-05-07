@@ -8,6 +8,7 @@ pipeline extracts text -> chunks -> embeds -> upserts into pgvector.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import re
 import threading
@@ -19,7 +20,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from config import NEXTCLOUD_DATA_ROOT
-from extractors import extract_text
+from extractors.registry import dispatch
 from chunker import chunk_text
 from embedder import embed_texts
 from db import upsert_chunk, delete_chunks_for_file, prune_excess_chunks
@@ -179,11 +180,20 @@ class IndexHandler(FileSystemEventHandler):
             size = os.path.getsize(path)
         except OSError:
             return
-        if size == 0 or size > 100 * 1024 * 1024:  # Skip empty or >100MB
+        if size == 0:
             return
+        # Oversized files (> MAX_INDEX_BYTES) are skipped by extractors.dispatch
+        # with `reason=oversized` in the log line — no DB write.
 
-        # Extract
-        text = extract_text(path)
+        # Extract — dispatch picks the right extractor by MIME and returns None
+        # for unsupported / oversized / failed paths.
+        mime, _ = mimetypes.guess_type(path)
+        if mime is None:
+            return  # unknown type, skip silently
+        doc = dispatch(path, mime)
+        if doc is None:
+            return
+        text = doc.get("text", "")
         if not text or len(text.strip()) < 10:
             return
 
