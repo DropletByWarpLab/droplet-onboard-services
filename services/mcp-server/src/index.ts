@@ -5,6 +5,7 @@ import { createServer } from "./server.js";
 import { startStdio } from "./transports/stdio.js";
 import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
+import { EmbeddingClient } from "./embedding.client.js";
 
 function parseTransport(argv: string[]): "stdio" | "http" {
   const arg = argv.find((a) => a.startsWith("--transport="));
@@ -94,6 +95,18 @@ async function main(): Promise<void> {
   // postinstall warns if the client isn't generated yet.
   const prisma = new PrismaClient();
 
+  // Singleton embedding client. The mcp-server is the trust boundary
+  // for the LLM tool path, so it owns the gRPC channel to ai-gateway —
+  // each `search_content` call reuses this stub. WARP-202.
+  //
+  // The channel is built lazily on the first `embed()` call (see
+  // EmbeddingClient.getStub), so a missing or temporarily unreachable
+  // ai-gateway at boot does not block stdio startup. `embed()` will
+  // throw `UNAVAILABLE` when the ai-gateway is down and `search_content`
+  // translates that into the user-facing `EMBEDDING_UNAVAILABLE` error.
+  const aiGatewayGrpcUrl = process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+  const embeddingClient = new EmbeddingClient({ url: aiGatewayGrpcUrl });
+
   // Connect lazily — the stdio child process should not block the parent's
   // boot path on a database that may not be reachable (in-process orchestrator
   // tests, dry-run roundtrips). Tools that touch Prisma will trigger the
@@ -113,11 +126,14 @@ async function main(): Promise<void> {
       getAuditLog: async () => ({}),
     },
     httpFactory: createHttpClient,
+    embedText: (texts) => embeddingClient.embed(texts),
   };
 
   // Disconnect cleanly when the parent SIGTERMs us. Without this the
-  // PrismaClient connection pool would leak across the stdio child boundary.
+  // PrismaClient connection pool would leak across the stdio child boundary,
+  // and the gRPC channel to ai-gateway would stay half-open.
   const shutdown = async () => {
+    embeddingClient.close();
     await prisma.$disconnect().catch(() => {});
     process.exit(0);
   };
