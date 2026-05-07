@@ -10,11 +10,13 @@ WORKDIR /app
 #  - libpq-dev + gcc: psycopg2 build deps
 #  - tesseract-ocr + tesseract-ocr-eng: WARP-201 image OCR extractor
 #  - ffmpeg: WARP-197 audio extractor (faster-whisper decodes via ffmpeg)
+#  - libmagic1: WARP-199 python-magic backend (MIME sniffing for email attachments)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       libpq-dev gcc \
       tesseract-ocr tesseract-ocr-eng \
-      ffmpeg && \
+      ffmpeg \
+      libmagic1 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY services/file-indexer/requirements.txt .
