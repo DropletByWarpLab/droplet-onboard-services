@@ -1,0 +1,40 @@
+# Docker Compose override layered on top of `docker-compose.yml` for the
+# RAG integration test lane (WARP-206). Publishes the orchestrator's API
+# port to the host so test runners can hit `http://localhost:3000` directly
+# without going through the gateway / TLS / auth-cookie machinery.
+#
+# Production never uses this file — `scripts/setup.sh` and the `setup-e2e`
+# CI lane both run with the base compose file only.
+#
+# Usage:
+#   docker compose \
+#     -f docker/docker-compose.yml \
+#     -f docker/docker-compose.test.override.yml \
+#     up -d <services>
+#
+# `scripts/test-rag.sh` and the `rag-tests` GitHub Actions workflow both
+# layer this file automatically.
+
+services:
+  orchestrator:
+    # Map host:container so vitest in tests/*.integration.test.ts can
+    # reach the orchestrator at localhost:3000. The base file only
+    # `expose:`s the port to the bridge network.
+    ports:
+      - "3000:3000"
+
+  # Map the DB so `tests/rag-search.integration.test.ts` (and the other
+  # tests that exec into the db container with `docker compose exec db
+  # psql ...`) can find the port. The exec path doesn't strictly need
+  # this — but the helper that calls `compose port db 5432` to derive
+  # an MCP-stdio child's DATABASE_URL does.
+  db:
+    ports:
+      - "5432:5432"
+
+  # ai-gateway exposes the gRPC port to the in-process MCP server stdio
+  # child during rag-search.integration.test.ts. Mirrored here so
+  # `compose port ai-gateway 50051` resolves to a host port.
+  ai-gateway:
+    ports:
+      - "50051:50051"

@@ -1,0 +1,230 @@
+name: rag-tests
+
+# RAG integration suite — boots the full Compose stack and runs all
+# six rag-*.integration.test.ts files in one job so we share one boot.
+#
+# Path-filtered: tests take 20+ min, running on every PR ruins
+# people's day. Triggered only when something on the RAG path changes.
+
+on:
+  pull_request:
+    paths:
+      - "services/file-indexer/**"
+      - "apps/orchestrator/src/routes/files*"
+      - "apps/orchestrator/src/routes/llm*"
+      - "apps/orchestrator/src/services/file-search*"
+      - "apps/orchestrator/src/services/brain-memory*"
+      - "apps/orchestrator/src/services/embedding.client*"
+      - "apps/orchestrator/prisma/schema.prisma"
+      - "apps/orchestrator/prisma/migrations/**"
+      - "apps/web-dashboard/src/app/knowledge/**"
+      - "packages/tools-core/src/handlers/files/**"
+      - "services/mcp-server/src/embedding.client*"
+      - "services/mcp-server/src/index*"
+      - "tests/rag-*.integration.test.ts"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.test.override.yml"
+      - ".github/workflows/rag-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/file-indexer/**"
+      - "apps/orchestrator/src/routes/files*"
+      - "apps/orchestrator/src/routes/llm*"
+      - "apps/orchestrator/src/services/file-search*"
+      - "apps/orchestrator/src/services/brain-memory*"
+      - "apps/orchestrator/src/services/embedding.client*"
+      - "apps/orchestrator/prisma/schema.prisma"
+      - "apps/orchestrator/prisma/migrations/**"
+      - "apps/web-dashboard/src/app/knowledge/**"
+      - "packages/tools-core/src/handlers/files/**"
+      - "services/mcp-server/src/embedding.client*"
+      - "services/mcp-server/src/index*"
+      - "tests/rag-*.integration.test.ts"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.test.override.yml"
+      - ".github/workflows/rag-tests.yml"
+
+concurrency:
+  group: rag-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rag-tests:
+    name: RAG integration suite
+    runs-on: ubuntu-latest
+    # Nextcloud cold-boot ~3 min + extractor unit boot + 6 test files,
+    # some of which run multiple Compose-up/down cycles. 35 min is the
+    # observed p95 ceiling locally; under that we'd start dropping
+    # legit slow runs as flaky.
+    timeout-minutes: 35
+
+    env:
+      RUN_RAG_INTEGRATION: "1"
+      API_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest has ~14GB free. The Compose stack (file-indexer
+      # alone pulls ~3GB of Tesseract + Pillow + pypdf + pgvector
+      # binaries) fills that during the build. Strip the preinstalled
+      # toolchains we don't use to reclaim ~25GB. Same trick used in
+      # docker-build.yml + setup-e2e.yml.
+      - name: Free disk space
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install root deps (workspaces)
+        run: npm ci
+
+      - name: Install tests workspace deps
+        working-directory: tests
+        run: npm ci || npm install --no-fund --no-audit
+
+      # mcp-server is built into its container image, but
+      # rag-search.integration.test.ts spawns the locally-built
+      # `services/mcp-server/dist/index.js` as a stdio child against
+      # the live Compose DB+ai-gateway. Without these builds the file
+      # is missing.
+      - name: Build @droplet/tools-core
+        run: npm run -w @droplet/tools-core build
+
+      - name: Build @droplet/mcp-server
+        run: npm run -w @droplet/mcp-server build
+
+      - name: Generate Prisma client
+        run: npm run -w @droplet/orchestrator db:generate
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The integration suite needs a `.env` for compose to satisfy its
+      # secret references. Use the same generator setup.sh uses but
+      # skip everything except secret generation — same trick as
+      # setup-e2e.yml (`--skip-docker --skip-drivers --skip-start`).
+      - name: Generate .env (secrets only)
+        run: ./scripts/setup.sh --skip-docker --skip-drivers --skip-start --verbose
+
+      # Bring up everything the tests touch. Layering the test override
+      # publishes orchestrator:3000, db:5432, ai-gateway:50051 to the
+      # host so vitest can reach them via localhost. Production
+      # compose deliberately keeps these internal-only behind nginx.
+      - name: Compose up
+        run: |
+          docker compose \
+            -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml \
+            up -d db cache broker ai-gateway file-indexer mcp-server orchestrator nextcloud
+
+      # Wait for the orchestrator's `/api/orchestrator/health` —
+      # rolled-up health for Docker healthcheck (returns 200 once db +
+      # cache are up). 90s deadline; Compose's own healthcheck has
+      # start_period: 60s.
+      - name: Wait for orchestrator health
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/api/orchestrator/health > /dev/null; then
+              echo "Orchestrator healthy after ${i}s polls."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Orchestrator never became healthy"
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml ps
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml logs orchestrator | tail -100
+          exit 1
+
+      # Wait for Nextcloud to finish first-run bootstrap (occ status
+      # exits 0). Skipping this races the file-indexer's first ingest
+      # against an unprovisioned Nextcloud.
+      - name: Wait for Nextcloud bootstrap
+        run: |
+          set -e
+          for i in $(seq 1 120); do
+            if docker compose -f docker/docker-compose.yml \
+                -f docker/docker-compose.test.override.yml \
+                exec -T -u www-data nextcloud php /var/www/html/occ status \
+                > /dev/null 2>&1; then
+              echo "Nextcloud bootstrapped after ${i} attempts."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Nextcloud never bootstrapped"
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml logs nextcloud | tail -100
+          exit 1
+
+      # Run the whole RAG suite in one vitest invocation so the boot
+      # cost is amortized across all six files. `--no-file-parallelism`
+      # serializes them — they all touch the same DB rows + Compose
+      # state and would clobber each other if run in parallel.
+      - name: Run RAG integration tests
+        id: run-tests
+        working-directory: tests
+        run: |
+          npx vitest run --no-file-parallelism \
+            rag-extractors.integration.test.ts \
+            rag-search.integration.test.ts \
+            rag-brain-upload.integration.test.ts \
+            rag-knowledge.integration.test.ts \
+            rag-brain-export.integration.test.ts \
+            rag-end-to-end.integration.test.ts
+
+      # Always dump container logs on test failure — without this a
+      # broken integration test at 03:00 is impossible to triage from
+      # the GHA logs view alone.
+      - name: Capture container logs (on failure)
+        if: failure()
+        run: |
+          mkdir -p /tmp/rag-logs
+          for svc in file-indexer orchestrator ai-gateway nextcloud db mcp-server; do
+            docker compose -f docker/docker-compose.yml \
+              -f docker/docker-compose.test.override.yml \
+              logs --no-color "$svc" > "/tmp/rag-logs/${svc}.log" 2>&1 || true
+          done
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml \
+            ps > /tmp/rag-logs/ps.txt 2>&1 || true
+
+      - name: Upload logs artifact (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-tests-logs-${{ github.run_id }}
+          path: /tmp/rag-logs
+          retention-days: 7
+
+      # Always tear the stack down so we don't leak containers
+      # between matrix runs / future workflow invocations.
+      - name: Compose down
+        if: always()
+        run: |
+          docker compose \
+            -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml \
+            down -v --remove-orphans
