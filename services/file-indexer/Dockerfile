@@ -9,10 +9,12 @@ WORKDIR /app
 # System deps:
 #  - libpq-dev + gcc: psycopg2 build deps
 #  - tesseract-ocr + tesseract-ocr-eng: WARP-201 image OCR extractor
+#  - ffmpeg: WARP-197 audio extractor (faster-whisper decodes via ffmpeg)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       libpq-dev gcc \
-      tesseract-ocr tesseract-ocr-eng && \
+      tesseract-ocr tesseract-ocr-eng \
+      ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 COPY services/file-indexer/requirements.txt .
