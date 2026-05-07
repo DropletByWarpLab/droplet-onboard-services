@@ -115,4 +115,91 @@ describe("brain-memory.service", () => {
       svc.isPathUnderUser("alice", join(tmpRoot, "alice", "..", "bob")),
     ).toBe(false);
   });
+
+  // ── WARP-205 ──
+  // purgeUserData drives the cascade-on-user-delete path wired into
+  // routes/auth.ts. Run against an in-memory fake prisma to keep the
+  // test fast (real prisma is exercised end-to-end in the live
+  // integration suite).
+  it("purgeUserData deletes brain rows + chunks + user tree, leaves siblings alone", async () => {
+    await svc.writeOriginal("alice", "i1", "a.txt", Buffer.from("a"));
+    await svc.writeOriginal("bob", "i1", "b.txt", Buffer.from("b"));
+
+    const aliceItems = [
+      { id: "i1", userId: "alice" },
+      { id: "i2", userId: "alice" },
+    ];
+    const aliceChunks = [
+      { id: 1n, userId: "alice", source: "brain" },
+      { id: 2n, userId: "alice", source: "brain" },
+      { id: 3n, userId: "alice", source: "brain" },
+    ];
+    const bobItems = [{ id: "i1", userId: "bob" }];
+    const bobChunks = [{ id: 4n, userId: "bob", source: "brain" }];
+
+    const items = [...aliceItems, ...bobItems];
+    const chunks = [...aliceChunks, ...bobChunks];
+
+    const fakePrisma = {
+      brainMemoryItem: {
+        deleteMany: async ({ where }: { where: { userId: string } }) => {
+          const before = items.length;
+          for (let i = items.length - 1; i >= 0; i--) {
+            if (items[i].userId === where.userId) items.splice(i, 1);
+          }
+          return { count: before - items.length };
+        },
+      },
+      fileContentChunk: {
+        deleteMany: async ({
+          where,
+        }: {
+          where: { userId: string; source: string };
+        }) => {
+          const before = chunks.length;
+          for (let i = chunks.length - 1; i >= 0; i--) {
+            if (
+              chunks[i].userId === where.userId &&
+              chunks[i].source === where.source
+            )
+              chunks.splice(i, 1);
+          }
+          return { count: before - chunks.length };
+        },
+      },
+    };
+
+    const result = await svc.purgeUserData(
+      fakePrisma as unknown as import("@prisma/client").PrismaClient,
+      "alice",
+    );
+
+    expect(result.items).toBe(2);
+    expect(result.chunks).toBe(3);
+    expect(items).toEqual([{ id: "i1", userId: "bob" }]);
+    expect(chunks).toEqual([{ id: 4n, userId: "bob", source: "brain" }]);
+
+    // On-disk: alice tree gone, bob untouched.
+    const aliceGone = await stat(join(tmpRoot, "alice")).catch(() => null);
+    expect(aliceGone).toBeNull();
+    const bob = await stat(join(tmpRoot, "bob"));
+    expect(bob.isDirectory()).toBe(true);
+  });
+
+  it("purgeUserData is idempotent — safe to call on a user with no data", async () => {
+    const fakePrisma = {
+      brainMemoryItem: {
+        deleteMany: async () => ({ count: 0 }),
+      },
+      fileContentChunk: {
+        deleteMany: async () => ({ count: 0 }),
+      },
+    };
+
+    const result = await svc.purgeUserData(
+      fakePrisma as unknown as import("@prisma/client").PrismaClient,
+      "ghost-user",
+    );
+    expect(result).toEqual({ items: 0, chunks: 0 });
+  });
 });

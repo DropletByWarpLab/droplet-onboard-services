@@ -27,7 +27,12 @@ import pino from "pino";
 import {
   writeOriginal,
   writeManifest,
+  streamExportZip,
+  deleteItem,
+  isPathUnderUser,
 } from "../services/brain-memory.service.js";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 
 const logger = pino({ name: "files-brain-route" });
@@ -234,6 +239,111 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         limit,
         offset,
       });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── GET /api/files/brain/export ──
+  // Streams a zip of the caller's brain-memory items + a manifest.
+  // Two scopes: ?all=1 (every item) or ?chatId=<id> (just the items
+  // tagged to that chat via originatingChatId). The zip is streamed —
+  // we never buffer the whole archive in memory — and headers are
+  // written BEFORE piping so the browser can start saving immediately.
+  router.get("/files/brain/export", async (req, res, next) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const all = req.query.all === "1" || req.query.all === "true";
+      const chatId =
+        typeof req.query.chatId === "string" && req.query.chatId.length > 0
+          ? req.query.chatId
+          : null;
+      if (!all && !chatId) {
+        res.status(400).json({
+          error: "missing_scope",
+          hint: "specify ?all=1 or ?chatId=<id>",
+        });
+        return;
+      }
+      const filenameTag = all ? "all" : chatId;
+      // Headers must land before the stream pipe. Once `streamExportZip`
+      // pipes into res it'll start writing bytes immediately.
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="brain-memory-${filenameTag}.zip"`,
+      });
+      await streamExportZip(
+        prisma,
+        userId,
+        all ? { scope: { kind: "all" } } : { scope: { kind: "chat", chatId: chatId! } },
+        res,
+      );
+    } catch (e) {
+      // Headers are already on the wire by the time we reach here in
+      // the streaming path, so we can't 500 cleanly. Bubble to the
+      // express error handler which will close the response.
+      next(e);
+    }
+  });
+
+  // ── GET /api/files/brain/:itemId/download ──
+  // Stream the original bytes of a single item. RBAC + zip-slip
+  // defense match the export route.
+  router.get("/files/brain/:itemId/download", async (req, res, next) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const item = await prisma.brainMemoryItem.findUnique({
+        where: { id: req.params.itemId },
+      });
+      if (!item || item.userId !== userId) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      if (!item.storagePath || !isPathUnderUser(userId, item.storagePath)) {
+        // Path escaped the user's tree — refuse rather than serve it.
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      try {
+        await stat(item.storagePath);
+      } catch {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": item.mimeType ?? "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${item.filename.replace(/"/g, "")}"`,
+      });
+      createReadStream(item.storagePath).pipe(res);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── DELETE /api/files/brain/:itemId ──
+  // Removes the row, cascades FileContentChunk via Prisma deleteMany,
+  // and purges the on-disk dir. Cross-user → 404 (no existence leak).
+  router.delete("/files/brain/:itemId", async (req, res, next) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const ok = await deleteItem(prisma, userId, req.params.itemId);
+      if (!ok) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+      res.status(204).end();
     } catch (e) {
       next(e);
     }

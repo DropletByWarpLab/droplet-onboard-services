@@ -38,6 +38,7 @@ import {
   resolveNcToken,
 } from "../services/nextcloud-session.service.js";
 import { config } from "../config.js";
+import { purgeUserData } from "../services/brain-memory.service.js";
 
 const logger = pino({ name: "auth-route" });
 
@@ -415,7 +416,9 @@ export function createPublicAuthRouter(): Router {
 // Protected auth routes — mounted AFTER the auth middleware
 // so req.user is populated by the middleware.
 // ────────────────────────────────────────────────────────────────
-export function createProtectedAuthRouter(): Router {
+export function createProtectedAuthRouter(
+  prisma?: import("@prisma/client").PrismaClient,
+): Router {
   const router = Router();
 
   // ── Get current user info ──
@@ -611,6 +614,14 @@ export function createProtectedAuthRouter(): Router {
   });
 
   // ── Delete user (admin only) ──
+  // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
+  // user owned. We do this AFTER Nextcloud-side delete succeeds so a
+  // failed upstream call doesn't leave the brain tier partially purged
+  // (the dashboard would then list a user that no longer exists in
+  // Nextcloud — strictly worse than the converse). The cascade is
+  // best-effort: if it throws we still return success, but log loud
+  // — orphaned local rows are recoverable later via a janitor job;
+  // returning 500 here would also fail to undo the upstream delete.
   router.delete("/auth/users/:username", async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
@@ -620,6 +631,35 @@ export function createProtectedAuthRouter(): Router {
       }
 
       await ncDeleteUser(token, req.params.username);
+
+      if (prisma) {
+        try {
+          const purged = await purgeUserData(prisma, req.params.username);
+          logger.info(
+            {
+              username: req.params.username,
+              items: purged.items,
+              chunks: purged.chunks,
+            },
+            "Cascaded brain-memory purge after user delete",
+          );
+        } catch (err) {
+          // Don't fail the user-delete if the local cascade trips —
+          // the upstream NC delete already succeeded, and undoing it
+          // is awkward. Log loud so on-call can clean up later.
+          logger.error(
+            { err, username: req.params.username },
+            "Brain-memory cascade purge failed (user already deleted in Nextcloud)",
+          );
+        }
+      } else {
+        // Should never happen in production; createProtectedAuthRouter
+        // is invoked with prisma in app.ts.
+        logger.warn(
+          { username: req.params.username },
+          "purgeUserData skipped — protected auth router instantiated without prisma",
+        );
+      }
 
       res.json({ status: "deleted", username: req.params.username });
     } catch (err) {
