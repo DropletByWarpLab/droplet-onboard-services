@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  BookOpen,
   Calendar as CalendarIcon,
   Film,
   FolderOpen,
@@ -36,6 +37,7 @@ const primaryNav: NavItem[] = [
   { href: "/chat", label: "Ask AI", icon: MessageSquare },
   { href: "/calendar", label: "Calendar", icon: CalendarIcon },
   { href: "/files", label: "Files", icon: FolderOpen },
+  { href: "/knowledge", label: "Knowledge", icon: BookOpen },
   { href: "/devices", label: "Devices", icon: Home },
 ];
 
