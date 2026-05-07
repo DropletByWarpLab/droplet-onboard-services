@@ -20,3 +20,5 @@ faster-whisper==1.0.3
 # (both use python-magic for content-based MIME sniffing).
 extract-msg==0.50.0
 python-magic==0.4.27
+# WARP-198 RAG Phase 2 video extractor (subtitle parsing for embedded SRT/mov_text/etc.)
+srt==3.5.3
