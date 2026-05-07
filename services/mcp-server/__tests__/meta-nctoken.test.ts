@@ -109,6 +109,70 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     await server.close();
   });
 
+  it("threads _meta.userId into ctx.userId so search_content scopes to that user (WARP-202)", async () => {
+    // Stdio path: no claims, but the orchestrator passes the calling
+    // user's username via _meta.userId. search-content.ts gates on
+    // ctx.userId, so this test pins the trusted-stdio plumbing.
+    const embedSpy = vi.fn().mockResolvedValue([[0.1]]);
+    const queryResult: unknown[] = [];
+    const deps: ContextDeps = {
+      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue(queryResult) } as never,
+      matter: {} as never,
+      httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
+      embedText: embedSpy,
+    };
+    const server = createServer(deps);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "meta-userid-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const res = await client.callTool({
+      name: "search_content",
+      arguments: { query: "hello world" },
+      _meta: { userId: "alice" },
+    });
+
+    expect(res.isError).toBe(false);
+    expect(embedSpy).toHaveBeenCalledWith(["hello world"]);
+    // The userId reached the handler — verified indirectly via the
+    // SQL execution path. Check the prisma stub was invoked with
+    // alice as a parameter.
+    const queryCall = (deps.prisma as unknown as {
+      $queryRawUnsafe: ReturnType<typeof vi.fn>;
+    }).$queryRawUnsafe.mock.calls[0];
+    expect(queryCall).toContain("alice");
+
+    await client.close();
+    await server.close();
+  });
+
+  it("rejects empty / non-string _meta.userId (defensive)", async () => {
+    const deps: ContextDeps = {
+      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as never,
+      matter: {} as never,
+      httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
+      embedText: vi.fn().mockResolvedValue([[0.1]]),
+    };
+    const server = createServer(deps);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "meta-userid-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const res = await client.callTool({
+      name: "search_content",
+      arguments: { query: "hello world" },
+      _meta: { userId: "" },
+    });
+
+    // Empty userId → ctx.userId remains undefined → AUTH_REQUIRED.
+    expect(res.isError).toBe(true);
+    const text = (res.content as { text: string }[])[0].text;
+    expect(text).toContain("AUTH_REQUIRED");
+
+    await client.close();
+    await server.close();
+  });
+
   it("does NOT leak _meta.ncToken into the tool's `arguments` payload", async () => {
     // The whole point of using `_meta` instead of `arguments` is that
     // `_meta` is reserved by the MCP spec for protocol metadata and

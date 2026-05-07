@@ -24,4 +24,39 @@ sed -i.bak 's/^import inference_pb2/from grpc_generated import inference_pb2/' "
 rm -f "$GRPC_OUT"/*.bak
 
 echo "==> Python gRPC stubs generated in $GRPC_OUT"
+
+# ── TypeScript stubs (orchestrator) ────────────────────────────────────────
+# Used by `EmbeddingClient` (apps/orchestrator/src/services/embedding.client.ts)
+# to call the ai-gateway's EmbedText RPC. WARP-202.
+TS_GRPC_OUT="$REPO_ROOT/apps/orchestrator/src/grpc-generated"
+echo "==> Generating TS gRPC stubs..."
+mkdir -p "$TS_GRPC_OUT"
+
+# Resolve ts-proto + grpc-tools binaries. npm hoists them to the workspace root
+# in this monorepo, but a non-hoisted install would land them under the
+# orchestrator's local node_modules — check both.
+ORCH_DIR="$REPO_ROOT/apps/orchestrator"
+PROTOC_BIN=""
+TS_PROTO_PLUGIN=""
+for dir in "$ORCH_DIR/node_modules/.bin" "$REPO_ROOT/node_modules/.bin"; do
+  if [[ -x "$dir/grpc_tools_node_protoc" && -x "$dir/protoc-gen-ts_proto" ]]; then
+    PROTOC_BIN="$dir/grpc_tools_node_protoc"
+    TS_PROTO_PLUGIN="$dir/protoc-gen-ts_proto"
+    break
+  fi
+done
+
+if [[ -z "$PROTOC_BIN" || -z "$TS_PROTO_PLUGIN" ]]; then
+  echo "ERROR: missing ts-proto/grpc-tools devDeps. Run: npm install --workspace @droplet/orchestrator" >&2
+  exit 1
+fi
+
+"$PROTOC_BIN" \
+  --plugin=protoc-gen-ts_proto="$TS_PROTO_PLUGIN" \
+  --ts_proto_out="$TS_GRPC_OUT" \
+  --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,useExactTypes=false \
+  --proto_path="$PROTO_DIR" \
+  "$PROTO_DIR/inference.proto"
+
+echo "==> TS gRPC stubs generated in $TS_GRPC_OUT"
 echo "Done."

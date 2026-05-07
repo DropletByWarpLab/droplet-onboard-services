@@ -39,6 +39,11 @@ COPY services/mcp-server ./services/mcp-server
 # `new PrismaClient()` at boot needs the generated client. We don't
 # need the rest of the orchestrator sources.
 COPY apps/orchestrator/prisma ./apps/orchestrator/prisma
+# The embedding client (WARP-202) uses @grpc/proto-loader to read
+# inference.proto at runtime. Copy the proto definition so it ships
+# with the image and is reachable from
+# `services/mcp-server/dist/embedding.client.js` at run time.
+COPY proto ./proto
 
 # Generate the Prisma client into the shared root node_modules. The
 # orchestrator and mcp-server both resolve @prisma/client from there.
@@ -66,6 +71,10 @@ COPY --from=builder /app/packages/tools-core/package.json ./packages/tools-core/
 COPY --from=builder /app/packages/tools-core/dist ./packages/tools-core/dist
 COPY --from=builder /app/services/mcp-server/package.json ./services/mcp-server/package.json
 COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
+# Proto file consumed by the runtime gRPC client. embedding.client.ts
+# probes a few candidate paths; `/app/proto/inference.proto` is the
+# absolute fallback this layout resolves to.
+COPY --from=builder /app/proto ./proto
 
 ENV NODE_ENV=production
 

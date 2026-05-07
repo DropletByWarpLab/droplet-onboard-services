@@ -125,4 +125,13 @@ export class McpClientService {
 export interface McpCallContext {
   /** Nextcloud session token for the calling user — required by file-tool handlers. */
   ncToken?: string;
+  /**
+   * Nextcloud username for the calling user. Forwarded as
+   * `_meta.userId` to the stdio child so handlers gated on the per-user
+   * RBAC boundary (e.g. `search_content`'s pgvector lookup, WARP-202)
+   * can scope queries to this user's chunks. The mcp-server's HTTP
+   * transport ignores `_meta.userId` — JWT claims (`claims.sub`) are
+   * the authoritative trust boundary there.
+   */
+  userId?: string;
 }

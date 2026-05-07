@@ -50,8 +50,10 @@
     "@types/supertest": "^6.0.2",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.10",
+    "grpc-tools": "^1.13.1",
     "prisma": "^5.14.0",
     "supertest": "^7.0.0",
+    "ts-proto": "^2.11.7",
     "tsx": "^4.11.0",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0"
