@@ -58,6 +58,15 @@ def main():
         logger.error("Cannot connect to PostgreSQL: %s", e)
         sys.exit(1)
 
+    # WARP-203: subscribe to brain-memory uploads from the orchestrator.
+    # Non-fatal if MQTT is unavailable — the subscriber is registered
+    # locally and will queue if the broker comes online later.
+    try:
+        from brain_ingest import start_brain_ingest
+        start_brain_ingest()
+    except Exception:
+        logger.warning("brain_ingest: failed to subscribe — chat-attached files won't index")
+
     # Start watching
     from watcher import start_watcher
     observer = start_watcher()
