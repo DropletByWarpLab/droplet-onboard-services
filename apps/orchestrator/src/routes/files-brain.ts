@@ -47,6 +47,7 @@ const logger = pino({ name: "files-brain-route" });
  *   image/*           → image extractor (OCR)   (WARP-201)
  *   audio/*           → audio extractor (ASR)   (WARP-197)
  *   email             → email extractor with recursive attachment dispatch (WARP-199)
+ *   archive (zip/tar) → archive extractor with 5-layer bomb defense (WARP-200)
  *
  * The list is intentionally explicit rather than wildcard-driven so a
  * user can't slip in `application/octet-stream` and end up indexing
@@ -83,6 +84,15 @@ const ALLOWED_MIMES = new Set<string>([
   "message/rfc822",
   "application/vnd.ms-outlook",
   "application/x-msmail",
+  // WARP-200 archive MIMEs — the file-indexer's archive extractor walks
+  // members under bounded recursion + 5-layer bomb defense before any
+  // member text is indexed.
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/x-tar",
+  "application/gzip",
+  "application/x-gzip",
+  "application/x-bzip2",
 ]);
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
