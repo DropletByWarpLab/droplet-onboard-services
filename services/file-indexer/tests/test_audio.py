@@ -10,7 +10,21 @@ from extractors.types import ExtractedDoc
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# `faster-whisper` is in requirements.txt but NOT in requirements-dev.txt
+# (the dep pulls in a ~150 MB CTranslate2 wheel that we don't need for the
+# unit-test surface — the integration test under RUN_RAG_INTEGRATION=1
+# exercises the real transcription path with the live Compose stack).
+# When faster-whisper isn't installed, `audio.WhisperModel` is `None` per
+# the lazy-import in extractors/audio.py — skip the live-call test.
+_WHISPER_AVAILABLE = audio.WhisperModel is not None
 
+
+@pytest.mark.skipif(
+    not _WHISPER_AVAILABLE,
+    reason="faster-whisper not installed (only in requirements.txt, not -dev). "
+    "Live ASR is exercised by tests/rag-audio.integration.test.ts under "
+    "RUN_RAG_INTEGRATION=1.",
+)
 def test_extract_returns_extracted_doc_for_wav():
     """Happy path: real WAV file produces a non-None ExtractedDoc with metadata."""
     result = audio.extract(FIXTURES / "sample.wav", mime="audio/wav")
