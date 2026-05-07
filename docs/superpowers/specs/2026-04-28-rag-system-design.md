@@ -52,8 +52,8 @@ This spec lights up the existing skeleton, adds a separate "brain memory" tier f
                               │   └────┬─────┘    └──────────┬───────────┘  │
                               └────────┼─────────────────────┼──────────────┘
                                        │                     │
-            POST /api/files/brain/upload│                     │ GET /api/files/recent
-                                       ▼                     ▼ GET /api/files/search
+            POST /api/files/brain/upload│                     │ GET /api/files/knowledge/recent
+                                       ▼                     ▼ GET /api/files/knowledge/search
                               ┌────────────────────────────────────────┐
                               │         Orchestrator (Express)          │
                               │   files-brain.routes  files-knowledge   │
@@ -207,7 +207,7 @@ Bind-mounted into orchestrator + file-indexer containers via a new Compose volum
 ### 6.3 Lifecycle
 
 - **Upload.** Dashboard `POST /api/files/brain/upload` (multipart) → orchestrator writes original to disk → inserts `BrainMemoryItem` (`indexedAt: null`) → publishes MQTT `droplet/files/brain/uploaded` → returns 202 `{itemId, status: "indexing"}`.
-- **Index.** file-indexer subscribes, runs the extractor → chunker → embedder pipeline (same as Nextcloud watcher), upserts `FileContentChunk` with `source: brain` and `brainItemId`, sets `BrainMemoryItem.indexedAt`, writes `extracted.txt` + `manifest.json`, publishes `droplet/files/brain/indexed {itemId, status: "ready"|"failed", reason?}`.
+- **Index.** file-indexer subscribes, runs the extractor → chunker → embedder pipeline (same as Nextcloud watcher), upserts `FileContentChunk` with `source: brain` and `brainItemId`, sets `BrainMemoryItem.indexedAt`, writes `extracted.txt` + `manifest.json`, publishes per-user `droplet/files/<userId>/brain/indexed {itemId, status: "ready"|"failed", reason?}`. *(Implementation note (WARP-203): publishes on the per-user topic to leverage the existing dashboard WebSocket bridge subscription. The `<userId>` segment makes the dashboard live-update automatic with zero extra wiring.)*
 - **Search.** `search_content` MCP tool runs cosine across BOTH sources by default. Optional `source` filter for "search only my Nextcloud" / "search only my brain memory."
 - **Export.** Dashboard `GET /api/files/brain/export?chatId=<id>` streams a zip of the user's brain-memory items scoped to that chat session, plus a top-level `manifest.json`. Or `?all=1` for everything.
 - **Delete.** `DELETE /api/files/brain/:itemId` removes the row, the on-disk directory, and cascades chunk deletion.
@@ -237,7 +237,7 @@ file-indexer (subscribed to droplet/files/brain/uploaded)
    - dispatches via extractors.registry by MIME
    - chunks → embeds (existing gRPC) → upserts FileContentChunk(source=brain, brainItemId)
    - updates BrainMemoryItem.indexedAt + writes extracted.txt + manifest.json
-   - publishes MQTT: droplet/files/brain/indexed {itemId, status: "ready"|"failed"}
+   - publishes MQTT: droplet/files/<userId>/brain/indexed {itemId, status: "ready"|"failed"}
         │
         ▼
 Dashboard subscribes via per-user MQTT bridge
@@ -265,10 +265,12 @@ Dashboard subscribes via per-user MQTT bridge
 
 Lives at `apps/web-dashboard/src/app/knowledge/`. New top-level tab in the dashboard nav alongside Network, Files, Chat.
 
+> **Path namespace note (WARP-204):** routes are mounted under `/api/files/knowledge/*` — NOT `/api/files/*` — to avoid colliding with the long-standing `/files/recents` (Nextcloud filename Recents tab) and `/files/search` (global filename search bar) routes that pre-date the RAG work. The `/knowledge/` prefix keeps both surfaces alive without breaking the existing dashboard.
+
 Three sub-sections:
 
-1. **Recently indexed** — chunked-by-day list grouped under "Today / Yesterday / This week / This month / Earlier". Cards show filename, source badge (`Nextcloud` / `Brain`), preview snippet (first chunk's text truncated), file-type icon. Backed by `GET /api/files/recent?limit=50&before=<cursor>` (cursor pagination).
-2. **Search** — full-text search box. Submitting hits `GET /api/files/search?q=<query>&limit=20` → returns the same `{source, path, score, snippet}` shape the LLM tool returns. **Shared service module** (`apps/orchestrator/src/services/file-search.service.ts`) so the LLM-tool path and the dashboard path can't drift.
+1. **Recently indexed** — chunked-by-day list grouped under "Today / Yesterday / This week / This month / Earlier". Cards show filename, source badge (`Nextcloud` / `Brain`), preview snippet (first chunk's text truncated), file-type icon. Backed by `GET /api/files/knowledge/recent?limit=50&before=<cursor>` (cursor pagination).
+2. **Search** — full-text search box. Submitting hits `GET /api/files/knowledge/search?q=<query>&limit=20` → returns the same `{source, path, score, snippet}` shape the LLM tool returns. **Shared service module** (`apps/orchestrator/src/services/file-search.service.ts`) so the LLM-tool path and the dashboard path can't drift.
 3. **Brain memory** — list of all `BrainMemoryItem` rows for the user with per-item delete + "Download original" + "Export all as zip" affordances.
 
 **Empty states.** "No files indexed yet. Drop a file in chat or upload to your Droplet's Nextcloud at `/files`." Friendly, persona-on-tone.
