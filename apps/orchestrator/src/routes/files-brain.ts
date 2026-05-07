@@ -38,13 +38,14 @@ import { publish as mqttPublish } from "../services/mqtt.service.js";
 const logger = pino({ name: "files-brain-route" });
 
 /**
- * MIME allow-list — must match the Phase-1 extractor set landed in
- * WARP-201 (`services/file-indexer/extractors/registry.py`):
+ * MIME allow-list — must match the extractor set in
+ * `services/file-indexer/extractors/registry.py`:
  *
- *   text + json + xml → text extractor
- *   pdf               → pdf extractor
- *   docx              → docx extractor (msword as a graceful upgrade)
- *   image/*           → image extractor (OCR via tesseract)
+ *   text + json + xml → text extractor          (WARP-201)
+ *   pdf               → pdf extractor           (WARP-201)
+ *   docx              → docx extractor          (WARP-201)
+ *   image/*           → image extractor (OCR)   (WARP-201)
+ *   audio/*           → audio extractor (ASR)   (WARP-197)
  *
  * The list is intentionally explicit rather than wildcard-driven so a
  * user can't slip in `application/octet-stream` and end up indexing
@@ -67,6 +68,16 @@ const ALLOWED_MIMES = new Set<string>([
   "image/heic",
   "image/tiff",
   "image/webp",
+  // WARP-197 — audio (faster-whisper ASR). MIME set mirrors
+  // `audio.SUPPORTED_MIMES` in extractors/audio.py.
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/ogg",
+  "audio/flac",
+  "audio/webm",
+  "audio/aac",
 ]);
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
