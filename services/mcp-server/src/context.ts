@@ -33,12 +33,27 @@ export interface ContextDeps {
   embedText?: (texts: string[]) => Promise<number[][]>;
 }
 
+/**
+ * Resolve `ctx.userId` from the available signals:
+ *
+ *   - HTTP transport — `claims.sub` is authoritative. `metaUserId` is
+ *     ignored even if a malicious client tried to set `_meta.userId`,
+ *     because the JWT-derived `claims.sub` is the trust boundary.
+ *   - Stdio transport (trusted, `claims === undefined`) — fall back to
+ *     `metaUserId` plumbed by the orchestrator's mcp-client. The
+ *     orchestrator is the only producer here and synthesizes it from
+ *     `req.user.username`, so the transitive trust comes from
+ *     `apps/orchestrator/src/middleware/auth.ts` validating the
+ *     dashboard cookie/Bearer token.
+ */
 export function buildContext(
   deps: ContextDeps,
   claims: Claims | undefined,
   signal: AbortSignal,
   ncToken?: string,
+  metaUserId?: string,
 ): ToolContext {
+  const userId = claims?.sub ?? metaUserId;
   return {
     prisma: deps.prisma,
     matter: deps.matter,
@@ -50,7 +65,7 @@ export function buildContext(
       nextcloud: deps.httpFactory("nextcloud"),
     },
     embedText: deps.embedText,
-    userId: claims?.sub,
+    userId,
     role: claims?.role,
     ncToken,
     signal,
