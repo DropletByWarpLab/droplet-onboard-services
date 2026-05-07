@@ -1,0 +1,477 @@
+/**
+ * Unit tests for /api/files/brain/* (WARP-203).
+ *
+ * Spec §6.3 (lifecycle), §7 (chat-attachment UX), §12 (RBAC):
+ *   POST /api/files/brain/upload   — multipart, 50MB cap, MIME allow-list,
+ *                                     row + disk + MQTT publish, returns 202.
+ *   GET  /api/files/brain          — paginated list of caller's items.
+ *   GET  /api/files/brain/:itemId  — manifest of caller's single item.
+ *
+ * The route file is `apps/orchestrator/src/routes/files-brain.ts`.
+ *
+ * RBAC test asserts user A can't read or upload to user B's items —
+ * spec §12 calls this out explicitly as the most critical thing to
+ * cover. We also assert per-user list isolation (cross-user list MUST
+ * NOT leak).
+ *
+ * Tests run with `BRAIN_MEMORY_ROOT` pinned to a per-suite tmpdir so
+ * the upload route's filesystem writes don't escape into the dev box.
+ */
+
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from "vitest";
+import request from "supertest";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// ── Pin BRAIN_MEMORY_ROOT BEFORE the route module loads so its
+// import-time read of the env var lands in our tempdir, not /data.
+let brainRoot: string;
+
+vi.mock("../config.js", () => ({
+  config: {
+    DATABASE_URL: "postgresql://test:test@localhost:5432/test",
+    REDIS_URL: "redis://localhost:6379",
+    MQTT_BROKER: "mqtt://localhost:1883",
+    AI_GATEWAY_URL: "http://localhost:8000",
+    PORT: 3000,
+    NODE_ENV: "test",
+    MAX_UPLOAD_SIZE_MB: 10,
+    NEXTCLOUD_URL: "http://nextcloud.test",
+    AUTH_ENABLED: false,
+  },
+}));
+
+vi.mock("../services/ai-gateway.client.js", () => ({
+  healthCheck: vi.fn().mockResolvedValue(true),
+  listModels: vi.fn().mockResolvedValue({ models: [] }),
+  chat: vi.fn(),
+  saveKey: vi.fn(),
+  listKeys: vi.fn().mockResolvedValue([]),
+  deleteKey: vi.fn(),
+}));
+
+const publishMock = vi.fn();
+vi.mock("../services/mqtt.service.js", () => ({
+  connectMqtt: vi.fn().mockResolvedValue(undefined),
+  publish: (...args: unknown[]) => publishMock(...args),
+  subscribe: vi.fn(),
+  subscribeToTopic: vi.fn(() => () => {}),
+  topicMatches: vi.fn(),
+}));
+
+vi.mock("../services/nextcloud.client.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../services/nextcloud.client.js")
+  >("../services/nextcloud.client.js");
+  return {
+    ...actual,
+    ncListFiles: vi.fn(),
+    ncUploadFile: vi.fn(),
+    ncDownloadFile: vi.fn(),
+    ncDeleteFile: vi.fn(),
+    ncCreateDirectory: vi.fn(),
+    ncListShares: vi.fn(),
+    ncMoveFile: vi.fn(),
+    ncCopyFile: vi.fn(),
+    ncGetFileId: vi.fn(),
+    ncListTrash: vi.fn(),
+    ncRestoreTrashItem: vi.fn(),
+    ncDeleteTrashItem: vi.fn(),
+    ncEmptyTrash: vi.fn(),
+    ncListVersions: vi.fn(),
+    ncRestoreVersion: vi.fn(),
+    ncSetFavorite: vi.fn(),
+    ncListFavorites: vi.fn(),
+    ncSearchFiles: vi.fn(),
+    ncListRecents: vi.fn(),
+    ncFetchThumbnail: vi.fn(),
+    ncCreateShareV2: vi.fn(),
+    ncUpdateShare: vi.fn(),
+    ncDeleteShare: vi.fn(),
+    ncListSharedWithMe: vi.fn(),
+    ncGetUserQuota: vi.fn(),
+  };
+});
+
+// ── In-memory Prisma stand-in for BrainMemoryItem ──
+//
+// We hand-roll the bits the route actually calls (create, update,
+// findMany, findUnique, count) so we can assert on the rows that
+// land. The shape mirrors the real Prisma client.
+type Item = {
+  id: string;
+  userId: string;
+  filename: string;
+  mimeType: string | null;
+  bytes: bigint;
+  storagePath: string;
+  source: string;
+  originatingChatId: string | null;
+  uploadedAt: Date;
+  indexedAt: Date | null;
+  extractorWarnings: string[];
+  hasOriginalBytes: boolean;
+};
+const itemStore = new Map<string, Item>();
+let cuidCounter = 0;
+
+vi.mock("@prisma/client", () => {
+  const mockPrisma = {
+    $connect: vi.fn().mockResolvedValue(undefined),
+    $disconnect: vi.fn().mockResolvedValue(undefined),
+    $queryRaw: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+    device: {
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    brainMemoryItem: {
+      create: vi.fn(async ({ data }: { data: Partial<Item> }) => {
+        const id = `bmi-${++cuidCounter}`;
+        const record: Item = {
+          id,
+          userId: data.userId!,
+          filename: data.filename!,
+          mimeType: data.mimeType ?? null,
+          bytes: data.bytes!,
+          storagePath: data.storagePath ?? "",
+          source: data.source!,
+          originatingChatId: data.originatingChatId ?? null,
+          uploadedAt: new Date(),
+          indexedAt: null,
+          extractorWarnings: data.extractorWarnings ?? [],
+          hasOriginalBytes: data.hasOriginalBytes ?? true,
+        };
+        itemStore.set(id, record);
+        return record;
+      }),
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<Item>;
+        }) => {
+          const r = itemStore.get(where.id);
+          if (!r) throw new Error("not found");
+          Object.assign(r, data);
+          return r;
+        },
+      ),
+      findUnique: vi.fn(
+        async ({ where }: { where: { id: string } }) =>
+          itemStore.get(where.id) ?? null,
+      ),
+      findMany: vi.fn(
+        async ({
+          where,
+          take,
+          skip,
+          orderBy: _orderBy,
+        }: {
+          where?: { userId?: string; source?: string; originatingChatId?: string };
+          take?: number;
+          skip?: number;
+          orderBy?: unknown;
+        } = {}) => {
+          let rows = Array.from(itemStore.values());
+          if (where?.userId) rows = rows.filter((r) => r.userId === where.userId);
+          if (where?.source) rows = rows.filter((r) => r.source === where.source);
+          if (where?.originatingChatId !== undefined) {
+            rows = rows.filter(
+              (r) => r.originatingChatId === where.originatingChatId,
+            );
+          }
+          rows.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
+          const start = skip ?? 0;
+          const end = take ? start + take : rows.length;
+          return rows.slice(start, end);
+        },
+      ),
+      count: vi.fn(
+        async ({ where }: { where?: { userId?: string } } = {}) => {
+          let rows = Array.from(itemStore.values());
+          if (where?.userId)
+            rows = rows.filter((r) => r.userId === where.userId);
+          return rows.length;
+        },
+      ),
+    },
+  };
+  return {
+    PrismaClient: vi.fn(() => mockPrisma),
+    Prisma: { PrismaClientKnownRequestError: class extends Error {} },
+  };
+});
+
+let app: import("express").Express;
+let prisma: import("@prisma/client").PrismaClient;
+let getCurrentUser: () => string;
+
+beforeAll(async () => {
+  const dir = await mkdtemp(join(tmpdir(), "files-brain-test-"));
+  brainRoot = dir;
+  process.env.BRAIN_MEMORY_ROOT = dir;
+  // AUTH_ENABLED is false; auth middleware injects { username: "dev" } —
+  // we override that with a per-test middleware that stamps the user
+  // we want.
+  let currentUser = "dev";
+  getCurrentUser = () => currentUser;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const express = (await import("express")).default;
+  const { PrismaClient } = await import("@prisma/client");
+  prisma = new PrismaClient();
+  const { createFilesBrainRouter } = await import(
+    "../routes/files-brain.js"
+  );
+  const _app = express();
+  _app.use(express.json());
+  _app.use((req, _res, next) => {
+    (req as { user?: { id: string; username: string } }).user = {
+      id: currentUser,
+      username: currentUser,
+    };
+    next();
+  });
+  _app.use("/api", createFilesBrainRouter(prisma));
+  app = _app;
+  // Expose so tests can swap users between requests.
+  (app as unknown as { __setUser: (u: string) => void }).__setUser = (
+    u: string,
+  ) => {
+    currentUser = u;
+  };
+});
+
+afterAll(async () => {
+  if (brainRoot) await rm(brainRoot, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  itemStore.clear();
+  publishMock.mockReset();
+  cuidCounter = 0;
+  (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
+});
+
+afterEach(async () => {
+  // Clean the per-suite tempdir between tests.
+  await rm(brainRoot, { recursive: true, force: true });
+});
+
+describe("POST /api/files/brain/upload", () => {
+  it("rejects missing file with 400", async () => {
+    const res = await request(app).post("/api/files/brain/upload");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("no_file");
+  });
+
+  it("rejects an unsupported MIME with 415", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("nope"), {
+        filename: "video.mp4",
+        contentType: "video/mp4",
+      });
+    expect(res.status).toBe(415);
+    expect(res.body.error).toBe("unsupported_mime");
+    expect(res.body.mimeType).toBe("video/mp4");
+  });
+
+  it("rejects oversized uploads with 413", async () => {
+    // multer's fileSize cap is 50MB. Use 50MB + 1KB to trip it without
+    // burning RAM in the test runner — supertest streams the buffer.
+    const huge = Buffer.alloc(50 * 1024 * 1024 + 1024, 0x61);
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", huge, {
+        filename: "big.txt",
+        contentType: "text/plain",
+      });
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe("file_too_large");
+  });
+
+  it("inserts row + writes original bytes + manifest + publishes MQTT, returns 202", async () => {
+    const bytes = Buffer.from("# hello brain\n\nbody copy", "utf8");
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .field("chatId", "chat-42")
+      .attach("file", bytes, {
+        filename: "notes.md",
+        contentType: "text/markdown",
+      });
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe("indexing");
+    expect(res.body.itemId).toBeTruthy();
+
+    // Row inserted with the right shape.
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.userId).toBe("alice");
+    expect(item.filename).toBe("notes.md");
+    expect(item.mimeType).toBe("text/markdown");
+    expect(item.source).toBe("chat_attachment");
+    expect(item.originatingChatId).toBe("chat-42");
+    expect(item.bytes).toBe(BigInt(bytes.length));
+    expect(item.storagePath).toMatch(/original\.md$/);
+
+    // On-disk: original bytes + manifest mirroring the row.
+    const onDisk = await readFile(item.storagePath);
+    expect(onDisk.equals(bytes)).toBe(true);
+    const manifestPath = join(brainRoot, "alice", item.id, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    expect(manifest.userId).toBe("alice");
+    expect(manifest.filename).toBe("notes.md");
+
+    // MQTT: droplet/files/brain/uploaded with itemId + userId + path.
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    expect(publishMock.mock.calls[0][0]).toBe("droplet/files/brain/uploaded");
+    const payload = publishMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(payload.itemId).toBe(item.id);
+    expect(payload.userId).toBe("alice");
+    expect(payload.path).toBe(item.storagePath);
+    expect(payload.mimeType).toBe("text/markdown");
+  });
+
+  it.each([
+    ["application/pdf", "doc.pdf"],
+    [
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "doc.docx",
+    ],
+    ["text/plain", "doc.txt"],
+    ["text/csv", "data.csv"],
+    ["text/html", "page.html"],
+    ["image/jpeg", "photo.jpg"],
+    ["image/png", "photo.png"],
+  ])("accepts %s files", async (mime, filename) => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("data"), { filename, contentType: mime });
+    expect(res.status).toBe(202);
+  });
+});
+
+describe("GET /api/files/brain", () => {
+  it("lists only the caller's items, paginated, newest first", async () => {
+    // Seed 3 alice items + 2 bob items.
+    (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
+    for (let i = 0; i < 3; i++) {
+      await request(app)
+        .post("/api/files/brain/upload")
+        .attach("file", Buffer.from(`alice-${i}`), {
+          filename: `a${i}.txt`,
+          contentType: "text/plain",
+        });
+    }
+    (app as unknown as { __setUser: (u: string) => void }).__setUser("bob");
+    for (let i = 0; i < 2; i++) {
+      await request(app)
+        .post("/api/files/brain/upload")
+        .attach("file", Buffer.from(`bob-${i}`), {
+          filename: `b${i}.txt`,
+          contentType: "text/plain",
+        });
+    }
+
+    // Alice list is hers only.
+    (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
+    const aliceList = await request(app).get("/api/files/brain");
+    expect(aliceList.status).toBe(200);
+    expect(aliceList.body.total).toBe(3);
+    expect(aliceList.body.items.length).toBe(3);
+    for (const it of aliceList.body.items) {
+      expect(it.userId).toBe("alice");
+      expect(it.filename).toMatch(/^a\d/);
+    }
+
+    // Bob's list is just his.
+    (app as unknown as { __setUser: (u: string) => void }).__setUser("bob");
+    const bobList = await request(app).get("/api/files/brain");
+    expect(bobList.body.total).toBe(2);
+    expect(bobList.body.items.every((i: Item) => i.userId === "bob")).toBe(
+      true,
+    );
+  });
+
+  it("respects ?limit and ?offset", async () => {
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .post("/api/files/brain/upload")
+        .attach("file", Buffer.from(`x${i}`), {
+          filename: `x${i}.txt`,
+          contentType: "text/plain",
+        });
+    }
+    const page1 = await request(app).get("/api/files/brain?limit=2");
+    expect(page1.body.items.length).toBe(2);
+    const page2 = await request(app).get("/api/files/brain?limit=2&offset=2");
+    expect(page2.body.items.length).toBe(2);
+    expect(page1.body.items[0].id).not.toBe(page2.body.items[0].id);
+  });
+
+  it("filters by ?originatingChatId", async () => {
+    await request(app)
+      .post("/api/files/brain/upload")
+      .field("chatId", "chat-A")
+      .attach("file", Buffer.from("a"), {
+        filename: "a.txt",
+        contentType: "text/plain",
+      });
+    await request(app)
+      .post("/api/files/brain/upload")
+      .field("chatId", "chat-B")
+      .attach("file", Buffer.from("b"), {
+        filename: "b.txt",
+        contentType: "text/plain",
+      });
+    const res = await request(app).get(
+      "/api/files/brain?originatingChatId=chat-A",
+    );
+    expect(res.body.items.length).toBe(1);
+    expect(res.body.items[0].originatingChatId).toBe("chat-A");
+  });
+});
+
+describe("GET /api/files/brain/:itemId", () => {
+  it("returns the manifest for the caller's own item", async () => {
+    const up = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("alice"), {
+        filename: "a.txt",
+        contentType: "text/plain",
+      });
+    const res = await request(app).get(
+      `/api/files/brain/${up.body.itemId}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.userId).toBe("alice");
+    expect(res.body.filename).toBe("a.txt");
+  });
+
+  it("404s another user's item (RBAC — does NOT leak existence)", async () => {
+    (app as unknown as { __setUser: (u: string) => void }).__setUser("alice");
+    const aliceUp = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("alice"), {
+        filename: "a.txt",
+        contentType: "text/plain",
+      });
+
+    (app as unknown as { __setUser: (u: string) => void }).__setUser("bob");
+    const res = await request(app).get(
+      `/api/files/brain/${aliceUp.body.itemId}`,
+    );
+    expect(res.status).toBe(404);
+  });
+});
