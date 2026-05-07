@@ -38,7 +38,7 @@ import { publish as mqttPublish } from "../services/mqtt.service.js";
 const logger = pino({ name: "files-brain-route" });
 
 /**
- * MIME allow-list — must match the extractor set in
+ * MIME allow-list — must match the extractor set landed in
  * `services/file-indexer/extractors/registry.py`:
  *
  *   text + json + xml → text extractor          (WARP-201)
@@ -46,6 +46,7 @@ const logger = pino({ name: "files-brain-route" });
  *   docx              → docx extractor          (WARP-201)
  *   image/*           → image extractor (OCR)   (WARP-201)
  *   audio/*           → audio extractor (ASR)   (WARP-197)
+ *   email             → email extractor with recursive attachment dispatch (WARP-199)
  *
  * The list is intentionally explicit rather than wildcard-driven so a
  * user can't slip in `application/octet-stream` and end up indexing
@@ -78,6 +79,10 @@ const ALLOWED_MIMES = new Set<string>([
   "audio/flac",
   "audio/webm",
   "audio/aac",
+  // WARP-199 email extractor MIMEs:
+  "message/rfc822",
+  "application/vnd.ms-outlook",
+  "application/x-msmail",
 ]);
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;

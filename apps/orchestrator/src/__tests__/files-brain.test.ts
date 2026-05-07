@@ -380,6 +380,32 @@ describe("POST /api/files/brain/upload", () => {
       .attach("file", fakeBytes, { filename, contentType: mime });
     expect(res.status).toBe(202);
   });
+
+  it("accepts email uploads (WARP-199)", async () => {
+    // The orchestrator only validates MIME + size — extraction happens
+    // in the file-indexer. A minimal RFC 822 envelope is enough.
+    const fakeEml = Buffer.from("Subject: hi\n\nbody\n");
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", fakeEml, {
+        filename: "march.eml",
+        contentType: "message/rfc822",
+      });
+    expect(res.status).toBe(202);
+  });
+
+  it.each([
+    ["application/vnd.ms-outlook", "outlook.msg"],
+    ["application/x-msmail", "outlook-alt.msg"],
+  ])("accepts Outlook %s uploads (WARP-199)", async (mime, filename) => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("fake mapi"), {
+        filename,
+        contentType: mime,
+      });
+    expect(res.status).toBe(202);
+  });
 });
 
 describe("GET /api/files/brain", () => {
