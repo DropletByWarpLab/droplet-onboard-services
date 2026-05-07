@@ -406,6 +406,25 @@ describe("POST /api/files/brain/upload", () => {
       });
     expect(res.status).toBe(202);
   });
+
+  // WARP-200 — archive MIMEs. The file-indexer's archive extractor walks
+  // members under bounded recursion + 5-layer bomb defense, so the
+  // upload route just has to accept the MIME; the actual safety lives
+  // downstream in services/file-indexer/extractors/archive.py.
+  it.each([
+    ["application/zip", "stuff.zip"],
+    ["application/x-zip-compressed", "stuff.zip"],
+    ["application/x-tar", "stuff.tar"],
+    ["application/gzip", "stuff.tar.gz"],
+    ["application/x-gzip", "stuff.tar.gz"],
+    ["application/x-bzip2", "stuff.tar.bz2"],
+  ])("accepts archive uploads: %s (WARP-200)", async (mime, filename) => {
+    const fakeArchive = Buffer.alloc(64);
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", fakeArchive, { filename, contentType: mime });
+    expect(res.status).toBe(202);
+  });
 });
 
 describe("GET /api/files/brain", () => {
