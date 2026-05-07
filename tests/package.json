@@ -5,6 +5,7 @@
   "scripts": {
     "test": "vitest run",
     "test:mcp": "vitest run mcp.integration.test.ts",
+    "test:rag-extractors": "RUN_RAG_INTEGRATION=1 vitest run rag-extractors.integration.test.ts",
     "test:docker": "docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-tests"
   },
   "devDependencies": {
