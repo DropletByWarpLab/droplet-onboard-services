@@ -158,6 +158,30 @@ jobs:
             -f docker/docker-compose.test.override.yml logs orchestrator | tail -100
           exit 1
 
+      # WARP-215: orchestrator's /api/orchestrator/health returns 200 from
+      # the auth-bypass middleware path BEFORE `prisma migrate deploy` has
+      # finished. Tests then `docker compose exec db psql ... INSERT INTO
+      # "BrainMemoryItem"` and fail because the table doesn't exist yet.
+      # Poll explicitly for the schema-ready signal before continuing.
+      - name: Wait for Prisma schema (BrainMemoryItem table exists)
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if docker compose -f docker/docker-compose.yml \
+                 -f docker/docker-compose.test.override.yml \
+                 exec -T db psql -U droplet -d droplet -tA \
+                 -c "SELECT to_regclass('public.\"BrainMemoryItem\"')" \
+                 2>/dev/null | grep -q "BrainMemoryItem"; then
+              echo "Prisma migrations complete after ${i}s polls."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Prisma schema never reached BrainMemoryItem in 120s"
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml logs orchestrator | tail -100
+          exit 1
+
       # Wait for Nextcloud to finish first-run bootstrap (occ status
       # exits 0). Skipping this races the file-indexer's first ingest
       # against an unprovisioned Nextcloud.
