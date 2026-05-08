@@ -18,6 +18,7 @@ from typing import Optional
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from config import NEXTCLOUD_DATA_ROOT
 from extractors.registry import dispatch
@@ -230,9 +231,23 @@ class IndexHandler(FileSystemEventHandler):
 
 
 def start_watcher() -> Observer:
-    """Start watching the Nextcloud data root for file changes."""
+    """Start watching the Nextcloud data root for file changes.
+
+    By default uses inotify-based `Observer` (efficient, real-time). Setting
+    `WATCHER_MODE=polling` switches to `PollingObserver`, which periodically
+    walks the tree instead of relying on kernel events. Polling is needed
+    in test stacks (WARP-215) and any cross-container/Docker overlay setup
+    where inotify events from one container don't reliably reach another
+    container's mount namespace. Polling is significantly slower (~5s
+    detection latency vs. milliseconds), so it is opt-in only.
+    """
     handler = IndexHandler()
-    observer = Observer()
+    mode = os.environ.get("WATCHER_MODE", "inotify").lower()
+    if mode == "polling":
+        observer: Observer = PollingObserver(timeout=2.0)
+        logger.info("WATCHER_MODE=polling — using PollingObserver (5s detection latency)")
+    else:
+        observer = Observer()
     observer.schedule(handler, NEXTCLOUD_DATA_ROOT, recursive=True)
     observer.start()
     logger.info("Watching %s for file changes", NEXTCLOUD_DATA_ROOT)

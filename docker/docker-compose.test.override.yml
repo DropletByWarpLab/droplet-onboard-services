@@ -31,6 +31,17 @@ services:
       # auth without polluting the user's local `.env`.
       - AUTH_ENABLED=false
 
+  # WARP-215: switch to polling-mode watcher in the test stack. inotify
+  # events from the nextcloud container don't reliably reach the
+  # file-indexer container's mount namespace under Docker's overlay
+  # driver, so files dropped into Nextcloud are invisible to the watcher
+  # and rag-extractors tests fail with `expected 0 to be greater than 0`.
+  # PollingObserver walks the tree every ~2s instead. ~5s detection
+  # latency, but reliable across container boundaries.
+  file-indexer:
+    environment:
+      - WATCHER_MODE=polling
+
   # Map the DB so `tests/rag-search.integration.test.ts` (and the other
   # tests that exec into the db container with `docker compose exec db
   # psql ...`) can find the port. The exec path doesn't strictly need
