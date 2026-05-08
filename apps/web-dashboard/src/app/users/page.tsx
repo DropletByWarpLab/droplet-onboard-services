@@ -79,6 +79,13 @@ export default function UsersPage() {
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editPassword, setEditPassword] = useState("");
 
+  // Stable id for the Edit dialog headline (mirrors invite dialog pattern).
+  const editHeadingId = useId();
+  // The element that opened the Edit dialog — captured at open time so we
+  // can restore focus on close. Each user row owns its own Edit button so
+  // a single ref isn't sufficient; capture document.activeElement instead.
+  const editTriggerRef = useRef<HTMLElement | null>(null);
+
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -239,10 +246,31 @@ export default function UsersPage() {
   };
 
   const openEdit = (u: AuthUser) => {
+    // Capture the activating element so we can restore focus on close —
+    // each row has its own Edit button, so a single ref pinned to the
+    // page root would land focus in the wrong place.
+    editTriggerRef.current = (document.activeElement as HTMLElement) ?? null;
     setEditing(u);
     setEditDisplayName(u.displayName || "");
     setEditPassword("");
   };
+
+  const closeEdit = useCallback(() => {
+    setEditing(null);
+    // Restore focus to the row's Edit button (Tier-2 dialog heuristic;
+    // mirrors the invite modal's close path).
+    setTimeout(() => editTriggerRef.current?.focus(), 0);
+  }, []);
+
+  // Close the Edit dialog on Escape (mirrors the invite modal).
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeEdit();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing, closeEdit]);
 
   const handleEditSave = async () => {
     if (!editing) return;
@@ -258,12 +286,12 @@ export default function UsersPage() {
       patch.password = editPassword;
     }
     if (!patch.displayName && !patch.password) {
-      setEditing(null);
+      closeEdit();
       return;
     }
     try {
       await updateUser(editing.id, patch);
-      setEditing(null);
+      closeEdit();
       await reload();
     } catch (err: any) {
       setError(err?.message || "Failed to update user");
@@ -591,23 +619,24 @@ export default function UsersPage() {
       )}
 
       {/* Edit dialog */}
-      {/* TODO: WARP-217 follow-up — apply same dialog semantics to Edit dialog
-          (role="dialog", aria-modal, aria-labelledby, Escape-close, focus restore). */}
       {editing && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
-          onClick={() => setEditing(null)}
+          onClick={closeEdit}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={editHeadingId}
             className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 className="type-headline text-label-primary">
+              <h3 id={editHeadingId} className="type-headline text-label-primary">
                 Edit {editing.id}
               </h3>
               <button
-                onClick={() => setEditing(null)}
+                onClick={closeEdit}
                 className="p-1 text-label-tertiary hover:text-label-primary"
               >
                 <X size={18} />
@@ -639,7 +668,7 @@ export default function UsersPage() {
             </div>
             <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
               <button
-                onClick={() => setEditing(null)}
+                onClick={closeEdit}
                 className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
               >
                 Cancel

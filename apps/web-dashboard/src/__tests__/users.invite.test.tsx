@@ -260,6 +260,29 @@ describe("Users page — invite UX", () => {
     expect(qrImg).toBeInTheDocument();
   });
 
+  it("edit dialog has dialog semantics + Escape closes it", async () => {
+    render(<UsersPage />);
+    // Wait for the user row to render — its Edit button uses `title=`
+    // today (aria-label takes over in the row-actions follow-up).
+    const editBtn = await screen.findByTitle(/^edit$/i);
+    fireEvent.click(editBtn);
+
+    // Edit dialog should expose the same a11y contract as the invite modal.
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledById = dialog.getAttribute("aria-labelledby");
+    expect(labelledById).toBeTruthy();
+    const headline = document.getElementById(labelledById!);
+    expect(headline).not.toBeNull();
+    expect(headline?.textContent).toMatch(/edit alice/i);
+
+    // Escape closes the dialog.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
   it("rejects reserved usernames at form-submit time without calling createInvite", async () => {
     render(<UsersPage />);
     await waitFor(() =>
