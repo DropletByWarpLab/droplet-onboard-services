@@ -283,6 +283,68 @@ describe("Users page — invite UX", () => {
     });
   });
 
+  it("row actions are visible without requiring hover (touch + keyboard discoverability)", async () => {
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        { id: "alice", username: "alice", displayName: "Alice" },
+      ],
+    });
+
+    render(<UsersPage />);
+
+    // No hover/focus interaction. Each action must be queryable by an
+    // accessible name that names the action and its target user.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /edit user alice/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: /disable user alice/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /delete user alice/i }),
+    ).toBeInTheDocument();
+
+    // None of those three buttons may be inside a container that hides
+    // them behind hover (opacity-0 group-hover:opacity-100). We assert
+    // that the closest container with the actions does NOT carry the
+    // opacity-0 class — guards against regression.
+    const editBtn = screen.getByRole("button", { name: /edit user alice/i });
+    const container = editBtn.closest("div");
+    expect(container?.className ?? "").not.toMatch(/opacity-0/);
+  });
+
+  it("revoke action on pending invites is visible without requiring hover", async () => {
+    listInvitesMock.mockResolvedValue({
+      invites: [
+        {
+          token: "z".repeat(43),
+          username: "diana",
+          displayName: "Diana",
+          email: null,
+          role: "user",
+          createdBy: "admin",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+          acceptedAt: null,
+          revokedAt: null,
+        },
+      ],
+    });
+
+    render(<UsersPage />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /revoke invite for diana/i }),
+      ).toBeInTheDocument();
+    });
+
+    const revokeBtn = screen.getByRole("button", { name: /revoke invite for diana/i });
+    const container = revokeBtn.closest("div");
+    expect(container?.className ?? "").not.toMatch(/opacity-0/);
+  });
+
   it("rejects reserved usernames at form-submit time without calling createInvite", async () => {
     render(<UsersPage />);
     await waitFor(() =>

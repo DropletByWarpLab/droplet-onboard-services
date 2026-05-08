@@ -378,10 +378,18 @@ export default function UsersPage() {
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              {/*
+                Row actions are always rendered (not opacity-gated on hover) so
+                they're discoverable on touch and reachable for keyboard-only
+                users. Each button carries an aria-label naming the action +
+                target user; the visual icons stay restrained via the muted
+                text-label-tertiary token.
+              */}
+              <div className="flex items-center gap-0.5">
                 <button
                   onClick={() => openEdit(u)}
-                  className="p-1.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
+                  aria-label={`Edit user ${u.id}`}
+                  className="p-1.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                   title="Edit"
                 >
                   <Edit3 size={14} />
@@ -390,14 +398,16 @@ export default function UsersPage() {
                   <>
                     <button
                       onClick={() => handleToggleEnabled(u, false)}
-                      className="p-1.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 transition-colors"
+                      aria-label={`Disable user ${u.id}`}
+                      className="p-1.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                       title="Disable"
                     >
                       <Shield size={14} />
                     </button>
                     <button
                       onClick={() => handleDelete(u)}
-                      className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 transition-colors"
+                      aria-label={`Delete user ${u.id}`}
+                      className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                       title="Delete"
                     >
                       <Trash2 size={14} />
@@ -440,10 +450,11 @@ export default function UsersPage() {
                     </span>
                   </div>
                   {canRevoke && (
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-0.5">
                       <button
                         onClick={() => handleRevokeInvite(i)}
-                        className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 transition-colors type-caption-1 px-2"
+                        aria-label={`Revoke invite for ${i.username}`}
+                        className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors type-caption-1 px-2"
                         title="Revoke invite"
                       >
                         Revoke
