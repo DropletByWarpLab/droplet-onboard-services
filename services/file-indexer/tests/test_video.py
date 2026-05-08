@@ -73,3 +73,31 @@ def test_returns_none_for_unsupported_mime():
     """Defensive: extractor refuses MIMEs it doesn't claim."""
     result = video.extract(FIXTURES / "with-srt.mp4", mime="audio/wav")
     assert result is None
+
+
+def test_video_metadata_includes_subtitle_source_for_chain_consumers(monkeypatch):
+    """WARP-214: subtitle_source must be reachable as ExtractedDoc.metadata['subtitle_source']
+    so the chunker can propagate it to FileContentChunk.metadata.subtitle_source.
+
+    Asserts the persistence-shape stability that the dashboard's
+    SourceChannelBadge reads from /api/files/knowledge/{recent,search}.
+    """
+    if not _WHISPER_AVAILABLE:
+        def _fake_audio_extract(path, mime):
+            return {
+                "text": "fake transcript",
+                "page_breaks": [],
+                "language": "en",
+                "metadata": {"duration_sec": 1.0, "extractor_name": "audio"},
+                "warnings": [],
+            }
+
+        monkeypatch.setattr(video.audio, "extract", _fake_audio_extract)
+
+    result_with = video.extract(FIXTURES / "with-srt.mp4", mime="video/mp4")
+    assert result_with is not None
+    assert result_with["metadata"]["subtitle_source"] == "embedded"
+
+    result_without = video.extract(FIXTURES / "no-srt.mp4", mime="video/mp4")
+    assert result_without is not None
+    assert result_without["metadata"]["subtitle_source"] == "asr_transcript"
