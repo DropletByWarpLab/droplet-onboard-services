@@ -158,6 +158,22 @@ jobs:
             -f docker/docker-compose.test.override.yml logs orchestrator | tail -100
           exit 1
 
+      # WARP-215 diagnostic: dump the merged compose env for the
+      # services we override so we can see exactly what the container is
+      # going to receive. Past failures had the override silently
+      # stripped (profile-gated services in compose v2). This step is
+      # cheap and the signal is decisive.
+      - name: Diagnose merged container env (WARP-215)
+        run: |
+          echo "=== orchestrator AUTH_ENABLED ==="
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml \
+            exec -T orchestrator printenv AUTH_ENABLED || echo "(unset)"
+          echo "=== file-indexer WATCHER_MODE ==="
+          docker compose -f docker/docker-compose.yml \
+            -f docker/docker-compose.test.override.yml \
+            exec -T file-indexer printenv WATCHER_MODE || echo "(unset)"
+
       # WARP-215: orchestrator's /api/orchestrator/health returns 200 from
       # the auth-bypass middleware path BEFORE `prisma migrate deploy` has
       # finished. Tests then `docker compose exec db psql ... INSERT INTO
