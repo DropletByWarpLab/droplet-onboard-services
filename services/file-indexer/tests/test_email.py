@@ -69,3 +69,30 @@ def test_html_only_eml_strips_html_to_text():
 def test_msg_extracts_headers_and_body():  # pragma: no cover
     """Placeholder for when we have a public-domain .msg fixture."""
     raise NotImplementedError
+
+
+def test_eml_with_attachment_writes_chain_metadata():
+    """WARP-214: when an .eml has a PDF attachment, the resulting ExtractedDoc
+    has a metadata.chain that traces email → attachment.
+
+    The chunker propagates this to FileContentChunk.metadata.chain so the
+    dashboard's Breadcrumbs component can render `email.eml › proposal.pdf`.
+    """
+    result = email_ext.extract(
+        str(FIXTURES / "with-pdf-attachment.eml"), mime="message/rfc822"
+    )
+    assert result is not None
+    metadata = result.get("metadata", {})
+    chain = metadata.get("chain")
+    assert chain is not None, f"chain missing; metadata keys={list(metadata)}"
+    # The chain should include the PDF attachment as the last segment, with the
+    # email itself as the parent — so a downstream chunker stamps each chunk
+    # with this trail.
+    assert isinstance(chain, list) and len(chain) >= 2
+    last = chain[-1]
+    assert last["filename"] == "proposal.pdf"
+    assert last["mime"] == "application/pdf"
+    # The chain entry just before should be the email (the parent dispatcher).
+    assert any(c.get("mime") == "message/rfc822" for c in chain), (
+        f"chain {chain} should include the parent email"
+    )
