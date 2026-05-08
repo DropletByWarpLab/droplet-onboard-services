@@ -17,7 +17,7 @@
  * during the WARP-203 → 204 → 205 rollout.
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Download,
   FileArchive,
@@ -25,57 +25,36 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  getBrainMemoryItems,
   type BrainMemoryItemInfo,
+  transcribeNow,
+  TranscribeNowUnavailable,
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
-
-interface State {
-  loading: boolean;
-  items: BrainMemoryItemInfo[];
-  unavailable: boolean;
-  error: string | null;
-}
-
-const INITIAL: State = {
-  loading: true,
-  items: [],
-  unavailable: false,
-  error: null,
-};
+import { useBrainStatus } from "@/lib/hooks/useBrainStatus";
+import { iconForMime } from "@/lib/mime-icons";
+import { StatusChip } from "@/components/StatusChip";
 
 export function BrainMemoryTab() {
-  const [state, setState] = useState<State>(INITIAL);
+  // WARP-214: useBrainStatus replaces the manual GET + state — it seeds from
+  // GET /api/files/brain and merges status flips from the WS bridge so the
+  // StatusChip flips in place when the file-indexer publishes a new status.
+  const { items: itemMap, loading, error } = useBrainStatus();
+  const items = Array.from(itemMap.values()).sort(
+    (a, b) =>
+      new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime(),
+  );
+  const unavailable = !loading && !error && itemMap.size === 0;
+
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [exportPending, setExportPending] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  // WARP-218 not yet merged: feature-detect transcribeNow availability so the
+  // overflow menu hides itself once we observe the route returning 404.
+  const [transcribeNowAvailable, setTranscribeNowAvailable] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    setState(INITIAL);
-    getBrainMemoryItems()
-      .then(({ items, unavailable }) => {
-        if (cancelled) return;
-        setState({
-          loading: false,
-          items,
-          unavailable: !!unavailable,
-          error: null,
-        });
-      })
-      .catch((err: Error) => {
-        if (cancelled) return;
-        setState({
-          loading: false,
-          items: [],
-          unavailable: false,
-          error: err.message,
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // The hook drives loading/error state; we keep `actionMessage` for inline
+  // delete/export feedback and clear it whenever the items list refreshes.
+  // (No-op effect — the WS bridge is the source of truth for re-render.)
 
   async function handleDelete(item: BrainMemoryItemInfo) {
     if (!confirm(`Delete "${item.filename}" from brain memory?`)) return;
@@ -96,11 +75,30 @@ export function BrainMemoryTab() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `Delete failed: ${res.status}`);
       }
-      setState((s) => ({ ...s, items: s.items.filter((i) => i.id !== item.id) }));
+      // WS bridge will eventually reconcile, but optimistically the list
+      // re-fetches on next /api/files/brain refresh. No local mutation.
     } catch (err) {
       setActionMessage(`Delete failed: ${(err as Error).message}`);
     } finally {
       setPendingDelete(null);
+    }
+  }
+
+  async function handleTranscribeNow(itemId: string) {
+    setActionMessage(null);
+    try {
+      await transcribeNow(itemId);
+      // Status flip arrives via the WS bridge.
+    } catch (e) {
+      if (e instanceof TranscribeNowUnavailable) {
+        // WARP-218 hasn't merged yet — hide the menu in subsequent renders.
+        setTranscribeNowAvailable(false);
+        setActionMessage(
+          "Manual transcription is not available yet. Items run on the nightly schedule.",
+        );
+      } else {
+        setActionMessage(`Transcribe failed: ${(e as Error).message}`);
+      }
     }
   }
 
@@ -133,7 +131,7 @@ export function BrainMemoryTab() {
     }
   }
 
-  if (state.loading) {
+  if (loading) {
     return (
       <div className="dp-card p-6 type-footnote text-label-tertiary">
         Loading…
@@ -141,15 +139,15 @@ export function BrainMemoryTab() {
     );
   }
 
-  if (state.error) {
+  if (error) {
     return (
       <div role="alert" className="dp-card p-4 type-footnote text-system-red">
-        Couldn&apos;t load brain memory: {state.error}
+        Couldn&apos;t load brain memory: {error}
       </div>
     );
   }
 
-  if (state.unavailable || state.items.length === 0) {
+  if (unavailable) {
     return (
       <div className="dp-card p-8 text-center" data-testid="brain-memory-empty">
         <Sparkles size={28} className="text-label-quaternary mx-auto mb-3" />
@@ -171,7 +169,7 @@ export function BrainMemoryTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="type-footnote text-label-tertiary px-1">
-          {state.items.length} item{state.items.length === 1 ? "" : "s"}
+          {items.length} item{items.length === 1 ? "" : "s"}
         </p>
         <button
           type="button"
@@ -197,19 +195,33 @@ export function BrainMemoryTab() {
       )}
 
       <ul className="space-y-2" data-testid="brain-memory-list">
-        {state.items.map((item) => (
+        {items.map((item) => {
+          // WARP-214: object-icon set keyed off MIME — Headphones for audio,
+          // Film for video, Mail for email, FileArchive for archives, etc.
+          const Icon = iconForMime(item.mimeType);
+          return (
           <li
             key={item.id}
             className="dp-card p-3 flex items-start gap-3"
             data-testid="brain-memory-item"
           >
             <div className="w-8 h-8 rounded-md bg-accent-subtle flex items-center justify-center flex-shrink-0">
-              <Sparkles size={14} className="text-accent" />
+              <Icon size={14} className="text-accent" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="type-subheadline text-label-primary truncate">
-                {item.filename}
-              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="type-subheadline text-label-primary truncate">
+                  {item.filename}
+                </p>
+                <StatusChip
+                  itemId={item.id}
+                  status={item.status ?? "ready"}
+                  failureReason={item.failureReason}
+                  onTranscribeNow={
+                    transcribeNowAvailable ? handleTranscribeNow : undefined
+                  }
+                />
+              </div>
               <p className="type-caption-1 text-label-tertiary">
                 {item.mimeType} · {(item.sizeBytes / 1024).toFixed(1)} KB ·{" "}
                 {new Date(item.uploadedAt).toLocaleString()}
@@ -246,7 +258,8 @@ export function BrainMemoryTab() {
               </button>
             </div>
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );

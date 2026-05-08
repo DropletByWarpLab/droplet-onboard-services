@@ -67,8 +67,7 @@ describe("StatusChip", () => {
     render(
       <StatusChip
         itemId="bmi-1"
-        // @ts-expect-error — verifying forward-compat behavior with an unknown enum
-        status="backfilling"
+        status={"backfilling" as unknown as "queued_for_transcription"}
       />,
     );
     expect(screen.getByText(/Processing/i)).toBeInTheDocument();
