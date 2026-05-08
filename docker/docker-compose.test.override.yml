@@ -22,6 +22,14 @@ services:
     # `expose:`s the port to the bridge network.
     ports:
       - "3000:3000"
+    environment:
+      # WARP-215: integration tests don't manage Nextcloud sessions / JWTs;
+      # they upload via the unauthenticated `dev` user the auth middleware
+      # injects when AUTH_ENABLED=false. The base compose env_file inherits
+      # `.env` (which `setup.sh` populates from `.env.example` with
+      # AUTH_ENABLED=true), so this override is the only way to disable
+      # auth without polluting the user's local `.env`.
+      - AUTH_ENABLED=false
 
   # Map the DB so `tests/rag-search.integration.test.ts` (and the other
   # tests that exec into the db container with `docker compose exec db
