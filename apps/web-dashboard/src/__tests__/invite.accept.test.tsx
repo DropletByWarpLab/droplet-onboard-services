@@ -173,6 +173,69 @@ describe("InviteAcceptPage", () => {
     expect(acceptInviteMock).toHaveBeenCalledWith("valid", "longenoughpw");
   });
 
+  it("translates err.code=USED into friendly copy and never surfaces the raw message", async () => {
+    getInviteMock.mockResolvedValueOnce({
+      username: "alice",
+      displayName: "Alice",
+      role: "user",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    // Server-shaped: short raw message + structured code.
+    const err = Object.assign(new Error("USED"), { status: 410, code: "USED" });
+    acceptInviteMock.mockRejectedValueOnce(err);
+
+    render(<InviteAcceptPage params={{ token: "valid" }} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
+    );
+
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: "longenoughpw" } });
+    fireEvent.change(inputs[1], { target: { value: "longenoughpw" } });
+    fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/already been used/i)).toBeInTheDocument();
+    });
+    // The terse raw message must NOT appear verbatim.
+    // Match the message as a stand-alone token (case-sensitive) — the
+    // friendly copy contains lowercase "used" but never uppercase "USED".
+    const matches = screen.queryAllByText((_, node) =>
+      !!node && /\bUSED\b/.test(node.textContent ?? ""),
+    );
+    expect(matches.length).toBe(0);
+  });
+
+  it("Enter on the Password field submits (parity with /login)", async () => {
+    getInviteMock.mockResolvedValueOnce({
+      username: "alice",
+      displayName: "Alice",
+      role: "user",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    acceptInviteMock.mockResolvedValueOnce({
+      user: { id: "alice", username: "alice", displayName: "Alice", role: "family" },
+    });
+
+    render(<InviteAcceptPage params={{ token: "valid" }} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /accept|join|set password/i })).toBeEnabled(),
+    );
+
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: "longenoughpw" } });
+    fireEvent.change(inputs[1], { target: { value: "longenoughpw" } });
+
+    // Press Enter on the Password (first) field — should submit the form.
+    fireEvent.keyDown(inputs[0], { key: "Enter" });
+
+    await waitFor(() => {
+      expect(acceptInviteMock).toHaveBeenCalledWith("valid", "longenoughpw");
+    });
+  });
+
   it("surfaces a friendly error when acceptInvite fails (no raw codes)", async () => {
     getInviteMock.mockResolvedValueOnce({
       username: "alice",
@@ -194,7 +257,9 @@ describe("InviteAcceptPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
 
     await waitFor(() => {
-      expect(screen.getByText(/could not create your account|account/i)).toBeInTheDocument();
+      // Generic-fallback friendly copy — we now ignore err.message entirely
+      // and surface a fixed string when no err.code is recognized.
+      expect(screen.getByText(/couldn't accept that invite|ask the admin/i)).toBeInTheDocument();
     });
     // No raw error codes / numbers leaked.
     expect(screen.queryByText(/\b500\b|\b404\b|undefined/)).not.toBeInTheDocument();

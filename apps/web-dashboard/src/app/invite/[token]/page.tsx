@@ -82,12 +82,23 @@ export default function InviteAcceptPage({ params }: PageProps) {
         state.kind === "ready" ? state.info.displayName : null;
       setState({ kind: "accepted", displayName });
     } catch (err: any) {
-      // Plain-language translations — no raw codes leaked to UI.
-      const friendly =
-        typeof err?.message === "string" && err.message.length < 200
-          ? err.message
-          : "Could not accept invite. Please try again or ask the admin who invited you.";
-      setError(friendly);
+      // Plain-language translations — dispatch on `err.code` only. Never
+      // surface `err.message` directly: the orchestrator may emit terse
+      // strings like "USED" / "INVALID_PASSWORD" that aren't user copy.
+      const code: string | undefined = err?.code;
+      if (code === "USED") {
+        setError("This invite has already been used. Please ask for a fresh link.");
+      } else if (code === "EXPIRED") {
+        setError("This invite has expired. Please ask for a fresh link.");
+      } else if (code === "INVALID_PASSWORD") {
+        setError(
+          "That password didn't meet the requirements. It must be at least 8 characters.",
+        );
+      } else {
+        setError(
+          "We couldn't accept that invite. Please ask the admin who invited you for a fresh link.",
+        );
+      }
     } finally {
       setSubmitting(false);
     }
@@ -223,6 +234,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
                 placeholder="At least 8 characters"
                 autoComplete="new-password"
                 className="dp-input pl-10 pr-10"
+                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
               />
               <button
                 type="button"

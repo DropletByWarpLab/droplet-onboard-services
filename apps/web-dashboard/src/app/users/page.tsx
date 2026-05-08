@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -69,6 +69,11 @@ export default function UsersPage() {
   const [inviteCopied, setInviteCopied] = useState(false);
   const [inviteSubmitting, setInviteSubmitting] = useState(false);
 
+  // Stable id used to wire up `aria-labelledby` on the invite dialog.
+  const inviteHeadingId = useId();
+  // Held so we can restore focus to the trigger on Escape-close.
+  const inviteTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   // Edit dialog state.
   const [editing, setEditing] = useState<AuthUser | null>(null);
   const [editDisplayName, setEditDisplayName] = useState("");
@@ -114,12 +119,25 @@ export default function UsersPage() {
     setInviteCopied(false);
   };
 
-  const closeInvite = () => {
+  const closeInvite = useCallback(() => {
     setShowInvite(false);
     setError(null);
     // Reset only after the modal animates out next tick — minor polish.
     setTimeout(resetInviteForm, 0);
-  };
+    // Restore focus to the "Invite user" trigger so keyboard users land
+    // back where they came from (Tier-2 dialog heuristic).
+    setTimeout(() => inviteTriggerRef.current?.focus(), 0);
+  }, []);
+
+  // Close the invite modal on Escape (Tier-2 dialog semantics).
+  useEffect(() => {
+    if (!showInvite) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeInvite();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showInvite, closeInvite]);
 
   const handleGenerateInvite = async () => {
     setError(null);
@@ -172,17 +190,25 @@ export default function UsersPage() {
     }
   };
 
-  const handleRevokeInvite = async (token: string) => {
+  const handleRevokeInvite = async (invite: InviteListItem) => {
+    // Tier-2 destructive confirm — same idiom as handleDelete above.
+    if (
+      !confirm(
+        `Revoke invite for "${invite.username}"? They won't be able to use this link anymore.`,
+      )
+    ) {
+      return;
+    }
     setError(null);
     // Optimistic: mark revoked locally; rollback on failure.
     const before = invites;
     setInvites((prev) =>
       prev.map((i) =>
-        i.token === token ? { ...i, revokedAt: new Date().toISOString() } : i,
+        i.token === invite.token ? { ...i, revokedAt: new Date().toISOString() } : i,
       ),
     );
     try {
-      await revokeInvite(token);
+      await revokeInvite(invite.token);
     } catch (err: any) {
       setInvites(before);
       setError(err?.message || "Failed to revoke invite");
@@ -274,6 +300,7 @@ export default function UsersPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="type-large-title text-label-primary">Users</h1>
         <button
+          ref={inviteTriggerRef}
           onClick={() => {
             resetInviteForm();
             setShowInvite(true);
@@ -387,7 +414,7 @@ export default function UsersPage() {
                   {canRevoke && (
                     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
-                        onClick={() => handleRevokeInvite(i.token)}
+                        onClick={() => handleRevokeInvite(i)}
                         className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 transition-colors type-caption-1 px-2"
                         title="Revoke invite"
                       >
@@ -409,11 +436,14 @@ export default function UsersPage() {
           onClick={closeInvite}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={inviteHeadingId}
             className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-              <h3 className="type-headline text-label-primary">
+              <h3 id={inviteHeadingId} className="type-headline text-label-primary">
                 {invitePhase === "form" ? "Invite user" : "Share this link"}
               </h3>
               <button
@@ -506,7 +536,11 @@ export default function UsersPage() {
                 </p>
                 {inviteResult && (
                   <>
-                    <div className="flex items-center justify-center bg-surface-secondary rounded-lg p-4">
+                    <div
+                      role="img"
+                      aria-label={`QR code containing invite link for ${inviteUsername || "the new user"}`}
+                      className="flex items-center justify-center bg-surface-secondary rounded-lg p-4"
+                    >
                       <QRCodeSVG value={inviteResult.url} size={160} level="M" />
                     </div>
                     <div className="flex items-stretch gap-2">
@@ -557,6 +591,8 @@ export default function UsersPage() {
       )}
 
       {/* Edit dialog */}
+      {/* TODO: WARP-217 follow-up — apply same dialog semantics to Edit dialog
+          (role="dialog", aria-modal, aria-labelledby, Escape-close, focus restore). */}
       {editing && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
