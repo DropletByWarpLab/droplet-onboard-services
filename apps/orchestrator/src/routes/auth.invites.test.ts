@@ -540,3 +540,63 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     expect(res.body.error).toMatch(/already exists/i);
   });
 });
+
+describe("POST /api/auth/users — admin createUser typed user-exists detection", () => {
+  it("returns 409 with friendly copy when ncCreateUser throws NextcloudUserExistsError", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const { NextcloudUserExistsError } = await import("../services/nextcloud.client.js");
+    (nc.ncCreateUser as any).mockRejectedValueOnce(
+      new NextcloudUserExistsError("User already exists"),
+    );
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({
+        username: "alice",
+        password: "longenoughpw",
+        displayName: "Alice",
+      });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already exists/i);
+  });
+
+  it("does NOT translate generic NextcloudOcsError messages that merely contain '102'", async () => {
+    // Defense in depth: if an unrelated error happens to mention '102' in
+    // its message, we should NOT downgrade it to 409. The route must
+    // discriminate by error type, not substring.
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    (nc.ncCreateUser as any).mockRejectedValueOnce(
+      new Error("flap, request id 1023, please retry"),
+    );
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({
+        username: "alice",
+        password: "longenoughpw",
+        displayName: "Alice",
+      });
+    // Falls through to the next() handler → default 500.
+    expect(res.status).toBe(500);
+  });
+
+  it("happy path returns 201 status=ok", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    (nc.ncCreateUser as any).mockResolvedValueOnce(undefined);
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({
+        username: "alice",
+        password: "longenoughpw",
+        displayName: "Alice",
+      });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ status: "ok", username: "alice" });
+  });
+});

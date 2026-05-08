@@ -757,7 +757,11 @@ export function createProtectedAuthRouter(
 
       res.status(201).json({ status: "ok", username: parsed.data.username });
     } catch (err: any) {
-      if (err.message?.includes("102")) {
+      // Typed-error path mirrors the invite-accept route — detect the
+      // OCS user-exists race (statuscode 102) by error class, not by
+      // substring-sniffing the message (which can false-positive on
+      // unrelated messages that happen to contain "102").
+      if (err instanceof NextcloudUserExistsError) {
         res.status(409).json({ error: "User already exists" });
         return;
       }
