@@ -1897,6 +1897,34 @@ export async function setDuckDnsConfig(opts: {
 
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---
 
+/** WARP-214 — source-channel signal: what extractor produced the text. */
+export type SubtitleSource =
+  | "asr_transcript"
+  | "embedded"
+  | "frame_ocr";
+
+/** WARP-214 — one step in the recursion chain for an attachment / archive member. */
+export interface ChainStep {
+  filename: string;
+  mime: string;
+  parentItemId?: string | null;
+}
+
+/** WARP-214 — free-form per-chunk metadata. Loose-typed so future extractors can extend. */
+export interface ChunkMetadata {
+  chain?: ChainStep[];
+  subtitle_source?: SubtitleSource | null;
+  // Reserve room for future extractor fields without forcing migrations.
+  [key: string]: unknown;
+}
+
+/** WARP-214 — brain-memory item status — drives the StatusChip rendering. */
+export type BrainMemoryItemStatus =
+  | "queued_for_transcription"
+  | "indexing"
+  | "ready"
+  | "failed";
+
 /** A row from FileContentChunk shaped for the dashboard. */
 export interface KnowledgeChunkItem {
   id: string;
@@ -1908,6 +1936,8 @@ export interface KnowledgeChunkItem {
   source: "nextcloud" | "brain";
   brainItemId: string | null;
   pageNumber: number | null;
+  // WARP-214: surfaced verbatim from the orchestrator. Null on legacy rows.
+  metadata?: ChunkMetadata | null;
 }
 
 export interface RecentKnowledgeResponse {
@@ -1923,6 +1953,8 @@ export interface KnowledgeSearchHit {
   pageNumber?: number | null;
   score: number;
   snippet: string;
+  // WARP-214: surfaced verbatim from the orchestrator. Null on legacy rows.
+  metadata?: ChunkMetadata | null;
 }
 
 export interface SearchKnowledgeResponse {
@@ -1937,6 +1969,9 @@ export interface BrainMemoryItemInfo {
   sizeBytes: number;
   uploadedAt: string;
   originatingChatId?: string | null;
+  // WARP-214: status drives the StatusChip; failureReason surfaces in tooltip.
+  status?: BrainMemoryItemStatus;
+  failureReason?: string | null;
 }
 
 /**
@@ -2010,4 +2045,35 @@ export async function getBrainMemoryItems(): Promise<{
   }
   const data = await res.json();
   return { items: data.items ?? [] };
+}
+
+/**
+ * WARP-214 + WARP-218: promote a queued brain memory item to immediate
+ * transcription. Discreet "Transcribe now" overflow action on the StatusChip.
+ *
+ * Returns 404 when WARP-218 isn't merged yet — callers catch
+ * `TranscribeNowUnavailable` and hide the menu item.
+ */
+export class TranscribeNowUnavailable extends Error {
+  constructor() {
+    super("transcribe-now-not-available");
+    this.name = "TranscribeNowUnavailable";
+  }
+}
+
+export async function transcribeNow(
+  itemId: string,
+): Promise<{ status: BrainMemoryItemStatus }> {
+  const res = await authFetch(
+    `${BASE}/api/files/brain/${encodeURIComponent(itemId)}/transcribe-now`,
+    { method: "POST" },
+  );
+  if (res.status === 404) {
+    throw new TranscribeNowUnavailable();
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `transcribe-now failed: ${res.status}`);
+  }
+  return res.json();
 }
