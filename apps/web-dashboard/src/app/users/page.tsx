@@ -360,7 +360,11 @@ export default function UsersPage() {
             No users yet.
           </div>
         ) : (
-          users.map((u) => (
+          users.map((u) => {
+            // aria-label uses the row's primary visible identifier so
+            // screen-reader announcements match what sighted users see.
+            const label = u.displayName || u.id;
+            return (
             <div key={u.id} className="dp-row group">
               <div className="flex items-center gap-3 flex-1 min-w-0">
                 <div className="w-9 h-9 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
@@ -383,13 +387,15 @@ export default function UsersPage() {
                 they're discoverable on touch and reachable for keyboard-only
                 users. Each button carries an aria-label naming the action +
                 target user; the visual icons stay restrained via the muted
-                text-label-tertiary token.
+                text-label-tertiary token. Padding token p-2.5 yields a
+                34 px × 34 px hit-target around the 14 px Lucide glyph,
+                clearing the ≥ 32 px floor in the ui-ux brief.
               */}
               <div className="flex items-center gap-0.5">
                 <button
                   onClick={() => openEdit(u)}
-                  aria-label={`Edit user ${u.id}`}
-                  className="p-1.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                  aria-label={`Edit user ${label}`}
+                  className="p-2.5 rounded-sm text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                   title="Edit"
                 >
                   <Edit3 size={14} />
@@ -398,16 +404,16 @@ export default function UsersPage() {
                   <>
                     <button
                       onClick={() => handleToggleEnabled(u, false)}
-                      aria-label={`Disable user ${u.id}`}
-                      className="p-1.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                      aria-label={`Disable user ${label}`}
+                      className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                       title="Disable"
                     >
                       <Shield size={14} />
                     </button>
                     <button
                       onClick={() => handleDelete(u)}
-                      aria-label={`Delete user ${u.id}`}
-                      className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                      aria-label={`Delete user ${label}`}
+                      className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                       title="Delete"
                     >
                       <Trash2 size={14} />
@@ -416,7 +422,8 @@ export default function UsersPage() {
                 )}
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
 
@@ -428,6 +435,9 @@ export default function UsersPage() {
             {invites.map((i) => {
               const status = inviteStatus(i);
               const canRevoke = !i.revokedAt && !i.acceptedAt;
+              // Mirror the row's primary visible label (displayName falls
+              // back to username) so the screen-reader announcement matches.
+              const inviteLabel = i.displayName || i.username;
               return (
                 <div key={i.token} className="dp-row group">
                   <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -453,8 +463,8 @@ export default function UsersPage() {
                     <div className="flex items-center gap-0.5">
                       <button
                         onClick={() => handleRevokeInvite(i)}
-                        aria-label={`Revoke invite for ${i.username}`}
-                        className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors type-caption-1 px-2"
+                        aria-label={`Revoke invite for ${inviteLabel}`}
+                        className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors type-caption-1 px-2"
                         title="Revoke invite"
                       >
                         Revoke
