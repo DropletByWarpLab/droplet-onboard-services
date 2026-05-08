@@ -297,7 +297,15 @@ services:
         condition: service_started
       broker:
         condition: service_started
-    profiles: ["full"]
+    # WARP-215: previously `profiles: ["full"]`, but file-indexer is core
+    # to the RAG pipeline (extract → chunk → embed → upsert) and should
+    # always run alongside the orchestrator, not be opt-in like the
+    # hardware-specific services (camera-discovery, switch, oled-display,
+    # frigate). The profile gate also broke compose override merging for
+    # the rag-tests workflow: `docker-compose.test.override.yml` couldn't
+    # add `WATCHER_MODE=polling` because compose strips override
+    # directives for profile-gated services when the profile isn't
+    # active. file-indexer now starts on every `docker compose up`.
     restart: always
 
   # --- Routing (OpenWrt control) ---
