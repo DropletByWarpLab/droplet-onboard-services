@@ -118,7 +118,12 @@ describe.skipIf(!SHOULD_RUN)("RAG search — live MCP integration (WARP-202)", (
 
     // Ensure the mcp-server build is up to date — without this an old
     // dist/ would still exercise pre-WARP-202 code.
-    sh("cd services/mcp-server && npm run build");
+    //
+    // WARP-215: this test runs from the `tests/` cwd (vitest's
+    // working-directory). A bare `cd services/mcp-server` resolves
+    // against `tests/` and fails. Use REPO_ROOT for an absolute path
+    // that works regardless of the runner's cwd.
+    sh(`cd ${REPO_ROOT}/services/mcp-server && npm run build`);
 
     // Drop the canonical RAG fixture and wait for it to be indexed.
     dropFixtureAndScan(
