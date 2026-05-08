@@ -41,8 +41,9 @@ export function createApp(prisma: PrismaClient) {
   app.use(requestLogger);
   app.use(express.json());
 
-  // Public auth routes (setup + login) — no authentication required
-  app.use("/api", createPublicAuthRouter());
+  // Public auth routes (setup + login + invite-accept) — no authentication required.
+  // Prisma is required for the WARP-217 invite-accept endpoints (token lookup).
+  app.use("/api", createPublicAuthRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
   // without a session cookie. Token in the query string is the auth (HMAC

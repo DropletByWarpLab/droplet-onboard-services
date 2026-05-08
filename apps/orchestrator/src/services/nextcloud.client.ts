@@ -402,19 +402,29 @@ export async function ncCreateUser(
   adminToken: string,
   username: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  groups?: string[],
 ): Promise<void> {
+  // OCS accepts repeated `groups[]` form fields. URLSearchParams handles
+  // repeats fine when we use the array-tuple constructor form.
+  const params: Array<[string, string]> = [
+    ["userid", username],
+    ["password", password],
+  ];
+  if (displayName) params.push(["displayName", displayName]);
+  if (groups) {
+    for (const g of groups) {
+      params.push(["groups[]", g]);
+    }
+  }
+
   const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/users"), {
     method: "POST",
     headers: {
       ...ocsHeaders(adminToken),
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: new URLSearchParams({
-      userid: username,
-      password,
-      ...(displayName ? { displayName } : {}),
-    }),
+    body: new URLSearchParams(params),
   });
 
   if (!resp.ok) {
@@ -423,8 +433,17 @@ export async function ncCreateUser(
   }
 
   const data = await resp.json();
-  if (data?.ocs?.meta?.statuscode !== 100) {
-    throw new Error(`OCS error creating user: ${data?.ocs?.meta?.message || "unknown"}`);
+  const ocsStatus: number | undefined = data?.ocs?.meta?.statuscode;
+  if (ocsStatus !== 100) {
+    const message = data?.ocs?.meta?.message || "unknown";
+    // 102 is the OCS "user already exists" status. Surface a typed error
+    // so callers (e.g. invite-accept route) can map it to a 409 without
+    // string-matching the message body. Other non-100 statuses fall
+    // through to the generic NextcloudOcsError.
+    if (ocsStatus === 102) {
+      throw new NextcloudUserExistsError(message);
+    }
+    throw new NextcloudOcsError(`OCS error creating user: ${message}`, ocsStatus ?? 0);
   }
 }
 
@@ -1105,6 +1124,18 @@ export class NextcloudOcsError extends Error {
     super(message);
     this.name = "NextcloudOcsError";
     this.ocsStatus = ocsStatus;
+  }
+}
+
+/**
+ * Thrown by `ncCreateUser` when Nextcloud reports OCS statuscode 102
+ * ("user already exists"). Callers can `instanceof`-check this without
+ * string-matching the OCS message — see `auth.ts` invite-accept handler.
+ */
+export class NextcloudUserExistsError extends NextcloudOcsError {
+  constructor(message = "User already exists") {
+    super(message, 102);
+    this.name = "NextcloudUserExistsError";
   }
 }
 

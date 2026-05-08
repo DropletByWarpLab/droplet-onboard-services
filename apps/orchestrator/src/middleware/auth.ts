@@ -50,7 +50,18 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   }
 
   // Skip auth for public endpoints
-  const publicPaths = ["/api/health", "/api/orchestrator/health", "/api/auth/setup", "/api/auth/login", "/api/auth/authorize", "/api/auth/callback", "/api/auth/refresh"];
+  const publicPaths = [
+    "/api/health",
+    "/api/orchestrator/health",
+    "/api/auth/setup",
+    "/api/auth/login",
+    "/api/auth/authorize",
+    "/api/auth/callback",
+    "/api/auth/refresh",
+    // WARP-217: invite-accept must be reachable by a fully logged-out
+    // invitee. The token in the URL is the auth.
+    "/api/auth/invites/accept/",
+  ];
   if (publicPaths.some((p) => req.path === p || req.path.startsWith(p))) {
     next();
     return;

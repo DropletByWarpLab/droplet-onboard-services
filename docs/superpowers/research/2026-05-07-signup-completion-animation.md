@@ -213,7 +213,7 @@ The `/setup` route is gated by `ncCheckSetupRequired()` — once any admin exist
 ### 5.3 Migration hygiene (per `.superpowers/agents/dev.md`)
 
 - Generate via `npx prisma migrate dev --create-only`.
-- Rename the timestamp to the ticket's canonical date so ordering stays stable across branches: `prisma/migrations/2026-05-07_warp_217_user_invite/`.
+- Rename the timestamp to the ticket's canonical date so ordering stays stable across branches: `prisma/migrations/20260507000000_warp_217_user_invite/`.
 - Re-run the migration a second time in dev and confirm row count is stable. Document this in the Dev's "Handoff notes."
 
 ---
@@ -267,7 +267,7 @@ docs/superpowers/research/2026-05-07-signup-completion-animation.md  # this file
 apps/orchestrator/
 ├── prisma/
 │   ├── schema.prisma                             # + UserInvite model
-│   └── migrations/2026-05-07_warp_217_user_invite/migration.sql  # NEW
+│   └── migrations/20260507000000_warp_217_user_invite/migration.sql  # NEW
 ├── src/
 │   ├── routes/auth.ts                            # + 5 invite routes
 │   ├── routes/auth.invites.test.ts               # NEW

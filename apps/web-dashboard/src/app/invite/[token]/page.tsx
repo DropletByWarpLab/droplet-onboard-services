@@ -1,0 +1,288 @@
+"use client";
+
+/**
+ * /invite/[token] — public invite-acceptance page.
+ *
+ * Flow (mirrors WARP-217 acceptance):
+ *   1. Fetch invite metadata via getInvite(token). 404/410 → friendly
+ *      "no longer valid" screen.
+ *   2. Render password + confirm form. Same dp-input + Lock icon idiom as
+ *      /login so the auth surface feels consistent.
+ *   3. Submit → acceptInvite(token, password). On success the orchestrator
+ *      sets cookies and we cross-fade into <WelcomeFlourish />, which
+ *      handles its own redirect to "/".
+ *
+ * Errors are translated to plain language (no raw status codes). Username
+ * + display name are read-only — the admin pre-claimed them.
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { Lock, User as UserIcon, Eye, EyeOff, ShieldOff } from "lucide-react";
+import { DropletMark } from "@/components/DropletMark";
+import { WelcomeFlourish } from "@/components/auth/WelcomeFlourish";
+import { getInvite, acceptInvite } from "@/lib/api";
+import type { InvitePublicInfo } from "@/lib/types";
+
+type LoadState =
+  | { kind: "loading" }
+  | { kind: "invalid"; reason: "missing" | "used" | "expired" }
+  | { kind: "ready"; info: InvitePublicInfo }
+  | { kind: "accepted"; displayName: string | null };
+
+interface PageProps {
+  params: { token: string };
+}
+
+export default function InviteAcceptPage({ params }: PageProps) {
+  const { token } = params;
+  const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadInvite = useCallback(async () => {
+    setState({ kind: "loading" });
+    try {
+      const info = await getInvite(token);
+      setState({ kind: "ready", info });
+    } catch (err: any) {
+      const status: number | undefined = err?.status;
+      const code: string | undefined = err?.code;
+      if (status === 410 && code === "USED") {
+        setState({ kind: "invalid", reason: "used" });
+      } else if (status === 410 && code === "EXPIRED") {
+        setState({ kind: "invalid", reason: "expired" });
+      } else {
+        setState({ kind: "invalid", reason: "missing" });
+      }
+    }
+  }, [token]);
+
+  useEffect(() => {
+    loadInvite();
+  }, [loadInvite]);
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords don't match.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await acceptInvite(token, password);
+      const displayName =
+        state.kind === "ready" ? state.info.displayName : null;
+      setState({ kind: "accepted", displayName });
+    } catch (err: any) {
+      // Plain-language translations — dispatch on `err.code` only. Never
+      // surface `err.message` directly: the orchestrator may emit terse
+      // strings like "USED" / "INVALID_PASSWORD" that aren't user copy.
+      const code: string | undefined = err?.code;
+      if (code === "USED") {
+        setError("This invite has already been used. Please ask for a fresh link.");
+      } else if (code === "EXPIRED") {
+        setError("This invite has expired. Please ask for a fresh link.");
+      } else if (code === "INVALID_PASSWORD") {
+        setError(
+          "That password didn't meet the requirements. It must be at least 8 characters.",
+        );
+      } else {
+        setError(
+          "We couldn't accept that invite. Please ask the admin who invited you for a fresh link.",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ── Accepted: hand the moment off to <WelcomeFlourish /> ──
+  if (state.kind === "accepted") {
+    return (
+      <div className="min-h-screen bg-surface-primary flex items-center justify-center p-6">
+        <WelcomeFlourish
+          displayName={state.displayName ?? undefined}
+          subtitle="You're now part of this Droplet."
+        />
+      </div>
+    );
+  }
+
+  // ── Invalid invite: friendly "no longer valid" screen ──
+  if (state.kind === "invalid") {
+    const headline =
+      state.reason === "used"
+        ? "This invite has already been used"
+        : state.reason === "expired"
+          ? "This invite has expired"
+          : "This invite is no longer valid";
+    const subline =
+      state.reason === "used"
+        ? "Looks like someone already accepted this invite. If that wasn't you, ask the admin who invited you."
+        : state.reason === "expired"
+          ? "Invites are time-limited for safety. Ask the admin who invited you to send a fresh link."
+          : "We couldn't find this invite. It may have been revoked or the link copied incorrectly.";
+
+    return (
+      <div className="min-h-screen bg-surface-primary flex items-center justify-center p-6">
+        <div className="w-full max-w-sm text-center">
+          <div className="flex items-center justify-center mx-auto mb-4">
+            <ShieldOff size={32} className="text-label-tertiary" />
+          </div>
+          <h1 className="type-title-1 text-label-primary mb-2">{headline}</h1>
+          <p className="type-subheadline text-label-secondary mb-6">
+            {subline}
+          </p>
+          <Link
+            href="/login"
+            className="dp-btn-primary inline-flex items-center justify-center"
+          >
+            Go to sign in
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Loading: small placeholder so the page never flashes empty ──
+  if (state.kind === "loading") {
+    return (
+      <div className="min-h-screen bg-surface-primary flex items-center justify-center p-6">
+        <div className="w-full max-w-sm text-center">
+          <DropletMark size={40} className="text-accent mx-auto mb-4" />
+          <p className="type-subheadline text-label-tertiary">
+            Loading your invitation...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Ready: invite is valid; render the password form ──
+  const { info } = state;
+  return (
+    <div className="min-h-screen bg-surface-primary flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="flex items-center justify-center mx-auto mb-4">
+            <DropletMark size={40} className="text-accent" />
+          </div>
+          <h1 className="type-title-1 text-label-primary">
+            You've been invited
+          </h1>
+          <p className="type-subheadline text-label-secondary mt-1">
+            Set a password to join this Droplet.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="type-subheadline text-label-secondary block mb-1.5">
+              Username
+            </label>
+            <div className="relative">
+              <UserIcon
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              />
+              <input
+                type="text"
+                value={info.username}
+                readOnly
+                aria-readonly
+                className="dp-input pl-10 cursor-not-allowed"
+              />
+            </div>
+          </div>
+
+          {info.displayName && (
+            <div>
+              <label className="type-subheadline text-label-secondary block mb-1.5">
+                Display name
+              </label>
+              <input
+                type="text"
+                value={info.displayName}
+                readOnly
+                aria-readonly
+                className="dp-input cursor-not-allowed"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="type-subheadline text-label-secondary block mb-1.5">
+              Choose a password
+            </label>
+            <div className="relative">
+              <Lock
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              />
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 8 characters"
+                autoComplete="new-password"
+                className="dp-input pl-10 pr-10"
+                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((s) => !s)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="type-subheadline text-label-secondary block mb-1.5">
+              Confirm password
+            </label>
+            <div className="relative">
+              <Lock
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              />
+              <input
+                type={showPassword ? "text" : "password"}
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                placeholder="Type it again"
+                autoComplete="new-password"
+                className="dp-input pl-10"
+                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+              />
+            </div>
+          </div>
+
+          {error && (
+            <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+              {error}
+            </p>
+          )}
+
+          <button
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="dp-btn-primary w-full"
+          >
+            {submitting ? "Accepting..." : "Accept invite"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

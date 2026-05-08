@@ -236,6 +236,44 @@ export interface AuthUser {
   email?: string | null;
 }
 
+// ── WARP-217 invite types ──
+export type InviteRole = "user" | "admin";
+
+export interface InviteCreateRequest {
+  username: string;
+  displayName?: string;
+  email?: string;
+  role?: InviteRole;
+  ttlHours?: number;
+}
+
+export interface InviteCreateResponse {
+  token: string;
+  url: string;
+  expiresAt: string;
+}
+
+/** Mirror of `findInviteByToken` projection used by the public lookup endpoint. */
+export interface InvitePublicInfo {
+  username: string;
+  displayName: string | null;
+  role: InviteRole;
+  expiresAt: string;
+}
+
+export interface InviteListItem {
+  token: string;
+  username: string;
+  displayName: string | null;
+  email: string | null;
+  role: InviteRole;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+}
+
 export interface ShareInfo {
   id?: number;
   url: string;
