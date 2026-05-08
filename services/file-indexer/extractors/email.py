@@ -152,15 +152,16 @@ def _dispatch_attachment(
         if parent_email_id is not None:
             sub_meta = sub.get("metadata") or {}
             sub_meta["parent_email_id"] = parent_email_id
-        # WARP-214: build the chain lineage. If the attachment itself was a
-        # carrier (nested .eml or .zip) it may already carry a chain — splice
-        # ours around it. Otherwise produce a 2-segment parent → child chain.
+        # WARP-214: build the chain lineage. Convention: a chain is
+        # [outermost, ..., innermost-leaf]. If the attachment was itself a
+        # recursive carrier (nested .eml/.zip) its sub_chain already starts
+        # with itself — we just prepend our parent. Otherwise produce a
+        # 2-segment parent → child chain.
         sub_chain = (sub.get("metadata") or {}).get("chain") or []
         if sub_chain:
             chain = [
                 {"filename": parent_filename, "mime": parent_mime},
                 *sub_chain,
-                {"filename": filename, "mime": mime},
             ]
         else:
             chain = [

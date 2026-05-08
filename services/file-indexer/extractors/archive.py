@@ -205,14 +205,16 @@ def _process_member_bytes(
         # Tag forwarded warnings with the member name so the operator can
         # tell which member triggered which downstream warning.
         tagged = [f"member:{member_name}:{w}" for w in sub_warnings]
-        # WARP-214: build the chain. If the member itself was a recursive
-        # carrier (zip-in-zip, eml-in-zip), splice our parent around its chain.
+        # WARP-214: build the chain. Convention: a chain is
+        # [outermost, ..., innermost-leaf]. If the member is itself a
+        # recursive carrier (zip-in-zip, eml-in-zip), its sub_chain already
+        # starts with itself — we just prepend the outer parent. Otherwise,
+        # produce the 2-segment parent → child chain.
         sub_chain = (sub.get("metadata") or {}).get("chain") or []
         if sub_chain:
             chain = [
                 {"filename": parent_filename, "mime": parent_mime},
                 *sub_chain,
-                {"filename": member_name, "mime": mime},
             ]
         else:
             chain = [
