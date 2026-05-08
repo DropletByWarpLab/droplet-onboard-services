@@ -1,7 +1,14 @@
-import { Router } from "express";
+import { Router, Request } from "express";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import pino from "pino";
+import {
+  generateInviteToken,
+  findInviteByToken,
+  isExpired,
+  isUsed,
+  isRevoked,
+} from "../services/invite.service.js";
 import {
   ncCheckSetupRequired,
   ncInstallAndCreateAdmin,
@@ -71,6 +78,40 @@ const createUserSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
 });
 
+// ── WARP-217 invite schemas ──
+const inviteRoleField = z.enum(["user", "admin"]);
+
+const createInviteSchema = z.object({
+  username: usernameField,
+  displayName: z.string().min(1).max(128).optional(),
+  email: z.string().email().max(200).optional(),
+  role: inviteRoleField.default("user"),
+  // Acceptance window in hours (1h–30d). Default 72h.
+  ttlHours: z.number().int().min(1).max(720).optional(),
+});
+
+const acceptInviteSchema = z.object({
+  password: z.string().min(8).max(128),
+});
+
+/** True if the caller is allowed to manage invites (issue / list / revoke). */
+function isAdmin(req: Request): boolean {
+  const role = req.user?.role;
+  return role === "owner" || role === "admin";
+}
+
+/** Best-effort source IP for the audit trail. Honours `trust proxy`. */
+function getRequestIp(req: Request): string | null {
+  return req.ip ?? req.socket?.remoteAddress ?? null;
+}
+
+/** Build the absolute invite URL for the issued token. */
+function buildInviteUrl(req: Request, token: string): string {
+  const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
+  return `${protocol}://${host}/invite/${token}`;
+}
+
 const updateUserSchema = z
   .object({
     displayName: z.string().min(1).max(128).optional(),
@@ -109,8 +150,16 @@ function resolveToken(req: import("express").Request): string | null {
 
 // ────────────────────────────────────────────────────────────────
 // Public auth routes — mounted BEFORE the auth middleware
+//
+// `prisma` is optional for backward compatibility with the legacy
+// createAuthRouter() shim, but the WARP-217 invite-accept endpoints need
+// it. When called without prisma those routes simply 404 (the dashboard's
+// `getInvite` / `acceptInvite` calls will treat that as "invite not found"
+// which is the right default for an under-configured deployment).
 // ────────────────────────────────────────────────────────────────
-export function createPublicAuthRouter(): Router {
+export function createPublicAuthRouter(
+  prisma?: import("@prisma/client").PrismaClient,
+): Router {
   const router = Router();
 
   // ── Check if initial setup is required ──
@@ -409,6 +458,183 @@ export function createPublicAuthRouter(): Router {
     }
   });
 
+  // ────────────────────────────────────────────────────────────
+  // WARP-217 — Public invite-accept endpoints
+  //
+  // These two are mounted on the PUBLIC router because the invitee, by
+  // definition, has no Droplet account yet. The token in the URL is the
+  // sole authentication. We never echo the stored token back, never log
+  // it, and compare it in constant time inside `findInviteByToken`.
+  //
+  //   GET  /api/auth/invites/accept/:token   — fetch invite metadata
+  //   POST /api/auth/invites/accept/:token   — set password + create NC user
+  //
+  // State-machine returns:
+  //   - 404 (not-found / revoked — both leak the same info to clients)
+  //   - 410 GONE  with code "USED" or "EXPIRED"
+  //   - 200 / 400 (bad password) / 500 (Nextcloud failure)
+  // ────────────────────────────────────────────────────────────
+  router.get("/auth/invites/accept/:token", async (req, res, next) => {
+    try {
+      if (!prisma) {
+        res.status(404).json({ error: "Invite not found" });
+        return;
+      }
+      const invite = await findInviteByToken(prisma, req.params.token);
+      if (!invite || isRevoked(invite)) {
+        res.status(404).json({ error: "Invite not found" });
+        return;
+      }
+      if (isUsed(invite)) {
+        res.status(410).json({ error: "This invite has already been used", code: "USED" });
+        return;
+      }
+      if (isExpired(invite)) {
+        res.status(410).json({ error: "This invite has expired", code: "EXPIRED" });
+        return;
+      }
+      res.json({
+        username: invite.username,
+        displayName: invite.displayName,
+        role: invite.role,
+        expiresAt: invite.expiresAt,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/auth/invites/accept/:token", async (req, res, next) => {
+    try {
+      if (!prisma) {
+        res.status(404).json({ error: "Invite not found" });
+        return;
+      }
+      const parsed = acceptInviteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Password must be at least 8 characters" });
+        return;
+      }
+      const { password } = parsed.data;
+
+      const invite = await findInviteByToken(prisma, req.params.token);
+      if (!invite || isRevoked(invite)) {
+        res.status(404).json({ error: "Invite not found" });
+        return;
+      }
+      if (isUsed(invite)) {
+        res.status(410).json({ error: "This invite has already been used", code: "USED" });
+        return;
+      }
+      if (isExpired(invite)) {
+        res.status(410).json({ error: "This invite has expired", code: "EXPIRED" });
+        return;
+      }
+
+      // Defense in depth: re-validate the username at accept time. The
+      // create endpoint already runs this check, but a stale row that was
+      // somehow hand-edited (or migrated in from elsewhere) must not be
+      // able to land a reserved username.
+      const usernameCheck = usernameField.safeParse(invite.username);
+      if (!usernameCheck.success) {
+        res.status(400).json({ error: "Invite has an invalid username" });
+        return;
+      }
+
+      // Build the Nextcloud groups list from the invite's role. Admin
+      // invites land users in the "admin" group so `roleFromGroups` will
+      // map them to "owner" on first login. Non-admin invites pass an
+      // empty groups array — Nextcloud's default group assignment applies.
+      const groups: string[] = invite.role === "admin" ? ["admin"] : [];
+
+      try {
+        await ncCreateUser(
+          // Use the configured admin token from env. No request-bound NC
+          // token is available since the invitee isn't logged in yet.
+          process.env.NEXTCLOUD_ADMIN_TOKEN ||
+            Buffer.from(
+              `${process.env.NEXTCLOUD_ADMIN_USER || "admin"}:${process.env.NEXTCLOUD_ADMIN_PASSWORD || ""}`,
+            ).toString("base64"),
+          invite.username,
+          password,
+          invite.displayName || undefined,
+          groups,
+        );
+      } catch (err: any) {
+        logger.error({ err, username: invite.username }, "Failed to create user from invite");
+        if (err.message?.includes("102")) {
+          res.status(409).json({ error: "A user with this username already exists" });
+          return;
+        }
+        res.status(500).json({ error: "Could not create your account. Please try again or ask the admin who invited you." });
+        return;
+      }
+
+      // Mark the invite accepted BEFORE we issue cookies — this is the
+      // single-use enforcement point. A concurrent second POST will see
+      // acceptedAt non-null and 410. The DB unique-on-token + this
+      // single-row update keeps the race window small (Prisma's update is
+      // not transactional with the ncCreateUser call, but Nextcloud's
+      // own statuscode 102 catches the user-exists race).
+      const acceptedFrom = getRequestIp(req);
+      await prisma.userInvite.update({
+        where: { id: invite.id },
+        data: {
+          acceptedAt: new Date(),
+          acceptedFrom: acceptedFrom ?? undefined,
+        },
+      });
+
+      // Auto-login the invitee — same shape as /api/auth/login.
+      const role: Role = invite.role === "admin" ? "owner" : "family";
+      const userId = invite.username;
+      const accessToken = signAccessToken({
+        id: userId,
+        username: userId,
+        displayName: invite.displayName || userId,
+        role,
+      });
+      const refreshToken = signRefreshToken({
+        id: userId,
+        username: userId,
+        displayName: invite.displayName || userId,
+        role,
+      });
+
+      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+      res.cookie(SESSION_COOKIE_NAME, accessToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/",
+        maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
+      });
+      res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
+        httpOnly: true,
+        secure: isHttps,
+        sameSite: "lax",
+        path: "/api/auth",
+        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+      });
+
+      logger.info(
+        { username: invite.username, role: invite.role, invitedBy: invite.createdBy },
+        "Invite accepted",
+      );
+
+      res.json({
+        user: {
+          id: userId,
+          username: userId,
+          displayName: invite.displayName || userId,
+          role,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 
@@ -662,6 +888,129 @@ export function createProtectedAuthRouter(
       }
 
       res.json({ status: "deleted", username: req.params.username });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // WARP-217 — Admin invite management
+  //
+  //   POST   /api/auth/invites           — generate a token + URL
+  //   GET    /api/auth/invites           — list (most recent first)
+  //   DELETE /api/auth/invites/:token    — revoke (idempotent)
+  //
+  // All three are admin-only. We rely on `req.user.role` populated by the
+  // upstream auth middleware. Returning 403 (not 401) on non-admin matches
+  // the existing ddns/vpn convention so the dashboard's "you're logged in,
+  // just not allowed" path is consistent across pages.
+  // ────────────────────────────────────────────────────────────
+  router.post("/auth/invites", async (req, res, next) => {
+    try {
+      if (!isAdmin(req)) {
+        res.status(403).json({ error: "Admin access required" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "Invite store unavailable" });
+        return;
+      }
+      const parsed = createInviteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        return;
+      }
+
+      const ttlHours = parsed.data.ttlHours ?? 72;
+      const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
+      const token = generateInviteToken();
+
+      const created = await prisma.userInvite.create({
+        data: {
+          token,
+          username: parsed.data.username,
+          displayName: parsed.data.displayName ?? null,
+          email: parsed.data.email ?? null,
+          role: parsed.data.role,
+          createdBy: req.user?.username ?? "unknown",
+          expiresAt,
+        },
+      });
+
+      logger.info(
+        {
+          username: parsed.data.username,
+          role: parsed.data.role,
+          createdBy: req.user?.username,
+          expiresAt,
+        },
+        "User invite created",
+      );
+
+      res.json({
+        token: created.token,
+        url: buildInviteUrl(req, created.token),
+        expiresAt: created.expiresAt,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/auth/invites", async (req, res, next) => {
+    try {
+      if (!isAdmin(req)) {
+        res.status(403).json({ error: "Admin access required" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "Invite store unavailable" });
+        return;
+      }
+      const rows = await prisma.userInvite.findMany({
+        orderBy: { createdAt: "desc" },
+      });
+      const invites = rows.map((r) => ({
+        token: r.token,
+        username: r.username,
+        displayName: r.displayName,
+        email: r.email,
+        role: r.role,
+        createdBy: r.createdBy,
+        createdAt: r.createdAt,
+        expiresAt: r.expiresAt,
+        acceptedAt: r.acceptedAt,
+        revokedAt: r.revokedAt,
+      }));
+      res.json({ invites });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/auth/invites/:token", async (req, res, next) => {
+    try {
+      if (!isAdmin(req)) {
+        res.status(403).json({ error: "Admin access required" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "Invite store unavailable" });
+        return;
+      }
+      const invite = await findInviteByToken(prisma, req.params.token);
+      if (!invite) {
+        res.status(404).json({ error: "Invite not found" });
+        return;
+      }
+      // Idempotent: revoking an already-revoked invite is a no-op success.
+      if (!invite.revokedAt) {
+        await prisma.userInvite.update({
+          where: { id: invite.id },
+          data: { revokedAt: new Date() },
+        });
+      }
+      res.json({ revoked: true });
     } catch (err) {
       next(err);
     }
