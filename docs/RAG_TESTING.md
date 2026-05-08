@@ -116,15 +116,28 @@ done
 
 ## CI
 
-The `.github/workflows/rag-tests.yml` workflow runs on:
-- Pull requests touching the RAG paths (file-indexer, embedding clients,
-  files-* routes, prisma migrations, `tests/rag-*.integration.test.ts`,
-  the test override compose file, the workflow yaml itself).
-- Pushes to `main` on the same path filter.
+**The rag-tests workflow does NOT run on pull requests.** WARP-215
+moved it to `workflow_dispatch`-only after PR-blocking runs were
+hitting 25-30 min and adding too much latency to the merge train.
 
-Path filtering is non-negotiable — the suite takes 20-25 min on a
-GHA `ubuntu-latest` runner; running it on every PR would block cores
-that other CI lanes need.
+The four PR-required workflows still cover the RAG surface:
+- `file-indexer-tests` (pytest, ~2 min) — exercises every extractor
+  unit-level via committed fixtures
+- `orchestrator-tests` (vitest, ~1 min) — covers the brain-memory
+  routes, the knowledge routes, and the Prisma surface via mocks
+- `mcp-server-tests` (vitest, ~1 min) — covers the search-content
+  tool wiring
+- `docker-build` (image builds, ~12 min) — catches Dockerfile
+  regressions before they hit prod
+
+Together those catch ~95% of regressions; this lane is the
+"cherry on top" that exercises the live stack and is meant for
+manual verification before a major RAG change.
+
+**Run locally** with `./scripts/test-rag.sh` for the inner loop, or
+**kick the workflow off manually** from
+https://github.com/DropletByWarpLab/droplet-pi-platform/actions/workflows/rag-tests.yml
+→ "Run workflow" → pick a branch → "Run workflow".
 
 **Job timeout:** 35 min. Above that we'd start dropping legit slow runs
 as flakes; below it Nextcloud's cold bootstrap (~3 min) eats too much
@@ -161,7 +174,7 @@ When you add a new RAG-touching code path:
    `packages/tools-core/`).
 2. Only add a new integration test if it spans services. The bar for
    adding to this suite is high — every test increases the suite's
-   per-PR latency.
-3. Update the path filter in `.github/workflows/rag-tests.yml` so the
-   workflow re-runs when your code changes.
+   manual-run latency.
+3. Add the new test file to the vitest invocation in
+   `.github/workflows/rag-tests.yml` so manual runs pick it up.
 4. Update this doc's "What gets tested" table.
