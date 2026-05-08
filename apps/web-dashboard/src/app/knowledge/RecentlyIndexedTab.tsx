@@ -15,8 +15,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   BookOpen,
   Clock,
-  FileText,
-  Image as ImageIcon,
   Sparkles,
 } from "lucide-react";
 import {
@@ -24,6 +22,9 @@ import {
   type KnowledgeChunkItem,
   type RecentKnowledgeResponse,
 } from "@/lib/api";
+import { iconForMime, mimeFromPath } from "@/lib/mime-icons";
+import { Breadcrumbs } from "@/components/Breadcrumbs";
+import { SourceChannelBadge } from "@/components/SourceChannelBadge";
 
 const PAGE_SIZE = 50;
 
@@ -47,13 +48,6 @@ function bucketFor(item: KnowledgeChunkItem, now: Date): Bucket {
   if (indexed >= weekAgo) return "This week";
   if (indexed >= monthAgo) return "This month";
   return "Earlier";
-}
-
-function fileIconFor(path: string) {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  if (["png", "jpg", "jpeg", "webp", "gif", "heic"].includes(ext))
-    return ImageIcon;
-  return FileText;
 }
 
 interface Props {
@@ -160,7 +154,11 @@ export function RecentlyIndexedTab({ source }: Props) {
           </h2>
           <ul className="space-y-2">
             {group.items.map((item) => {
-              const Icon = fileIconFor(item.path);
+              // WARP-214: object-icon set keyed off MIME (Headphones for
+              // audio, Film for video, Mail for email, FileArchive for
+              // archives, etc.). Falls back to FileText for unknown types.
+              const mime = mimeFromPath(item.path);
+              const Icon = iconForMime(mime);
               const fileName = item.path.split("/").pop() || item.path;
               const SourceIcon =
                 item.source === "brain" ? Sparkles : BookOpen;
@@ -196,11 +194,24 @@ export function RecentlyIndexedTab({ source }: Props) {
                     <p className="type-caption-1 text-label-tertiary truncate">
                       {item.path}
                     </p>
+                    {/* WARP-214: chevron-joined recursion lineage. Renders
+                        only when the chunk's metadata.chain is non-empty
+                        (~5% of items). */}
+                    <Breadcrumbs chain={item.metadata?.chain} />
                     {item.snippet && (
                       <p className="type-caption-1 text-label-secondary mt-1 line-clamp-2">
                         {item.snippet}
                       </p>
                     )}
+                    {/* WARP-214: source-channel pill — only shows when
+                        the channel is "lossy" enough to matter (ASR,
+                        OCR, embedded subtitles). */}
+                    <div className="mt-1">
+                      <SourceChannelBadge
+                        subtitleSource={item.metadata?.subtitle_source ?? null}
+                        warnings={[]}
+                      />
+                    </div>
                   </div>
                 </li>
               );
