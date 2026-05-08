@@ -216,8 +216,20 @@ class IndexHandler(FileSystemEventHandler):
             return
 
         # Upsert
+        # WARP-214: forward ExtractedDoc.metadata (chain[], subtitle_source) to
+        # the chunk row so the dashboard can render breadcrumbs + source-channel
+        # badges from /api/files/knowledge/{recent,search}.
+        doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
         for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
-            upsert_chunk(user, file_id, f"/{relpath}", idx, chunk, vec)
+            upsert_chunk(
+                user,
+                file_id,
+                f"/{relpath}",
+                idx,
+                chunk,
+                vec,
+                metadata=doc_metadata,
+            )
 
         # Prune excess chunks if the file shrunk
         prune_excess_chunks(file_id, len(chunks) - 1)

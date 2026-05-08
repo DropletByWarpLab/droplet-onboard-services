@@ -166,6 +166,11 @@ def handle_brain_uploaded(payload: dict) -> None:
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
 
+    # WARP-214: surface the extractor's metadata (chain[], subtitle_source) so
+    # the dashboard can render breadcrumbs + source-channel badges from
+    # /api/files/knowledge/{recent,search}.
+    doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
+
     # Upsert (delete-then-insert to keep brain rows independent of the
     # ncFileId-based unique constraint that the watcher relies on).
     try:
@@ -187,6 +192,7 @@ def handle_brain_uploaded(payload: dict) -> None:
                 source="brain",
                 brain_item_id=item_id,
                 warnings=warnings,
+                metadata=doc_metadata,
             )
         mark_brain_item_indexed(item_id, warnings=warnings)
     except Exception as e:
