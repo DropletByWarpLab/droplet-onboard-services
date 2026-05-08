@@ -286,33 +286,67 @@ describe("Users page — invite UX", () => {
   it("row actions are visible without requiring hover (touch + keyboard discoverability)", async () => {
     fetchUsersMock.mockResolvedValue({
       users: [
-        { id: "alice", username: "alice", displayName: "Alice" },
+        { id: "alice", username: "alice", displayName: "Alice Anderson" },
       ],
     });
 
     render(<UsersPage />);
 
     // No hover/focus interaction. Each action must be queryable by an
-    // accessible name that names the action and its target user.
+    // accessible name that names the action and its target user — using
+    // the user's display name (matches the row's primary visible label).
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /edit user alice/i }),
+        screen.getByRole("button", { name: /edit user alice anderson/i }),
       ).toBeInTheDocument();
     });
     expect(
-      screen.getByRole("button", { name: /disable user alice/i }),
+      screen.getByRole("button", { name: /disable user alice anderson/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /delete user alice/i }),
+      screen.getByRole("button", { name: /delete user alice anderson/i }),
     ).toBeInTheDocument();
 
     // None of those three buttons may be inside a container that hides
     // them behind hover (opacity-0 group-hover:opacity-100). We assert
     // that the closest container with the actions does NOT carry the
     // opacity-0 class — guards against regression.
-    const editBtn = screen.getByRole("button", { name: /edit user alice/i });
+    const editBtn = screen.getByRole("button", { name: /edit user alice anderson/i });
     const container = editBtn.closest("div");
     expect(container?.className ?? "").not.toMatch(/opacity-0/);
+
+    // Hit-target floor (≥ 32 px per ui-ux brief). vitest+jsdom doesn't do
+    // real layout, so assert the class-list carries the padding token that
+    // produces a ≥ 32 px square (p-2.5 → 14 px icon + 20 px padding = 34).
+    expect(editBtn.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+    expect(
+      screen.getByRole("button", { name: /disable user alice anderson/i }).className,
+    ).toMatch(/(^|\s)p-2\.5(\s|$)/);
+    expect(
+      screen.getByRole("button", { name: /delete user alice anderson/i }).className,
+    ).toMatch(/(^|\s)p-2\.5(\s|$)/);
+  });
+
+  it("row action aria-labels fall back to user id when displayName is absent", async () => {
+    fetchUsersMock.mockResolvedValue({
+      users: [
+        { id: "bob", username: "bob" },
+      ],
+    });
+
+    render(<UsersPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /edit user bob/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: /disable user bob/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /delete user bob/i }),
+    ).toBeInTheDocument();
   });
 
   it("revoke action on pending invites is visible without requiring hover", async () => {
@@ -321,7 +355,7 @@ describe("Users page — invite UX", () => {
         {
           token: "z".repeat(43),
           username: "diana",
-          displayName: "Diana",
+          displayName: "Diana Prince",
           email: null,
           role: "user",
           createdBy: "admin",
@@ -336,13 +370,44 @@ describe("Users page — invite UX", () => {
     render(<UsersPage />);
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /revoke invite for diana/i }),
+        screen.getByRole("button", { name: /revoke invite for diana prince/i }),
       ).toBeInTheDocument();
     });
 
-    const revokeBtn = screen.getByRole("button", { name: /revoke invite for diana/i });
+    const revokeBtn = screen.getByRole("button", {
+      name: /revoke invite for diana prince/i,
+    });
     const container = revokeBtn.closest("div");
     expect(container?.className ?? "").not.toMatch(/opacity-0/);
+
+    // Hit-target floor: same p-2.5 token as the user-row icon buttons.
+    expect(revokeBtn.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+  });
+
+  it("revoke aria-label falls back to invite username when displayName is absent", async () => {
+    listInvitesMock.mockResolvedValue({
+      invites: [
+        {
+          token: "w".repeat(43),
+          username: "eve",
+          displayName: null,
+          email: null,
+          role: "user",
+          createdBy: "admin",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+          acceptedAt: null,
+          revokedAt: null,
+        },
+      ],
+    });
+
+    render(<UsersPage />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /revoke invite for eve/i }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("rejects reserved usernames at form-submit time without calling createInvite", async () => {
