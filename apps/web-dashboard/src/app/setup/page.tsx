@@ -1,12 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { setupAdmin, loginUser, fetchMatterDevices } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
   ArrowRight,
-  Check,
   Eye,
   EyeOff,
   Lightbulb,
@@ -18,6 +16,7 @@ import {
   Wifi,
 } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
+import { WelcomeFlourish } from "@/components/auth/WelcomeFlourish";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
 
 type Step = "welcome" | "account" | "discovery" | "done";
@@ -32,7 +31,6 @@ const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
 };
 
 export default function SetupPage() {
-  const router = useRouter();
   const { completeSetup } = useAuth();
   const [step, setStep] = useState<Step>("welcome");
   const [username, setUsername] = useState("");
@@ -392,38 +390,22 @@ export default function SetupPage() {
           </div>
         )}
 
-        {/* Step: Done */}
+        {/* Step: Done — fluid completion flourish + auto-redirect to dashboard.
+            Replaces the legacy static check + /login button (WARP-216). The
+            user is already logged in by the time we reach this branch (see
+            handleCreateAccount), so the redirect target is the dashboard. */}
         {step === "done" && (
-          <div className="text-center animate-in fade-in duration-300">
-            <div className="w-20 h-20 rounded-full bg-system-green/10 flex items-center justify-center mx-auto mb-6">
-              <Check size={40} className="text-system-green" />
-            </div>
-
-            <h1 className="type-title-1 text-label-primary mb-3">
-              You&apos;re all set!
-            </h1>
-            <p className="type-body text-label-secondary mb-2">
-              Your Droplet is ready.
-            </p>
-            {discoveredDevices.length > 0 && (
-              <p className="type-subheadline text-label-tertiary mb-8">
-                {discoveredDevices.length} device{discoveredDevices.length !== 1 ? "s" : ""} connected and ready to control.
-              </p>
-            )}
-            {discoveredDevices.length === 0 && (
-              <p className="type-subheadline text-label-tertiary mb-8">
-                You can add smart home devices later from the Devices page.
-              </p>
-            )}
-
-            <button
-              onClick={() => router.push("/login")}
-              className="dp-btn-primary w-full"
-            >
-              Sign In
-              <ArrowRight size={16} />
-            </button>
-          </div>
+          <WelcomeFlourish
+            displayName={displayName || undefined}
+            subtitle={
+              discoveredDevices.length > 0
+                ? `${discoveredDevices.length} device${
+                    discoveredDevices.length !== 1 ? "s" : ""
+                  } connected and ready to control.`
+                : "You can add smart home devices later from the Devices page."
+            }
+            redirectTo="/"
+          />
         )}
       </div>
     </div>
