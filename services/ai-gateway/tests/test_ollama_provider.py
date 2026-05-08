@@ -439,3 +439,106 @@ class TestSemaphoreConcurrency:
             f"semaphore did not cap concurrency: max_in_flight={max_in_flight}, "
             f"expected {num_parallel}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _stream_chat() — 503 path symmetry
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingProvider503Path:
+    """Streaming 503 path: must run the SAME refresh-and-resize logic as the
+    non-streaming branch (silver-tier review issue I-4).
+
+    Pre-fix, the streaming branch only refreshed limits — never rebuilt the
+    semaphore — so a scale-up signaled via 503 was silently dropped.
+    """
+
+    @respx.mock
+    async def test_streaming_503_raises_http_status_error(self, provider):
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(200, json=_limits_payload(num_parallel=2))
+        )
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(
+                503, headers={"Retry-After": "30"}, text="overload"
+            )
+        )
+
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="llama3.2:3b",
+            stream=True,
+        )
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            async for _ in gen:
+                pass
+        assert exc_info.value.response.status_code == 503
+
+    @respx.mock
+    async def test_streaming_503_resizes_semaphore_when_num_parallel_changes(
+        self, provider
+    ):
+        # Pre-stage state so _ensure_limits short-circuits and we control
+        # exactly what the on-503 refresh sees. Mirrors the non-streaming
+        # 503-resize test so the two paths are exercised symmetrically.
+        provider._limits.num_parallel = 2
+        provider._limits._last_refresh = time.monotonic()
+        provider._limits._refresh_min_interval = 0.0
+        provider._sema = asyncio.Semaphore(2)
+        provider._sema_size = 2
+        sema_before = provider._sema
+
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(200, json=_limits_payload(num_parallel=4))
+        )
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(
+                503, headers={"Retry-After": "30"}, text="overload"
+            )
+        )
+
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="llama3.2:3b",
+            stream=True,
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in gen:
+                pass
+
+        # The on-503 refresh must have run AND rebuilt the semaphore — exactly
+        # what the non-streaming branch does. Pre-fix, this assertion failed:
+        # the streaming branch only refreshed.
+        assert provider._limits.num_parallel == 4
+        assert provider._sema is not sema_before
+        assert provider._sema_size == 4
+
+    @respx.mock
+    async def test_streaming_503_no_resize_when_num_parallel_unchanged(self, provider):
+        provider._limits.num_parallel = 2
+        provider._limits._last_refresh = time.monotonic()
+        provider._limits._refresh_min_interval = 0.0
+        provider._sema = asyncio.Semaphore(2)
+        provider._sema_size = 2
+        sema_before = provider._sema
+
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(200, json=_limits_payload(num_parallel=2))
+        )
+        respx.post(TEST_CHAT_URL).mock(
+            return_value=httpx.Response(503, text="overload")
+        )
+
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="llama3.2:3b",
+            stream=True,
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in gen:
+                pass
+
+        # No rebuild needed — the semaphore object is the same instance.
+        assert provider._sema is sema_before
+        assert provider._sema_size == 2
