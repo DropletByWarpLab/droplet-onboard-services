@@ -10,38 +10,66 @@ import {
   ShieldOff,
   Shield,
   Check,
+  Copy,
+  Link as LinkIcon,
 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
 import {
   fetchUsers,
-  createUser,
   deleteUser as apiDeleteUser,
   updateUser,
   setUserEnabled,
+  createInvite,
+  listInvites,
+  revokeInvite,
 } from "@/lib/api";
-import type { AuthUser } from "@/lib/types";
+import type {
+  AuthUser,
+  InviteListItem,
+  InviteRole,
+  InviteCreateResponse,
+} from "@/lib/types";
 
 const RESERVED_USERNAMES = ["admin", "root"];
+
+const TTL_OPTIONS: Array<{ label: string; hours: number }> = [
+  { label: "24 hours", hours: 24 },
+  { label: "72 hours", hours: 72 },
+  { label: "7 days", hours: 24 * 7 },
+];
 
 /**
  * Admin-only user management page. Non-admin callers get a 403 from the
  * orchestrator on fetchUsers; we detect that and show a friendly notice
  * instead of letting the error bubble up.
+ *
+ * WARP-217: invite UX is now token-based — no admin-typed passwords. The
+ * "Invite user" button opens a modal that POSTs to /api/auth/invites and
+ * flips into a "Share this link" view with URL + QR + copy action. A new
+ * "Pending invites" section below the user list lets admins see and
+ * revoke outstanding invites.
  */
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
   const [users, setUsers] = useState<AuthUser[]>([]);
+  const [invites, setInvites] = useState<InviteListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Invite form state
+  // Invite modal state — split into "form" and "share" phases.
   const [showInvite, setShowInvite] = useState(false);
-  const [inviteName, setInviteName] = useState("");
+  const [invitePhase, setInvitePhase] = useState<"form" | "share">("form");
+  const [inviteUsername, setInviteUsername] = useState("");
   const [inviteDisplay, setInviteDisplay] = useState("");
-  const [invitePassword, setInvitePassword] = useState("");
+  const [inviteRole, setInviteRole] = useState<InviteRole>("user");
+  const [inviteTtlHours, setInviteTtlHours] = useState<number>(72);
+  const [inviteResult, setInviteResult] = useState<InviteCreateResponse | null>(null);
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [inviteSubmitting, setInviteSubmitting] = useState(false);
 
-  // Edit dialog state (only displayName + email — password change is a separate action)
+  // Edit dialog state.
   const [editing, setEditing] = useState<AuthUser | null>(null);
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editPassword, setEditPassword] = useState("");
@@ -53,6 +81,14 @@ export default function UsersPage() {
       const data = await fetchUsers();
       setUsers(data.users || []);
       setIsAdmin(true);
+      try {
+        const inviteData = await listInvites();
+        setInvites(inviteData.invites || []);
+      } catch {
+        // Pending invites are nice-to-have; if the orchestrator hasn't
+        // migrated yet, don't block the user list.
+        setInvites([]);
+      }
     } catch (err: any) {
       if (String(err?.message ?? "").includes("403")) {
         setIsAdmin(false);
@@ -68,29 +104,88 @@ export default function UsersPage() {
     reload();
   }, [reload]);
 
-  const handleInvite = async () => {
+  const resetInviteForm = () => {
+    setInviteUsername("");
+    setInviteDisplay("");
+    setInviteRole("user");
+    setInviteTtlHours(72);
+    setInvitePhase("form");
+    setInviteResult(null);
+    setInviteCopied(false);
+  };
+
+  const closeInvite = () => {
+    setShowInvite(false);
     setError(null);
-    if (!inviteName.trim() || !invitePassword.trim()) {
-      setError("Username and password are required");
+    // Reset only after the modal animates out next tick — minor polish.
+    setTimeout(resetInviteForm, 0);
+  };
+
+  const handleGenerateInvite = async () => {
+    setError(null);
+    const username = inviteUsername.trim().toLowerCase();
+    if (!username) {
+      setError("Username is required");
       return;
     }
-    if (RESERVED_USERNAMES.includes(inviteName.trim().toLowerCase())) {
+    if (RESERVED_USERNAMES.includes(username)) {
       setError("This username is reserved and cannot be used");
       return;
     }
-    if (invitePassword.length < 8) {
-      setError("Password must be at least 8 characters");
+    if (!/^[a-z0-9._-]+$/.test(username)) {
+      setError("Username must contain only letters, numbers, dots, dashes, and underscores");
       return;
     }
+    setInviteSubmitting(true);
     try {
-      await createUser(inviteName, invitePassword, inviteDisplay || undefined);
-      setInviteName("");
-      setInviteDisplay("");
-      setInvitePassword("");
-      setShowInvite(false);
-      await reload();
+      const result = await createInvite({
+        username,
+        displayName: inviteDisplay.trim() || undefined,
+        role: inviteRole,
+        ttlHours: inviteTtlHours,
+      });
+      setInviteResult(result);
+      setInvitePhase("share");
+      // Refresh the pending list.
+      try {
+        const inviteData = await listInvites();
+        setInvites(inviteData.invites || []);
+      } catch {
+        // ignore
+      }
     } catch (err: any) {
-      setError(err?.message || "Failed to create user");
+      setError(err?.message || "Failed to create invite");
+    } finally {
+      setInviteSubmitting(false);
+    }
+  };
+
+  const handleCopyInviteUrl = async () => {
+    if (!inviteResult) return;
+    try {
+      await navigator.clipboard.writeText(inviteResult.url);
+      setInviteCopied(true);
+      setTimeout(() => setInviteCopied(false), 2000);
+    } catch {
+      // Clipboard might be blocked (insecure context); leave the textbox
+      // visible so the admin can manually select the link.
+    }
+  };
+
+  const handleRevokeInvite = async (token: string) => {
+    setError(null);
+    // Optimistic: mark revoked locally; rollback on failure.
+    const before = invites;
+    setInvites((prev) =>
+      prev.map((i) =>
+        i.token === token ? { ...i, revokedAt: new Date().toISOString() } : i,
+      ),
+    );
+    try {
+      await revokeInvite(token);
+    } catch (err: any) {
+      setInvites(before);
+      setError(err?.message || "Failed to revoke invite");
     }
   };
 
@@ -165,12 +260,24 @@ export default function UsersPage() {
     );
   }
 
+  // Status pill copy + class for the pending-invites list.
+  function inviteStatus(i: InviteListItem): { label: string; cls: string } {
+    if (i.revokedAt) return { label: "Revoked", cls: "bg-label-quaternary/10 text-label-tertiary" };
+    if (i.acceptedAt) return { label: "Accepted", cls: "bg-system-green/15 text-system-green" };
+    if (new Date(i.expiresAt).getTime() < Date.now())
+      return { label: "Expired", cls: "bg-system-orange/15 text-system-orange" };
+    return { label: "Pending", cls: "bg-accent/15 text-accent" };
+  }
+
   return (
     <div className="p-6 lg:p-8 max-w-4xl">
       <div className="flex items-center justify-between mb-6">
         <h1 className="type-large-title text-label-primary">Users</h1>
         <button
-          onClick={() => setShowInvite(true)}
+          onClick={() => {
+            resetInviteForm();
+            setShowInvite(true);
+          }}
           className="dp-btn-primary type-subheadline !py-2 !px-4 !min-h-[36px]"
         >
           <Plus size={14} />
@@ -187,54 +294,7 @@ export default function UsersPage() {
         </div>
       )}
 
-      {/* Invite form */}
-      {showInvite && (
-        <div className="dp-card p-4 mb-4 space-y-3">
-          <p className="type-headline text-label-primary">New user</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <input
-              autoFocus
-              value={inviteName}
-              onChange={(e) => setInviteName(e.target.value.toLowerCase())}
-              placeholder="username"
-              className="dp-input"
-            />
-            <input
-              value={inviteDisplay}
-              onChange={(e) => setInviteDisplay(e.target.value)}
-              placeholder="Display name (optional)"
-              className="dp-input"
-            />
-          </div>
-          <input
-            type="password"
-            value={invitePassword}
-            onChange={(e) => setInvitePassword(e.target.value)}
-            placeholder="Password (min 8 chars)"
-            className="dp-input"
-            onKeyDown={(e) => e.key === "Enter" && handleInvite()}
-          />
-          <div className="flex items-center gap-2 pt-1">
-            <button
-              onClick={handleInvite}
-              className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5"
-            >
-              Create
-            </button>
-            <button
-              onClick={() => {
-                setShowInvite(false);
-                setError(null);
-              }}
-              className="type-subheadline text-accent hover:text-accent-hover px-3 py-1.5 transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* List */}
+      {/* User list */}
       <div className="dp-group">
         {loading && users.length === 0 ? (
           <div className="dp-row flex items-center justify-center text-label-tertiary type-subheadline">
@@ -294,6 +354,207 @@ export default function UsersPage() {
           ))
         )}
       </div>
+
+      {/* Pending invites */}
+      {invites.length > 0 && (
+        <div className="mt-8">
+          <h2 className="type-headline text-label-primary mb-3">Pending invites</h2>
+          <div className="dp-group">
+            {invites.map((i) => {
+              const status = inviteStatus(i);
+              const canRevoke = !i.revokedAt && !i.acceptedAt;
+              return (
+                <div key={i.token} className="dp-row group">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="w-9 h-9 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0">
+                      <LinkIcon size={14} className="text-accent" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="type-callout text-label-primary truncate">
+                        {i.displayName || i.username}
+                      </p>
+                      <p className="type-caption-1 text-label-tertiary truncate">
+                        {i.username} · {i.role === "admin" ? "admin" : "user"} · invited by{" "}
+                        {i.createdBy}
+                      </p>
+                    </div>
+                    <span
+                      className={`type-caption-1 px-2 py-0.5 rounded-full ${status.cls}`}
+                    >
+                      {status.label}
+                    </span>
+                  </div>
+                  {canRevoke && (
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => handleRevokeInvite(i.token)}
+                        className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 transition-colors type-caption-1 px-2"
+                        title="Revoke invite"
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Invite modal */}
+      {showInvite && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
+          onClick={closeInvite}
+        >
+          <div
+            className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
+              <h3 className="type-headline text-label-primary">
+                {invitePhase === "form" ? "Invite user" : "Share this link"}
+              </h3>
+              <button
+                onClick={closeInvite}
+                className="p-1 text-label-tertiary hover:text-label-primary"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {invitePhase === "form" ? (
+              <>
+                <div className="p-4 space-y-3">
+                  <div>
+                    <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                      Username
+                    </label>
+                    <input
+                      autoFocus
+                      value={inviteUsername}
+                      onChange={(e) => setInviteUsername(e.target.value.toLowerCase())}
+                      placeholder="Username"
+                      className="dp-input"
+                    />
+                  </div>
+                  <div>
+                    <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                      Display name (optional)
+                    </label>
+                    <input
+                      value={inviteDisplay}
+                      onChange={(e) => setInviteDisplay(e.target.value)}
+                      placeholder="Display name"
+                      className="dp-input"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                        Role
+                      </label>
+                      <select
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value as InviteRole)}
+                        className="dp-input"
+                      >
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+                        Link expires in
+                      </label>
+                      <select
+                        value={inviteTtlHours}
+                        onChange={(e) => setInviteTtlHours(Number(e.target.value))}
+                        className="dp-input"
+                      >
+                        {TTL_OPTIONS.map((opt) => (
+                          <option key={opt.hours} value={opt.hours}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
+                  <button
+                    onClick={closeInvite}
+                    className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleGenerateInvite}
+                    disabled={inviteSubmitting}
+                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                  >
+                    {inviteSubmitting ? "Generating..." : "Generate link"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="p-4 space-y-4">
+                <p className="type-subheadline text-label-secondary">
+                  Send this link to {inviteUsername || "the new user"}. They'll set their own
+                  password and join automatically.
+                </p>
+                {inviteResult && (
+                  <>
+                    <div className="flex items-center justify-center bg-surface-secondary rounded-lg p-4">
+                      <QRCodeSVG value={inviteResult.url} size={160} level="M" />
+                    </div>
+                    <div className="flex items-stretch gap-2">
+                      <input
+                        readOnly
+                        value={inviteResult.url}
+                        className="dp-input flex-1 type-footnote"
+                        onFocus={(e) => e.currentTarget.select()}
+                      />
+                      <button
+                        onClick={handleCopyInviteUrl}
+                        className="dp-btn-primary type-footnote !min-h-0 !py-2 !px-3 flex-shrink-0"
+                        aria-label="Copy invite link"
+                      >
+                        {inviteCopied ? (
+                          <>
+                            <Check size={14} /> Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={14} /> Copy
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <p className="type-caption-1 text-label-tertiary">
+                      Expires{" "}
+                      {new Date(inviteResult.expiresAt).toLocaleString(undefined, {
+                        dateStyle: "medium",
+                        timeStyle: "short",
+                      })}
+                      .
+                    </p>
+                  </>
+                )}
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    onClick={closeInvite}
+                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Edit dialog */}
       {editing && (
