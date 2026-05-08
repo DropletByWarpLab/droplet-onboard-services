@@ -23,6 +23,7 @@ import {
   ncOAuth2AuthorizeUrl,
   ncOAuth2ExchangeCode,
   ncOAuth2RefreshToken,
+  NextcloudUserExistsError,
 } from "../services/nextcloud.client.js";
 import {
   signAccessToken,
@@ -512,7 +513,10 @@ export function createPublicAuthRouter(
       }
       const parsed = acceptInviteSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Password must be at least 8 characters" });
+        res.status(400).json({
+          error: "Password must be at least 8 characters",
+          code: "INVALID_PASSWORD",
+        });
         return;
       }
       const { password } = parsed.data;
@@ -562,7 +566,9 @@ export function createPublicAuthRouter(
         );
       } catch (err: any) {
         logger.error({ err, username: invite.username }, "Failed to create user from invite");
-        if (err.message?.includes("102")) {
+        // Typed-error path: NextcloudUserExistsError carries ocsStatus=102
+        // and lets us detect user-exists without sniffing message strings.
+        if (err instanceof NextcloudUserExistsError) {
           res.status(409).json({ error: "A user with this username already exists" });
           return;
         }

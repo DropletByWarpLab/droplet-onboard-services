@@ -31,21 +31,39 @@ vi.mock("../config.js", () => ({
 }));
 
 // Stub the Nextcloud client to avoid HTTP traffic in tests.
-vi.mock("../services/nextcloud.client.js", () => ({
-  ncCheckSetupRequired: vi.fn(),
-  ncInstallAndCreateAdmin: vi.fn(),
-  ncLoginWithCredentials: vi.fn(),
-  ncDeleteAppPassword: vi.fn(),
-  ncGetCurrentUser: vi.fn().mockResolvedValue({ id: "alice", displayName: "Alice", groups: [] }),
-  ncCreateUser: vi.fn().mockResolvedValue(undefined),
-  ncDeleteUser: vi.fn(),
-  ncListUsers: vi.fn(),
-  ncUpdateUser: vi.fn(),
-  ncSetUserEnabled: vi.fn(),
-  ncOAuth2AuthorizeUrl: vi.fn(),
-  ncOAuth2ExchangeCode: vi.fn(),
-  ncOAuth2RefreshToken: vi.fn(),
-}));
+vi.mock("../services/nextcloud.client.js", () => {
+  class NextcloudOcsError extends Error {
+    public readonly ocsStatus: number;
+    constructor(message: string, ocsStatus: number) {
+      super(message);
+      this.name = "NextcloudOcsError";
+      this.ocsStatus = ocsStatus;
+    }
+  }
+  class NextcloudUserExistsError extends NextcloudOcsError {
+    constructor(message = "User already exists") {
+      super(message, 102);
+      this.name = "NextcloudUserExistsError";
+    }
+  }
+  return {
+    ncCheckSetupRequired: vi.fn(),
+    ncInstallAndCreateAdmin: vi.fn(),
+    ncLoginWithCredentials: vi.fn(),
+    ncDeleteAppPassword: vi.fn(),
+    ncGetCurrentUser: vi.fn().mockResolvedValue({ id: "alice", displayName: "Alice", groups: [] }),
+    ncCreateUser: vi.fn().mockResolvedValue(undefined),
+    ncDeleteUser: vi.fn(),
+    ncListUsers: vi.fn(),
+    ncUpdateUser: vi.fn(),
+    ncSetUserEnabled: vi.fn(),
+    ncOAuth2AuthorizeUrl: vi.fn(),
+    ncOAuth2ExchangeCode: vi.fn(),
+    ncOAuth2RefreshToken: vi.fn(),
+    NextcloudOcsError,
+    NextcloudUserExistsError,
+  };
+});
 
 // The session/token storage helpers — protected routes call into them
 // for legacy/NC-impersonation flows. Stub to no-ops.
@@ -485,5 +503,40 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
       .post("/api/auth/invites/accept/totally-not-real")
       .send({ password: "longenoughpw" });
     expect(res.status).toBe(404);
+  });
+
+  it("password-too-short response carries code=INVALID_PASSWORD", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const token = create.body.token;
+
+    const publicApp = buildApp(prisma, null);
+    const res = await request(publicApp)
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: "short" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_PASSWORD");
+  });
+
+  it("translates ncCreateUser user-exists indicator to 409 with friendly copy", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const token = create.body.token;
+
+    // Simulate the user-exists path — ncCreateUser throws a typed error
+    // that the route can detect without substring-sniffing.
+    const { NextcloudUserExistsError } = await import("../services/nextcloud.client.js");
+    (nc.ncCreateUser as any).mockRejectedValueOnce(
+      new NextcloudUserExistsError("User already exists"),
+    );
+
+    const publicApp = buildApp(prisma, null);
+    const res = await request(publicApp)
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: "longenoughpw" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already exists/i);
   });
 });
