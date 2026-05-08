@@ -144,18 +144,26 @@ def _result_doc(
     meta_format: str,
     text_parts: list[str],
     warnings: list[str],
+    chain: Optional[list[dict]] = None,
 ) -> ExtractedDoc:
+    metadata: dict = {
+        "extractor_name": "archive",
+        "extractor_version": "1.0",
+        "format": meta_format,
+    }
+    # WARP-214: surface the first member's chain on the doc-level metadata so
+    # the chunker propagates it to FileContentChunk.metadata.chain. Multiple
+    # members produce multiple chains; chunk-level chain assignment is a
+    # follow-up — the dashboard's depth-2 cap is satisfied by the first chain.
+    if chain:
+        metadata["chain"] = chain
     return cast(
         ExtractedDoc,
         {
             "text": "\n".join(text_parts),
             "page_breaks": [],
             "language": None,
-            "metadata": {
-                "extractor_name": "archive",
-                "extractor_version": "1.0",
-                "format": meta_format,
-            },
+            "metadata": metadata,
             "warnings": warnings,
         },
     )
@@ -165,13 +173,18 @@ def _process_member_bytes(
     member_name: str,
     member_bytes: bytes,
     depth: int,
-) -> tuple[str, list[str]]:
+    parent_filename: str = "(archive)",
+    parent_mime: str = "application/zip",
+) -> tuple[str, list[str], Optional[list[dict]]]:
     """Detect MIME, write to a temp file, recurse via dispatch().
 
     The temp file is necessary because most extractors (PDF, docx, etc.)
     take a filesystem path, not a buffer. We delete it after. If
     `dispatch()` returns None (unsupported MIME), we surface that as a
     warning so the operator can see what slipped through.
+
+    WARP-214: returns a third tuple element — the chain[] for this member,
+    or None if the dispatch didn't produce a usable doc.
     """
     # Local import to avoid a circular import at module load time.
     from extractors import registry
@@ -186,13 +199,27 @@ def _process_member_bytes(
     try:
         sub = registry.dispatch(tmp, mime, depth=depth + 1)
         if sub is None:
-            return "", [f"unsupported_member:{member_name}:{mime}"]
+            return "", [f"unsupported_member:{member_name}:{mime}"], None
         text = sub.get("text", "")
         sub_warnings = list(sub.get("warnings") or [])
         # Tag forwarded warnings with the member name so the operator can
         # tell which member triggered which downstream warning.
         tagged = [f"member:{member_name}:{w}" for w in sub_warnings]
-        return text, tagged
+        # WARP-214: build the chain. If the member itself was a recursive
+        # carrier (zip-in-zip, eml-in-zip), splice our parent around its chain.
+        sub_chain = (sub.get("metadata") or {}).get("chain") or []
+        if sub_chain:
+            chain = [
+                {"filename": parent_filename, "mime": parent_mime},
+                *sub_chain,
+                {"filename": member_name, "mime": mime},
+            ]
+        else:
+            chain = [
+                {"filename": parent_filename, "mime": parent_mime},
+                {"filename": member_name, "mime": mime},
+            ]
+        return text, tagged, chain
     finally:
         try:
             os.unlink(tmp)
@@ -205,6 +232,8 @@ def _extract_zip(path: Path, depth: int) -> ExtractedDoc:
     text_parts: list[str] = []
     warnings: list[str] = []
     cumulative = 0
+    parent_filename = path.name or "(archive)"
+    member_chains: list[list[dict]] = []
 
     try:
         with zipfile.ZipFile(path) as zf:
@@ -264,7 +293,10 @@ def _extract_zip(path: Path, depth: int) -> ExtractedDoc:
                     cumulative += len(head)
                     if cumulative > MAX_ARCHIVE_TOTAL_BYTES:
                         warnings.append("decompressed_size_cap_exceeded")
-                        return _result_doc("zip", text_parts, warnings)
+                        return _result_doc(
+                            "zip", text_parts, warnings,
+                            chain=member_chains[0] if member_chains else None,
+                        )
                     while True:
                         b = f.read(_READ_CHUNK)
                         if not b:
@@ -274,24 +306,39 @@ def _extract_zip(path: Path, depth: int) -> ExtractedDoc:
                             warnings.append(
                                 "decompressed_size_cap_exceeded"
                             )
-                            return _result_doc("zip", text_parts, warnings)
+                            return _result_doc(
+                                "zip", text_parts, warnings,
+                                chain=member_chains[0] if member_chains else None,
+                            )
                         chunks.append(b)
                     member_bytes = b"".join(chunks)
 
                 # Recurse via the registry — depth+1 is enforced by dispatch().
-                t, w = _process_member_bytes(
-                    info.filename, member_bytes, depth
+                t, w, chain = _process_member_bytes(
+                    info.filename,
+                    member_bytes,
+                    depth,
+                    parent_filename=parent_filename,
+                    parent_mime="application/zip",
                 )
                 if t:
                     text_parts.append(
                         f"{_MEMBER_SEPARATOR.format(name=info.filename)}\n{t}"
                     )
                 warnings.extend(w)
+                if chain:
+                    member_chains.append(chain)
     except zipfile.BadZipFile as exc:
         warnings.append(f"bad_zip_file:{exc}")
-        return _result_doc("zip", text_parts, warnings)
+        return _result_doc(
+            "zip", text_parts, warnings,
+            chain=member_chains[0] if member_chains else None,
+        )
 
-    return _result_doc("zip", text_parts, warnings)
+    return _result_doc(
+        "zip", text_parts, warnings,
+        chain=member_chains[0] if member_chains else None,
+    )
 
 
 def _extract_tar(path: Path, depth: int) -> ExtractedDoc:
@@ -303,6 +350,8 @@ def _extract_tar(path: Path, depth: int) -> ExtractedDoc:
     text_parts: list[str] = []
     warnings: list[str] = []
     cumulative = 0
+    parent_filename = path.name or "(archive)"
+    member_chains: list[list[dict]] = []
 
     try:
         with tarfile.open(path, "r:*") as tf:
@@ -344,7 +393,10 @@ def _extract_tar(path: Path, depth: int) -> ExtractedDoc:
                 cumulative += len(head)
                 if cumulative > MAX_ARCHIVE_TOTAL_BYTES:
                     warnings.append("decompressed_size_cap_exceeded")
-                    return _result_doc("tar", text_parts, warnings)
+                    return _result_doc(
+                        "tar", text_parts, warnings,
+                        chain=member_chains[0] if member_chains else None,
+                    )
                 while True:
                     b = f.read(_READ_CHUNK)
                     if not b:
@@ -352,21 +404,38 @@ def _extract_tar(path: Path, depth: int) -> ExtractedDoc:
                     cumulative += len(b)
                     if cumulative > MAX_ARCHIVE_TOTAL_BYTES:
                         warnings.append("decompressed_size_cap_exceeded")
-                        return _result_doc("tar", text_parts, warnings)
+                        return _result_doc(
+                            "tar", text_parts, warnings,
+                            chain=member_chains[0] if member_chains else None,
+                        )
                     chunks.append(b)
                 member_bytes = b"".join(chunks)
 
-                t, w = _process_member_bytes(m.name, member_bytes, depth)
+                t, w, chain = _process_member_bytes(
+                    m.name,
+                    member_bytes,
+                    depth,
+                    parent_filename=parent_filename,
+                    parent_mime="application/x-tar",
+                )
                 if t:
                     text_parts.append(
                         f"{_MEMBER_SEPARATOR.format(name=m.name)}\n{t}"
                     )
                 warnings.extend(w)
+                if chain:
+                    member_chains.append(chain)
     except tarfile.TarError as exc:
         warnings.append(f"bad_tar_file:{exc}")
-        return _result_doc("tar", text_parts, warnings)
+        return _result_doc(
+            "tar", text_parts, warnings,
+            chain=member_chains[0] if member_chains else None,
+        )
 
-    return _result_doc("tar", text_parts, warnings)
+    return _result_doc(
+        "tar", text_parts, warnings,
+        chain=member_chains[0] if member_chains else None,
+    )
 
 
 def extract(path, mime: str, depth: int = 0) -> Optional[ExtractedDoc]:

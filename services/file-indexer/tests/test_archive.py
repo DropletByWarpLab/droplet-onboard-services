@@ -134,6 +134,22 @@ def test_too_many_members_aborts_with_warning(tmp_path, monkeypatch):
     assert any(w.startswith("too_many_members:") for w in result["warnings"])
 
 
+def test_archive_with_member_writes_chain_metadata():
+    """WARP-214: nested.zip (zip-in-zip) produces a chain[] reflecting the
+    archive lineage. The chunker propagates this to chunk metadata.
+    """
+    result = archive.extract(FIXTURES / "nested.zip", mime="application/zip")
+    assert result is not None
+    metadata = result.get("metadata", {})
+    chain = metadata.get("chain")
+    assert chain is not None, f"chain missing; metadata keys={list(metadata)}"
+    # The outermost archive (.zip) is the parent; the inner archive's content
+    # is the leaf.
+    assert any(c.get("mime") == "application/zip" for c in chain), (
+        f"chain {chain} should include the outer zip"
+    )
+
+
 def test_tar_archive_extracts_member_text(tmp_path):
     """A plain .tar — the extractor handles it through the same code path."""
     import tarfile
