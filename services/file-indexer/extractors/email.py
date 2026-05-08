@@ -113,11 +113,15 @@ def _dispatch_attachment(
     filename: str,
     depth: int,
     parent_email_id: Optional[str],
-) -> tuple[list[str], list[str]]:
+    parent_filename: str = "(email)",
+    parent_mime: str = "message/rfc822",
+) -> tuple[list[str], list[str], Optional[list[dict]]]:
     """Write payload to a temp file, sniff its MIME, recurse via dispatch.
 
-    Returns (text_parts, warnings) — text_parts is empty if the
-    attachment couldn't be handled.
+    Returns (text_parts, warnings, chain) — text_parts is empty and chain is
+    None if the attachment couldn't be handled. WARP-214: the returned chain
+    traces parent → (sub.metadata.chain, if any) → child so downstream
+    chunkers can stamp each chunk with its recursion lineage.
     """
     # Local import avoids a circular dep at module load time
     # (registry imports extractors.email lazily inside _route + _cap_for_mime).
@@ -136,7 +140,7 @@ def _dispatch_attachment(
         sub = registry.dispatch(tmp, mime, depth=depth + 1)
         if sub is None:
             warnings.append(f"unsupported_attachment:{filename}:{mime}")
-            return text_parts, warnings
+            return text_parts, warnings, None
         text_parts.append(_ATTACHMENT_SEPARATOR.format(name=filename))
         text_parts.append(sub.get("text", ""))
         for w in sub.get("warnings") or []:
@@ -148,20 +152,45 @@ def _dispatch_attachment(
         if parent_email_id is not None:
             sub_meta = sub.get("metadata") or {}
             sub_meta["parent_email_id"] = parent_email_id
+        # WARP-214: build the chain lineage. Convention: a chain is
+        # [outermost, ..., innermost-leaf]. If the attachment was itself a
+        # recursive carrier (nested .eml/.zip) its sub_chain already starts
+        # with itself — we just prepend our parent. Otherwise produce a
+        # 2-segment parent → child chain.
+        sub_chain = (sub.get("metadata") or {}).get("chain") or []
+        if sub_chain:
+            chain = [
+                {"filename": parent_filename, "mime": parent_mime},
+                *sub_chain,
+            ]
+        else:
+            chain = [
+                {"filename": parent_filename, "mime": parent_mime},
+                {"filename": filename, "mime": mime},
+            ]
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-    return text_parts, warnings
+    return text_parts, warnings, chain
 
 
 def _walk_eml_attachments(
-    msg: Message, depth: int, parent_email_id: Optional[str]
-) -> tuple[str, list[str]]:
-    """Recursively dispatch each .eml attachment; return (text, warnings)."""
+    msg: Message,
+    depth: int,
+    parent_email_id: Optional[str],
+    parent_filename: str = "(email)",
+) -> tuple[str, list[str], list[list[dict]]]:
+    """Recursively dispatch each .eml attachment.
+
+    Returns (text, warnings, chains) — chains is one chain[] per
+    successfully-dispatched attachment so downstream callers can attach
+    a parent-side chain to the ExtractedDoc metadata.
+    """
     all_text: list[str] = []
     all_warnings: list[str] = []
+    all_chains: list[list[dict]] = []
     for part in msg.walk():
         if part.is_multipart():
             continue
@@ -171,10 +200,19 @@ def _walk_eml_attachments(
         payload = part.get_payload(decode=True) or b""
         if not payload:
             continue
-        parts, warnings = _dispatch_attachment(payload, filename, depth, parent_email_id)
+        parts, warnings, chain = _dispatch_attachment(
+            payload,
+            filename,
+            depth,
+            parent_email_id,
+            parent_filename=parent_filename,
+            parent_mime="message/rfc822",
+        )
         all_text.extend(parts)
         all_warnings.extend(warnings)
-    return "\n".join(all_text), all_warnings
+        if chain:
+            all_chains.append(chain)
+    return "\n".join(all_text), all_warnings, all_chains
 
 
 def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> ExtractedDoc:
@@ -183,8 +221,9 @@ def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
         msg = stdlib_email.message_from_binary_file(f, policy=email.policy.default)
     headers = _format_headers(msg)
     body = _extract_body(msg)
-    attachments_text, attachment_warnings = _walk_eml_attachments(
-        msg, depth, parent_email_id
+    parent_filename = os.path.basename(path) or "(email)"
+    attachments_text, attachment_warnings, attachment_chains = _walk_eml_attachments(
+        msg, depth, parent_email_id, parent_filename=parent_filename
     )
 
     sections = [s for s in (headers, body, attachments_text) if s]
@@ -196,18 +235,26 @@ def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
         # (offset of the first body char in the combined string).
         page_breaks.append(len(headers) + 2)  # +2 for "\n\n"
 
+    metadata: dict = {
+        "extractor_name": "email",
+        "extractor_version": "1.0",
+        "from": msg.get("From"),
+        "to": msg.get("To"),
+        "subject": msg.get("Subject"),
+        "date": msg.get("Date"),
+    }
+    # WARP-214: surface the first attachment's chain on the doc-level metadata
+    # so the chunker propagates it to FileContentChunk.metadata.chain. Multiple
+    # attachments produce multiple chains; chunk-level chain assignment is a
+    # follow-up — the dashboard's depth-2 cap is satisfied by the first chain.
+    if attachment_chains:
+        metadata["chain"] = attachment_chains[0]
+
     return ExtractedDoc(
         text=full_text,
         page_breaks=page_breaks,
         language=None,
-        metadata={
-            "extractor_name": "email",
-            "extractor_version": "1.0",
-            "from": msg.get("From"),
-            "to": msg.get("To"),
-            "subject": msg.get("Subject"),
-            "date": msg.get("Date"),
-        },
+        metadata=metadata,
         warnings=attachment_warnings,
     )
 
@@ -234,14 +281,25 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
 
     attachments_text_parts: list[str] = []
     warnings: list[str] = []
+    parent_filename = os.path.basename(str(path)) or "(email)"
+    msg_chains: list[list[dict]] = []
     for att in m.attachments:
         filename = att.longFilename or att.shortFilename or "unnamed"
         payload = att.data
         if not payload:
             continue
-        parts, sub_warnings = _dispatch_attachment(payload, filename, depth, parent_email_id)
+        parts, sub_warnings, chain = _dispatch_attachment(
+            payload,
+            filename,
+            depth,
+            parent_email_id,
+            parent_filename=parent_filename,
+            parent_mime="application/vnd.ms-outlook",
+        )
         attachments_text_parts.extend(parts)
         warnings.extend(sub_warnings)
+        if chain:
+            msg_chains.append(chain)
 
     attachments_text = "\n".join(attachments_text_parts)
     sections = [s for s in (headers, body, attachments_text) if s]
@@ -251,18 +309,23 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
     if headers and body:
         page_breaks.append(len(headers) + 2)
 
+    metadata: dict = {
+        "extractor_name": "email",
+        "extractor_version": "1.0",
+        "from": m.sender,
+        "to": m.to,
+        "subject": m.subject,
+        "date": str(m.date) if m.date else None,
+    }
+    # WARP-214: see _extract_eml — first chain wins for doc-level metadata.
+    if msg_chains:
+        metadata["chain"] = msg_chains[0]
+
     return ExtractedDoc(
         text=full_text,
         page_breaks=page_breaks,
         language=None,
-        metadata={
-            "extractor_name": "email",
-            "extractor_version": "1.0",
-            "from": m.sender,
-            "to": m.to,
-            "subject": m.subject,
-            "date": str(m.date) if m.date else None,
-        },
+        metadata=metadata,
         warnings=warnings,
     )
 

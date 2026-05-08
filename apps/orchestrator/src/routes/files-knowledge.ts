@@ -92,6 +92,10 @@ function serializeChunk(row: any) {
     source: row.source ?? "nextcloud",
     brainItemId: row.brainItemId ?? null,
     pageNumber: row.pageNumber ?? null,
+    // WARP-214: free-form per-chunk metadata for breadcrumbs (chain[])
+    // + source-channel badge (subtitle_source). Returns null when the
+    // row is from before the WARP-214 migration / extractor backfill.
+    metadata: row.metadata ?? null,
   };
 }
 
@@ -293,7 +297,16 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
         since: validSince,
       });
 
-      res.json({ hits });
+      // WARP-214: surface free-form metadata (chain[], subtitle_source) on the
+      // wire so the dashboard's Breadcrumbs + SourceChannelBadge can render
+      // without an extra fetch. `metadata` is null on legacy rows; the
+      // dashboard treats null/undefined the same.
+      res.json({
+        hits: (hits as Array<Record<string, unknown>>).map((h) => ({
+          ...h,
+          metadata: (h.metadata as unknown) ?? null,
+        })),
+      });
     } catch (err) {
       next(err);
     }

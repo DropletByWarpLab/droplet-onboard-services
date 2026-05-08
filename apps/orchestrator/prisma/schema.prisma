@@ -281,6 +281,14 @@ model FileContentChunk {
   brainItemId String?
   pageNumber  Int?
   warnings    String[]                   @default([])
+  // WARP-214: free-form per-chunk metadata. Today carries:
+  //   - chain[]            { filename, mime, parentItemId? }[] for email/archive recursion
+  //   - subtitle_source    "asr_transcript" | "embedded" | "frame_ocr"
+  // The orchestrator surfaces this verbatim on the /api/files/knowledge
+  // routes; the dashboard renders breadcrumbs + source-channel badge from it.
+  // Keep loose-typed Json so future extractors can add fields without
+  // requiring a migration (e.g. WARP-208 frame OCR, WARP-207 diarization).
+  metadata    Json?
 
   @@unique([ncFileId, chunkIdx])
   @@index([userId])

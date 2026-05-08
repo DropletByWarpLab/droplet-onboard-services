@@ -32,6 +32,13 @@ export interface SearchHit {
   score: number;
   snippet: string;
   brainItemId: string | null;
+  /**
+   * WARP-214: free-form per-chunk metadata. Carries `chain[]` (recursion
+   * breadcrumbs from email/archive extractors) and `subtitle_source`
+   * (from the video extractor). Null for legacy rows that pre-date the
+   * jsonb column.
+   */
+  metadata: Record<string, unknown> | null;
 }
 
 export interface SearchByVectorParams {
@@ -57,6 +64,7 @@ interface RawSearchRow {
   brainItemId: string | null;
   score: number;
   snippet: string;
+  metadata: Record<string, unknown> | null;
 }
 
 export async function searchByVector(
@@ -87,6 +95,7 @@ export async function searchByVector(
            "pageNumber",
            "brainItemId",
            LEFT(text, 280) AS snippet,
+           metadata,
            1 - (embedding <=> '${vec}'::vector) AS score
     FROM "FileContentChunk"
     WHERE ${where.join(" AND ")}
@@ -109,6 +118,7 @@ export async function searchByVector(
       brainItemId: r.brainItemId,
       score: r.score,
       snippet: r.snippet,
+      metadata: r.metadata ?? null,
     }));
 }
 

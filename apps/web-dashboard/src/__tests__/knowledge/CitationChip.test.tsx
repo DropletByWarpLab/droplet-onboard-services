@@ -83,4 +83,47 @@ describe("CitationChip", () => {
     expect(link.textContent).not.toMatch(/p\./);
     expect(link.textContent).not.toMatch(/%/);
   });
+
+  // ──────────────────────────────────────────
+  // WARP-214: iconForMime integration
+  // ──────────────────────────────────────────
+  it("uses an icon mapped from mimeType prop when provided", () => {
+    const { container: audio } = render(
+      <CitationChip
+        source="brain"
+        path="/Brain/meeting.m4a"
+        mimeType="audio/mp4"
+      />
+    );
+    const audioSvg = audio.querySelector("svg");
+    expect(audioSvg).toBeTruthy();
+    const audioMarkup = audioSvg!.outerHTML;
+
+    const { container: text } = render(
+      <CitationChip
+        source="brain"
+        path="/Brain/foo.txt"
+        mimeType="text/plain"
+      />
+    );
+    const textSvg = text.querySelector("svg");
+    expect(textSvg).toBeTruthy();
+    // Different MIMEs render different lucide icons → different SVG markup.
+    expect(audioMarkup).not.toEqual(textSvg!.outerHTML);
+  });
+
+  it("falls back to a path-derived MIME when mimeType prop is omitted (zip path → archive icon)", () => {
+    const { container: zip } = render(
+      <CitationChip source="brain" path="/Brain/q1-stuff.zip" />
+    );
+    const { container: txt } = render(
+      <CitationChip source="brain" path="/Brain/notes.txt" />
+    );
+    const zipSvg = zip.querySelector("svg");
+    const txtSvg = txt.querySelector("svg");
+    expect(zipSvg).toBeTruthy();
+    expect(txtSvg).toBeTruthy();
+    // The two paths resolve to different MIMEs → different icons.
+    expect(zipSvg!.outerHTML).not.toEqual(txtSvg!.outerHTML);
+  });
 });

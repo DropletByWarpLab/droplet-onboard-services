@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -55,6 +56,7 @@ def upsert_chunk(
     brain_item_id: Optional[str] = None,
     page_number: Optional[int] = None,
     warnings: Optional[list[str]] = None,
+    metadata: Optional[dict] = None,
 ) -> None:
     """Insert or update a single chunk + embedding.
 
@@ -69,16 +71,23 @@ def upsert_chunk(
     watcher path untouched. The `nc_file_id` for brain rows is 0 (the
     column is non-null in the schema; the row's identity comes from
     `brainItemId` instead).
+
+    WARP-214 adds the optional `metadata` jsonb column carrying free-form
+    per-chunk metadata: today the `chain[]` recursion breadcrumb (email +
+    archive) and `subtitle_source` (video). Future extractors extend the
+    dict without needing a schema change.
     """
+    metadata_value = json.dumps(metadata) if metadata is not None else None
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO "FileContentChunk"
                 ("userId", "ncFileId", "path", "chunkIdx", "text", "embedding",
-                 "indexedAt", "source", "brainItemId", "pageNumber", "warnings")
+                 "indexedAt", "source", "brainItemId", "pageNumber", "warnings",
+                 "metadata")
             VALUES (%s, %s, %s, %s, %s, %s::vector, NOW(), %s::"FileContentSource",
-                    %s, %s, %s)
+                    %s, %s, %s, %s::jsonb)
             ON CONFLICT ("ncFileId", "chunkIdx")
             DO UPDATE SET
                 "path"        = EXCLUDED."path",
@@ -88,7 +97,8 @@ def upsert_chunk(
                 "source"      = EXCLUDED."source",
                 "brainItemId" = EXCLUDED."brainItemId",
                 "pageNumber"  = EXCLUDED."pageNumber",
-                "warnings"    = EXCLUDED."warnings"
+                "warnings"    = EXCLUDED."warnings",
+                "metadata"    = EXCLUDED."metadata"
             """,
             (
                 user_id,
@@ -101,6 +111,7 @@ def upsert_chunk(
                 brain_item_id,
                 page_number,
                 warnings or [],
+                metadata_value,
             ),
         )
 

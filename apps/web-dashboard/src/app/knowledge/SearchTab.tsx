@@ -19,6 +19,9 @@ import {
   type SearchKnowledgeResponse,
 } from "@/lib/api";
 import { CitationChip } from "@/components/CitationChip";
+import { Breadcrumbs } from "@/components/Breadcrumbs";
+import { SourceChannelBadge } from "@/components/SourceChannelBadge";
+import { mimeFromPath } from "@/lib/mime-icons";
 
 interface Props {
   initialQuery?: string;
@@ -160,23 +163,36 @@ export function SearchTab({
 
       {status.kind === "ready" && status.hits.length > 0 && (
         <ul className="space-y-2" data-testid="knowledge-search-results">
-          {status.hits.map((hit, i) => (
-            <li key={`${hit.path}-${i}`} className="dp-card p-3">
-              <div className="flex items-center gap-2 mb-2 flex-wrap">
-                <CitationChip
-                  source={hit.source}
-                  path={hit.path}
-                  pageNumber={hit.pageNumber}
-                  score={hit.score}
-                  brainItemId={hit.brainItemId}
-                  snippet={hit.snippet}
-                />
-              </div>
-              <p className="type-caption-1 text-label-secondary line-clamp-3">
-                {hit.snippet}
-              </p>
-            </li>
-          ))}
+          {status.hits.map((hit, i) => {
+            // WARP-214: feed the chip a derived MIME so the icon matches
+            // the file's true type instead of the source-based fallback.
+            const mime = mimeFromPath(hit.path);
+            return (
+              <li key={`${hit.path}-${i}`} className="dp-card p-3">
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
+                  <CitationChip
+                    source={hit.source}
+                    path={hit.path}
+                    pageNumber={hit.pageNumber}
+                    score={hit.score}
+                    brainItemId={hit.brainItemId}
+                    snippet={hit.snippet}
+                    mimeType={mime}
+                  />
+                  <SourceChannelBadge
+                    subtitleSource={hit.metadata?.subtitle_source ?? null}
+                    warnings={[]}
+                  />
+                </div>
+                {/* WARP-214: chevron-joined recursion lineage if the hit
+                    came from a recursive carrier (zip → email → pdf). */}
+                <Breadcrumbs chain={hit.metadata?.chain} />
+                <p className="type-caption-1 text-label-secondary line-clamp-3">
+                  {hit.snippet}
+                </p>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

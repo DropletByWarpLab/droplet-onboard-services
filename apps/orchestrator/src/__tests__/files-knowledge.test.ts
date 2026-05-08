@@ -242,6 +242,109 @@ describe("files-knowledge routes", () => {
       expect(res.body.error).toMatch(/embedding/i);
     });
 
+    // ──────────────────────────────────────────
+    // WARP-214: metadata serialization
+    // ──────────────────────────────────────────
+    describe("WARP-214: metadata serialization", () => {
+      it("includes metadata.chain on /recent responses when present on chunks", async () => {
+        const fakeRow = {
+          id: 99n,
+          userId: "dev",
+          ncFileId: 0,
+          path: "/Brain/q1-stuff.zip/march.eml/proposal.pdf",
+          chunkIdx: 0,
+          text: "the budget for q4 is one hundred thousand",
+          indexedAt: new Date("2026-05-01"),
+          source: "brain",
+          brainItemId: "bmi-99",
+          pageNumber: null,
+          warnings: [],
+          metadata: {
+            chain: [
+              { filename: "q1-stuff.zip", mime: "application/zip" },
+              { filename: "march.eml", mime: "message/rfc822" },
+              { filename: "proposal.pdf", mime: "application/pdf" },
+            ],
+            subtitle_source: null,
+          },
+        };
+        findManyMock.mockResolvedValueOnce([fakeRow]);
+
+        const res = await request(app).get("/api/files/knowledge/recent");
+        expect(res.status).toBe(200);
+        expect(res.body.items[0].metadata).toBeDefined();
+        expect(res.body.items[0].metadata.chain).toHaveLength(3);
+        expect(res.body.items[0].metadata.chain[0].filename).toBe("q1-stuff.zip");
+      });
+
+      it("returns null metadata on legacy chunks (pre-WARP-214 rows)", async () => {
+        // Row without a `metadata` key at all — simulates a row created
+        // before the migration applied. The route must surface `null`
+        // rather than `undefined` so JSON shape stays stable.
+        findManyMock.mockResolvedValueOnce([
+          {
+            id: 1n,
+            userId: "dev",
+            ncFileId: 100,
+            path: "/Documents/notes.txt",
+            chunkIdx: 0,
+            text: "Hello world",
+            indexedAt: new Date("2026-04-30"),
+          },
+        ]);
+
+        const res = await request(app).get("/api/files/knowledge/recent");
+        expect(res.status).toBe(200);
+        expect(res.body.items[0].metadata).toBeNull();
+      });
+
+      it("includes metadata.subtitle_source on /search hits when present", async () => {
+        embedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+        searchByVectorSpy.mockResolvedValueOnce([
+          {
+            path: "/Brain/meeting.mp4",
+            score: 0.95,
+            text: "transcript text",
+            snippet: "transcript text",
+            source: "brain",
+            chunkIdx: 0,
+            pageNumber: null,
+            brainItemId: "bmi-1",
+            metadata: { subtitle_source: "asr_transcript" },
+          },
+        ]);
+
+        const res = await request(app).get(
+          "/api/files/knowledge/search?q=meeting"
+        );
+        expect(res.status).toBe(200);
+        expect(res.body.hits[0].metadata).toBeDefined();
+        expect(res.body.hits[0].metadata.subtitle_source).toBe("asr_transcript");
+      });
+
+      it("returns null metadata on /search hits without metadata (legacy)", async () => {
+        embedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+        searchByVectorSpy.mockResolvedValueOnce([
+          {
+            path: "/Documents/old.txt",
+            score: 0.9,
+            text: "...",
+            snippet: "...",
+            source: "nextcloud",
+            chunkIdx: 0,
+            pageNumber: null,
+            brainItemId: null,
+          },
+        ]);
+
+        const res = await request(app).get(
+          "/api/files/knowledge/search?q=hello"
+        );
+        expect(res.status).toBe(200);
+        expect(res.body.hits[0].metadata).toBeNull();
+      });
+    });
+
     it("returns hits when embedding + file-search both succeed", async () => {
       embedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
       searchByVectorSpy.mockResolvedValueOnce([
