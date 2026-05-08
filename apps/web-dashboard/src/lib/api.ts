@@ -42,6 +42,10 @@ import type {
   DrivesResponse,
   WirelessScanResult,
   AuthUser,
+  InviteCreateRequest,
+  InviteCreateResponse,
+  InvitePublicInfo,
+  InviteListItem,
   ShareInfo,
   ShareDetail,
   ShareCreateOptions,
@@ -132,6 +136,96 @@ export async function deleteUser(username: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+}
+
+// --- WARP-217 invites ---
+
+/**
+ * Generate a single-use invite token + URL. Admin-only on the backend; the
+ * dashboard's Users page is already gated, so this throws on 403.
+ */
+export async function createInvite(
+  payload: InviteCreateRequest,
+): Promise<InviteCreateResponse> {
+  const res = await authFetch(`${BASE}/api/auth/invites`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Failed to create invite");
+  }
+  return res.json();
+}
+
+export async function listInvites(): Promise<{ invites: InviteListItem[] }> {
+  const res = await authFetch(`${BASE}/api/auth/invites`);
+  if (!res.ok) throw new Error(`Failed to list invites: ${res.status}`);
+  return res.json();
+}
+
+export async function revokeInvite(token: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/auth/invites/${encodeURIComponent(token)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to revoke invite: ${res.status}`);
+  }
+}
+
+/**
+ * PUBLIC — invitee fetches their invite metadata before setting a password.
+ * Throws with `{ status, code }`-shaped detail so callers can distinguish
+ * 404 (not found / revoked) from 410 USED / 410 EXPIRED.
+ */
+export async function getInvite(token: string): Promise<InvitePublicInfo> {
+  const res = await authFetch(
+    `${BASE}/api/auth/invites/accept/${encodeURIComponent(token)}`,
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || `Invite unavailable: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = data.code;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
+ * PUBLIC — invitee submits a password to claim the invite. On success the
+ * orchestrator sets the same JWT cookies as /auth/login and returns the
+ * user payload, so the caller can navigate straight into the dashboard.
+ */
+export async function acceptInvite(
+  token: string,
+  password: string,
+): Promise<{ user: AuthUser & { role: string } }> {
+  const res = await authFetch(
+    `${BASE}/api/auth/invites/accept/${encodeURIComponent(token)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || `Failed to accept invite: ${res.status}`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    err.status = res.status;
+    err.code = data.code;
+    throw err;
+  }
+  return res.json();
 }
 
 // --- Storage ---
