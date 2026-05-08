@@ -14,6 +14,7 @@
 
 import Link from "next/link";
 import { FileText, Sparkles } from "lucide-react";
+import { iconForMime, mimeFromPath } from "@/lib/mime-icons";
 
 export interface CitationChipProps {
   source: "nextcloud" | "brain";
@@ -25,6 +26,12 @@ export interface CitationChipProps {
   snippet?: string;
   /** Override the click-through URL — defaults to a sensible per-source destination. */
   href?: string;
+  /**
+   * WARP-214: when provided, the chip uses the Lucide icon mapped from this
+   * MIME via `iconForMime`. When omitted, falls back to the source-based
+   * Sparkles/FileText choice (preserving pre-WARP-214 behavior).
+   */
+  mimeType?: string;
 }
 
 function defaultHref(props: CitationChipProps): string {
@@ -41,9 +48,22 @@ function defaultHref(props: CitationChipProps): string {
 }
 
 export function CitationChip(props: CitationChipProps) {
-  const { source, path, pageNumber, score, snippet } = props;
+  const { source, path, pageNumber, score, snippet, mimeType } = props;
   const fileName = path.split("/").pop() || path;
-  const Icon = source === "brain" ? Sparkles : FileText;
+  // WARP-214: prefer the explicit MIME the caller hands us; fall back to
+  // path-derived MIME so the dashboard's RecentlyIndexed/Search surfaces
+  // still get a meaningful icon when the orchestrator only carries the
+  // path. Only when neither yields a hit do we fall back to the legacy
+  // source-based Sparkles/FileText choice.
+  let Icon = source === "brain" ? Sparkles : FileText;
+  if (mimeType) {
+    Icon = iconForMime(mimeType);
+  } else {
+    const guessed = mimeFromPath(path);
+    if (guessed !== "application/octet-stream") {
+      Icon = iconForMime(guessed);
+    }
+  }
   const tone =
     source === "brain"
       ? "bg-accent-subtle text-accent border-accent/20 hover:bg-accent/15"
