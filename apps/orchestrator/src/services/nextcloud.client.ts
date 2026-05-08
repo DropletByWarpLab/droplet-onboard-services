@@ -402,19 +402,29 @@ export async function ncCreateUser(
   adminToken: string,
   username: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  groups?: string[],
 ): Promise<void> {
+  // OCS accepts repeated `groups[]` form fields. URLSearchParams handles
+  // repeats fine when we use the array-tuple constructor form.
+  const params: Array<[string, string]> = [
+    ["userid", username],
+    ["password", password],
+  ];
+  if (displayName) params.push(["displayName", displayName]);
+  if (groups) {
+    for (const g of groups) {
+      params.push(["groups[]", g]);
+    }
+  }
+
   const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/users"), {
     method: "POST",
     headers: {
       ...ocsHeaders(adminToken),
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: new URLSearchParams({
-      userid: username,
-      password,
-      ...(displayName ? { displayName } : {}),
-    }),
+    body: new URLSearchParams(params),
   });
 
   if (!resp.ok) {
