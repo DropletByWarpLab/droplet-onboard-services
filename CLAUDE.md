@@ -53,6 +53,15 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
     reads, and microcontroller event loops on different runtimes (CircuitPython).
     The rule is about *scheduling* — fire X every N seconds / at time Y — not
     about every loop in the codebase.
+- **No guessing, ever.** Persistent state lives in explicit columns, not in
+  the absence of other columns. If `status` is a property of a row, declare
+  it as `status: SomeEnum`; do not derive it from `indexedAt IS NULL` or
+  similar absence patterns. Querying for "all failed transcripts" should be
+  `WHERE status = 'failed'` — direct, indexable, no joins, no compound
+  predicates over nullable fields. Adding a column for the canonical
+  representation is cheaper than every reader having to remember the
+  derivation rule. WARP-218's `BrainMemoryItemStatus` enum is the canonical
+  example; copy that pattern.
 
 ## LLM tool calling
 
