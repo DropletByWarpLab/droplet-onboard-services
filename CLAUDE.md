@@ -35,6 +35,25 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Frigate
 - **Smart home:** Native Matter controller in the orchestrator (`matter.service.ts`). The dashboard talks to Matter directly via `/api/matter/*`.
 
+## Coding standards
+
+- **No `while True` loops for scheduling.** Use a proper scheduler instead:
+  - **Python services:** `apscheduler` (`AsyncIOScheduler` for asyncio services,
+    `BackgroundScheduler` otherwise). Pinned to `apscheduler` in each service's
+    `requirements.txt`. The first canonical usage lands in WARP-218
+    (`services/file-indexer`); copy that pattern.
+  - **TypeScript orchestrator:** `apps/orchestrator/src/services/cron-runtime.service.ts`
+    via `createCronRuntime(...).scheduleCron(...)` or `.scheduleInterval(...)`.
+    Already used by reminders-poller, schedule ticker, and the daily 03:00 purge.
+  - Existing `while True` violations are tracked in WARP-221 (camera-discovery's
+    ONVIF scan, switch driver's keepalive). Add new ones to that ticket if you
+    spot more — don't introduce them.
+  - Legitimate `while True` patterns DO exist and are NOT covered by this rule:
+    event-driven dispatch loops (`await event.wait()`), bounded chunk-streaming
+    reads, and microcontroller event loops on different runtimes (CircuitPython).
+    The rule is about *scheduling* — fire X every N seconds / at time Y — not
+    about every loop in the codebase.
+
 ## LLM tool calling
 
 - All LLM-callable tools live in the `@droplet/tools-core` workspace package
