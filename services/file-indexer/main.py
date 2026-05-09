@@ -67,6 +67,64 @@ def main():
     except Exception:
         logger.warning("brain_ingest: failed to subscribe — chat-attached files won't index")
 
+    # WARP-218: reconcile any items stuck mid-transcription before the
+    # scheduler starts ticking, so a crashed run doesn't leave rows in
+    # 'indexing' forever. Non-fatal if the DB is briefly unavailable —
+    # the next daily run will retry.
+    try:
+        import transcription_worker
+        transcription_worker.reconcile_at_startup()
+    except Exception:
+        logger.warning("transcription_worker.reconcile: failed at startup (non-fatal)")
+
+    # WARP-218: subscribe to the orchestrator's "run one" command topic so
+    # /transcribe-now overrides land here. Handler dispatches to the worker
+    # synchronously on the paho network thread — same shape as brain_ingest.
+    def _handle_run_one(payload: dict) -> None:
+        item_id = payload.get("itemId")
+        if not isinstance(item_id, str) or not item_id:
+            logger.warning("run_one: missing or invalid itemId in payload: %r", payload)
+            return
+        try:
+            import transcription_worker
+            transcription_worker.run_one(item_id)
+        except Exception:
+            logger.exception("transcription_worker.run_one crashed for %s", item_id)
+    try:
+        from mqtt_client import subscribe as mqtt_subscribe
+        mqtt_subscribe("droplet/transcription/run-one", _handle_run_one)
+    except Exception:
+        logger.warning("transcription_worker: run-one subscribe failed (non-fatal)")
+
+    # WARP-218: start the daily scheduler. Per CLAUDE.md, scheduling work
+    # uses apscheduler — never while-True loops. The scheduler runs on its
+    # own asyncio loop in a daemon thread because main()'s primary
+    # blocking surface is still the watchdog Observer (started below).
+    import asyncio
+    import threading
+    scheduler_holder: dict = {}
+    scheduler_loop: dict = {}
+
+    def _scheduler_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        scheduler_loop["loop"] = loop
+        try:
+            import scheduler_service
+            scheduler_holder["scheduler"] = scheduler_service.build_scheduler()
+        except Exception:
+            logger.exception("scheduler_service.build_scheduler failed")
+            return
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+
+    sched_thread = threading.Thread(
+        target=_scheduler_thread, name="warp218-scheduler", daemon=True
+    )
+    sched_thread.start()
+
     # Start watching
     from watcher import start_watcher
     observer = start_watcher()
@@ -74,6 +132,18 @@ def main():
     # Graceful shutdown
     def shutdown(sig, _frame):
         logger.info("Shutting down (signal %s)...", sig)
+        sched = scheduler_holder.get("scheduler")
+        if sched is not None:
+            try:
+                sched.shutdown(wait=False)
+            except Exception:
+                pass
+        loop = scheduler_loop.get("loop")
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
         observer.stop()
         observer.join(timeout=5)
         sys.exit(0)
@@ -81,7 +151,10 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Block main thread
+    # Block main thread on the watchdog Observer. The Observer's own
+    # internal scheduling is event-driven (inotify), so the `while
+    # observer.is_alive()` here is the canonical "wait for thread to
+    # exit" pattern, not a scheduling loop.
     try:
         while observer.is_alive():
             observer.join(timeout=1)
