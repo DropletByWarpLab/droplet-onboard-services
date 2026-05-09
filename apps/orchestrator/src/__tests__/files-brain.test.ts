@@ -121,6 +121,12 @@ type Item = {
   indexedAt: Date | null;
   extractorWarnings: string[];
   hasOriginalBytes: boolean;
+  // WARP-218
+  status: string;
+  failureReason: string | null;
+  lastAttemptedAt: Date | null;
+  recentAttemptCount: number;
+  recentAttemptWindowStartedAt: Date | null;
 };
 const itemStore = new Map<string, Item>();
 let cuidCounter = 0;
@@ -150,6 +156,11 @@ vi.mock("@prisma/client", () => {
           indexedAt: null,
           extractorWarnings: data.extractorWarnings ?? [],
           hasOriginalBytes: data.hasOriginalBytes ?? true,
+          status: data.status ?? "indexing",
+          failureReason: data.failureReason ?? null,
+          lastAttemptedAt: data.lastAttemptedAt ?? null,
+          recentAttemptCount: data.recentAttemptCount ?? 0,
+          recentAttemptWindowStartedAt: data.recentAttemptWindowStartedAt ?? null,
         };
         itemStore.set(id, record);
         return record;
@@ -211,6 +222,15 @@ vi.mock("@prisma/client", () => {
   return {
     PrismaClient: vi.fn(() => mockPrisma),
     Prisma: { PrismaClientKnownRequestError: class extends Error {} },
+    // WARP-218: route imports BrainMemoryItemStatus directly to pick the
+    // initial status by MIME — the mock has to surface the same enum
+    // values the real generated client emits.
+    BrainMemoryItemStatus: {
+      queued_for_transcription: "queued_for_transcription",
+      indexing: "indexing",
+      ready: "ready",
+      failed: "failed",
+    },
   };
 });
 
@@ -448,6 +468,46 @@ describe("POST /api/files/brain/upload", () => {
       .post("/api/files/brain/upload")
       .attach("file", fakeVideo, { filename, contentType: mime });
     expect(res.status).toBe(202);
+  });
+
+  // WARP-218 — audio + video uploads must land with
+  // status='queued_for_transcription' so the daily ASR worker (and the
+  // synchronous brain_ingest path's skip guard) can see them. Other
+  // MIMEs keep the original 'indexing' status.
+  it("audio uploads insert with status=queued_for_transcription (WARP-218)", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.alloc(64), {
+        filename: "memo.wav",
+        contentType: "audio/wav",
+      });
+    expect(res.status).toBe(202);
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.status).toBe("queued_for_transcription");
+  });
+
+  it("video uploads insert with status=queued_for_transcription (WARP-218)", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.alloc(64), {
+        filename: "demo.mp4",
+        contentType: "video/mp4",
+      });
+    expect(res.status).toBe(202);
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.status).toBe("queued_for_transcription");
+  });
+
+  it("document uploads keep status=indexing (existing path) (WARP-218)", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("hello"), {
+        filename: "note.txt",
+        contentType: "text/plain",
+      });
+    expect(res.status).toBe(202);
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.status).toBe("indexing");
   });
 });
 

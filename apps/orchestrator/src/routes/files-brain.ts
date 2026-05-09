@@ -22,7 +22,7 @@
 
 import { Router, type Request, type Response, type NextFunction } from "express";
 import multer, { MulterError } from "multer";
-import type { PrismaClient } from "@prisma/client";
+import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import pino from "pino";
 import {
   writeOriginal,
@@ -187,6 +187,16 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
           typeof (req.body as Record<string, unknown>)?.chatId === "string"
             ? ((req.body as Record<string, unknown>).chatId as string)
             : null;
+        // WARP-218: audio + video land in `queued_for_transcription` so the
+        // file-indexer's daily ASR worker (or a manual /transcribe-now
+        // override) drives them through the extractor — never the inline
+        // brain_ingest path. Documents stay on the original 'indexing' path.
+        const isAudioOrVideo =
+          file.mimetype.startsWith("audio/") ||
+          file.mimetype.startsWith("video/");
+        const initialStatus: BrainMemoryItemStatus = isAudioOrVideo
+          ? BrainMemoryItemStatus.queued_for_transcription
+          : BrainMemoryItemStatus.indexing;
         const item = await prisma.brainMemoryItem.create({
           data: {
             userId,
@@ -199,6 +209,7 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
             // string literal satisfies but TypeScript widens to `string`.
             source: "chat_attachment" as unknown as never,
             originatingChatId: chatId,
+            status: initialStatus,
           },
         });
         const path = await writeOriginal(
