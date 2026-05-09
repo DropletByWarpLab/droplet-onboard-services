@@ -4,6 +4,10 @@ We exercise `handle_brain_uploaded` in isolation by monkeypatching the
 db / embedder / publish surface so the test runs without Postgres,
 gRPC, or a live MQTT broker. Each test asserts on side-effect calls
 the production handler is contracted to make.
+
+WARP-218 adds a status check at the top of the handler: rows with
+status='queued_for_transcription' are deferred to the daily ASR worker
+and the inline dispatch path skips them entirely.
 """
 from __future__ import annotations
 
@@ -179,3 +183,44 @@ def test_synthetic_nc_file_id_is_deterministic():
     # with real Nextcloud fileids (which start at 1 and grow modestly).
     assert a >= (1 << 30)
     assert a < (1 << 31)
+
+
+def test_handle_uploaded_skips_when_status_is_queued_for_transcription(
+    fake_io, tmp_path, monkeypatch
+):
+    """WARP-218: when the BrainMemoryItem row's status is
+    'queued_for_transcription' (audio/video uploads), the handler logs and
+    returns without dispatching the extractor or publishing a status flip.
+    The daily ASR worker (or transcribe-now MQTT) drives those items.
+    """
+    import brain_ingest
+
+    text_path = _write_text_payload(tmp_path, "item-Q", "anything")
+
+    # Stub the db status fetch so we don't need Postgres.
+    monkeypatch.setattr(
+        brain_ingest, "_fetch_item_status", lambda _i: "queued_for_transcription"
+    )
+
+    dispatch_calls: list[tuple] = []
+    monkeypatch.setattr(
+        brain_ingest,
+        "dispatch",
+        lambda *a, **k: dispatch_calls.append((a, k)) or None,
+    )
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-Q",
+            "userId": "alice",
+            "path": str(text_path),
+            "mimeType": "audio/wav",
+        }
+    )
+
+    assert dispatch_calls == [], "dispatch must NOT run for queued items"
+    # No "indexed"/"failed" status publish — the daily worker fires one later.
+    assert fake_io["published"] == []
+    # No mark + no chunk upserts — leaves the row in queued state.
+    assert fake_io["marked"] == []
+    assert fake_io["upserts"] == []
