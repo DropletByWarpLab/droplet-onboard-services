@@ -569,6 +569,42 @@ describe("GET /api/files/brain", () => {
     expect(page1.body.items[0].id).not.toBe(page2.body.items[0].id);
   });
 
+  // WARP-218 — GET surfaces status + failureReason on every list row so the
+  // dashboard chip can render "Queued for transcription" / "Failed" without
+  // a second round trip. We assert directly on the in-memory store-backed
+  // response rather than mocking findMany separately.
+  it("surfaces status, failureReason on each row (WARP-218)", async () => {
+    // Seed via the upload path (status=queued_for_transcription for audio).
+    const upAudio = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.alloc(64), {
+        filename: "memo.wav",
+        contentType: "audio/wav",
+      });
+    const upDoc = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("hi"), {
+        filename: "n.txt",
+        contentType: "text/plain",
+      });
+    // Hand-edit one of them to look like a failed run.
+    const failed = itemStore.get(upDoc.body.itemId)!;
+    failed.status = "failed";
+    failed.failureReason = "ffmpeg exit 1";
+
+    const res = await request(app).get("/api/files/brain");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    const byId: Record<string, Record<string, unknown>> = {};
+    for (const it of res.body.items as Array<Record<string, unknown>>) {
+      byId[it.id as string] = it;
+    }
+    expect(byId[upAudio.body.itemId].status).toBe("queued_for_transcription");
+    expect(byId[upAudio.body.itemId].failureReason).toBeNull();
+    expect(byId[upDoc.body.itemId].status).toBe("failed");
+    expect(byId[upDoc.body.itemId].failureReason).toBe("ffmpeg exit 1");
+  });
+
   it("filters by ?originatingChatId", async () => {
     await request(app)
       .post("/api/files/brain/upload")
