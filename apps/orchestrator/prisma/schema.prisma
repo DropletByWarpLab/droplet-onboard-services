@@ -322,12 +322,31 @@ model BrainMemoryItem {
   extractorWarnings String[]          @default([]) // e.g. ["low_confidence_ocr_page_3"]
   hasOriginalBytes  Boolean           @default(true) // toggled false if user opts into bytes-purge
 
+  // WARP-218: explicit status (no guessing per CLAUDE.md). The worker
+  // updates this; readers query directly. `failureReason` is non-null
+  // only when status='failed'. Retry-window fields enforce the
+  // max-3-per-rolling-hour cap (see worker's claim_attempt).
+  status                       BrainMemoryItemStatus @default(indexing)
+  failureReason                String?
+  lastAttemptedAt              DateTime?
+  recentAttemptCount           Int                   @default(0)
+  recentAttemptWindowStartedAt DateTime?
+
   @@index([userId, uploadedAt])
   @@index([userId, originatingChatId])
+  @@index([userId, status])
+  @@index([status])
 }
 
 enum BrainMemorySource {
   chat_attachment
+}
+
+enum BrainMemoryItemStatus {
+  queued_for_transcription
+  indexing
+  ready
+  failed
 }
 
 // ── WARP-80: Device intelligence ──

@@ -121,6 +121,12 @@ type Item = {
   indexedAt: Date | null;
   extractorWarnings: string[];
   hasOriginalBytes: boolean;
+  // WARP-218
+  status: string;
+  failureReason: string | null;
+  lastAttemptedAt: Date | null;
+  recentAttemptCount: number;
+  recentAttemptWindowStartedAt: Date | null;
 };
 const itemStore = new Map<string, Item>();
 let cuidCounter = 0;
@@ -150,6 +156,11 @@ vi.mock("@prisma/client", () => {
           indexedAt: null,
           extractorWarnings: data.extractorWarnings ?? [],
           hasOriginalBytes: data.hasOriginalBytes ?? true,
+          status: data.status ?? "indexing",
+          failureReason: data.failureReason ?? null,
+          lastAttemptedAt: data.lastAttemptedAt ?? null,
+          recentAttemptCount: data.recentAttemptCount ?? 0,
+          recentAttemptWindowStartedAt: data.recentAttemptWindowStartedAt ?? null,
         };
         itemStore.set(id, record);
         return record;
@@ -211,6 +222,15 @@ vi.mock("@prisma/client", () => {
   return {
     PrismaClient: vi.fn(() => mockPrisma),
     Prisma: { PrismaClientKnownRequestError: class extends Error {} },
+    // WARP-218: route imports BrainMemoryItemStatus directly to pick the
+    // initial status by MIME — the mock has to surface the same enum
+    // values the real generated client emits.
+    BrainMemoryItemStatus: {
+      queued_for_transcription: "queued_for_transcription",
+      indexing: "indexing",
+      ready: "ready",
+      failed: "failed",
+    },
   };
 });
 
@@ -449,6 +469,49 @@ describe("POST /api/files/brain/upload", () => {
       .attach("file", fakeVideo, { filename, contentType: mime });
     expect(res.status).toBe(202);
   });
+
+  // WARP-218 — audio + video uploads must land with
+  // status='queued_for_transcription' so the daily ASR worker (and the
+  // synchronous brain_ingest path's skip guard) can see them. Other
+  // MIMEs keep the original 'indexing' status.
+  it("audio uploads insert with status=queued_for_transcription (WARP-218)", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.alloc(64), {
+        filename: "memo.wav",
+        contentType: "audio/wav",
+      });
+    expect(res.status).toBe(202);
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.status).toBe("queued_for_transcription");
+    // WARP-218 cosmetic: response body status mirrors the row's initial status
+    // so a CLI/script direct-consumer doesn't see misleading "indexing".
+    expect(res.body.status).toBe("queued_for_transcription");
+  });
+
+  it("video uploads insert with status=queued_for_transcription (WARP-218)", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.alloc(64), {
+        filename: "demo.mp4",
+        contentType: "video/mp4",
+      });
+    expect(res.status).toBe(202);
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.status).toBe("queued_for_transcription");
+  });
+
+  it("document uploads keep status=indexing (existing path) (WARP-218)", async () => {
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("hello"), {
+        filename: "note.txt",
+        contentType: "text/plain",
+      });
+    expect(res.status).toBe(202);
+    const item = itemStore.get(res.body.itemId)!;
+    expect(item.status).toBe("indexing");
+  });
 });
 
 describe("GET /api/files/brain", () => {
@@ -507,6 +570,42 @@ describe("GET /api/files/brain", () => {
     const page2 = await request(app).get("/api/files/brain?limit=2&offset=2");
     expect(page2.body.items.length).toBe(2);
     expect(page1.body.items[0].id).not.toBe(page2.body.items[0].id);
+  });
+
+  // WARP-218 — GET surfaces status + failureReason on every list row so the
+  // dashboard chip can render "Queued for transcription" / "Failed" without
+  // a second round trip. We assert directly on the in-memory store-backed
+  // response rather than mocking findMany separately.
+  it("surfaces status, failureReason on each row (WARP-218)", async () => {
+    // Seed via the upload path (status=queued_for_transcription for audio).
+    const upAudio = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.alloc(64), {
+        filename: "memo.wav",
+        contentType: "audio/wav",
+      });
+    const upDoc = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("hi"), {
+        filename: "n.txt",
+        contentType: "text/plain",
+      });
+    // Hand-edit one of them to look like a failed run.
+    const failed = itemStore.get(upDoc.body.itemId)!;
+    failed.status = "failed";
+    failed.failureReason = "ffmpeg exit 1";
+
+    const res = await request(app).get("/api/files/brain");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    const byId: Record<string, Record<string, unknown>> = {};
+    for (const it of res.body.items as Array<Record<string, unknown>>) {
+      byId[it.id as string] = it;
+    }
+    expect(byId[upAudio.body.itemId].status).toBe("queued_for_transcription");
+    expect(byId[upAudio.body.itemId].failureReason).toBeNull();
+    expect(byId[upDoc.body.itemId].status).toBe("failed");
+    expect(byId[upDoc.body.itemId].failureReason).toBe("ffmpeg exit 1");
   });
 
   it("filters by ?originatingChatId", async () => {

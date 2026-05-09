@@ -41,6 +41,26 @@ logger = logging.getLogger(__name__)
 BRAIN_UPLOADED_TOPIC = "droplet/files/brain/uploaded"
 
 
+def _fetch_item_status(item_id: str) -> str | None:
+    """Look up BrainMemoryItem.status. Returns None if the row is missing.
+
+    WARP-218: brain_ingest is the synchronous fallback path; audio + video
+    rows now land with status='queued_for_transcription' and MUST NOT
+    dispatch here — the daily ASR worker (transcription_worker) owns
+    them. Documents stay on the inline path with status='indexing'.
+    """
+    import db
+
+    conn = db.get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            'SELECT "status" FROM "BrainMemoryItem" WHERE "id" = %s',
+            (item_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _indexed_topic(user_id: str) -> str:
     """Per-user topic for the dashboard's WebSocket bridge.
 
@@ -104,6 +124,27 @@ def handle_brain_uploaded(payload: dict) -> None:
     if not os.path.exists(path):
         logger.warning("brain_ingest: file missing on disk: %s", path)
         _publish_status(user_id, item_id, "failed", reason="file_missing")
+        return
+
+    # WARP-218: defer audio/video to the daily ASR worker. The orchestrator
+    # marks those rows status='queued_for_transcription' on insert; this
+    # synchronous path must NOT dispatch them. The daily run (or the
+    # transcribe-now MQTT subscriber) drives them through `_dispatch_and_index`
+    # in `transcription_worker.py` instead.
+    try:
+        status = _fetch_item_status(item_id)
+    except Exception:
+        # If the status lookup fails (e.g. transient DB hiccup), fall through
+        # to the normal path rather than dropping the file silently. The
+        # daily worker will reconcile any duplicates via delete-then-insert.
+        logger.exception("brain_ingest: status lookup failed for %s", item_id)
+        status = None
+    if status == "queued_for_transcription":
+        logger.info(
+            "brain_ingest: itemId=%s is queued_for_transcription, "
+            "skipping inline dispatch",
+            item_id,
+        )
         return
 
     logger.info(

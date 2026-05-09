@@ -22,3 +22,9 @@ extract-msg==0.50.0
 python-magic==0.4.27
 # WARP-198 RAG Phase 2 video extractor (subtitle parsing for embedded SRT/mov_text/etc.)
 srt==3.5.3
+# WARP-218 — daily scheduling for the deferred-ASR worker. AsyncIOScheduler
+# fires `transcription_worker.run_pass()` once per day at
+# TRANSCRIPTION_RUN_LOCAL_TIME (default 03:00 local). Pinned because
+# apscheduler 3.x and 4.x have incompatible APIs.
+apscheduler==3.10.4
+tzlocal>=5.0

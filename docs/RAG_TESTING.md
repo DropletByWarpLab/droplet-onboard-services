@@ -178,3 +178,56 @@ When you add a new RAG-touching code path:
 3. Add the new test file to the vitest invocation in
    `.github/workflows/rag-tests.yml` so manual runs pick it up.
 4. Update this doc's "What gets tested" table.
+
+## Deferred ASR (WARP-218)
+
+Audio + video uploads via the chat-attachment path are no longer transcribed
+synchronously. They land in `BrainMemoryItem.status='queued_for_transcription'`
+and a daily APScheduler job in the file-indexer dequeues them once per day at
+`TRANSCRIPTION_RUN_LOCAL_TIME` (env, default `03:00` local). The worker lives
+in `services/file-indexer/transcription_worker.py`; the schedule wiring lives
+in `services/file-indexer/scheduler_service.py`.
+
+### Manual override
+
+Operators (and the dashboard's kebab → "Transcribe now") can promote one
+item to immediate processing:
+
+    POST /api/files/brain/:itemId/transcribe-now
+
+Response codes:
+
+  - 202 → MQTT publish fired on `droplet/transcription/run-one`; worker picks
+    up out-of-band
+  - 401 → no auth
+  - 404 → cross-user (no existence leak; same pattern as the GET / DELETE
+    routes)
+  - 409 → status is already 'indexing' or 'ready'
+  - 429 → 3 attempts in last 60 minutes; check `Retry-After`
+
+### Retry cap
+
+Per item, max **3 attempts per rolling 60-minute window**. The window opens
+on the first attempt; the cap is enforced both by the worker (silent skip
+on the daily run via `db.claim_attempt`) and the orchestrator route (429 +
+`Retry-After`). On a successful run the window resets so a transient retry
+doesn't penalize a future one.
+
+### Stuck-item reconciliation
+
+On file-indexer startup, `transcription_worker.reconcile_at_startup()` flips
+every row in `status='indexing'` with `lastAttemptedAt < NOW() - INTERVAL '6
+hours'` back to `queued_for_transcription`. Catches mid-transcription crashes
+— without it, those rows would sit in 'indexing' forever.
+
+### Failure-mode cheatsheet
+
+  - Audio/video upload → `BrainMemoryItem.status` = `queued_for_transcription`.
+    File-indexer logs `brain_ingest: itemId=… is queued_for_transcription,
+    skipping inline dispatch`.
+  - Dashboard chip should read "Queued for transcription · runs nightly"
+    until the daily run flips it.
+  - Force the run early: `TRANSCRIPTION_RUN_LOCAL_TIME=$(date -d '+2 minutes' +'%H:%M')`,
+    restart the file-indexer container, watch the worker logs.
+  - Force a failure: stop the ai-gateway container, then `transcribe-now`.
+    Status should land at `failed` with a populated `failureReason`.

@@ -160,6 +160,205 @@ def delete_chunks_for_file(nc_file_id: int) -> None:
         )
 
 
+# ── WARP-218: BrainMemoryItem status helpers ──
+#
+# These helpers run plain psycopg parametrised SQL — same style as
+# upsert_chunk above. Unlike the older helpers that pull `get_conn()`
+# internally, these accept the conn explicitly so the worker can hold a
+# single connection across a SELECT-then-UPDATE inside `claim_attempt`.
+# That matches the spec's "atomic read+write within a single conn
+# transaction" requirement for the rolling-hour retry cap.
+
+
+def select_queued_items(conn, *, limit: int = 50) -> list[dict]:
+    """Return BrainMemoryItem rows with status='queued_for_transcription',
+    oldest-first by uploadedAt. Each dict has id, userId, storagePath, mimeType.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT "id", "userId", "storagePath", "mimeType"
+              FROM "BrainMemoryItem"
+             WHERE "status" = 'queued_for_transcription'
+             ORDER BY "uploadedAt" ASC
+             LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return [
+        {"id": r[0], "userId": r[1], "storagePath": r[2], "mimeType": r[3]}
+        for r in rows
+    ]
+
+
+def update_item_status(
+    conn,
+    *,
+    item_id: str,
+    status: str,
+    failure_reason: Optional[str] = None,
+) -> None:
+    """Update BrainMemoryItem.status (+ side-effects per the state machine).
+
+    Side effects:
+      - status='ready'  → indexedAt = NOW(), failureReason = NULL,
+                          recentAttemptCount = 0,
+                          recentAttemptWindowStartedAt = NULL
+      - status='failed' → failureReason set
+      - other transitions → just status (no side effects)
+    """
+    if status == "ready":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "status" = %s,
+                       "indexedAt" = NOW(),
+                       "failureReason" = NULL,
+                       "recentAttemptCount" = 0,
+                       "recentAttemptWindowStartedAt" = NULL
+                 WHERE "id" = %s
+                """,
+                (status, item_id),
+            )
+    elif status == "failed":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "status" = %s,
+                       "failureReason" = %s
+                 WHERE "id" = %s
+                """,
+                (status, (failure_reason or "")[:200], item_id),
+            )
+    else:
+        with conn.cursor() as cur:
+            cur.execute(
+                'UPDATE "BrainMemoryItem" SET "status" = %s WHERE "id" = %s',
+                (status, item_id),
+            )
+    # The module-level `_conn` is autocommit (see get_conn), so commit is a
+    # no-op there. Calling it explicitly stays correct for fresh
+    # non-autocommit connections too.
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
+def claim_attempt(conn, *, item_id: str) -> bool:
+    """Apply the rolling-hour retry cap (max 3 / 60 min). Returns True if
+    we may proceed (and bumps the counter); False if cap is hit.
+    Atomically reads + writes within a single conn transaction.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT "recentAttemptWindowStartedAt", "recentAttemptCount"
+              FROM "BrainMemoryItem"
+             WHERE "id" = %s
+            """,
+            (item_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        window_started_at, count = row
+        now = datetime.now(tz=timezone.utc)
+        # Normalise naive datetimes to UTC so the timedelta math doesn't
+        # explode when Postgres hands back a tz-naive timestamp.
+        if window_started_at is not None and window_started_at.tzinfo is None:
+            window_started_at = window_started_at.replace(tzinfo=timezone.utc)
+        # If window expired (>1h since opened) OR never opened → fresh slot.
+        if window_started_at is None or (now - window_started_at) > timedelta(hours=1):
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "recentAttemptCount" = 1,
+                       "recentAttemptWindowStartedAt" = %s,
+                       "lastAttemptedAt" = %s
+                 WHERE "id" = %s
+                """,
+                (now, now, item_id),
+            )
+            try:
+                conn.commit()
+            except Exception:
+                pass
+            return True
+        # Window open + count < 3 → bump.
+        if count < 3:
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "recentAttemptCount" = "recentAttemptCount" + 1,
+                       "lastAttemptedAt" = %s
+                 WHERE "id" = %s
+                """,
+                (now, item_id),
+            )
+            try:
+                conn.commit()
+            except Exception:
+                pass
+            return True
+        # Cap hit.
+        return False
+
+
+def reconcile_stuck_items(conn, *, stuck_after_hours: int = 6) -> int:
+    """Flip rows stuck in 'indexing' (presumably crashed mid-transcription)
+    back to 'queued_for_transcription' so the next run picks them up.
+    Returns the number of rows updated.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE "BrainMemoryItem"
+               SET "status" = 'queued_for_transcription'
+             WHERE "status" = 'indexing'
+               AND "lastAttemptedAt" < NOW() - (%s || ' hours')::interval
+            """,
+            (str(stuck_after_hours),),
+        )
+        n = cur.rowcount
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    return n
+
+
+def fetch_item(conn, *, item_id: str) -> Optional[dict]:
+    """Return BrainMemoryItem fields the worker needs, or None.
+
+    Mirrors the projection returned by select_queued_items so callers
+    can treat both as the same shape.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT "id", "userId", "storagePath", "mimeType"
+              FROM "BrainMemoryItem"
+             WHERE "id" = %s
+            """,
+            (item_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "userId": row[1],
+        "storagePath": row[2],
+        "mimeType": row[3],
+    }
+
+
 def prune_excess_chunks(nc_file_id: int, max_chunk_idx: int) -> None:
     """Remove chunks beyond the current file's chunk count (file shrunk).
 

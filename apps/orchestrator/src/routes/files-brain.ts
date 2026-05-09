@@ -22,7 +22,7 @@
 
 import { Router, type Request, type Response, type NextFunction } from "express";
 import multer, { MulterError } from "multer";
-import type { PrismaClient } from "@prisma/client";
+import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import pino from "pino";
 import {
   writeOriginal,
@@ -34,6 +34,41 @@ import {
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { publishRunOne } from "../services/transcription-bus.service.js";
+
+// WARP-218 — per-item rolling-hour retry cap for /transcribe-now.
+const TRANSCRIBE_NOW_RETRY_WINDOW_MS = 60 * 60 * 1000;
+const TRANSCRIBE_NOW_RETRY_CAP = 3;
+
+interface CapState {
+  windowStartedAt: Date | null;
+  attemptCount: number;
+}
+
+function isCapHit(
+  state: CapState,
+  now: Date = new Date(),
+): { capped: boolean; retryAfterSeconds: number } {
+  if (
+    state.windowStartedAt === null ||
+    now.getTime() - state.windowStartedAt.getTime() >
+      TRANSCRIBE_NOW_RETRY_WINDOW_MS
+  ) {
+    return { capped: false, retryAfterSeconds: 0 };
+  }
+  if (state.attemptCount >= TRANSCRIBE_NOW_RETRY_CAP) {
+    const windowExpiresAt =
+      state.windowStartedAt.getTime() + TRANSCRIBE_NOW_RETRY_WINDOW_MS;
+    return {
+      capped: true,
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((windowExpiresAt - now.getTime()) / 1000),
+      ),
+    };
+  }
+  return { capped: false, retryAfterSeconds: 0 };
+}
 
 const logger = pino({ name: "files-brain-route" });
 
@@ -187,6 +222,16 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
           typeof (req.body as Record<string, unknown>)?.chatId === "string"
             ? ((req.body as Record<string, unknown>).chatId as string)
             : null;
+        // WARP-218: audio + video land in `queued_for_transcription` so the
+        // file-indexer's daily ASR worker (or a manual /transcribe-now
+        // override) drives them through the extractor — never the inline
+        // brain_ingest path. Documents stay on the original 'indexing' path.
+        const isAudioOrVideo =
+          file.mimetype.startsWith("audio/") ||
+          file.mimetype.startsWith("video/");
+        const initialStatus: BrainMemoryItemStatus = isAudioOrVideo
+          ? BrainMemoryItemStatus.queued_for_transcription
+          : BrainMemoryItemStatus.indexing;
         const item = await prisma.brainMemoryItem.create({
           data: {
             userId,
@@ -199,6 +244,7 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
             // string literal satisfies but TypeScript widens to `string`.
             source: "chat_attachment" as unknown as never,
             originatingChatId: chatId,
+            status: initialStatus,
           },
         });
         const path = await writeOriginal(
@@ -231,7 +277,11 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
           );
         }
 
-        res.status(202).json({ itemId: item.id, status: "indexing" });
+        // WARP-218: report the actual initial status so a direct
+        // upload-response consumer (CLI, scripts, third-party clients)
+        // sees `queued_for_transcription` for audio/video. The dashboard
+        // uses GET to render the chip and is unaffected either way.
+        res.status(202).json({ itemId: item.id, status: initialStatus });
       } catch (e) {
         next(e);
       }
@@ -363,6 +413,83 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         "Content-Disposition": `attachment; filename="${item.filename.replace(/"/g, "")}"`,
       });
       createReadStream(item.storagePath).pipe(res);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── POST /api/files/brain/:itemId/transcribe-now ──
+  // WARP-218 — operator/dashboard override that promotes a queued (or
+  // failed) item to immediate processing. Validates auth → ownership →
+  // state → rolling-hour retry cap, then publishes
+  // `droplet/transcription/run-one` so the file-indexer worker picks it
+  // up out-of-band from the daily 03:00 cron. Cross-user requests 404
+  // (no existence leak — same pattern as the GET / DELETE routes).
+  router.post("/files/brain/:itemId/transcribe-now", async (req, res, next) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const itemId = req.params.itemId;
+      const row = await prisma.brainMemoryItem.findUnique({
+        where: { id: itemId },
+      });
+      if (!row || row.userId !== userId) {
+        res.status(404).json({ error: "not_found" });
+        return;
+      }
+
+      // Only queued or failed items are eligible. 'indexing' means the
+      // worker is mid-flight; 'ready' is terminal. 409 either way.
+      if (
+        row.status !== BrainMemoryItemStatus.queued_for_transcription &&
+        row.status !== BrainMemoryItemStatus.failed
+      ) {
+        res.status(409).json({ error: "invalid_state", status: row.status });
+        return;
+      }
+
+      const cap = isCapHit({
+        windowStartedAt: row.recentAttemptWindowStartedAt,
+        attemptCount: row.recentAttemptCount,
+      });
+      if (cap.capped) {
+        res.setHeader("Retry-After", String(cap.retryAfterSeconds));
+        res.status(429).json({
+          error: "rate_limited",
+          attemptsInWindow: row.recentAttemptCount,
+          retryAfterSeconds: cap.retryAfterSeconds,
+        });
+        return;
+      }
+
+      // Flip a failed item back to queued so the worker treats it as a
+      // fresh entry. Queued rows stay queued — the publish is the actual
+      // promotion signal.
+      if (row.status === BrainMemoryItemStatus.failed) {
+        await prisma.brainMemoryItem.update({
+          where: { id: itemId },
+          data: { status: BrainMemoryItemStatus.queued_for_transcription },
+        });
+      }
+
+      try {
+        publishRunOne({ publish: mqttPublish }, { itemId, userId });
+      } catch (e) {
+        // MQTT publish is best-effort — the row's queued state is the
+        // durable signal the daily worker falls back on.
+        logger.warn(
+          { err: e, itemId },
+          "MQTT publish for transcribe-now failed (non-fatal)",
+        );
+      }
+
+      res.status(202).json({
+        itemId,
+        status: BrainMemoryItemStatus.queued_for_transcription,
+      });
     } catch (e) {
       next(e);
     }
