@@ -277,7 +277,11 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
           );
         }
 
-        res.status(202).json({ itemId: item.id, status: "indexing" });
+        // WARP-218: report the actual initial status so a direct
+        // upload-response consumer (CLI, scripts, third-party clients)
+        // sees `queued_for_transcription` for audio/video. The dashboard
+        // uses GET to render the chip and is unaffected either way.
+        res.status(202).json({ itemId: item.id, status: initialStatus });
       } catch (e) {
         next(e);
       }

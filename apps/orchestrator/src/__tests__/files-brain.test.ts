@@ -484,6 +484,9 @@ describe("POST /api/files/brain/upload", () => {
     expect(res.status).toBe(202);
     const item = itemStore.get(res.body.itemId)!;
     expect(item.status).toBe("queued_for_transcription");
+    // WARP-218 cosmetic: response body status mirrors the row's initial status
+    // so a CLI/script direct-consumer doesn't see misleading "indexing".
+    expect(res.body.status).toBe("queued_for_transcription");
   });
 
   it("video uploads insert with status=queued_for_transcription (WARP-218)", async () => {
