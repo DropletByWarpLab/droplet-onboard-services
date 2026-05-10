@@ -1,0 +1,768 @@
+/**
+ * WARP-225 — `/api/me/context-stats/*` route + cross-user RBAC tests.
+ *
+ * Covers all 5 endpoints:
+ *   GET  /api/me/context-stats
+ *   GET  /api/me/context-stats/full
+ *   GET  /api/me/context-stats/queued
+ *   GET  /api/me/context-stats/failed
+ *   POST /api/me/context-stats/failed/:id/retry
+ *
+ * Mandatory test (spec §RBAC): seed 2 users (alice, bob), each with 5
+ * BrainMemoryItem rows; hit every endpoint as alice; assert no row of
+ * bob's leaks anywhere — counts, recently-indexed, queued, failed,
+ * pipeline health, donut. Also assert that alice POSTing retry against
+ * bob's itemId returns 404 (not 403, not 200) so the existence of
+ * bob's items is never observable.
+ */
+
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+} from "vitest";
+import request from "supertest";
+
+vi.mock("../config.js", () => ({
+  config: {
+    DATABASE_URL: "postgresql://test:test@localhost:5432/test",
+    REDIS_URL: "",
+    MQTT_BROKER: "mqtt://localhost:1883",
+    AI_GATEWAY_URL: "http://localhost:8000",
+    PORT: 3000,
+    NODE_ENV: "test",
+    MAX_UPLOAD_SIZE_MB: 10,
+    NEXTCLOUD_URL: "http://nextcloud.test",
+    AUTH_ENABLED: false,
+  },
+}));
+
+const publishMock = vi.fn();
+vi.mock("../services/mqtt.service.js", () => ({
+  connectMqtt: vi.fn().mockResolvedValue(undefined),
+  publish: (...args: unknown[]) => publishMock(...args),
+  subscribe: vi.fn(),
+  subscribeToTopic: vi.fn(() => () => {}),
+  topicMatches: vi.fn(),
+}));
+
+// Hoisted via vi.mock so it survives the module reset.
+type Item = {
+  id: string;
+  userId: string;
+  filename: string;
+  mimeType: string | null;
+  bytes: bigint;
+  storagePath: string;
+  source: string;
+  originatingChatId: string | null;
+  uploadedAt: Date;
+  indexedAt: Date | null;
+  extractorWarnings: string[];
+  hasOriginalBytes: boolean;
+  status: string;
+  failureReason: string | null;
+  lastAttemptedAt: Date | null;
+  recentAttemptCount: number;
+  recentAttemptWindowStartedAt: Date | null;
+};
+
+type Chunk = {
+  id: bigint;
+  userId: string;
+  brainItemId: string | null;
+};
+
+const itemStore = new Map<string, Item>();
+const chunkStore = new Map<string, Chunk>();
+
+function itemsFor(userId: string): Item[] {
+  return [...itemStore.values()].filter((i) => i.userId === userId);
+}
+
+function chunksFor(userId: string): Chunk[] {
+  return [...chunkStore.values()].filter((c) => c.userId === userId);
+}
+
+// Local re-implementation of the service's `mime_to_category()` so the
+// $queryRaw stub can simulate the SQL function deterministically.
+function mimeToCategory(mime: string | null): string {
+  if (!mime) return "other";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime.startsWith("video/")) return "video";
+  if (
+    mime === "message/rfc822" ||
+    mime === "application/vnd.ms-outlook" ||
+    mime === "application/x-msmail"
+  )
+    return "email";
+  if (
+    mime === "application/zip" ||
+    mime === "application/x-zip-compressed" ||
+    mime === "application/x-tar" ||
+    mime === "application/gzip" ||
+    mime === "application/x-gzip" ||
+    mime === "application/x-bzip2"
+  )
+    return "archive";
+  if (mime === "application/pdf") return "pdf";
+  if (mime.startsWith("image/")) return "image";
+  if (
+    mime ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    mime === "application/msword" ||
+    mime === "application/json" ||
+    mime === "application/xml"
+  )
+    return "text";
+  if (mime.startsWith("text/")) return "text";
+  return "other";
+}
+
+vi.mock("@prisma/client", () => {
+  const mockPrisma = {
+    $connect: vi.fn().mockResolvedValue(undefined),
+    $disconnect: vi.fn().mockResolvedValue(undefined),
+    $queryRaw: async (s: TemplateStringsArray, ...args: unknown[]) => {
+      const parts: string[] = [];
+      for (let i = 0; i < s.length; i++) {
+        parts.push(s[i]);
+        if (i < args.length) parts.push(`$${i + 1}`);
+      }
+      const sql = parts.join(" ").replace(/\s+/g, " ").trim();
+      const userId = args[0] as string;
+
+      // Counts
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "BrainMemoryItem" WHERE "userId" = \$1\s*$/.test(
+          sql,
+        )
+      ) {
+        return [{ c: BigInt(itemsFor(userId).length) }];
+      }
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "FileContentChunk"/.test(sql)
+      ) {
+        return [{ c: BigInt(chunksFor(userId).length) }];
+      }
+      // Anchor the COUNT(*) variant so the queued/failed list queries
+      // (which include the same status literal) don't match this branch.
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "BrainMemoryItem" WHERE "userId" = \$1 AND "status" = 'queued_for_transcription'/.test(
+          sql,
+        )
+      ) {
+        return [
+          {
+            c: BigInt(
+              itemsFor(userId).filter(
+                (i) => i.status === "queued_for_transcription",
+              ).length,
+            ),
+          },
+        ];
+      }
+      if (
+        /^SELECT count\(\*\)::bigint AS c FROM "BrainMemoryItem" WHERE "userId" = \$1 AND "status" = 'failed'/.test(
+          sql,
+        )
+      ) {
+        return [
+          {
+            c: BigInt(
+              itemsFor(userId).filter((i) => i.status === "failed").length,
+            ),
+          },
+        ];
+      }
+      if (
+        /sum\("bytes"\), 0\)::bigint AS b\s+FROM "BrainMemoryItem" WHERE/.test(
+          sql,
+        )
+      ) {
+        return [
+          {
+            b: itemsFor(userId).reduce((acc, i) => acc + i.bytes, 0n),
+          },
+        ];
+      }
+
+      // recentlyIndexed
+      if (/AS "chunkCount"\s+FROM "BrainMemoryItem"/.test(sql)) {
+        const rows = itemsFor(userId)
+          .filter((i) => i.indexedAt !== null)
+          .sort(
+            (a, b) =>
+              (b.indexedAt as Date).getTime() -
+              (a.indexedAt as Date).getTime(),
+          )
+          .slice(0, 10)
+          .map((i) => ({
+            id: i.id,
+            filename: i.filename,
+            mimeType: i.mimeType,
+            indexedAt: i.indexedAt as Date,
+            chunkCount: BigInt(
+              chunksFor(userId).filter((c) => c.brainItemId === i.id).length,
+            ),
+          }));
+        return rows;
+      }
+
+      // byCategory
+      if (
+        /AS files,\s+COALESCE\(sum\("bytes"\), 0\)::bigint AS bytes/.test(sql)
+      ) {
+        const buckets = new Map<string, { files: number; bytes: bigint }>();
+        for (const i of itemsFor(userId)) {
+          const cat = mimeToCategory(i.mimeType);
+          const cur = buckets.get(cat) ?? { files: 0, bytes: 0n };
+          cur.files += 1;
+          cur.bytes += i.bytes;
+          buckets.set(cat, cur);
+        }
+        return [...buckets.entries()].map(([category, v]) => ({
+          category,
+          files: BigInt(v.files),
+          bytes: v.bytes,
+        }));
+      }
+
+      // throughput7d
+      if (/date_trunc\('day', "indexedAt"\)::date AS day/.test(sql)) {
+        const byDay = new Map<string, number>();
+        const cutoff = new Date();
+        cutoff.setUTCDate(cutoff.getUTCDate() - 7);
+        for (const i of itemsFor(userId)) {
+          if (!i.indexedAt) continue;
+          if (i.indexedAt < cutoff) continue;
+          const k = i.indexedAt.toISOString().slice(0, 10);
+          byDay.set(k, (byDay.get(k) ?? 0) + 1);
+        }
+        return [...byDay.entries()].map(([k, n]) => ({
+          day: new Date(k + "T00:00:00Z"),
+          count: BigInt(n),
+        }));
+      }
+
+      // pipelineHealth
+      if (/avg\(\s+EXTRACT\(EPOCH FROM/.test(sql)) {
+        const buckets = new Map<
+          string,
+          { files: number; readyTimes: number[]; failed: number }
+        >();
+        for (const i of itemsFor(userId)) {
+          const cat = mimeToCategory(i.mimeType);
+          const cur =
+            buckets.get(cat) ?? { files: 0, readyTimes: [], failed: 0 };
+          cur.files += 1;
+          if (i.status === "failed") cur.failed += 1;
+          if (i.indexedAt && i.status === "ready") {
+            cur.readyTimes.push(
+              (i.indexedAt.getTime() - i.uploadedAt.getTime()) / 1000,
+            );
+          }
+          buckets.set(cat, cur);
+        }
+        return [...buckets.entries()].map(([category, v]) => ({
+          category,
+          files: BigInt(v.files),
+          avg_seconds:
+            v.readyTimes.length === 0
+              ? null
+              : v.readyTimes.reduce((a, b) => a + b, 0) / v.readyTimes.length,
+          failed: BigInt(v.failed),
+        }));
+      }
+
+      // queued list
+      if (
+        /"id", "filename", "mimeType", "uploadedAt"\s+FROM "BrainMemoryItem"\s+WHERE "userId" = \$1\s+AND "status" = 'queued_for_transcription'/.test(
+          sql,
+        )
+      ) {
+        return itemsFor(userId)
+          .filter((i) => i.status === "queued_for_transcription")
+          .sort((a, b) => a.uploadedAt.getTime() - b.uploadedAt.getTime())
+          .map((i) => ({
+            id: i.id,
+            filename: i.filename,
+            mimeType: i.mimeType,
+            uploadedAt: i.uploadedAt,
+          }));
+      }
+
+      // failed list
+      if (
+        /"failureReason",\s+"lastAttemptedAt", "recentAttemptCount"\s+FROM "BrainMemoryItem"\s+WHERE "userId" = \$1\s+AND "status" = 'failed'/.test(
+          sql,
+        )
+      ) {
+        return itemsFor(userId)
+          .filter((i) => i.status === "failed")
+          .map((i) => ({
+            id: i.id,
+            filename: i.filename,
+            mimeType: i.mimeType,
+            failureReason: i.failureReason,
+            lastAttemptedAt: i.lastAttemptedAt,
+            recentAttemptCount: i.recentAttemptCount,
+          }));
+      }
+
+      throw new Error(`Unexpected query: ${sql.slice(0, 200)}`);
+    },
+    device: {
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    brainMemoryItem: {
+      findUnique: vi.fn(
+        async ({ where }: { where: { id: string } }) =>
+          itemStore.get(where.id) ?? null,
+      ),
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<Item>;
+        }) => {
+          const r = itemStore.get(where.id);
+          if (!r) throw new Error("not found");
+          Object.assign(r, data);
+          return r;
+        },
+      ),
+    },
+  };
+  return {
+    PrismaClient: vi.fn(() => mockPrisma),
+    Prisma: { PrismaClientKnownRequestError: class extends Error {} },
+    BrainMemoryItemStatus: {
+      queued_for_transcription: "queued_for_transcription",
+      indexing: "indexing",
+      ready: "ready",
+      failed: "failed",
+    },
+  };
+});
+
+let app: import("express").Express;
+let setUser: (u: string) => void;
+
+beforeAll(async () => {
+  let currentUser = "alice";
+  setUser = (u: string) => {
+    currentUser = u;
+  };
+  const express = (await import("express")).default;
+  const { PrismaClient } = await import("@prisma/client");
+  const prisma = new PrismaClient();
+  const { createMeContextStatsRouter } = await import(
+    "../routes/me-context-stats.js"
+  );
+  const _app = express();
+  _app.use(express.json());
+  _app.use((req, _res, next) => {
+    (req as { user?: { id: string; username: string } }).user = {
+      id: currentUser,
+      username: currentUser,
+    };
+    next();
+  });
+  _app.use("/api", createMeContextStatsRouter(prisma));
+  app = _app;
+});
+
+beforeEach(() => {
+  itemStore.clear();
+  chunkStore.clear();
+  publishMock.mockReset();
+  setUser("alice");
+});
+
+let chunkId = 0n;
+function makeItem(overrides: Partial<Item> = {}): Item {
+  const now = new Date();
+  const id = overrides.id ?? `bmi-${itemStore.size + 1}`;
+  const base: Item = {
+    id,
+    userId: "alice",
+    filename: `${id}.bin`,
+    mimeType: "application/pdf",
+    bytes: 1024n,
+    storagePath: `/tmp/${id}`,
+    source: "chat_attachment",
+    originatingChatId: null,
+    uploadedAt: now,
+    indexedAt: now,
+    extractorWarnings: [],
+    hasOriginalBytes: true,
+    status: "ready",
+    failureReason: null,
+    lastAttemptedAt: null,
+    recentAttemptCount: 0,
+    recentAttemptWindowStartedAt: null,
+    ...overrides,
+  };
+  base.id = id;
+  itemStore.set(base.id, base);
+  return base;
+}
+
+function makeChunk(userId: string, brainItemId: string): void {
+  chunkId += 1n;
+  chunkStore.set(`c-${chunkId}`, {
+    id: chunkId,
+    userId,
+    brainItemId,
+  });
+}
+
+// ── Endpoint smoke tests ────────────────────────────────────────────────
+
+describe("GET /api/me/context-stats", () => {
+  it("returns 401 when no user is on the request", async () => {
+    const express = (await import("express")).default;
+    const { PrismaClient } = await import("@prisma/client");
+    const prisma = new PrismaClient();
+    const { createMeContextStatsRouter } = await import(
+      "../routes/me-context-stats.js"
+    );
+    const noAuthApp = express();
+    noAuthApp.use(express.json());
+    noAuthApp.use("/api", createMeContextStatsRouter(prisma));
+    const res = await request(noAuthApp).get("/api/me/context-stats");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns counts + recently-indexed for the caller", async () => {
+    makeItem({ id: "a-1", filename: "alpha.pdf", indexedAt: new Date() });
+    makeItem({ id: "a-2", filename: "beta.pdf", indexedAt: new Date() });
+    makeChunk("alice", "a-1");
+    makeChunk("alice", "a-1");
+    makeChunk("alice", "a-2");
+    const res = await request(app).get("/api/me/context-stats");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(2);
+    expect(res.body.chunks).toBe(3);
+    expect(res.body.recentlyIndexed).toHaveLength(2);
+    expect(res.headers["cache-control"]).toContain("max-age=30");
+  });
+});
+
+describe("GET /api/me/context-stats/full", () => {
+  it("returns full deep-dive with throughput, byCategory, pipeline health", async () => {
+    makeItem({
+      id: "a-1",
+      filename: "doc.pdf",
+      mimeType: "application/pdf",
+      indexedAt: new Date(),
+    });
+    makeItem({
+      id: "a-2",
+      filename: "talk.mp3",
+      mimeType: "audio/mpeg",
+      indexedAt: new Date(),
+    });
+    const res = await request(app).get("/api/me/context-stats/full");
+    expect(res.status).toBe(200);
+    expect(res.body.bytesIndexed).toBe(2048);
+    expect(res.body.byCategory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: "pdf", files: 1 }),
+        expect.objectContaining({ category: "audio", files: 1 }),
+      ]),
+    );
+    expect(res.body.throughput7d).toHaveLength(7);
+    expect(res.body.pipelineHealth.length).toBeGreaterThan(0);
+  });
+});
+
+describe("GET /api/me/context-stats/queued", () => {
+  it("returns the queued list with per-MIME reason strings", async () => {
+    makeItem({
+      id: "q-1",
+      mimeType: "audio/mpeg",
+      status: "queued_for_transcription",
+      indexedAt: null,
+    });
+    const res = await request(app).get("/api/me/context-stats/queued");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0]).toMatchObject({
+      id: "q-1",
+      category: "audio",
+    });
+  });
+});
+
+describe("GET /api/me/context-stats/failed", () => {
+  it("returns the failed list with failureReason and retry-cap state", async () => {
+    makeItem({
+      id: "f-1",
+      mimeType: "video/mp4",
+      status: "failed",
+      failureReason: "no_chunks",
+      indexedAt: null,
+    });
+    const res = await request(app).get("/api/me/context-stats/failed");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0]).toMatchObject({
+      id: "f-1",
+      failureReason: "no_chunks",
+      category: "video",
+    });
+  });
+});
+
+describe("POST /api/me/context-stats/failed/:id/retry", () => {
+  it("flips a failed row to queued and publishes run-one", async () => {
+    makeItem({
+      id: "f-1",
+      mimeType: "audio/mpeg",
+      status: "failed",
+      failureReason: "no_chunks",
+      indexedAt: null,
+    });
+    const res = await request(app).post(
+      "/api/me/context-stats/failed/f-1/retry",
+    );
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe("queued_for_transcription");
+    expect(itemStore.get("f-1")?.status).toBe("queued_for_transcription");
+    expect(publishMock).toHaveBeenCalledWith(
+      "droplet/transcription/run-one",
+      { itemId: "f-1", userId: "alice" },
+    );
+  });
+
+  it("returns 409 when the row isn't in 'failed' state", async () => {
+    makeItem({ id: "r-1", status: "ready" });
+    const res = await request(app).post(
+      "/api/me/context-stats/failed/r-1/retry",
+    );
+    expect(res.status).toBe(409);
+    expect(publishMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 + Retry-After when 3 attempts already happened in the last hour", async () => {
+    makeItem({
+      id: "f-2",
+      status: "failed",
+      recentAttemptCount: 3,
+      recentAttemptWindowStartedAt: new Date(Date.now() - 30 * 60 * 1000),
+    });
+    const res = await request(app).post(
+      "/api/me/context-stats/failed/f-2/retry",
+    );
+    expect(res.status).toBe(429);
+    expect(res.body.error).toBe("rate_limited");
+    expect(res.headers["retry-after"]).toBeDefined();
+    expect(publishMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Mandatory cross-user RBAC isolation test (spec §RBAC) ───────────────
+
+describe("RBAC: cross-user isolation", () => {
+  // Per spec: 2 users (alice + bob), each with 5 files. Alice hits every
+  // endpoint; assert no row of bob's leaks anywhere. Then assert alice
+  // POSTing retry against bob's itemId returns 404 (no existence leak).
+
+  beforeEach(() => {
+    // Alice: 2 ready, 1 queued (audio), 1 failed (video), 1 indexing.
+    makeItem({
+      id: "a-1",
+      userId: "alice",
+      filename: "alice-doc-1.pdf",
+      mimeType: "application/pdf",
+      status: "ready",
+      indexedAt: new Date(),
+    });
+    makeItem({
+      id: "a-2",
+      userId: "alice",
+      filename: "alice-doc-2.pdf",
+      mimeType: "application/pdf",
+      status: "ready",
+      indexedAt: new Date(),
+    });
+    makeItem({
+      id: "a-3",
+      userId: "alice",
+      filename: "alice-talk.mp3",
+      mimeType: "audio/mpeg",
+      status: "queued_for_transcription",
+      indexedAt: null,
+    });
+    makeItem({
+      id: "a-4",
+      userId: "alice",
+      filename: "alice-clip.mp4",
+      mimeType: "video/mp4",
+      status: "failed",
+      failureReason: "extractor_unavailable",
+      indexedAt: null,
+    });
+    makeItem({
+      id: "a-5",
+      userId: "alice",
+      filename: "alice-mid.docx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      status: "indexing",
+      indexedAt: null,
+    });
+    makeChunk("alice", "a-1");
+    makeChunk("alice", "a-1");
+    makeChunk("alice", "a-2");
+
+    // Bob: 5 distinct files spanning every category Alice's set covers,
+    // plus one bob-only category (image) so a leak would be obvious.
+    makeItem({
+      id: "b-1",
+      userId: "bob",
+      filename: "bob-secret.pdf",
+      mimeType: "application/pdf",
+      status: "ready",
+      indexedAt: new Date(),
+    });
+    makeItem({
+      id: "b-2",
+      userId: "bob",
+      filename: "bob-talk.mp3",
+      mimeType: "audio/mpeg",
+      status: "queued_for_transcription",
+      indexedAt: null,
+    });
+    makeItem({
+      id: "b-3",
+      userId: "bob",
+      filename: "bob-clip.mp4",
+      mimeType: "video/mp4",
+      status: "failed",
+      failureReason: "bob_specific_failure",
+      indexedAt: null,
+    });
+    makeItem({
+      id: "b-4",
+      userId: "bob",
+      filename: "bob-photo.jpg",
+      mimeType: "image/jpeg",
+      status: "ready",
+      indexedAt: new Date(),
+    });
+    makeItem({
+      id: "b-5",
+      userId: "bob",
+      filename: "bob-zip.zip",
+      mimeType: "application/zip",
+      status: "ready",
+      indexedAt: new Date(),
+    });
+    makeChunk("bob", "b-1");
+    makeChunk("bob", "b-1");
+    makeChunk("bob", "b-1");
+    makeChunk("bob", "b-4");
+    makeChunk("bob", "b-5");
+
+    setUser("alice");
+  });
+
+  it("GET /me/context-stats only sees alice's 5 files + 3 chunks", async () => {
+    const res = await request(app).get("/api/me/context-stats");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(5); // not 10
+    expect(res.body.chunks).toBe(3); // not 8
+    expect(res.body.queued).toBe(1); // alice's audio
+    expect(res.body.failed).toBe(1); // alice's video
+    // Recently-indexed must not contain any bob filename.
+    const filenames = res.body.recentlyIndexed.map(
+      (r: { filename: string }) => r.filename,
+    );
+    expect(filenames.every((f: string) => !f.startsWith("bob-"))).toBe(true);
+  });
+
+  it("GET /me/context-stats/full hides bob's image + archive categories", async () => {
+    const res = await request(app).get("/api/me/context-stats/full");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(5);
+    // Categories present in alice's data: pdf, audio, video, text.
+    // Bob-only categories must NOT appear.
+    const cats = res.body.byCategory.map(
+      (r: { category: string }) => r.category,
+    );
+    expect(cats).not.toContain("image");
+    expect(cats).not.toContain("archive");
+    // Bob's bytes must not be summed in.
+    expect(res.body.bytesIndexed).toBe(5 * 1024); // alice has 5 items × 1024 bytes
+  });
+
+  it("GET /me/context-stats/queued only lists alice's queued audio", async () => {
+    const res = await request(app).get("/api/me/context-stats/queued");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe("a-3");
+    // No bob row anywhere.
+    expect(
+      res.body.items.every(
+        (i: { filename: string }) => !i.filename.startsWith("bob-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("GET /me/context-stats/failed only lists alice's failed video", async () => {
+    const res = await request(app).get("/api/me/context-stats/failed");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe("a-4");
+    expect(res.body.items[0].failureReason).toBe("extractor_unavailable");
+    expect(res.body.items[0].failureReason).not.toBe("bob_specific_failure");
+  });
+
+  it("POST /me/context-stats/failed/<bob's id>/retry returns 404, not 403, not 200", async () => {
+    // Alice attempts to retry bob's failed item.
+    setUser("alice");
+    const res = await request(app).post(
+      "/api/me/context-stats/failed/b-3/retry",
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("not_found");
+    // Bob's item state must not change; no MQTT publish.
+    expect(itemStore.get("b-3")?.status).toBe("failed");
+    expect(publishMock).not.toHaveBeenCalled();
+  });
+
+  it("POST /me/context-stats/failed/<bob's id>/retry doesn't differ from missing-id 404", async () => {
+    // Both must return identical 404 envelope so an attacker can't
+    // distinguish "exists but not yours" from "doesn't exist at all".
+    setUser("alice");
+    const cross = await request(app).post(
+      "/api/me/context-stats/failed/b-3/retry",
+    );
+    const missing = await request(app).post(
+      "/api/me/context-stats/failed/does-not-exist/retry",
+    );
+    expect(cross.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(cross.body).toEqual(missing.body);
+  });
+
+  it("Switching to bob shows only bob's data", async () => {
+    setUser("bob");
+    const res = await request(app).get("/api/me/context-stats");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(5);
+    expect(res.body.chunks).toBe(5); // bob's 5 chunks
+    expect(res.body.queued).toBe(1);
+    expect(res.body.failed).toBe(1);
+    setUser("alice"); // restore
+  });
+});
