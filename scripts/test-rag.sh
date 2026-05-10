@@ -128,6 +128,23 @@ if [[ ! -f "${REPO_ROOT}/.env" ]]; then
   run "${REPO_ROOT}/scripts/setup.sh" --skip-docker --skip-drivers --skip-start
 fi
 
+# WARP-227 R3: setup.sh writes AUTH_ENABLED=true (production default), but
+# the test lane needs AUTH_ENABLED=false. The test override's
+# `environment:` block is *supposed* to win over the base file's
+# `env_file:`, but Compose's interaction is unreliable across versions.
+# Force it in .env directly. Same fix the rag-tests workflow applies.
+if grep -qE '^AUTH_ENABLED=' "${REPO_ROOT}/.env"; then
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    sed -i.bak 's/^AUTH_ENABLED=.*/AUTH_ENABLED=false/' "${REPO_ROOT}/.env" \
+      && rm -f "${REPO_ROOT}/.env.bak"
+  fi
+else
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    echo "AUTH_ENABLED=false" >> "${REPO_ROOT}/.env"
+  fi
+fi
+log "Test lane: AUTH_ENABLED=false enforced in .env (WARP-227 R3)."
+
 # ─── boot ─────────────────────────────────────────────────────────────
 log "Bringing up Compose stack: ${SERVICES[*]}"
 run "${COMPOSE[@]}" up -d "${SERVICES[@]}"

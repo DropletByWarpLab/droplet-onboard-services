@@ -102,6 +102,25 @@ jobs:
       - name: Generate .env (secrets only)
         run: ./scripts/setup.sh --skip-docker --skip-drivers --skip-start --verbose
 
+      # WARP-227 R3: setup.sh writes AUTH_ENABLED=true to .env (production
+      # default). The test override's `environment: AUTH_ENABLED=false` is
+      # *supposed* to override that per Compose precedence rules, but the
+      # interaction between the override file's `environment:` block and
+      # the base file's `env_file: ../.env` is unreliable across Compose
+      # versions. Without this step the orchestrator boots with
+      # AUTH_ENABLED=true and every test that POSTs/GETs an authenticated
+      # endpoint gets 401. Force AUTH_ENABLED=false directly in the .env
+      # so there's no ambiguity.
+      - name: Force AUTH_ENABLED=false for test lane
+        run: |
+          set -euo pipefail
+          if grep -qE '^AUTH_ENABLED=' .env; then
+            sed -i 's/^AUTH_ENABLED=.*/AUTH_ENABLED=false/' .env
+          else
+            echo "AUTH_ENABLED=false" >> .env
+          fi
+          grep -E '^AUTH_ENABLED=' .env
+
       # Bring up everything the tests touch. Layering the test override
       # publishes orchestrator:3000, db:5432, ai-gateway:50051 to the
       # host so vitest can reach them via localhost. Production
