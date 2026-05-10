@@ -1,0 +1,82 @@
+/**
+ * WARP-225 — wire types for /api/me/context-stats/*.
+ *
+ * Mirrors the Express response shapes in
+ * `apps/orchestrator/src/services/context-stats.service.ts`. Types are
+ * duplicated rather than imported from the orchestrator workspace
+ * because the dashboard's tsconfig isolates these surfaces (no
+ * cross-workspace import path) and the surface is small enough that
+ * drift-by-edit is tolerable. Adding a field requires updating both
+ * the orchestrator response shape and this file.
+ */
+
+export type MimeCategory =
+  | "audio"
+  | "video"
+  | "pdf"
+  | "image"
+  | "email"
+  | "archive"
+  | "text"
+  | "other";
+
+export interface RecentlyIndexedItem {
+  id: string;
+  filename: string;
+  mimeType: string | null;
+  category: MimeCategory;
+  indexedAt: string;
+  chunkCount: number;
+}
+
+export interface ContextStatsSummary {
+  files: number;
+  chunks: number;
+  queued: number;
+  failed: number;
+  recentlyIndexed: RecentlyIndexedItem[];
+}
+
+export interface SourceCategoryRow {
+  category: MimeCategory;
+  files: number;
+  bytes: number;
+}
+
+export interface ThroughputDay {
+  day: string; // YYYY-MM-DD
+  count: number;
+}
+
+export interface PipelineHealthRow {
+  category: MimeCategory;
+  files: number;
+  avgSecondsToReady: number | null;
+  failed: number;
+}
+
+export interface ContextStatsFull extends ContextStatsSummary {
+  bytesIndexed: number;
+  byCategory: SourceCategoryRow[];
+  throughput7d: ThroughputDay[];
+  pipelineHealth: PipelineHealthRow[];
+}
+
+export interface QueuedItem {
+  id: string;
+  filename: string;
+  mimeType: string | null;
+  category: MimeCategory;
+  uploadedAt: string;
+  reason: string;
+}
+
+export interface FailedItem {
+  id: string;
+  filename: string;
+  mimeType: string | null;
+  category: MimeCategory;
+  failureReason: string | null;
+  lastAttemptedAt: string | null;
+  recentAttemptCount: number;
+}
