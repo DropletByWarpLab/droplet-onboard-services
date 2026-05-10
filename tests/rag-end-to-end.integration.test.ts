@@ -141,6 +141,10 @@ const NC_SUBDIR_ARCHIVE = "test-warp224-archive";
 const DEFERRED_AUDIO_NAME = "warp224-deferred-audio.wav";
 const DEFERRED_AUDIO_SENTINEL = "hundred thousand"; // same fixture as Task 3, distinguished by upload name
 
+// A unique nonsense token. If any chunk text contains this, a
+// fixture leak has happened — fail loudly.
+const NEGATIVE_SENTINEL = "zzzqqqxxx-nonexistent-token-warp224";
+
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
@@ -334,6 +338,18 @@ describe.skipIf(!SHOULD_RUN)(
       // And confirm chunks landed.
       const chunkOk = await pollUntilBrainIndexed(deferredItemId, 60_000);
       expect(chunkOk, "deferred audio reached 'ready' but no chunks").toBe(true);
+
+      // ─── Sentinel uniqueness audit ───
+      // If any indexed chunk contains the negative sentinel, the negative
+      // test below would silently pass against a hit — defeating the whole
+      // point. Fail loudly so the next dev picks a different token.
+      const leak = dbQuery(
+        `SELECT count(*) FROM "FileContentChunk" WHERE "text" ILIKE '%${NEGATIVE_SENTINEL}%'`,
+      );
+      expect(
+        Number.parseInt(leak, 10),
+        "negative sentinel leaked into a fixture — pick a different token",
+      ).toBe(0);
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
 
     afterAll(async () => {
@@ -530,6 +546,35 @@ describe.skipIf(!SHOULD_RUN)(
       expect(deferredHit!.text.length).toBeGreaterThan(0);
       expect(deferredHit!.text.toLowerCase()).toContain(DEFERRED_AUDIO_SENTINEL);
     }, 120_000);
+
+    it("agent does not fabricate citations when nothing relevant is indexed", async () => {
+      const resp = await chat(
+        `Search my files for "${NEGATIVE_SENTINEL}". What does the document say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+
+      // The agent SHOULD call search_content (acceptable: 1+ hits, all
+      // unrelated, OR zero hits). What we forbid is hallucinated hits.
+      // Concretely: no hit's path should reference the sentinel, and no
+      // hit's text should contain it.
+      for (const h of hits) {
+        expect(
+          h.path.toLowerCase().includes(NEGATIVE_SENTINEL.toLowerCase()),
+          `hallucinated citation: path '${h.path}' references the negative sentinel`,
+        ).toBe(false);
+        expect(
+          h.text.toLowerCase().includes(NEGATIVE_SENTINEL.toLowerCase()),
+          `hallucinated citation: text contains the negative sentinel`,
+        ).toBe(false);
+      }
+
+      // The agent's prose may say anything — "I don't see that document"
+      // or "iteration_limit" or even confabulate prose. Free-text isn't
+      // the contract this asserts. The contract is: search results are
+      // truthful (no fabricated hits).
+    }, 60_000);
 
     // Determinism harness — see header comment. We loop on retrieval
     // because that's the part the spec constrains. The model's prose
