@@ -61,15 +61,26 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
-import { readFileSync } from "node:fs";
 
-const REPO_ROOT = resolve(__dirname, "..");
-const COMPOSE_BASE = `-f ${REPO_ROOT}/docker/docker-compose.yml`;
-const COMPOSE_OVERRIDE = `-f ${REPO_ROOT}/docker/docker-compose.test.override.yml`;
-const COMPOSE = `docker compose ${COMPOSE_BASE} ${COMPOSE_OVERRIDE}`;
-const NC_DATA_DIR = "/var/www/html/data/admin/files";
-const SHOULD_RUN = process.env.RUN_RAG_INTEGRATION === "1";
-const API_URL = process.env.API_URL ?? "http://localhost:3000";
+import {
+  REPO_ROOT,
+  COMPOSE,
+  NC_DATA_DIR,
+  SHOULD_RUN,
+  API_URL,
+  sh,
+  dbQuery,
+  citationsFrom,
+  chat,
+  uploadBrainFile,
+  uploadNextcloudFile,
+  pollUntilBrainIndexed,
+  pollNcChunkCount,
+  waitForOrchestrator,
+  transcribeNow,
+  getBrainStatus,
+  pollUntilBrainStatus,
+} from "./helpers/rag-retrieval";
 
 // The PDF fixture contains the unique sentinel "alphahotel" (see
 // services/file-indexer/tests/test_extractors_pdf.py). The PNG fixture
@@ -87,143 +98,62 @@ const PDF_SENTINEL = "alphahotel";
 const PNG_SENTINEL = "echofoxtrot";
 const NC_SUBDIR = "test-rag-end-to-end";
 
-function sh(cmd: string): string {
-  return execSync(cmd, { encoding: "utf8" }).trim();
-}
+const WAV_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/sample.wav");
+// sample.wav speaks "the budget for q4 is one hundred thousand" in the
+// existing WARP-197 fixture. We assert on the substring "hundred thousand"
+// because faster-whisper output isn't byte-stable across model versions.
+const WAV_SENTINEL = "hundred thousand";
 
-function shSilent(cmd: string): string {
-  return execSync(cmd, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
-}
+const SUBS_VIDEO_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/with-srt.mp4");
+// with-srt.mp4 muxes the WARP-197 sample.wav with a mov_text subtitle
+// stream containing "budget meeting kickoff" / "projecting q4 revenue
+// at one hundred thousand". The video extractor takes the subtitle
+// path (no ASR fallback). The unique 4-word phrase isolates THIS file
+// from the audio file's transcript.
+const SUBS_VIDEO_SENTINEL = "budget meeting kickoff";
 
-function dbQuery(sql: string): string {
-  return shSilent(
-    `${COMPOSE} exec -T db psql -U droplet -d droplet -t -A -c ${JSON.stringify(sql)}`,
-  );
-}
+const FRAME_VIDEO_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/with-frame-text.mp4");
+// with-frame-text.mp4 has NO audio + NO subtitle stream. Frame OCR
+// is the only retrievable channel. Three on-screen slides:
+const FRAME_VIDEO_SENTINEL = "BUDGET KICKOFF";
+const FRAME_VIDEO_SECONDARY_SENTINEL = "ONE HUNDRED THOUSAND";
 
-async function pollNcChunkCount(
-  pathLike: string,
-  timeoutMs: number,
-): Promise<number> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const out = dbQuery(
-      `SELECT count(*) FROM "FileContentChunk" WHERE "path" LIKE '${pathLike}' AND "source" = 'nextcloud'`,
-    );
-    const n = Number.parseInt(out, 10);
-    if (Number.isFinite(n) && n > 0) return n;
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  return 0;
-}
+const EML_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/with-pdf-attachment.eml");
+// with-pdf-attachment.eml is the WARP-199 fixture: an email body that
+// reads "Bob, see the attached PDF for the full proposal." plus a
+// ReportLab-generated placeholder PDF attachment.
+//
+// We assert on the EMAIL BODY for citation (the embedded PDF is a
+// placeholder with no meaningful text). The attachment-separator
+// assertion proves the recursive dispatcher still walked into the PDF.
+const EML_BODY_SENTINEL = "bob, see the attached pdf";
+const EML_ATTACHMENT_SEPARATOR = "--- Attachment: ";
 
-async function pollBrainIndexed(
-  itemId: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const out = dbQuery(
-      `SELECT "indexedAt" FROM "BrainMemoryItem" WHERE "id" = '${itemId}'`,
-    );
-    if (out && out.length > 0) {
-      // Also wait for the chunk rows. indexedAt flips before the chunk
-      // commit on some race windows.
-      const chunks = dbQuery(
-        `SELECT count(*) FROM "FileContentChunk" WHERE "brainItemId" = '${itemId}' AND "source" = 'brain'`,
-      );
-      if (Number.parseInt(chunks, 10) > 0) return true;
-    }
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  return false;
-}
+const ZIP_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/simple.zip");
+// simple.zip contains note.txt with "the budget for q4 is one hundred
+// thousand" and more.txt with "second file" — see WARP-200. Indexed
+// via the Nextcloud scan path (NOT brain-upload), exercising the same
+// code path we use for archives uploaded via files.
+const ZIP_BODY_SENTINEL = "the budget for q4";
+const ZIP_MEMBER_SEPARATOR = "--- Member: ";
+const NC_SUBDIR_ARCHIVE = "test-warp224-archive";
 
-interface ChatResponse {
-  message: { role: string; content: string };
-  trace: Array<{
-    tool: string;
-    args: Record<string, unknown>;
-    result: unknown;
-  }>;
-  iterations: number;
-  stop_reason: string;
-  error?: string;
-}
+const DEFERRED_AUDIO_NAME = "warp224-deferred-audio.wav";
+const DEFERRED_AUDIO_SENTINEL = "hundred thousand"; // same fixture as Task 3, distinguished by upload name
 
-interface SearchToolHit {
-  path: string;
-  score: number;
-  text: string;
-}
-
-/**
- * Pull the search_content invocations out of an agent trace and
- * surface their results. Returns a flat list of {path, text} pairs
- * for citation assertions.
- */
-function citationsFrom(resp: ChatResponse): SearchToolHit[] {
-  const hits: SearchToolHit[] = [];
-  for (const entry of resp.trace) {
-    if (entry.tool !== "search_content") continue;
-    const result = entry.result as
-      | { ok?: boolean; data?: { results?: SearchToolHit[] }; results?: SearchToolHit[] }
-      | undefined;
-    // The MCP envelope unwraps to either {ok, data: {results}} (handler
-    // shape) or {query, results} (server-formatted payload). Both have
-    // appeared in the wild while WARP-202/203 were stacking — accept
-    // either rather than coupling the test to one parse tree.
-    const list =
-      result?.data?.results ?? result?.results ?? [];
-    for (const r of list) {
-      if (r && typeof r.path === "string") {
-        hits.push({
-          path: r.path,
-          score: typeof r.score === "number" ? r.score : 0,
-          text: typeof r.text === "string" ? r.text : "",
-        });
-      }
-    }
-  }
-  return hits;
-}
-
-async function chat(question: string): Promise<ChatResponse> {
-  const res = await fetch(`${API_URL}/api/llm/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      // Use whatever model the gateway resolves by default — the test
-      // assertions only depend on the agent calling search_content,
-      // not on the prose the model returns.
-      model: process.env.RAG_E2E_MODEL ?? "llama3.1",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a helpful assistant. When the user asks about a document, you MUST call search_content to retrieve from the user's indexed files before answering. Never answer from memory.",
-        },
-        { role: "user", content: question },
-      ],
-      // Bound the loop so a confused model can't burn the budget.
-      max_iter: 4,
-      temperature: 0,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "<no body>");
-    throw new Error(`/api/llm/chat returned ${res.status}: ${body}`);
-  }
-  return (await res.json()) as ChatResponse;
-}
+// A unique nonsense token. If any chunk text contains this, a
+// fixture leak has happened — fail loudly.
+const NEGATIVE_SENTINEL = "zzzqqqxxx-nonexistent-token-warp224";
 
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
     let brainItemId: string | null = null;
+    let audioItemId: string | null = null;
+    let subsVideoItemId: string | null = null;
+    let frameVideoItemId: string | null = null;
+    let emailItemId: string | null = null;
+    let deferredItemId: string | null = null;
 
     beforeAll(async () => {
       // Bring up the full chain. mcp-server is a sibling Compose
@@ -275,35 +205,14 @@ describe.skipIf(!SHOULD_RUN)(
       }
 
       // ─── Step 1: drop a PDF into Nextcloud's admin user files dir ───
-      sh(`${COMPOSE} exec -T nextcloud mkdir -p ${NC_DATA_DIR}/${NC_SUBDIR}`);
-      sh(
-        `${COMPOSE} exec -T nextcloud chown www-data:www-data ${NC_DATA_DIR}/${NC_SUBDIR}`,
-      );
-      sh(`${COMPOSE} cp ${PDF_FIXTURE} nextcloud:${NC_DATA_DIR}/${NC_SUBDIR}/`);
-      sh(
-        `${COMPOSE} exec -T nextcloud chown -R www-data:www-data ${NC_DATA_DIR}/${NC_SUBDIR}`,
-      );
-      sh(
-        `${COMPOSE} exec -T -u www-data nextcloud php /var/www/html/occ files:scan --path=admin/files/${NC_SUBDIR} --quiet`,
-      );
+      await uploadNextcloudFile(PDF_FIXTURE, NC_SUBDIR);
 
       // ─── Step 2: upload a PNG via the brain-upload API ───
-      const pngBytes = readFileSync(PNG_FIXTURE);
-      const form = new FormData();
-      form.append(
-        "file",
-        new Blob([pngBytes], { type: "image/png" }),
+      const upJson = await uploadBrainFile(
+        PNG_FIXTURE,
         "warp206-image.png",
+        "image/png",
       );
-      const upRes = await fetch(`${API_URL}/api/files/brain/upload`, {
-        method: "POST",
-        body: form,
-      });
-      if (upRes.status !== 202) {
-        const body = await upRes.text().catch(() => "<no body>");
-        throw new Error(`brain/upload returned ${upRes.status}: ${body}`);
-      }
-      const upJson = (await upRes.json()) as { itemId: string; status: string };
       brainItemId = upJson.itemId;
 
       // ─── Step 3: poll for indexedAt + chunk rows on both ───
@@ -318,12 +227,129 @@ describe.skipIf(!SHOULD_RUN)(
           "Nextcloud PDF never produced FileContentChunk rows — check file-indexer logs",
         );
       }
-      const brainOk = await pollBrainIndexed(brainItemId, 180_000);
+      const brainOk = await pollUntilBrainIndexed(brainItemId, 180_000);
       if (!brainOk) {
         throw new Error(
           `Brain item ${brainItemId} never indexed — check file-indexer + ai-gateway logs`,
         );
       }
+
+      // ─── Audio brain-upload (chat-attachment path; deferred per WARP-218) ───
+      const wavUp = await uploadBrainFile(WAV_FIXTURE, "warp224-audio.wav", "audio/wav");
+      audioItemId = wavUp.itemId;
+      expect(
+        wavUp.status,
+        "audio uploads must land in queued_for_transcription per WARP-218",
+      ).toBe("queued_for_transcription");
+      const wavTxCode = await transcribeNow(audioItemId);
+      expect(wavTxCode, `transcribe-now for audio returned ${wavTxCode}`).toBe(202);
+      const audioOk = await pollUntilBrainIndexed(audioItemId, 240_000);
+      if (!audioOk) {
+        throw new Error(`Audio brain item ${audioItemId} never indexed — check file-indexer + ai-gateway logs`);
+      }
+
+      // ─── Video w/ subtitles brain-upload (deferred per WARP-218; force via transcribe-now) ───
+      const subsVidUp = await uploadBrainFile(
+        SUBS_VIDEO_FIXTURE,
+        "warp224-video-subs.mp4",
+        "video/mp4",
+      );
+      subsVideoItemId = subsVidUp.itemId;
+      expect(
+        subsVidUp.status,
+        "video uploads must land in queued_for_transcription per WARP-218",
+      ).toBe("queued_for_transcription");
+      const subsTxCode = await transcribeNow(subsVideoItemId);
+      expect(subsTxCode, `transcribe-now for video-subs returned ${subsTxCode}`).toBe(202);
+      const subsVideoOk = await pollUntilBrainIndexed(subsVideoItemId, 240_000);
+      if (!subsVideoOk) {
+        throw new Error(
+          `Video-w/-subs item ${subsVideoItemId} never indexed — check file-indexer logs`,
+        );
+      }
+
+      // ─── Video w/ frame OCR brain-upload (WARP-208) (deferred per WARP-218; force via transcribe-now) ───
+      // The file-indexer needs VIDEO_FRAME_OCR_ENABLED=1 in its env for
+      // this flow's frame-OCR text to land in chunks. The test override
+      // (docker/docker-compose.test.override.yml) sets it for this lane.
+      const frameVidUp = await uploadBrainFile(
+        FRAME_VIDEO_FIXTURE,
+        "warp224-video-frame.mp4",
+        "video/mp4",
+      );
+      frameVideoItemId = frameVidUp.itemId;
+      expect(
+        frameVidUp.status,
+        "video uploads must land in queued_for_transcription per WARP-218",
+      ).toBe("queued_for_transcription");
+      const frameTxCode = await transcribeNow(frameVideoItemId);
+      expect(frameTxCode, `transcribe-now for video-frame returned ${frameTxCode}`).toBe(202);
+      const frameVideoOk = await pollUntilBrainIndexed(frameVideoItemId, 300_000);
+      if (!frameVideoOk) {
+        throw new Error(
+          `Video-frame item ${frameVideoItemId} never indexed — frame OCR may be off (VIDEO_FRAME_OCR_ENABLED) or extractor regressed`,
+        );
+      }
+
+      // ─── Email brain-upload (WARP-199) ───
+      const emlUp = await uploadBrainFile(
+        EML_FIXTURE,
+        "warp224-email.eml",
+        "message/rfc822",
+      );
+      emailItemId = emlUp.itemId;
+      const emailOk = await pollUntilBrainIndexed(emailItemId, 240_000);
+      if (!emailOk) {
+        throw new Error(
+          `Email item ${emailItemId} never indexed — check file-indexer logs for email extractor`,
+        );
+      }
+
+      // ─── Archive Nextcloud-scan (WARP-200) ───
+      await uploadNextcloudFile(ZIP_FIXTURE, NC_SUBDIR_ARCHIVE);
+      const zipOk = await pollNcChunkCount(`%${NC_SUBDIR_ARCHIVE}/simple.zip`, 240_000);
+      if (zipOk === 0) {
+        throw new Error("Archive simple.zip never produced FileContentChunk rows — check file-indexer logs");
+      }
+
+      // ─── Deferred-ASR brain-upload (WARP-218) — explicit status-sequence flow ───
+      const deferredUp = await uploadBrainFile(WAV_FIXTURE, DEFERRED_AUDIO_NAME, "audio/wav");
+      deferredItemId = deferredUp.itemId;
+
+      // Confirm initial status BEFORE transcribe-now (this is what makes the
+      // deferred-flow assertion distinct from Task 3's audio flow).
+      const initialStatus = getBrainStatus(deferredItemId);
+      expect(
+        initialStatus,
+        "deferred audio should land in queued_for_transcription before transcribe-now",
+      ).toBe("queued_for_transcription");
+
+      // Promote to immediate processing.
+      const txCode = await transcribeNow(deferredItemId);
+      expect(txCode, `transcribe-now for deferred audio returned ${txCode}`).toBe(202);
+
+      // Wait for the worker to flip status -> indexing -> ready.
+      const finalStatus = await pollUntilBrainStatus(deferredItemId, "ready", 240_000);
+      expect(
+        finalStatus,
+        `deferred audio never reached 'ready' (last seen: ${finalStatus})`,
+      ).toBe("ready");
+
+      // And confirm chunks landed.
+      const chunkOk = await pollUntilBrainIndexed(deferredItemId, 60_000);
+      expect(chunkOk, "deferred audio reached 'ready' but no chunks").toBe(true);
+
+      // ─── Sentinel uniqueness audit ───
+      // If any indexed chunk contains the negative sentinel, the negative
+      // test below would silently pass against a hit — defeating the whole
+      // point. Fail loudly so the next dev picks a different token.
+      const leak = dbQuery(
+        `SELECT count(*) FROM "FileContentChunk" WHERE "text" ILIKE '%${NEGATIVE_SENTINEL}%'`,
+      );
+      expect(
+        Number.parseInt(leak, 10),
+        "negative sentinel leaked into a fixture — pick a different token",
+      ).toBe(0);
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
 
     afterAll(async () => {
@@ -331,6 +357,11 @@ describe.skipIf(!SHOULD_RUN)(
         sh(
           `${COMPOSE} exec -T nextcloud rm -rf ${NC_DATA_DIR}/${NC_SUBDIR}`,
         );
+      } catch {
+        /* swallow */
+      }
+      try {
+        sh(`${COMPOSE} exec -T nextcloud rm -rf ${NC_DATA_DIR}/${NC_SUBDIR_ARCHIVE}`);
       } catch {
         /* swallow */
       }
@@ -381,6 +412,170 @@ describe.skipIf(!SHOULD_RUN)(
       expect(pngHit!.text.toLowerCase()).toContain(PNG_SENTINEL);
     }, 120_000);
 
+    it("agent retrieval reaches the brain-uploaded audio (faster-whisper transcript)", async () => {
+      const resp = await chat(
+        `Search my recordings for "${WAV_SENTINEL}". What does the audio file say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content or got no hits").toBeGreaterThan(0);
+
+      const wavHit = hits.find((h) => h.path.toLowerCase().includes("warp224-audio"));
+      expect(wavHit, "no citation for warp224-audio.wav").toBeDefined();
+      expect(wavHit!.text.length).toBeGreaterThan(0);
+      expect(wavHit!.text.toLowerCase()).toContain(WAV_SENTINEL);
+    }, 120_000);
+
+    it("agent retrieval reaches a video via subtitle stream (WARP-198)", async () => {
+      const resp = await chat(
+        `Search my videos for "${SUBS_VIDEO_SENTINEL}". What does the recording say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const subsHit = hits.find((h) => h.path.toLowerCase().includes("warp224-video-subs"));
+      expect(subsHit, "no citation for warp224-video-subs.mp4").toBeDefined();
+      expect(subsHit!.text.length).toBeGreaterThan(0);
+      expect(subsHit!.text.toLowerCase()).toContain(SUBS_VIDEO_SENTINEL);
+    }, 120_000);
+
+    it("agent retrieval reaches a video via frame OCR only (WARP-208)", async () => {
+      const resp = await chat(
+        `Search my videos for "${FRAME_VIDEO_SENTINEL}" — it should be on-screen text. What slide is shown?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const frameHit = hits.find((h) => h.path.toLowerCase().includes("warp224-video-frame"));
+      expect(frameHit, "no citation for warp224-video-frame.mp4").toBeDefined();
+      expect(frameHit!.text.length).toBeGreaterThan(0);
+
+      // Tesseract is more deterministic than faster-whisper, so we can
+      // assert the slide string verbatim. Either of the two sentinels
+      // proves frame OCR fired (they're on different slides; the chunker
+      // may pack them into one chunk or split, both are acceptable).
+      const upperText = frameHit!.text.toUpperCase();
+      expect(
+        upperText.includes(FRAME_VIDEO_SENTINEL) ||
+        upperText.includes(FRAME_VIDEO_SECONDARY_SENTINEL),
+        `expected frame OCR sentinel in chunk text, got: ${frameHit!.text.slice(0, 200)}`,
+      ).toBe(true);
+    }, 120_000);
+
+    it("frame-OCR video chunks carry the frame_ocr provenance label", async () => {
+      // Read the underlying chunk row's text to confirm the frame-OCR
+      // section separator survived. The extractor emits "--- Frame OCR ---"
+      // before the timestamped slide text; if that separator's missing,
+      // the WARP-208 code path didn't run.
+      const chunkText = dbQuery(
+        `SELECT string_agg("text", ' ') FROM "FileContentChunk" ` +
+        `WHERE "brainItemId" = '${frameVideoItemId}' AND "source" = 'brain'`,
+      );
+      expect(chunkText.length).toBeGreaterThan(0);
+      expect(chunkText).toContain("--- Frame OCR ---");
+    }, 30_000);
+
+    it("agent retrieval reaches an email's body and walks into the attached PDF (WARP-199)", async () => {
+      const resp = await chat(
+        `Search my email for "Bob, see the attached PDF". What does the email say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const emailHit = hits.find((h) => h.path.toLowerCase().includes("warp224-email"));
+      expect(emailHit, "no citation for warp224-email.eml").toBeDefined();
+      expect(emailHit!.text.length).toBeGreaterThan(0);
+      expect(emailHit!.text.toLowerCase()).toContain(EML_BODY_SENTINEL);
+    }, 120_000);
+
+    it("email chunks carry the --- Attachment: --- separator (recursive dispatch)", async () => {
+      const chunkText = dbQuery(
+        `SELECT string_agg("text", ' ') FROM "FileContentChunk" ` +
+        `WHERE "brainItemId" = '${emailItemId}' AND "source" = 'brain'`,
+      );
+      expect(chunkText.length).toBeGreaterThan(0);
+      expect(chunkText).toContain(EML_ATTACHMENT_SEPARATOR);
+    }, 30_000);
+
+    it("agent retrieval reaches an archive member via Nextcloud scan (WARP-200)", async () => {
+      const resp = await chat(
+        `Search my files for "${ZIP_BODY_SENTINEL}". What's inside the zip?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const zipHit = hits.find(
+        (h) =>
+          h.path.includes(NC_SUBDIR_ARCHIVE) &&
+          h.path.toLowerCase().endsWith(".zip"),
+      );
+      expect(zipHit, "no citation for simple.zip").toBeDefined();
+      expect(zipHit!.text.length).toBeGreaterThan(0);
+      expect(zipHit!.text.toLowerCase()).toContain(ZIP_BODY_SENTINEL);
+    }, 120_000);
+
+    it("archive chunks carry the --- Member: --- separator", async () => {
+      const chunkText = dbQuery(
+        `SELECT string_agg("text", ' ') FROM "FileContentChunk" ` +
+        `WHERE "path" LIKE '%${NC_SUBDIR_ARCHIVE}/simple.zip' AND "source" = 'nextcloud'`,
+      );
+      expect(chunkText.length).toBeGreaterThan(0);
+      expect(chunkText).toContain(ZIP_MEMBER_SEPARATOR);
+    }, 30_000);
+
+    it("agent retrieval reaches a deferred-ASR audio after transcribe-now (WARP-218)", async () => {
+      const resp = await chat(
+        `Search my recordings for "${DEFERRED_AUDIO_SENTINEL}" — there's a queued one. What does it say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const deferredHit = hits.find((h) => h.path.toLowerCase().includes("warp224-deferred-audio"));
+      expect(deferredHit, "no citation for warp224-deferred-audio.wav").toBeDefined();
+      expect(deferredHit!.text.length).toBeGreaterThan(0);
+      expect(deferredHit!.text.toLowerCase()).toContain(DEFERRED_AUDIO_SENTINEL);
+    }, 120_000);
+
+    it("agent does not fabricate citations when nothing relevant is indexed", async () => {
+      const resp = await chat(
+        `Search my files for "${NEGATIVE_SENTINEL}". What does the document say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+
+      // The agent SHOULD call search_content (acceptable: 1+ hits, all
+      // unrelated, OR zero hits). What we forbid is hallucinated hits.
+      // Concretely: no hit's path should reference the sentinel, and no
+      // hit's text should contain it.
+      for (const h of hits) {
+        expect(
+          h.path.toLowerCase().includes(NEGATIVE_SENTINEL.toLowerCase()),
+          `hallucinated citation: path '${h.path}' references the negative sentinel`,
+        ).toBe(false);
+        expect(
+          h.text.toLowerCase().includes(NEGATIVE_SENTINEL.toLowerCase()),
+          `hallucinated citation: text contains the negative sentinel`,
+        ).toBe(false);
+      }
+
+      // The agent's prose may say anything — "I don't see that document"
+      // or "iteration_limit" or even confabulate prose. Free-text isn't
+      // the contract this asserts. The contract is: search results are
+      // truthful (no fabricated hits).
+    }, 60_000);
+
     // Determinism harness — see header comment. We loop on retrieval
     // because that's the part the spec constrains. The model's prose
     // is allowed to vary across runs; it just has to keep calling
@@ -405,6 +600,27 @@ describe.skipIf(!SHOULD_RUN)(
           `run #${run}: PDF citation missing — retrieval is flaky`,
         ).toBeDefined();
         expect(pdfHit!.text.toLowerCase()).toContain(PDF_SENTINEL);
+      },
+      120_000,
+    );
+
+    it.each([1, 2, 3, 4, 5])(
+      "retrieval stays deterministic across run #%i (audio citation)",
+      async (run) => {
+        const resp = await chat(
+          `Tell me about "${WAV_SENTINEL}" from my audio recordings.`,
+        );
+        const hits = citationsFrom(resp);
+        expect(
+          hits.length,
+          `run #${run}: agent did not call search_content or got no hits`,
+        ).toBeGreaterThan(0);
+        const wavHit = hits.find((h) => h.path.toLowerCase().includes("warp224-audio"));
+        expect(
+          wavHit,
+          `run #${run}: audio citation missing — retrieval is flaky`,
+        ).toBeDefined();
+        expect(wavHit!.text.toLowerCase()).toContain(WAV_SENTINEL);
       },
       120_000,
     );

@@ -19,6 +19,155 @@ boot cost is amortized.
 | `rag-brain-export.integration.test.ts` | WARP-205. Uploads a brain file, exports the zip via `GET /api/files/brain/export?all=1`, deletes the row, asserts cascade deletion of chunks. |
 | `rag-end-to-end.integration.test.ts` | WARP-206. The full chain: PDF into Nextcloud + PNG via brain-upload → wait for indexedAt → POST `/api/llm/chat` twice → assert each response cites the right file with non-empty snippets. Loops 5x for retrieval determinism. |
 
+## Chat retrieval validation
+
+The `rag-end-to-end.integration.test.ts` file is the regression-lock
+for the **upload → index → chat → cite** chain. Every shipped
+extractor has an `it()` block here that proves the agent can
+actually retrieve from a file of its kind. WARP-224 grew this from
+2 to 9 flows; future RAG-touching changes should add a flow here
+or update the relevant one.
+
+### Flows under test
+
+| # | Flow | Fixture | Upload path | Question shape | Asserts | Owner |
+|---|---|---|---|---|---|---|
+| 1 | PDF | `sample.pdf` | Nextcloud scan | "What does the document with `alphahotel` say?" | citation on `sample.pdf` + `alphahotel` substring | WARP-204 |
+| 2 | PNG | `sample.png` | brain-upload (sync — non-audio/video) | "What text is in the screenshot?" | citation on `warp206-image.png` + `echofoxtrot` substring | WARP-201 |
+| 3 | Audio (faster-whisper) | `sample.wav` | brain-upload (deferred per WARP-218) → `transcribeNow` | "What does the audio recording say about budget?" | initial status = `queued_for_transcription`, transcribe-now = 202, citation on `warp224-audio.wav` + `hundred thousand` substring | WARP-197 |
+| 4 | Video w/ subs | `with-srt.mp4` | brain-upload (deferred per WARP-218) → `transcribeNow` | "What does the meeting recording say?" | initial status = `queued_for_transcription`, transcribe-now = 202, citation on `warp224-video-subs.mp4` + `budget meeting kickoff` substring | WARP-198 |
+| 5 | Video w/ frame text | `with-frame-text.mp4` | brain-upload (deferred per WARP-218) → `transcribeNow` | "What's on the slide deck?" | initial status = `queued_for_transcription`, transcribe-now = 202, citation + `BUDGET KICKOFF` or `ONE HUNDRED THOUSAND` + `--- Frame OCR ---` separator in chunks | WARP-208 |
+| 6 | Email + nested PDF | `with-pdf-attachment.eml` | brain-upload (sync — non-audio/video) | "What's in the email body?" | citation on `warp224-email.eml` + `bob, see the attached pdf` body sentinel + `--- Attachment: ` separator in chunks | WARP-199 |
+| 7 | Archive member | `simple.zip` | Nextcloud scan | "What's inside the zip?" | citation + `the budget for q4` substring + `--- Member: ` separator in chunks | WARP-200 |
+| 8 | Deferred-ASR | `sample.wav` (re-used) | brain-upload (queued) + `POST /transcribe-now` (explicit status walk) | "What does the queued audio say?" | initial status = `queued_for_transcription`, post-transcribe-now status = `ready`, citation + sentinel | WARP-218 |
+| ‒ | Negative | (none) | (no upload) | "Search for `zzzqqqxxx-nonexistent…`" | no citation hit's path or text contains the negative sentinel | WARP-224 |
+
+Every flow runs once; flows #1 (PDF) and #3 (audio) ALSO run a 5x
+loop to flush retrieval flake. Free-text prose is allowed to vary;
+the retrieval chain (`search_content` called, hits include the file,
+snippets non-empty) is what we constrain.
+
+A sentinel-uniqueness audit runs at the end of `beforeAll`: every
+indexed chunk is scanned for the negative sentinel and the suite
+fails loudly if a fixture has drifted into containing it (would
+silently invalidate the negative test otherwise).
+
+### WARP-218 deferred-ASR contract
+
+Per WARP-218, **all audio + video brain-uploads land in
+`status='queued_for_transcription'` regardless of upload context**
+(MIME-based, not chat-attachment-flag-based — see
+`apps/orchestrator/src/routes/files-brain.ts` lines 225-247).
+
+The default daily ASR worker fires at 03:00 local. Tests cannot wait
+for the daily run, so flows #3, #4, #5, and #8 explicitly call
+`POST /api/files/brain/:itemId/transcribe-now` to force immediate
+processing. The upload-response status is asserted to be
+`queued_for_transcription` first, canonicalizing the WARP-218
+contract before transcribe-now flips it to `indexing` → `ready`.
+
+Documents (PDFs, images, emails, archives) still index synchronously
+on the inline `brain_ingest` path.
+
+### Running the suite
+
+```bash
+./scripts/test-rag.sh --only end-to-end
+```
+
+Or manually with Compose already up:
+
+```bash
+RUN_RAG_INTEGRATION=1 API_URL=http://localhost:3000 \
+  npx vitest run --no-file-parallelism \
+  tests/rag-end-to-end.integration.test.ts
+```
+
+Wall-clock: ~12-25 min cold, ~6-10 min warm. The dominant cost is
+the `beforeAll` (compose up + Nextcloud bootstrap + 9 fixture
+uploads + indexing waits + transcribe-now triggers). Each individual
+`it()` runs in 30-120s.
+
+**macOS dev-machine note:** `./scripts/test-rag.sh` currently fails
+on macOS because Nextcloud's `/mnt/droplet` bind-mount hits Docker
+Desktop's File Sharing allow-list. Tracked in WARP-226. Workaround:
+trigger the `rag-tests` workflow on GitHub Actions (Linux) via:
+
+```bash
+gh workflow run rag-tests --ref <branch>
+gh run list --workflow rag-tests --limit 1
+```
+
+### Triaging a failure
+
+| Symptom | First service to check | Likely cause |
+|---|---|---|
+| `agent did not call search_content` (any flow) | orchestrator | agent loop iteration limit, model not honoring tool prompt, system prompt regression |
+| `no citation for <file>` but `search_content` was called and got OTHER hits | file-indexer | the relevant extractor never wrote chunks; check extractor logs for the fixture's MIME |
+| `no citation for <file>` AND `search_content` returned zero hits everywhere | ai-gateway | gRPC unreachable, embed model not loaded, `EMBEDDING_UNAVAILABLE` |
+| Citation present but `text.length === 0` | file-indexer (chunker) | chunk row exists but text column is empty; corrupted extractor output |
+| Frame-OCR flow fails citation but `--- Frame OCR ---` separator absent | file-indexer | `VIDEO_FRAME_OCR_ENABLED` not set in test override (check `docker/docker-compose.test.override.yml`) or extractor regression |
+| Email flow citation passes but `--- Attachment: ` separator absent | file-indexer | recursive dispatcher didn't walk into the PDF; check email extractor logs |
+| Archive flow citation passes but `--- Member: ` separator absent | file-indexer | recursive dispatcher didn't walk into the zip; check archive extractor logs |
+| Audio/video upload returns status other than `queued_for_transcription` | orchestrator | WARP-218 contract regression in `apps/orchestrator/src/routes/files-brain.ts:225-247` |
+| `transcribeNow returned 429` on a fresh upload | orchestrator | retry-cap state corruption; check `BrainMemoryItem` retry columns |
+| Deferred-ASR `status` stuck at `queued_for_transcription` post-transcribe-now | file-indexer | MQTT broker, `transcription_worker.run_one` not picking up the message — check broker logs |
+| Negative test fails (sentinel hit) | test fixture or sentinel | a fixture contains the negative sentinel; pick a different token |
+| Sentinel-uniqueness audit fails in `beforeAll` | test fixture | a fixture's text drifted into containing `zzzqqqxxx-nonexistent-token-warp224` — pick a new sentinel and audit fixtures |
+
+For the full Compose-up + service-by-service triage cheatsheet
+(everything BEFORE chat retrieval enters the picture — Nextcloud
+bootstrap, db init, etc.), see "Reading failure modes" above.
+
+Container logs:
+
+```bash
+# Tail one service:
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.test.override.yml \
+  logs --tail 200 file-indexer
+
+# Dump every service for offline triage (mirrors what CI uploads):
+for svc in file-indexer orchestrator ai-gateway nextcloud db mcp-server broker; do
+  docker compose -f docker/docker-compose.yml \
+    -f docker/docker-compose.test.override.yml \
+    logs --no-color "$svc" > "rag-${svc}.log"
+done
+```
+
+### Adding a new flow when a future extractor lands
+
+1. Place the fixture in `services/file-indexer/tests/fixtures/<name>` (commit it; tiny synthetic preferred).
+2. Pick a unique sentinel substring that does NOT appear in any other fixture. The sentinel-uniqueness audit will catch a fixture leak; design the sentinel to never collide with the negative-test token either.
+3. Decide upload path: brain-upload for items via chat / `/api/files/brain/upload`, Nextcloud-scan for archive-style items via the watched data dir.
+4. If the file is audio or video, expect WARP-218's deferred-by-default behavior: assert the upload status is `queued_for_transcription`, then `transcribeNow(itemId)`, then poll. Otherwise (document MIMEs) the inline `brain_ingest` path runs synchronously — just `pollUntilBrainIndexed` after upload.
+5. Add fixture-path + sentinel constants near the top of `tests/rag-end-to-end.integration.test.ts`.
+6. In `beforeAll`, add the upload + (transcribe-now if applicable) + poll-until-ready block. Use `uploadBrainFile` / `uploadNextcloudFile` / `transcribeNow` from `tests/helpers/rag-retrieval.ts`.
+7. Add the `it()` block for citation assertion. Use the audio flow as a template for deferred MIMEs, the email flow for sync MIMEs.
+8. If the extractor emits a structural separator (`--- Member: `, `--- Attachment: `, `--- Frame OCR ---`), add a sibling `it()` that scans the chunks for it — proves the extractor's code path actually fired.
+9. Add the new row to the table above and to the spec's flow inventory.
+10. Run `./scripts/test-rag.sh --only end-to-end` and confirm green (or trigger the `rag-tests` workflow if on macOS).
+
+### Why we loop on retrieval determinism
+
+Same chunks, same file, same sentinel — that should be deterministic
+across model invocations even if the model's prose isn't. The 5-loop
+check on flows #1 and #3 surfaces the "1-in-5 retrieval missed"
+case that single-shot tests would call green and ship.
+
+### LLM offline acceptance
+
+If `ai-gateway` routes Ollama to an unreachable Jetson (the default
+on a developer laptop), the agent hits `max_iter` and returns
+`stop_reason: "iteration_limit"`. That's acceptable as long as
+`search_content` was still called and hits came back. The test
+asserts on the trace, not the model's prose — so iteration-limit
+flows pass exactly like a model-online flow would.
+
+To force a specific test model (e.g., a local Ollama with a small
+model loaded), set `RAG_E2E_MODEL=mistral` (or whatever) in the
+test environment.
+
 ## Running locally
 
 The runner script handles boot, health checks, and teardown.
