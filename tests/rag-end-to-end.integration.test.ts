@@ -115,6 +115,17 @@ const FRAME_VIDEO_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixt
 const FRAME_VIDEO_SENTINEL = "BUDGET KICKOFF";
 const FRAME_VIDEO_SECONDARY_SENTINEL = "ONE HUNDRED THOUSAND";
 
+const EML_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/with-pdf-attachment.eml");
+// with-pdf-attachment.eml is the WARP-199 fixture: an email body that
+// reads "Bob, see the attached PDF for the full proposal." plus a
+// ReportLab-generated placeholder PDF attachment.
+//
+// We assert on the EMAIL BODY for citation (the embedded PDF is a
+// placeholder with no meaningful text). The attachment-separator
+// assertion proves the recursive dispatcher still walked into the PDF.
+const EML_BODY_SENTINEL = "bob, see the attached pdf";
+const EML_ATTACHMENT_SEPARATOR = "--- Attachment: ";
+
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
@@ -122,6 +133,7 @@ describe.skipIf(!SHOULD_RUN)(
     let audioItemId: string | null = null;
     let subsVideoItemId: string | null = null;
     let frameVideoItemId: string | null = null;
+    let emailItemId: string | null = null;
 
     beforeAll(async () => {
       // Bring up the full chain. mcp-server is a sibling Compose
@@ -238,6 +250,20 @@ describe.skipIf(!SHOULD_RUN)(
       if (!frameVideoOk) {
         throw new Error(
           `Video-frame item ${frameVideoItemId} never indexed — frame OCR may be off (VIDEO_FRAME_OCR_ENABLED) or extractor regressed`,
+        );
+      }
+
+      // ─── Email brain-upload (WARP-199) ───
+      const emlUp = await uploadBrainFile(
+        EML_FIXTURE,
+        "warp224-email.eml",
+        "message/rfc822",
+      );
+      emailItemId = emlUp.itemId;
+      const emailOk = await pollUntilBrainIndexed(emailItemId, 240_000);
+      if (!emailOk) {
+        throw new Error(
+          `Email item ${emailItemId} never indexed — check file-indexer logs for email extractor`,
         );
       }
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
@@ -363,6 +389,30 @@ describe.skipIf(!SHOULD_RUN)(
       );
       expect(chunkText.length).toBeGreaterThan(0);
       expect(chunkText).toContain("--- Frame OCR ---");
+    }, 30_000);
+
+    it("agent retrieval reaches an email's body and walks into the attached PDF (WARP-199)", async () => {
+      const resp = await chat(
+        `Search my email for "Bob, see the attached PDF". What does the email say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const emailHit = hits.find((h) => h.path.toLowerCase().includes("warp224-email"));
+      expect(emailHit, "no citation for warp224-email.eml").toBeDefined();
+      expect(emailHit!.text.length).toBeGreaterThan(0);
+      expect(emailHit!.text.toLowerCase()).toContain(EML_BODY_SENTINEL);
+    }, 120_000);
+
+    it("email chunks carry the --- Attachment: --- separator (recursive dispatch)", async () => {
+      const chunkText = dbQuery(
+        `SELECT string_agg("text", ' ') FROM "FileContentChunk" ` +
+        `WHERE "brainItemId" = '${emailItemId}' AND "source" = 'brain'`,
+      );
+      expect(chunkText.length).toBeGreaterThan(0);
+      expect(chunkText).toContain(EML_ATTACHMENT_SEPARATOR);
     }, 30_000);
 
     // Determinism harness — see header comment. We loop on retrieval
