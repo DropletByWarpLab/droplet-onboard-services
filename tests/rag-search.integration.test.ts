@@ -57,8 +57,12 @@ function shSilent(cmd: string): string {
  * container, sidestepping a pg client dependency in tests/.
  */
 function dbQuery(sql: string): string {
+  // Multi-line SQL doesn't survive JSON.stringify → bash double-quote
+  // (newlines become literal \n that psql parses as syntax). Flatten
+  // any whitespace runs to single spaces. WARP-227.
+  const flat = sql.replace(/\s+/g, " ").trim();
   return shSilent(
-    `${COMPOSE} exec -T db psql -U droplet -d droplet -t -A -c ${JSON.stringify(sql)}`,
+    `${COMPOSE} exec -T db psql -U droplet -d droplet -t -A -c ${JSON.stringify(flat)}`,
   );
 }
 
