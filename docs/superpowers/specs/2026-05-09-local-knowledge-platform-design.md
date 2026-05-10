@@ -1,10 +1,21 @@
 # Local Knowledge Platform — Long-Term Design
 
-**Status:** Design baseline as of 2026-05-09. Subject to revision after Phase 0 completion as we learn what the compliance controls actually cost in practice. North-star reference; every product PR from this point forward conforms to it.
+**Status:** Design baseline as of 2026-05-09; execution strategy updated 2026-05-10 (see §2.5 below). North-star reference; every product PR conforms to it.
 
 **Tracking epic:** WARP-228 — Trust & Compliance Foundations.
 **Sequential execution chain:** WARP-229 → WARP-278 (50 child tickets, blocks-linked in order).
 **Live progress:** `docs/compliance-progress.md`.
+
+## 2026-05-10 strategy update — E → C
+
+The original "all-compliance-first, sequential, then product" plan was honest about timeline but heavy: 12-18 months wall-clock with zero product features in the window. After introspection we moved to:
+
+- **E (triage now):** WARP-227 (fix 9 broken rag-tests) and WARP-225 (dashboard context-meter — direct user ask) before any new lane starts.
+- **C (interleaved going forward):** compliance lane (WARP-229..278) and product lane (Phases A-J below) run in parallel, alternating weeks. Compliance milestones become customer-demand-gated rather than wall-clock-gated.
+
+WARP-229 spec is preserved at `docs/superpowers/specs/2026-05-10-warp-229-fips-provider-design.md` and resumes when the compliance lane is active. The 50-ticket Jira chain is not changed; only execution cadence shifts.
+
+Audits (SOC 2 Type I/II, HIPAA gap assessment, pen test booking, GRC tooling) are deferred until a customer demand justifies the cost. Engineering controls still ship; the audit attestations follow when paid demand exists.
 
 ---
 
