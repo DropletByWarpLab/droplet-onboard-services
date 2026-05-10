@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Activity,
   BookOpen,
   Calendar as CalendarIcon,
   Film,
@@ -51,6 +52,14 @@ const secondaryNav: NavItem[] = [
   { href: "/remote-access", label: "Remote Access", icon: Globe },
   { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
+];
+
+// WARP-279: admin-only entries appended to the secondary nav at render
+// time when the current user has owner/admin role. Keeping it as a
+// separate list rather than baking the role check into NavItem so the
+// rest of the file stays type-stable.
+const adminNav: NavItem[] = [
+  { href: "/admin/claude-activity", label: "Activity", icon: Activity },
 ];
 
 const navItems: NavItem[] = [...primaryNav, ...secondaryNav];
@@ -131,6 +140,25 @@ export function Sidebar() {
               pathname={pathname}
             />
           ))}
+
+          {/* WARP-279: admin-only nav entries. Hidden until the user's
+              role hydrates as owner/admin so we never render a link the
+              orchestrator would 403. */}
+          {(user?.role === "owner" || user?.role === "admin") && (
+            <>
+              <div className="px-3 pt-4 pb-2">
+                <div className="h-px bg-separator" />
+              </div>
+              {adminNav.map((item) => (
+                <NavLink
+                  key={item.href}
+                  item={item}
+                  active={isActive(item.href)}
+                  pathname={pathname}
+                />
+              ))}
+            </>
+          )}
         </nav>
 
         {/* Footer */}
