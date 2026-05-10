@@ -29,9 +29,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
+import { COMPOSE } from "./helpers/rag-retrieval";
 
 const REPO_ROOT = resolve(__dirname, "..");
-const COMPOSE = `docker compose -f ${REPO_ROOT}/docker/docker-compose.yml`;
 const NC_DATA_DIR = "/var/www/html/data/admin/files";
 const SHOULD_RUN = process.env.RUN_RAG_INTEGRATION === "1";
 

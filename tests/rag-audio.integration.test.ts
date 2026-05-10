@@ -29,9 +29,9 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import { resolve } from "node:path";
+import { COMPOSE } from "./helpers/rag-retrieval";
 
 const REPO_ROOT = resolve(__dirname, "..");
-const COMPOSE = `docker compose -f ${REPO_ROOT}/docker/docker-compose.yml`;
 const SHOULD_RUN = process.env.RUN_RAG_INTEGRATION === "1";
 const API_URL = process.env.API_URL ?? "http://localhost:3000";
 const FIXTURE = resolve(

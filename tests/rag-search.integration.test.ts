@@ -37,9 +37,9 @@ import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { COMPOSE } from "./helpers/rag-retrieval";
 
 const REPO_ROOT = resolve(__dirname, "..");
-const COMPOSE = `docker compose -f ${REPO_ROOT}/docker/docker-compose.yml`;
 const NC_DATA_DIR = "/var/www/html/data/admin/files";
 const SHOULD_RUN = process.env.RUN_RAG_INTEGRATION === "1";
 const MCP_SERVER_BIN = resolve(REPO_ROOT, "services/mcp-server/dist/index.js");
