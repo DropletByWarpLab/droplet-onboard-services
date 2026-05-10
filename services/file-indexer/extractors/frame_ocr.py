@@ -103,7 +103,61 @@ def parse_phash_threshold(raw: Optional[str] = None) -> int:
         return DEFAULT_PHASH_THRESHOLD
 
 
-# Function bodies for sample/phash/ocr/merge/extract land in 1.4..1.6.
+def _sample_frames(
+    video_path: Union[str, Path], *, interval_sec: int
+) -> Iterator[bytes]:
+    """Yield JPEG-encoded frame bytes from ffmpeg, one per `interval_sec`.
+
+    Reads ffmpeg stdout in chunks and splits on the JPEG SOI marker
+    (0xFFD8). Each yielded chunk starts with SOI and is the bytes of
+    one encoded JPEG frame.
+    """
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", f"fps=1/{interval_sec}",
+        "-q:v", "2",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "-",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    buf = b""
+    READ_SIZE = 64 * 1024
+    try:
+        while True:
+            data = proc.stdout.read(READ_SIZE)
+            if not data:
+                break
+            buf += data
+            # Split on SOI markers; everything between two SOIs is one
+            # JPEG frame.
+            while True:
+                first = buf.find(JPEG_SOI_MARKER)
+                if first == -1:
+                    break
+                second = buf.find(JPEG_SOI_MARKER, first + 2)
+                if second == -1:
+                    break
+                yield buf[first:second]
+                buf = buf[second:]
+        # Trailing frame: whatever's left after the last SOI is the
+        # final frame.
+        if buf and buf.startswith(JPEG_SOI_MARKER):
+            yield buf
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+# Function bodies for phash/ocr/merge/extract land in 1.5..1.6.
 def extract_frame_text(
     path: Union[str, Path],
     *,
