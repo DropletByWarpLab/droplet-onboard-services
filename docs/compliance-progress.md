@@ -28,7 +28,7 @@ This means **the timeline anchors below shift**: compliance milestones are no lo
 | SOC 2 Type I attestation | 🔵 not started | After engineering controls + policies in place; ~9 months in |
 | SOC 2 Type II attestation | 🔵 not started | Type I + 6-12 month observation; ~18-24 months in |
 | HIPAA-ready (architecture + BAA + processes) | 🔵 not started | Achieved by end of WARP-274 |
-| FIPS 140-3 cryptographic modules | 🔵 not started | Achieved at WARP-229 close (using pre-validated modules) |
+| FIPS 140-3 cryptographic modules | 🟡 in progress | WARP-229 closed: provider activation apparatus + boot self-tests + PR-blocking lint shipped. Pending: operator sourcing of validated `fips.so` (Ubuntu Pro / Red Hat UBI / source-built) — tracked separately. |
 | NIST 800-53 Rev 5 Moderate baseline mapping | 🔵 not started | Documentation exercise, runs alongside other tickets |
 | STIG-hardened OS profile | 🔵 not started | Configuration; produced as part of WARP-231 |
 | Common Criteria EAL2 | ⏸ deferred | Year 2+, gated on a federal customer |
@@ -42,7 +42,7 @@ Legend: ✅ done · 🟡 in progress · 🔵 not started · ❌ blocked or N/A �
 
 | Workstream | Tickets | Done | In progress | Not started |
 |---|---|---|---|---|
-| Cryptographic foundations | 8 | 0 | 0 | 8 |
+| Cryptographic foundations | 8 | 1 | 0 | 7 |
 | Audit & monitoring | 5 | 0 | 0 | 5 |
 | Identity & access | 5 | 0 | 0 | 5 |
 | Data protection | 8 | 0 | 0 | 8 |
@@ -51,7 +51,7 @@ Legend: ✅ done · 🟡 in progress · 🔵 not started · ❌ blocked or N/A �
 | Privacy + telemetry | 3 | 0 | 0 | 3 |
 | Governance UI + Trust Center | 3 | 0 | 0 | 3 |
 | GRC operations | 6 | 0 | 0 | 6 |
-| **Total** | **50** | **0** | **0** | **50** |
+| **Total** | **50** | **1** | **0** | **49** |
 
 ---
 
@@ -61,7 +61,7 @@ The chain is non-negotiable — each ticket blocks the next.
 
 | # | Ticket | Title | Workstream | Status |
 |---|---|---|---|---|
-| 1 | [WARP-229](https://warp-lab.atlassian.net/browse/WARP-229) | FIPS 140-3 cryptographic provider + CI lint | Crypto | 🔵 |
+| 1 | [WARP-229](https://warp-lab.atlassian.net/browse/WARP-229) | FIPS 140-3 cryptographic provider + CI lint | Crypto | ✅ |
 | 2 | [WARP-230](https://warp-lab.atlassian.net/browse/WARP-230) | TPM 2.0-sealed device identity | Crypto | 🔵 |
 | 3 | [WARP-231](https://warp-lab.atlassian.net/browse/WARP-231) | UEFI Secure Boot + signed kernel + dm-verity rootfs + IMA | Crypto | 🔵 |
 | 4 | [WARP-232](https://warp-lab.atlassian.net/browse/WARP-232) | LUKS2 disk encryption with TPM-sealed keys | Crypto | 🔵 |
@@ -157,8 +157,9 @@ Don't update audit dates here without an actual auditor commitment in writing.
 
 ## Recent closes
 
-- **2026-05-10** — WARP-229 spec written + reviewed. Implementation paused per E→C strategy update; will resume when the compliance lane is active. Spec at `docs/superpowers/specs/2026-05-10-warp-229-fips-provider-design.md`.
+- **2026-05-10** — **WARP-229 ✅ done.** FIPS 140-3 cryptographic provider activation apparatus shipped across all 8 application service containers (orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway, camera-discovery, routing, switch, oled-display). New `@droplet/fips-selftest` TS package + `services/_shared/fips_selftest.py` Python helper. PR-blocking static lint at `scripts/test-fips.sh` + `.github/workflows/test-fips.yml`. Documented allowed algorithms (`docs/security/fips-allowed-algorithms.md`) and 3-entry exceptions registry (`docs/security/fips-exceptions.md`): RTSP digest MD5, WireGuard X25519, FIPS-selftest negative-probe. file-indexer's MD5 item-id fingerprint replaced with SHA-256. Operator note: validated `fips.so` sourcing tracked separately.
+- **2026-05-10** — WARP-229 spec written + reviewed. (Implementation followed in the same day, on the WARP-229 branch.) Spec at `docs/superpowers/specs/2026-05-10-warp-229-fips-provider-design.md`.
 
 ---
 
-*Living document. Last updated 2026-05-10 with E→C strategy.*
+*Living document. Last updated 2026-05-10 with WARP-229 close.*
