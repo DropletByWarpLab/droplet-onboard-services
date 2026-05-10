@@ -248,6 +248,7 @@ the failure manually.
 | `/api/llm/chat` returns 200 but trace has no `search_content` call | `orchestrator` — agent loop iter limit, model not honoring tool prompt. The retrieval test loops 5x to surface this kind of flake. |
 | Nextcloud `occ files:scan` hangs forever | `nextcloud` — bootstrap not done yet (occ status fails), or admin user-files dir missing. |
 | `localhost:3000` connection refused | The test override wasn't loaded — re-run with `./scripts/test-rag.sh` instead of just `docker compose up`. |
+| All requests return 401 `Missing or invalid authentication` | `orchestrator` booted with `AUTH_ENABLED=true` from `.env`; the test override's `environment: AUTH_ENABLED=false` didn't win the Compose merge race. WARP-227 R3 fixes this by `sed`-ing `AUTH_ENABLED=false` into `.env` before `compose up` (in both `scripts/test-rag.sh` and the `rag-tests` workflow). If you've manually edited `.env` and skipped the script, ensure `AUTH_ENABLED=false`. |
 
 ```bash
 # Tail one service's logs from a still-running stack:
