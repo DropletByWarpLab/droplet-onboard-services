@@ -284,19 +284,31 @@ def _synthetic_nc_file_id(item_id: str) -> int:
 
     The FileContentChunk schema uses `(ncFileId, chunkIdx)` as a unique
     constraint, which the existing watcher relies on for upsert. Brain
-    items don't have a Nextcloud fileid — we hash the cuid (md5 truncated
-    to 30 bits) into a deterministic non-negative int, then offset into
-    the upper half (>= 2^30) so we don't collide with real Nextcloud
-    fileids (which start at 1 and grow modestly).
+    items don't have a Nextcloud fileid — we hash the cuid (SHA-256
+    truncated to 30 bits) into a deterministic non-negative int, then
+    offset into the upper half (>= 2^30) so we don't collide with real
+    Nextcloud fileids (which start at 1 and grow modestly).
 
-    md5 (not Python's per-process-randomized `hash()`) so the same item
-    produces the same synthetic id across restarts — `delete_chunks_for_brain_item`
-    by `brainItemId` is the actual idempotency key, but predictability of
-    the synthetic id keeps post-mortem queries by `ncFileId` sane.
+    SHA-256 (not Python's per-process-randomized `hash()`) so the same
+    item produces the same synthetic id across restarts —
+    `delete_chunks_for_brain_item` by `brainItemId` is the actual
+    idempotency key, but predictability of the synthetic id keeps
+    post-mortem queries by `ncFileId` sane.
+
+    Previously used MD5; switched to SHA-256 under WARP-229 (FIPS 140-3
+    provider). The function contract — deterministic 30-bit hash mapped
+    into the upper INTEGER half — is unchanged. The exact output value
+    for any given item_id changes between MD5 and SHA-256, which means
+    BrainMemoryItem rows already ingested under the MD5 scheme will get
+    a different `ncFileId` next time they're re-ingested. That's fine:
+    `delete_chunks_for_brain_item` keys off `brainItemId`, not
+    `ncFileId`, so the upsert path stays consistent. Post-mortem queries
+    that depend on the legacy MD5 value would need to re-derive, but no
+    such tooling exists today.
     """
     import hashlib
 
-    digest = hashlib.md5(item_id.encode("utf-8")).digest()
+    digest = hashlib.sha256(item_id.encode("utf-8")).digest()
     h = int.from_bytes(digest[:4], "big") % (1 << 30)
     return (1 << 30) + h
 
