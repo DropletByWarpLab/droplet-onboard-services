@@ -13,6 +13,11 @@ export interface AuthUser {
   id: string;
   username: string;
   displayName: string;
+  // Role mirrors the orchestrator's JWT role enum. /api/auth/me returns
+  // it; we keep it optional here so older cached profiles don't break
+  // the type. WARP-279 added the field for the /admin/claude-activity
+  // visibility check.
+  role?: "owner" | "admin" | "family" | "guest";
 }
 
 interface AuthContextValue {

@@ -135,6 +135,23 @@ const envSchema = z.object({
   // Contact mailto for VAPID's `aud` claim. Some push services (FCM,
   // Mozilla autopush) reject pushes without a valid contact.
   VAPID_CONTACT_EMAIL: z.string().default(""),
+
+  // --- WARP-279: Claude-activity meta-observability dashboard ---
+  // GitHub adapter — optional PAT. Repo defaults to the public droplet repo
+  // and is documented under GITHUB_REPO_OWNER / GITHUB_REPO_NAME in
+  // .env.example. We deliberately don't list those here: they're only read
+  // by the GitHub adapter and never re-emitted as part of `config`.
+  GITHUB_TOKEN: z.string().default(""),
+
+  // Jira adapter — basic auth (email + API token) against an Atlassian
+  // Cloud instance. All three are required for Jira data to populate; with
+  // any one missing, the dashboard's "WARP-228 chain progress" and
+  // "in-flight tickets" panels degrade to empty (with a banner), the rest
+  // of the dashboard works normally. The host is the bare cloud subdomain
+  // (e.g. `warp-lab.atlassian.net`, no scheme).
+  JIRA_HOST: z.string().default(""),
+  JIRA_EMAIL: z.string().default(""),
+  JIRA_API_TOKEN: z.string().default(""),
 });
 
 export const config = envSchema.parse(process.env);
