@@ -26,6 +26,7 @@ import { createNotificationsRouter } from "./routes/notifications.js";
 import { createVpnRouter } from "./routes/vpn.js";
 import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
+import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
 
@@ -82,6 +83,8 @@ export function createApp(prisma: PrismaClient) {
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
   app.use("/api", createAdminClaudeActivityRouter());
+  // WARP-225: per-user context-meter (home widget + /context page).
+  app.use("/api", createMeContextStatsRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.

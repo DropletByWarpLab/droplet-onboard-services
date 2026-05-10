@@ -228,6 +228,94 @@ export async function acceptInvite(
   return res.json();
 }
 
+// --- WARP-225: per-user context-meter ---
+
+import type {
+  ContextStatsSummary,
+  ContextStatsFull,
+  QueuedItem,
+  FailedItem,
+} from "./types-context-stats";
+
+export async function fetchContextStatsSummary(): Promise<ContextStatsSummary> {
+  const res = await authFetch(`${BASE}/api/me/context-stats`);
+  if (!res.ok)
+    throw new Error(`Failed to fetch context-stats summary: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchContextStatsFull(): Promise<ContextStatsFull> {
+  const res = await authFetch(`${BASE}/api/me/context-stats/full`);
+  if (!res.ok)
+    throw new Error(`Failed to fetch context-stats full: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchContextStatsQueued(): Promise<QueuedItem[]> {
+  const res = await authFetch(`${BASE}/api/me/context-stats/queued`);
+  if (!res.ok)
+    throw new Error(`Failed to fetch context-stats queued: ${res.status}`);
+  const body = (await res.json()) as { items: QueuedItem[] };
+  return body.items ?? [];
+}
+
+export async function fetchContextStatsFailed(): Promise<FailedItem[]> {
+  const res = await authFetch(`${BASE}/api/me/context-stats/failed`);
+  if (!res.ok)
+    throw new Error(`Failed to fetch context-stats failed: ${res.status}`);
+  const body = (await res.json()) as { items: FailedItem[] };
+  return body.items ?? [];
+}
+
+/**
+ * POST retry on a failed item. Surfaces 429 (rate-limited) inline so
+ * the FailedList can show "Retry available in <X minutes>" without
+ * looping the whole component into the SWR error path.
+ */
+export interface RetryResult {
+  ok: boolean;
+  status: number;
+  retryAfterSeconds?: number;
+}
+export async function retryFailedContextItem(
+  itemId: string,
+): Promise<RetryResult> {
+  const res = await authFetch(
+    `${BASE}/api/me/context-stats/failed/${encodeURIComponent(itemId)}/retry`,
+    { method: "POST" },
+  );
+  if (res.status === 202) return { ok: true, status: 202 };
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({}));
+    return {
+      ok: false,
+      status: 429,
+      retryAfterSeconds: Number(body?.retryAfterSeconds) || undefined,
+    };
+  }
+  return { ok: false, status: res.status };
+}
+
+/** WARP-218 — exists already; called from QueuedList "Run now" button. */
+export async function transcribeNowBrainItem(
+  itemId: string,
+): Promise<RetryResult> {
+  const res = await authFetch(
+    `${BASE}/api/files/brain/${encodeURIComponent(itemId)}/transcribe-now`,
+    { method: "POST" },
+  );
+  if (res.status === 202) return { ok: true, status: 202 };
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({}));
+    return {
+      ok: false,
+      status: 429,
+      retryAfterSeconds: Number(body?.retryAfterSeconds) || undefined,
+    };
+  }
+  return { ok: false, status: res.status };
+}
+
 // --- Storage ---
 
 export async function fetchStorage(): Promise<StorageStats> {

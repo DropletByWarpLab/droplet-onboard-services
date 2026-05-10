@@ -23,6 +23,7 @@ import {
   Clock,
   type LucideIcon,
 } from "lucide-react";
+import { ContextWidget } from "@/components/context/ContextWidget";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStorage } from "@/lib/hooks/useStorage";
@@ -259,6 +260,17 @@ export default function DashboardPage() {
                 : "No cloud keys configured"}
             </span>
           </div>
+        </section>
+
+        {/* ── CONTEXT WIDGET (WARP-225) ─────────────────── */}
+        {/* Compact tile that shows files indexed, chunks searchable, and
+            queued/failed callouts. Click-through to /context for the
+            full analytics page. Animated counter ticks on each 30s poll. */}
+        <section
+          className="mb-6 animate-fade-rise"
+          style={{ animationDelay: "180ms" }}
+        >
+          <ContextWidget />
         </section>
 
         {/* ── PRIMARY TILES: Files & Devices ─────────────── */}

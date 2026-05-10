@@ -27,5 +27,17 @@ vi.mock("next/link", () => ({
   },
 }));
 
+// WARP-225: jsdom doesn't ship ResizeObserver, but recharts'
+// ResponsiveContainer relies on it. Polyfill with a no-op so chart
+// components can render in vitest without each test having to wire
+// it up locally.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+
 // Suppress console noise in tests
 vi.spyOn(console, "error").mockImplementation(() => {});

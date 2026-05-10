@@ -58,6 +58,13 @@ def _publish_status(
     if reason is not None:
         payload["reason"] = reason
     mqtt_client.publish(f"droplet/files/{user_id}/brain/indexed", payload)
+    # WARP-225: invalidate per-user context-stats cache so the
+    # /context page reflects the new state on the next poll. Same
+    # rationale as brain_ingest._publish_status — fan-out on every
+    # transition, best-effort.
+    mqtt_client.publish(
+        "droplet/context-stats/invalidate", {"userId": user_id}
+    )
 
 
 def _dispatch_and_index(item: dict) -> None:
