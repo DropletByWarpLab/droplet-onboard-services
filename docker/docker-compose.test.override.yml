@@ -41,6 +41,11 @@ services:
   file-indexer:
     environment:
       - WATCHER_MODE=polling
+      # WARP-224: enable frame-OCR for the rag-end-to-end test lane so
+      # tests/rag-end-to-end.integration.test.ts can exercise the
+      # WARP-208 frame-OCR code path (mute video, no subs, on-screen
+      # text only).
+      - VIDEO_FRAME_OCR_ENABLED=1
 
   # Map the DB so `tests/rag-search.integration.test.ts` (and the other
   # tests that exec into the db container with `docker compose exec db

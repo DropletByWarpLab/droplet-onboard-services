@@ -109,12 +109,19 @@ const SUBS_VIDEO_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtu
 // from the audio file's transcript.
 const SUBS_VIDEO_SENTINEL = "budget meeting kickoff";
 
+const FRAME_VIDEO_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/with-frame-text.mp4");
+// with-frame-text.mp4 has NO audio + NO subtitle stream. Frame OCR
+// is the only retrievable channel. Three on-screen slides:
+const FRAME_VIDEO_SENTINEL = "BUDGET KICKOFF";
+const FRAME_VIDEO_SECONDARY_SENTINEL = "ONE HUNDRED THOUSAND";
+
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
     let brainItemId: string | null = null;
     let audioItemId: string | null = null;
     let subsVideoItemId: string | null = null;
+    let frameVideoItemId: string | null = null;
 
     beforeAll(async () => {
       // Bring up the full chain. mcp-server is a sibling Compose
@@ -216,6 +223,23 @@ describe.skipIf(!SHOULD_RUN)(
           `Video-w/-subs item ${subsVideoItemId} never indexed — check file-indexer logs`,
         );
       }
+
+      // ─── Video w/ frame OCR brain-upload (WARP-208) ───
+      // The file-indexer needs VIDEO_FRAME_OCR_ENABLED=1 in its env for
+      // this flow's frame-OCR text to land in chunks. The test override
+      // (docker/docker-compose.test.override.yml) sets it for this lane.
+      const frameVidUp = await uploadBrainFile(
+        FRAME_VIDEO_FIXTURE,
+        "warp224-video-frame.mp4",
+        "video/mp4",
+      );
+      frameVideoItemId = frameVidUp.itemId;
+      const frameVideoOk = await pollUntilBrainIndexed(frameVideoItemId, 300_000);
+      if (!frameVideoOk) {
+        throw new Error(
+          `Video-frame item ${frameVideoItemId} never indexed — frame OCR may be off (VIDEO_FRAME_OCR_ENABLED) or extractor regressed`,
+        );
+      }
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
 
     afterAll(async () => {
@@ -302,6 +326,44 @@ describe.skipIf(!SHOULD_RUN)(
       expect(subsHit!.text.length).toBeGreaterThan(0);
       expect(subsHit!.text.toLowerCase()).toContain(SUBS_VIDEO_SENTINEL);
     }, 120_000);
+
+    it("agent retrieval reaches a video via frame OCR only (WARP-208)", async () => {
+      const resp = await chat(
+        `Search my videos for "${FRAME_VIDEO_SENTINEL}" — it should be on-screen text. What slide is shown?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const frameHit = hits.find((h) => h.path.toLowerCase().includes("warp224-video-frame"));
+      expect(frameHit, "no citation for warp224-video-frame.mp4").toBeDefined();
+      expect(frameHit!.text.length).toBeGreaterThan(0);
+
+      // Tesseract is more deterministic than faster-whisper, so we can
+      // assert the slide string verbatim. Either of the two sentinels
+      // proves frame OCR fired (they're on different slides; the chunker
+      // may pack them into one chunk or split, both are acceptable).
+      const upperText = frameHit!.text.toUpperCase();
+      expect(
+        upperText.includes(FRAME_VIDEO_SENTINEL) ||
+        upperText.includes(FRAME_VIDEO_SECONDARY_SENTINEL),
+        `expected frame OCR sentinel in chunk text, got: ${frameHit!.text.slice(0, 200)}`,
+      ).toBe(true);
+    }, 120_000);
+
+    it("frame-OCR video chunks carry the frame_ocr provenance label", async () => {
+      // Read the underlying chunk row's text to confirm the frame-OCR
+      // section separator survived. The extractor emits "--- Frame OCR ---"
+      // before the timestamped slide text; if that separator's missing,
+      // the WARP-208 code path didn't run.
+      const chunkText = dbQuery(
+        `SELECT string_agg("text", ' ') FROM "FileContentChunk" ` +
+        `WHERE "brainItemId" = '${frameVideoItemId}' AND "source" = 'brain'`,
+      );
+      expect(chunkText.length).toBeGreaterThan(0);
+      expect(chunkText).toContain("--- Frame OCR ---");
+    }, 30_000);
 
     // Determinism harness — see header comment. We loop on retrieval
     // because that's the part the spec constrains. The model's prose
