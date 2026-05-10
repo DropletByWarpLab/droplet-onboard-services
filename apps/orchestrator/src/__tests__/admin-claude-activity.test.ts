@@ -11,7 +11,7 @@
  * the repo's .claude/ at the moment.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -19,6 +19,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createAdminClaudeActivityRouter } from "../routes/admin-claude-activity.js";
 import type { Role } from "../services/jwt.service.js";
+
+// Stub GitHub adapter so the route tests stay deterministic and don't hit
+// api.github.com from CI. Each test that needs custom data overrides via
+// vi.mocked().
+vi.mock("../services/claude-activity/github-adapter.js", () => ({
+  getGitHubSnapshot: vi.fn().mockResolvedValue({
+    commits: [],
+    prs: [],
+    ci_runs: [],
+  }),
+}));
 
 function appWith(role: Role) {
   const app = express();
@@ -101,7 +112,7 @@ describe("GET /api/admin/claude-activity", () => {
         expect.objectContaining({ summary: "Picked B" }),
       ],
       recent_actions: [],
-      github: null,
+      github: { commits: [], prs: [], ci_runs: [] },
       jira: null,
       compliance: null,
     });

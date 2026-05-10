@@ -20,6 +20,10 @@
 import { Router, Request, Response, NextFunction } from "express";
 import pino from "pino";
 import { readSessionState } from "../services/claude-activity/session-state.js";
+import {
+  getGitHubSnapshot,
+  type GitHubSnapshot,
+} from "../services/claude-activity/github-adapter.js";
 
 const logger = pino({ name: "admin-claude-activity" });
 
@@ -32,7 +36,7 @@ export interface ClaudeActivityResponse {
   now: Awaited<ReturnType<typeof readSessionState>>["now"];
   decisions: Awaited<ReturnType<typeof readSessionState>>["decisions"];
   recent_actions: Awaited<ReturnType<typeof readSessionState>>["recent_actions"];
-  github: unknown | null;
+  github: GitHubSnapshot | null;
   jira: unknown | null;
   compliance: unknown | null;
   // Wall-clock the orchestrator computed this snapshot. The dashboard uses
@@ -53,26 +57,33 @@ export function createAdminClaudeActivityRouter(): Router {
       }
 
       try {
-        const session = await readSessionState();
+        // Read session-state + GitHub snapshot in parallel. Each call has
+        // its own failure handling — if GitHub is down its leaf is empty
+        // arrays, not a 500.
+        const [session, github] = await Promise.all([
+          readSessionState(),
+          getGitHubSnapshot().catch((err) => {
+            logger.warn({ err }, "github snapshot failed");
+            return null;
+          }),
+        ]);
         const generatedAt = new Date();
 
         const body: ClaudeActivityResponse = {
           now: session.now,
           decisions: session.decisions,
           recent_actions: session.recent_actions,
-          github: null,
+          github,
           jira: null,
           compliance: null,
           generated_at: generatedAt.toISOString(),
         };
 
         // WARP-279: support `If-Modified-Since` so 30s polling can short-
-        // circuit when the underlying signal hasn't moved. We use the
-        // session-state's most-recent timestamp (decisions or recent_actions,
-        // whichever is more recent) as the canonical Last-Modified — that's
-        // the only file-backed signal in this initial scaffold. Once GitHub
-        // / Jira are wired in (commits 3-4) the comparison broadens.
-        const lastModified = mostRecentTimestamp(session) ?? generatedAt;
+        // circuit when nothing moved. Reduce over every timestamp we
+        // surface — session-state, commits, PRs, CI runs.
+        const lastModified =
+          mostRecentTimestamp(session, github) ?? generatedAt;
         res.setHeader("Last-Modified", lastModified.toUTCString());
         // Strong cache-control: data is per-user-role and we don't want
         // intermediaries serving a stale admin payload to a guest browser.
@@ -103,19 +114,21 @@ export function createAdminClaudeActivityRouter(): Router {
 
 function mostRecentTimestamp(
   session: Awaited<ReturnType<typeof readSessionState>>,
+  github: GitHubSnapshot | null,
 ): Date | null {
   let max: number | null = null;
-  for (const d of session.decisions) {
-    const t = Date.parse(d.ts);
+  const consider = (s: string | null | undefined) => {
+    if (!s) return;
+    const t = Date.parse(s);
     if (!Number.isNaN(t) && (max === null || t > max)) max = t;
-  }
-  for (const a of session.recent_actions) {
-    const t = Date.parse(a.ts);
-    if (!Number.isNaN(t) && (max === null || t > max)) max = t;
-  }
-  if (session.now.started_at) {
-    const t = Date.parse(session.now.started_at);
-    if (!Number.isNaN(t) && (max === null || t > max)) max = t;
+  };
+  for (const d of session.decisions) consider(d.ts);
+  for (const a of session.recent_actions) consider(a.ts);
+  consider(session.now.started_at);
+  if (github) {
+    for (const c of github.commits) consider(c.ts);
+    for (const p of github.prs) consider(p.updated_at);
+    for (const r of github.ci_runs) consider(r.updated_at);
   }
   return max === null ? null : new Date(max);
 }
