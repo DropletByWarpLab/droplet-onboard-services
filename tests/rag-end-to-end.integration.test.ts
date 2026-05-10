@@ -77,6 +77,7 @@ import {
   pollUntilBrainIndexed,
   pollNcChunkCount,
   waitForOrchestrator,
+  transcribeNow,
 } from "./helpers/rag-retrieval";
 
 // The PDF fixture contains the unique sentinel "alphahotel" (see
@@ -223,21 +224,33 @@ describe.skipIf(!SHOULD_RUN)(
         );
       }
 
-      // ─── Audio brain-upload (sync chat-attachment path, not deferred) ───
+      // ─── Audio brain-upload (chat-attachment path; deferred per WARP-218) ───
       const wavUp = await uploadBrainFile(WAV_FIXTURE, "warp224-audio.wav", "audio/wav");
       audioItemId = wavUp.itemId;
+      expect(
+        wavUp.status,
+        "audio uploads must land in queued_for_transcription per WARP-218",
+      ).toBe("queued_for_transcription");
+      const wavTxCode = await transcribeNow(audioItemId);
+      expect(wavTxCode, `transcribe-now for audio returned ${wavTxCode}`).toBe(202);
       const audioOk = await pollUntilBrainIndexed(audioItemId, 240_000);
       if (!audioOk) {
         throw new Error(`Audio brain item ${audioItemId} never indexed — check file-indexer + ai-gateway logs`);
       }
 
-      // ─── Video w/ subtitles brain-upload ───
+      // ─── Video w/ subtitles brain-upload (deferred per WARP-218; force via transcribe-now) ───
       const subsVidUp = await uploadBrainFile(
         SUBS_VIDEO_FIXTURE,
         "warp224-video-subs.mp4",
         "video/mp4",
       );
       subsVideoItemId = subsVidUp.itemId;
+      expect(
+        subsVidUp.status,
+        "video uploads must land in queued_for_transcription per WARP-218",
+      ).toBe("queued_for_transcription");
+      const subsTxCode = await transcribeNow(subsVideoItemId);
+      expect(subsTxCode, `transcribe-now for video-subs returned ${subsTxCode}`).toBe(202);
       const subsVideoOk = await pollUntilBrainIndexed(subsVideoItemId, 240_000);
       if (!subsVideoOk) {
         throw new Error(
@@ -245,7 +258,7 @@ describe.skipIf(!SHOULD_RUN)(
         );
       }
 
-      // ─── Video w/ frame OCR brain-upload (WARP-208) ───
+      // ─── Video w/ frame OCR brain-upload (WARP-208) (deferred per WARP-218; force via transcribe-now) ───
       // The file-indexer needs VIDEO_FRAME_OCR_ENABLED=1 in its env for
       // this flow's frame-OCR text to land in chunks. The test override
       // (docker/docker-compose.test.override.yml) sets it for this lane.
@@ -255,6 +268,12 @@ describe.skipIf(!SHOULD_RUN)(
         "video/mp4",
       );
       frameVideoItemId = frameVidUp.itemId;
+      expect(
+        frameVidUp.status,
+        "video uploads must land in queued_for_transcription per WARP-218",
+      ).toBe("queued_for_transcription");
+      const frameTxCode = await transcribeNow(frameVideoItemId);
+      expect(frameTxCode, `transcribe-now for video-frame returned ${frameTxCode}`).toBe(202);
       const frameVideoOk = await pollUntilBrainIndexed(frameVideoItemId, 300_000);
       if (!frameVideoOk) {
         throw new Error(
