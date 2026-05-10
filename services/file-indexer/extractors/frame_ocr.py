@@ -157,7 +157,83 @@ def _sample_frames(
                 pass
 
 
-# Function bodies for phash/ocr/merge/extract land in 1.5..1.6.
+def _phash_bytes(jpeg_bytes: bytes):
+    """Compute a perceptual hash of a JPEG byte payload.
+
+    Lazy-imports `imagehash` so this module stays loadable on minimal
+    dev envs that haven't pip-installed the optional dep yet. The
+    orchestrator function `extract_frame_text` catches the resulting
+    `ImportError` and degrades gracefully.
+    """
+    import imagehash  # noqa: WPS433 — intentional lazy import
+    from PIL import Image
+
+    return imagehash.phash(Image.open(io.BytesIO(jpeg_bytes)))
+
+
+def _dedup_by_phash(
+    frames: list[bytes],
+    *,
+    phash_threshold: int,
+) -> list[tuple[int, bytes]]:
+    """Filter frames where consecutive hamming-distance < phash_threshold.
+
+    Returns a list of (frame_index, frame_bytes) tuples for survivors.
+    The frame_index is the index into the original list (so callers
+    can compute timestamps as `frame_index * interval_sec`).
+
+    `ImportError` (e.g. imagehash missing) propagates up so the
+    orchestrator can return `frame_ocr_unavailable`. Other exceptions
+    on a single frame are logged and that frame is skipped, but
+    `prev_hash` is left untouched so the dedup chain stays consistent
+    with the surviving frames.
+    """
+    kept: list[tuple[int, bytes]] = []
+    prev_hash = None
+    for idx, fb in enumerate(frames):
+        try:
+            cur_hash = _phash_bytes(fb)
+        except ImportError:
+            # Propagate so extract_frame_text can flag frame_ocr_unavailable.
+            raise
+        except Exception as exc:
+            logger.debug(
+                "frame_ocr: phash failed on frame %d (%s) — skipping",
+                idx, exc,
+            )
+            continue
+        if prev_hash is not None and (cur_hash - prev_hash) < phash_threshold:
+            continue
+        prev_hash = cur_hash
+        kept.append((idx, fb))
+    return kept
+
+
+def _merge_segments(segments: list[FrameSegment]) -> list[FrameSegment]:
+    """Extend each segment's end_sec to the next segment's start_sec.
+
+    A slide that survives at 00:30 and is skipped (deduped) at 00:35,
+    00:40, 00:45 produces one segment [00:30 -> 00:50] instead of
+    [00:30 -> 00:35]. The final segment keeps its provisional end_sec.
+    """
+    if not segments:
+        return []
+    out: list[FrameSegment] = []
+    for i in range(len(segments) - 1):
+        cur = segments[i]
+        nxt = segments[i + 1]
+        out.append(
+            FrameSegment(
+                start_sec=cur.start_sec,
+                end_sec=nxt.start_sec,
+                text=cur.text,
+            )
+        )
+    out.append(segments[-1])
+    return out
+
+
+# Function body for extract_frame_text lands in 1.6.
 def extract_frame_text(
     path: Union[str, Path],
     *,

@@ -102,3 +102,95 @@ def test_sample_frames_yields_zero_when_pipe_empty():
     with patch("extractors.frame_ocr.subprocess.Popen", return_value=fake_proc):
         out = list(frame_ocr._sample_frames("/tmp/x.mp4", interval_sec=5))
     assert out == []
+
+
+# ---- _merge_segments ----------------------------------------------------
+
+
+def test_merge_segments_extends_end_to_next_start():
+    segs = [
+        frame_ocr.FrameSegment(start_sec=0, end_sec=5, text="A"),
+        frame_ocr.FrameSegment(start_sec=10, end_sec=15, text="B"),
+        frame_ocr.FrameSegment(start_sec=30, end_sec=35, text="C"),
+    ]
+    merged = frame_ocr._merge_segments(segs)
+    assert [(s.start_sec, s.end_sec) for s in merged] == [(0, 10), (10, 30), (30, 35)]
+    assert [s.text for s in merged] == ["A", "B", "C"]
+
+
+def test_merge_segments_empty_returns_empty():
+    assert frame_ocr._merge_segments([]) == []
+
+
+def test_merge_segments_single_segment_unchanged():
+    seg = frame_ocr.FrameSegment(start_sec=0, end_sec=5, text="A")
+    merged = frame_ocr._merge_segments([seg])
+    assert len(merged) == 1
+    assert merged[0].start_sec == 0
+    assert merged[0].end_sec == 5
+    assert merged[0].text == "A"
+
+
+# ---- _dedup_by_phash ----------------------------------------------------
+
+
+def _stub_hash(distance: int) -> MagicMock:
+    """Return a fake imagehash.ImageHash whose `__sub__` always yields `distance`."""
+    h = MagicMock()
+    h.__sub__ = lambda self, other: distance
+    return h
+
+
+def test_phash_dedup_skips_similar_frames():
+    """Two frames with hamming-distance < threshold -> second skipped."""
+    h_a = _stub_hash(5)  # very similar
+    h_b = _stub_hash(5)
+    with patch("extractors.frame_ocr._phash_bytes", side_effect=[h_a, h_b]):
+        kept = frame_ocr._dedup_by_phash(
+            [b"frame-a", b"frame-b"],
+            phash_threshold=8,
+        )
+    assert kept == [(0, b"frame-a")]
+
+
+def test_phash_dedup_keeps_distinct_frames():
+    """Two frames with hamming-distance >= threshold -> both kept."""
+    h_a = _stub_hash(20)  # very different
+    h_b = _stub_hash(20)
+    with patch("extractors.frame_ocr._phash_bytes", side_effect=[h_a, h_b]):
+        kept = frame_ocr._dedup_by_phash(
+            [b"frame-a", b"frame-b"],
+            phash_threshold=8,
+        )
+    assert [idx for idx, _ in kept] == [0, 1]
+
+
+def test_phash_dedup_first_frame_always_kept():
+    """The first frame has no `prev_hash` to compare against; always kept."""
+    h_a = _stub_hash(0)
+    with patch("extractors.frame_ocr._phash_bytes", side_effect=[h_a]):
+        kept = frame_ocr._dedup_by_phash([b"frame-a"], phash_threshold=8)
+    assert kept == [(0, b"frame-a")]
+
+
+def test_phash_dedup_propagates_import_error():
+    """If imagehash is missing, the ImportError must surface so the
+    orchestrator can return frame_ocr_unavailable."""
+    with patch("extractors.frame_ocr._phash_bytes",
+               side_effect=ImportError("no imagehash")):
+        with pytest.raises(ImportError):
+            frame_ocr._dedup_by_phash([b"frame-a"], phash_threshold=8)
+
+
+def test_phash_dedup_skips_corrupt_frame_silently():
+    """A non-Import exception on a single frame -> skip just that frame."""
+    h_a = _stub_hash(20)
+    with patch("extractors.frame_ocr._phash_bytes",
+               side_effect=[h_a, ValueError("corrupt JPEG"), h_a]):
+        kept = frame_ocr._dedup_by_phash(
+            [b"a", b"b", b"c"],
+            phash_threshold=8,
+        )
+    # Frame 0 kept, frame 1 errored (skipped), frame 2 kept (compared
+    # to frame 0's hash since frame 1 didn't update prev_hash).
+    assert [idx for idx, _ in kept] == [0, 2]
