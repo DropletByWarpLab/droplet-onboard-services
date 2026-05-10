@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "now": {
+    "task": "Building WARP-279 meta-observability dashboard",
+    "ticket": "WARP-279",
+    "branch": "WARP-279",
+    "started_at": "2026-05-10T18:00:00Z",
+    "blocked_on": null
+  },
+  "decisions": [
+    {
+      "ts": "2026-05-10T17:50:00Z",
+      "summary": "Meta-dashboard B (LAN-only, extend web-dashboard) over hosted alternatives",
+      "rationale": "User picked LAN auth via existing Nextcloud OCS; iframe-able into other LAN pages"
+    },
+    {
+      "ts": "2026-05-10T17:55:00Z",
+      "summary": "Tier 2 content (data + Claude-now panel + decisions + compliance)",
+      "rationale": "Tier 1 misses 'what's Claude doing now'; Tier 3 buries signal"
+    }
+  ],
+  "recent_actions": [
+    {
+      "ts": "2026-05-10T18:00:00Z",
+      "kind": "ticket_filed",
+      "ref": "WARP-279",
+      "summary": "Filed meta-observability dashboard ticket"
+    }
+  ]
+}

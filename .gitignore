@@ -12,7 +12,14 @@ __pycache__/
 .pytest_cache/
 .next/
 .data/
-.claude/
+# WARP-279 — `.claude/` is ignored by default, but we make a narrow
+# exception for the session-state example file. The real session-state.json
+# is volatile (rewritten by the AI engineer mid-session) and must never
+# land in git, but the example is the schema reference the orchestrator
+# reader is documented against, so we keep it tracked.
+.claude/*
+!.claude/session-state.example.json
+.claude/session-state.json
 *.tsbuildinfo
 .DS_Store
 
