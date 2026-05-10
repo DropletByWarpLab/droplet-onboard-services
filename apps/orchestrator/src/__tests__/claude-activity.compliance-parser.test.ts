@@ -43,10 +43,21 @@ describe("compliance-parser", () => {
       expect(live.queue[0]?.index).toBe(1);
       expect(live.queue[49]?.ticket).toBe("WARP-278");
       expect(live.queue[49]?.index).toBe(50);
-      // All initial entries are 🔵 not_started per the doc snapshot.
+      // Every row's status is one of the small enum's values. As tickets
+      // close they transition from "not_started" → "in_progress" → "done";
+      // the test originally asserted all-not_started against the doc
+      // snapshot, but that snapshot ages as compliance work lands.
       for (const row of live.queue) {
-        expect(row.status).toBe("not_started");
+        expect(["not_started", "in_progress", "done", "blocked", "deferred"]).toContain(
+          row.status,
+        );
       }
+      // At least one row should still be "not_started" — the chain has 50
+      // tickets and hasn't been completed yet. (Belt-and-braces guard so
+      // we'd notice if the parser silently mapped everything to "done".)
+      expect(live.queue.some((row) => row.status === "not_started")).toBe(
+        true,
+      );
 
       // Audit + certification milestones: at least the SOC 2 ones.
       const milestones = live.milestones.map((m) => m.milestone);

@@ -1,0 +1,51 @@
+# OpenSSL 3 configuration that activates the FIPS provider.
+#
+# Shared across every Droplet service container (Node + Python). Mounted
+# in via Dockerfile COPY at /etc/ssl/openssl-fips.cnf; activated by
+# setting `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` in the container's
+# environment. Both runtimes' crypto libraries (Node's built-in OpenSSL
+# binding, Python `cryptography`'s OpenSSL backend) auto-honor
+# OPENSSL_CONF on startup.
+#
+# Tested on Debian Bookworm-slim base image. Confirms the OpenSSL FIPS
+# provider (NIST CMVP cert #4282) is loaded and the FIPS property is the
+# default property string for cryptographic ops. The companion boot
+# self-test (`@droplet/fips-selftest` / `services/_shared/fips_selftest.py`)
+# negative-probes by attempting an MD5 digest at startup and asserts the
+# call raises a FIPS-disabled error; the container won't start if either
+# check fails. WARP-229.
+
+# OpenSSL config root.
+config_diagnostics = 1
+openssl_conf = openssl_init
+
+# Reference the FIPS provider configuration. This file is shipped by the
+# Debian `openssl` package — typically at /usr/lib/ssl/fipsmodule.cnf or
+# /etc/ssl/fipsmodule.cnf — and contains the integrity MAC that the
+# provider validates against itself at load time.
+.include /etc/ssl/fipsmodule.cnf
+
+[openssl_init]
+providers = provider_sect
+alg_section = algorithm_sect
+
+# Activate the FIPS provider as default. The `base` provider stays
+# loaded so encoder/decoder routines (PEM, DER) keep working — these
+# are not cryptographic primitives themselves. The `default` provider
+# is intentionally NOT activated; any algorithm not available in
+# `fips`+`base` will fail rather than silently fall through to non-FIPS.
+[provider_sect]
+fips = fips_sect
+base = base_sect
+
+[fips_sect]
+activate = 1
+
+[base_sect]
+activate = 1
+
+# Make `fips=yes` the default property string. Cryptographic operations
+# select algorithm implementations whose properties match; pinning this
+# means any operation that isn't FIPS-approved is unavailable.
+[algorithm_sect]
+default_properties = fips=yes

@@ -1,11 +1,30 @@
 #!/usr/bin/env node
 import { PrismaClient } from "@prisma/client";
 import type { HttpClient } from "@droplet/tools-core";
+import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { createServer } from "./server.js";
 import { startStdio } from "./transports/stdio.js";
 import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
+
+// WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
+// — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
+// mcp-server is the trust boundary for the LLM tool path; if the FIPS
+// provider isn't loaded we want the container to refuse to start
+// rather than handle tool calls under a broken cryptographic posture.
+function runFipsBootSelfTest(): void {
+  const required =
+    process.env.DROPLET_FIPS_REQUIRED?.toLowerCase() === "true" ||
+    process.env.DROPLET_FIPS_REQUIRED === "1" ||
+    (process.env.DROPLET_FIPS_REQUIRED === undefined &&
+      process.env.NODE_ENV === "production");
+  if (!required) {
+    // No-op; non-production / explicitly opted-out runs.
+    return;
+  }
+  assertFipsAtBootOrExit("mcp-server");
+}
 
 function parseTransport(argv: string[]): "stdio" | "http" {
   const arg = argv.find((a) => a.startsWith("--transport="));
@@ -86,6 +105,8 @@ function createHttpClient(target: HttpTarget): HttpClient {
 }
 
 async function main(): Promise<void> {
+  runFipsBootSelfTest();
+
   const transport = parseTransport(process.argv.slice(2));
 
   // The Prisma client is generated in the orchestrator workspace

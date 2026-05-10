@@ -249,8 +249,12 @@ services:
   # --- AI Services ---
   ai-gateway:
     build:
-      context: ../services/ai-gateway
-      dockerfile: Dockerfile
+      # WARP-229: context promoted from `../services/ai-gateway` to `..`
+      # (repo root) so the Dockerfile can `COPY docker/openssl-fips.cnf`
+      # and `COPY services/_shared/fips_selftest.py` for the FIPS boot
+      # self-test. Mirrors file-indexer's repo-root context.
+      context: ..
+      dockerfile: services/ai-gateway/Dockerfile
     expose:
       - "8000"
       - "50051"
@@ -319,8 +323,9 @@ services:
   # ROUTING_MODE=mock in .env to run without a real router (fixtures).
   routing:
     build:
-      context: ../services/routing
-      dockerfile: Dockerfile
+      # WARP-229: repo-root context for shared FIPS config + helper.
+      context: ..
+      dockerfile: services/routing/Dockerfile
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -344,8 +349,9 @@ services:
   # --- Managed Switch (PoE + VLAN control) ---
   switch:
     build:
-      context: ../services/switch
-      dockerfile: Dockerfile
+      # WARP-229: repo-root context for shared FIPS config + helper.
+      context: ..
+      dockerfile: services/switch/Dockerfile
     network_mode: host
     environment:
       - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
@@ -436,8 +442,9 @@ services:
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
   camera-discovery:
     build:
-      context: ../services/camera-discovery
-      dockerfile: Dockerfile
+      # WARP-229: repo-root context for shared FIPS config + helper.
+      context: ..
+      dockerfile: services/camera-discovery/Dockerfile
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -471,8 +478,9 @@ services:
   # orchestrator's display.client.ts and existing env wiring.
   oled-display:
     build:
-      context: ../services/oled-display
-      dockerfile: Dockerfile
+      # WARP-229: repo-root context for shared FIPS config + helper.
+      context: ..
+      dockerfile: services/oled-display/Dockerfile
     network_mode: host
     environment:
       - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}

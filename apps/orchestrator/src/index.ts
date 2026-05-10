@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
+import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
@@ -40,7 +41,38 @@ import { startContextStatsInvalidator } from "./services/context-stats-invalidat
 
 const logger = pino({ name: "orchestrator" });
 
+// WARP-229: FIPS 140-3 boot self-test. Runs synchronously before any
+// async crypto operation (Prisma connect, TLS to Redis/MQTT, etc.).
+//
+// Gate: `DROPLET_FIPS_REQUIRED` env var. Default behavior:
+//   - "true" / "1" / unset-in-container        → enforce; exit 1 on failure
+//   - "false" / "0" / dev (NODE_ENV !== "production") → skip with a warning
+//
+// Default to ENFORCING in production. Container Dockerfile sets
+// `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` and the bookworm-slim image
+// has the OpenSSL FIPS provider available; the only way the self-test
+// can fail at this point is a misconfiguration in the image, which we
+// want to catch immediately rather than at first real crypto use.
+function runFipsBootSelfTest(): void {
+  const required =
+    process.env.DROPLET_FIPS_REQUIRED?.toLowerCase() === "true" ||
+    process.env.DROPLET_FIPS_REQUIRED === "1" ||
+    (process.env.DROPLET_FIPS_REQUIRED === undefined &&
+      process.env.NODE_ENV === "production");
+  if (!required) {
+    logger.warn(
+      "FIPS boot self-test skipped (DROPLET_FIPS_REQUIRED=false or non-production env)",
+    );
+    return;
+  }
+  // assertFipsAtBootOrExit logs structured JSON + exits non-zero on
+  // failure; if it returns, the provider is loaded AND enforcing.
+  assertFipsAtBootOrExit("orchestrator");
+}
+
 async function main() {
+  runFipsBootSelfTest();
+
   // Initialize Prisma
   const prisma = new PrismaClient();
   await prisma.$connect();

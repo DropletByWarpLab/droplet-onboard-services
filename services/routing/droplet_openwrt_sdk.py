@@ -718,11 +718,18 @@ class VPNApi:
         private key as one-shot output: hand it to the user (e.g. inside a
         QR) and discard. We never persist client private keys in uci or in
         the orchestrator DB.
+
+        WARP-229 / FIPS 140-3: WireGuard mandates X25519 for the Noise IK
+        handshake; the algorithm is registered in
+        docs/security/fips-exceptions.md → wireguard-x25519. Risk acceptance
+        is documented there (WAN-edge tunnels only, no PHI/PII transits).
         """
         from base64 import b64encode
         from cryptography.hazmat.primitives import serialization
+        # fips:allowed: wireguard-x25519
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+        # fips:allowed: wireguard-x25519
         priv = X25519PrivateKey.generate()
         priv_bytes = priv.private_bytes(
             encoding=serialization.Encoding.Raw,
@@ -745,8 +752,10 @@ class VPNApi:
         """
         from base64 import b64decode, b64encode
         from cryptography.hazmat.primitives import serialization
+        # fips:allowed: wireguard-x25519
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+        # fips:allowed: wireguard-x25519
         priv = X25519PrivateKey.from_private_bytes(b64decode(private_key_b64))
         pub_bytes = priv.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,

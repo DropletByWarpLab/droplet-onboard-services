@@ -1,7 +1,28 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { verifyJwt, type Claims } from "../auth/jwt.js";
+
+// WARP-229: probe FIPS state on every `/ _/fips` request. Mirrors the
+// orchestrator's createFipsRouter shape so external probers see the
+// same payload everywhere.
+function probeFips(): { fips: boolean; provider: string } {
+  let fipsOn = false;
+  try {
+    fipsOn = crypto.getFips() === 1;
+  } catch {
+    fipsOn = false;
+  }
+  if (!fipsOn) return { fips: false, provider: "none" };
+  try {
+    // fips:allowed: fips-selftest-negative-probe
+    crypto.createHash("md5").update("fips-status-probe").digest("hex");
+    return { fips: false, provider: "OpenSSL (FIPS reported but not enforcing)" };
+  } catch {
+    return { fips: true, provider: "OpenSSL 3 FIPS" };
+  }
+}
 
 export interface HttpServerOptions {
   /** TCP port to bind. Use `0` to let the OS pick a free port (used in tests). */
@@ -45,6 +66,23 @@ export function startHttp(opts: HttpServerOptions): http.Server {
       if (url.pathname === HEALTH_PATH) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      // WARP-229: FIPS status probe. Pre-auth so an operator can verify
+      // the cryptographic posture even if JWT issuance is broken.
+      if (url.pathname === "/_/fips") {
+        const status = probeFips();
+        const payload = {
+          event: "fips_self_test" as const,
+          service: "mcp-server",
+          fips: status.fips,
+          provider: status.provider,
+        };
+        res.writeHead(status.fips ? 200 : 503, {
+          "Content-Type": "application/json",
+        });
+        res.end(JSON.stringify(payload));
         return;
       }
 

@@ -134,8 +134,17 @@ def _digest_header(user: str, pw: str, method: str, uri: str,
     """
     realm = auth_info.get("realm", "")
     nonce = auth_info.get("nonce", "")
+    # RFC 2617 Digest auth mandates MD5 (legacy form). The three MD5
+    # call sites below — HA1, HA2, response — are the protocol's
+    # required digest nesting; every RTSP camera firmware we support
+    # accepts only the MD5 form on the RTSP control port. See
+    # docs/security/fips-exceptions.md → rtsp-digest-rfc2617 for the
+    # full risk acceptance + annual-review owner.
+    # fips:allowed: rtsp-digest-rfc2617
     ha1 = hashlib.md5(f"{user}:{realm}:{pw}".encode()).hexdigest()
+    # fips:allowed: rtsp-digest-rfc2617
     ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+    # fips:allowed: rtsp-digest-rfc2617
     response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
     return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
             f'uri="{uri}", response="{response}"')

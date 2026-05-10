@@ -10,6 +10,18 @@ screen is a compact version of the admin UI. Touch tiles on the home
 screen route to Health, Network, Chat and Settings sub-screens.
 """
 
+import sys as _sys
+
+# WARP-229: FIPS 140-3 boot self-test. Env-gated; see
+# services/_shared/fips_selftest.py for the contract.
+_sys.path.insert(0, "/app")
+try:
+    from _shared.fips_selftest import gated_assert_fips_at_boot  # type: ignore
+
+    gated_assert_fips_at_boot("oled-display")
+except ImportError:
+    pass
+
 import os
 import io
 import hmac
