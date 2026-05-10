@@ -126,6 +126,15 @@ const EML_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/wit
 const EML_BODY_SENTINEL = "bob, see the attached pdf";
 const EML_ATTACHMENT_SEPARATOR = "--- Attachment: ";
 
+const ZIP_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/simple.zip");
+// simple.zip contains note.txt with "the budget for q4 is one hundred
+// thousand" and more.txt with "second file" — see WARP-200. Indexed
+// via the Nextcloud scan path (NOT brain-upload), exercising the same
+// code path we use for archives uploaded via files.
+const ZIP_BODY_SENTINEL = "the budget for q4";
+const ZIP_MEMBER_SEPARATOR = "--- Member: ";
+const NC_SUBDIR_ARCHIVE = "test-warp224-archive";
+
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
@@ -266,6 +275,13 @@ describe.skipIf(!SHOULD_RUN)(
           `Email item ${emailItemId} never indexed — check file-indexer logs for email extractor`,
         );
       }
+
+      // ─── Archive Nextcloud-scan (WARP-200) ───
+      await uploadNextcloudFile(ZIP_FIXTURE, NC_SUBDIR_ARCHIVE);
+      const zipOk = await pollNcChunkCount(`%${NC_SUBDIR_ARCHIVE}/simple.zip`, 240_000);
+      if (zipOk === 0) {
+        throw new Error("Archive simple.zip never produced FileContentChunk rows — check file-indexer logs");
+      }
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
 
     afterAll(async () => {
@@ -273,6 +289,11 @@ describe.skipIf(!SHOULD_RUN)(
         sh(
           `${COMPOSE} exec -T nextcloud rm -rf ${NC_DATA_DIR}/${NC_SUBDIR}`,
         );
+      } catch {
+        /* swallow */
+      }
+      try {
+        sh(`${COMPOSE} exec -T nextcloud rm -rf ${NC_DATA_DIR}/${NC_SUBDIR_ARCHIVE}`);
       } catch {
         /* swallow */
       }
@@ -413,6 +434,34 @@ describe.skipIf(!SHOULD_RUN)(
       );
       expect(chunkText.length).toBeGreaterThan(0);
       expect(chunkText).toContain(EML_ATTACHMENT_SEPARATOR);
+    }, 30_000);
+
+    it("agent retrieval reaches an archive member via Nextcloud scan (WARP-200)", async () => {
+      const resp = await chat(
+        `Search my files for "${ZIP_BODY_SENTINEL}". What's inside the zip?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const zipHit = hits.find(
+        (h) =>
+          h.path.includes(NC_SUBDIR_ARCHIVE) &&
+          h.path.toLowerCase().endsWith(".zip"),
+      );
+      expect(zipHit, "no citation for simple.zip").toBeDefined();
+      expect(zipHit!.text.length).toBeGreaterThan(0);
+      expect(zipHit!.text.toLowerCase()).toContain(ZIP_BODY_SENTINEL);
+    }, 120_000);
+
+    it("archive chunks carry the --- Member: --- separator", async () => {
+      const chunkText = dbQuery(
+        `SELECT string_agg("text", ' ') FROM "FileContentChunk" ` +
+        `WHERE "path" LIKE '%${NC_SUBDIR_ARCHIVE}/simple.zip' AND "source" = 'nextcloud'`,
+      );
+      expect(chunkText.length).toBeGreaterThan(0);
+      expect(chunkText).toContain(ZIP_MEMBER_SEPARATOR);
     }, 30_000);
 
     // Determinism harness — see header comment. We loop on retrieval
