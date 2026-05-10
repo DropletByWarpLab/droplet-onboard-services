@@ -7,6 +7,23 @@ Discovery events are published to MQTT for the orchestrator to relay to clients.
 
 from __future__ import annotations
 
+import sys as _sys
+
+# WARP-229: FIPS 140-3 boot self-test. Runs at module import, BEFORE
+# any other heavy imports that could initialize OpenSSL on first use.
+# Env-gated: enforces only when DROPLET_FIPS_REQUIRED=true. See
+# services/_shared/fips_selftest.py for the contract.
+_sys.path.insert(0, "/app")
+try:
+    from _shared.fips_selftest import gated_assert_fips_at_boot  # type: ignore
+
+    gated_assert_fips_at_boot("camera-discovery")
+except ImportError:
+    # Helper not present (running outside the production Docker layout).
+    # The env-gated default skips when DROPLET_FIPS_REQUIRED is unset,
+    # so this mirrors the no-op path.
+    pass
+
 import asyncio
 import hmac
 import ipaddress

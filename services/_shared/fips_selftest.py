@@ -161,3 +161,27 @@ def assert_fips_at_boot_or_exit(
         sink = log if log is not None else (lambda l: sys.stderr.write(l + "\n"))
         sink(json.dumps(payload))
         sys.exit(1)
+
+
+def gated_assert_fips_at_boot(service: str) -> None:
+    """Env-gated wrapper. Each Python service calls this at module
+    import time. Behavior:
+
+      DROPLET_FIPS_REQUIRED=true / 1     → run the boot self-test;
+                                            exit 1 on failure.
+      DROPLET_FIPS_REQUIRED=false / 0    → skip with no output.
+      DROPLET_FIPS_REQUIRED unset        → skip with no output (dev/CI default).
+
+    The default-off-when-unset posture is deliberate. Production
+    deployments (Jetson appliance) flip the env to "true" via the
+    operator's compose env or systemd unit; dev / CI runs with
+    `python:3.12-slim` (no validated `fips.so` available) skip silently.
+    """
+    import os
+
+    raw = os.environ.get("DROPLET_FIPS_REQUIRED")
+    if raw is None:
+        return
+    if raw.lower() in ("false", "0", "no"):
+        return
+    assert_fips_at_boot_or_exit(service)

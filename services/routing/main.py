@@ -5,6 +5,18 @@ FastAPI wrapper around the OpenWrt SDK, exposing router management
 as a REST API for the orchestrator and AI gateway to consume.
 """
 
+import sys as _sys
+
+# WARP-229: FIPS 140-3 boot self-test. Env-gated; see
+# services/_shared/fips_selftest.py for the contract.
+_sys.path.insert(0, "/app")
+try:
+    from _shared.fips_selftest import gated_assert_fips_at_boot  # type: ignore
+
+    gated_assert_fips_at_boot("routing")
+except ImportError:
+    pass
+
 import hmac
 import os
 import logging

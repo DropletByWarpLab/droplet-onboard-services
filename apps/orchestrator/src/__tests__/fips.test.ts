@@ -1,6 +1,8 @@
 /**
  * WARP-229 — orchestrator FIPS integration tests.
  *
+ * Strategy:
+ * fips:allowed: fips-selftest-negative-probe
  * We mock `crypto.getFips()` and `crypto.createHash("md5")` to simulate
  * the production (FIPS-on) and degraded (FIPS-off / FIPS-loaded-but-not-
  * enforcing) paths without requiring a FIPS OpenSSL on the test runner.

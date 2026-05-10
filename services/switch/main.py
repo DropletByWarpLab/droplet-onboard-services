@@ -9,6 +9,18 @@ Lantronix SM8TAT2SA is the prototype driver. When the custom PCB ASIC is
 ready, set SWITCH_DRIVER=asic and nothing else changes.
 """
 
+import sys as _sys
+
+# WARP-229: FIPS 140-3 boot self-test. Env-gated; see
+# services/_shared/fips_selftest.py for the contract.
+_sys.path.insert(0, "/app")
+try:
+    from _shared.fips_selftest import gated_assert_fips_at_boot  # type: ignore
+
+    gated_assert_fips_at_boot("switch")
+except ImportError:
+    pass
+
 import os
 import logging
 from contextlib import asynccontextmanager

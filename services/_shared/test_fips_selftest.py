@@ -93,3 +93,32 @@ def test_assert_fips_at_boot_or_exit_exits_on_failure(monkeypatch):
     parsed = json.loads(lines[0])
     assert parsed["fips"] is False
     assert parsed["service"] == "routing"
+
+
+# --- gated_assert_fips_at_boot ---------------------------------------------
+
+
+@pytest.fixture()
+def _reset_droplet_fips_env(monkeypatch):
+    monkeypatch.delenv("DROPLET_FIPS_REQUIRED", raising=False)
+
+
+def test_gated_skip_when_env_unset(_reset_droplet_fips_env):
+    # No exception, no SystemExit.
+    fips_selftest.gated_assert_fips_at_boot("camera-discovery")
+
+
+@pytest.mark.parametrize("falsy", ["false", "0", "no", "FALSE", "False", "No"])
+def test_gated_skip_when_env_falsy(monkeypatch, falsy):
+    monkeypatch.setenv("DROPLET_FIPS_REQUIRED", falsy)
+    fips_selftest.gated_assert_fips_at_boot("routing")
+
+
+@pytest.mark.parametrize("truthy", ["true", "1", "TRUE", "True"])
+def test_gated_calls_helper_when_env_truthy(monkeypatch, truthy):
+    monkeypatch.setenv("DROPLET_FIPS_REQUIRED", truthy)
+    # is_fips_enabled returns False on the dev runner → the helper
+    # exits 1.
+    with pytest.raises(SystemExit) as exc:
+        fips_selftest.gated_assert_fips_at_boot("switch")
+    assert exc.value.code == 1
