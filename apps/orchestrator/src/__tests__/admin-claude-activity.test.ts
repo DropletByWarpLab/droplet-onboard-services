@@ -20,14 +20,30 @@ import path from "node:path";
 import { createAdminClaudeActivityRouter } from "../routes/admin-claude-activity.js";
 import type { Role } from "../services/jwt.service.js";
 
-// Stub GitHub adapter so the route tests stay deterministic and don't hit
-// api.github.com from CI. Each test that needs custom data overrides via
-// vi.mocked().
+// Stub GitHub + Jira adapters so the route tests stay deterministic and
+// don't hit api.github.com / atlassian.net from CI. Each test that needs
+// custom data overrides via vi.mocked().
 vi.mock("../services/claude-activity/github-adapter.js", () => ({
   getGitHubSnapshot: vi.fn().mockResolvedValue({
     commits: [],
     prs: [],
     ci_runs: [],
+  }),
+}));
+
+vi.mock("../services/claude-activity/jira-adapter.js", () => ({
+  getJiraSnapshot: vi.fn().mockResolvedValue({
+    configured: false,
+    chain: [],
+    in_flight: [],
+    chain_progress: {
+      total: 0,
+      done: 0,
+      in_progress: 0,
+      blocked: 0,
+      not_started: 0,
+      percent: 0,
+    },
   }),
 }));
 
@@ -113,7 +129,11 @@ describe("GET /api/admin/claude-activity", () => {
       ],
       recent_actions: [],
       github: { commits: [], prs: [], ci_runs: [] },
-      jira: null,
+      jira: {
+        configured: false,
+        chain: [],
+        in_flight: [],
+      },
       compliance: null,
     });
     expect(typeof res.body.generated_at).toBe("string");

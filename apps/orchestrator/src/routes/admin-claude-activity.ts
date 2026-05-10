@@ -24,6 +24,10 @@ import {
   getGitHubSnapshot,
   type GitHubSnapshot,
 } from "../services/claude-activity/github-adapter.js";
+import {
+  getJiraSnapshot,
+  type JiraSnapshot,
+} from "../services/claude-activity/jira-adapter.js";
 
 const logger = pino({ name: "admin-claude-activity" });
 
@@ -37,7 +41,7 @@ export interface ClaudeActivityResponse {
   decisions: Awaited<ReturnType<typeof readSessionState>>["decisions"];
   recent_actions: Awaited<ReturnType<typeof readSessionState>>["recent_actions"];
   github: GitHubSnapshot | null;
-  jira: unknown | null;
+  jira: JiraSnapshot | null;
   compliance: unknown | null;
   // Wall-clock the orchestrator computed this snapshot. The dashboard uses
   // it for the "last refreshed N seconds ago" footer; the HTTP
@@ -57,13 +61,17 @@ export function createAdminClaudeActivityRouter(): Router {
       }
 
       try {
-        // Read session-state + GitHub snapshot in parallel. Each call has
-        // its own failure handling — if GitHub is down its leaf is empty
-        // arrays, not a 500.
-        const [session, github] = await Promise.all([
+        // Read session-state + GitHub + Jira in parallel. Each call has
+        // its own failure handling — if any one is down, its leaf returns
+        // an empty/unconfigured shape, never a 500.
+        const [session, github, jira] = await Promise.all([
           readSessionState(),
           getGitHubSnapshot().catch((err) => {
             logger.warn({ err }, "github snapshot failed");
+            return null;
+          }),
+          getJiraSnapshot().catch((err) => {
+            logger.warn({ err }, "jira snapshot failed");
             return null;
           }),
         ]);
@@ -74,16 +82,16 @@ export function createAdminClaudeActivityRouter(): Router {
           decisions: session.decisions,
           recent_actions: session.recent_actions,
           github,
-          jira: null,
+          jira,
           compliance: null,
           generated_at: generatedAt.toISOString(),
         };
 
         // WARP-279: support `If-Modified-Since` so 30s polling can short-
         // circuit when nothing moved. Reduce over every timestamp we
-        // surface — session-state, commits, PRs, CI runs.
+        // surface — session-state, GitHub, Jira.
         const lastModified =
-          mostRecentTimestamp(session, github) ?? generatedAt;
+          mostRecentTimestamp(session, github, jira) ?? generatedAt;
         res.setHeader("Last-Modified", lastModified.toUTCString());
         // Strong cache-control: data is per-user-role and we don't want
         // intermediaries serving a stale admin payload to a guest browser.
@@ -115,6 +123,7 @@ export function createAdminClaudeActivityRouter(): Router {
 function mostRecentTimestamp(
   session: Awaited<ReturnType<typeof readSessionState>>,
   github: GitHubSnapshot | null,
+  jira: JiraSnapshot | null,
 ): Date | null {
   let max: number | null = null;
   const consider = (s: string | null | undefined) => {
@@ -129,6 +138,10 @@ function mostRecentTimestamp(
     for (const c of github.commits) consider(c.ts);
     for (const p of github.prs) consider(p.updated_at);
     for (const r of github.ci_runs) consider(r.updated_at);
+  }
+  if (jira) {
+    for (const t of jira.chain) consider(t.updated);
+    for (const t of jira.in_flight) consider(t.updated);
   }
   return max === null ? null : new Date(max);
 }
