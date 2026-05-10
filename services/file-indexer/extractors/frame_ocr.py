@@ -233,11 +233,78 @@ def _merge_segments(segments: list[FrameSegment]) -> list[FrameSegment]:
     return out
 
 
-# Function body for extract_frame_text lands in 1.6.
+def _ocr_jpeg_bytes(jpeg_bytes: bytes) -> tuple[str, list[str]]:
+    """Run Tesseract on raw JPEG bytes via the image extractor's helper.
+    Returns (text, warnings)."""
+    from extractors.image import _ocr_image_bytes
+    return _ocr_image_bytes(jpeg_bytes)
+
+
 def extract_frame_text(
     path: Union[str, Path],
     *,
     interval_sec: Optional[int] = None,
     phash_threshold: Optional[int] = None,
 ) -> tuple[list[FrameSegment], FrameOCRStats]:
-    raise NotImplementedError("WARP-208 Task 1.6 wires the pipeline")
+    """Sample -> phash dedup -> OCR -> merge. Best-effort; never raises out.
+
+    Pipeline failures degrade to (empty list, stats with warning) so the
+    caller can attach the warning to the video extractor's `metadata.warnings`
+    and still return whatever subtitle/ASR result it already produced.
+    """
+    interval = interval_sec if interval_sec is not None else parse_interval_sec()
+    phash_thresh = (
+        phash_threshold if phash_threshold is not None else parse_phash_threshold()
+    )
+    stats = FrameOCRStats(interval_sec_used=interval)
+
+    # Phase 1: sample frames via ffmpeg pipe.
+    try:
+        frames = list(_sample_frames(path, interval_sec=interval))
+    except Exception as exc:
+        logger.warning("frame_ocr: sample failed (%s)", exc)
+        stats.warnings.append(f"frame_ocr_sample_failed:{exc}")
+        return [], stats
+    stats.frames_sampled = len(frames)
+    if not frames:
+        return [], stats
+
+    # Phase 2: dedup. ImportError on imagehash propagates from
+    # _phash_bytes -> _dedup_by_phash; we catch it here so the rest of
+    # the video extraction can still complete.
+    try:
+        survivors = _dedup_by_phash(frames, phash_threshold=phash_thresh)
+    except ImportError as exc:
+        logger.warning("frame_ocr: imagehash unavailable (%s)", exc)
+        stats.warnings.append("frame_ocr_unavailable")
+        return [], stats
+    except Exception as exc:
+        logger.warning("frame_ocr: dedup failed (%s)", exc)
+        stats.warnings.append(f"frame_ocr_dedup_failed:{exc}")
+        return [], stats
+
+    # Phase 3: OCR each survivor.
+    raw_segments: list[FrameSegment] = []
+    for frame_idx, frame_bytes in survivors:
+        stats.frames_ocr_run += 1
+        try:
+            text, _warnings = _ocr_jpeg_bytes(frame_bytes)
+        except Exception as exc:
+            logger.warning(
+                "frame_ocr: OCR failed on frame %d (%s)", frame_idx, exc,
+            )
+            continue
+        if not text.strip():
+            continue
+        raw_segments.append(
+            FrameSegment(
+                start_sec=frame_idx * interval,
+                end_sec=(frame_idx + 1) * interval,  # provisional; merge extends
+                text=text.strip(),
+            )
+        )
+
+    # Phase 4: merge consecutive segments' time ranges.
+    merged = _merge_segments(raw_segments)
+    stats.segments_emitted = len(merged)
+    return merged, stats

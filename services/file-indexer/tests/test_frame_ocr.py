@@ -194,3 +194,134 @@ def test_phash_dedup_skips_corrupt_frame_silently():
     # Frame 0 kept, frame 1 errored (skipped), frame 2 kept (compared
     # to frame 0's hash since frame 1 didn't update prev_hash).
     assert [idx for idx, _ in kept] == [0, 2]
+
+
+# ---- extract_frame_text orchestrator -----------------------------------
+
+
+def test_extract_frame_text_returns_empty_when_no_frames(tmp_path):
+    """No-frame video -> empty segments + zero stats."""
+    fake_video = tmp_path / "empty.mp4"
+    fake_video.write_bytes(b"")
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter([])):
+        segs, stats = frame_ocr.extract_frame_text(fake_video, interval_sec=5)
+    assert segs == []
+    assert stats.frames_sampled == 0
+    assert stats.frames_ocr_run == 0
+    assert stats.segments_emitted == 0
+    assert stats.interval_sec_used == 5
+
+
+def test_extract_frame_text_runs_ocr_on_distinct_frames(tmp_path):
+    """3 distinct JPEGs -> 3 phashes + 3 OCR calls + segment merge."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    frames = [b"\xff\xd8frame-1", b"\xff\xd8frame-2", b"\xff\xd8frame-3"]
+    hashes = [_stub_hash(30), _stub_hash(30), _stub_hash(30)]
+
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter(frames)), \
+         patch("extractors.frame_ocr._phash_bytes", side_effect=hashes), \
+         patch("extractors.frame_ocr._ocr_jpeg_bytes",
+               side_effect=[("welcome", []), ("revenue", []), ("risk", [])]):
+        segs, stats = frame_ocr.extract_frame_text(fake_video, interval_sec=5)
+
+    assert [s.text for s in segs] == ["welcome", "revenue", "risk"]
+    assert [s.start_sec for s in segs] == [0, 5, 10]
+    assert stats.frames_sampled == 3
+    assert stats.frames_ocr_run == 3
+    assert stats.segments_emitted == 3
+    assert stats.interval_sec_used == 5
+
+
+def test_extract_frame_text_skips_empty_ocr_results(tmp_path):
+    """OCR returning '' -> frame skipped (no segment emitted) but phash
+    still tracked, so frames_ocr_run still counts it."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    frames = [b"\xff\xd8a", b"\xff\xd8b"]
+    hashes = [_stub_hash(30), _stub_hash(30)]
+
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter(frames)), \
+         patch("extractors.frame_ocr._phash_bytes", side_effect=hashes), \
+         patch("extractors.frame_ocr._ocr_jpeg_bytes",
+               side_effect=[("", []), ("real text", [])]):
+        segs, stats = frame_ocr.extract_frame_text(fake_video, interval_sec=5)
+
+    assert [s.text for s in segs] == ["real text"]
+    assert stats.frames_sampled == 2
+    assert stats.frames_ocr_run == 2  # both ran OCR
+    assert stats.segments_emitted == 1
+
+
+def test_extract_frame_text_dedup_reduces_ocr_calls(tmp_path):
+    """If frame 2 is similar to frame 1, only frame 1 is OCR'd."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    frames = [b"\xff\xd8a", b"\xff\xd8b", b"\xff\xd8c"]
+    # frame 0 distant from None (always kept); frame 1 close to 0 (skipped);
+    # frame 2 distant from 0 again (kept).
+    hashes = [_stub_hash(30), _stub_hash(0), _stub_hash(30)]
+
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter(frames)), \
+         patch("extractors.frame_ocr._phash_bytes", side_effect=hashes), \
+         patch("extractors.frame_ocr._ocr_jpeg_bytes",
+               side_effect=[("a-text", []), ("c-text", [])]):
+        segs, stats = frame_ocr.extract_frame_text(
+            fake_video, interval_sec=5, phash_threshold=8,
+        )
+
+    assert stats.frames_sampled == 3
+    assert stats.frames_ocr_run == 2  # only the two survivors
+    assert [s.start_sec for s in segs] == [0, 10]
+
+
+def test_extract_frame_text_handles_imagehash_missing(tmp_path):
+    """ImportError on imagehash -> return empty + warning, don't raise."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    frames = [b"\xff\xd8frame-1"]
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter(frames)), \
+         patch("extractors.frame_ocr._phash_bytes",
+               side_effect=ImportError("no imagehash")):
+        segs, stats = frame_ocr.extract_frame_text(fake_video, interval_sec=5)
+    assert segs == []
+    assert any("frame_ocr_unavailable" in w for w in stats.warnings)
+
+
+def test_extract_frame_text_handles_ffmpeg_failure(tmp_path):
+    """ffmpeg subprocess raises -> return empty + warning, don't raise."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    with patch("extractors.frame_ocr._sample_frames",
+               side_effect=subprocess.SubprocessError("ffmpeg crashed")):
+        segs, stats = frame_ocr.extract_frame_text(fake_video, interval_sec=5)
+    assert segs == []
+    assert any("frame_ocr_sample_failed" in w for w in stats.warnings)
+
+
+def test_extract_frame_text_uses_env_defaults_when_args_omitted(tmp_path, monkeypatch):
+    """If interval_sec/phash_threshold args are None, env-var parsers
+    (and their defaults) are used."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    monkeypatch.setenv("VIDEO_FRAME_OCR_INTERVAL_SEC", "7")
+    monkeypatch.setenv("VIDEO_FRAME_OCR_PHASH_THRESHOLD", "12")
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter([])):
+        _segs, stats = frame_ocr.extract_frame_text(fake_video)
+    assert stats.interval_sec_used == 7
+
+
+def test_extract_frame_text_skips_failing_ocr_frame(tmp_path):
+    """OCR exception on one frame -> just that frame skipped, others continue."""
+    fake_video = tmp_path / "x.mp4"
+    fake_video.write_bytes(b"")
+    frames = [b"\xff\xd8a", b"\xff\xd8b"]
+    hashes = [_stub_hash(30), _stub_hash(30)]
+    with patch("extractors.frame_ocr._sample_frames", return_value=iter(frames)), \
+         patch("extractors.frame_ocr._phash_bytes", side_effect=hashes), \
+         patch("extractors.frame_ocr._ocr_jpeg_bytes",
+               side_effect=[RuntimeError("tesseract crash"), ("ok", [])]):
+        segs, stats = frame_ocr.extract_frame_text(fake_video, interval_sec=5)
+    assert [s.text for s in segs] == ["ok"]
+    assert stats.frames_ocr_run == 2
+    assert stats.segments_emitted == 1
