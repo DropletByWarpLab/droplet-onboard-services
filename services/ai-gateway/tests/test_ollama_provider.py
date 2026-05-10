@@ -46,15 +46,30 @@ TEST_CHAT_URL = "http://test-jetson:8002/proxy/v1/chat/completions"
 
 
 def _limits_payload(
-    num_parallel: int = 1, max_queue: int = 16, max_loaded_models: int = 1
+    num_parallel: int = 1,
+    max_queue: int = 16,
+    max_loaded_models: int = 1,
+    schema_version: int | None | object = ...,  # sentinel: include version=1
 ) -> dict:
-    return {
+    """Build a /health-shaped body for tests.
+
+    By default includes ``schema_version: 1`` so existing tests assert the
+    happy path. Pass ``schema_version=None`` to omit the field (simulates a
+    pre-WARP-284 appliance) or any other int to force a drift case.
+    """
+    body: dict = {
         "limits": {
             "num_parallel": num_parallel,
             "max_queue": max_queue,
             "max_loaded_models": max_loaded_models,
         }
     }
+    if schema_version is ...:
+        body["schema_version"] = 1
+    elif schema_version is not None:
+        body["schema_version"] = schema_version
+    # schema_version=None: omit the key entirely (pre-WARP-284 shape).
+    return body
 
 
 @pytest.fixture
@@ -160,6 +175,119 @@ class TestLimitsCache:
 
         assert route.call_count == 2
         assert cache.num_parallel == 4
+
+
+# ---------------------------------------------------------------------------
+# _LimitsCache schema_version drift detection (WARP-284)
+# ---------------------------------------------------------------------------
+
+
+class TestLimitsCacheSchemaVersion:
+    """The four cases of /health.schema_version vs _KNOWN_SCHEMA_VERSION."""
+
+    @respx.mock
+    async def test_schema_version_equal_is_silent(self, caplog):
+        """Happy path: appliance schema_version matches what we know."""
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_limits_payload(schema_version=_LimitsCache._KNOWN_SCHEMA_VERSION)
+            )
+        )
+        cache = _LimitsCache(TEST_BASE_URL)
+        with caplog.at_level("WARNING", logger="providers.ollama_local"):
+            async with httpx.AsyncClient() as client:
+                await cache.refresh(client)
+
+        # No warning about schema version drift.
+        assert not any(
+            "schema_version" in r.getMessage() for r in caplog.records
+        ), f"unexpected schema_version warning: {[r.getMessage() for r in caplog.records]}"
+        # Limits still parsed normally.
+        assert cache.num_parallel == 1
+
+    @respx.mock
+    async def test_schema_version_missing_logs_warning(self, caplog):
+        """Pre-WARP-284 appliance: no schema_version key in body."""
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(200, json=_limits_payload(schema_version=None))
+        )
+        cache = _LimitsCache(TEST_BASE_URL)
+        with caplog.at_level("WARNING", logger="providers.ollama_local"):
+            async with httpx.AsyncClient() as client:
+                await cache.refresh(client)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("appliance_schema_version_missing" in m for m in msgs), msgs
+        # Limits still parsed by name — graceful degradation.
+        assert cache.num_parallel == 1
+
+    @respx.mock
+    async def test_schema_version_newer_logs_warning(self, caplog):
+        """Appliance is on a future version this orchestrator doesn't know."""
+        future_version = _LimitsCache._KNOWN_SCHEMA_VERSION + 5
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_limits_payload(schema_version=future_version)
+            )
+        )
+        cache = _LimitsCache(TEST_BASE_URL)
+        with caplog.at_level("WARNING", logger="providers.ollama_local"):
+            async with httpx.AsyncClient() as client:
+                await cache.refresh(client)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "appliance_schema_version_newer_than_known" in m for m in msgs
+        ), msgs
+        # The warning includes both numbers so operators can see the gap.
+        joined = "\n".join(msgs)
+        assert f"appliance={future_version}" in joined
+        assert f"orchestrator={_LimitsCache._KNOWN_SCHEMA_VERSION}" in joined
+
+    @respx.mock
+    async def test_schema_version_older_logs_warning(self, caplog):
+        """Appliance is on stale code — older than the orchestrator knows.
+
+        Only meaningful once _KNOWN_SCHEMA_VERSION > 1; for now we simulate
+        by temporarily setting the cache's known to a higher number.
+        """
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(200, json=_limits_payload(schema_version=1))
+        )
+        cache = _LimitsCache(TEST_BASE_URL)
+        # Force the orchestrator to know a higher version than the appliance reports.
+        cache._KNOWN_SCHEMA_VERSION = 99  # type: ignore[misc]  # test-only override
+        with caplog.at_level("WARNING", logger="providers.ollama_local"):
+            async with httpx.AsyncClient() as client:
+                await cache.refresh(client)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "appliance_schema_version_older_than_known" in m for m in msgs
+        ), msgs
+
+    @respx.mock
+    async def test_schema_version_warning_logged_once(self, caplog):
+        """Repeated refreshes against the same drift state log only once."""
+        future_version = _LimitsCache._KNOWN_SCHEMA_VERSION + 5
+        respx.get(TEST_HEALTH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_limits_payload(schema_version=future_version)
+            )
+        )
+        cache = _LimitsCache(TEST_BASE_URL)
+        # Disable debounce so multiple refreshes hit the schema-check path.
+        cache._refresh_min_interval = 0.0
+        with caplog.at_level("WARNING", logger="providers.ollama_local"):
+            async with httpx.AsyncClient() as client:
+                await cache.refresh(client)
+                await cache.refresh(client)
+                await cache.refresh(client)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        # Exactly one schema_version warning despite three refreshes.
+        schema_warnings = [m for m in msgs if "schema_version" in m]
+        assert len(schema_warnings) == 1, schema_warnings
 
 
 # ---------------------------------------------------------------------------

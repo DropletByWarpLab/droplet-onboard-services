@@ -51,6 +51,15 @@ ai-gateway reads `/health.limits` at provider init to size its outbound
 concurrency to match `OLLAMA_NUM_PARALLEL` on the appliance, and refreshes
 those limits on a 503 from the proxy.
 
+The `/health` body is **versioned** via a top-level `schema_version` integer
+(WARP-284). The orchestrator's `_LimitsCache` carries
+`_KNOWN_SCHEMA_VERSION = 1` and logs a structured warning whenever the live
+appliance reports an unknown version (newer, older, or absent). The point is
+forward compatibility — a planned appliance bump rolls out independently;
+the warning log is the canary. The canonical schema-history table lives in
+[`droplet-jetson-ai/docs/model-management.md`](../../droplet-jetson-ai/docs/model-management.md);
+bump both sides in lockstep when the contract changes.
+
 ## Where things live
 
 | Concern | Location |

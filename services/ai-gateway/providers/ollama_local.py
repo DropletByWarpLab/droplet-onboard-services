@@ -37,7 +37,40 @@ class _LimitsCache:
     The Jetson appliance exposes its Ollama queue limits via /health so the
     orchestrator can size outbound concurrency. We debounce refreshes so a
     burst of 503s doesn't hammer /health.
+
+    Schema-version awareness (WARP-284):
+
+    The appliance ships ``schema_version`` as a top-level integer in the
+    /health response. This class carries ``_KNOWN_SCHEMA_VERSION`` — the
+    version this orchestrator was built against — and logs a structured
+    warning whenever the live appliance's version differs:
+
+    * absent: pre-WARP-284 appliance — log warning, fall back to existing
+      behavior (read limits by name).
+    * equal: silent. Happy path.
+    * newer: log warning. The appliance has been updated; the orchestrator
+      may be ignoring new fields. Update ``_KNOWN_SCHEMA_VERSION`` and any
+      consumers, then redeploy.
+    * older: log warning. The appliance is on stale code; pull and
+      re-run setup.sh on it.
+
+    The point is forward compatibility — we never hard-fail on version
+    mismatch, so a planned appliance bump can roll out independently. The
+    warning log is the canary; until the shared-contracts package lands
+    (audit option B) this is the cheapest drift detector available.
     """
+
+    # Version of the /health schema this code knows. Bump in lockstep with
+    # ``services/ollama-manager/main.py::_HEALTH_SCHEMA_VERSION`` in the
+    # appliance repo. See ``droplet-jetson-ai/docs/model-management.md``
+    # for the canonical schema-history table.
+    _KNOWN_SCHEMA_VERSION = 1
+
+    # Sentinel for "we haven't observed a schema_version yet" — distinct
+    # from None ("appliance returned no schema_version key"). Without this,
+    # the first observation of a missing key would silently equal the
+    # initial state and skip the warning log.
+    _SCHEMA_VERSION_UNOBSERVED = object()
 
     def __init__(self, base_url: str):
         self.base_url = base_url
@@ -46,12 +79,64 @@ class _LimitsCache:
         self.max_loaded_models = 1
         self._last_refresh = 0.0
         self._refresh_min_interval = 30.0  # seconds; debounce
+        # Track the last observed schema version so we only log on each new
+        # observation, not on every refresh while the version is "wrong".
+        # Starts at a sentinel distinct from None so a missing version key
+        # is correctly detected as a first observation.
+        self._last_seen_schema_version: object = self._SCHEMA_VERSION_UNOBSERVED
 
     @property
     def health_url(self) -> str:
         # base_url is the proxy URL; strip /proxy to hit /health on :8002 root.
         root = self.base_url.removesuffix("/proxy")
         return f"{root}/health"
+
+    def _check_schema_version(self, body: dict) -> None:
+        """Compare the appliance's schema_version against what we know.
+
+        Logs a warning on first observation of any non-equal version. Silent
+        on subsequent refreshes that observe the same version, so a long-lived
+        appliance/orchestrator pair on different versions doesn't spam.
+        """
+        observed = body.get("schema_version")
+        if observed == self._last_seen_schema_version:
+            return  # already logged (or already silent on equal)
+        self._last_seen_schema_version = observed
+
+        if observed is None:
+            logger.warning(
+                "appliance_schema_version_missing: pre-WARP-284 appliance "
+                "(known=%d). Reading limits by name; redeploy the appliance "
+                "to pick up the versioned contract.",
+                self._KNOWN_SCHEMA_VERSION,
+            )
+            return
+        if not isinstance(observed, int):
+            logger.warning(
+                "appliance_schema_version_invalid: got %r, expected int",
+                observed,
+            )
+            return
+        if observed == self._KNOWN_SCHEMA_VERSION:
+            return  # happy path — silent
+        if observed > self._KNOWN_SCHEMA_VERSION:
+            logger.warning(
+                "appliance_schema_version_newer_than_known: "
+                "appliance=%d orchestrator=%d. The appliance has been "
+                "updated; the orchestrator may be ignoring new /health "
+                "fields. Bump _KNOWN_SCHEMA_VERSION in ollama_local.py "
+                "and any consumers.",
+                observed,
+                self._KNOWN_SCHEMA_VERSION,
+            )
+            return
+        logger.warning(
+            "appliance_schema_version_older_than_known: "
+            "appliance=%d orchestrator=%d. The appliance is on stale "
+            "code; pull and re-run setup.sh on the Jetson.",
+            observed,
+            self._KNOWN_SCHEMA_VERSION,
+        )
 
     async def refresh(self, client: httpx.AsyncClient) -> None:
         now = time.monotonic()
@@ -61,7 +146,9 @@ class _LimitsCache:
         try:
             resp = await client.get(self.health_url, timeout=5.0)
             if resp.status_code == 200:
-                limits = resp.json().get("limits") or {}
+                body = resp.json()
+                self._check_schema_version(body)
+                limits = body.get("limits") or {}
                 self.num_parallel = int(limits.get("num_parallel", self.num_parallel))
                 self.max_queue = int(limits.get("max_queue", self.max_queue))
                 self.max_loaded_models = int(
