@@ -78,6 +78,8 @@ import {
   pollNcChunkCount,
   waitForOrchestrator,
   transcribeNow,
+  getBrainStatus,
+  pollUntilBrainStatus,
 } from "./helpers/rag-retrieval";
 
 // The PDF fixture contains the unique sentinel "alphahotel" (see
@@ -136,6 +138,9 @@ const ZIP_BODY_SENTINEL = "the budget for q4";
 const ZIP_MEMBER_SEPARATOR = "--- Member: ";
 const NC_SUBDIR_ARCHIVE = "test-warp224-archive";
 
+const DEFERRED_AUDIO_NAME = "warp224-deferred-audio.wav";
+const DEFERRED_AUDIO_SENTINEL = "hundred thousand"; // same fixture as Task 3, distinguished by upload name
+
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
@@ -144,6 +149,7 @@ describe.skipIf(!SHOULD_RUN)(
     let subsVideoItemId: string | null = null;
     let frameVideoItemId: string | null = null;
     let emailItemId: string | null = null;
+    let deferredItemId: string | null = null;
 
     beforeAll(async () => {
       // Bring up the full chain. mcp-server is a sibling Compose
@@ -301,6 +307,33 @@ describe.skipIf(!SHOULD_RUN)(
       if (zipOk === 0) {
         throw new Error("Archive simple.zip never produced FileContentChunk rows — check file-indexer logs");
       }
+
+      // ─── Deferred-ASR brain-upload (WARP-218) — explicit status-sequence flow ───
+      const deferredUp = await uploadBrainFile(WAV_FIXTURE, DEFERRED_AUDIO_NAME, "audio/wav");
+      deferredItemId = deferredUp.itemId;
+
+      // Confirm initial status BEFORE transcribe-now (this is what makes the
+      // deferred-flow assertion distinct from Task 3's audio flow).
+      const initialStatus = getBrainStatus(deferredItemId);
+      expect(
+        initialStatus,
+        "deferred audio should land in queued_for_transcription before transcribe-now",
+      ).toBe("queued_for_transcription");
+
+      // Promote to immediate processing.
+      const txCode = await transcribeNow(deferredItemId);
+      expect(txCode, `transcribe-now for deferred audio returned ${txCode}`).toBe(202);
+
+      // Wait for the worker to flip status -> indexing -> ready.
+      const finalStatus = await pollUntilBrainStatus(deferredItemId, "ready", 240_000);
+      expect(
+        finalStatus,
+        `deferred audio never reached 'ready' (last seen: ${finalStatus})`,
+      ).toBe("ready");
+
+      // And confirm chunks landed.
+      const chunkOk = await pollUntilBrainIndexed(deferredItemId, 60_000);
+      expect(chunkOk, "deferred audio reached 'ready' but no chunks").toBe(true);
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
 
     afterAll(async () => {
@@ -482,6 +515,21 @@ describe.skipIf(!SHOULD_RUN)(
       expect(chunkText.length).toBeGreaterThan(0);
       expect(chunkText).toContain(ZIP_MEMBER_SEPARATOR);
     }, 30_000);
+
+    it("agent retrieval reaches a deferred-ASR audio after transcribe-now (WARP-218)", async () => {
+      const resp = await chat(
+        `Search my recordings for "${DEFERRED_AUDIO_SENTINEL}" — there's a queued one. What does it say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const deferredHit = hits.find((h) => h.path.toLowerCase().includes("warp224-deferred-audio"));
+      expect(deferredHit, "no citation for warp224-deferred-audio.wav").toBeDefined();
+      expect(deferredHit!.text.length).toBeGreaterThan(0);
+      expect(deferredHit!.text.toLowerCase()).toContain(DEFERRED_AUDIO_SENTINEL);
+    }, 120_000);
 
     // Determinism harness — see header comment. We loop on retrieval
     // because that's the part the spec constrains. The model's prose
