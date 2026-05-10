@@ -6,6 +6,19 @@
 **Epic:** [WARP-228](https://warp-lab.atlassian.net/browse/WARP-228)
 **Sequential chain:** WARP-229 → WARP-278 (50 tickets, blocks-linked in order)
 
+## Execution strategy (2026-05-10 update)
+
+After honest introspection on the original "all-compliance-first, sequential" plan, the strategy moved to **E → C**:
+
+- **E (triage now, ~2 weeks):** unblock the platform's current state before starting compliance work.
+  - WARP-227 — fix 9 failing rag-tests on main (silently broken since WARP-218 went `workflow_dispatch`-only)
+  - WARP-225 — dashboard context-meter (the user's direct feature ask)
+- **C (interleaved, ongoing):** compliance lane (WARP-229..278) and product lane (Phases A-J from the design doc) run in parallel, alternating weeks. WARP-229 spec is already written and is paused in implementation, not deleted; the spec at `docs/superpowers/specs/2026-05-10-warp-229-fips-provider-design.md` is ready to pick up when the compliance lane resumes.
+
+Rationale: the literal "Type II attestation in hand at launch" target was 12-18 months wall-clock with zero new product features in that window. Type II observation is non-compressible (AICPA rule). A customer-driven model is cheaper and ships product faster. If a customer materializes who needs the literal attestation timeline, we revisit and accelerate the compliance lane.
+
+This means **the timeline anchors below shift**: compliance milestones are no longer wall-clock dates, they are tracked relative to "when the compliance lane has burned through N tickets."
+
 ---
 
 ## Targets
@@ -103,19 +116,18 @@ The chain is non-negotiable — each ticket blocks the next.
 
 ## Audit + certification milestones
 
-| Milestone | Target wall-clock | Status |
+Per the 2026-05-10 strategy update, milestones are tracked relative to compliance-lane progress, not wall-clock. Audits are gated on customer demand (signed customer with attestation requirement → kick off the audit booking).
+
+| Milestone | Trigger | Status |
 |---|---|---|
-| All engineering controls (WARP-229..272) merged | Month 6-7 | 🔵 not started |
-| Policy library complete (WARP-273..274) | Month 7 | 🔵 not started |
-| Vanta + Wazuh operational (WARP-275..276) | Month 7 | 🔵 not started |
-| Penetration test (WARP-277) | Month 8 | 🔵 not started |
-| Pen-test findings remediated | Month 9 | 🔵 not started |
-| SOC 2 Type I readiness assessment (WARP-278) | Month 9 | 🔵 not started |
-| **SOC 2 Type I attestation issued** | Month 10 | 🔵 not started |
-| HIPAA gap assessment (third-party) | Month 11 | 🔵 not started |
-| **Launch-ready** | Month 11-12 | 🔵 not started |
-| SOC 2 Type II observation period start | Month 11 | 🔵 not started |
-| **SOC 2 Type II attestation issued** | Month 18-24 | 🔵 not started |
+| All engineering controls (WARP-229..272) merged | When the compliance lane completes the engineering subset | 🔵 not started |
+| Policy library complete (WARP-273..274) | When customer demand justifies the cost | 🔵 not started |
+| Vanta + Wazuh operational (WARP-275..276) | When evidence-collection is needed for a real audit | 🔵 not started |
+| Penetration test (WARP-277) | Pre-audit, when SOC 2 Type I is booked | 🔵 not started |
+| SOC 2 Type I readiness (WARP-278) | When customer demand justifies the cost | 🔵 not started |
+| **SOC 2 Type I attestation issued** | After WARP-278 completes successfully | 🔵 not started |
+| HIPAA gap assessment | When a healthcare customer signs | 🔵 not started |
+| **SOC 2 Type II attestation issued** | Type I + 6-12 months observation | 🔵 not started |
 
 ---
 
@@ -145,8 +157,8 @@ Don't update audit dates here without an actual auditor commitment in writing.
 
 ## Recent closes
 
-*(none yet — first ticket WARP-229 in progress at design-doc-commit time)*
+- **2026-05-10** — WARP-229 spec written + reviewed. Implementation paused per E→C strategy update; will resume when the compliance lane is active. Spec at `docs/superpowers/specs/2026-05-10-warp-229-fips-provider-design.md`.
 
 ---
 
-*Living document. Last updated 2026-05-09 at design-doc creation.*
+*Living document. Last updated 2026-05-10 with E→C strategy.*
