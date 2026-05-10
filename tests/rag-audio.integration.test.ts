@@ -29,9 +29,9 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import { resolve } from "node:path";
+import { COMPOSE } from "./helpers/rag-retrieval";
 
 const REPO_ROOT = resolve(__dirname, "..");
-const COMPOSE = `docker compose -f ${REPO_ROOT}/docker/docker-compose.yml`;
 const SHOULD_RUN = process.env.RUN_RAG_INTEGRATION === "1";
 const API_URL = process.env.API_URL ?? "http://localhost:3000";
 const FIXTURE = resolve(
@@ -51,8 +51,12 @@ function shSilent(cmd: string): string {
 }
 
 function dbQuery(sql: string): string {
+  // Multi-line SQL doesn't survive JSON.stringify → bash double-quote
+  // (newlines become literal \n that psql parses as syntax). Flatten
+  // any whitespace runs to single spaces. WARP-227.
+  const flat = sql.replace(/\s+/g, " ").trim();
   return shSilent(
-    `${COMPOSE} exec -T db psql -U droplet -d droplet -t -A -c ${JSON.stringify(sql)}`,
+    `${COMPOSE} exec -T db psql -U droplet -d droplet -t -A -c ${JSON.stringify(flat)}`,
   );
 }
 
