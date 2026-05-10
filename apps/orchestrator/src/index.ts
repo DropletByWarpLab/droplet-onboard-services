@@ -36,6 +36,7 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -65,6 +66,12 @@ async function main() {
   } catch (err) {
     logger.warn("MQTT broker unavailable");
   }
+
+  // WARP-225: subscribe to file-indexer's
+  // `droplet/context-stats/invalidate` events so per-user dashboard
+  // caches drop within the next round-trip on a write. Best-effort —
+  // if MQTT is down we still bound staleness via the cache TTL.
+  startContextStatsInvalidator();
 
   // Initialize Matter controller (non-fatal if unavailable)
   try {

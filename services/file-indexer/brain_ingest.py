@@ -83,6 +83,14 @@ def _publish_status(
     if reason:
         payload["reason"] = reason
     publish(_indexed_topic(user_id), payload)
+    # WARP-225: piggyback a context-stats cache-invalidate publish so
+    # the orchestrator drops the per-user `context-stats:<userId>:*`
+    # keys within the next round-trip. Best-effort — if MQTT is down
+    # we keep the TTL, and the dashboard eats up to one cache window
+    # of staleness. Done from `_publish_status` (rather than the
+    # individual call sites) so every status transition fans out one
+    # invalidate without per-callsite plumbing.
+    publish("droplet/context-stats/invalidate", {"userId": user_id})
 
 
 def _extract_text_path(storage_path: str) -> Path:
