@@ -61,15 +61,23 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
-import { readFileSync } from "node:fs";
 
-const REPO_ROOT = resolve(__dirname, "..");
-const COMPOSE_BASE = `-f ${REPO_ROOT}/docker/docker-compose.yml`;
-const COMPOSE_OVERRIDE = `-f ${REPO_ROOT}/docker/docker-compose.test.override.yml`;
-const COMPOSE = `docker compose ${COMPOSE_BASE} ${COMPOSE_OVERRIDE}`;
-const NC_DATA_DIR = "/var/www/html/data/admin/files";
-const SHOULD_RUN = process.env.RUN_RAG_INTEGRATION === "1";
-const API_URL = process.env.API_URL ?? "http://localhost:3000";
+import {
+  REPO_ROOT,
+  COMPOSE,
+  NC_DATA_DIR,
+  SHOULD_RUN,
+  API_URL,
+  sh,
+  dbQuery,
+  citationsFrom,
+  chat,
+  uploadBrainFile,
+  uploadNextcloudFile,
+  pollUntilBrainIndexed,
+  pollNcChunkCount,
+  waitForOrchestrator,
+} from "./helpers/rag-retrieval";
 
 // The PDF fixture contains the unique sentinel "alphahotel" (see
 // services/file-indexer/tests/test_extractors_pdf.py). The PNG fixture
@@ -86,139 +94,6 @@ const PNG_FIXTURE = resolve(
 const PDF_SENTINEL = "alphahotel";
 const PNG_SENTINEL = "echofoxtrot";
 const NC_SUBDIR = "test-rag-end-to-end";
-
-function sh(cmd: string): string {
-  return execSync(cmd, { encoding: "utf8" }).trim();
-}
-
-function shSilent(cmd: string): string {
-  return execSync(cmd, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
-}
-
-function dbQuery(sql: string): string {
-  return shSilent(
-    `${COMPOSE} exec -T db psql -U droplet -d droplet -t -A -c ${JSON.stringify(sql)}`,
-  );
-}
-
-async function pollNcChunkCount(
-  pathLike: string,
-  timeoutMs: number,
-): Promise<number> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const out = dbQuery(
-      `SELECT count(*) FROM "FileContentChunk" WHERE "path" LIKE '${pathLike}' AND "source" = 'nextcloud'`,
-    );
-    const n = Number.parseInt(out, 10);
-    if (Number.isFinite(n) && n > 0) return n;
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  return 0;
-}
-
-async function pollBrainIndexed(
-  itemId: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const out = dbQuery(
-      `SELECT "indexedAt" FROM "BrainMemoryItem" WHERE "id" = '${itemId}'`,
-    );
-    if (out && out.length > 0) {
-      // Also wait for the chunk rows. indexedAt flips before the chunk
-      // commit on some race windows.
-      const chunks = dbQuery(
-        `SELECT count(*) FROM "FileContentChunk" WHERE "brainItemId" = '${itemId}' AND "source" = 'brain'`,
-      );
-      if (Number.parseInt(chunks, 10) > 0) return true;
-    }
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-  return false;
-}
-
-interface ChatResponse {
-  message: { role: string; content: string };
-  trace: Array<{
-    tool: string;
-    args: Record<string, unknown>;
-    result: unknown;
-  }>;
-  iterations: number;
-  stop_reason: string;
-  error?: string;
-}
-
-interface SearchToolHit {
-  path: string;
-  score: number;
-  text: string;
-}
-
-/**
- * Pull the search_content invocations out of an agent trace and
- * surface their results. Returns a flat list of {path, text} pairs
- * for citation assertions.
- */
-function citationsFrom(resp: ChatResponse): SearchToolHit[] {
-  const hits: SearchToolHit[] = [];
-  for (const entry of resp.trace) {
-    if (entry.tool !== "search_content") continue;
-    const result = entry.result as
-      | { ok?: boolean; data?: { results?: SearchToolHit[] }; results?: SearchToolHit[] }
-      | undefined;
-    // The MCP envelope unwraps to either {ok, data: {results}} (handler
-    // shape) or {query, results} (server-formatted payload). Both have
-    // appeared in the wild while WARP-202/203 were stacking — accept
-    // either rather than coupling the test to one parse tree.
-    const list =
-      result?.data?.results ?? result?.results ?? [];
-    for (const r of list) {
-      if (r && typeof r.path === "string") {
-        hits.push({
-          path: r.path,
-          score: typeof r.score === "number" ? r.score : 0,
-          text: typeof r.text === "string" ? r.text : "",
-        });
-      }
-    }
-  }
-  return hits;
-}
-
-async function chat(question: string): Promise<ChatResponse> {
-  const res = await fetch(`${API_URL}/api/llm/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      // Use whatever model the gateway resolves by default — the test
-      // assertions only depend on the agent calling search_content,
-      // not on the prose the model returns.
-      model: process.env.RAG_E2E_MODEL ?? "llama3.1",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a helpful assistant. When the user asks about a document, you MUST call search_content to retrieve from the user's indexed files before answering. Never answer from memory.",
-        },
-        { role: "user", content: question },
-      ],
-      // Bound the loop so a confused model can't burn the budget.
-      max_iter: 4,
-      temperature: 0,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "<no body>");
-    throw new Error(`/api/llm/chat returned ${res.status}: ${body}`);
-  }
-  return (await res.json()) as ChatResponse;
-}
 
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
@@ -275,35 +150,14 @@ describe.skipIf(!SHOULD_RUN)(
       }
 
       // ─── Step 1: drop a PDF into Nextcloud's admin user files dir ───
-      sh(`${COMPOSE} exec -T nextcloud mkdir -p ${NC_DATA_DIR}/${NC_SUBDIR}`);
-      sh(
-        `${COMPOSE} exec -T nextcloud chown www-data:www-data ${NC_DATA_DIR}/${NC_SUBDIR}`,
-      );
-      sh(`${COMPOSE} cp ${PDF_FIXTURE} nextcloud:${NC_DATA_DIR}/${NC_SUBDIR}/`);
-      sh(
-        `${COMPOSE} exec -T nextcloud chown -R www-data:www-data ${NC_DATA_DIR}/${NC_SUBDIR}`,
-      );
-      sh(
-        `${COMPOSE} exec -T -u www-data nextcloud php /var/www/html/occ files:scan --path=admin/files/${NC_SUBDIR} --quiet`,
-      );
+      await uploadNextcloudFile(PDF_FIXTURE, NC_SUBDIR);
 
       // ─── Step 2: upload a PNG via the brain-upload API ───
-      const pngBytes = readFileSync(PNG_FIXTURE);
-      const form = new FormData();
-      form.append(
-        "file",
-        new Blob([pngBytes], { type: "image/png" }),
+      const upJson = await uploadBrainFile(
+        PNG_FIXTURE,
         "warp206-image.png",
+        "image/png",
       );
-      const upRes = await fetch(`${API_URL}/api/files/brain/upload`, {
-        method: "POST",
-        body: form,
-      });
-      if (upRes.status !== 202) {
-        const body = await upRes.text().catch(() => "<no body>");
-        throw new Error(`brain/upload returned ${upRes.status}: ${body}`);
-      }
-      const upJson = (await upRes.json()) as { itemId: string; status: string };
       brainItemId = upJson.itemId;
 
       // ─── Step 3: poll for indexedAt + chunk rows on both ───
@@ -318,7 +172,7 @@ describe.skipIf(!SHOULD_RUN)(
           "Nextcloud PDF never produced FileContentChunk rows — check file-indexer logs",
         );
       }
-      const brainOk = await pollBrainIndexed(brainItemId, 180_000);
+      const brainOk = await pollUntilBrainIndexed(brainItemId, 180_000);
       if (!brainOk) {
         throw new Error(
           `Brain item ${brainItemId} never indexed — check file-indexer + ai-gateway logs`,
