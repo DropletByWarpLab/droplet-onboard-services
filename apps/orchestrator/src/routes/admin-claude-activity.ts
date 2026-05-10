@@ -28,6 +28,10 @@ import {
   getJiraSnapshot,
   type JiraSnapshot,
 } from "../services/claude-activity/jira-adapter.js";
+import {
+  readComplianceProgress,
+  type ComplianceSnapshot,
+} from "../services/claude-activity/compliance-parser.js";
 
 const logger = pino({ name: "admin-claude-activity" });
 
@@ -42,7 +46,7 @@ export interface ClaudeActivityResponse {
   recent_actions: Awaited<ReturnType<typeof readSessionState>>["recent_actions"];
   github: GitHubSnapshot | null;
   jira: JiraSnapshot | null;
-  compliance: unknown | null;
+  compliance: ComplianceSnapshot | null;
   // Wall-clock the orchestrator computed this snapshot. The dashboard uses
   // it for the "last refreshed N seconds ago" footer; the HTTP
   // `Last-Modified` header carries the same value to drive the 304 path.
@@ -61,10 +65,10 @@ export function createAdminClaudeActivityRouter(): Router {
       }
 
       try {
-        // Read session-state + GitHub + Jira in parallel. Each call has
-        // its own failure handling — if any one is down, its leaf returns
-        // an empty/unconfigured shape, never a 500.
-        const [session, github, jira] = await Promise.all([
+        // Read session-state + GitHub + Jira + compliance in parallel.
+        // Each call has its own failure handling — if any one is down,
+        // its leaf returns an empty/unconfigured shape, never a 500.
+        const [session, github, jira, compliance] = await Promise.all([
           readSessionState(),
           getGitHubSnapshot().catch((err) => {
             logger.warn({ err }, "github snapshot failed");
@@ -72,6 +76,10 @@ export function createAdminClaudeActivityRouter(): Router {
           }),
           getJiraSnapshot().catch((err) => {
             logger.warn({ err }, "jira snapshot failed");
+            return null;
+          }),
+          readComplianceProgress().catch((err) => {
+            logger.warn({ err }, "compliance snapshot failed");
             return null;
           }),
         ]);
@@ -83,15 +91,15 @@ export function createAdminClaudeActivityRouter(): Router {
           recent_actions: session.recent_actions,
           github,
           jira,
-          compliance: null,
+          compliance,
           generated_at: generatedAt.toISOString(),
         };
 
         // WARP-279: support `If-Modified-Since` so 30s polling can short-
         // circuit when nothing moved. Reduce over every timestamp we
-        // surface — session-state, GitHub, Jira.
+        // surface — session-state, GitHub, Jira, compliance file mtime.
         const lastModified =
-          mostRecentTimestamp(session, github, jira) ?? generatedAt;
+          mostRecentTimestamp(session, github, jira, compliance) ?? generatedAt;
         res.setHeader("Last-Modified", lastModified.toUTCString());
         // Strong cache-control: data is per-user-role and we don't want
         // intermediaries serving a stale admin payload to a guest browser.
@@ -124,6 +132,7 @@ function mostRecentTimestamp(
   session: Awaited<ReturnType<typeof readSessionState>>,
   github: GitHubSnapshot | null,
   jira: JiraSnapshot | null,
+  compliance: ComplianceSnapshot | null,
 ): Date | null {
   let max: number | null = null;
   const consider = (s: string | null | undefined) => {
@@ -142,6 +151,10 @@ function mostRecentTimestamp(
   if (jira) {
     for (const t of jira.chain) consider(t.updated);
     for (const t of jira.in_flight) consider(t.updated);
+  }
+  if (compliance?.source_mtime_ms) {
+    if (max === null || compliance.source_mtime_ms > max)
+      max = compliance.source_mtime_ms;
   }
   return max === null ? null : new Date(max);
 }

@@ -47,6 +47,18 @@ vi.mock("../services/claude-activity/jira-adapter.js", () => ({
   }),
 }));
 
+vi.mock("../services/claude-activity/compliance-parser.js", () => ({
+  readComplianceProgress: vi.fn().mockResolvedValue({
+    source: "/fake/docs/compliance-progress.md",
+    source_mtime_ms: null,
+    generated_at: "2026-05-10T18:00:00Z",
+    workstreams: [],
+    queue: [],
+    milestones: [],
+    parsed: false,
+  }),
+}));
+
 function appWith(role: Role) {
   const app = express();
   app.use((req, _res, next) => {
@@ -134,7 +146,7 @@ describe("GET /api/admin/claude-activity", () => {
         chain: [],
         in_flight: [],
       },
-      compliance: null,
+      compliance: { parsed: false, workstreams: [], queue: [], milestones: [] },
     });
     expect(typeof res.body.generated_at).toBe("string");
     expect(res.headers["last-modified"]).toBeTruthy();
