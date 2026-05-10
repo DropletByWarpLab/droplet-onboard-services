@@ -101,11 +101,20 @@ const WAV_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/sam
 // because faster-whisper output isn't byte-stable across model versions.
 const WAV_SENTINEL = "hundred thousand";
 
+const SUBS_VIDEO_FIXTURE = resolve(REPO_ROOT, "services/file-indexer/tests/fixtures/with-srt.mp4");
+// with-srt.mp4 muxes the WARP-197 sample.wav with a mov_text subtitle
+// stream containing "budget meeting kickoff" / "projecting q4 revenue
+// at one hundred thousand". The video extractor takes the subtitle
+// path (no ASR fallback). The unique 4-word phrase isolates THIS file
+// from the audio file's transcript.
+const SUBS_VIDEO_SENTINEL = "budget meeting kickoff";
+
 describe.skipIf(!SHOULD_RUN)(
   "RAG end-to-end smoke — Nextcloud + brain → /api/llm/chat (WARP-206)",
   () => {
     let brainItemId: string | null = null;
     let audioItemId: string | null = null;
+    let subsVideoItemId: string | null = null;
 
     beforeAll(async () => {
       // Bring up the full chain. mcp-server is a sibling Compose
@@ -193,6 +202,20 @@ describe.skipIf(!SHOULD_RUN)(
       if (!audioOk) {
         throw new Error(`Audio brain item ${audioItemId} never indexed — check file-indexer + ai-gateway logs`);
       }
+
+      // ─── Video w/ subtitles brain-upload ───
+      const subsVidUp = await uploadBrainFile(
+        SUBS_VIDEO_FIXTURE,
+        "warp224-video-subs.mp4",
+        "video/mp4",
+      );
+      subsVideoItemId = subsVidUp.itemId;
+      const subsVideoOk = await pollUntilBrainIndexed(subsVideoItemId, 240_000);
+      if (!subsVideoOk) {
+        throw new Error(
+          `Video-w/-subs item ${subsVideoItemId} never indexed — check file-indexer logs`,
+        );
+      }
     }, 600_000); // 10 min ceiling — Nextcloud cold-boot + OCR + embed
 
     afterAll(async () => {
@@ -263,6 +286,21 @@ describe.skipIf(!SHOULD_RUN)(
       expect(wavHit, "no citation for warp224-audio.wav").toBeDefined();
       expect(wavHit!.text.length).toBeGreaterThan(0);
       expect(wavHit!.text.toLowerCase()).toContain(WAV_SENTINEL);
+    }, 120_000);
+
+    it("agent retrieval reaches a video via subtitle stream (WARP-198)", async () => {
+      const resp = await chat(
+        `Search my videos for "${SUBS_VIDEO_SENTINEL}". What does the recording say?`,
+      );
+
+      expect(resp.error).toBeUndefined();
+      const hits = citationsFrom(resp);
+      expect(hits.length, "agent did not call search_content").toBeGreaterThan(0);
+
+      const subsHit = hits.find((h) => h.path.toLowerCase().includes("warp224-video-subs"));
+      expect(subsHit, "no citation for warp224-video-subs.mp4").toBeDefined();
+      expect(subsHit!.text.length).toBeGreaterThan(0);
+      expect(subsHit!.text.toLowerCase()).toContain(SUBS_VIDEO_SENTINEL);
     }, 120_000);
 
     // Determinism harness — see header comment. We loop on retrieval
