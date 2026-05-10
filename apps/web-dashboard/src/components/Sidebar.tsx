@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Network,
   Settings,
+  Sparkles,
   Trash2,
   Star,
   Clock,
@@ -39,6 +40,11 @@ const primaryNav: NavItem[] = [
   { href: "/calendar", label: "Calendar", icon: CalendarIcon },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/knowledge", label: "Knowledge", icon: BookOpen },
+  // WARP-225: investor-grade per-user context-meter dashboard. Lives in
+  // primary nav next to Knowledge so the eye reads them as paired —
+  // /knowledge is "what's indexed" by file, /context is "what's
+  // indexed" by capability density.
+  { href: "/context", label: "Context", icon: Sparkles },
   { href: "/devices", label: "Devices", icon: Home },
 ];
 
