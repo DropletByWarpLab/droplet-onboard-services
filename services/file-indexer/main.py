@@ -20,8 +20,50 @@ logging.basicConfig(
 logger = logging.getLogger("file-indexer")
 
 
+def _run_fips_boot_self_test() -> None:
+    """WARP-229: assert the OpenSSL FIPS provider is loaded + enforcing.
+
+    Gating: `DROPLET_FIPS_REQUIRED` env var.
+      "true" / "1"           → enforce; exit 1 on failure
+      "false" / "0" / unset  → skip with note (dev/CI default)
+
+    The container's Dockerfile sets `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf`
+    and ships the FIPS module config alongside; the only way the
+    self-test can fail at this point is a misconfiguration in the image
+    OR the validated `fips.so` not having been layered on yet (operator
+    task — see Dockerfile comment).
+    """
+    raw = os.environ.get("DROPLET_FIPS_REQUIRED")
+    if raw is None or raw.lower() in ("false", "0", "no"):
+        logger.info(
+            "FIPS boot self-test skipped (DROPLET_FIPS_REQUIRED=%s)",
+            raw if raw is not None else "<unset>",
+        )
+        return
+
+    # Lazy import — `_shared` is only laid into the image at build time
+    # by `COPY services/_shared/...`. Running main.py directly outside
+    # Docker would miss the helper; the env-gated skip above prevents
+    # that path from breaking dev workflows.
+    sys.path.insert(0, "/app")
+    try:
+        from _shared.fips_selftest import assert_fips_at_boot_or_exit
+    except ImportError as err:
+        logger.error(
+            "FIPS boot self-test required but the helper isn't importable: %s. "
+            "This usually means the image was built with an out-of-date Dockerfile.",
+            err,
+        )
+        sys.exit(1)
+    # Logs structured JSON + exits non-zero on failure; if it returns,
+    # the provider is loaded AND enforcing.
+    assert_fips_at_boot_or_exit("file-indexer")
+
+
 def main():
     from config import NEXTCLOUD_DATA_ROOT, AI_GATEWAY_GRPC_URL
+
+    _run_fips_boot_self_test()
 
     logger.info("Droplet file-indexer starting")
     logger.info("  Nextcloud data: %s", NEXTCLOUD_DATA_ROOT)

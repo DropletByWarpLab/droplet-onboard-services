@@ -5,8 +5,42 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+
+
+def _run_fips_boot_self_test() -> None:
+    """WARP-229: assert the OpenSSL FIPS provider is loaded + enforcing.
+
+    Gating: `DROPLET_FIPS_REQUIRED` env var.
+      "true" / "1"           → enforce; exit 1 on failure
+      "false" / "0" / unset  → skip (dev/CI default)
+
+    Runs at module import, BEFORE the FastAPI app object is constructed
+    and BEFORE any worker is forked, so a non-FIPS image fails closed
+    before serving the first request.
+    """
+    raw = os.environ.get("DROPLET_FIPS_REQUIRED")
+    if raw is None or raw.lower() in ("false", "0", "no"):
+        return
+    sys.path.insert(0, "/app")
+    try:
+        from _shared.fips_selftest import assert_fips_at_boot_or_exit
+    except ImportError as err:
+        sys.stderr.write(
+            '{"event":"fips_self_test","service":"ai-gateway","fips":false,'
+            f'"reason":"helper not importable: {err}"}}\n'
+        )
+        sys.exit(1)
+    assert_fips_at_boot_or_exit("ai-gateway")
+
+
+# Run BEFORE any other imports that might initiate crypto. Httpx /
+# starlette / uvicorn all touch OpenSSL on first import; gating here
+# keeps the failure mode clean.
+_run_fips_boot_self_test()
+
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query

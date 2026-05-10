@@ -243,8 +243,12 @@ services:
   # --- AI Services ---
   ai-gateway:
     build:
-      context: ../services/ai-gateway
-      dockerfile: Dockerfile
+      # WARP-229: context promoted from `../services/ai-gateway` to `..`
+      # (repo root) so the Dockerfile can `COPY docker/openssl-fips.cnf`
+      # and `COPY services/_shared/fips_selftest.py` for the FIPS boot
+      # self-test. Mirrors file-indexer's repo-root context.
+      context: ..
+      dockerfile: services/ai-gateway/Dockerfile
     expose:
       - "8000"
       - "50051"
