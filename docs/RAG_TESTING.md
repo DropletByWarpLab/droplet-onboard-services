@@ -231,3 +231,82 @@ hours'` back to `queued_for_transcription`. Catches mid-transcription crashes
     restart the file-indexer container, watch the worker logs.
   - Force a failure: stop the ai-gateway container, then `transcribe-now`.
     Status should land at `failed` with a populated `failureReason`.
+
+## Frame OCR (WARP-208)
+
+Off by default. When `VIDEO_FRAME_OCR_ENABLED=1`, video uploads also get
+frame OCR alongside subtitles or ASR — useful for screencasts, slide decks,
+signage videos, and any clip where the on-screen text is the primary signal.
+
+Frame OCR runs **inside** the deferred-ASR path (WARP-218). There is no
+new scheduler — when the daily 03:00 transcription window picks up a video
+item, frame OCR is layered on top of the subtitle/ASR result before the
+text gets chunked.
+
+### Knobs
+
+| Env var | Default | Range | Notes |
+|---|---|---|---|
+| `VIDEO_FRAME_OCR_ENABLED` | `0` (off) | `0` / `1` | Master switch. `0` keeps WARP-198 behavior intact. |
+| `VIDEO_FRAME_OCR_INTERVAL_SEC` | `5` | `1..60` | Frame sample period in seconds. Lower = more frames sampled = more OCR cost. Garbage values fall back to default. |
+| `VIDEO_FRAME_OCR_PHASH_THRESHOLD` | `8` | `0..64` | Hamming-distance threshold for the pre-OCR perceptual-hash dedup. Lower = more frames pass through to OCR. `8` is the standard "very similar" cutoff for slide transitions. |
+
+### Cost on a 60-min screencast (5-second sampling)
+
+- Frame sampling (720 frames): ~10s
+- 720 phashes: ~5s
+- Surviving OCR calls (~5 distinct slides): ~1s
+- **Total frame-OCR cost: ~15-20s on top of the existing ASR path.**
+
+Negligible at the WARP-218 deferred-window timescale (the ASR call itself
+dominates).
+
+### Output
+
+Frame OCR text is appended to the video's existing transcript under a
+sentinel separator:
+
+```
+budget meeting kickoff
+projecting q4 revenue at one hundred thousand
+
+--- Frame OCR ---
+[00:00 → 00:30] Welcome to Q4 Planning · Acme Corp
+[00:30 → 02:15] Revenue Targets — $100K MRR by EOY
+```
+
+`metadata.subtitle_source` carries the combined provenance, one of:
+
+  - `embedded` — subtitles only (frame OCR disabled or produced nothing)
+  - `embedded+frame_ocr` — subtitles AND frame OCR
+  - `asr_transcript` — ASR only
+  - `asr_transcript+frame_ocr` — ASR AND frame OCR
+  - `frame_ocr_only` — no subtitles, ASR empty, frame OCR is the sole channel
+
+`metadata.frame_ocr` (new sub-dict) is populated whenever the flag is on and
+the path runs, regardless of segment count:
+
+```json
+{
+  "frames_sampled": 12,
+  "frames_ocr_run": 5,
+  "segments_emitted": 4,
+  "interval_sec_used": 5
+}
+```
+
+Useful for operators triaging cost vs. quality.
+
+### Smoke test
+
+1. Set `VIDEO_FRAME_OCR_ENABLED=1` and `VIDEO_FRAME_OCR_INTERVAL_SEC=2` in `.env`.
+2. Recreate the file-indexer container so the env var is re-read:
+   `docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate file-indexer`.
+3. Drop a `.mp4` with on-screen text into Nextcloud OR upload via brain memory.
+4. Force the daily run early: `POST /api/files/brain/:itemId/transcribe-now`.
+5. Watch file-indexer logs for `frame_ocr.extract_frame_text` activity.
+6. Confirm the chunked text contains `--- Frame OCR ---` and `[mm:ss → mm:ss]`
+   timestamp segments:
+   `docker compose exec db psql -U droplet -d droplet -c 'SELECT text FROM "FileContentChunk" ORDER BY "indexedAt" DESC LIMIT 3;'`.
+7. The dashboard's `/knowledge` source-channel badge will reflect the combined
+   provenance via WARP-214's `SourceChannelBadge`.
