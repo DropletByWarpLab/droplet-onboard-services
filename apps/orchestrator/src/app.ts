@@ -27,6 +27,7 @@ import { createVpnRouter } from "./routes/vpn.js";
 import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
+import { createFipsRouter } from "./routes/fips.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
 
@@ -56,6 +57,12 @@ export function createApp(prisma: PrismaClient) {
   // session; the HMAC-signed token in ?t=... is the authorization. Mounted
   // BEFORE auth middleware so forwarded links work without a Droplet account.
   app.use("/api", createCameraSharePublicRouter());
+
+  // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
+  // stuck-auth incident doesn't hide the FIPS state from the operator.
+  // Lives under `/_/fips` (not `/api/...`) so it sits in the
+  // orchestrator's internal namespace, parallel to other operator probes.
+  app.use(createFipsRouter("orchestrator"));
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
