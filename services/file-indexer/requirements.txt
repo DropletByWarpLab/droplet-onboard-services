@@ -28,3 +28,9 @@ srt==3.5.3
 # apscheduler 3.x and 4.x have incompatible APIs.
 apscheduler==3.10.4
 tzlocal>=5.0
+# WARP-208 — frame OCR for video extractor (perceptual hashing for
+# pre-OCR dedup so we don't run Tesseract on every redundant frame).
+# imagehash 4.3.1 is the canonical pure-python perceptual-hashing lib;
+# small (~20KB), MIT licensed, depends only on Pillow (already pulled
+# in by pytesseract).
+imagehash==4.3.1
