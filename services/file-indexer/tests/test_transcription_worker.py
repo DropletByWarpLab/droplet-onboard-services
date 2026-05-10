@@ -43,15 +43,15 @@ def test_run_one_happy_path_transitions_queued_to_ready():
     # Two updates: queued→indexing, then indexing→ready.
     statuses = [c.kwargs["status"] for c in upd.call_args_list]
     assert statuses == ["indexing", "ready"]
-    # Find the brain-indexed publish by topic — WARP-225 added a
-    # sibling publish on droplet/context-stats/invalidate, so the
-    # brain-indexed call may not be the last in the call_args_list.
-    brain_indexed = [
+    # _publish_status is called twice (once per status transition).
+    # Each call publishes to two topics: brain/indexed + context-stats/invalidate.
+    # Find the brain-indexed call with status=ready.
+    ready_publishes = [
         c for c in publish.call_args_list
         if c[0][0] == "droplet/files/alice/brain/indexed"
+        and c[0][1].get("status") == "ready"
     ]
-    assert len(brain_indexed) == 1, "expected exactly one brain/indexed publish"
-    assert brain_indexed[0][0][1]["status"] == "ready"
+    assert len(ready_publishes) == 1, "expected exactly one brain/indexed status=ready publish"
 
 
 def test_run_one_extractor_raises_transitions_to_failed():
@@ -72,13 +72,13 @@ def test_run_one_extractor_raises_transitions_to_failed():
 
     failed_call = [c for c in upd.call_args_list if c.kwargs["status"] == "failed"][0]
     assert "ffmpeg fail" in (failed_call.kwargs.get("failure_reason") or "")
-    # Find the brain-indexed publish by topic — see WARP-225 note above.
-    brain_indexed = [
+    # Two brain-indexed publishes: indexing then failed. Find the failed one.
+    failed_publishes = [
         c for c in publish.call_args_list
         if c[0][0] == "droplet/files/alice/brain/indexed"
+        and c[0][1].get("status") == "failed"
     ]
-    assert len(brain_indexed) == 1, "expected exactly one brain/indexed publish"
-    assert brain_indexed[0][0][1]["status"] == "failed"
+    assert len(failed_publishes) == 1, "expected exactly one brain/indexed status=failed publish"
 
 
 def test_run_one_skips_when_claim_attempt_returns_false():
