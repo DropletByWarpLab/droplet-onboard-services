@@ -1,0 +1,59 @@
+name: test-fips
+
+# FIPS 140-3 static lint (scripts/test-fips.sh). Mirrors the security-tests
+# workflow's shape — fast, no Docker, runs on every PR touching source/config
+# directories. WARP-229.
+#
+# REPORT-ONLY for now: this commit lands the lint script + workflow before
+# the allowlist registry (docs/security/fips-exceptions.md) and the
+# brain_ingest MD5 fix exist. Running the script on `main` right now would
+# correctly fail. The job step uses `continue-on-error: true` so CI doesn't
+# go red while the rest of the WARP-229 chain (commits 3-11) is landing.
+#
+# Commit 12 flips this to a PR-blocking required check.
+
+on:
+  pull_request:
+    paths:
+      - "apps/**"
+      - "services/**"
+      - "packages/**"
+      - "scripts/**"
+      - "docker/**"
+      - "docs/security/fips-exceptions.md"
+      - "docs/security/fips-allowed-algorithms.md"
+      - ".github/workflows/test-fips.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "services/**"
+      - "packages/**"
+      - "scripts/**"
+      - "docker/**"
+      - "docs/security/fips-exceptions.md"
+      - "docs/security/fips-allowed-algorithms.md"
+      - ".github/workflows/test-fips.yml"
+
+concurrency:
+  group: test-fips-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fips-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run FIPS static lint (report-only)
+        id: lint
+        continue-on-error: true
+        run: ./scripts/test-fips.sh
+
+      - name: Run lint script's own unit tests
+        run: ./tests/test-fips-script/run.sh
+
+      - name: Note report-only mode
+        if: steps.lint.outcome == 'failure'
+        run: |
+          echo "::warning::FIPS lint reported violations. Report-only mode (WARP-229 commit 2) — will flip to blocking in commit 12."

@@ -53,6 +53,7 @@ export function isFipsEnabled(): boolean {
  */
 export function md5ShouldFail(): string | null {
   try {
+    // fips:allowed: fips-selftest-negative-probe
     crypto.createHash("md5").update("fips-selftest-probe").digest("hex");
     // If we got here, MD5 succeeded — FIPS is not actually enforced.
     return null;

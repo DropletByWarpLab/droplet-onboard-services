@@ -81,6 +81,7 @@ def md5_should_fail() -> Optional[str]:
         # `usedforsecurity=True` is the default; pinning it explicitly so
         # this probe is unambiguous against a future Python that flips
         # the default.
+        # fips:allowed: fips-selftest-negative-probe
         hashlib.new("md5", b"fips-selftest-probe", usedforsecurity=True).hexdigest()
     except ValueError as err:
         return str(err) or "md5 rejected"
