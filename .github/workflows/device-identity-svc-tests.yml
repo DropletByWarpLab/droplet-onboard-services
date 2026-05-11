@@ -1,0 +1,62 @@
+name: device-identity-svc-tests
+
+# WARP-230 — pytest for services/device-identity-svc. Path-filtered.
+# Real-backend tests (tpm2-pytss) are skip-gated by RUN_TPM_INTEGRATION=1;
+# this workflow only runs the mock backend + storage + gRPC handler
+# tests, which is what we cover on PR-time CI.
+
+on:
+  pull_request:
+    paths:
+      - "services/device-identity-svc/**"
+      - "proto/**"
+      - ".github/workflows/device-identity-svc-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/device-identity-svc/**"
+      - "proto/**"
+      - ".github/workflows/device-identity-svc-tests.yml"
+
+concurrency:
+  group: device-identity-svc-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/device-identity-svc
+    steps:
+      - uses: actions/checkout@v4
+
+      # WARP-230: tpm2-pytss pip-install builds against tss2-esapi C
+      # headers from libtss2-dev. Without these apt packages the build
+      # errors with "Require tss2-esapi to be installed and at least
+      # version 2.4.0". Real-backend tests still skip-gate themselves
+      # on RUN_TPM_INTEGRATION=1; this dep is needed at install-time
+      # not test-time.
+      - name: Install tss2-esapi system headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libtss2-dev pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/device-identity-svc/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}/services/device-identity-svc
+        run: pytest -v

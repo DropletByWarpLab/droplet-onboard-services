@@ -62,3 +62,14 @@ services:
   ai-gateway:
     ports:
       - "50051:50051"
+
+  # WARP-230: the test lane runs on CI hosts without a TPM. Force the
+  # mock backend. Compose 2.20+ `!reset` clears the inherited devices
+  # list so /dev/tpm0 isn't required on the CI host. Compose versions
+  # below 2.20 will gracefully ignore the unknown tag and inherit the
+  # devices list, which is still survivable: Docker silently skips a
+  # device entry whose source doesn't exist on the host.
+  device-identity-svc:
+    environment:
+      - DROPLET_TPM_BACKEND=mock
+    devices: !reset []

@@ -1,0 +1,63 @@
+// WARP-230 — Device identity sidecar gRPC interface.
+//
+// Backed by TPM 2.0 in production (real backend) and a pure-Python in-memory
+// mock in dev/CI. The same interface is satisfied by both.
+syntax = "proto3";
+
+package droplet.device_identity;
+
+service DeviceIdentityService {
+  // Sign a payload with the device's non-extractable identity key.
+  rpc Sign(SignRequest) returns (SignResponse);
+  // Return the device's self-signed X.509 cert (PEM-encoded).
+  rpc GetCert(GetCertRequest) returns (GetCertResponse);
+  // Report on provisioning state + seal validity.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // Re-bind the sealed identity blob to the current PCR snapshot.
+  // Requires a fresh operator-auth nonce issued by the orchestrator.
+  rpc Reseal(ResealRequest) returns (ResealResponse);
+}
+
+message SignRequest {
+  // Bytes to sign. Caller hashes if needed; sidecar feeds directly into
+  // ECDSA(SHA-256) signer.
+  bytes payload = 1;
+}
+
+message SignResponse {
+  bytes signature = 1;            // DER-encoded ECDSA signature
+  string algorithm = 2;           // "ECDSA-P256-SHA256"
+}
+
+message GetCertRequest {}
+
+message GetCertResponse {
+  string cert_pem = 1;            // PEM-encoded X.509 cert (self-signed v1)
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  bool provisioned = 1;
+  string backend = 2;             // "real" | "mock"
+  string cert_subject = 3;
+  string cert_fingerprint = 4;    // "sha256:<hex>"
+  string cert_expires_at = 5;     // ISO 8601
+  repeated int32 sealing_pcrs = 6;
+  bool seal_valid = 7;
+  string last_reseal_at = 8;      // ISO 8601 or empty
+  map<int32, string> current_pcr_snapshot = 9;  // PCR index → hex digest
+}
+
+message ResealRequest {
+  // Operator-auth nonce issued by the orchestrator after MFA re-auth.
+  // Single-use, validated against a short-lived (60s) table inside the
+  // sidecar.
+  string operator_auth_nonce = 1;
+}
+
+message ResealResponse {
+  bool resealed = 1;
+  string sealed_at = 2;           // ISO 8601
+  repeated int32 new_pcr_snapshot_indices = 3;
+}

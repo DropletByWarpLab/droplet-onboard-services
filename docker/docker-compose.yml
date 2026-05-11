@@ -112,6 +112,10 @@ services:
       # so it can write extracted.txt + updated manifest) so a single
       # ingest step covers both write paths.
       - brain-memory-data:/data/brain-memory
+      # WARP-230: share the device-identity sidecar's Unix-socket dir so
+      # the orchestrator's gRPC client can reach it without exposing a
+      # network port. Read-only — the orchestrator never writes.
+      - /var/run/droplet:/var/run/droplet:ro
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
@@ -121,6 +125,50 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 3
+    restart: always
+
+  # --- Device identity sidecar (WARP-230) ---
+  # Python gRPC service holding the device's non-extractable identity
+  # key sealed to TPM 2.0 PCRs [0, 2, 4, 7]. Only container with
+  # /dev/tpm0 passthrough; orchestrator talks to it over a Unix socket
+  # so no network port is exposed.
+  device-identity-svc:
+    build:
+      context: ..
+      dockerfile: services/device-identity-svc/Dockerfile
+    container_name: droplet-device-identity-svc
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # Backend selection — defaults to 'real' in production. Override
+      # to 'mock' on hosts without /dev/tpm0 (Mac dev, CI runners).
+      # docker-compose.test.override.yml forces 'mock' for the test lane.
+      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-real}
+      DROPLET_DEVICE_ID: ${DROPLET_DEVICE_ID:-droplet}
+      # Auto-provision on first start: if /var/lib/droplet/tpm/ has no
+      # provisioned.json, generate the EK / SRK / device-id key and
+      # seal to the canonical PCR set. Idempotent — no-op on subsequent
+      # starts.
+      DROPLET_AUTO_PROVISION: "1"
+      # Sealing PCR set. Override per spec §Risk register when the
+      # device's UEFI/cboot uses a different canonical set.
+      DROPLET_TPM_PCRS: "0,2,4,7"
+    # /dev/tpm0 passthrough for the real backend. Docker silently
+    # skips this entry on hosts where /dev/tpm0 doesn't exist (Mac,
+    # CI), so the same compose file works everywhere. The test
+    # override clears the devices list to be explicit.
+    devices:
+      - "/dev/tpm0:/dev/tpm0"
+    volumes:
+      # Persistent artifacts: EK cert, SRK pub, device-id pub/cert,
+      # sealed blob, provisioned.json. Bind-mounted from the host so
+      # the artifacts survive container recreate.
+      - /var/lib/droplet/tpm:/var/lib/droplet/tpm
+      # Unix-socket directory — the orchestrator container mounts the
+      # same path read-only so it can dial unix:///var/run/droplet/
+      # device-identity.sock.
+      - /var/run/droplet:/var/run/droplet
     restart: always
 
   # --- MCP Server (HTTP transport) ---

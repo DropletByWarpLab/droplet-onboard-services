@@ -98,6 +98,13 @@ AUTH_ENABLED=true
 FILES_ROOT=/data/files
 MAX_UPLOAD_SIZE_MB=100
 
+# --- WARP-230 device identity ---
+# Selects the device-identity-svc backend.
+#   real = use /dev/tpm0 via tpm2-pytss (Jetson production).
+#   mock = pure-Python in-memory mock (dev / CI / hosts without a TPM).
+DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
+DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
+
 # --- Compose profiles ---
 # Linux: include "linux" so Frigate (which needs /dev/dri/renderD128 and
 # /dev/bus/usb) is part of the default \`docker compose up\`.
@@ -174,6 +181,14 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+
+  # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
+  # on the host — Jetson production hits 'real', everything else hits
+  # 'mock'. Operator can override either by editing .env.
+  local di_backend_default="mock"
+  [ -e /dev/tpm0 ] && di_backend_default="real"
+  _migrate_ensure_key DROPLET_TPM_BACKEND "$di_backend_default"
+  _migrate_ensure_key DROPLET_DEVICE_ID "$(hostname 2>/dev/null || echo droplet)"
 
   if [ "$appended_count" -gt 0 ]; then
     log_success "Migrated .env: appended$appended_keys"
