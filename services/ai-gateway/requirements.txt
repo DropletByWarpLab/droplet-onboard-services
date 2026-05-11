@@ -13,6 +13,10 @@ torch --index-url https://download.pytorch.org/whl/cpu
 
 # WARP-286: BGE-reranker-base int8 via optimum + onnxruntime.
 # Used by the Rerank gRPC handler for hybrid retrieval.
+#
+# Do NOT also pin onnxruntime explicitly — the optimum[onnxruntime] extra
+# pulls in a compatible version transitively. Newer optimum releases
+# (1.27+) bumped their onnxruntime constraints past <2.0, so an explicit
+# upper-bound pin here makes the resolver impossible to satisfy.
 optimum[onnxruntime]>=1.21,<2.0
-onnxruntime>=1.18,<2.0
 huggingface_hub>=0.24,<1.0
