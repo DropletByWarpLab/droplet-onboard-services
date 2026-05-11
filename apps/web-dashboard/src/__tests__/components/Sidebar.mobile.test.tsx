@@ -214,6 +214,41 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
       expect(cls).toMatch(/min-h-\[44px\]|min-h-11|h-11|h-\[44px\]|h-12|min-h-12/);
     }
   });
+
+  // ── UX fold-in (WARP-290) ───────────────────────────────────────────
+  it("drawer renders a separator between displaced-primary group and secondary-nav group", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+
+    // Pick a known displaced-primary link (Calendar) and a known
+    // secondary-nav link (Cameras). The DOM order must be:
+    //   Calendar → … → Cameras, with a separator <div class="h-px …">
+    // somewhere between them. The desktop sidebar uses the same
+    // `bg-separator` token; the drawer must mirror that mental model.
+    const calendar = within(dialog).getByRole("link", { name: /calendar/i });
+    const cameras = within(dialog).getByRole("link", { name: /cameras/i });
+
+    // Sanity: Calendar comes before Cameras in DOM order.
+    expect(
+      calendar.compareDocumentPosition(cameras) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // Find every hairline separator inside the drawer.
+    const separators = dialog.querySelectorAll("div.h-px.bg-separator");
+    expect(separators.length).toBeGreaterThan(0);
+
+    // At least one separator must sit strictly between Calendar and Cameras.
+    const between = Array.from(separators).some((sep) => {
+      const afterCalendar =
+        calendar.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_FOLLOWING;
+      const beforeCameras =
+        cameras.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_PRECEDING;
+      return Boolean(afterCalendar && beforeCameras);
+    });
+    expect(between).toBe(true);
+  });
 });
 
 describe("<Sidebar> desktop branch a11y (WARP-290)", () => {

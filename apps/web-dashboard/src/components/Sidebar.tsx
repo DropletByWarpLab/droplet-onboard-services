@@ -119,15 +119,14 @@ export function Sidebar() {
     : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
   // WARP-290: items the bottom tab bar can't fit get folded into the
-  // drawer. Order: displaced primaries (preserving primaryNav order)
-  // then secondaryNav, then admin-only entries.
-  const drawerNav: NavItem[] = [
-    ...primaryNav.filter(
-      (item) => !MOBILE_PRIMARY_HREFS.includes(item.href as typeof MOBILE_PRIMARY_HREFS[number]),
-    ),
-    ...secondaryNav,
-    ...(user?.role === "owner" || user?.role === "admin" ? adminNav : []),
-  ];
+  // drawer. Three logical groups, rendered with a hairline separator
+  // between each so the drawer mirrors the desktop sidebar's
+  // primary / secondary / admin mental model (UX fold-in).
+  const displacedPrimaryNav: NavItem[] = primaryNav.filter(
+    (item) => !MOBILE_PRIMARY_HREFS.includes(item.href as typeof MOBILE_PRIMARY_HREFS[number]),
+  );
+  const drawerAdminNav: NavItem[] =
+    user?.role === "owner" || user?.role === "admin" ? adminNav : [];
 
   // The four hrefs that survive into the bottom tab bar, looked up
   // against primaryNav so the icon + label match the desktop sidebar.
@@ -308,31 +307,42 @@ export function Sidebar() {
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
-            {drawerNav.map((item) => {
-              const Icon = item.icon;
-              const active = isActive(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  onClick={() => setMoreOpen(false)}
-                  aria-current={active ? "page" : undefined}
-                  className={`
-                    flex items-center gap-3 px-3 min-h-[44px] rounded-lg
-                    type-subheadline transition-all duration-200 ease-smooth
-                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
-                    ${
-                      active
-                        ? "bg-accent-subtle text-accent font-medium"
-                        : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-                    }
-                  `}
-                >
-                  <Icon size={18} strokeWidth={active ? 2 : 1.5} />
-                  {item.label}
-                </Link>
-              );
-            })}
+            {[displacedPrimaryNav, secondaryNav, drawerAdminNav]
+              .filter((group) => group.length > 0)
+              .map((group, groupIndex, groups) => (
+                <div key={`drawer-group-${groupIndex}`}>
+                  {group.map((item) => {
+                    const Icon = item.icon;
+                    const active = isActive(item.href);
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        onClick={() => setMoreOpen(false)}
+                        aria-current={active ? "page" : undefined}
+                        className={`
+                          flex items-center gap-3 px-3 min-h-[44px] rounded-lg
+                          type-subheadline transition-all duration-200 ease-smooth
+                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                          ${
+                            active
+                              ? "bg-accent-subtle text-accent font-medium"
+                              : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+                          }
+                        `}
+                      >
+                        <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+                        {item.label}
+                      </Link>
+                    );
+                  })}
+                  {groupIndex < groups.length - 1 && (
+                    <div className="px-3 pt-2 pb-2">
+                      <div className="h-px bg-separator" />
+                    </div>
+                  )}
+                </div>
+              ))}
 
             <div className="px-3 pt-4 pb-2">
               <div className="h-px bg-separator" />
