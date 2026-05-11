@@ -41,17 +41,20 @@ interface Handlers {
 }
 
 function rowProps(file: FileEntryInfo, h: Handlers) {
+  // The `as any` shim sidesteps vi.fn()'s default `unknown` return type
+  // — the actual handlers are signature-compatible at runtime; we only
+  // need TS to stop complaining about Mock<..., unknown>.
   return {
     file,
     isSelected: false,
     isRenaming: false,
-    onSelect: h.onSelect,
-    onOpen: h.onOpen,
-    onDownload: h.onDownload,
-    onDelete: h.onDelete,
-    onRename: h.onRename,
-    onCancelRename: h.onCancelRename,
-    onContextMenu: h.onContextMenu,
+    onSelect: h.onSelect as any,
+    onOpen: h.onOpen as any,
+    onDownload: h.onDownload as any,
+    onDelete: h.onDelete as any,
+    onRename: h.onRename as any,
+    onCancelRename: h.onCancelRename as any,
+    onContextMenu: h.onContextMenu as any,
   };
 }
 
@@ -61,6 +64,8 @@ function makeHandlers(): Handlers {
     onOpen: vi.fn(),
     onDownload: vi.fn(),
     onDelete: vi.fn(),
+    // Typed as Promise<void> so the FileRowProps.onRename signature aligns
+    // (TS infers `unknown` from vi.fn() by default).
     onRename: vi.fn(),
     onCancelRename: vi.fn(),
     onContextMenu: vi.fn(),
