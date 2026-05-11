@@ -72,7 +72,7 @@ function formatDate(iso: string): string {
  *  - multi-select (click / ctrl-click / shift-click handled by caller)
  *  - right-click context menu (caller positions it)
  *  - in-place rename (switches to an input when `isRenaming` is true)
- *  - hover row actions (download, delete)
+ *  - always-visible row actions (download, delete) — WARP-292
  */
 export function FileRow({
   file,
@@ -207,15 +207,25 @@ export function FileRow({
         />
       </div>
 
-      <div className="flex items-center gap-0.5 w-16 justify-end flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+      {/*
+        WARP-292: row actions are always rendered (no opacity-gate) so
+        they're discoverable on touch and reachable for keyboard users.
+        WARP-298 owns the broader FileRow keyboard-nav story (Tab /
+        Arrow keys to focus a row, Enter to open) — this commit just
+        gets the action buttons into the DOM tab order. p-2.5 → 14 px
+        icon + 20 px padding = 34 px hit-target, clearing the 32 px
+        ui-ux floor. aria-labels name the file so screen-reader users
+        hear which entry they're acting on.
+      */}
+      <div className="flex items-center gap-0.5 justify-end flex-shrink-0 transition-opacity duration-200">
         {!file.isDirectory && (
           <button
             onClick={(e) => {
               e.stopPropagation();
               onDownload();
             }}
-            className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
-            aria-label="Download"
+            className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+            aria-label={`Download ${file.name}`}
           >
             <Download size={14} />
           </button>
@@ -225,8 +235,8 @@ export function FileRow({
             e.stopPropagation();
             onDelete();
           }}
-          className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
-          aria-label="Delete"
+          className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+          aria-label={`Delete ${file.name}`}
         >
           <Trash2 size={14} />
         </button>
