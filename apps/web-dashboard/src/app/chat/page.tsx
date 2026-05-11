@@ -280,21 +280,29 @@ export default function ChatPage() {
         {/* WARP-295: Jump-to-latest pill — visible only when the user
             scrolled up off the live tail. Sits absolutely above the
             ChatInput so it floats over the last message without
-            stealing layout space when hidden. */}
-        {isDetached && messages.length > 0 ? (
-          <div className="relative">
+            stealing layout space when hidden. The container is always
+            rendered (only the pill's opacity toggles) so we get a soft
+            fade on both appear and disappear instead of a hard pop.
+            `pointer-events-none` while hidden keeps the invisible pill
+            from intercepting clicks; reduced-motion users still get a
+            usable pill — the global `prefers-reduced-motion` block in
+            globals.css collapses Tailwind transitions to ~0ms. */}
+        {messages.length > 0 ? (
+          <div className="relative" aria-hidden={!isDetached}>
             <button
               type="button"
               onClick={scrollToBottom}
               data-testid="jump-to-latest"
-              className="
+              tabIndex={isDetached ? 0 : -1}
+              className={`
                 absolute left-1/2 -translate-x-1/2 -top-12 z-10
                 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
                 bg-accent text-white shadow-md
                 type-caption-1 hover:bg-accent-hover
                 focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors duration-150
-              "
+                transition-opacity duration-150
+                ${isDetached ? "opacity-100" : "opacity-0 pointer-events-none"}
+              `}
               aria-label="Jump to latest message"
             >
               <ArrowDown size={12} strokeWidth={2.5} aria-hidden="true" />
