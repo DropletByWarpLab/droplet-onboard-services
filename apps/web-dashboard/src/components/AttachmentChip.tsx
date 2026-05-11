@@ -92,7 +92,12 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
         // the DOM (text or title) — the backend may emit terse strings
         // (HTTP codes, indexer enums, ECONNREFUSED). The full raw cause
         // goes via the helper's console.error for QA / operator triage.
-        <span className="text-label-tertiary truncate">
+        // The `title` carries the same friendly translation so the full
+        // string is reachable on small screens where `truncate` clips.
+        <span
+          className="text-label-tertiary truncate"
+          title={translateError({ message: error }, "chat")}
+        >
           — {translateError({ message: error }, "chat")}
         </span>
       ) : null}
