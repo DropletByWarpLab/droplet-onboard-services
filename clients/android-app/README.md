@@ -97,17 +97,37 @@ generate the wrapper as part of the project sync.
 
 ### Debug build
 
+From the repo root (uses the npm wrapper script):
+
+```bash
+npm run android-app:build
+# APK at: clients/android-app/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Or directly:
+
 ```bash
 cd clients/android-app
 ./gradlew :app:assembleDebug
-# APK at: app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Install on a connected device:
 
 ```bash
-./gradlew :app:installDebug
+cd clients/android-app && ./gradlew :app:installDebug
 ```
+
+### Other npm-wrapped tasks
+
+```bash
+npm run android-app:test     # JVM unit tests
+npm run android-app:lint     # Lint check
+npm run android-app:bundle   # Release AAB (needs keystore env)
+```
+
+These all dispatch via `scripts/android-app.sh`, which short-circuits with
+a helpful error if JDK isn't on PATH — so contributors who only work on
+Node services aren't blocked by the Android toolchain.
 
 ### Release build
 
@@ -163,7 +183,12 @@ add them).
 4. **Multi-Droplet**:
    - Tap the swap icon in the top-right of the dashboard → `ServerSwitcherScreen`
    - Pick a different paired Droplet to switch the WebView origin.
-   - "Forget" removes the paired record AND clears cookies for that origin.
+   - Tap the **pencil** icon to rename the Droplet — e.g. "Living room" vs
+     "Office". The rename is preserved across re-pair (a fresh QR scan of an
+     already-known Droplet won't overwrite the name), enforced via the
+     `ServerRepository.markPaired` helper.
+   - Tap the **delete** icon to forget — removes the paired record AND
+     clears cookies for that origin.
 
 ## Network policy
 
@@ -202,36 +227,78 @@ WebView's pair page already handles it.
 
 ## Integration with the monorepo
 
-This module is intentionally **not** in `package.json`'s workspaces. Gradle
-is the build system; the root Turborepo doesn't know about it. The
-`.github/workflows/android-app.yml` workflow is independent and triggers on
-changes under `clients/android-app/**`.
+This module is intentionally **not** in `package.json`'s workspaces — Gradle
+is the build system, not npm. But four convenience scripts are exposed at
+the root for parity with the rest of the repo:
 
-If you want a one-shot "build everything" command at the repo root, add
-something like:
-
-```jsonc
-// turbo.json
-{
-  "tasks": {
-    "android-app:build": {
-      "cache": false,
-      "outputs": ["clients/android-app/app/build/outputs/**"]
-    }
-  }
-}
+```bash
+npm run android-app:build    # → :app:assembleDebug
+npm run android-app:test     # → :app:testDebugUnitTest
+npm run android-app:lint     # → :app:lintDebug
+npm run android-app:bundle   # → :app:bundleRelease  (needs keystore env)
 ```
 
-…plus a top-level `package.json` script that shells out to gradlew. Left
-out for now because it'd require Java on every node-only contributor's
-machine.
+All four dispatch via `scripts/android-app.sh`, which detects whether JDK is
+on PATH and prints an actionable hint if not — so Node-only contributors
+aren't forced to install the Android toolchain.
 
-## TODO / known stubs
+The path-scoped `.github/workflows/android-app.yml` workflow is independent
+of `turbo.json` (Gradle has its own dependency graph; reusing Turbo's task
+graph would just add a layer of indirection). It triggers on changes under
+`clients/android-app/**`.
 
-| File | What's stubbed | Why |
+## Architecture decisions worth knowing
+
+### Why a Kotlin/Compose shell + WebView, not React Native or Capacitor
+
+| Approach | Why we didn't pick it |
+|---|---|
+| **React Native** | Would let us reuse some React knowledge from the dashboard, but porting 30 pages of Next.js + SWR + HLS + react-markdown + qrcode is months of work. Lose feature parity the moment the dashboard ships a new page. |
+| **Capacitor / Cordova / TWA** | Same WebView underneath, but adds a JS toolchain + Capacitor's own plugin system on top of Android Studio's tooling. The other native client (`clients/android/`, the Nextcloud fork) is already Kotlin, so two Kotlin engineers can share patterns and CI. |
+| **Native Compose port** | 6+ months of duplicate UI work to match dashboard feature parity, then ongoing drift on every dashboard release. |
+| **Kotlin/Compose shell + WebView** ← *chosen* | WebView renders the live dashboard at 100% parity. Native only handles QR scanning, mDNS, deep links, multi-server switching, push (future). New dashboard features ship without an app release. APK <10 MB. |
+
+### Why not React Native's existing Nextcloud fork
+
+`clients/android/` is for **file sync** (Nextcloud Android, AGPL). This app
+is for **dashboard / control plane** — chat, cameras, network admin,
+Matter, etc. They have different bundle IDs (`com.warplab.droplet.files`
+vs `ai.warplab.droplet`) and ship side-by-side. Users install both for
+the full experience.
+
+### Why the WebView reloads when returning from the switcher
+
+Compose Navigation removes a destination's composable from composition
+when you navigate away. `remember`-scoped state is wiped, so the WebView
+rebuilds when the user returns. We accept this trade-off because the
+appliance's HTTP cache + the dashboard's SWR hot cache make the reload
+mostly indistinguishable from an in-place refresh.
+
+A real fix would be to host the WebView in an `androidx.lifecycle.ViewModel`
+scoped above the NavHost, but Android lifecycle + WebView interaction has
+known leak patterns (ViewModel survives config change → can outlive the
+Activity context the WebView captured). We're leaving that refactor for a
+follow-up PR where it can get its own design review.
+
+## Remaining work — external dependencies
+
+These can't be done from this codebase alone:
+
+| Task | Blocked on |
+|---|---|
+| Wire FCM push notifications | (a) Firebase project + `google-services.json` (b) orchestrator `POST /api/devices/clients/{id}/push-token` route + topic registration |
+| Tighten network security to pin Warp Lab managed PKI root | Managed-PKI rollout shipping with the appliance |
+| Replace placeholder launcher icon | Romain's brand book |
+| HTTPS App Links (`pair.warp-lab.ai`) | (a) `.well-known/assetlinks.json` published (b) `PairUrl.parse` extended to accept the HTTPS form |
+| Hold WebView across navigation (no reload on switcher round-trip) | Design review on ViewModel-scoped WebView lifecycle |
+| Instrumented tests (Espresso/Compose UI) | Emulator on CI; out of scope for v0.1 |
+
+## TODO / known stubs in this codebase
+
+| File | What's stubbed | Action when ready |
 |---|---|---|
-| `app/src/main/res/drawable/ic_launcher_foreground.xml` | Placeholder droplet teardrop | Brand asset pending Romain |
-| `push/DropletFcmService.kt` | Class disabled | Needs `google-services.json` + orchestrator `POST /push-token` route |
-| `network_security_config.xml` | Cleartext + user CAs for LAN | Tighten once managed PKI ships |
-| `gradle/wrapper/gradle-wrapper.jar` | Not checked in | Generate via `gradle wrapper` on first build |
-| `app/src/androidTest/` | Empty | Add instrumented tests post-MVP |
+| `app/src/main/res/drawable/ic_launcher_foreground.xml` | Placeholder droplet teardrop | Replace SVG path with Romain's asset |
+| `push/DropletFcmService.kt` | Class body commented out (no `: FirebaseMessagingService()` base) | Uncomment + add `google-services.json` per linked external task |
+| `network_security_config.xml` | Cleartext + user CAs allowed on LAN | Drop the `<domain-config>` block; add `<pin-set>` for the managed-PKI root |
+| `gradle/wrapper/gradle-wrapper.jar` | Not checked in | CI regenerates via `gradle wrapper` per run; Android Studio sync generates locally |
+| `app/src/androidTest/` | Empty dir | Add Compose UI tests once emulator is on CI |

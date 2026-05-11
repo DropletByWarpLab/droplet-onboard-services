@@ -115,6 +115,23 @@ class ServerRepository(private val context: Context) {
         store.edit { prefs -> prefs[KEY_ACTIVE_URL] = url }
     }
 
+    /**
+     * Rename a paired Droplet. No-op (silently) if the URL isn't paired,
+     * or if [newName] is blank — UX rule: blank rename should leave the
+     * existing name alone rather than replace it with whitespace. The
+     * caller is expected to trim before calling.
+     */
+    suspend fun rename(url: String, newName: String) {
+        if (newName.isBlank()) return
+        store.edit { prefs ->
+            val current = decode(prefs[KEY_SERVERS])
+            val updated = current.map {
+                if (it.url == url) it.copy(displayName = newName) else it
+            }
+            prefs[KEY_SERVERS] = json.encodeToString(updated)
+        }
+    }
+
     suspend fun touchLastSeen(url: String) {
         store.edit { prefs ->
             val current = decode(prefs[KEY_SERVERS])

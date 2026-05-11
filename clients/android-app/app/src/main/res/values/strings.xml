@@ -30,6 +30,11 @@
     <string name="switcher_title">Switch Droplet</string>
     <string name="switcher_add">Add another Droplet</string>
     <string name="switcher_forget">Forget this Droplet</string>
+    <string name="switcher_rename">Rename</string>
+    <string name="rename_title">Rename Droplet</string>
+    <string name="rename_hint">e.g. Living room Droplet</string>
+    <string name="rename_save">Save</string>
+    <string name="rename_cancel">Cancel</string>
 
     <!-- WebView errors -->
     <string name="webview_offline_title">Can\'t reach Droplet</string>

@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -14,6 +15,8 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -21,13 +24,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -37,10 +44,14 @@ import ai.warplab.droplet.data.ServerRepository
 import kotlinx.coroutines.launch
 
 /**
- * Multi-Droplet switcher. Reachable from the dashboard's chrome (long-press
- * the title bar) or from the system intent path when a user installs a second
- * Droplet later. List sorted by lastSeenAt — the one you used yesterday
+ * Multi-Droplet switcher. Reachable from the dashboard's chrome (swap icon
+ * in the top-right). List sorted by lastSeenAt — the one you used yesterday
  * floats to the top.
+ *
+ * Each row supports:
+ *   • Tap → switch active server (closes the screen)
+ *   • Edit icon → rename inline via a dialog
+ *   • Delete icon → forget the Droplet + clear its cookies
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +64,10 @@ fun ServerSwitcherScreen(
     val servers by serverRepository.servers.collectAsState(initial = emptyList())
     val activeUrl by serverRepository.activeServerUrl.collectAsState(initial = null)
     val scope = rememberCoroutineScope()
+
+    // Currently-renaming server, or null if the dialog is closed. Hoisted to
+    // the screen level so a row-level recomposition doesn't dismiss the dialog.
+    var renaming by remember { mutableStateOf<PairedServer?>(null) }
 
     Scaffold(
         topBar = {
@@ -87,6 +102,7 @@ fun ServerSwitcherScreen(
                             onPicked()
                         }
                     },
+                    onRename = { renaming = server },
                     onForget = {
                         scope.launch { serverRepository.forget(server.url) }
                     },
@@ -95,6 +111,19 @@ fun ServerSwitcherScreen(
             }
         }
     }
+
+    renaming?.let { target ->
+        RenameDialog(
+            initial = target.displayName,
+            onDismiss = { renaming = null },
+            onConfirm = { newName ->
+                scope.launch {
+                    serverRepository.rename(target.url, newName.trim())
+                    renaming = null
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -102,6 +131,7 @@ private fun ServerRow(
     server: PairedServer,
     isActive: Boolean,
     onPick: () -> Unit,
+    onRename: () -> Unit,
     onForget: () -> Unit,
 ) {
     ListItem(
@@ -128,11 +158,61 @@ private fun ServerRow(
             }
         },
         trailingContent = {
-            TextButton(onClick = onForget) {
-                Icon(
-                    Icons.Outlined.Delete,
-                    contentDescription = stringResource(R.string.switcher_forget),
-                )
+            // Two trailing actions — rename + delete. Wrap in a Row so they
+            // render side-by-side; ListItem's trailingContent is a single slot.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                IconButton(onClick = onRename) {
+                    Icon(
+                        Icons.Outlined.Edit,
+                        contentDescription = stringResource(R.string.switcher_rename),
+                    )
+                }
+                IconButton(onClick = onForget) {
+                    Icon(
+                        Icons.Outlined.Delete,
+                        contentDescription = stringResource(R.string.switcher_forget),
+                    )
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun RenameDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var text by remember(initial) { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.rename_title)) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                placeholder = { Text(stringResource(R.string.rename_hint)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(text) },
+                // Disabled if blank — matches the repository's silent no-op
+                // policy. Surfaces the constraint at the UI rather than
+                // letting the user think they renamed when nothing changed.
+                enabled = text.trim().isNotEmpty(),
+            ) {
+                Text(stringResource(R.string.rename_save))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.rename_cancel))
             }
         },
     )

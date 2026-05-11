@@ -19,7 +19,11 @@
     "test:all": "npm run test:security && npm run test:ai-gateway && npm run test",
     "test:setup": "bash tests/setup.test.sh",
     "test:integration": "cd tests && npm run test:docker",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "android-app:build": "bash scripts/android-app.sh :app:assembleDebug",
+    "android-app:test": "bash scripts/android-app.sh :app:testDebugUnitTest",
+    "android-app:lint": "bash scripts/android-app.sh :app:lintDebug",
+    "android-app:bundle": "bash scripts/android-app.sh :app:bundleRelease"
   },
   "packageManager": "npm@10.9.2",
   "devDependencies": {
