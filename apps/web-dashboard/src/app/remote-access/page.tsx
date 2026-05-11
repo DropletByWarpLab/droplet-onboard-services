@@ -403,6 +403,10 @@ function PeerRow({
   onRevoke: () => void;
 }) {
   const isRevoked = peer.status === "revoked";
+  // aria-label uses the row's primary visible identifier (deviceLabel),
+  // falling back to the stable peer id when the label is empty. Mirrors
+  // the WARP-220 pattern applied site-wide in WARP-292.
+  const label = peer.deviceLabel?.trim() ? peer.deviceLabel : peer.id;
   return (
     <div className="dp-row group">
       <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -430,10 +434,14 @@ function PeerRow({
         </div>
       </div>
       {!isRevoked && isOwner && (
-        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+        // Always rendered (no opacity-gate) so touch + keyboard users can
+        // reach the action. p-2.5 → 14 px icon + 20 px padding = 34 px
+        // hit-target, clearing the ≥ 32 px ui-ux floor.
+        <div className="flex items-center gap-0.5">
           <button
             onClick={onRevoke}
-            className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 transition-colors"
+            aria-label={`Revoke device ${label}`}
+            className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
             title="Revoke"
           >
             <Trash2 size={14} />
