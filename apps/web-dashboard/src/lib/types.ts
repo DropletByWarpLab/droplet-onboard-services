@@ -773,11 +773,28 @@ export interface CameraPinInfo {
 }
 
 export interface CameraSSEEvent {
-  type: "connected" | "detection" | "camera_discovered" | "camera_online" | "camera_offline";
+  /**
+   * `detection`        — a NEW event accepted by the per-camera gate;
+   *                      toast + SWR revalidation.
+   * `detection_update` — live confidence update for the active event;
+   *                      cameras page only, toast MUST ignore.
+   * `detection_end`    — recording window closed; refresh events list,
+   *                      no toast.
+   * Mirrors `apps/orchestrator/src/types/camera.ts`.
+   */
+  type:
+    | "connected"
+    | "detection"
+    | "detection_update"
+    | "detection_end"
+    | "camera_discovered"
+    | "camera_online"
+    | "camera_offline";
   camera?: string;
   label?: string;
   score?: number;
   thumbnail?: string;
+  eventId?: string;
   timestamp?: number;
 }
 

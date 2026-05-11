@@ -187,11 +187,31 @@ export interface CameraNotificationPrefs {
 }
 
 export interface CameraSSEEvent {
-  type: "connected" | "detection" | "camera_discovered" | "camera_online" | "camera_offline";
+  /**
+   * `detection`        — a NEW event was accepted by the per-camera gate;
+   *                      the toast/notification center renders this.
+   * `detection_update` — a tracker update for the currently-active event;
+   *                      cameras page can render live confidence. The
+   *                      toast/notification center MUST ignore this so it
+   *                      does not saturate.
+   * `detection_end`    — the active event's recording window closed and
+   *                      the clip is being finalized. Cameras page can
+   *                      flip to "clip available". Toast ignores.
+   */
+  type:
+    | "connected"
+    | "detection"
+    | "detection_update"
+    | "detection_end"
+    | "camera_discovered"
+    | "camera_online"
+    | "camera_offline";
   camera?: string;
   label?: string;
   score?: number;
   thumbnail?: string;
+  /** Frigate event id — populated for detection / detection_update / detection_end. */
+  eventId?: string;
   timestamp?: number;
   data?: Record<string, unknown>;
 }

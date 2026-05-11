@@ -30,11 +30,30 @@ export function useCameraEvents() {
 
         switch (data.type) {
           case "detection":
-            // Revalidate camera list and events
+            // A NEW event was accepted by the server-side per-camera
+            // gate (one per camera, gated on prior-recording-ended +
+            // 5s cooldown). This is the one type that surfaces to the
+            // user: toast + SWR revalidation. Push is dispatched
+            // server-side in parallel.
             mutate(CAMERAS_KEY);
             mutate(EVENTS_KEY);
-            // Add to notification queue
             setNotifications((prev) => [...prev.slice(-9), data]);
+            break;
+
+          case "detection_update":
+            // Tracker refinement for an already-notified event. The
+            // cameras page may consume this for live confidence UI;
+            // the notification center MUST ignore it so it does not
+            // saturate. No SWR mutate either — every confidence tick
+            // would otherwise bust the cameras + events list.
+            break;
+
+          case "detection_end":
+            // Recording window closed; the clip is finalizing. Refresh
+            // the events list so the new clip shows up, but no toast —
+            // the user already got the "detection" toast when the
+            // event started.
+            mutate(EVENTS_KEY);
             break;
 
           case "camera_discovered":
