@@ -1,44 +1,48 @@
 """PDF extractor using pypdf.
 
-Records per-page text plus the cumulative character offset where each
-page ended, so chunkers / citation rendering can deep-link to a page
-number.
+Emits one Span per non-empty page with `Anchor(kind="pdf-page", page=N)`.
+Blank pages are skipped (the Span dataclass rejects empty text).
 """
 from __future__ import annotations
 
-from typing import cast
+import logging
 
 from pypdf import PdfReader
 
+from anchor_schema import PdfPageAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
+
+logger = logging.getLogger(__name__)
 
 
 def extract(path: str) -> ExtractedDoc:
     reader = PdfReader(path)
-    parts: list[str] = []
-    page_breaks: list[int] = []
-    cum = 0
-    for page in reader.pages:
-        text = (page.extract_text() or "").strip()
-        if text:
-            parts.append(text)
-            cum += len(text) + 2  # +2 for "\n\n" join below
-        page_breaks.append(cum)
+    spans: list[Span] = []
+    warnings: list[str] = []
 
-    full_text = "\n\n".join(parts)
+    for idx, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception as exc:  # noqa: BLE001 — per-page failure must not abort the file
+            logger.warning(
+                "extractor.span.failed",
+                extra={"extractor": "pdf", "page": idx, "error": str(exc)},
+            )
+            warnings.append(f"page_{idx}_extract_failed")
+            continue
 
-    return cast(
-        ExtractedDoc,
-        {
-            "text": full_text,
-            "page_breaks": page_breaks,
-            "language": None,
-            "metadata": {
-                "extractor_name": "pdf",
-                "extractor_version": "1.0",
-                "page_count": len(reader.pages),
-                "word_count": len(full_text.split()),
-            },
-            "warnings": [],
+        if not text or not text.strip():
+            continue
+        spans.append(Span(text=text, anchor=PdfPageAnchor(page=idx)))
+
+    return ExtractedDoc(
+        spans=spans,
+        language=None,
+        metadata={
+            "extractor_name": "pdf",
+            "extractor_version": "2",
+            "page_count": len(reader.pages),
         },
+        warnings=warnings,
     )
