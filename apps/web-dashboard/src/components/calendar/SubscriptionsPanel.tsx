@@ -10,6 +10,7 @@ import {
   getPublishUrl,
 } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
 
 export function SubscriptionsPanel() {
   const { sources, refresh, isLoading } = useCalendarSources();
@@ -50,7 +51,8 @@ export function SubscriptionsPanel() {
       setShowNew(false);
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to add", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     } finally {
       setBusy(null);
     }
@@ -60,11 +62,18 @@ export function SubscriptionsPanel() {
     setBusy(id);
     try {
       const r = await syncSource(id);
-      if (r.error) toast(`Sync error: ${r.error}`, "error");
-      else toast(`Synced — added ${r.added}, updated ${r.updated}`, "success");
+      if (r.error) {
+        // WARP-294: r.error is the server-side sync error string —
+        // route it through the helper so users see "We couldn't sync
+        // that calendar right now" instead of CalDAV / ICS internals.
+        toast(translateError({ message: r.error }, "subscription"), "error");
+      } else {
+        toast(`Synced — added ${r.added}, updated ${r.updated}`, "success");
+      }
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Sync failed", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     } finally {
       setBusy(null);
     }
@@ -78,7 +87,8 @@ export function SubscriptionsPanel() {
       toast("Subscription removed", "success");
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     } finally {
       setBusy(null);
     }
@@ -90,7 +100,8 @@ export function SubscriptionsPanel() {
       const fullUrl = `${window.location.origin}${url}`;
       setPublishUrl(fullUrl);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to load URL", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     }
   }
 
@@ -186,8 +197,13 @@ export function SubscriptionsPanel() {
                     <>Not yet synced</>
                   )}
                   {s.lastSyncError && (
+                    // WARP-294: the orchestrator stores a raw sync
+                    // error here (HTTP code, CalDAV parser message).
+                    // Translate before rendering so users see plain
+                    // copy instead of "401 Unauthorized" / "ETIMEDOUT".
                     <span className="text-system-red ml-1 inline-flex items-center gap-1">
-                      <AlertCircle size={10} /> {s.lastSyncError}
+                      <AlertCircle size={10} />{" "}
+                      {translateError({ message: s.lastSyncError }, "subscription")}
                     </span>
                   )}
                 </div>
