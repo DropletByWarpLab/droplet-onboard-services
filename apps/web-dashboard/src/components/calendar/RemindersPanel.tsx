@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Bell, Check, Plus, Trash2, X } from "lucide-react";
 import { useReminders, createReminder, patchReminder, deleteReminder } from "@/lib/hooks/useReminders";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
 
 function formatRel(iso: string): string {
   const now = Date.now();
@@ -37,7 +38,8 @@ export function RemindersPanel() {
       setShowNew(false);
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to create reminder", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "calendar"), "error");
     }
   }
 
@@ -46,7 +48,8 @@ export function RemindersPanel() {
       await patchReminder(id, { completed });
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to update", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "calendar"), "error");
     }
   }
 
@@ -55,7 +58,8 @@ export function RemindersPanel() {
       await deleteReminder(id);
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to delete", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "calendar"), "error");
     }
   }
 

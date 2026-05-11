@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Check, Key, Trash2 } from "lucide-react";
 import { saveProviderKey, deleteProviderKey } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 
 interface ProviderKeyFormProps {
   provider: string;
@@ -30,7 +31,9 @@ export function ProviderKeyForm({
       setApiKey("");
       onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save key");
+      // WARP-294: keep raw err out of the DOM — orchestrator can
+      // return terse strings (HTTP statuses, validator codes).
+      setError(translateError(err, "provider-key"));
     } finally {
       setSaving(false);
     }
@@ -41,7 +44,8 @@ export function ProviderKeyForm({
       await deleteProviderKey(provider);
       onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete key");
+      // WARP-294: same — translate before rendering.
+      setError(translateError(err, "provider-key"));
     }
   };
 
@@ -86,7 +90,9 @@ export function ProviderKeyForm({
       </div>
 
       {error && (
-        <p className="mt-2 type-footnote text-system-red">{error}</p>
+        <p className="mt-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+          {error}
+        </p>
       )}
     </div>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { translateError } from "@/lib/friendly-errors";
 
 interface Props {
   src: string;
@@ -97,7 +98,10 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
         const { default: Hls } = await import("hls.js");
         if (cancelled) return;
         if (!Hls.isSupported()) {
-          onError?.("This browser doesn't support HLS playback.");
+          // WARP-294: route through translateError so the recordings
+          // page receives the same friendly copy idiom for every
+          // failure mode (no raw enum, no engineer-speak).
+          onError?.(translateError({ code: "UNSUPPORTED" }, "media"));
           return;
         }
         const hls = new Hls({
@@ -114,12 +118,22 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
         hls.attachMedia(video);
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) {
-            onError?.(`Playback error: ${data.details ?? data.type}`);
+            // WARP-294: hls.js's `data.details` / `data.type` are
+            // engineer-facing enum strings (bufferStalledError,
+            // manifestLoadError, …). Translate them to plain copy via
+            // the media domain before bubbling up to the parent's
+            // setPlayerError.
+            onError?.(
+              translateError({ code: data.details ?? data.type }, "media"),
+            );
           }
         });
       } catch (err) {
         if (!cancelled) {
-          onError?.(err instanceof Error ? err.message : "Failed to load HLS");
+          // WARP-294: never echo err.message — dynamic-import failures
+          // and Hls instance constructor errors can surface unhelpful
+          // strings like "Failed to fetch".
+          onError?.(translateError(err, "media"));
         }
       }
     })();

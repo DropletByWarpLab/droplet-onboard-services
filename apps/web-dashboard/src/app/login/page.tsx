@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { Check, Lock, User, Eye, EyeOff } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
+import { translateError } from "@/lib/friendly-errors";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -29,8 +30,10 @@ export default function LoginPage() {
     try {
       await login(username, password);
       router.push("/");
-    } catch (err: any) {
-      setError(err.message || "Invalid credentials");
+    } catch (err) {
+      // WARP-294: never render err.message verbatim — orchestrator may
+      // surface terse strings like "OCS 401" / "connect ECONNREFUSED".
+      setError(translateError(err, "auth"));
     } finally {
       setIsSubmitting(false);
     }
