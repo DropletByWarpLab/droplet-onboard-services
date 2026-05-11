@@ -28,6 +28,7 @@ export default function ChatPage() {
     messages,
     isStreaming,
     sendMessage,
+    stop,
     retryMessage,
     clearMessages,
     attachments,
@@ -223,6 +224,8 @@ export default function ChatPage() {
           attachments={attachments}
           onAttach={attach}
           onRemoveAttachment={removeAttachment}
+          isStreaming={isStreaming}
+          onStop={stop}
         />
       </div>
     </div>

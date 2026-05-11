@@ -71,6 +71,71 @@ describe("ChatInput", () => {
   });
 });
 
+// ── WARP-295: Stop button while streaming + IME guard ──
+
+describe("ChatInput stop button (WARP-295)", () => {
+  it("renders the Stop button (not Send) while isStreaming is true", () => {
+    render(
+      <ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />,
+    );
+    const stop = screen.getByLabelText("Stop generating");
+    expect(stop).toBeInTheDocument();
+    // Send button is no longer the visible primary action.
+    expect(screen.queryByLabelText("Send message")).not.toBeInTheDocument();
+  });
+
+  it("calls onStop when the Stop button is clicked", () => {
+    const onStop = vi.fn();
+    render(
+      <ChatInput onSend={vi.fn()} onStop={onStop} isStreaming />,
+    );
+    fireEvent.click(screen.getByLabelText("Stop generating"));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the Send button when isStreaming is false (or unset)", () => {
+    render(<ChatInput onSend={vi.fn()} onStop={vi.fn()} />);
+    expect(screen.getByLabelText("Send message")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Stop generating")).not.toBeInTheDocument();
+  });
+
+  it("uses text-system-red on the Stop icon so it reads as a destructive primary", () => {
+    render(
+      <ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />,
+    );
+    const stop = screen.getByLabelText("Stop generating");
+    // The stop icon (or its wrapper) carries text-system-red — sniffing
+    // for either the button or any descendant with the token.
+    const hasRedToken =
+      stop.className.includes("text-system-red") ||
+      stop.querySelector('[class*="text-system-red"]') !== null;
+    expect(hasRedToken).toBe(true);
+  });
+});
+
+describe("ChatInput IME composition guard (WARP-295)", () => {
+  it("does NOT send on Enter while the user is composing a CJK character", () => {
+    const onSend = vi.fn();
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByPlaceholderText("Send a message...");
+
+    fireEvent.change(textarea, { target: { value: "你好" } });
+    // jsdom's KeyboardEvent doesn't surface `isComposing` through the
+    // synthetic event; ChatInput reads it off `e.nativeEvent.isComposing`,
+    // so we set it on the underlying KeyboardEvent.
+    const evt = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(evt, "isComposing", { value: true });
+    textarea.dispatchEvent(evt);
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
 // ── WARP-203: chat-attached files ──
 
 describe("ChatInput attachments", () => {
