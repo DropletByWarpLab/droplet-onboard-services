@@ -1,6 +1,5 @@
 package ai.warplab.droplet.ui.servers
 
-import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -33,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import ai.warplab.droplet.R
-import ai.warplab.droplet.data.PairedServer
 import ai.warplab.droplet.data.ServerRepository
 import ai.warplab.droplet.discovery.DropletNsdDiscovery
 import kotlinx.coroutines.launch
@@ -80,16 +78,13 @@ fun DiscoveryScreen(
                             .fillMaxWidth()
                             .clickable {
                                 scope.launch {
-                                    val url = entry.toServerUrl()
-                                    val host = Uri.parse(url).host ?: url
-                                    val now = System.currentTimeMillis()
-                                    serverRepository.upsert(
-                                        PairedServer(
-                                            url = url,
-                                            displayName = entry.serviceName.ifBlank { host },
-                                            pairedAt = now,
-                                            lastSeenAt = now,
-                                        )
+                                    // markPaired with the mDNS service name as
+                                    // the default display name (only used if
+                                    // this is a fresh pair — existing names
+                                    // are preserved).
+                                    serverRepository.markPaired(
+                                        url = entry.toServerUrl(),
+                                        defaultDisplayName = entry.serviceName,
                                     )
                                     onPicked()
                                 }

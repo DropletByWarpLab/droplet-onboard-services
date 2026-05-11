@@ -1,6 +1,5 @@
 package ai.warplab.droplet.ui.pair
 
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -17,7 +16,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import ai.warplab.droplet.R
-import ai.warplab.droplet.data.PairedServer
 import ai.warplab.droplet.data.ServerRepository
 import ai.warplab.droplet.pair.PairUrl
 
@@ -26,11 +24,16 @@ import ai.warplab.droplet.pair.PairUrl
  * outside the app (email, NFC tag, another phone's QR). Persists the paired
  * server and bounces to the dashboard. The actual `POST /api/devices/pair/claim`
  * happens inside the WebView (because that's where the user's session cookie
- * lives) — see DashboardWebViewScreen.kt for the in-page claim hook.
+ * lives) — the dashboard's pair completion page reads `code` from the URL and
+ * POSTs claim itself.
  *
- * If [pairUrl] is null we treat it as a stale intent (e.g. user backed out
- * and re-entered the app via launcher icon) and onFailed() — caller routes
- * back to onboarding.
+ * Uses [ServerRepository.markPaired] (not upsert) so a user who already
+ * renamed this Droplet to "Home" doesn't see their custom name reverted to
+ * the hostname on every re-pair.
+ *
+ * If [pairUrl] is null we treat it as a stale composition (e.g. activity
+ * recreated after the deep link was already consumed) and onFailed() —
+ * caller routes back to onboarding.
  */
 @Composable
 fun PairHandoffScreen(
@@ -45,19 +48,7 @@ fun PairHandoffScreen(
             onFailed("Missing pair URL")
             return@LaunchedEffect
         }
-        val now = System.currentTimeMillis()
-        val host = Uri.parse(link.server).host ?: link.server
-        serverRepository.upsert(
-            PairedServer(
-                url = link.server,
-                displayName = host,
-                pairedAt = now,
-                lastSeenAt = now,
-            )
-        )
-        // The dashboard's pair page in the WebView will read `code` from the
-        // URL fragment we append and POST /api/devices/pair/claim on its own,
-        // re-using the user's already-logged-in session.
+        serverRepository.markPaired(link.server)
         onDone()
     }
 

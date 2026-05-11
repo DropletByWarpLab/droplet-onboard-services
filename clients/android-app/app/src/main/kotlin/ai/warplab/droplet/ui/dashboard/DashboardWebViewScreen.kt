@@ -1,6 +1,7 @@
 package ai.warplab.droplet.ui.dashboard
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -34,8 +36,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -68,15 +71,17 @@ import ai.warplab.droplet.data.ServerRepository
  *     app immediately reflects them — no Play Store release needed for
  *     dashboard changes.
  *
- * The Compose chrome handles:
- *   • Loading progress (LinearProgressIndicator at top)
- *   • Server switcher entry point (icon in top-right when the WebView is at
- *     the dashboard root — hidden inside deep links to keep chrome out of
- *     the way)
- *   • Hardware back: routes to WebView's history first, falls through to
- *     activity finish
- *   • Connection-failed empty state (e.g. appliance off the network) with
- *     Retry + Switch Droplet actions
+ * Lifecycle contract:
+ *   • The WebView is constructed inside [remember] so it survives recompositions
+ *     (the dashboard would lose JS state on every Compose snapshot otherwise).
+ *   • DisposableEffect calls webView.destroy() on leave-composition, which
+ *     releases the Chromium renderer thread, JS context, and network
+ *     connections. Without it the WebView keeps running indefinitely after
+ *     the user navigates away.
+ *   • canGoBack state is updated from onPageFinished so the BackHandler's
+ *     `enabled` parameter is reactive — earlier version read canGoBack() at
+ *     compose time, which never updated as the user navigated within the
+ *     dashboard.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -87,19 +92,49 @@ fun DashboardWebViewScreen(
     val context = LocalContext.current
     val activeUrl by serverRepository.activeServerUrl.collectAsState(initial = null)
 
-    var webView by remember { mutableStateOf<WebView?>(null) }
     var loadProgress by remember { mutableStateOf(0) }
     var loadError by remember { mutableStateOf<String?>(null) }
+    var canGoBack by remember { mutableStateOf(false) }
 
-    // Touch lastSeenAt on every successful navigation — keeps the switcher
+    // Touch lastSeenAt on every active-server change — keeps the switcher
     // sorted by recency.
     LaunchedEffect(activeUrl) {
         activeUrl?.let { url -> serverRepository.touchLastSeen(url) }
     }
 
-    BackHandler(enabled = webView?.canGoBack() == true) {
-        webView?.goBack()
+    // Build the WebView once per screen lifetime. State assignment moved out
+    // of the AndroidView factory so we never mutate Compose state during the
+    // composition phase. The `remember(context)` key changes only if the
+    // Activity is recreated — same lifecycle the WebView itself wants.
+    val webView = remember(context) {
+        buildWebView(
+            context = context,
+            onProgress = { p -> loadProgress = p },
+            onMainFrameError = { msg -> loadError = msg },
+            onPageStarted = {
+                loadProgress = 0
+                loadError = null
+            },
+            onPageFinished = { wv -> canGoBack = wv.canGoBack() },
+        )
     }
+
+    // Release Chromium-side resources when leaving the composition. WebView
+    // does NOT release on garbage collection — without explicit destroy() the
+    // JS context, network connections, and renderer thread leak for the
+    // process lifetime.
+    DisposableEffect(webView) {
+        onDispose {
+            // Detach from any parent first; calling destroy() on an attached
+            // WebView leaks the renderer and logs a noisy warning.
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView.stopLoading()
+            webView.loadUrl("about:blank")  // drops live media + JS timers
+            webView.destroy()
+        }
+    }
+
+    BackHandler(enabled = canGoBack) { webView.goBack() }
 
     Scaffold(
         topBar = {
@@ -114,59 +149,58 @@ fun DashboardWebViewScreen(
                     }
                 },
                 // Skinny bar so the dashboard owns most of the screen
-                colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 )
             )
         }
     ) { padding ->
-        Box(modifier = Modifier
-            .fillMaxSize()
-            .padding(padding)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
             val url = activeUrl
-            if (url == null) {
-                // Shouldn't reach here in normal flow (nav guards), but be
-                // defensive — repository could be empty if user just forgot
-                // their last server while this screen was composed.
-                ConnectionError(
-                    PaddingValues(0.dp),
-                    host = "",
-                    onRetry = {},
-                    onSwitch = onOpenSwitcher,
-                )
-                return@Scaffold
-            }
-
-            if (loadError != null) {
-                ConnectionError(
-                    PaddingValues(0.dp),
-                    host = Uri.parse(url).host ?: url,
-                    onRetry = {
-                        loadError = null
-                        webView?.reload()
-                    },
-                    onSwitch = onOpenSwitcher,
-                )
-            } else {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        buildWebView(ctx) { progress, error ->
-                            loadProgress = progress
-                            loadError = error
-                        }.also { webView = it }
-                    },
-                    update = { wv ->
-                        // Re-navigate only when the active URL actually changed.
-                        if (wv.url?.startsWith(url) != true) {
-                            wv.loadUrl(url)
-                        }
-                    },
-                )
-                if (loadProgress in 1..99) {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth(),
+            when {
+                url == null -> {
+                    // Shouldn't reach here in normal flow (nav guards), but be
+                    // defensive — repository could be empty if user just
+                    // forgot their last server while this screen was composed.
+                    ConnectionError(
+                        host = "",
+                        onRetry = {},
+                        onSwitch = onOpenSwitcher,
                     )
+                }
+                loadError != null -> {
+                    ConnectionError(
+                        host = Uri.parse(url).host ?: url,
+                        onRetry = {
+                            loadError = null
+                            webView.reload()
+                        },
+                        onSwitch = onOpenSwitcher,
+                    )
+                }
+                else -> {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { webView },
+                        update = { wv ->
+                            // Reload only when the active origin actually changed.
+                            // Subpaths (e.g. /cameras/front) shouldn't trigger
+                            // a full reload to the root.
+                            val currentUrl = wv.url
+                            if (currentUrl == null || !currentUrl.startsWith(url)) {
+                                wv.loadUrl(url)
+                            }
+                        },
+                    )
+                    if (loadProgress in 1..99) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         }
@@ -175,8 +209,11 @@ fun DashboardWebViewScreen(
 
 @SuppressLint("SetJavaScriptEnabled")
 private fun buildWebView(
-    context: android.content.Context,
-    onState: (progress: Int, error: String?) -> Unit,
+    context: Context,
+    onProgress: (Int) -> Unit,
+    onMainFrameError: (String) -> Unit,
+    onPageStarted: () -> Unit,
+    onPageFinished: (WebView) -> Unit,
 ): WebView {
     val cm = CookieManager.getInstance()
     cm.setAcceptCookie(true)
@@ -192,6 +229,10 @@ private fun buildWebView(
             domStorageEnabled = true                       // SWR cache, theme prefs
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false       // HLS auto-plays Frigate clips
+            // TODO before GA: tighten to MIXED_CONTENT_NEVER_ALLOW once the
+            // appliance reliably serves all assets over HTTPS. COMPATIBILITY
+            // is the standard browser default but silently loads HTTP
+            // subresources from HTTPS pages.
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             cacheMode = WebSettings.LOAD_DEFAULT
             allowFileAccess = false                        // never let dashboard read app files
@@ -207,12 +248,16 @@ private fun buildWebView(
 
         webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                onState(newProgress, null)
+                onProgress(newProgress)
             }
         }
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                onState(0, null)
+                onPageStarted()
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                view?.let(onPageFinished)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -224,8 +269,9 @@ private fun buildWebView(
                 // else (mailto:, tel:, external https that didn't originate
                 // from the appliance host) out to the OS.
                 val host = url.host ?: return false
-                val originHost = Uri.parse(view.url).host
-                if (host == originHost) return false
+                val originHost = Uri.parse(view.url).host ?: return false
+                // Case-insensitive — hosts are case-insensitive per RFC 3986.
+                if (host.equals(originHost, ignoreCase = true)) return false
                 view.context.startActivity(
                     Intent(Intent.ACTION_VIEW, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
@@ -242,7 +288,7 @@ private fun buildWebView(
                 // whole dashboard with an error.
                 if (request?.isForMainFrame != true) return
                 Log.w("DropletWebView", "Main frame error: ${error?.description}")
-                onState(0, error?.description?.toString() ?: "Unknown error")
+                onMainFrameError(error?.description?.toString() ?: "Unknown error")
             }
         }
     }
@@ -250,7 +296,6 @@ private fun buildWebView(
 
 @Composable
 private fun ConnectionError(
-    padding: PaddingValues,
     host: String,
     onRetry: () -> Unit,
     onSwitch: () -> Unit,
@@ -258,7 +303,6 @@ private fun ConnectionError(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(padding)
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,

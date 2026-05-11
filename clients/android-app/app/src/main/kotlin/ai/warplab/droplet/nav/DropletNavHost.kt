@@ -4,6 +4,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -17,6 +20,7 @@ import ai.warplab.droplet.ui.scanner.QrScannerScreen
 import ai.warplab.droplet.ui.servers.DiscoveryScreen
 import ai.warplab.droplet.ui.servers.ServerSwitcherScreen
 import ai.warplab.droplet.ui.pair.PairHandoffScreen
+import kotlinx.coroutines.flow.SharedFlow
 
 /**
  * All app routes. Encoded as a sealed hierarchy + `path` strings (rather than
@@ -38,19 +42,45 @@ sealed class DropletRoute(val path: String) {
     data object Dashboard : DropletRoute("dashboard")
     data object Switcher : DropletRoute("switcher")
     /** Terminal screen for a freshly-arrived `droplet://pair?...` deep link.
-     *  Pairs and then jumps to Dashboard. */
+     *  Pairs and then jumps to Dashboard. The actual [PairUrl] payload lives
+     *  in the parent composition's `currentDeepLink` state, set by the
+     *  collector of [deepLinkFlow] right before navigation. */
     data object PairHandoff : DropletRoute("pair/handoff")
 }
 
 @Composable
 fun DropletNavHost(
     navController: NavHostController,
-    startDestination: String,
     serverRepository: ServerRepository,
     nsdDiscovery: DropletNsdDiscovery,
-    pendingDeepLink: PairUrl?,
-    onDeepLinkConsumed: () -> Unit,
+    deepLinkFlow: SharedFlow<PairUrl>,
 ) {
+    // Synchronously seed both the start destination AND the payload from the
+    // SharedFlow's replay cache. This eliminates a cold-start race where the
+    // LaunchedEffect body hadn't yet run when PairHandoffScreen first
+    // composed — it would have read currentDeepLink == null and bailed via
+    // onFailed before the flow collector could fill it in.
+    val bufferedLink = remember { deepLinkFlow.replayCache.firstOrNull() }
+    var currentDeepLink by remember { mutableStateOf(bufferedLink) }
+    val startDestination = remember {
+        if (bufferedLink != null) DropletRoute.PairHandoff.path
+        else DropletRoute.Bootstrap.path
+    }
+
+    // Collect FUTURE deep links (warm-path: user taps a pair link while the
+    // app is already running). For the cold-start case, the replayCache seed
+    // above already drove navigation; the flow's first emit to this collector
+    // is the same buffered value, which currentDeepLink already holds and the
+    // navigate() is launchSingleTop = no-op. Idempotent by design.
+    LaunchedEffect(deepLinkFlow, navController) {
+        deepLinkFlow.collect { link ->
+            currentDeepLink = link
+            navController.navigate(DropletRoute.PairHandoff.path) {
+                launchSingleTop = true
+            }
+        }
+    }
+
     NavHost(navController = navController, startDestination = startDestination) {
 
         composable(DropletRoute.Bootstrap.path) {
@@ -118,14 +148,14 @@ fun DropletNavHost(
 
         composable(DropletRoute.PairHandoff.path) {
             PairHandoffScreen(
-                pairUrl = pendingDeepLink,
+                pairUrl = currentDeepLink,
                 serverRepository = serverRepository,
                 onDone = {
-                    onDeepLinkConsumed()
+                    currentDeepLink = null
                     navController.navigateToDashboard()
                 },
                 onFailed = {
-                    onDeepLinkConsumed()
+                    currentDeepLink = null
                     navController.navigate(DropletRoute.Onboarding.path) {
                         popUpTo(0)
                     }

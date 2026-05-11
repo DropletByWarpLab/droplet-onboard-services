@@ -17,7 +17,7 @@
 -keep class com.google.mlkit.** { *; }
 -keep class com.google.android.gms.internal.mlkit_** { *; }
 
-# Keep WebView JS bridge class methods discoverable by name.
--keepclassmembers class ai.warplab.droplet.ui.dashboard.DropletJsBridge {
-    @android.webkit.JavascriptInterface <methods>;
-}
+# NOTE: No JavaScript bridge yet — the dashboard runs in WebView without
+# addJavascriptInterface. If we add one later, restore a -keepclassmembers
+# rule keyed on @android.webkit.JavascriptInterface so R8 doesn't strip the
+# bridge methods (which are called by name from JS, not from Kotlin).

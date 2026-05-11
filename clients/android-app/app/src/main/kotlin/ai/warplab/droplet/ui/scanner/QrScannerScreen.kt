@@ -1,7 +1,6 @@
 package ai.warplab.droplet.ui.scanner
 
 import android.Manifest
-import android.net.Uri
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -45,7 +44,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import ai.warplab.droplet.R
-import ai.warplab.droplet.data.PairedServer
 import ai.warplab.droplet.data.ServerRepository
 import ai.warplab.droplet.pair.PairUrl
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -152,8 +150,12 @@ private fun CameraPreview(
                 val providerFuture = ProcessCameraProvider.getInstance(ctx)
                 providerFuture.addListener({
                     val provider = providerFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
+                    val preview = Preview.Builder().build().apply {
+                        // Explicit setter call — matches the canonical CameraX
+                        // Kotlin samples; the property-assignment shorthand
+                        // relies on Kotlin's set-only Java property syntax
+                        // which is more fragile across compiler versions.
+                        setSurfaceProvider(previewView.surfaceProvider)
                     }
                     val analysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -166,17 +168,11 @@ private fun CameraPreview(
                         processForBarcode(proxy) { pair ->
                             if (!paired) {
                                 paired = true
-                                val host = Uri.parse(pair.server).host ?: pair.server
-                                val now = System.currentTimeMillis()
+                                // markPaired preserves a user-set displayName
+                                // if this Droplet was previously known to the
+                                // app under a friendly name.
                                 scope.launch {
-                                    serverRepository.upsert(
-                                        PairedServer(
-                                            url = pair.server,
-                                            displayName = host,
-                                            pairedAt = now,
-                                            lastSeenAt = now,
-                                        )
-                                    )
+                                    serverRepository.markPaired(pair.server)
                                     onPaired()
                                 }
                             }

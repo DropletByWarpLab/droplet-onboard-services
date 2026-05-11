@@ -1,6 +1,5 @@
 package ai.warplab.droplet.ui.onboarding
 
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -31,7 +30,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import ai.warplab.droplet.R
-import ai.warplab.droplet.data.PairedServer
 import ai.warplab.droplet.data.ServerRepository
 import ai.warplab.droplet.pair.UrlValidator
 import kotlinx.coroutines.launch
@@ -100,16 +98,9 @@ fun ManualUrlScreen(
                         return@Button
                     }
                     scope.launch {
-                        val now = System.currentTimeMillis()
-                        val host = Uri.parse(normalised).host ?: normalised
-                        serverRepository.upsert(
-                            PairedServer(
-                                url = normalised,
-                                displayName = host,
-                                pairedAt = now,
-                                lastSeenAt = now,
-                            )
-                        )
+                        // markPaired preserves a user-set displayName if this
+                        // Droplet was previously known under a friendly name.
+                        serverRepository.markPaired(normalised)
                         onPaired()
                     }
                 },
