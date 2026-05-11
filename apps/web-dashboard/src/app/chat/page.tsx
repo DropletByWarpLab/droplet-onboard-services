@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  ArrowDown,
   MessageSquare,
   RotateCcw,
   Settings2,
@@ -12,6 +13,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
+import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 
 export default function ChatPage() {
   // WARP-104: chat is now a single rolling thread held in React state.
@@ -40,7 +42,16 @@ export default function ChatPage() {
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // WARP-295: sticky-bottom auto-scroll + Jump-to-latest pill. The hook
+  // owns the detach detection so the page just wires onScroll +
+  // stickyScrollToBottom through.
+  const {
+    scrollRef,
+    isDetached,
+    scrollToBottom,
+    onScroll,
+    stickyScrollToBottom,
+  } = useStickyScroll();
 
   // Auto-select the first available model
   useEffect(() => {
@@ -69,10 +80,13 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
 
-  // Auto-scroll to bottom
+  // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
+  // attached (within ~80px of the bottom). When they've scrolled up to
+  // re-read a citation, new tokens land off-screen and the Jump-to-latest
+  // pill below appears as the affordance to catch up.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    stickyScrollToBottom();
+  }, [messages, stickyScrollToBottom]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -95,6 +109,7 @@ export default function ChatPage() {
     },
     [retryMessage, selectedModel, systemPrompt],
   );
+
 
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
@@ -173,7 +188,12 @@ export default function ChatPage() {
         )}
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          data-testid="chat-scroll"
+          className="relative flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary"
+        >
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-label-tertiary">
               <MessageSquare size={40} strokeWidth={1} className="mb-3 text-label-quaternary" />
@@ -214,8 +234,32 @@ export default function ChatPage() {
               onRetry={handleRetry}
             />
           ))}
-          <div ref={messagesEndRef} />
         </div>
+        {/* WARP-295: Jump-to-latest pill — visible only when the user
+            scrolled up off the live tail. Sits absolutely above the
+            ChatInput so it floats over the last message without
+            stealing layout space when hidden. */}
+        {isDetached && messages.length > 0 ? (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              data-testid="jump-to-latest"
+              className="
+                absolute left-1/2 -translate-x-1/2 -top-12 z-10
+                inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                bg-accent text-white shadow-md
+                type-caption-1 hover:bg-accent-hover
+                focus:outline-none focus:ring-2 focus:ring-accent/40
+                transition-colors duration-150
+              "
+              aria-label="Jump to latest message"
+            >
+              <ArrowDown size={12} strokeWidth={2.5} aria-hidden="true" />
+              Jump to latest
+            </button>
+          </div>
+        ) : null}
 
         {/* Input */}
         <ChatInput
