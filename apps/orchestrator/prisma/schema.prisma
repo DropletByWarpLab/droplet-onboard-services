@@ -289,6 +289,10 @@ model FileContentChunk {
   // Keep loose-typed Json so future extractors can add fields without
   // requiring a migration (e.g. WARP-208 frame OCR, WARP-207 diarization).
   metadata    Json?
+  // WARP-286: generated tsvector column for lexical (BM25-style) search.
+  // Read-only from the app side; computed by Postgres on insert/update.
+  // Declared as Unsupported() because Prisma has no first-class tsvector type.
+  text_tsv    Unsupported("tsvector")?
 
   @@unique([ncFileId, chunkIdx])
   @@index([userId])
