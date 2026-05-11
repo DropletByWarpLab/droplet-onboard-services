@@ -1,5 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+
+// CitationChip wraps next/link — the global mock in setup.ts returns a
+// raw string template rather than a real element, which makes the chip
+// render as text. Override here so the chip renders an <a>.
+vi.mock("next/link", () => ({
+  default: ({ children, ...props }: any) => {
+    const React = require("react");
+    return React.createElement("a", props, children);
+  },
+}));
+
 import { ChatMessage } from "@/components/ChatMessage";
 import type {
   ChatMessage as ChatMessageType,
@@ -245,6 +256,291 @@ describe("ChatMessage", () => {
       expect(
         screen.queryByRole("button", { name: /try sending this message again/i }),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("message-actions toolbar (WARP-295)", () => {
+    function assistantMsg(): ChatMessageType {
+      return {
+        id: "asst-1",
+        role: "assistant",
+        content: "Two plus two is four.",
+      };
+    }
+
+    it("renders Copy / Quote / Regenerate buttons on the last assistant turn with aria-labels", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /copy message/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /quote message/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /regenerate response/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("hides Regenerate on non-last assistant turns (Copy + Quote still shown)", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant={false}
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /copy message/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /quote message/i })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /regenerate response/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not render the toolbar on user messages", () => {
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "Hi" }}
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+          isLastAssistant
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /copy message/i })).not.toBeInTheDocument();
+    });
+
+    it("Copy button calls onCopy with the assistant message text and shows a transient 'Copied' state", async () => {
+      const onCopy = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={onCopy}
+        />,
+      );
+      const btn = screen.getByRole("button", { name: /copy message/i });
+      btn.click();
+      expect(onCopy).toHaveBeenCalledWith("Two plus two is four.");
+      // After the async copy promise resolves, the button flips to a
+      // "Copied" affordance. Use findByRole so we wait for the microtask
+      // chain to finish before asserting.
+      const copied = await screen.findByRole("button", { name: /copied/i });
+      expect(copied).toBeInTheDocument();
+    });
+
+    it("Quote button calls onQuote with the assistant message text", () => {
+      const onQuote = vi.fn();
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onQuote={onQuote}
+        />,
+      );
+      screen.getByRole("button", { name: /quote message/i }).click();
+      expect(onQuote).toHaveBeenCalledWith("Two plus two is four.");
+    });
+
+    it("Regenerate button calls onRegenerate with the message id", () => {
+      const onRegenerate = vi.fn();
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onRegenerate={onRegenerate}
+        />,
+      );
+      screen.getByRole("button", { name: /regenerate response/i }).click();
+      expect(onRegenerate).toHaveBeenCalledWith("asst-1");
+    });
+
+    it("toolbar buttons exist for an assistant message with neither error nor streaming state", () => {
+      // Regression guard: pre-WARP-295 the only buttons on the message
+      // were the failed-turn retry. Make sure the toolbar isn't hidden
+      // behind some `hasError` discriminator.
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /copy message/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("toolbar gets `mt-1` spacing when citations also render — breathing room between the two rows (UX fold-in)", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-cite",
+            role: "assistant",
+            content: "Answered with sources.",
+            citations: [{ source: "brain", path: "x.md" }],
+          }}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      const toolbar = screen.getByTestId("message-actions");
+      expect(toolbar.className).toMatch(/\bmt-1\b/);
+    });
+
+    it("toolbar does NOT add `mt-1` when there are no citations to crowd against", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      const toolbar = screen.getByTestId("message-actions");
+      expect(toolbar.className).not.toMatch(/\bmt-1\b/);
+    });
+  });
+
+  describe("markdown polish (WARP-295)", () => {
+    it("wraps GFM tables in an overflow-x-auto container so wide tables don't blow out the bubble", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "asst-tbl",
+            role: "assistant",
+            content:
+              "| col1 | col2 | col3 |\n| --- | --- | --- |\n| a | b | c |\n",
+          }}
+        />,
+      );
+      const table = container.querySelector("table");
+      expect(table).not.toBeNull();
+      const wrapper = table!.parentElement;
+      expect(wrapper?.className).toMatch(/overflow-x-auto/);
+    });
+
+    it("includes an SR-only Working… cue alongside the animated streaming cursor", () => {
+      // The cursor itself is animate-pulse (motion-reduce:hidden) so
+      // reduced-motion users see a visible ellipsis instead; the SR-only
+      // span ensures both audiences get the streaming-state signal.
+      const { container } = render(
+        <ChatMessage
+          message={{ id: "asst-s", role: "assistant", content: "..." }}
+          isStreaming
+        />,
+      );
+      const srOnly = container.querySelector(".sr-only");
+      expect(srOnly).not.toBeNull();
+      expect(srOnly!.textContent).toMatch(/working/i);
+    });
+  });
+
+  describe("citation chips (WARP-295)", () => {
+    it("renders a row of <CitationChip> chips below assistant messages with citations", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "asst-c",
+            role: "assistant",
+            content: "Here's what I found.",
+            citations: [
+              {
+                source: "brain",
+                path: "wireguard-cheatsheet.md",
+                pageNumber: 3,
+                score: 0.81,
+                brainItemId: "bmi-42",
+                snippet: "wg genkey ...",
+              },
+              {
+                source: "nextcloud",
+                path: "/Docs/vpn-setup.md",
+                score: 0.93,
+                snippet: "wg-quick up wg0",
+              },
+            ],
+          }}
+        />,
+      );
+
+      const row = screen.getByTestId("chat-citations");
+      expect(row).toBeInTheDocument();
+      // Both chips render through the shared component.
+      const chips = container.querySelectorAll("[data-citation-path]");
+      expect(chips).toHaveLength(2);
+      expect(chips[0].getAttribute("data-citation-source")).toBe("brain");
+      expect(chips[1].getAttribute("data-citation-source")).toBe("nextcloud");
+    });
+
+    it("renders no citation row when the assistant message has no citations", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-no-c",
+            role: "assistant",
+            content: "Nothing to cite.",
+          }}
+        />,
+      );
+      expect(screen.queryByTestId("chat-citations")).not.toBeInTheDocument();
+    });
+
+    it("does not render citations on a user bubble (defensive — the type allows it)", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "user-c",
+            role: "user",
+            content: "Question",
+            // Type allows it through ChatMessageType — but the component
+            // must render zero chips because user turns never carry RAG hits.
+            citations: [
+              { source: "brain", path: "x.md" },
+            ],
+          }}
+        />,
+      );
+      expect(screen.queryByTestId("chat-citations")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("stopped marker (WARP-295)", () => {
+    it("renders a 'Stopped by you' tag on an assistant message with stopped=true", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-stop",
+            role: "assistant",
+            content: "Partial answer",
+            stopped: true,
+          }}
+        />,
+      );
+      expect(screen.getByText(/stopped by you/i)).toBeInTheDocument();
+      // The partial content is preserved.
+      expect(screen.getByText(/partial answer/i)).toBeInTheDocument();
+    });
+
+    it("no stopped tag when the flag is unset", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-ok",
+            role: "assistant",
+            content: "Full answer",
+          }}
+        />,
+      );
+      expect(screen.queryByText(/stopped by you/i)).not.toBeInTheDocument();
     });
   });
 

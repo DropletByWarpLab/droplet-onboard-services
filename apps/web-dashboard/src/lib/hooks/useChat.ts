@@ -2,7 +2,71 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sendChat, uploadBrainFile } from "../api";
-import type { ChatAttachment, ChatMessage, ChatToolCall } from "../types";
+import type {
+  ChatAttachment,
+  ChatCitation,
+  ChatMessage,
+  ChatToolCall,
+} from "../types";
+
+/**
+ * WARP-295: tools whose `tool_result.data.results[]` carries
+ * citation-shaped rows. Keep the set narrow — non-retrieval tools (e.g.
+ * `list_network_devices`) return device data, and surfacing those as
+ * citations would pollute the chip row with bogus links.
+ *
+ * Source-of-truth shape:
+ *   packages/tools-core/src/handlers/files/search-content.ts
+ *
+ * If new retrieval tools land (e.g. `search_brain`, `search_calendar`),
+ * add their names here and confirm the data.results[] shape matches —
+ * the extractor is tolerant of missing fields but assumes `path`.
+ */
+const RETRIEVAL_TOOL_NAMES = new Set(["search_content"]);
+
+/** Stable dedupe key for one citation row. */
+function citationKey(c: ChatCitation): string {
+  return `${c.source}|${c.path}|${c.pageNumber ?? ""}`;
+}
+
+interface RawCitationRow {
+  source?: string;
+  path?: string;
+  pageNumber?: number | null;
+  page_number?: number | null;
+  score?: number;
+  text?: string;
+  snippet?: string;
+  brainItemId?: string | null;
+  brain_item_id?: string | null;
+  mimeType?: string;
+  mime_type?: string;
+}
+
+/** Extract `ChatCitation[]` from a tool_result event, or return [] if shape doesn't match. */
+function extractCitations(toolName: string, data: unknown): ChatCitation[] {
+  if (!RETRIEVAL_TOOL_NAMES.has(toolName)) return [];
+  if (!data || typeof data !== "object") return [];
+  const results = (data as { results?: unknown }).results;
+  if (!Array.isArray(results)) return [];
+  const out: ChatCitation[] = [];
+  for (const r of results as RawCitationRow[]) {
+    if (!r || typeof r !== "object") continue;
+    if (typeof r.path !== "string") continue;
+    const source: "nextcloud" | "brain" =
+      r.source === "brain" ? "brain" : "nextcloud";
+    out.push({
+      source,
+      path: r.path,
+      pageNumber: r.pageNumber ?? r.page_number ?? null,
+      score: typeof r.score === "number" ? r.score : undefined,
+      brainItemId: r.brainItemId ?? r.brain_item_id ?? null,
+      snippet: r.snippet ?? r.text ?? undefined,
+      mimeType: r.mimeType ?? r.mime_type ?? undefined,
+    });
+  }
+  return out;
+}
 
 /**
  * Chat hook backed by `POST /api/llm/chat` (the MCP-backed orchestrator
@@ -130,6 +194,14 @@ export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  // AbortController for the in-flight stream (WARP-295). Stored in a
+  // ref so `stop()` can read the current controller synchronously
+  // without re-renders. `isStoppingRef` lets the SSE reader loop's
+  // catch/finally distinguish a user-initiated abort (preserve partial
+  // content, mark `stopped: true`) from a genuine fetch failure
+  // (`friendlyErrorMessage` path).
+  const abortRef = useRef<AbortController | null>(null);
+  const isStoppingRef = useRef(false);
   // The chatId can change between renders; freeze the latest value in
   // a ref so `attach` (a stable callback) reads the current value.
   const chatIdRef = useRef<string | undefined>(options.chatId);
@@ -274,12 +346,21 @@ export function useChat(options: UseChatOptions = {}) {
       });
 
       setIsStreaming(true);
+      // Mint a fresh AbortController for this turn. Any previous one
+      // is stale — sendMessage isn't called while a stream is in flight
+      // because the input is disabled, but we still defensively abort
+      // the old controller so dangling listeners don't leak.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      isStoppingRef.current = false;
 
       try {
         const response = await sendChat({
           model,
           messages: replayMessages,
           stream: true,
+          signal: controller.signal,
         });
 
         if (!response.body) {
@@ -317,27 +398,67 @@ export function useChat(options: UseChatOptions = {}) {
           if (evt) applyEvent(setMessages, assistantMessage.id, evt, content);
         }
       } catch (err) {
-        const friendly = friendlyErrorMessage(err);
-        setMessages((prev) => {
-          const updated = [...prev];
-          const idx = updated.findIndex((m) => m.id === assistantMessage.id);
-          if (idx !== -1) {
-            const last = updated[idx];
-            if (last.role === "assistant" && !last.content) {
-              updated[idx] = {
-                ...last,
-                error: { message: friendly, retryPrompt: content },
-              };
+        // WARP-295: a user-initiated stop() aborts the underlying
+        // fetch, which surfaces here as an AbortError. That is NOT an
+        // error condition from the UX's perspective — we preserve any
+        // partial content the model already streamed and mark the
+        // bubble with `stopped: true` so the ChatMessage layer can
+        // render the "Stopped by you" tag.
+        const isAbort =
+          isStoppingRef.current ||
+          controller.signal.aborted ||
+          (err instanceof DOMException && err.name === "AbortError");
+        if (isAbort) {
+          setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === assistantMessage.id);
+            if (idx === -1) return prev;
+            const last = prev[idx];
+            if (last.role !== "assistant") return prev;
+            const updated = [...prev];
+            updated[idx] = { ...last, stopped: true };
+            return updated;
+          });
+        } else {
+          const friendly = friendlyErrorMessage(err);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantMessage.id);
+            if (idx !== -1) {
+              const last = updated[idx];
+              if (last.role === "assistant" && !last.content) {
+                updated[idx] = {
+                  ...last,
+                  error: { message: friendly, retryPrompt: content },
+                };
+              }
             }
-          }
-          return updated;
-        });
+            return updated;
+          });
+        }
       } finally {
         setIsStreaming(false);
+        isStoppingRef.current = false;
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
       }
     },
     [],
   );
+
+  /**
+   * Cancel the in-flight stream (WARP-295). Aborts the underlying
+   * fetch via the per-turn AbortController and signals the SSE reader
+   * catch block to treat the abort as user-initiated. No-op when no
+   * stream is in flight — the button may still be visible for a frame
+   * after the stream ends if React hasn't re-rendered yet.
+   */
+  const stop = useCallback(() => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    isStoppingRef.current = true;
+    controller.abort();
+  }, []);
 
   /**
    * Re-send the prompt that drove a failed assistant turn. Drops the
@@ -367,6 +488,46 @@ export function useChat(options: UseChatOptions = {}) {
       });
 
       await sendMessage(retryPrompt, model, systemPrompt);
+    },
+    [sendMessage],
+  );
+
+  /**
+   * WARP-295: re-run an assistant turn. Drops the targeted assistant
+   * message plus the immediately-preceding user prompt (the
+   * sendMessage updater will re-append both), then re-sends the
+   * prompt. Distinct from retryMessage: regenerate is invoked from
+   * the message-actions toolbar on a successful turn, retry is the
+   * affordance on a failed turn. The two paths share a common
+   * "drop-and-resend" shape.
+   *
+   * No-op when handed a non-assistant id — the page wires this to a
+   * button rendered only on the last assistant turn, but defensive
+   * guards are cheap and protect against runaway calls if the wiring
+   * regresses.
+   */
+  const regenerate = useCallback(
+    async (messageId: string, model: string, systemPrompt?: string) => {
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      const target = snapshot[idx];
+      if (target.role !== "assistant") return;
+      const prevUser =
+        idx > 0 && snapshot[idx - 1].role === "user" ? snapshot[idx - 1] : null;
+      if (!prevUser) return;
+      const prompt = prevUser.content;
+
+      // Drop both the assistant turn and the user prompt before it;
+      // sendMessage will re-append a fresh pair.
+      setMessages((prev) => {
+        const i = prev.findIndex((m) => m.id === messageId);
+        if (i === -1) return prev;
+        const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
+        return prev.filter((_, k) => k !== i && k !== userIdx);
+      });
+
+      await sendMessage(prompt, model, systemPrompt);
     },
     [sendMessage],
   );
@@ -430,7 +591,9 @@ export function useChat(options: UseChatOptions = {}) {
     setMessages,
     isStreaming,
     sendMessage,
+    stop,
     retryMessage,
+    regenerate,
     clearMessages,
     attachments,
     attach,
@@ -490,7 +653,34 @@ function applyEvent(
           message: evt.message,
         };
         const updated = [...prev];
-        updated[idx] = { ...last, toolCalls: updatedCalls };
+        // WARP-295: when the matching tool is a retrieval tool, fold
+        // its result rows into the assistant message's citations. The
+        // chip row below the bubble re-renders as each result lands so
+        // sources appear alongside the streaming answer.
+        const toolName = calls[callIdx].name;
+        const newCitations =
+          evt.ok && evt.status !== "confirmation_required"
+            ? extractCitations(toolName, evt.data)
+            : [];
+        let mergedCitations = last.citations;
+        if (newCitations.length > 0) {
+          const seen = new Set((mergedCitations ?? []).map(citationKey));
+          const additions: ChatCitation[] = [];
+          for (const c of newCitations) {
+            const k = citationKey(c);
+            if (seen.has(k)) continue;
+            seen.add(k);
+            additions.push(c);
+          }
+          if (additions.length > 0) {
+            mergedCitations = [...(mergedCitations ?? []), ...additions];
+          }
+        }
+        updated[idx] = {
+          ...last,
+          toolCalls: updatedCalls,
+          ...(mergedCitations ? { citations: mergedCitations } : {}),
+        };
         return updated;
       }
       case "done": {

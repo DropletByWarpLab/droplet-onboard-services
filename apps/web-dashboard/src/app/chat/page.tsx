@@ -1,17 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
   MessageSquare,
   RotateCcw,
   Settings2,
 } from "lucide-react";
 import { ChatMessage } from "@/components/ChatMessage";
-import { ChatInput } from "@/components/ChatInput";
+import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
+import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 
 export default function ChatPage() {
   // WARP-104: chat is now a single rolling thread held in React state.
@@ -28,18 +30,30 @@ export default function ChatPage() {
     messages,
     isStreaming,
     sendMessage,
+    stop,
     retryMessage,
+    regenerate,
     clearMessages,
     attachments,
     attach,
     removeAttachment,
     clearAttachments,
   } = useChat({ chatId });
+  const chatInputRef = useRef<ChatInputHandle>(null);
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // WARP-295: sticky-bottom auto-scroll + Jump-to-latest pill. The hook
+  // owns the detach detection so the page just wires onScroll +
+  // stickyScrollToBottom through.
+  const {
+    scrollRef,
+    isDetached,
+    scrollToBottom,
+    onScroll,
+    stickyScrollToBottom,
+  } = useStickyScroll();
 
   // Auto-select the first available model
   useEffect(() => {
@@ -68,10 +82,13 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
 
-  // Auto-scroll to bottom
+  // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
+  // attached (within ~80px of the bottom). When they've scrolled up to
+  // re-read a citation, new tokens land off-screen and the Jump-to-latest
+  // pill below appears as the affordance to catch up.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    stickyScrollToBottom();
+  }, [messages, stickyScrollToBottom]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -94,6 +111,43 @@ export default function ChatPage() {
     },
     [retryMessage, selectedModel, systemPrompt],
   );
+
+  // WARP-295: message-actions (Copy / Quote / Regenerate). Copy is
+  // delegated to the Clipboard API; Quote feeds the composer through
+  // ChatInputHandle.insertQuote; Regenerate threads through to
+  // useChat.regenerate() which owns the drop-and-resend slice surgery.
+  const handleCopy = useCallback(async (text: string) => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API rejects in unfocused tabs / cross-origin frames —
+      // silently no-op; the toolbar still flips its transient "Copied"
+      // state so the UI doesn't get stuck.
+    }
+  }, []);
+
+  const handleQuote = useCallback((text: string) => {
+    chatInputRef.current?.insertQuote(text);
+  }, []);
+
+  const handleRegenerate = useCallback(
+    (messageId: string) => {
+      if (!selectedModel) return;
+      regenerate(messageId, selectedModel, systemPrompt || undefined);
+    },
+    [regenerate, selectedModel, systemPrompt],
+  );
+
+  // Index of the last assistant message — the page passes
+  // `isLastAssistant` to each ChatMessage so the Regenerate button
+  // only surfaces on that one row.
+  const lastAssistantIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
 
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
@@ -172,7 +226,12 @@ export default function ChatPage() {
         )}
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          data-testid="chat-scroll"
+          className="relative flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary"
+        >
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-label-tertiary">
               <MessageSquare size={40} strokeWidth={1} className="mb-3 text-label-quaternary" />
@@ -210,19 +269,58 @@ export default function ChatPage() {
               isStreaming={
                 isStreaming && idx === messages.length - 1 && msg.role === "assistant"
               }
+              isLastAssistant={idx === lastAssistantIdx}
               onRetry={handleRetry}
+              onCopy={handleCopy}
+              onQuote={handleQuote}
+              onRegenerate={handleRegenerate}
             />
           ))}
-          <div ref={messagesEndRef} />
         </div>
+        {/* WARP-295: Jump-to-latest pill — visible only when the user
+            scrolled up off the live tail. Sits absolutely above the
+            ChatInput so it floats over the last message without
+            stealing layout space when hidden. The container is always
+            rendered (only the pill's opacity toggles) so we get a soft
+            fade on both appear and disappear instead of a hard pop.
+            `pointer-events-none` while hidden keeps the invisible pill
+            from intercepting clicks; reduced-motion users still get a
+            usable pill — the global `prefers-reduced-motion` block in
+            globals.css collapses Tailwind transitions to ~0ms. */}
+        {messages.length > 0 ? (
+          <div className="relative" aria-hidden={!isDetached}>
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              data-testid="jump-to-latest"
+              tabIndex={isDetached ? 0 : -1}
+              className={`
+                absolute left-1/2 -translate-x-1/2 -top-12 z-10
+                inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                bg-accent text-white shadow-md
+                type-caption-1 hover:bg-accent-hover
+                focus:outline-none focus:ring-2 focus:ring-accent/40
+                transition-opacity duration-150
+                ${isDetached ? "opacity-100" : "opacity-0 pointer-events-none"}
+              `}
+              aria-label="Jump to latest message"
+            >
+              <ArrowDown size={12} strokeWidth={2.5} aria-hidden="true" />
+              Jump to latest
+            </button>
+          </div>
+        ) : null}
 
         {/* Input */}
         <ChatInput
+          ref={chatInputRef}
           onSend={handleSend}
           disabled={isStreaming || !selectedModel}
           attachments={attachments}
           onAttach={attach}
           onRemoveAttachment={removeAttachment}
+          isStreaming={isStreaming}
+          onStop={stop}
         />
       </div>
     </div>

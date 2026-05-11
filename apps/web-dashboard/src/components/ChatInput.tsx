@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
-import { ArrowUp, Paperclip } from "lucide-react";
+import { useState, useRef, useCallback, useImperativeHandle, forwardRef } from "react";
+import { ArrowUp, Paperclip, Square } from "lucide-react";
 import type { ChatAttachment } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 
@@ -18,15 +18,35 @@ interface ChatInputProps {
   attachments?: ChatAttachment[];
   onAttach?: (file: File) => void | Promise<unknown>;
   onRemoveAttachment?: (localId: string) => void;
+  /**
+   * WARP-295: while the agent loop is streaming, the send button swaps
+   * to a Stop button that calls `onStop()`. Both props are required to
+   * surface the Stop affordance — without `onStop` ChatInput falls back
+   * to the disabled Send button for back-compat.
+   */
+  isStreaming?: boolean;
+  onStop?: () => void;
 }
 
-export function ChatInput({
+/**
+ * WARP-295: imperative handle exposed to the chat page so the
+ * message-actions "Quote" affordance can prepend a `> quoted text`
+ * block into the composer's textarea without prop-drilling the value
+ * back up. The page wires this via a ref on `<ChatInput>`.
+ */
+export interface ChatInputHandle {
+  insertQuote: (text: string) => void;
+}
+
+export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSend,
   disabled,
   attachments,
   onAttach,
   onRemoveAttachment,
-}: ChatInputProps) {
+  isStreaming,
+  onStop,
+}, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -43,6 +63,11 @@ export function ChatInput({
   }, [value, disabled, onSend]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // WARP-295: IME composition guard — while a CJK / accented input is
+    // mid-composition, Enter commits the candidate, it doesn't submit
+    // the message. Reading `nativeEvent.isComposing` covers the cases
+    // React's synthetic event misses on Safari/Firefox.
+    if (e.nativeEvent.isComposing) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -96,9 +121,47 @@ export function ChatInput({
     handleFiles(e.dataTransfer.files);
   };
 
+  // Expose insertQuote to the parent — see ChatInputHandle. Wraps the
+  // text in markdown blockquote syntax (matches what users would type
+  // by hand) and focuses the textarea so they can keep typing their
+  // follow-up. Auto-resizes via the same scrollHeight handler.
+  useImperativeHandle(
+    ref,
+    () => ({
+      insertQuote: (text: string) => {
+        const quoted = text
+          .split("\n")
+          .map((l) => `> ${l}`)
+          .join("\n");
+        setValue((prev) => {
+          const sep = prev.length === 0 ? "" : "\n\n";
+          return `${quoted}${sep}${prev}`;
+        });
+        // Defer focus + size until the next frame so the controlled
+        // textarea has flushed the new value.
+        queueMicrotask(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
+          // Cursor lands at the end of the new value.
+          const end = el.value.length;
+          el.setSelectionRange(end, end);
+          el.style.height = "auto";
+          el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+        });
+      },
+    }),
+    [],
+  );
+
   const hasText = value.trim().length > 0;
   const showAttachmentRow = attachments && attachments.length > 0;
   const dropEnabled = Boolean(onAttach);
+  // WARP-295: Stop button replaces Send while a stream is in flight.
+  // Both props must be present — `isStreaming` is the discriminator,
+  // `onStop` is the handler. Without `onStop` we keep the historical
+  // behavior (disabled Send while `disabled` is true).
+  const showStop = Boolean(isStreaming && onStop);
 
   return (
     <div
@@ -168,25 +231,42 @@ export function ChatInput({
             disabled:opacity-50 disabled:cursor-not-allowed
             transition-all duration-200 ease-smooth"
         />
-        <button
-          onClick={handleSubmit}
-          disabled={disabled || !hasText}
-          aria-label="Send message"
-          className={`
-            w-9 h-9 rounded-full flex items-center justify-center
-            transition-all duration-200 ease-smooth
-            ${
-              hasText
-                ? "bg-accent text-white scale-100 opacity-100"
-                : "bg-label-quaternary text-label-tertiary scale-90 opacity-60"
-            }
-            disabled:cursor-not-allowed
-            active:scale-90
-          `}
-        >
-          <ArrowUp size={18} strokeWidth={2.5} />
-        </button>
+        {showStop ? (
+          <button
+            type="button"
+            onClick={onStop}
+            aria-label="Stop generating"
+            className="
+              w-9 h-9 rounded-full flex items-center justify-center
+              bg-surface-secondary text-system-red
+              hover:bg-system-red/10
+              transition-all duration-200 ease-smooth
+              active:scale-90
+            "
+          >
+            <Square size={14} strokeWidth={2.5} fill="currentColor" aria-hidden="true" />
+          </button>
+        ) : (
+          <button
+            onClick={handleSubmit}
+            disabled={disabled || !hasText}
+            aria-label="Send message"
+            className={`
+              w-9 h-9 rounded-full flex items-center justify-center
+              transition-all duration-200 ease-smooth
+              ${
+                hasText
+                  ? "bg-accent text-white scale-100 opacity-100"
+                  : "bg-label-quaternary text-label-tertiary scale-90 opacity-60"
+              }
+              disabled:cursor-not-allowed
+              active:scale-90
+            `}
+          >
+            <ArrowUp size={18} strokeWidth={2.5} />
+          </button>
+        )}
       </div>
     </div>
   );
-}
+});
