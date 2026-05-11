@@ -50,7 +50,7 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
       aria-label={`${filename} — ${statusText}`}
       className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 type-caption-1
         max-w-full bg-surface-secondary border
-        ${isFailed ? "border-warning/60" : "border-separator"}
+        ${isFailed ? "border-system-orange/60" : "border-separator"}
       `}
     >
       <FileText
@@ -75,13 +75,13 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
       ) : isReady ? (
         <Check
           size={14}
-          className="text-positive flex-shrink-0"
+          className="text-system-green flex-shrink-0"
           aria-hidden
         />
       ) : (
         <AlertTriangle
           size={14}
-          className="text-warning flex-shrink-0"
+          className="text-system-orange flex-shrink-0"
           aria-hidden
         />
       )}

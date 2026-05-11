@@ -37,7 +37,7 @@ const PILL_BASE =
 const STATUS_CLASSES: Record<string, string> = {
   queued: `${PILL_BASE} bg-surface-secondary border-separator text-label-secondary`,
   indexing: `${PILL_BASE} bg-accent/10 border-accent/40 text-accent`,
-  failed: `${PILL_BASE} bg-warning/10 border-warning/50 text-warning`,
+  failed: `${PILL_BASE} bg-system-orange/10 border-system-orange/50 text-system-orange`,
   unknown: `${PILL_BASE} bg-surface-secondary border-separator text-label-tertiary`,
 };
 
