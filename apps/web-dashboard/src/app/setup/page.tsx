@@ -248,6 +248,8 @@ export default function SetupPage() {
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-pressed={showPassword}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary"
                   >
                     {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}

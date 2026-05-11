@@ -44,7 +44,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="flex items-center justify-center mx-auto mb-4">
-            <DropletMark size={40} className="text-accent" />
+            <DropletMark size={40} className="text-accent" aria-label="Droplet" />
           </div>
           <h1 className="type-title-1 text-label-primary">Sign in</h1>
           <p className="type-subheadline text-label-secondary mt-1">
@@ -98,6 +98,8 @@ export default function LoginPage() {
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary"
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}

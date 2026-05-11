@@ -32,9 +32,10 @@ export function DiscoveryBanner({ count }: DiscoveryBannerProps) {
       </p>
       <button
         onClick={() => setDismissed(true)}
+        aria-label="Dismiss discovery banner"
         className="p-1 rounded text-label-tertiary hover:text-label-primary transition-colors"
       >
-        <X size={14} />
+        <X size={14} aria-hidden="true" />
       </button>
     </div>
   );

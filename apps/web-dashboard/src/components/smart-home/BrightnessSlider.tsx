@@ -37,6 +37,11 @@ export function BrightnessSlider({
         max={100}
         value={localPct}
         onChange={handleChange}
+        aria-label="Brightness"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={localPct}
+        aria-valuetext={`${localPct}%`}
         className="flex-1 h-1.5 rounded-full appearance-none bg-label-quaternary
           [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4
           [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full
