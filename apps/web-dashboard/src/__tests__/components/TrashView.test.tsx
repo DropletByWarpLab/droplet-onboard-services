@@ -136,3 +136,52 @@ describe("<TrashView> empty-trash migration to <ConfirmDialog>", () => {
     expect(screen.queryByRole("button", { name: /empty trash/i })).toBeNull();
   });
 });
+
+describe("<TrashView> per-row Restore + Delete-forever actions (WARP-300)", () => {
+  it("Restore + Delete-forever buttons name the file in their aria-label", () => {
+    render(
+      <TrashView
+        items={[makeItem({ originalName: "photo.jpg" })]}
+        isLoading={false}
+        onRestore={vi.fn()}
+        onDeleteForever={vi.fn()}
+        onEmpty={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /restore photo\.jpg/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /delete forever photo\.jpg/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("Restore + Delete-forever buttons are not hidden behind opacity-0 hover", () => {
+    render(
+      <TrashView
+        items={[makeItem({ originalName: "photo.jpg" })]}
+        isLoading={false}
+        onRestore={vi.fn()}
+        onDeleteForever={vi.fn()}
+        onEmpty={vi.fn()}
+      />,
+    );
+
+    const restore = screen.getByRole("button", {
+      name: /restore photo\.jpg/i,
+    });
+    const del = screen.getByRole("button", {
+      name: /delete forever photo\.jpg/i,
+    });
+
+    expect(restore.className).not.toMatch(/opacity-0/);
+    expect(del.className).not.toMatch(/opacity-0/);
+    expect(restore.closest("div")?.className ?? "").not.toMatch(/opacity-0/);
+    expect(del.closest("div")?.className ?? "").not.toMatch(/opacity-0/);
+
+    // Hit-target floor.
+    expect(restore.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+    expect(del.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+  });
+});
