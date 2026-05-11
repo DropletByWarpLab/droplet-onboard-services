@@ -5,6 +5,7 @@ import { Bell, Check, Plus, Trash2, X } from "lucide-react";
 import { useReminders, createReminder, patchReminder, deleteReminder } from "@/lib/hooks/useReminders";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 function formatRel(iso: string): string {
   const now = Date.now();
@@ -28,6 +29,9 @@ export function RemindersPanel() {
   const [showNew, setShowNew] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDueAt, setNewDueAt] = useState("");
+  // WARP-291: confirm deletion. The audit flagged the bare click-to-
+  // delete on a `group-hover` icon as too easy to fire by accident.
+  const [removeTargetId, setRemoveTargetId] = useState<string | null>(null);
 
   async function handleCreate() {
     if (!newTitle.trim() || !newDueAt) return;
@@ -53,13 +57,17 @@ export function RemindersPanel() {
     }
   }
 
-  async function remove(id: string) {
+async function performRemove() {
+    const id = removeTargetId;
+    if (!id) return;
     try {
       await deleteReminder(id);
+      setRemoveTargetId(null);
       refresh();
     } catch (err) {
       // WARP-294: friendly translation; never raw err.message.
       toast(translateError(err, "calendar"), "error");
+      throw err;
     }
   }
 
@@ -128,7 +136,8 @@ export function RemindersPanel() {
                   <div className="type-caption-1 text-label-tertiary">{formatRel(r.dueAt)}</div>
                 </div>
                 <button
-                  onClick={() => remove(r.id)}
+                  onClick={() => setRemoveTargetId(r.id)}
+                  aria-label={`Delete reminder ${r.title}`}
                   className="opacity-0 group-hover:opacity-100 text-label-tertiary hover:text-system-red transition"
                 >
                   <Trash2 size={12} />
@@ -138,6 +147,16 @@ export function RemindersPanel() {
           })}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={removeTargetId !== null}
+        onConfirm={performRemove}
+        onCancel={() => setRemoveTargetId(null)}
+        title="Delete reminder?"
+        description="The reminder is removed from your list. If a notification was queued, it won't fire."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
     </div>
   );
 }
