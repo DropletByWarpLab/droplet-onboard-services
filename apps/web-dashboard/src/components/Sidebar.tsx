@@ -266,7 +266,7 @@ export function Sidebar() {
                 `}
               >
                 <Icon size={22} strokeWidth={active ? 2 : 1.5} />
-                <span className="type-caption-2">{item.label}</span>
+                <span className="type-caption-2 whitespace-nowrap">{item.label}</span>
               </Link>
             );
           })}
@@ -286,7 +286,7 @@ export function Sidebar() {
             `}
           >
             <MoreHorizontal size={22} strokeWidth={moreOpen ? 2 : 1.5} />
-            <span className="type-caption-2">More</span>
+            <span className="type-caption-2 whitespace-nowrap">More</span>
           </button>
         </div>
       </nav>

@@ -249,6 +249,32 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     });
     expect(between).toBe(true);
   });
+
+  it("bottom tab bar labels carry whitespace-nowrap so they never wrap on narrow viewports", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
+
+    // Every tab (4 links + 1 button) renders its label in a
+    // <span class="type-caption-2 …">. At 320px (iPhone SE 1st gen)
+    // "Ask AI" already crowds; without nowrap, a future longer label
+    // (or split-screen iPad) would break the row to 2 lines and shove
+    // the icon up. Pin the class so this never regresses.
+    const tabLinks = within(bottomNav).getAllByRole("link");
+    const moreBtn = within(bottomNav).getByRole("button", { name: /more/i });
+
+    const labelSpans: HTMLElement[] = [];
+    for (const el of [...tabLinks, moreBtn]) {
+      const spans = el.querySelectorAll("span.type-caption-2");
+      // Each tab/button has exactly one caption span (its label).
+      expect(spans.length).toBe(1);
+      labelSpans.push(spans[0] as HTMLElement);
+    }
+
+    expect(labelSpans).toHaveLength(5);
+    for (const span of labelSpans) {
+      expect(span.className).toMatch(/whitespace-nowrap/);
+    }
+  });
 });
 
 describe("<Sidebar> desktop branch a11y (WARP-290)", () => {
