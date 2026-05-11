@@ -113,6 +113,32 @@ describe("ChatInput stop button (WARP-295)", () => {
   });
 });
 
+// ── WARP-301: hit-target audit (WCAG 2.5.5 AA → 44 px) ──
+
+describe("ChatInput hit-targets (WARP-301)", () => {
+  it("Send button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    const send = screen.getByLabelText("Send message");
+    // Tailwind's w-11/h-11 = 2.75rem = 44 px. The audit floor.
+    expect(send.className).toMatch(/(^|\s)w-11(\s|$)/);
+    expect(send.className).toMatch(/(^|\s)h-11(\s|$)/);
+  });
+
+  it("Stop button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+    render(<ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />);
+    const stop = screen.getByLabelText("Stop generating");
+    expect(stop.className).toMatch(/(^|\s)w-11(\s|$)/);
+    expect(stop.className).toMatch(/(^|\s)h-11(\s|$)/);
+  });
+
+  it("Paperclip / attach button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+    render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
+    const attach = screen.getByLabelText("Attach a file");
+    expect(attach.className).toMatch(/(^|\s)w-11(\s|$)/);
+    expect(attach.className).toMatch(/(^|\s)h-11(\s|$)/);
+  });
+});
+
 describe("ChatInput IME composition guard (WARP-295)", () => {
   it("does NOT send on Enter while the user is composing a CJK character", () => {
     const onSend = vi.fn();
