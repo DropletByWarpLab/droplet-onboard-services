@@ -13,7 +13,7 @@
  * scroll-lock. This primitive folds all of that into one place.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import React, { useRef } from "react";
 
 import { Dialog } from "@/components/Dialog";
@@ -101,42 +101,42 @@ describe("<Dialog> primitive", () => {
   it("focuses the first focusable child on open", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText("Open"));
-    // Wait a microtask for the post-mount focus effect.
-    await act(async () => {});
-    expect(document.activeElement?.textContent).toBe("First focusable");
+    await waitFor(() => {
+      expect(document.activeElement?.textContent).toBe("First focusable");
+    });
   });
 
   it("closes on Escape keydown", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText("Open"));
-    await act(async () => {});
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "Escape" });
-    await act(async () => {});
-    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
   });
 
   it("closes on backdrop click by default", async () => {
-    const { container } = render(<Harness />);
+    render(<Harness />);
     fireEvent.click(screen.getByText("Open"));
-    await act(async () => {});
     const dialog = screen.getByRole("dialog");
     const backdrop = dialog.parentElement!;
     fireEvent.click(backdrop);
-    await act(async () => {});
-    expect(screen.queryByRole("dialog")).toBeNull();
-    // container is not used but kept to satisfy testing-library's API.
-    void container;
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
   });
 
   it("does NOT close on backdrop click when closeOnBackdrop=false", async () => {
     render(<Harness closeOnBackdrop={false} />);
     fireEvent.click(screen.getByText("Open"));
-    await act(async () => {});
     const dialog = screen.getByRole("dialog");
     const backdrop = dialog.parentElement!;
     fireEvent.click(backdrop);
-    await act(async () => {});
+    // Give the (non-existent) close path a tick to fire then assert still open.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
@@ -144,20 +144,25 @@ describe("<Dialog> primitive", () => {
     render(<Harness />);
     const trigger = screen.getByText("Open");
     fireEvent.click(trigger);
-    await act(async () => {});
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+    });
     fireEvent.keyDown(window, { key: "Escape" });
-    await act(async () => {});
-    // Focus returns to the original trigger button.
-    expect(document.activeElement).toBe(trigger);
+    await waitFor(() => {
+      // Focus returns to the original trigger button.
+      expect(document.activeElement).toBe(trigger);
+    });
   });
 
   it("locks body scroll while open and restores on close", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText("Open"));
-    await act(async () => {});
-    expect(document.body.style.overflow).toBe("hidden");
+    await waitFor(() => {
+      expect(document.body.style.overflow).toBe("hidden");
+    });
     fireEvent.keyDown(window, { key: "Escape" });
-    await act(async () => {});
-    expect(document.body.style.overflow).toBe("");
+    await waitFor(() => {
+      expect(document.body.style.overflow).toBe("");
+    });
   });
 });
