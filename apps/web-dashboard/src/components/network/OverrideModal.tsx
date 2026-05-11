@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import * as Icons from "lucide-react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { useActiveOverrides } from "@/lib/hooks/useActiveOverrides";
@@ -8,6 +8,7 @@ import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { nextTransitionFor } from "@/lib/scheduleEval";
 import type { Schedule, ScheduleOverride } from "@/lib/types";
+import { Dialog } from "@/components/Dialog";
 
 /**
  * Compact modal for creating one-off allow/block overrides against a device
@@ -141,6 +142,8 @@ export function OverrideModal({
   );
   const [pickerDeviceMac, setPickerDeviceMac] = useState<string>("");
   const [pickerGroupId, setPickerGroupId] = useState<string>("");
+
+  const headingId = useId();
 
   const devicesSwr = useNetworkDevices();
   const groupsSwr = useNetworkGroups();
@@ -310,26 +313,28 @@ export function OverrideModal({
   const groups = groupsSwr.data?.groups ?? [];
 
   return (
-    <div
-      data-testid="override-modal-backdrop"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-      onClick={onClose}
+    <Dialog
+      open
+      onClose={onClose}
+      labelledBy={headingId}
+      maxWidth="md"
     >
       <div
-        role="dialog"
-        aria-label="Create override"
-        onClick={(e) => e.stopPropagation()}
-        className="bg-surface-primary border border-separator rounded-lg w-full max-w-[450px] max-h-[90vh] overflow-y-auto shadow-xl"
+        data-testid="override-modal-backdrop"
+        className="max-h-[90vh] overflow-y-auto"
       >
         <div className="p-4 border-b border-separator flex items-center justify-between">
-          <h2 className="type-title-3 text-label-primary">
+          <h2
+            id={headingId}
+            className="type-title-3 text-label-primary"
+          >
             Override for {subjectLabel}
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-label-secondary hover:text-label-primary"
+            className="text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
           >
             <Icons.X className="w-5 h-5" />
           </button>
@@ -606,6 +611,6 @@ export function OverrideModal({
           </div>
         )}
       </div>
-    </div>
+    </Dialog>
   );
 }

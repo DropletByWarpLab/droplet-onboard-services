@@ -90,12 +90,28 @@ describe("OverrideModal", () => {
   it("renders with subject name and the default action preselected", async () => {
     installDefaultMocks(fetchMock);
     renderModal({ defaultAction: "block" });
+    // WARP-289: after migration the dialog is named by the visible
+    // "Override for <subject>" heading instead of the previous
+    // aria-label="Create override".
     expect(
-      screen.getByRole("dialog", { name: /create override/i }),
+      screen.getByRole("dialog", { name: /override for/i }),
     ).toBeInTheDocument();
     expect(screen.getByText(/override for emma's ipad/i)).toBeInTheDocument();
     const blockRadio = screen.getByRole("radio", { name: /block/i }) as HTMLInputElement;
     expect(blockRadio.checked).toBe(true);
+  });
+
+  // WARP-289: full modal ARIA via the shared <Dialog> primitive.
+  it("renders as a role=dialog with aria-modal and aria-labelledby (WARP-289)", async () => {
+    installDefaultMocks(fetchMock);
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    const heading = document.getElementById(labelledBy!);
+    expect(heading).not.toBeNull();
+    expect(heading!.textContent).toMatch(/Override for/i);
   });
 
   it("clicking the 1h chip + Apply POSTs endAt = now + 1h", async () => {
