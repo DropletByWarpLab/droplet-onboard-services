@@ -48,7 +48,7 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
       data-status={status}
       role="status"
       aria-label={`${filename} — ${statusText}`}
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 type-caption
+      className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 type-caption-1
         max-w-full bg-surface-secondary border
         ${isFailed ? "border-warning/60" : "border-separator"}
       `}

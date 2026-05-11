@@ -98,9 +98,9 @@ export function RemindersPanel() {
       )}
 
       {isLoading ? (
-        <div className="type-caption text-label-tertiary">Loading…</div>
+        <div className="type-caption-1 text-label-tertiary">Loading…</div>
       ) : reminders.length === 0 ? (
-        <div className="type-caption text-label-tertiary py-2">No active reminders.</div>
+        <div className="type-caption-1 text-label-tertiary py-2">No active reminders.</div>
       ) : (
         <ul className="flex flex-col gap-1">
           {reminders.map((r) => {
@@ -121,7 +121,7 @@ export function RemindersPanel() {
                   <div className={`type-subheadline truncate ${completed ? "line-through text-label-tertiary" : "text-label-primary"}`}>
                     {r.title}
                   </div>
-                  <div className="type-caption text-label-tertiary">{formatRel(r.dueAt)}</div>
+                  <div className="type-caption-1 text-label-tertiary">{formatRel(r.dueAt)}</div>
                 </div>
                 <button
                   onClick={() => remove(r.id)}

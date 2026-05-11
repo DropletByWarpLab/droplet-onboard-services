@@ -167,9 +167,9 @@ export function SubscriptionsPanel() {
       )}
 
       {isLoading ? (
-        <div className="type-caption text-label-tertiary">Loading…</div>
+        <div className="type-caption-1 text-label-tertiary">Loading…</div>
       ) : sources.length === 0 ? (
-        <div className="type-caption text-label-tertiary py-2">
+        <div className="type-caption-1 text-label-tertiary py-2">
           No external calendars subscribed yet.
         </div>
       ) : (
@@ -178,8 +178,8 @@ export function SubscriptionsPanel() {
             <li key={s.id} className="flex items-start gap-2 p-2 rounded bg-surface-secondary">
               <div className="flex-1 min-w-0">
                 <div className="type-subheadline text-label-primary truncate">{s.name}</div>
-                <div className="type-caption text-label-tertiary truncate">{s.url}</div>
-                <div className="type-caption text-label-tertiary mt-0.5">
+                <div className="type-caption-1 text-label-tertiary truncate">{s.url}</div>
+                <div className="type-caption-1 text-label-tertiary mt-0.5">
                   {s.lastSyncAt ? (
                     <>Last synced {new Date(s.lastSyncAt).toLocaleString()}</>
                   ) : (
@@ -211,13 +211,13 @@ export function SubscriptionsPanel() {
         </ul>
       )}
 
-      <div className="mt-4 pt-3 border-t border-separator-primary">
+      <div className="mt-4 pt-3 border-t border-separator">
         <h3 className="type-subheadline text-label-secondary mb-2">
           Subscribe phones / other calendar apps
         </h3>
         {publishUrl ? (
           <div className="flex items-center gap-2 p-2 rounded bg-surface-secondary">
-            <code className="type-caption flex-1 truncate text-label-secondary">{publishUrl}</code>
+            <code className="type-caption-1 flex-1 truncate text-label-secondary">{publishUrl}</code>
             <button
               onClick={copyPublish}
               className="text-label-secondary hover:text-label-primary"
@@ -231,7 +231,7 @@ export function SubscriptionsPanel() {
             Reveal publish URL
           </button>
         )}
-        <p className="type-caption text-label-tertiary mt-2">
+        <p className="type-caption-1 text-label-tertiary mt-2">
           Use this URL in your phone's "Subscribe to calendar" flow. Your local
           events will appear automatically.
         </p>

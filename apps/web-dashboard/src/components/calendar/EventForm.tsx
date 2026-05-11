@@ -127,7 +127,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
-          <h2 className="type-title text-label-primary">
+          <h2 className="type-title-3 text-label-primary">
             {editing ? "Edit event" : "New event"}
           </h2>
           <button onClick={onClose} className="text-label-tertiary hover:text-label-primary">
@@ -136,7 +136,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
         </div>
 
         {externallySynced && (
-          <div className="mb-3 p-2 rounded type-caption bg-system-orange/10 text-system-orange">
+          <div className="mb-3 p-2 rounded type-caption-1 bg-system-orange/10 text-system-orange">
             This event is synced from an external calendar and can't be edited
             here. Make changes in the source calendar and they'll sync back.
           </div>
@@ -144,7 +144,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
 
         <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1">
-            <span className="type-caption text-label-secondary">Title</span>
+            <span className="type-caption-1 text-label-secondary">Title</span>
             <input
               type="text"
               value={title}
@@ -167,7 +167,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
 
           <div className="grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1">
-              <span className="type-caption text-label-secondary">Starts</span>
+              <span className="type-caption-1 text-label-secondary">Starts</span>
               <input
                 type="datetime-local"
                 value={startsAt}
@@ -177,7 +177,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="type-caption text-label-secondary">Ends</span>
+              <span className="type-caption-1 text-label-secondary">Ends</span>
               <input
                 type="datetime-local"
                 value={endsAt}
@@ -189,7 +189,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
           </div>
 
           <label className="flex flex-col gap-1">
-            <span className="type-caption text-label-secondary">Location</span>
+            <span className="type-caption-1 text-label-secondary">Location</span>
             <input
               type="text"
               value={location}
@@ -201,7 +201,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
           </label>
 
           <label className="flex flex-col gap-1">
-            <span className="type-caption text-label-secondary">Notes</span>
+            <span className="type-caption-1 text-label-secondary">Notes</span>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
