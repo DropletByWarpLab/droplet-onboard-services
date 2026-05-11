@@ -55,9 +55,9 @@ export function DeviceDetailPanel({
 
         {/* Controls */}
         <div className="p-5 space-y-6">
-          {/* Connection state */}
+          {/* Connection state — offline is a warning, not a saved-state */}
           {!isConnected && (
-            <div className="bg-system-yellow/10 border border-system-yellow/20 rounded-lg p-3">
+            <div className="bg-system-orange/10 border border-system-orange/20 rounded-lg p-3">
               <p className="type-caption-1 text-label-secondary capitalize">
                 {device.connectionState}
               </p>
