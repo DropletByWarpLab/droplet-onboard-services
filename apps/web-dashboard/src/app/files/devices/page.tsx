@@ -8,31 +8,34 @@ import { ClientDeviceCard } from "@/components/ClientDeviceCard";
 import { ClientDetailPanel } from "@/components/ClientDetailPanel";
 import { PairDialog } from "@/components/PairDialog";
 import { useToast } from "@/components/Toast";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { DeviceClientInfo } from "@/lib/types";
 
 export default function SyncDevicesPage() {
   const { items, isLoading, isRefreshing, refresh } = useDeviceClients();
   const [selectedClient, setSelectedClient] = useState<DeviceClientInfo | null>(null);
   const [pairOpen, setPairOpen] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<DeviceClientInfo | null>(null);
   const { toast } = useToast();
 
   const activeItems = items.filter((i) => i.status === "active");
   const revokedItems = items.filter((i) => i.status === "revoked");
 
-  async function handleRevoke(client: DeviceClientInfo) {
-    if (
-      !confirm(
-        `Revoke "${client.deviceName}"? It won't be able to sync until you pair it again.`
-      )
-    ) {
-      return;
-    }
+  function handleRevoke(client: DeviceClientInfo) {
+    setRevokeTarget(client);
+  }
+
+  async function performRevoke() {
+    const client = revokeTarget;
+    if (!client) return;
     try {
       await revokeDeviceClient(client.id);
+      setRevokeTarget(null);
       await refresh();
       setSelectedClient(null);
     } catch (err) {
       toast(err instanceof Error ? err.message : "Revoke failed");
+      throw err;
     }
   }
 
@@ -159,6 +162,20 @@ export default function SyncDevicesPage() {
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        onConfirm={performRevoke}
+        onCancel={() => setRevokeTarget(null)}
+        title={
+          revokeTarget
+            ? `Revoke "${revokeTarget.deviceName}"?`
+            : "Revoke device?"
+        }
+        description="This device stops syncing files immediately. To use it again, pair it from the Pair Device flow."
+        confirmLabel="Revoke"
+        variant="destructive"
+      />
     </div>
   );
 }

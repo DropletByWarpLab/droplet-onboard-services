@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { createShare, updateShare, deleteShare } from "@/lib/api";
 import type { ShareDetail } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface ShareDialogProps {
   filePath: string;
@@ -56,6 +57,7 @@ export function ShareDialog({
   const [error, setError] = useState<string | null>(null);
   const [shares, setShares] = useState<ShareDetail[]>(existingShares);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [revokeTargetId, setRevokeTargetId] = useState<number | null>(null);
 
   useEffect(() => {
     setShares(existingShares);
@@ -92,14 +94,21 @@ export function ShareDialog({
     }
   };
 
-  const handleRevoke = async (shareId: number) => {
-    if (!confirm("Revoke this share link?")) return;
+  const handleRevoke = (shareId: number) => {
+    setRevokeTargetId(shareId);
+  };
+
+  const performRevoke = async () => {
+    const shareId = revokeTargetId;
+    if (shareId == null) return;
     try {
       await deleteShare(shareId);
       setShares(shares.filter((s) => s.id !== shareId));
+      setRevokeTargetId(null);
       onChange?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Revoke failed");
+      throw err;
     }
   };
 
@@ -320,6 +329,16 @@ export function ShareDialog({
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={revokeTargetId !== null}
+        onConfirm={performRevoke}
+        onCancel={() => setRevokeTargetId(null)}
+        title="Revoke this share link?"
+        description="Anyone with the link will lose access immediately. You can always create a new one."
+        confirmLabel="Revoke"
+        variant="destructive"
+      />
     </div>
   );
 }

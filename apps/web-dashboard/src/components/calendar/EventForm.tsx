@@ -6,6 +6,7 @@ import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
 import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface Props {
   open: boolean;
@@ -38,6 +39,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
   const [endsAt, setEndsAt] = useState("");
   const [allDay, setAllDay] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const headingId = useId();
 
@@ -107,18 +109,24 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
     }
   }
 
-  async function handleDelete() {
+  function handleDelete() {
     if (!editing || !initial) return;
-    if (!confirm(`Delete "${initial.title}"?`)) return;
+    setConfirmingDelete(true);
+  }
+
+  async function performDelete() {
+    if (!initial) return;
     setSaving(true);
     try {
       await deleteEvent(initial.id);
       toast("Event deleted", "success");
+      setConfirmingDelete(false);
       onSaved();
       onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Delete failed";
       toast(msg, "error");
+      throw err;
     } finally {
       setSaving(false);
     }
@@ -243,6 +251,16 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmingDelete}
+        onConfirm={performDelete}
+        onCancel={() => setConfirmingDelete(false)}
+        title={initial ? `Delete "${initial.title}"?` : "Delete event?"}
+        description="This event is removed from your calendar. Anyone you invited won't see it anymore. This cannot be undone."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
     </Dialog>
   );
 }

@@ -212,7 +212,7 @@ describe("DeviceDetailPanel", () => {
     });
   });
 
-  it("footer Block button toggles firewall state on click", async () => {
+  it("footer Block button opens a ConfirmDialog and POSTs to firewall endpoint on confirm (WARP-291)", async () => {
     mockFetchOnceJson(fetchMock, {
       device: makeDevice({ isBlocked: false }),
       presence: makePresence(),
@@ -227,7 +227,14 @@ describe("DeviceDetailPanel", () => {
     // POST to the firewall endpoint resolves OK.
     mockFetchOnceJson(fetchMock, { operationId: "op-42" });
 
+    // WARP-291: clicking the trigger opens a ConfirmDialog instead of
+    // firing the POST. We need to confirm.
     fireEvent.click(blockBtn);
+    // The dialog renders a second "Block" button — find it inside the
+    // dialog so we don't ambiguously click the trigger again.
+    const dialog = await screen.findByRole("dialog", { name: /Block .*?/i });
+    const confirmInDialog = within(dialog).getByRole("button", { name: "Block" });
+    fireEvent.click(confirmInDialog);
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(

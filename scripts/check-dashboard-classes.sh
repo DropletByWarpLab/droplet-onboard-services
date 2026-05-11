@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
 #
-# check-dashboard-classes.sh — WARP-288.
+# check-dashboard-classes.sh — WARP-288 (classes) + WARP-291 (native dialogs).
 #
-# Greps the web-dashboard source tree for known-bad Tailwind utility class
-# names that don't exist in `apps/web-dashboard/src/app/globals.css` or
-# `apps/web-dashboard/tailwind.config.ts`. Tailwind drops unknown classes
-# silently, so without this guard a single typo (`dp-button-primary`
-# instead of `dp-btn-primary`) ships unstyled elements to production.
+# Two guards in one script:
 #
-# The list of bad classes is kept in sync with the vitest guard at
-# `apps/web-dashboard/src/__tests__/dashboard-classes-guard.test.ts` —
-# both must agree, but each runs in its own pipeline (this script in CI
-# pre-test, the vitest guard alongside the dashboard unit suite).
+# 1. Bad Tailwind utility class names that don't exist in
+#    `apps/web-dashboard/src/app/globals.css` or
+#    `apps/web-dashboard/tailwind.config.ts`. Tailwind drops unknown
+#    classes silently — without this guard a single typo
+#    (`dp-button-primary` instead of `dp-btn-primary`) ships unstyled
+#    elements. Source of truth list kept in sync with the vitest guard
+#    at `apps/web-dashboard/src/__tests__/dashboard-classes-guard.test.ts`.
 #
-# Exit 0 when clean, 1 with a per-class summary when any hit is found.
+# 2. Native browser dialogs (`window.confirm`, `window.alert`,
+#    `window.prompt`, or the bare `confirm(`/`alert(`/`prompt(` global
+#    invocations). These bypass our ARIA + focus + theming primitives
+#    and break the design language. The WARP-291 `<ConfirmDialog>`
+#    primitive is the replacement for confirms; for non-destructive
+#    informational popups use `toast(...)` from `components/Toast.tsx`;
+#    for free-text input use an inline form inside `<Dialog>`. See the
+#    WARP-291 audit notes for migration patterns.
 #
-# Excluded from the scan:
-#   - `__tests__/` directories (tests carry the bad-class list verbatim
-#     and intentionally name them as strings).
-#   - any `*.md` files (the audit doc and ROADMAP reference the bad
-#     classes by name).
+# Exit 0 when clean, 1 with a per-hit summary when any rule fires.
+#
+# Excluded from both scans:
+#   - `__tests__/` directories (tests intentionally reference these
+#     names as strings).
+#   - any `*.md` files (audit doc + ROADMAP reference both by name).
 #   - `node_modules/`, `.next/`, build output.
+#   - The `<ConfirmDialog>` primitive's own doc-comment, which names
+#     `window.confirm()` to describe what it replaces.
 #
 # Usage:
 #   ./scripts/check-dashboard-classes.sh
@@ -104,3 +113,100 @@ if [ "$exit_code" -ne 0 ]; then
 fi
 
 echo "check-dashboard-classes: OK (0 silently-dropped classes across $SRC_ROOT)"
+
+# ─────────────────────────────────────────────────────────────────────
+# WARP-291: native-dialog guard.
+#
+# Block:
+#   - `window.confirm(`, `window.alert(`, `window.prompt(`
+#   - bare `confirm(`, `alert(`, `prompt(` at the start of an
+#     identifier (i.e. not `.confirm(` / `.alert(` / `.prompt(`)
+#
+# The `(^|[^A-Za-z0-9_.])` prefix is key: it excludes member-access
+# calls like `useNetwork.ts`'s `async function confirm(...)` definition
+# (the leading `function ` keyword counts as non-word), but does match
+# `confirm("…")` at the start of a statement.
+#
+# We allow the bare keyword in function declarations only — to keep the
+# regex simple, we instead allowlist the one file where `confirm` is a
+# function NAME (`useNetwork.ts`). Add to the allowlist below if new
+# legitimate non-dialog uses appear (rare).
+# ─────────────────────────────────────────────────────────────────────
+
+NATIVE_DIALOG_REGEXES=(
+  # Member-form calls: window.confirm("…") / window.alert("…") / etc.
+  '(^|[^A-Za-z0-9_])window\.(confirm|alert|prompt)\s*\('
+  # Bare calls. The leading anchor disallows `.confirm(` and `_confirm(`
+  # but does match `confirm(`, `  confirm(`, `if (!confirm(` etc.
+  '(^|[^A-Za-z0-9_.])(confirm|alert|prompt)\s*\('
+)
+
+# Files where these names legitimately appear (function declarations,
+# string-only references, etc.). Keep this list short — when in doubt,
+# rename the offending function rather than allowlisting.
+NATIVE_DIALOG_ALLOWLIST_FILES=(
+  # `async function confirm(token, operation, entityId)` — tier-2
+  # confirm helper, NOT a native dialog call.
+  "$SRC_ROOT/lib/hooks/useNetwork.ts"
+  # `replaces every native window.confirm() callsite` — doc comment only.
+  "$SRC_ROOT/components/ConfirmDialog.tsx"
+)
+
+dialog_exit_code=0
+dialog_total_hits=0
+
+for pattern in "${NATIVE_DIALOG_REGEXES[@]}"; do
+  set +e
+  raw_hits="$(
+    grep -rEn \
+      --include='*.ts' \
+      --include='*.tsx' \
+      --exclude-dir='__tests__' \
+      --exclude-dir='node_modules' \
+      --exclude-dir='.next' \
+      "$pattern" \
+      "$SRC_ROOT"
+  )"
+  set -e
+
+  if [ -z "$raw_hits" ]; then
+    continue
+  fi
+
+  # Strip allowlisted files from the hit list.
+  hits="$raw_hits"
+  for allow in "${NATIVE_DIALOG_ALLOWLIST_FILES[@]}"; do
+    hits="$(printf '%s\n' "$hits" | grep -v "^${allow}:" || true)"
+  done
+
+  # Also strip pure-comment lines (`*`-prefixed JSDoc, `//` line
+  # comments, JSX `{/* … */}` block comments) — the bare regex matches
+  # doc-comment prose like "Replaces every native `window.confirm()`
+  # callsite". Match the post-line-number column to detect comment
+  # leaders.
+  hits="$(printf '%s\n' "$hits" \
+    | grep -vE ':[0-9]+:[[:space:]]*\*' \
+    | grep -vE ':[0-9]+:[[:space:]]*//' \
+    | grep -vE ':[0-9]+:[[:space:]]*\{/\*' \
+    || true)"
+
+  if [ -n "$hits" ]; then
+    count="$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]')"
+    dialog_total_hits=$((dialog_total_hits + count))
+    dialog_exit_code=1
+    echo
+    echo "✘ Native dialog pattern \`${pattern}\` found in ${count} site(s):"
+    printf '%s\n' "$hits" | sed 's/^/    /'
+  fi
+done
+
+if [ "$dialog_exit_code" -ne 0 ]; then
+  echo
+  echo "check-native-dialogs: ${dialog_total_hits} native-dialog call(s) found."
+  echo "Use the <ConfirmDialog> primitive (apps/web-dashboard/src/components/ConfirmDialog.tsx)"
+  echo "for destructive confirmations, toast() for informational popups, or an inline"
+  echo "form inside <Dialog> for free-text prompts. Refs: WARP-291."
+  exit 1
+fi
+
+echo "check-native-dialogs: OK (0 native confirm/alert/prompt calls across $SRC_ROOT)"

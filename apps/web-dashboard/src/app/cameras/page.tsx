@@ -28,6 +28,8 @@ import { CameraGroupNav } from "@/components/cameras/CameraGroupNav";
 import { CameraGroupEditor } from "@/components/cameras/CameraGroupEditor";
 import { authFetch } from "@/lib/auth";
 import { triggerCameraScan } from "@/lib/api";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 import type { CameraGroupInfo, CameraInfo } from "@/lib/types";
 
 export default function CamerasPage() {
@@ -67,6 +69,8 @@ export default function CamerasPage() {
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorGroup, setEditorGroup] = useState<CameraGroupInfo | null>(null);
+  const [deleteGroupTarget, setDeleteGroupTarget] = useState<CameraGroupInfo | null>(null);
+  const { toast } = useToast();
 
   // Per-user pinned cameras. The set drives the star icon on each card;
   // the array drives the order of the "Pinned" rail above the grid.
@@ -100,7 +104,7 @@ export default function CamerasPage() {
     try {
       await pinsHook.toggle(cam.name);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to toggle pin");
+      toast(e instanceof Error ? e.message : "Failed to update pin", "error");
     }
   };
 
@@ -120,14 +124,22 @@ export default function CamerasPage() {
     setEditorGroup(group);
     setEditorOpen(true);
   };
-  const handleDeleteGroup = async (group: CameraGroupInfo) => {
-    if (!confirm(`Delete group "${group.name}"? Cameras themselves are not removed.`)) return;
+  const handleDeleteGroup = (group: CameraGroupInfo) => {
+    setDeleteGroupTarget(group);
+  };
+
+  const performDeleteGroup = async () => {
+    const group = deleteGroupTarget;
+    if (!group) return;
     try {
       await groupsHook.remove(group.id);
       // If the deleted group was selected, snap back to All.
       if (selectedGroupId === group.id) setSelectedGroupId(null);
+      setDeleteGroupTarget(null);
+      toast(`Deleted "${group.name}".`, "success");
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to delete group");
+      toast(e instanceof Error ? e.message : "Failed to delete group", "error");
+      throw e;
     }
   };
 
@@ -429,6 +441,24 @@ export default function CamerasPage() {
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={deleteGroupTarget !== null}
+        onConfirm={performDeleteGroup}
+        onCancel={() => setDeleteGroupTarget(null)}
+        title={
+          deleteGroupTarget
+            ? `Delete group "${deleteGroupTarget.name}"?`
+            : "Delete group?"
+        }
+        description={
+          deleteGroupTarget
+            ? `${deleteGroupTarget.members?.length ?? 0} camera${(deleteGroupTarget.members?.length ?? 0) === 1 ? "" : "s"} will become ungrouped. The cameras themselves are not removed.`
+            : "Cameras are not removed."
+        }
+        confirmLabel="Delete group"
+        variant="destructive"
+      />
     </div>
   );
 }

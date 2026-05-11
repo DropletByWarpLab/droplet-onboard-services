@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Plus,
@@ -30,6 +30,9 @@ import type {
   VpnPeerCreatedInfo,
   DuckDnsStatus,
 } from "@/lib/types";
+import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -50,6 +53,8 @@ export default function RemoteAccessPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<VpnPeerInfo | null>(null);
+  const { toast } = useToast();
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -72,13 +77,16 @@ export default function RemoteAccessPage() {
     reload();
   }, [reload]);
 
-  const handleRevoke = async (peer: VpnPeerInfo) => {
-    if (!confirm(`Revoke "${peer.deviceLabel}"? It will be disconnected immediately.`)) return;
+  const handleRevokeConfirm = async () => {
+    if (!revokeTarget) return;
     try {
-      await deleteVpnPeer(peer.id);
+      await deleteVpnPeer(revokeTarget.id);
+      toast(`Revoked "${revokeTarget.deviceLabel}".`, "success");
+      setRevokeTarget(null);
       await reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Revoke failed");
+      toast(err instanceof Error ? err.message : "Revoke failed", "error");
+      throw err;
     }
   };
 
@@ -158,7 +166,7 @@ export default function RemoteAccessPage() {
               key={peer.id}
               peer={peer}
               isOwner={peer.userId === currentUser?.username}
-              onRevoke={() => handleRevoke(peer)}
+              onRevoke={() => setRevokeTarget(peer)}
             />
           ))
         )}
@@ -175,6 +183,16 @@ export default function RemoteAccessPage() {
           onAdded={reload}
         />
       )}
+
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        onConfirm={handleRevokeConfirm}
+        onCancel={() => setRevokeTarget(null)}
+        title={revokeTarget ? `Revoke "${revokeTarget.deviceLabel}"?` : "Revoke device?"}
+        description="It will be disconnected from your network immediately and the WireGuard config on the device will stop working."
+        confirmLabel="Revoke"
+        variant="destructive"
+      />
     </div>
   );
 }
@@ -433,10 +451,8 @@ function PeerRow({
 // drop it on close. There's no way to re-fetch it; the user revokes and
 // re-mints if they lose it.
 //
-// TODO(WARP-291): migrate this modal onto the shared <Dialog> primitive
-// from WARP-289. Deferred to WARP-291 alongside the broader remote-access
-// surface rework (which is touching the .conf-once UX anyway, so doing
-// both together avoids a churning rebase).
+// WARP-291: built on top of the shared <Dialog> primitive so ARIA +
+// focus + Escape + scroll-lock all come from there.
 
 function AddDeviceDialog({
   onClose,
@@ -451,6 +467,8 @@ function AddDeviceDialog({
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
   const [copied, setCopied] = useState(false);
+  const headingId = useId();
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   const handleCreate = async () => {
     const trimmed = deviceLabel.trim();
@@ -492,16 +510,16 @@ function AddDeviceDialog({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
-      onClick={onClose}
+    <Dialog
+      open
+      onClose={onClose}
+      labelledBy={headingId}
+      maxWidth="md"
+      initialFocusRef={inputRef}
     >
-      <div
-        className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div>
         <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-          <h3 className="type-headline text-label-primary">
+          <h3 id={headingId} className="type-headline text-label-primary">
             {step === "form" ? "Add a device" : "Scan to connect"}
           </h3>
           <button
@@ -520,7 +538,7 @@ function AddDeviceDialog({
                 Device name
               </label>
               <input
-                autoFocus
+                ref={inputRef}
                 value={deviceLabel}
                 onChange={(e) => setDeviceLabel(e.target.value)}
                 placeholder="Alice&rsquo;s iPhone"
@@ -626,6 +644,6 @@ function AddDeviceDialog({
           </div>
         )}
       </div>
-    </div>
+    </Dialog>
   );
 }

@@ -21,6 +21,7 @@ import { isWindowActive, nextTransitionFor } from "@/lib/scheduleEval";
 import { OverrideModal } from "./OverrideModal";
 import { ScheduleEditorModal } from "./ScheduleEditorModal";
 import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 const fetcher = async (url: string) => {
   const r = await fetch(url);
@@ -41,7 +42,8 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
   );
   const { patchDevice, forgetDevice, assignGroups, toastForError } = useDeviceMutations();
   const { toggleBlock } = useDeviceBlockMutation();
-  const [blockPending, setBlockPending] = useState(false);
+  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+  const blockTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const [displayName, setDisplayName] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
@@ -112,17 +114,14 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
     }
   }
 
-  async function handleBlockToggle() {
+  async function handleBlockConfirm() {
     if (!data?.device) return;
-    // TODO(WARP-41): run tier-2 token-bound confirm here before hitting the
-    // firewall endpoint. The hook doesn't exist on this branch yet.
-    setBlockPending(true);
     try {
       await toggleBlock(data.device);
     } catch (err) {
       setToast(toastForError(err));
-    } finally {
-      setBlockPending(false);
+      // Re-throw so ConfirmDialog stays open and the user can retry.
+      throw err;
     }
   }
 
@@ -307,13 +306,34 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-separator flex gap-2">
         <button
+          ref={blockTriggerRef}
           type="button"
-          onClick={() => void handleBlockToggle()}
-          disabled={blockPending || !data?.device}
+          onClick={() => setBlockConfirmOpen(true)}
+          disabled={!data?.device}
           className={`type-footnote px-3 py-1.5 rounded ${data?.device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
         >
-          {blockPending ? "..." : data?.device.isBlocked ? "Unblock" : "Block"}
+          {data?.device.isBlocked ? "Unblock" : "Block"}
         </button>
+        {data?.device && blockConfirmOpen && (
+          <ConfirmDialog
+            open={blockConfirmOpen}
+            triggerRef={blockTriggerRef}
+            onConfirm={handleBlockConfirm}
+            onCancel={() => setBlockConfirmOpen(false)}
+            title={
+              data.device.isBlocked
+                ? `Unblock ${data.device.displayName ?? data.device.hostname ?? data.device.vendor ?? "this device"}?`
+                : `Block ${data.device.displayName ?? data.device.hostname ?? data.device.vendor ?? "this device"}?`
+            }
+            description={
+              data.device.isBlocked
+                ? "This device will regain internet access."
+                : "This device won't be able to reach the internet until you unblock it."
+            }
+            confirmLabel={data.device.isBlocked ? "Unblock" : "Block"}
+            variant={data.device.isBlocked ? "neutral" : "destructive"}
+          />
+        )}
         {!confirmForget ? (
           <button
             type="button"

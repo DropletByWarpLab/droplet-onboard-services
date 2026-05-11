@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2, Users, X } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
 import {
@@ -26,6 +27,7 @@ export default function SettingsPage() {
   const [newDisplayName, setNewDisplayName] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [userError, setUserError] = useState<string | null>(null);
+  const [deleteUserTarget, setDeleteUserTarget] = useState<string | null>(null);
 
   const loadKeys = useCallback(async () => {
     try {
@@ -77,17 +79,24 @@ export default function SettingsPage() {
     }
   };
 
-  const handleDeleteUser = async (username: string) => {
+  const handleDeleteUser = (username: string) => {
     if (username === currentUser?.username) {
       setUserError("You cannot delete your own account");
       return;
     }
-    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    setDeleteUserTarget(username);
+  };
+
+  const performDeleteUser = async () => {
+    const username = deleteUserTarget;
+    if (!username) return;
     try {
       await apiDeleteUser(username);
+      setDeleteUserTarget(null);
       await loadUsers();
     } catch (err: any) {
       setUserError(err.message || "Failed to delete user");
+      throw err;
     }
   };
 
@@ -277,6 +286,19 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      <ConfirmDialog
+        open={deleteUserTarget !== null}
+        onConfirm={performDeleteUser}
+        onCancel={() => setDeleteUserTarget(null)}
+        title={
+          deleteUserTarget
+            ? `Delete user "${deleteUserTarget}"?`
+            : "Delete user?"
+        }
+        description="The account, sessions, and per-user state are removed. This cannot be undone."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
     </div>
   );
 }
