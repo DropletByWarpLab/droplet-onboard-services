@@ -129,8 +129,24 @@ describe("ScheduleEditorModal", () => {
     mockEndpoints(fetchMock, []);
     const onClose = vi.fn();
     renderModal({ scheduleId: "new", onClose });
-    fireEvent.click(screen.getByTestId("schedule-editor-backdrop"));
+    // WARP-289: the visible backdrop is rendered by the shared
+    // <Dialog> primitive as the dialog container's parent element.
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(dialog.parentElement!);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  // WARP-289: full modal ARIA via the shared <Dialog> primitive.
+  it("renders as a role=dialog with aria-modal and aria-labelledby", () => {
+    mockEndpoints(fetchMock, []);
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    const heading = document.getElementById(labelledBy!);
+    expect(heading).not.toBeNull();
+    expect(heading!.textContent).toMatch(/New schedule|Edit schedule/);
   });
 
   it("Save on update path calls PATCH without subject fields", async () => {

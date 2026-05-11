@@ -109,10 +109,12 @@ describe("QuickSchedulePopover", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Customize" }));
 
-    // The editor modal uses aria-label "Edit schedule".
+    // WARP-289: the editor modal is now named by its heading via
+    // aria-labelledby. "Customize" enters the creation path, so the
+    // heading reads "New schedule".
     await waitFor(() => {
       expect(
-        screen.getByRole("dialog", { name: "Edit schedule" }),
+        screen.getByRole("dialog", { name: /new schedule/i }),
       ).toBeInTheDocument();
     });
   });

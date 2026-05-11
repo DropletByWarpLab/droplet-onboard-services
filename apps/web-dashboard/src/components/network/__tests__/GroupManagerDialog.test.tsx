@@ -45,6 +45,19 @@ describe("GroupManagerDialog", () => {
     vi.unstubAllGlobals();
   });
 
+  // WARP-289: full modal ARIA via the shared <Dialog> primitive.
+  it("renders as a role=dialog with aria-modal and aria-labelledby", async () => {
+    mockFetchOnceJson(fetchMock, { groups: [] });
+    renderDialog();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    const heading = document.getElementById(labelledBy!);
+    expect(heading).not.toBeNull();
+    expect(heading!.textContent).toMatch(/Manage groups/);
+  });
+
   it("renders the list of groups with member count", async () => {
     mockFetchOnceJson(fetchMock, {
       groups: [

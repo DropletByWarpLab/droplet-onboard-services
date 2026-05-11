@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import { X } from "lucide-react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
+import { Dialog } from "@/components/Dialog";
 
 interface Props {
   open: boolean;
@@ -38,6 +39,8 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
   const [allDay, setAllDay] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const headingId = useId();
+
   useEffect(() => {
     if (!open) return;
     if (initial) {
@@ -59,7 +62,8 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
     }
   }, [open, initial]);
 
-  if (!open) return null;
+  // No early return — pass `open` through to <Dialog>, which handles
+  // mount/unmount via its AnimatePresence wrapper.
 
   async function handleSave() {
     if (!title.trim()) {
@@ -121,16 +125,17 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div
-        className="dp-card w-full max-w-md mx-4 p-5 max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="md">
+      <div className="p-5 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="type-title-3 text-label-primary">
+          <h2 id={headingId} className="type-title-3 text-label-primary">
             {editing ? "Edit event" : "New event"}
           </h2>
-          <button onClick={onClose} className="text-label-tertiary hover:text-label-primary">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm p-1"
+          >
             <X size={18} />
           </button>
         </div>
@@ -238,6 +243,6 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
           </div>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }

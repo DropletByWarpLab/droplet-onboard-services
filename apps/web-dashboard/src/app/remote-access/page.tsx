@@ -432,6 +432,11 @@ function PeerRow({
 // back ONCE in the create response — we keep it in component state and
 // drop it on close. There's no way to re-fetch it; the user revokes and
 // re-mints if they lose it.
+//
+// TODO(WARP-291): migrate this modal onto the shared <Dialog> primitive
+// from WARP-289. Deferred to WARP-291 alongside the broader remote-access
+// surface rework (which is touching the .conf-once UX anyway, so doing
+// both together avoids a churning rebase).
 
 function AddDeviceDialog({
   onClose,

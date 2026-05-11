@@ -1,33 +1,28 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useId, useState } from "react";
 import * as Icons from "lucide-react";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { useGroupMutations } from "@/lib/hooks/useGroupMutations";
 import { GroupRow } from "./GroupRow";
+import { Dialog } from "@/components/Dialog";
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
+/**
+ * WARP-289: rebuilt on the shared <Dialog> primitive. Escape close, focus
+ * restore, body scroll-lock, and the role=dialog + aria-modal +
+ * aria-labelledby triad come from there.
+ */
 export function GroupManagerDialog({ open, onClose }: Props) {
   const { data } = useNetworkGroups();
   const { createGroup, renameGroup, deleteGroup, groupToastForError } = useGroupMutations();
   const [newName, setNewName] = useState("");
   const [toast, setToast] = useState<string | null>(null);
 
-  // ESC closes the dialog. Only bound while open so we don't steal Escape
-  // from the rest of the page.
-  useEffect(() => {
-    if (!open) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
+  const headingId = useId();
 
   async function handleCreate() {
     const name = newName.trim();
@@ -62,23 +57,17 @@ export function GroupManagerDialog({ open, onClose }: Props) {
   const groups = data?.groups ?? [];
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
-      onClick={onClose}
-    >
-      <div
-        role="dialog"
-        aria-label="Manage groups"
-        onClick={(e) => e.stopPropagation()}
-        className="bg-surface-primary border border-separator rounded-lg w-full max-w-lg max-h-[80vh] overflow-y-auto shadow-xl"
-      >
+    <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="lg">
+      <div className="max-h-[80vh] overflow-y-auto">
         <div className="p-4 border-b border-separator flex items-center justify-between">
-          <h2 className="type-title-3 text-label-primary">Manage groups</h2>
+          <h2 id={headingId} className="type-title-3 text-label-primary">
+            Manage groups
+          </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-label-secondary hover:text-label-primary"
+            className="text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
           >
             <Icons.X className="w-5 h-5" />
           </button>
@@ -142,6 +131,6 @@ export function GroupManagerDialog({ open, onClose }: Props) {
           </div>
         )}
       </div>
-    </div>
+    </Dialog>
   );
 }

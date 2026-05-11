@@ -106,6 +106,21 @@ describe("DeviceDetailPanel", () => {
     await waitFor(() => expect(input.value).toBe("Romain's MacBook"));
   });
 
+  // WARP-289: full modal ARIA via the shared <Dialog> primitive.
+  it("renders as a role=dialog with aria-modal and aria-labelledby", async () => {
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    // The panel renders the dialog synchronously; SWR fills body after.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    const heading = document.getElementById(labelledBy!);
+    expect(heading).not.toBeNull();
+    // Heading is the device-detail label ("Device details").
+    expect(heading!.textContent).toMatch(/Device details/i);
+  });
+
   it("debounces displayName edits and PATCHes after 500ms", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
