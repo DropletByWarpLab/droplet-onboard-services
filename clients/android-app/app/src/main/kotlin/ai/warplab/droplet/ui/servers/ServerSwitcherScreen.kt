@@ -129,7 +129,10 @@ private fun ServerRow(
         },
         trailingContent = {
             TextButton(onClick = onForget) {
-                Icon(Icons.Outlined.Delete, contentDescription = null)
+                Icon(
+                    Icons.Outlined.Delete,
+                    contentDescription = stringResource(R.string.switcher_forget),
+                )
             }
         },
     )

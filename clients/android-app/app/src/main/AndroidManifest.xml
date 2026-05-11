@@ -60,22 +60,20 @@
                    • The dashboard's "Tap to pair" link on the same device
                    • iOS hand-off when the user has both apps installed
                  The activity is singleTask so subsequent deep links re-enter
-                 the existing instance via onNewIntent(). -->
+                 the existing instance via onNewIntent().
+
+                 NOTE: We deliberately do NOT register an https://pair.warp-lab.ai
+                 app-link variant yet. PairUrl.parse() strictly rejects any
+                 scheme other than `droplet`, so an HTTPS deep link would
+                 launch the activity but be silently dropped. Add the second
+                 intent-filter only when (a) the .well-known/assetlinks.json
+                 is published on pair.warp-lab.ai and (b) PairUrl is extended
+                 to accept that form. Tracked in README's TODO table. -->
             <intent-filter android:autoVerify="false">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="droplet" android:host="pair" />
-            </intent-filter>
-
-            <!-- Optional HTTPS app-link form (for future App Links verification
-                 with the warp-lab.ai apex). Disabled (autoVerify=false) until
-                 the .well-known/assetlinks.json is published. -->
-            <intent-filter android:autoVerify="false">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="pair.warp-lab.ai" />
             </intent-filter>
         </activity>
 

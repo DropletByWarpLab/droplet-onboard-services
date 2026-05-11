@@ -10,7 +10,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.callbackFlow
-import java.net.InetAddress
+import kotlinx.coroutines.flow.updateAndGet
 
 /**
  * Bonjour/mDNS discovery for Droplet appliances on the local Wi-Fi. The
@@ -70,15 +70,22 @@ class DropletNsdDiscovery(private val context: Context) {
                         host = host,
                         port = resolved.port,
                     )
-                    state.value = state.value + (entry.serviceName to entry)
-                    trySend(state.value.values.toList())
+                    // .update is atomic read-modify-write — important because
+                    // NSD on API 34+ delivers resolved callbacks via the
+                    // executor we provide (context.mainExecutor), which IS
+                    // the main thread, but the registerServiceInfoCallback
+                    // contract doesn't guarantee single-threaded delivery
+                    // for all OEM ROMs. Defending against the cheaper-pattern
+                    // bug is essentially free.
+                    val snapshot = state.updateAndGet { it + (entry.serviceName to entry) }
+                    trySend(snapshot.values.toList())
                 }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 val key = serviceInfo.serviceName ?: return
-                state.value = state.value - key
-                trySend(state.value.values.toList())
+                val snapshot = state.updateAndGet { it - key }
+                trySend(snapshot.values.toList())
             }
 
             override fun onDiscoveryStopped(serviceType: String) {}
@@ -129,15 +136,14 @@ class DropletNsdDiscovery(private val context: Context) {
     }
 
     /** Pull a usable host string out of NsdServiceInfo regardless of which
-     *  API level filled it in. Pre-Q `host` is an InetAddress; Q+ exposes
-     *  `hostAddresses` as a list. */
+     *  API level filled it in. Pre-Android 14: single `host` InetAddress.
+     *  Android 14+: `hostAddresses` list (typed List<InetAddress>). */
     private fun NsdServiceInfo.hostString(): String? {
         @Suppress("DEPRECATION")
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             return host?.hostAddress
         }
-        val first = hostAddresses?.firstOrNull() ?: return null
-        return (first as? InetAddress)?.hostAddress ?: first.toString()
+        return hostAddresses?.firstOrNull()?.hostAddress
     }
 
     private companion object {

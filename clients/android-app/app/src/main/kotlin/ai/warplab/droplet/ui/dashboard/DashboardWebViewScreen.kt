@@ -42,6 +42,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -92,7 +93,9 @@ fun DashboardWebViewScreen(
     val context = LocalContext.current
     val activeUrl by serverRepository.activeServerUrl.collectAsState(initial = null)
 
-    var loadProgress by remember { mutableStateOf(0) }
+    // Primitive Int state — mutableIntStateOf avoids autoboxing in the
+    // composition's snapshot. Compose lint flags mutableStateOf(0) here.
+    var loadProgress by remember { mutableIntStateOf(0) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
 
@@ -111,9 +114,18 @@ fun DashboardWebViewScreen(
             context = context,
             onProgress = { p -> loadProgress = p },
             onMainFrameError = { msg -> loadError = msg },
-            onPageStarted = {
+            onPageStarted = { wv ->
                 loadProgress = 0
                 loadError = null
+                // Refresh canGoBack at the *start* of navigation too so a
+                // user double-tapping back doesn't get stranded: after
+                // goBack() the in-flight history index changes immediately,
+                // but onPageFinished only fires after the new page loads.
+                // Without this update, BackHandler.enabled would stay true
+                // even after we've reached the bottom of history, and
+                // subsequent back presses would silently no-op instead of
+                // falling through to activity-finish.
+                canGoBack = wv.canGoBack()
             },
             onPageFinished = { wv -> canGoBack = wv.canGoBack() },
         )
@@ -139,7 +151,7 @@ fun DashboardWebViewScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Droplet") },
+                title = { Text(stringResource(R.string.app_name)) },
                 actions = {
                     IconButton(onClick = onOpenSwitcher) {
                         Icon(
@@ -212,7 +224,7 @@ private fun buildWebView(
     context: Context,
     onProgress: (Int) -> Unit,
     onMainFrameError: (String) -> Unit,
-    onPageStarted: () -> Unit,
+    onPageStarted: (WebView) -> Unit,
     onPageFinished: (WebView) -> Unit,
 ): WebView {
     val cm = CookieManager.getInstance()
@@ -253,7 +265,7 @@ private fun buildWebView(
         }
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                onPageStarted()
+                view?.let(onPageStarted)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {

@@ -1,6 +1,5 @@
 <resources>
     <string name="app_name">Droplet</string>
-    <string name="app_tagline">Your private AI appliance, in your pocket</string>
 
     <!-- Onboarding -->
     <string name="onboarding_title">Connect your Droplet</string>
@@ -26,7 +25,6 @@
     <!-- Discovery -->
     <string name="discovery_title">Droplets on this network</string>
     <string name="discovery_empty">No Droplets visible yet. Make sure your phone and the appliance are on the same Wi-Fi.</string>
-    <string name="discovery_retry">Scan again</string>
 
     <!-- Switcher -->
     <string name="switcher_title">Switch Droplet</string>
@@ -42,5 +40,4 @@
     <!-- Pair deep link -->
     <string name="pair_handoff_title">Pairing Droplet</string>
     <string name="pair_handoff_body">Completing pairing with the appliance — this should only take a second.</string>
-    <string name="pair_handoff_error">Pairing failed: %1$s</string>
 </resources>
