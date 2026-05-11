@@ -126,6 +126,46 @@ describe("RemindersPanel — per-row delete (WARP-292)", () => {
     expect(idToken!.className).toMatch(/font-mono/);
   });
 
+  // WARP-301: checkbox hit-target. The wrapper button used to be a
+  // bare 16 px square — touch-impossible on mobile. The visual 16 px
+  // checkbox now sits inside a `p-2.5` wrapper so the tap target hits
+  // ≥ 32 px while the rendered checkmark stays the same visual size.
+  it("checkbox button has p-2.5 wrapper (≥ 32 px hit-target, WARP-301)", () => {
+    useRemindersMock.mockReturnValue({
+      reminders: [makeReminder()],
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+
+    render(<RemindersPanel />);
+
+    const checkbox = screen.getByRole("button", {
+      name: /mark walk the dog as done/i,
+    });
+    expect(checkbox.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+  });
+
+  it("checked-state visual cue is preserved (system-green inner square)", () => {
+    useRemindersMock.mockReturnValue({
+      reminders: [makeReminder({ completedAt: new Date().toISOString() })],
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+
+    render(<RemindersPanel />);
+
+    const checkbox = screen.getByRole("button", {
+      name: /mark walk the dog as not done/i,
+    });
+    // The button's inner indicator must still carry the green token so
+    // a completed reminder reads "done" without ambiguity. We accept
+    // the class either on the button itself or on an inner element.
+    const hasGreen =
+      checkbox.className.includes("bg-system-green") ||
+      checkbox.querySelector('[class*="bg-system-green"]') !== null;
+    expect(hasGreen).toBe(true);
+  });
+
   it("falls back to reminder id in confirmedIdentifier when title is empty", async () => {
     useRemindersMock.mockReturnValue({
       reminders: [makeReminder({ id: "rem-empty", title: "" })],
