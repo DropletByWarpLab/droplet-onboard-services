@@ -208,7 +208,9 @@ describe("ChatInput attachments", () => {
     expect(chips[0].getAttribute("data-status")).toBe("indexing");
     expect(chips[1].getAttribute("data-status")).toBe("failed");
     expect(screen.getByText("notes.md")).toBeInTheDocument();
-    expect(screen.getByText(/extractor_unavailable/)).toBeInTheDocument();
+    // WARP-294: failed chips render the friendly chat-domain
+    // translation of `error`, never the raw orchestrator token.
+    expect(screen.queryByText(/extractor_unavailable/)).not.toBeInTheDocument();
   });
 
   it("calls onRemoveAttachment when the chip's X button is clicked", () => {
