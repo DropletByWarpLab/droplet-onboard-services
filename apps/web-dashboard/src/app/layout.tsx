@@ -56,6 +56,15 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body className="font-[family-name:var(--font-inter)] antialiased">
+        {/* Skip link — first focusable element so keyboard users can bypass
+            the sidebar nav and jump straight to page content. Visually hidden
+            until focused. (WARP-298) */}
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 dp-btn-primary"
+        >
+          Skip to content
+        </a>
         <ThemeProvider>
           <AuthProvider>
             <ToastProvider>
