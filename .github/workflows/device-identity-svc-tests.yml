@@ -31,6 +31,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WARP-230: tpm2-pytss pip-install builds against tss2-esapi C
+      # headers from libtss2-dev. Without these apt packages the build
+      # errors with "Require tss2-esapi to be installed and at least
+      # version 2.4.0". Real-backend tests still skip-gate themselves
+      # on RUN_TPM_INTEGRATION=1; this dep is needed at install-time
+      # not test-time.
+      - name: Install tss2-esapi system headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libtss2-dev pkg-config
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -41,9 +53,6 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # tpm2-pytss is commented out in requirements.txt so this lane
-          # installs grpcio + cryptography + click only. Real-backend
-          # tests skip themselves when RUN_TPM_INTEGRATION!=1.
           pip install -r requirements.txt
           pip install pytest
 
