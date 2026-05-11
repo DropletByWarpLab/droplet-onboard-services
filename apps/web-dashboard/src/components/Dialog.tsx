@@ -57,6 +57,19 @@ export interface DialogProps {
    * every existing dashboard modal. Sizes map to Tailwind `max-w-*`.
    */
   maxWidth?: "sm" | "md" | "lg" | "xl";
+  /**
+   * Where the dialog sits on screen.
+   *
+   *   - `center` (default): a centered modal card. Used for forms /
+   *     confirms / sharing surfaces.
+   *   - `right`: a full-height right-edge side panel. Used for
+   *     detail panels (smart-home device, network device, paired
+   *     client) that the user keeps open while scanning context.
+   *
+   * Side panels skip the `dp-card` shell + max-width and instead
+   * render edge-to-edge against the right border.
+   */
+  placement?: "center" | "right";
   /** Close on backdrop click. Default `true`. */
   closeOnBackdrop?: boolean;
   /**
@@ -91,6 +104,7 @@ export function Dialog({
   labelledBy,
   describedBy,
   maxWidth = "md",
+  placement = "center",
   closeOnBackdrop = true,
   initialFocusRef,
   children,
@@ -185,6 +199,33 @@ export function Dialog({
         transition: { duration: 0.15 },
       };
 
+  const isSide = placement === "right";
+
+  const backdropClass = isSide
+    ? "fixed inset-0 z-50 flex justify-end bg-black/30"
+    : "fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-6";
+
+  const containerClass = isSide
+    ? "relative w-full max-w-md h-full bg-surface-primary border-l border-separator shadow-xl overflow-y-auto"
+    : `dp-card ${widthClass} w-full shadow-xl overflow-hidden p-0`;
+
+  // Side panels slide in from the right when motion is allowed; the
+  // centered variant gets the existing fade+scale.
+  const sideMotion = prefersReducedMotion
+    ? {
+        initial: { opacity: 1, x: 0 },
+        animate: { opacity: 1, x: 0 },
+        exit: { opacity: 1, x: 0 },
+      }
+    : {
+        initial: { opacity: 0, x: 24 },
+        animate: { opacity: 1, x: 0 },
+        exit: { opacity: 0, x: 24 },
+        transition: { duration: 0.18 },
+      };
+
+  const panelMotion = isSide ? sideMotion : motionProps;
+
   return createPortal(
     <AnimatePresence>
       {open && (
@@ -193,7 +234,7 @@ export function Dialog({
           animate={{ opacity: 1 }}
           exit={{ opacity: prefersReducedMotion ? 1 : 0 }}
           transition={{ duration: prefersReducedMotion ? 0 : 0.12 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-6"
+          className={backdropClass}
           onClick={handleBackdropClick}
         >
           <motion.div
@@ -202,9 +243,9 @@ export function Dialog({
             aria-modal="true"
             aria-labelledby={labelledBy}
             aria-describedby={describedBy}
-            className={`dp-card ${widthClass} w-full shadow-xl overflow-hidden p-0`}
+            className={containerClass}
             onClick={(e) => e.stopPropagation()}
-            {...motionProps}
+            {...panelMotion}
           >
             {children}
           </motion.div>

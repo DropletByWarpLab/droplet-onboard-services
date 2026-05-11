@@ -53,6 +53,26 @@ describe("DeviceDetailPanel — connection-state warning (WARP-299)", () => {
     expect(container.innerHTML).not.toContain("border-system-yellow/20");
   });
 
+  // WARP-289 — verify the panel has the full modal ARIA contract via the
+  // shared <Dialog> primitive (role=dialog + aria-modal + aria-labelledby
+  // resolving to the device name heading).
+  it("renders as a role=dialog with aria-modal and aria-labelledby (WARP-289)", () => {
+    render(
+      <DeviceDetailPanel
+        device={makeDevice()}
+        onCommand={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    const heading = document.getElementById(labelledBy!);
+    expect(heading).not.toBeNull();
+    expect(heading!.textContent).toMatch(/Living Room Lamp/);
+  });
+
   it("does not render the connection-state notice when the device is connected", () => {
     render(
       <DeviceDetailPanel
