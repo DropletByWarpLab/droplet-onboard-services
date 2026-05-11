@@ -296,7 +296,7 @@ export default function ChatPage() {
               tabIndex={isDetached ? 0 : -1}
               className={`
                 absolute left-1/2 -translate-x-1/2 -top-12 z-10
-                inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full
                 bg-accent text-white shadow-md
                 type-caption-1 hover:bg-accent-hover
                 focus:outline-none focus:ring-2 focus:ring-accent/40
