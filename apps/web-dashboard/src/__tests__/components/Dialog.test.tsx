@@ -179,6 +179,66 @@ describe("<Dialog> primitive", () => {
     expect(backdrop.className).not.toContain("backdrop-blur-sm");
   });
 
+  it("traps Tab forward: from last focusable wraps to first", async () => {
+    // WARP-289 UX fold-in. Without this the dialog's aria-modal="true"
+    // is a lie — keyboard users tab past the close button straight into
+    // background chrome. The trap wraps Tab from the last child back
+    // to the first.
+    function FocusTrapHarness() {
+      const [open, setOpen] = React.useState(true);
+      return (
+        <Dialog
+          open={open}
+          onClose={() => setOpen(false)}
+          labelledBy="ft-heading"
+        >
+          <h2 id="ft-heading">Trap</h2>
+          <button>btn-1</button>
+          <button>btn-2</button>
+          <button>btn-3</button>
+        </Dialog>
+      );
+    }
+    render(<FocusTrapHarness />);
+    const dialog = await screen.findByRole("dialog");
+    const buttons = dialog.querySelectorAll("button");
+    const last = buttons[buttons.length - 1] as HTMLButtonElement;
+    last.focus();
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(buttons[0]);
+    });
+  });
+
+  it("traps Shift+Tab backward: from first focusable wraps to last", async () => {
+    function FocusTrapHarness() {
+      const [open, setOpen] = React.useState(true);
+      return (
+        <Dialog
+          open={open}
+          onClose={() => setOpen(false)}
+          labelledBy="ft-heading-2"
+        >
+          <h2 id="ft-heading-2">Trap</h2>
+          <button>btn-1</button>
+          <button>btn-2</button>
+          <button>btn-3</button>
+        </Dialog>
+      );
+    }
+    render(<FocusTrapHarness />);
+    const dialog = await screen.findByRole("dialog");
+    const buttons = dialog.querySelectorAll("button");
+    const first = buttons[0] as HTMLButtonElement;
+    first.focus();
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(buttons[buttons.length - 1]);
+    });
+  });
+
   it("locks body scroll while open and restores on close", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText("Open"));

@@ -178,6 +178,51 @@ export function Dialog({
     [closeOnBackdrop, onClose],
   );
 
+  // Focus trap — keep Tab/Shift-Tab cycling inside the dialog so the
+  // `aria-modal="true"` claim is truthful (ARIA Authoring Practices for
+  // `dialog`). Without this, keyboard users tab past the last focusable
+  // child straight into background page chrome and lose the modal
+  // context entirely.
+  //
+  // Edge cases worth flagging:
+  //   - No focusable children: bail without preventDefault, letting the
+  //     browser do its native thing (Tab moves focus to the document
+  //     body / next document chrome). Should be rare in practice — every
+  //     real dialog has at least a close button.
+  //   - Iframes / portals nested inside the dialog: anything within
+  //     `containerRef.current.querySelectorAll(FOCUSABLE_SELECTOR)` is
+  //     considered in-scope. iframe focus is opaque to this trap; we
+  //     don't currently render any so this is acceptable for now.
+  const handleContainerKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!open) return;
+      if (e.key !== "Tab") return;
+      const root = containerRef.current;
+      if (!root) return;
+      const focusables = Array.from(
+        root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      ).filter(
+        (el) => !(el as HTMLButtonElement | HTMLInputElement).disabled,
+      );
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey) {
+        if (active === first || !root.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (active === last || !root.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    },
+    [open],
+  );
+
   // SSR / pre-hydration guard. `document` is not defined during
   // Next.js server rendering, and we can't portal until it is.
   if (typeof document === "undefined") return null;
@@ -252,6 +297,7 @@ export function Dialog({
             aria-describedby={describedBy}
             className={containerClass}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={handleContainerKeyDown}
             {...panelMotion}
           >
             {children}
