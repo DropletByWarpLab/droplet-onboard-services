@@ -102,7 +102,15 @@ export function DeviceCard({ device, onOpen, onError }: Props) {
       <div className="mt-2">
         <DeviceSparkline days={device.presenceDays ?? []} size="sm" />
       </div>
-      <div className="mt-3 flex justify-end gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+      {/*
+        WARP-292: action row is always visible so touch + keyboard users
+        can discover Quick Schedule / Block without hovering. The
+        previous opacity-0 group-hover gate made these unreachable on
+        mobile and required focus-within fallback to be keyboard-safe.
+        Keeping the row visible at rest matches the WARP-220 pattern
+        shipped on /users.
+      */}
+      <div className="mt-3 flex justify-end gap-2 transition">
         <QuickScheduleActionButton device={device} />
         <BlockActionButton device={device} onError={onError} />
       </div>
@@ -116,6 +124,8 @@ function QuickScheduleActionButton({
   device: EnrichedNetworkDevice;
 }) {
   const [open, setOpen] = useState(false);
+  const displayName =
+    device.displayName ?? device.hostname ?? device.vendor ?? "this device";
 
   return (
     <div className="relative" onClick={(e) => e.stopPropagation()}>
@@ -129,8 +139,8 @@ function QuickScheduleActionButton({
           setOpen((o) => !o);
         }}
         onKeyDown={(e) => e.stopPropagation()}
-        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1"
-        aria-label="Quick schedule"
+        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        aria-label={`Quick schedule for ${displayName}`}
       >
         <Icons.CalendarClock className="w-3.5 h-3.5" />
         Quick schedule
@@ -195,8 +205,12 @@ function BlockActionButton({
         type="button"
         onClick={openConfirm}
         onKeyDown={(e) => e.stopPropagation()}
-        className={`type-caption-1 px-2 py-1 rounded ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
-        aria-label={isUnblocking ? "Unblock device" : "Block device"}
+        className={`type-caption-1 px-2 py-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
+        aria-label={
+          isUnblocking
+            ? `Unblock device ${displayName}`
+            : `Block device ${displayName}`
+        }
         title={error ?? undefined}
       >
         {isUnblocking ? "Unblock" : "Block"}

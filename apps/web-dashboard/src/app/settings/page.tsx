@@ -188,7 +188,12 @@ export default function SettingsPage() {
               <span className="type-subheadline text-label-tertiary">No users found</span>
             </div>
           ) : (
-            users.map((u) => (
+            users.map((u) => {
+              // aria-label mirrors the row's primary visible identifier so
+              // screen-reader announcements match what sighted users see
+              // (WARP-220 pattern; applied site-wide in WARP-292).
+              const label = u.displayName || u.id;
+              return (
               <div key={u.id} className="dp-row group">
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <div className="w-8 h-8 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
@@ -202,9 +207,15 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 {u.id !== currentUser?.username && (
+                  // Always rendered (no opacity-gate on hover) so the
+                  // action is discoverable for touch + keyboard users.
+                  // p-2.5 → 14 px icon + 20 px padding = 34 px hit-target,
+                  // clearing the ≥ 32 px ui-ux floor.
                   <button
                     onClick={() => handleDeleteUser(u.id)}
-                    className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 opacity-0 group-hover:opacity-100 transition-all"
+                    aria-label={`Delete user ${label}`}
+                    className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                    title="Delete"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -215,7 +226,8 @@ export default function SettingsPage() {
                   </span>
                 )}
               </div>
-            ))
+              );
+            })
           )}
         </div>
       </section>
