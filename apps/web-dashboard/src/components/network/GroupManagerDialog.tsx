@@ -119,7 +119,7 @@ export function GroupManagerDialog({ open, onClose }: Props) {
             type="button"
             onClick={() => void handleCreate()}
             disabled={!newName.trim()}
-            className="dp-button-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="dp-btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Create
           </button>

@@ -10,7 +10,7 @@
  * is "lossy" enough that the user benefits from knowing.
  *
  * Styling matches AttachmentChip's pill convention: rounded-full,
- * type-caption, surface-secondary background, label-tertiary text.
+ * type-caption-1, surface-secondary background, label-tertiary text.
  */
 
 import type { SubtitleSource } from "@/lib/api";
@@ -21,7 +21,7 @@ export interface SourceChannelBadgeProps {
 }
 
 const PILL_CLASS =
-  "source-channel-badge inline-flex items-center rounded-full bg-surface-secondary border border-separator px-2 py-0.5 type-caption text-label-tertiary";
+  "source-channel-badge inline-flex items-center rounded-full bg-surface-secondary border border-separator px-2 py-0.5 type-caption-1 text-label-tertiary";
 
 export function SourceChannelBadge({
   subtitleSource,

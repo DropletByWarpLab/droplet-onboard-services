@@ -377,7 +377,7 @@ export function ScheduleEditorModal({
           <button
             type="button"
             onClick={onClose}
-            className="dp-button-secondary"
+            className="dp-btn-secondary"
           >
             Cancel
           </button>
@@ -385,7 +385,7 @@ export function ScheduleEditorModal({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="dp-button-primary disabled:opacity-50"
+            className="dp-btn-primary disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save"}
           </button>

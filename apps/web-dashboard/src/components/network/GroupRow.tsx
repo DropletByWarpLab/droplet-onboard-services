@@ -213,7 +213,7 @@ export function GroupRow({ group: g, onRename, onDelete }: Props) {
             <button
               type="button"
               onClick={() => setEditorOpen(true)}
-              className="dp-button-secondary text-sm"
+              className="dp-btn-secondary text-sm"
             >
               + New schedule
             </button>

@@ -575,7 +575,7 @@ export function OverrideModal({
           <button
             type="button"
             onClick={onClose}
-            className="dp-button-secondary"
+            className="dp-btn-secondary"
           >
             Cancel
           </button>
@@ -583,7 +583,7 @@ export function OverrideModal({
             type="button"
             onClick={handleApply}
             disabled={applyDisabled}
-            className="dp-button-primary disabled:opacity-50"
+            className="dp-btn-primary disabled:opacity-50"
           >
             {saving ? "Applying…" : "Apply"}
           </button>

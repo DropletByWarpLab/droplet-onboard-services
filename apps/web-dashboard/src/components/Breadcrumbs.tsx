@@ -34,7 +34,7 @@ export function Breadcrumbs({ chain }: BreadcrumbsProps) {
 
   return (
     <div
-      className="breadcrumbs flex flex-wrap items-center gap-1 type-caption"
+      className="breadcrumbs flex flex-wrap items-center gap-1 type-caption-1"
       role="list"
     >
       {chain.map((step, i) => {

@@ -144,7 +144,11 @@ describe("ScheduleEditorModal", () => {
     fireEvent.change(screen.getByLabelText(/^name$/i), {
       target: { value: "Bedtime v2" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    // WARP-288: confirm the Save button uses the canonical primary-button
+    // utility class (was `dp-button-primary`, which Tailwind silently dropped).
+    const saveBtn = screen.getByRole("button", { name: /^save$/i });
+    expect(saveBtn).toHaveClass("dp-btn-primary");
+    fireEvent.click(saveBtn);
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
         (c) =>
