@@ -12,6 +12,16 @@ const statusColors = {
   offline: "bg-label-quaternary",
 };
 
+// Plain-English status descriptions for screen readers. The raw enum
+// ("ok"/"warning") is useless when announced; WARP-298 mapped these to
+// human-readable phrases.
+const statusLabels = {
+  ok: "All good",
+  warning: "Needs attention",
+  error: "Error",
+  offline: "Offline",
+};
+
 export function StatusCard({ title, value, subtitle, status }: StatusCardProps) {
   return (
     <div className="dp-card p-5 hover:shadow-lg transition-shadow duration-200 ease-smooth">
@@ -22,7 +32,8 @@ export function StatusCard({ title, value, subtitle, status }: StatusCardProps) 
         {status && (
           <span
             className={`w-2 h-2 rounded-full ${statusColors[status]}`}
-            aria-label={status}
+            role="img"
+            aria-label={statusLabels[status]}
           />
         )}
       </div>
