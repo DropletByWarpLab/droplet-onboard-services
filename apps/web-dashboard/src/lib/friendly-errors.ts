@@ -94,7 +94,7 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     INDEX_FAILED:
       "We couldn't index that attachment. The chat will keep working without it.",
     NETWORK:
-      "I can't reach the Droplet right now. Check the connection and try again.",
+      "We can't reach this Droplet right now. Check the connection and try again.",
     TIMEOUT: "That took too long. Try again, or simplify the request.",
     ABORT: "The request was cancelled.",
   },
