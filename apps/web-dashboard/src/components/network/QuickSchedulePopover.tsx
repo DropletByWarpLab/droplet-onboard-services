@@ -125,7 +125,7 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
             e.stopPropagation();
             handleCustomize();
           }}
-          className="dp-button-secondary text-sm"
+          className="dp-btn-secondary text-sm"
         >
           Customize
         </button>
@@ -136,7 +136,7 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
             void handleApply();
           }}
           disabled={saving}
-          className="dp-button-primary text-sm disabled:opacity-50"
+          className="dp-btn-primary text-sm disabled:opacity-50"
         >
           {saving ? "Applying…" : "Apply"}
         </button>

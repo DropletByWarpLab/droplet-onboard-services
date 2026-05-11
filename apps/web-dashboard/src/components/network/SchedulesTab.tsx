@@ -55,7 +55,7 @@ export function SchedulesTab() {
           <button
             type="button"
             onClick={() => setEditorOpenFor({ mode: "new" })}
-            className="dp-button-primary"
+            className="dp-btn-primary"
           >
             + New schedule
           </button>

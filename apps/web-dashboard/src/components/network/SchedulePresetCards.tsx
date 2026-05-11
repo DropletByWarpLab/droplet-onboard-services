@@ -56,7 +56,7 @@ export function SchedulePresetCards({ onUseRecurring, onUseOverride }: Props) {
                     if (preset.kind === "recurring") onUseRecurring(preset);
                     else onUseOverride(preset);
                   }}
-                  className="dp-button-secondary text-sm"
+                  className="dp-btn-secondary text-sm"
                 >
                   Use preset
                 </button>

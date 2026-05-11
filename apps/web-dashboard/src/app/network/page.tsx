@@ -177,7 +177,7 @@ export default function NetworkPage() {
           {!isDisabled && (
             <button
               onClick={refresh}
-              className="dp-button-secondary text-sm mt-4"
+              className="dp-btn-secondary text-sm mt-4"
               disabled={isRefreshing}
             >
               {isRefreshing ? "Retrying…" : "Retry now"}
@@ -210,7 +210,7 @@ export default function NetworkPage() {
         <button
           onClick={refresh}
           disabled={isRefreshing}
-          className="dp-button-secondary flex items-center gap-2"
+          className="dp-btn-secondary flex items-center gap-2"
         >
           <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
           Refresh
@@ -231,7 +231,7 @@ export default function NetworkPage() {
           <div className="flex gap-2">
             <button
               onClick={() => setPendingConfirm(null)}
-              className="dp-button-secondary text-sm"
+              className="dp-btn-secondary text-sm"
             >
               Cancel
             </button>
@@ -251,7 +251,7 @@ export default function NetworkPage() {
                   }
                 }
               }}
-              className="dp-button-primary text-sm"
+              className="dp-btn-primary text-sm"
             >
               Confirm
             </button>
@@ -285,7 +285,7 @@ export default function NetworkPage() {
           <p className="type-subheadline text-label-primary flex-1">Change applied.</p>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
             aria-label="Dismiss"
           >
             Dismiss
@@ -308,7 +308,7 @@ export default function NetworkPage() {
           </div>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
             aria-label="Dismiss"
           >
             Dismiss
@@ -534,7 +534,7 @@ function DevicesTab() {
         <button
           type="button"
           onClick={() => setGroupManagerOpen(true)}
-          className="dp-button-secondary text-sm"
+          className="dp-btn-secondary text-sm"
         >
           Manage groups
         </button>
@@ -559,7 +559,7 @@ function DevicesTab() {
           <button
             type="button"
             onClick={() => devicesSwr.mutate()}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
           >
             Retry
           </button>
@@ -650,7 +650,7 @@ function WifiTab() {
           <button
             onClick={handleScan}
             disabled={scanning}
-            className="dp-button-secondary flex items-center gap-2 text-sm"
+            className="dp-btn-secondary flex items-center gap-2 text-sm"
           >
             <Signal size={14} className={scanning ? "animate-pulse" : ""} />
             {scanning ? "Scanning..." : "Scan"}
