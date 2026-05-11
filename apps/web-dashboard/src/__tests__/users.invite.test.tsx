@@ -10,7 +10,7 @@
  *     status pill + per-row revoke action.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import React from "react";
 
 const fetchUsersMock = vi.fn();
@@ -126,7 +126,7 @@ describe("Users page — invite UX", () => {
     expect(screen.getByRole("button", { name: /copy/i })).toBeInTheDocument();
   });
 
-  it("renders pending invites with status + revoke action", async () => {
+  it("renders pending invites with status + revoke action (WARP-291: ConfirmDialog)", async () => {
     listInvitesMock.mockResolvedValue({
       invites: [
         {
@@ -144,8 +144,6 @@ describe("Users page — invite UX", () => {
       ],
     });
     revokeInviteMock.mockResolvedValue(undefined);
-    // Revoke is destructive — the page now confirms first; auto-accept here.
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<UsersPage />);
 
@@ -157,15 +155,22 @@ describe("Users page — invite UX", () => {
     // "Pending invites" header + the status pill both match — assert the pill specifically.
     expect(screen.getAllByText(/pending/i).length).toBeGreaterThanOrEqual(1);
 
-    const revokeBtn = screen.getByRole("button", { name: /revoke/i });
+    // Click the row Revoke button — opens a ConfirmDialog (WARP-291).
+    const revokeBtn = screen.getByRole("button", { name: /Revoke invite for/i });
     fireEvent.click(revokeBtn);
+
+    // Confirm the destructive action inside the dialog.
+    const dialog = await screen.findByRole("dialog", { name: /Revoke invite/i });
+    const confirmInDialog = dialog.querySelector('button.bg-system-red') as HTMLButtonElement;
+    expect(confirmInDialog).not.toBeNull();
+    fireEvent.click(confirmInDialog);
+
     await waitFor(() => {
       expect(revokeInviteMock).toHaveBeenCalledWith("z".repeat(43));
     });
-    confirmSpy.mockRestore();
   });
 
-  it("revoke confirms before calling the API; cancel aborts", async () => {
+  it("revoke confirms before calling the API; cancel aborts (WARP-291: ConfirmDialog)", async () => {
     listInvitesMock.mockResolvedValue({
       invites: [
         {
@@ -184,29 +189,32 @@ describe("Users page — invite UX", () => {
     });
     revokeInviteMock.mockResolvedValue(undefined);
 
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-
     render(<UsersPage />);
     await waitFor(() => {
       expect(screen.getByText("Diana")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /revoke/i }));
+    // Open the ConfirmDialog.
+    fireEvent.click(screen.getByRole("button", { name: /Revoke invite for/i }));
 
-    expect(confirmSpy).toHaveBeenCalled();
-    // Confirm copy mentions the username + the consequence.
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/diana/i);
-    expect(confirmSpy.mock.calls[0][0]).toMatch(/won't be able/i);
-    // User declined — API must NOT be called.
+    const dialog = await screen.findByRole("dialog", { name: /Revoke invite/i });
+    // The dialog title contains the username + the consequence sentence.
+    expect(dialog.textContent).toMatch(/diana/i);
+    expect(dialog.textContent).toMatch(/won't be able/i);
+
+    // Click Cancel — API must NOT be called.
+    const cancelBtn = within(dialog).getByRole("button", { name: /Cancel/i });
+    fireEvent.click(cancelBtn);
     expect(revokeInviteMock).not.toHaveBeenCalled();
 
-    // Now confirm — API should fire.
-    confirmSpy.mockReturnValue(true);
-    fireEvent.click(screen.getByRole("button", { name: /revoke/i }));
+    // Re-open + confirm — API fires.
+    fireEvent.click(screen.getByRole("button", { name: /Revoke invite for/i }));
+    const dialog2 = await screen.findByRole("dialog", { name: /Revoke invite/i });
+    const confirmBtn = dialog2.querySelector('button.bg-system-red') as HTMLButtonElement;
+    fireEvent.click(confirmBtn);
     await waitFor(() => {
       expect(revokeInviteMock).toHaveBeenCalledWith("z".repeat(43));
     });
-    confirmSpy.mockRestore();
   });
 
   it("invite modal has dialog semantics + Escape closes it", async () => {
