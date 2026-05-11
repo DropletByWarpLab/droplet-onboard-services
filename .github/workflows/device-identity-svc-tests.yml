@@ -1,0 +1,53 @@
+name: device-identity-svc-tests
+
+# WARP-230 — pytest for services/device-identity-svc. Path-filtered.
+# Real-backend tests (tpm2-pytss) are skip-gated by RUN_TPM_INTEGRATION=1;
+# this workflow only runs the mock backend + storage + gRPC handler
+# tests, which is what we cover on PR-time CI.
+
+on:
+  pull_request:
+    paths:
+      - "services/device-identity-svc/**"
+      - "proto/**"
+      - ".github/workflows/device-identity-svc-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/device-identity-svc/**"
+      - "proto/**"
+      - ".github/workflows/device-identity-svc-tests.yml"
+
+concurrency:
+  group: device-identity-svc-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/device-identity-svc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/device-identity-svc/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # tpm2-pytss is commented out in requirements.txt so this lane
+          # installs grpcio + cryptography + click only. Real-backend
+          # tests skip themselves when RUN_TPM_INTEGRATION!=1.
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}/services/device-identity-svc
+        run: pytest -v
