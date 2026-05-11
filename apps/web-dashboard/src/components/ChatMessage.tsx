@@ -130,7 +130,20 @@ export const ChatMessage = memo(function ChatMessage({
               </div>
             )}
             {message.content && (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  // WARP-295: wrap GFM tables in a horizontal-scroll
+                  // container so a wide table doesn't blow out the
+                  // bubble's max-width on narrow viewports. Audit §5.4
+                  // flagged this as a should-fix.
+                  table: ({ node, ...props }) => (
+                    <div className="overflow-x-auto">
+                      <table {...props} />
+                    </div>
+                  ),
+                }}
+              >
                 {message.content}
               </ReactMarkdown>
             )}

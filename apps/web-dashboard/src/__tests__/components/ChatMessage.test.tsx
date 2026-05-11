@@ -381,6 +381,40 @@ describe("ChatMessage", () => {
     });
   });
 
+  describe("markdown polish (WARP-295)", () => {
+    it("wraps GFM tables in an overflow-x-auto container so wide tables don't blow out the bubble", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "asst-tbl",
+            role: "assistant",
+            content:
+              "| col1 | col2 | col3 |\n| --- | --- | --- |\n| a | b | c |\n",
+          }}
+        />,
+      );
+      const table = container.querySelector("table");
+      expect(table).not.toBeNull();
+      const wrapper = table!.parentElement;
+      expect(wrapper?.className).toMatch(/overflow-x-auto/);
+    });
+
+    it("includes an SR-only Working… cue alongside the animated streaming cursor", () => {
+      // The cursor itself is animate-pulse (motion-reduce:hidden) so
+      // reduced-motion users see a visible ellipsis instead; the SR-only
+      // span ensures both audiences get the streaming-state signal.
+      const { container } = render(
+        <ChatMessage
+          message={{ id: "asst-s", role: "assistant", content: "..." }}
+          isStreaming
+        />,
+      );
+      const srOnly = container.querySelector(".sr-only");
+      expect(srOnly).not.toBeNull();
+      expect(srOnly!.textContent).toMatch(/working/i);
+    });
+  });
+
   describe("citation chips (WARP-295)", () => {
     it("renders a row of <CitationChip> chips below assistant messages with citations", () => {
       const { container } = render(
