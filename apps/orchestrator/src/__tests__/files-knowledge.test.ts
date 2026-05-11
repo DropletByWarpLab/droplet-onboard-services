@@ -37,11 +37,18 @@ vi.mock("../config.js", () => ({
 // don't fall through to the 503 path) and inject controllable test
 // doubles. Tests can override these via the hoisted spies.
 // ─────────────────────────────────────────────────────────────────────────
-const { embedSpy, searchByVectorSpy, listRecentSpy } = vi.hoisted(() => ({
-  embedSpy: vi.fn(),
-  searchByVectorSpy: vi.fn(),
-  listRecentSpy: vi.fn(),
-}));
+const { embedSpy, searchByVectorSpy, searchHybridSpy, listRecentSpy } =
+  vi.hoisted(() => ({
+    embedSpy: vi.fn(),
+    searchByVectorSpy: vi.fn(),
+    // WARP-286: the /knowledge search route now delegates to searchHybrid.
+    // The legacy searchByVectorSpy is kept (as a backwards-compatible alias
+    // wired below) so the existing test cases continue to drive results
+    // without rewriting their setup. New cases can spy on searchHybridSpy
+    // directly when they need to assert on rerank-pipe args.
+    searchHybridSpy: vi.fn(),
+    listRecentSpy: vi.fn(),
+  }));
 
 vi.mock("../services/embedding.client.js", () => ({
   EmbeddingClient: class {
@@ -54,6 +61,15 @@ vi.mock("../services/embedding.client.js", () => ({
 
 vi.mock("../services/file-search.service.js", () => ({
   searchByVector: (...args: unknown[]) => searchByVectorSpy(...args),
+  // The route calls `searchHybrid`. If a test set up legacy
+  // `searchByVectorSpy.mockResolvedValueOnce(...)` we forward to it as
+  // long as the new spy has no mocked return value of its own.
+  searchHybrid: (...args: unknown[]) => {
+    if (searchHybridSpy.mock.results.length > 0 || searchHybridSpy.getMockImplementation()) {
+      return searchHybridSpy(...args);
+    }
+    return searchByVectorSpy(...args);
+  },
   listRecent: (...args: unknown[]) => listRecentSpy(...args),
 }));
 

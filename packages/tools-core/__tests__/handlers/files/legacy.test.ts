@@ -19,6 +19,7 @@ interface CtxOpts {
   userId?: string;
   ncToken?: string;
   embedText?: ToolContext["embedText"];
+  searchHybrid?: ToolContext["searchHybrid"];
   ncPost?: ReturnType<typeof vi.fn>;
   ncDelete?: ReturnType<typeof vi.fn>;
   prisma?: ToolContext["prisma"];
@@ -43,6 +44,7 @@ function makeCtx(opts: CtxOpts = {}) {
     },
     matter: {} as ToolContext["matter"],
     embedText: opts.embedText,
+    searchHybrid: opts.searchHybrid,
     userId: opts.userId === undefined ? userId : opts.userId,
     ncToken: opts.ncToken === undefined ? ncToken : opts.ncToken,
     signal: new AbortController().signal,
@@ -389,41 +391,62 @@ describe("move_file & copy_file", () => {
 
 describe("search_content", () => {
   it("rejects a query shorter than 2 characters", async () => {
-    const embedText = vi.fn();
-    const { ctx } = makeCtx({ embedText });
+    const searchHybrid = vi.fn();
+    const { ctx } = makeCtx({ searchHybrid });
     const res = await runTool("search_content", { query: "a" }, ctx);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toMatch(/at least 2/);
-    expect(embedText).not.toHaveBeenCalled();
+    expect(searchHybrid).not.toHaveBeenCalled();
   });
 
-  it("returns embedding_service_unavailable when ctx.embedText is missing", async () => {
+  it("returns SEARCH_UNAVAILABLE when ctx.searchHybrid is missing", async () => {
+    // WARP-286: the handler delegates to ctx.searchHybrid. When the
+    // orchestrator hasn't wired it (e.g. embedder unavailable at
+    // context-build time), the handler returns SEARCH_UNAVAILABLE.
     const { ctx } = makeCtx();
-    const res = await runTool("search_content", { query: "voltage regulator" }, ctx);
+    const res = await runTool(
+      "search_content",
+      { query: "voltage regulator" },
+      ctx,
+    );
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.message).toBe("embedding_service_unavailable");
+    if (!res.ok) {
+      expect(res.error.code).toBe("SEARCH_UNAVAILABLE");
+      expect(res.error.message).toBe("search_unavailable");
+    }
   });
 
-  it("returns embedding_service_unavailable when embedText throws", async () => {
-    const embedText = vi.fn().mockRejectedValue(new Error("nope"));
-    const { ctx } = makeCtx({ embedText });
-    const res = await runTool("search_content", { query: "voltage regulator" }, ctx);
+  it("returns SEARCH_FAILED when searchHybrid throws", async () => {
+    const searchHybrid = vi
+      .fn()
+      .mockRejectedValue(new Error("ai-gateway unreachable"));
+    const { ctx } = makeCtx({ searchHybrid });
+    const res = await runTool(
+      "search_content",
+      { query: "voltage regulator" },
+      ctx,
+    );
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.message).toBe("embedding_service_unavailable");
+    if (!res.ok) {
+      expect(res.error.code).toBe("SEARCH_FAILED");
+      expect(res.error.message).toBe("search_failed");
+    }
   });
 
-  it("rejects non-finite vector elements from a misbehaving embedder", async () => {
-    const embedText = vi.fn().mockResolvedValue([[0.1, NaN, 0.3]]);
-    const { ctx } = makeCtx({ embedText });
-    const res = await runTool("search_content", { query: "voltage regulator" }, ctx);
-    expect(res.ok).toBe(false);
-    if (!res.ok)
-      expect(res.error.message).toBe("embedding_service_returned_invalid_vector");
-  });
-
-  it("queries pgvector and returns ranked results", async () => {
-    const embedText = vi.fn().mockResolvedValue([new Array(384).fill(0.1)]);
-    const { ctx, $queryRawUnsafe } = makeCtx({ embedText });
+  it("returns hybrid retrieval results in the wire shape", async () => {
+    const searchHybrid = vi.fn().mockResolvedValue([
+      {
+        source: "nextcloud" as const,
+        path: "/Notes/idea.md",
+        chunkIdx: 0,
+        pageNumber: null,
+        brainItemId: null,
+        score: 0.92,
+        snippet: "the rest of that idea...",
+        metadata: null,
+      },
+    ]);
+    const { ctx } = makeCtx({ searchHybrid });
     const res = await runTool(
       "search_content",
       { query: "voltage regulator", limit: 5 },
@@ -431,35 +454,47 @@ describe("search_content", () => {
     );
     expect(res.ok).toBe(true);
     if (res.ok) {
-      const data = res.data as { query: string; results: Array<{ path: string }> };
+      const data = res.data as {
+        query: string;
+        results: Array<{ path: string; source: string; score: number }>;
+      };
       expect(data.query).toBe("voltage regulator");
       expect(data.results).toHaveLength(1);
       expect(data.results[0].path).toBe("/Notes/idea.md");
+      expect(data.results[0].source).toBe("nextcloud");
+      expect(data.results[0].score).toBe(0.92);
     }
-    expect($queryRawUnsafe).toHaveBeenCalledTimes(1);
-    const [, vecLiteral, calledUser, calledLimit] = $queryRawUnsafe.mock.calls[0];
-    expect(vecLiteral).toMatch(/^\[/);
-    expect(calledUser).toBe(userId);
-    expect(calledLimit).toBe(5);
+    expect(searchHybrid).toHaveBeenCalledTimes(1);
+    expect(searchHybrid).toHaveBeenCalledWith({
+      query: "voltage regulator",
+      limit: 5,
+    });
   });
 
   it("clamps limit to [1, 50]", async () => {
-    const embedText = vi.fn().mockResolvedValue([new Array(384).fill(0.1)]);
-    const { ctx, $queryRawUnsafe } = makeCtx({ embedText });
+    const searchHybrid = vi.fn().mockResolvedValue([]);
+    const { ctx } = makeCtx({ searchHybrid });
     await runTool(
       "search_content",
       { query: "voltage regulator", limit: 9999 },
       ctx,
     );
-    const [, , , calledLimit] = $queryRawUnsafe.mock.calls[0];
-    expect(calledLimit).toBe(50);
+    expect(searchHybrid).toHaveBeenCalledWith({
+      query: "voltage regulator",
+      limit: 50,
+    });
   });
 
   it("requires userId", async () => {
-    const embedText = vi.fn();
-    const { ctx } = makeCtx({ embedText, userId: "" });
-    const res = await runTool("search_content", { query: "voltage regulator" }, ctx);
+    const searchHybrid = vi.fn();
+    const { ctx } = makeCtx({ searchHybrid, userId: "" });
+    const res = await runTool(
+      "search_content",
+      { query: "voltage regulator" },
+      ctx,
+    );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("AUTH_REQUIRED");
+    expect(searchHybrid).not.toHaveBeenCalled();
   });
 });

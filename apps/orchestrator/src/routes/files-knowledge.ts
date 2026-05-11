@@ -139,6 +139,62 @@ async function loadEmbeddingClient(): Promise<any | null> {
   }
 }
 
+/**
+ * WARP-286 — assemble the rerank pipe (Redis + gRPC reranker client)
+ * for the `/knowledge` search route. Returns `undefined` when either
+ * dependency is unconfigured / unavailable; `searchHybrid` then falls
+ * back to RRF top-K without reranking.
+ *
+ * Both pieces are imported lazily so the module load order can't make
+ * route registration fail on a fresh device where the reranker stack
+ * hasn't run yet.
+ */
+let rerankPipeSingleton:
+  | {
+      redis: { get(k: string): Promise<string | null>; setex(k: string, ttl: number, v: string): Promise<unknown> };
+      reranker: { rerank(args: { query: string; passages: string[]; model?: string }): Promise<{ scores: number[] }> };
+    }
+  | null
+  | undefined = undefined;
+async function buildRerankPipe(): Promise<
+  | {
+      redis: { get(k: string): Promise<string | null>; setex(k: string, ttl: number, v: string): Promise<unknown> };
+      reranker: { rerank(args: { query: string; passages: string[]; model?: string }): Promise<{ scores: number[] }> };
+    }
+  | undefined
+> {
+  if (rerankPipeSingleton !== undefined) {
+    return rerankPipeSingleton ?? undefined;
+  }
+  try {
+    if (!process.env.REDIS_URL) {
+      rerankPipeSingleton = null;
+      return undefined;
+    }
+    const [{ getRedis }, { RerankerClient }] = await Promise.all([
+      import("../services/cache.service.js"),
+      import("../services/reranker.client.js"),
+    ]);
+    const aiGatewayGrpcUrl =
+      process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+    rerankPipeSingleton = {
+      redis: getRedis() as unknown as {
+        get(k: string): Promise<string | null>;
+        setex(k: string, ttl: number, v: string): Promise<unknown>;
+      },
+      reranker: new RerankerClient({ url: aiGatewayGrpcUrl }),
+    };
+    return rerankPipeSingleton;
+  } catch (err) {
+    logger.warn(
+      { err: (err as Error)?.message },
+      "rerank pipe unavailable; serving RRF top-K without rerank",
+    );
+    rerankPipeSingleton = null;
+    return undefined;
+  }
+}
+
 export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -288,13 +344,21 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const hits = await search.searchByVector(prisma, {
+      // WARP-286: switch from vector-only to hybrid (BM25 + vector + RRF
+      // + cross-encoder reranker). The rerank pipe is wired below; on
+      // any backend failure (Redis down, ai-gateway down, model not
+      // cached) `searchHybrid` / `rerankPassages` pass-through to the
+      // RRF top-K so the dashboard stays usable.
+      const rerankPipe = await buildRerankPipe();
+      const hits = await search.searchHybrid(prisma, {
         userId: user.username,
         vector,
+        query: q,
         limit,
         minSimilarity: SEARCH_MIN_SIMILARITY,
         source,
         since: validSince,
+        rerank: rerankPipe,
       });
 
       // WARP-214: surface free-form metadata (chain[], subtitle_source) on the

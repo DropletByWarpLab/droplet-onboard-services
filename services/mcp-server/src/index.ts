@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import Redis from "ioredis";
+
 import { PrismaClient } from "@prisma/client";
 import type { HttpClient } from "@droplet/tools-core";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
@@ -7,6 +9,8 @@ import { startStdio } from "./transports/stdio.js";
 import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
+import { RerankerClient } from "./reranker.client.js";
+import { searchHybrid } from "./file-search.service.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -128,6 +132,20 @@ async function main(): Promise<void> {
   const aiGatewayGrpcUrl = process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
   const embeddingClient = new EmbeddingClient({ url: aiGatewayGrpcUrl });
 
+  // WARP-286: a second gRPC stub for the BGE-reranker-base Rerank RPC.
+  // Same lazy-connect / channel-reuse / SHUTDOWN-recover semantics as
+  // the embedding stub.
+  const rerankerClient = new RerankerClient({ url: aiGatewayGrpcUrl });
+
+  // WARP-286: Redis for the rerank result cache. lazyConnect so a missing
+  // / temporarily-unreachable cache does not block stdio startup;
+  // `rerankPassages` swallows Redis errors and falls back to live rerank
+  // calls without caching.
+  const redisUrl = process.env.REDIS_URL;
+  const redis = redisUrl
+    ? new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true })
+    : null;
+
   // Connect lazily — the stdio child process should not block the parent's
   // boot path on a database that may not be reachable (in-process orchestrator
   // tests, dry-run roundtrips). Tools that touch Prisma will trigger the
@@ -148,6 +166,33 @@ async function main(): Promise<void> {
     },
     httpFactory: createHttpClient,
     embedText: (texts) => embeddingClient.embed(texts),
+    // WARP-286: hybrid retrieval shim consumed by the `search_content`
+    // tool. We materialize the embedding here, then hand the full pipe
+    // (vector, lexical, RRF, rerank) to `searchHybrid`. If Redis is
+    // unconfigured we still serve hybrid results without the rerank
+    // cache (every call hits ai-gateway).
+    searchHybrid: async ({ userId, query, limit }) => {
+      const vectors = await embeddingClient.embed([query]);
+      const vector = vectors[0];
+      if (!vector || vector.length === 0) {
+        throw new Error("embedding_service_returned_no_vector");
+      }
+      return searchHybrid(prisma, {
+        userId,
+        vector,
+        query,
+        limit,
+        rerank: redis
+          ? {
+              redis: redis as unknown as {
+                get(k: string): Promise<string | null>;
+                setex(k: string, ttl: number, v: string): Promise<unknown>;
+              },
+              reranker: rerankerClient,
+            }
+          : undefined,
+      });
+    },
   };
 
   // Disconnect cleanly when the parent SIGTERMs us. Without this the
@@ -155,6 +200,14 @@ async function main(): Promise<void> {
   // and the gRPC channel to ai-gateway would stay half-open.
   const shutdown = async () => {
     embeddingClient.close();
+    rerankerClient.close();
+    if (redis) {
+      try {
+        await redis.quit();
+      } catch {
+        /* best-effort */
+      }
+    }
     await prisma.$disconnect().catch(() => {});
     process.exit(0);
   };

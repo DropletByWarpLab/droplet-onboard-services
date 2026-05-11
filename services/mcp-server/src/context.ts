@@ -31,6 +31,37 @@ export interface ContextDeps {
    *     missing and `EMBEDDING_FAILED` when the call throws.
    */
   embedText?: (texts: string[]) => Promise<number[][]>;
+  /**
+   * WARP-286 — hybrid retrieval shim wired in `index.ts`. The
+   * `search_content` tool delegates here so the BM25 + vector + RRF +
+   * reranker pipeline lives in one place (`file-search.service.ts` in
+   * this workspace; mirrored in the orchestrator for `/knowledge`).
+   *
+   * Optional because:
+   *   - In-process unit tests don't exercise the full search pipeline.
+   *   - On a fresh device ai-gateway / redis may be unreachable at
+   *     boot; the handler returns `SEARCH_UNAVAILABLE` when this is
+   *     missing.
+   *
+   * Bound per-call with the calling user's id; never pass through
+   * unauthenticated.
+   */
+  searchHybrid?: (args: {
+    userId: string;
+    query: string;
+    limit: number;
+  }) => Promise<
+    Array<{
+      source: "nextcloud" | "brain";
+      path: string;
+      chunkIdx: number;
+      pageNumber: number | null;
+      brainItemId: string | null;
+      score: number;
+      snippet: string;
+      metadata: Record<string, unknown> | null;
+    }>
+  >;
 }
 
 /**
@@ -54,6 +85,14 @@ export function buildContext(
   metaUserId?: string,
 ): ToolContext {
   const userId = claims?.sub ?? metaUserId;
+  // WARP-286: bind the searchHybrid shim with the authenticated userId
+  // baked in. The tool handler then calls ctx.searchHybrid({ query, limit })
+  // without ever seeing (or being able to forge) a userId.
+  const searchHybrid =
+    deps.searchHybrid && userId
+      ? async (args: { query: string; limit: number }) =>
+          deps.searchHybrid!({ userId, query: args.query, limit: args.limit })
+      : undefined;
   return {
     prisma: deps.prisma,
     matter: deps.matter,
@@ -65,6 +104,7 @@ export function buildContext(
       nextcloud: deps.httpFactory("nextcloud"),
     },
     embedText: deps.embedText,
+    searchHybrid,
     userId,
     role: claims?.role,
     ncToken,
