@@ -9,6 +9,7 @@ on:
       - "apps/web-dashboard/**"
       - "package.json"
       - "package-lock.json"
+      - "scripts/check-dashboard-classes.sh"
       - ".github/workflows/web-dashboard-tests.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "apps/web-dashboard/**"
       - "package.json"
       - "package-lock.json"
+      - "scripts/check-dashboard-classes.sh"
       - ".github/workflows/web-dashboard-tests.yml"
 
 concurrency:
@@ -37,6 +39,12 @@ jobs:
 
       - name: Install dependencies (npm workspaces, root install)
         run: npm ci
+
+      # WARP-288: catch silently-dropped Tailwind utility classes before
+      # they reach the unit suite. Runs before vitest so a regression
+      # fails fast with a clear per-class summary.
+      - name: Lint dashboard class names
+        run: bash scripts/check-dashboard-classes.sh
 
       - name: Run vitest
         run: npm run -w @droplet/web-dashboard test

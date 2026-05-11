@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start -p 3001",
     "lint": "next lint",
+    "lint:dashboard-classes": "bash ../../scripts/check-dashboard-classes.sh",
     "test": "vitest run",
     "test:watch": "vitest"
   },
