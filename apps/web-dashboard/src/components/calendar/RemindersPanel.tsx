@@ -158,7 +158,7 @@ async function performRemove() {
                   className="p-2.5 rounded-sm text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                   title="Delete"
                 >
-                  <Trash2 size={12} />
+                  <Trash2 size={14} />
                 </button>
               </li>
             );
