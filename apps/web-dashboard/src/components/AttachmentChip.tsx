@@ -2,6 +2,7 @@
 
 import { Loader2, FileText, AlertTriangle, Check, X } from "lucide-react";
 import type { ChatAttachment } from "@/lib/types";
+import { translateError } from "@/lib/friendly-errors";
 
 interface AttachmentChipProps {
   attachment: ChatAttachment;
@@ -87,8 +88,12 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
       )}
       <span className="text-label-tertiary flex-shrink-0">{statusText}</span>
       {isFailed && error ? (
-        <span className="text-label-tertiary truncate" title={error}>
-          — {error}
+        // WARP-294: never surface the raw `error` payload anywhere in
+        // the DOM (text or title) — the backend may emit terse strings
+        // (HTTP codes, indexer enums, ECONNREFUSED). The full raw cause
+        // goes via the helper's console.error for QA / operator triage.
+        <span className="text-label-tertiary truncate">
+          — {translateError({ message: error }, "chat")}
         </span>
       ) : null}
       {onRemove ? (
