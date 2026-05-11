@@ -99,8 +99,7 @@ export function TrashView({
     }
   };
 
-  const handleEmpty = async () => {
-    setConfirmEmpty(false);
+  const performEmpty = async () => {
     await onEmpty();
   };
 
@@ -124,31 +123,14 @@ export function TrashView({
           <p className="type-footnote text-label-tertiary">
             {items.length} {items.length === 1 ? "item" : "items"} in trash
           </p>
-          {!confirmEmpty ? (
-            <button
-              onClick={() => setConfirmEmpty(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 type-footnote text-system-red hover:bg-system-red/10 rounded-sm transition-colors"
-            >
-              <AlertTriangle size={14} />
-              Empty trash
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="type-caption-1 text-system-red">Permanently delete all?</span>
-              <button
-                onClick={handleEmpty}
-                className="dp-btn-primary !bg-system-red type-caption-1 !py-1 !px-3 !min-h-[28px]"
-              >
-                Yes, empty
-              </button>
-              <button
-                onClick={() => setConfirmEmpty(false)}
-                className="type-caption-1 text-label-tertiary hover:text-label-primary px-2"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
+          <button
+            onClick={() => setConfirmEmpty(true)}
+            disabled={items.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 type-footnote text-system-red hover:bg-system-red/10 rounded-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <AlertTriangle size={14} />
+            Empty trash
+          </button>
         </div>
       )}
 
@@ -231,6 +213,20 @@ export function TrashView({
         }
         description="This bypasses Trash. The file cannot be restored after this."
         confirmLabel="Delete forever"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={confirmEmpty}
+        onConfirm={performEmpty}
+        onCancel={() => setConfirmEmpty(false)}
+        title={
+          items.length > 0
+            ? `Permanently delete ${items.length} ${items.length === 1 ? "item" : "items"} in trash?`
+            : "Empty trash?"
+        }
+        description="Every file in Trash is gone for good. This cannot be undone."
+        confirmLabel="Empty trash"
         variant="destructive"
       />
     </div>
