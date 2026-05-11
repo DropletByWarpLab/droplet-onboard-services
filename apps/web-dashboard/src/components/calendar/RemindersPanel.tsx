@@ -170,10 +170,18 @@ async function performRemove() {
         open={removeTarget !== null}
         onConfirm={performRemove}
         onCancel={() => setRemoveTarget(null)}
-        title={
-          removeTarget && removeTarget.title.trim()
-            ? `Delete "${removeTarget.title}"?`
-            : "Delete reminder?"
+        title="Delete reminder?"
+        // WARP-292 fold-in: route the reminder identifier through the
+        // ConfirmDialog `confirmedIdentifier` prop instead of
+        // interpolating it into the title. This (a) dodges escape
+        // hazards for titles containing `"`, and (b) renders the
+        // identifier in the consistent monospace-token style every
+        // other migrated confirm uses. Fall back to the id when the
+        // title is empty so the user still has a verification handle.
+        confirmedIdentifier={
+          removeTarget
+            ? removeTarget.title.trim() || removeTarget.id
+            : undefined
         }
         description="The reminder is removed from your list. If a notification was queued, it won't fire."
         confirmLabel="Delete"

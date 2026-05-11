@@ -88,7 +88,7 @@ describe("RemindersPanel — per-row delete (WARP-292)", () => {
     ).toBeInTheDocument();
   });
 
-  it("clicking delete opens ConfirmDialog that shows the reminder title", async () => {
+  it("clicking delete opens ConfirmDialog with generic title and identifier in body", async () => {
     useRemindersMock.mockReturnValue({
       reminders: [makeReminder({ id: "rem-9", title: "Pay rent" })],
       isLoading: false,
@@ -104,8 +104,45 @@ describe("RemindersPanel — per-row delete (WARP-292)", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeInTheDocument();
     });
-    // The dialog body must identify which reminder is being deleted so
-    // the user can verify before confirming.
-    expect(screen.getByRole("dialog").textContent ?? "").toMatch(/pay rent/i);
+    // WARP-292 fold-in: the dialog heading is now the generic
+    // "Delete reminder?" — the reminder identifier flows through the
+    // ConfirmDialog `confirmedIdentifier` prop, which renders it in the
+    // monospace-token style consistent with every other migrated
+    // confirm in the dashboard. This dodges title-string escaping for
+    // reminders whose titles contain quotes.
+    const dialog = screen.getByRole("dialog");
+    expect(
+      screen.getByRole("heading", { name: /^delete reminder\?$/i }),
+    ).toBeInTheDocument();
+    // The reminder identifier still has to appear somewhere in the
+    // dialog body so the user can verify what they're destroying.
+    expect(dialog.textContent ?? "").toMatch(/pay rent/i);
+    // And the identifier must render in the dedicated mono-token slot
+    // rather than being interpolated into the title.
+    const idToken = Array.from(dialog.querySelectorAll("p")).find((p) =>
+      /pay rent/i.test(p.textContent ?? ""),
+    );
+    expect(idToken).toBeDefined();
+    expect(idToken!.className).toMatch(/font-mono/);
+  });
+
+  it("falls back to reminder id in confirmedIdentifier when title is empty", async () => {
+    useRemindersMock.mockReturnValue({
+      reminders: [makeReminder({ id: "rem-empty", title: "" })],
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+
+    render(<RemindersPanel />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /delete reminder rem-empty/i }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent ?? "").toMatch(/rem-empty/i);
   });
 });
