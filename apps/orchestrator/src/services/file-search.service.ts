@@ -20,6 +20,8 @@
  *     server-generated floats, not user input.
  */
 
+import { createHash } from "node:crypto";
+
 import type { PrismaClient } from "@prisma/client";
 
 export type FileContentSource = "nextcloud" | "brain";
@@ -238,6 +240,149 @@ export function reciprocalRankFusion(
     .map(({ hit, score }) => ({ ...hit, score }));
 }
 
+export interface RerankerLike {
+  rerank(args: {
+    query: string;
+    passages: string[];
+    model?: string;
+  }): Promise<{ scores: number[] }>;
+}
+
+export interface RedisLike {
+  get(key: string): Promise<string | null>;
+  setex(key: string, ttl: number, value: string): Promise<unknown>;
+}
+
+export interface RerankPassagesParams {
+  query: string;
+  hits: SearchHit[];
+  /** Redis-like client; abstracted so unit tests can mock without ioredis. */
+  redis: RedisLike;
+  /** Reranker client (gRPC wrapper) — abstracted so unit tests can mock. */
+  reranker: RerankerLike;
+  /** Cap per-passage length; bigger values cost more tokens at the model. */
+  maxPassageChars?: number;
+  /** Cache TTL in seconds. Default `RERANK_DEFAULT_CACHE_TTL_SEC`. */
+  cacheTtlSec?: number;
+}
+
+/**
+ * Max characters of each passage sent to the reranker. Matches the
+ * BGE-reranker-base tokenizer's max_length (~512 tokens ≈ 2k chars,
+ * but we cap conservatively to keep the wire payload small + the
+ * tokenizer truncation step cheap). See `services/ai-gateway/reranker.py`
+ * for the model-side constant.
+ */
+export const RERANK_DEFAULT_MAX_PASSAGE_CHARS = 512;
+/**
+ * Rerank cache TTL. 5 minutes is the spec value — long enough to absorb
+ * a single user's burst of typing/refinement on the same query; short
+ * enough that newly-indexed chunks become visible promptly.
+ */
+export const RERANK_DEFAULT_CACHE_TTL_SEC = 300;
+/**
+ * How many RRF top candidates to send to the reranker by default.
+ * Spec §Pipeline: top-50 of the fused list. Anything beyond is
+ * unlikely to be in the answer-set.
+ */
+export const RERANK_DEFAULT_CANDIDATES = 50;
+
+/**
+ * WARP-286 — rerank a set of hits via a cross-encoder.
+ *
+ * Cached in Redis by `sha256(query || '::' || chunk-id-list)`, TTL
+ * `RERANK_DEFAULT_CACHE_TTL_SEC` by default. The cache key includes the
+ * chunk-id list so it auto-invalidates when the underlying RRF
+ * candidate set changes (e.g. new files indexed).
+ *
+ * On any error path (Redis down, reranker down, malformed payload) the
+ * input hits are returned unchanged so the caller still gets results,
+ * just unreranked. This makes a degraded reranker non-fatal.
+ *
+ * Cryptography note: SHA-256 is a FIPS-approved digest algorithm; the
+ * use here is non-security (cache key derivation, not authentication
+ * or integrity).
+ */
+export async function rerankPassages(
+  params: RerankPassagesParams,
+): Promise<SearchHit[]> {
+  const { query, hits, redis, reranker } = params;
+  if (hits.length === 0) return [];
+  const maxChars = params.maxPassageChars ?? RERANK_DEFAULT_MAX_PASSAGE_CHARS;
+  const ttl = params.cacheTtlSec ?? RERANK_DEFAULT_CACHE_TTL_SEC;
+
+  const ids = hits
+    .map((h) => `${h.source}:${h.path}:${h.chunkIdx}`)
+    .join("|");
+  // SHA-256: FIPS-approved digest used as a non-cryptographic cache key.
+  const cacheKey =
+    "rerank:" +
+    createHash("sha256").update(query + "::" + ids).digest("hex");
+
+  // Cache lookup is best-effort — Redis down should not break search.
+  let cached: string | null = null;
+  try {
+    cached = await redis.get(cacheKey);
+  } catch {
+    cached = null;
+  }
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached) as unknown;
+      if (
+        Array.isArray(parsed) &&
+        parsed.length === hits.length &&
+        parsed.every((n) => typeof n === "number")
+      ) {
+        const scores = parsed as number[];
+        return hits
+          .map((h, i) => ({ ...h, score: scores[i] ?? 0 }))
+          .sort((a, b) => b.score - a.score);
+      }
+    } catch {
+      // Cache entry malformed — fall through to live call.
+    }
+  }
+
+  let scores: number[];
+  try {
+    const passages = hits.map((h) => h.snippet.slice(0, maxChars));
+    const resp = await reranker.rerank({ query, passages });
+    if (
+      !resp ||
+      !Array.isArray(resp.scores) ||
+      resp.scores.length !== hits.length
+    ) {
+      return hits;
+    }
+    scores = resp.scores;
+  } catch {
+    return hits; // reranker unavailable; pass-through unsorted
+  }
+
+  // Cache write is best-effort.
+  try {
+    await redis.setex(cacheKey, ttl, JSON.stringify(scores));
+  } catch {
+    // Redis down — return successfully without caching.
+  }
+
+  return hits
+    .map((h, i) => ({ ...h, score: scores[i] ?? 0 }))
+    .sort((a, b) => b.score - a.score);
+}
+
+export interface SearchHybridRerankOption {
+  redis: RedisLike;
+  reranker: RerankerLike;
+  /** Pre-rerank candidate count from the RRF list. Default `RERANK_DEFAULT_CANDIDATES`. */
+  candidates?: number;
+  /** Per-passage character cap forwarded to `rerankPassages`. */
+  maxPassageChars?: number;
+  /** Cache TTL forwarded to `rerankPassages`. */
+  cacheTtlSec?: number;
+}
+
 export interface SearchHybridParams {
   /** Nextcloud username — the per-user RBAC boundary. */
   userId: string;
@@ -253,6 +398,12 @@ export interface SearchHybridParams {
   perArmK?: number;
   source?: FileContentSource;
   since?: Date;
+  /**
+   * Optional reranker pipe. When omitted, `searchHybrid` returns RRF
+   * top-K. When provided, the RRF top-`candidates` is reranked via the
+   * cross-encoder and the top-K of that is returned.
+   */
+  rerank?: SearchHybridRerankOption;
 }
 
 /**
@@ -298,6 +449,21 @@ export async function searchHybrid(
     }),
   ]);
   const fused = reciprocalRankFusion(vectorHits, lexicalHits);
+
+  if (params.rerank) {
+    const candidatesN =
+      params.rerank.candidates ?? RERANK_DEFAULT_CANDIDATES;
+    const candidates = fused.slice(0, candidatesN);
+    const reranked = await rerankPassages({
+      query: params.query,
+      hits: candidates,
+      redis: params.rerank.redis,
+      reranker: params.rerank.reranker,
+      maxPassageChars: params.rerank.maxPassageChars,
+      cacheTtlSec: params.rerank.cacheTtlSec,
+    });
+    return reranked.slice(0, limit);
+  }
   return fused.slice(0, limit);
 }
 
