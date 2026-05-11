@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# scripts/droplet-admin — WARP-230 admin CLI surface.
+#
+# Dispatches to subcommand handlers in scripts/lib/. The CLI is a thin
+# wrapper around the same admin HTTP routes the dashboard hits, so RBAC
+# + MFA gating are enforced identically — it's an alternate operator
+# surface, not a bypass.
+#
+# Usage: droplet-admin <command> <subcommand> [args]
+#
+# Required env:
+#   DROPLET_API_URL      Orchestrator endpoint (default http://localhost:3000)
+#   DROPLET_ADMIN_TOKEN  Bearer token for the admin user
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=lib/logging.sh
+source "$SCRIPT_DIR/lib/logging.sh"
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  device-identity)
+    # shellcheck source=lib/device-identity.sh
+    source "$SCRIPT_DIR/lib/device-identity.sh"
+    di_cli_dispatch "$@"
+    ;;
+  help|--help|-h|"")
+    cat <<EOF
+Usage: droplet-admin <command> <subcommand> [args]
+
+Commands:
+  device-identity status         Show TPM device identity status
+  device-identity reseal         Re-bind sealed identity to current PCRs
+                                 (requires admin + recent MFA re-auth)
+
+Environment:
+  DROPLET_API_URL                Default: http://localhost:3000
+  DROPLET_ADMIN_TOKEN            Bearer token for the admin user
+EOF
+    ;;
+  *)
+    log_error "Unknown command: $CMD"
+    exit 64
+    ;;
+esac
