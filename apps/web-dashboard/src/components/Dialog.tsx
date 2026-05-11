@@ -201,9 +201,16 @@ export function Dialog({
 
   const isSide = placement === "right";
 
+  // Backdrop opacity differs by placement to match dashboard convention:
+  //   - Centered modals: bg-black/50 + blur, matching the WARP-217 gold
+  //     standard (users/page.tsx) so every centered modal in the
+  //     dashboard reads as the same surface weight.
+  //   - Side panels: bg-black/30, no blur — matches the pre-existing
+  //     side-panel convention (lighter scrim so the user can still scan
+  //     the underlying list while the panel is open).
   const backdropClass = isSide
     ? "fixed inset-0 z-50 flex justify-end bg-black/30"
-    : "fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-6";
+    : "fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6";
 
   const containerClass = isSide
     ? "relative w-full max-w-md h-full bg-surface-primary border-l border-separator shadow-xl overflow-y-auto"

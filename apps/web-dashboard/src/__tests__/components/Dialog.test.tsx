@@ -36,10 +36,12 @@ function Harness({
   initiallyOpen = false,
   closeOnBackdrop = true,
   withDescribedBy = false,
+  placement,
 }: {
   initiallyOpen?: boolean;
   closeOnBackdrop?: boolean;
   withDescribedBy?: boolean;
+  placement?: "center" | "right";
 }) {
   const [open, setOpen] = React.useState(initiallyOpen);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -55,6 +57,7 @@ function Harness({
         labelledBy="dialog-heading"
         describedBy={withDescribedBy ? "dialog-desc" : undefined}
         closeOnBackdrop={closeOnBackdrop}
+        placement={placement}
       >
         <h2 id="dialog-heading">Confirm</h2>
         {withDescribedBy && <p id="dialog-desc">Are you sure?</p>}
@@ -152,6 +155,28 @@ describe("<Dialog> primitive", () => {
       // Focus returns to the original trigger button.
       expect(document.activeElement).toBe(trigger);
     });
+  });
+
+  it("uses bg-black/50 + backdrop-blur-sm for centered placement (gold-standard parity)", () => {
+    // The audit's gold-standard backdrop is `bg-black/50 backdrop-blur-sm`
+    // (see users/page.tsx). Centered modals must match so the dashboard's
+    // modal surfaces read as one consistent weight. WARP-289 UX fold-in.
+    render(<Harness initiallyOpen />);
+    const dialog = screen.getByRole("dialog");
+    const backdrop = dialog.parentElement!;
+    expect(backdrop.className).toContain("bg-black/50");
+    expect(backdrop.className).toContain("backdrop-blur-sm");
+  });
+
+  it("uses bg-black/30 with NO blur for side placement (pre-existing side-panel convention)", () => {
+    // Side panels use a lighter scrim and no blur so the user can still
+    // scan the underlying list while the panel is open. Keep this
+    // separate from the centered case.
+    render(<Harness initiallyOpen placement="right" />);
+    const dialog = screen.getByRole("dialog");
+    const backdrop = dialog.parentElement!;
+    expect(backdrop.className).toContain("bg-black/30");
+    expect(backdrop.className).not.toContain("backdrop-blur-sm");
   });
 
   it("locks body scroll while open and restores on close", async () => {
