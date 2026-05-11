@@ -12,6 +12,15 @@ export interface AuthUser {
   username: string;
   displayName: string;
   role: Role;
+  /**
+   * WARP-230: timestamp of the most-recent successful MFA challenge.
+   * Read by `require-recent-mfa` middleware to gate sensitive admin
+   * actions (device-identity reseal, future key rotation). Populated
+   * by the MFA-challenge flow in WARP-238; until that ticket lands
+   * this is always null and reseal routes will 401 mfa_required,
+   * which is the correct fail-closed behavior.
+   */
+  lastMfaAt?: Date | string | null;
 }
 
 declare global {
