@@ -9,6 +9,7 @@
     "test:rag-brain-upload": "RUN_RAG_INTEGRATION=1 vitest run rag-brain-upload.integration.test.ts",
     "test:rag-brain-export": "RUN_RAG_INTEGRATION=1 vitest run rag-brain-export.integration.test.ts",
     "test:rag-end-to-end": "RUN_RAG_INTEGRATION=1 vitest run rag-end-to-end.integration.test.ts",
+    "test:retrieval-eval": "RUN_RAG_INTEGRATION=1 vitest run retrieval-eval/run.integration.test.ts --reporter=verbose",
     "test:rag": "RUN_RAG_INTEGRATION=1 vitest run --no-file-parallelism rag-extractors.integration.test.ts rag-search.integration.test.ts rag-brain-upload.integration.test.ts rag-knowledge.integration.test.ts rag-brain-export.integration.test.ts rag-end-to-end.integration.test.ts",
     "test:docker": "docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from integration-tests"
   },
@@ -18,6 +19,7 @@
     "@types/yauzl": "^2.10.3",
     "jsonwebtoken": "^9.0.3",
     "vitest": "^1.6.0",
+    "yaml": "^2.4.0",
     "yauzl": "^3.3.0"
   }
 }
