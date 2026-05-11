@@ -1,0 +1,8 @@
+grpcio>=1.62.0
+grpcio-tools>=1.62.0
+cryptography>=42.0.0
+click>=8.0.0
+# tpm2-pytss is only needed for the real backend (Jetson). Installed
+# in Task 3's Dockerfile change. Listed as optional here to keep
+# mock-only environments working without TPM headers.
+# tpm2-pytss>=2.2.0
