@@ -14,6 +14,7 @@ import {
   Archive,
 } from "lucide-react";
 import type { TrashItemInfo } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface TrashViewProps {
   items: TrashItemInfo[];
@@ -69,6 +70,7 @@ export function TrashView({
 }: TrashViewProps) {
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<TrashItemInfo | null>(null);
 
   const handleRestore = async (item: TrashItemInfo) => {
     setBusy(item.name);
@@ -79,13 +81,19 @@ export function TrashView({
     }
   };
 
-  const handleDelete = async (item: TrashItemInfo) => {
-    if (!confirm(`Permanently delete "${item.originalName}"? This cannot be undone.`)) {
-      return;
-    }
+  const handleDelete = (item: TrashItemInfo) => {
+    setPendingDelete(item);
+  };
+
+  const performDelete = async () => {
+    const item = pendingDelete;
+    if (!item) return;
     setBusy(item.name);
     try {
       await onDeleteForever(item.name);
+      setPendingDelete(null);
+    } catch (err) {
+      throw err;
     } finally {
       setBusy(null);
     }
@@ -211,6 +219,20 @@ export function TrashView({
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onConfirm={performDelete}
+        onCancel={() => setPendingDelete(null)}
+        title={
+          pendingDelete
+            ? `Permanently delete "${pendingDelete.originalName}"?`
+            : "Permanently delete?"
+        }
+        description="This bypasses Trash. The file cannot be restored after this."
+        confirmLabel="Delete forever"
+        variant="destructive"
+      />
     </div>
   );
 }

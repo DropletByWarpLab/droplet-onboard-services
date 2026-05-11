@@ -21,6 +21,7 @@ import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useFiles } from "@/lib/hooks/useFiles";
 import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
@@ -143,26 +144,38 @@ export default function FilesPage() {
   }, [fm.selectedPaths, files, handleDownload]);
 
   // ── Delete / bulk delete ──
-  const handleDelete = useCallback(
-    async (filePath: string) => {
-      if (!confirm(`Delete "${filePath.split("/").pop()}"?`)) return;
-      try {
-        await deleteFile(filePath);
-        if (selectedFile?.path === filePath) setSelectedFile(null);
-        fm.clearSelection();
-        await refresh();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : "Delete failed");
-      }
-    },
-    [selectedFile, refresh, toast, fm]
-  );
+  //
+  // Both flows route through <ConfirmDialog>. Single-file delete stores
+  // the path string in pendingDeletePath; bulk delete just stores `true`
+  // (the paths are already in `fm.selectedPaths`).
+  const [pendingDeletePath, setPendingDeletePath] = useState<string | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
-  const handleBulkDelete = useCallback(async () => {
-    if (fm.selectedCount === 0) return;
-    if (!confirm(`Move ${fm.selectedCount} item${fm.selectedCount > 1 ? "s" : ""} to trash?`)) {
-      return;
+  const handleDelete = useCallback((filePath: string) => {
+    setPendingDeletePath(filePath);
+  }, []);
+
+  const performDelete = useCallback(async () => {
+    const filePath = pendingDeletePath;
+    if (!filePath) return;
+    try {
+      await deleteFile(filePath);
+      if (selectedFile?.path === filePath) setSelectedFile(null);
+      fm.clearSelection();
+      setPendingDeletePath(null);
+      await refresh();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Delete failed");
+      throw err;
     }
+  }, [pendingDeletePath, selectedFile, refresh, toast, fm]);
+
+  const handleBulkDelete = useCallback(() => {
+    if (fm.selectedCount === 0) return;
+    setPendingBulkDelete(true);
+  }, [fm.selectedCount]);
+
+  const performBulkDelete = useCallback(async () => {
     try {
       const results = await bulkDeleteFiles(fm.selectedPaths);
       const failed = results.filter((r) => !r.ok);
@@ -171,9 +184,11 @@ export default function FilesPage() {
       }
       fm.clearSelection();
       setSelectedFile(null);
+      setPendingBulkDelete(false);
       await refresh();
     } catch (err) {
       toast(err instanceof Error ? err.message : "Bulk delete failed");
+      throw err;
     }
   }, [fm, refresh, toast]);
 
@@ -675,6 +690,30 @@ export default function FilesPage() {
           onConfirm={handleMoveCopyConfirm}
         />
       )}
+
+      <ConfirmDialog
+        open={pendingDeletePath !== null}
+        onConfirm={performDelete}
+        onCancel={() => setPendingDeletePath(null)}
+        title={
+          pendingDeletePath
+            ? `Delete "${pendingDeletePath.split("/").pop()}"?`
+            : "Delete file?"
+        }
+        description="The file moves to Trash. You can restore it from there until Trash is emptied."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={pendingBulkDelete}
+        onConfirm={performBulkDelete}
+        onCancel={() => setPendingBulkDelete(false)}
+        title={`Move ${fm.selectedCount} item${fm.selectedCount > 1 ? "s" : ""} to Trash?`}
+        description="The items move to Trash. You can restore them from there until Trash is emptied."
+        confirmLabel="Move to Trash"
+        variant="destructive"
+      />
     </div>
   );
 }
