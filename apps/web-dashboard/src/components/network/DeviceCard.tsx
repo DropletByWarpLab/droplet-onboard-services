@@ -139,7 +139,7 @@ function QuickScheduleActionButton({
           setOpen((o) => !o);
         }}
         onKeyDown={(e) => e.stopPropagation()}
-        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1"
+        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         aria-label={`Quick schedule for ${displayName}`}
       >
         <Icons.CalendarClock className="w-3.5 h-3.5" />
@@ -205,7 +205,7 @@ function BlockActionButton({
         type="button"
         onClick={openConfirm}
         onKeyDown={(e) => e.stopPropagation()}
-        className={`type-caption-1 px-2 py-1 rounded ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
+        className={`type-caption-1 px-2 py-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
         aria-label={
           isUnblocking
             ? `Unblock device ${displayName}`
