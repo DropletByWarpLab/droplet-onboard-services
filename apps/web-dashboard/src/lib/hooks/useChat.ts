@@ -2,7 +2,71 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sendChat, uploadBrainFile } from "../api";
-import type { ChatAttachment, ChatMessage, ChatToolCall } from "../types";
+import type {
+  ChatAttachment,
+  ChatCitation,
+  ChatMessage,
+  ChatToolCall,
+} from "../types";
+
+/**
+ * WARP-295: tools whose `tool_result.data.results[]` carries
+ * citation-shaped rows. Keep the set narrow — non-retrieval tools (e.g.
+ * `list_network_devices`) return device data, and surfacing those as
+ * citations would pollute the chip row with bogus links.
+ *
+ * Source-of-truth shape:
+ *   packages/tools-core/src/handlers/files/search-content.ts
+ *
+ * If new retrieval tools land (e.g. `search_brain`, `search_calendar`),
+ * add their names here and confirm the data.results[] shape matches —
+ * the extractor is tolerant of missing fields but assumes `path`.
+ */
+const RETRIEVAL_TOOL_NAMES = new Set(["search_content"]);
+
+/** Stable dedupe key for one citation row. */
+function citationKey(c: ChatCitation): string {
+  return `${c.source}|${c.path}|${c.pageNumber ?? ""}`;
+}
+
+interface RawCitationRow {
+  source?: string;
+  path?: string;
+  pageNumber?: number | null;
+  page_number?: number | null;
+  score?: number;
+  text?: string;
+  snippet?: string;
+  brainItemId?: string | null;
+  brain_item_id?: string | null;
+  mimeType?: string;
+  mime_type?: string;
+}
+
+/** Extract `ChatCitation[]` from a tool_result event, or return [] if shape doesn't match. */
+function extractCitations(toolName: string, data: unknown): ChatCitation[] {
+  if (!RETRIEVAL_TOOL_NAMES.has(toolName)) return [];
+  if (!data || typeof data !== "object") return [];
+  const results = (data as { results?: unknown }).results;
+  if (!Array.isArray(results)) return [];
+  const out: ChatCitation[] = [];
+  for (const r of results as RawCitationRow[]) {
+    if (!r || typeof r !== "object") continue;
+    if (typeof r.path !== "string") continue;
+    const source: "nextcloud" | "brain" =
+      r.source === "brain" ? "brain" : "nextcloud";
+    out.push({
+      source,
+      path: r.path,
+      pageNumber: r.pageNumber ?? r.page_number ?? null,
+      score: typeof r.score === "number" ? r.score : undefined,
+      brainItemId: r.brainItemId ?? r.brain_item_id ?? null,
+      snippet: r.snippet ?? r.text ?? undefined,
+      mimeType: r.mimeType ?? r.mime_type ?? undefined,
+    });
+  }
+  return out;
+}
 
 /**
  * Chat hook backed by `POST /api/llm/chat` (the MCP-backed orchestrator
@@ -589,7 +653,34 @@ function applyEvent(
           message: evt.message,
         };
         const updated = [...prev];
-        updated[idx] = { ...last, toolCalls: updatedCalls };
+        // WARP-295: when the matching tool is a retrieval tool, fold
+        // its result rows into the assistant message's citations. The
+        // chip row below the bubble re-renders as each result lands so
+        // sources appear alongside the streaming answer.
+        const toolName = calls[callIdx].name;
+        const newCitations =
+          evt.ok && evt.status !== "confirmation_required"
+            ? extractCitations(toolName, evt.data)
+            : [];
+        let mergedCitations = last.citations;
+        if (newCitations.length > 0) {
+          const seen = new Set((mergedCitations ?? []).map(citationKey));
+          const additions: ChatCitation[] = [];
+          for (const c of newCitations) {
+            const k = citationKey(c);
+            if (seen.has(k)) continue;
+            seen.add(k);
+            additions.push(c);
+          }
+          if (additions.length > 0) {
+            mergedCitations = [...(mergedCitations ?? []), ...additions];
+          }
+        }
+        updated[idx] = {
+          ...last,
+          toolCalls: updatedCalls,
+          ...(mergedCitations ? { citations: mergedCitations } : {}),
+        };
         return updated;
       }
       case "done": {

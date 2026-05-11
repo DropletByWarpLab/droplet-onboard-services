@@ -1,5 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+
+// CitationChip wraps next/link — the global mock in setup.ts returns a
+// raw string template rather than a real element, which makes the chip
+// render as text. Override here so the chip renders an <a>.
+vi.mock("next/link", () => ({
+  default: ({ children, ...props }: any) => {
+    const React = require("react");
+    return React.createElement("a", props, children);
+  },
+}));
+
 import { ChatMessage } from "@/components/ChatMessage";
 import type {
   ChatMessage as ChatMessageType,
@@ -367,6 +378,75 @@ describe("ChatMessage", () => {
       expect(
         screen.getByRole("button", { name: /copy message/i }),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe("citation chips (WARP-295)", () => {
+    it("renders a row of <CitationChip> chips below assistant messages with citations", () => {
+      const { container } = render(
+        <ChatMessage
+          message={{
+            id: "asst-c",
+            role: "assistant",
+            content: "Here's what I found.",
+            citations: [
+              {
+                source: "brain",
+                path: "wireguard-cheatsheet.md",
+                pageNumber: 3,
+                score: 0.81,
+                brainItemId: "bmi-42",
+                snippet: "wg genkey ...",
+              },
+              {
+                source: "nextcloud",
+                path: "/Docs/vpn-setup.md",
+                score: 0.93,
+                snippet: "wg-quick up wg0",
+              },
+            ],
+          }}
+        />,
+      );
+
+      const row = screen.getByTestId("chat-citations");
+      expect(row).toBeInTheDocument();
+      // Both chips render through the shared component.
+      const chips = container.querySelectorAll("[data-citation-path]");
+      expect(chips).toHaveLength(2);
+      expect(chips[0].getAttribute("data-citation-source")).toBe("brain");
+      expect(chips[1].getAttribute("data-citation-source")).toBe("nextcloud");
+    });
+
+    it("renders no citation row when the assistant message has no citations", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-no-c",
+            role: "assistant",
+            content: "Nothing to cite.",
+          }}
+        />,
+      );
+      expect(screen.queryByTestId("chat-citations")).not.toBeInTheDocument();
+    });
+
+    it("does not render citations on a user bubble (defensive — the type allows it)", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "user-c",
+            role: "user",
+            content: "Question",
+            // Type allows it through ChatMessageType — but the component
+            // must render zero chips because user turns never carry RAG hits.
+            citations: [
+              { source: "brain", path: "x.md" },
+            ],
+          }}
+        />,
+      );
+      expect(screen.queryByTestId("chat-citations")).not.toBeInTheDocument();
     });
   });
 
