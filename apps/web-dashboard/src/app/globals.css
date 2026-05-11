@@ -30,6 +30,7 @@
   /* System status */
   --color-system-red: #ff3b30;
   --color-system-orange: #ff9500;
+  --color-system-yellow: #ffcc00;
   --color-system-green: #34c759;
   --color-system-blue: #007aff;
 
@@ -75,6 +76,7 @@
   /* System status (dark variants) */
   --color-system-red: #ff453a;
   --color-system-orange: #ff9f0a;
+  --color-system-yellow: #ffd60a;
   --color-system-green: #30d158;
   --color-system-blue: #0a84ff;
 
