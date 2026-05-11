@@ -120,8 +120,69 @@ export function FileRow({
     void onRename(next);
   };
 
+  // WARP-298: full keyboard support. Each row is its own focus stop
+  // (role=button, tabIndex 0) and responds to:
+  //   - Enter / Space  → open (mirror onClick/onDoubleClick semantics)
+  //   - ArrowDown      → move focus to next row
+  //   - ArrowUp        → move focus to previous row
+  //   - Delete         → trigger delete (the parent passes a handler that
+  //                      routes through ConfirmDialog — we never bypass it)
+  //   - Shift+F10 / ContextMenu key → open context menu at the row's
+  //                      bounding rect (standard kb shortcut for right-click)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (isRenaming) return; // Defer all keys to the input while renaming.
+    switch (e.key) {
+      case "Enter":
+      case " ":
+        // Space scrolls the page by default; block before opening.
+        e.preventDefault();
+        onOpen();
+        return;
+      case "ArrowDown": {
+        e.preventDefault();
+        const next = (e.currentTarget.nextElementSibling as HTMLElement | null);
+        if (next && next.tagName === e.currentTarget.tagName) next.focus();
+        return;
+      }
+      case "ArrowUp": {
+        e.preventDefault();
+        const prev = (e.currentTarget.previousElementSibling as HTMLElement | null);
+        if (prev && prev.tagName === e.currentTarget.tagName) prev.focus();
+        return;
+      }
+      case "Delete": {
+        // Routes through the parent's ConfirmDialog (WARP-291); never
+        // bypasses confirmation. Backspace is NOT bound here — too easy
+        // to hit accidentally and the rename-input handler stops
+        // propagation but other transient focus states could let a
+        // stray Backspace through.
+        e.preventDefault();
+        onDelete();
+        return;
+      }
+      case "F10":
+        if (e.shiftKey) {
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          onContextMenu(rect.left + 16, rect.bottom);
+        }
+        return;
+      case "ContextMenu": {
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        onContextMenu(rect.left + 16, rect.bottom);
+        return;
+      }
+    }
+  };
+
   return (
     <div
+      role="button"
+      tabIndex={isRenaming ? -1 : 0}
+      aria-label={`${file.isDirectory ? "Folder" : "File"} ${file.name}`}
+      aria-selected={isSelected}
+      data-filerow="1"
       onClick={(e) => {
         if (isRenaming) return;
         onSelect(e);
@@ -131,11 +192,13 @@ export function FileRow({
         e.stopPropagation();
         onOpen();
       }}
+      onKeyDown={handleKeyDown}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu(e.clientX, e.clientY);
       }}
       className={`dp-row group transition-colors duration-200 ease-smooth cursor-pointer
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
         ${isSelected ? "bg-accent-subtle" : "hover:bg-surface-secondary/60"}`}
     >
       {/* Selection indicator */}
