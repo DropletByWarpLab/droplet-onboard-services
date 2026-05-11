@@ -56,6 +56,19 @@ export interface SearchByVectorParams {
   since?: Date;
 }
 
+export interface SearchByLexicalParams {
+  /** Nextcloud username — the per-user RBAC boundary. */
+  userId: string;
+  /** Raw user query string. `websearch_to_tsquery` handles punctuation safely. */
+  query: string;
+  /** Maximum rows to return (caller-clamped). */
+  limit: number;
+  /** Optional: restrict to one source. */
+  source?: FileContentSource;
+  /** Optional: only chunks indexed at-or-after this timestamp. */
+  since?: Date;
+}
+
 interface RawSearchRow {
   source: FileContentSource;
   path: string;
@@ -120,6 +133,172 @@ export async function searchByVector(
       snippet: r.snippet,
       metadata: r.metadata ?? null,
     }));
+}
+
+/**
+ * Lexical (BM25-style) search via Postgres native FTS.
+ * Uses `websearch_to_tsquery` (forgiving query parser) and `ts_rank_cd`
+ * with normalization flag 32 (mean-of-distance-between-matches) — the
+ * closest native-FTS analog to BM25's length-normalization.
+ *
+ * WARP-286: paired with `searchByVector` and fused via
+ * `reciprocalRankFusion` in `searchHybrid`. The interface lets us
+ * swap to pg_search (Tantivy) later without changing callers.
+ */
+export async function searchByLexical(
+  prisma: PrismaClient,
+  params: SearchByLexicalParams,
+): Promise<SearchHit[]> {
+  const where: string[] = [
+    `"userId" = $1`,
+    `"text_tsv" @@ websearch_to_tsquery('english', $2)`,
+  ];
+  const args: unknown[] = [params.userId, params.query];
+  let p = 3;
+  if (params.source !== undefined) {
+    where.push(`source = $${p}::"FileContentSource"`);
+    args.push(params.source);
+    p++;
+  }
+  if (params.since !== undefined) {
+    where.push(`"indexedAt" >= $${p}`);
+    args.push(params.since);
+    p++;
+  }
+  const limitParam = p;
+  args.push(params.limit);
+
+  const sql = `SELECT
+       source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
+       LEFT(text, 280) AS snippet,
+       ts_rank_cd("text_tsv", websearch_to_tsquery('english', $2), 32) AS score
+     FROM "FileContentChunk"
+     WHERE ${where.join(" AND ")}
+     ORDER BY score DESC
+     LIMIT $${limitParam}`;
+  const rows = await (
+    prisma as unknown as {
+      $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawSearchRow[]>;
+    }
+  ).$queryRawUnsafe(sql, ...args);
+  return rows.map((r) => ({
+    source: r.source,
+    path: r.path,
+    chunkIdx: r.chunkIdx,
+    pageNumber: r.pageNumber,
+    brainItemId: r.brainItemId,
+    score: r.score,
+    snippet: r.snippet,
+    metadata: r.metadata ?? null,
+  }));
+}
+
+/**
+ * RRF constant `k`. Cormack et al. 2009 use `k=60` as the canonical
+ * value; raising k flattens the rank-decay curve (favors consensus
+ * across retrievers), lowering it sharpens it (favors highly-ranked
+ * outliers). Tuning knob documented in `docs/RAG_RETRIEVAL.md`.
+ */
+export const RRF_DEFAULT_K = 60;
+
+/**
+ * Reciprocal rank fusion (Cormack et al., 2009). Combines two ranked
+ * lists into a single list ordered by the sum of `1 / (k + rank)`
+ * contributions from each list. Default k=60 is the canonical value
+ * from the original paper.
+ *
+ * Deduplicates by (source, path, chunkIdx). A chunk in both inputs
+ * gets the sum of its two contributions, which is what makes RRF
+ * elevate items strongly endorsed by multiple retrievers.
+ *
+ * WARP-286: bridge between BM25 (lexical) and ANN (vector). The
+ * returned `score` field is the RRF score, not the original similarity.
+ */
+export function reciprocalRankFusion(
+  vectorHits: SearchHit[],
+  lexicalHits: SearchHit[],
+  k: number = RRF_DEFAULT_K,
+): SearchHit[] {
+  const scores = new Map<string, { hit: SearchHit; score: number }>();
+
+  for (const [rank, h] of vectorHits.entries()) {
+    const key = `${h.source}:${h.path}:${h.chunkIdx}`;
+    scores.set(key, { hit: h, score: 1 / (k + rank) });
+  }
+  for (const [rank, h] of lexicalHits.entries()) {
+    const key = `${h.source}:${h.path}:${h.chunkIdx}`;
+    const prev = scores.get(key);
+    scores.set(key, {
+      hit: prev?.hit ?? h,
+      score: (prev?.score ?? 0) + 1 / (k + rank),
+    });
+  }
+  return [...scores.values()]
+    .sort((a, b) => b.score - a.score)
+    .map(({ hit, score }) => ({ ...hit, score }));
+}
+
+export interface SearchHybridParams {
+  /** Nextcloud username — the per-user RBAC boundary. */
+  userId: string;
+  /** Embedding vector for the query. */
+  vector: number[];
+  /** Raw query text for the lexical arm. */
+  query: string;
+  /** Final result count (caller-clamped). Default `SEARCH_HYBRID_DEFAULT_LIMIT`. */
+  limit?: number;
+  /** Cosine-similarity floor for the vector arm. Default `SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY`. */
+  minSimilarity?: number;
+  /** How many to pull from each retriever before fusion. Default `SEARCH_HYBRID_DEFAULT_PER_ARM_K`. */
+  perArmK?: number;
+  source?: FileContentSource;
+  since?: Date;
+}
+
+/**
+ * Default candidate count fetched from each retrieval arm (vector + lexical)
+ * before RRF fusion. WARP-286 §Pipeline: 100 keeps recall high without
+ * blowing up rerank cost (top-50 of fused is reranked downstream).
+ */
+export const SEARCH_HYBRID_DEFAULT_PER_ARM_K = 100;
+/** Caller-facing default result count. */
+export const SEARCH_HYBRID_DEFAULT_LIMIT = 10;
+/** Cosine-similarity floor for the vector arm of `searchHybrid`. */
+export const SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY = 0.3;
+
+/**
+ * Hybrid retrieval: parallel BM25 + vector, fused via RRF.
+ *
+ * WARP-286: this is the v1 caller-facing entrypoint. The reranker
+ * step lives in a separate commit (Task 5); for now this returns the
+ * RRF top-K. Tests verify the wiring; the eval harness (Task 7)
+ * measures quality.
+ */
+export async function searchHybrid(
+  prisma: PrismaClient,
+  params: SearchHybridParams,
+): Promise<SearchHit[]> {
+  const perArmK = params.perArmK ?? SEARCH_HYBRID_DEFAULT_PER_ARM_K;
+  const limit = params.limit ?? SEARCH_HYBRID_DEFAULT_LIMIT;
+  const [vectorHits, lexicalHits] = await Promise.all([
+    searchByVector(prisma, {
+      userId: params.userId,
+      vector: params.vector,
+      limit: perArmK,
+      minSimilarity: params.minSimilarity ?? SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY,
+      source: params.source,
+      since: params.since,
+    }),
+    searchByLexical(prisma, {
+      userId: params.userId,
+      query: params.query,
+      limit: perArmK,
+      source: params.source,
+      since: params.since,
+    }),
+  ]);
+  const fused = reciprocalRankFusion(vectorHits, lexicalHits);
+  return fused.slice(0, limit);
 }
 
 export interface ListRecentParams {
