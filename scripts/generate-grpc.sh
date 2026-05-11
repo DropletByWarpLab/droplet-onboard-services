@@ -10,7 +10,7 @@ PROTO_DIR="$REPO_ROOT/proto"
 AI_GATEWAY_DIR="$REPO_ROOT/services/ai-gateway"
 GRPC_OUT="$AI_GATEWAY_DIR/grpc_generated"
 
-echo "==> Generating Python gRPC stubs..."
+echo "==> Generating Python gRPC stubs (ai-gateway)..."
 mkdir -p "$GRPC_OUT"
 python3 -m grpc_tools.protoc \
   -I"$PROTO_DIR" \
@@ -24,6 +24,22 @@ sed -i.bak 's/^import inference_pb2/from grpc_generated import inference_pb2/' "
 rm -f "$GRPC_OUT"/*.bak
 
 echo "==> Python gRPC stubs generated in $GRPC_OUT"
+
+# WARP-230 — device-identity sidecar stubs.
+DEVICE_IDENTITY_DIR="$REPO_ROOT/services/device-identity-svc"
+DI_GRPC_OUT="$DEVICE_IDENTITY_DIR/grpc_generated"
+echo "==> Generating Python gRPC stubs (device-identity-svc)..."
+mkdir -p "$DI_GRPC_OUT"
+touch "$DI_GRPC_OUT/__init__.py"
+python3 -m grpc_tools.protoc \
+  -I"$PROTO_DIR" \
+  --python_out="$DI_GRPC_OUT" \
+  --grpc_python_out="$DI_GRPC_OUT" \
+  "$PROTO_DIR/device_identity.proto"
+sed -i.bak 's/^import device_identity_pb2/from grpc_generated import device_identity_pb2/' "$DI_GRPC_OUT/device_identity_pb2_grpc.py" 2>/dev/null || \
+  sed -i '' 's/^import device_identity_pb2/from grpc_generated import device_identity_pb2/' "$DI_GRPC_OUT/device_identity_pb2_grpc.py"
+rm -f "$DI_GRPC_OUT"/*.bak
+echo "==> Python gRPC stubs generated in $DI_GRPC_OUT"
 
 # ── TypeScript stubs (orchestrator) ────────────────────────────────────────
 # Used by `EmbeddingClient` (apps/orchestrator/src/services/embedding.client.ts)
@@ -56,7 +72,8 @@ fi
   --ts_proto_out="$TS_GRPC_OUT" \
   --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,useExactTypes=false \
   --proto_path="$PROTO_DIR" \
-  "$PROTO_DIR/inference.proto"
+  "$PROTO_DIR/inference.proto" \
+  "$PROTO_DIR/device_identity.proto"
 
 echo "==> TS gRPC stubs generated in $TS_GRPC_OUT"
 echo "Done."
