@@ -8,6 +8,13 @@ import {
   sendTestPush,
   unregisterPushSubscription,
 } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
+
+// WARP-294: track inline status messages with an explicit tone instead
+// of inferring "is this red?" from a substring search of err.message.
+// Untyped substring sniffing leaked the raw orchestrator string onto
+// the screen whenever the error didn't include "fail" or "denied".
+type MsgState = { text: string; tone: "success" | "error" } | null;
 
 type Status = "checking" | "unsupported" | "denied" | "subscribed" | "ready" | "configured-off";
 
@@ -45,7 +52,7 @@ export function PushSubscriptionCard() {
   const [status, setStatus] = useState<Status>("checking");
   const [busy, setBusy] = useState<"subscribe" | "unsubscribe" | "test" | null>(null);
   const [endpoint, setEndpoint] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<MsgState>(null);
 
   useEffect(() => {
     void probe();
@@ -73,11 +80,13 @@ export function PushSubscriptionCard() {
       await fetchVapidPublicKey();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      // Treat "not configured" as its own state (a config gap, not an
+      // error to retry). Everything else routes through the helper.
       if (message.includes("not configured")) {
         setStatus("configured-off");
         return;
       }
-      setMsg(message);
+      setMsg({ text: translateError(e, "push"), tone: "error" });
     }
     // Already subscribed?
     try {
@@ -124,9 +133,9 @@ export function PushSubscriptionCard() {
       await registerPushSubscription(sub);
       setEndpoint(sub.endpoint);
       setStatus("subscribed");
-      setMsg("Push notifications enabled.");
+      setMsg({ text: "Push notifications enabled.", tone: "success" });
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Subscribe failed");
+      setMsg({ text: translateError(e, "push"), tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -145,9 +154,9 @@ export function PushSubscriptionCard() {
       }
       setEndpoint(null);
       setStatus("ready");
-      setMsg("Push notifications disabled.");
+      setMsg({ text: "Push notifications disabled.", tone: "success" });
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Unsubscribe failed");
+      setMsg({ text: translateError(e, "push"), tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -159,12 +168,18 @@ export function PushSubscriptionCard() {
     try {
       const r = await sendTestPush();
       if (r.sent === 0) {
-        setMsg("Test queued — but no active subscription. Re-subscribe?");
+        setMsg({
+          text: "Test queued — but no active subscription. Re-subscribe?",
+          tone: "error",
+        });
       } else {
-        setMsg(`Test sent (${r.sent} subscription${r.sent === 1 ? "" : "s"}). Check your OS notification tray.`);
+        setMsg({
+          text: `Test sent (${r.sent} subscription${r.sent === 1 ? "" : "s"}). Check your OS notification tray.`,
+          tone: "success",
+        });
       }
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Test failed");
+      setMsg({ text: translateError(e, "push"), tone: "error" });
     } finally {
       setBusy(null);
     }
@@ -255,12 +270,10 @@ export function PushSubscriptionCard() {
           {msg && (
             <p
               className={`type-caption-1 mt-2 ${
-                msg.toLowerCase().includes("fail") || msg.toLowerCase().includes("denied")
-                  ? "text-system-red"
-                  : "text-system-green"
+                msg.tone === "error" ? "text-system-red" : "text-system-green"
               }`}
             >
-              {msg}
+              {msg.text}
             </p>
           )}
         </div>
