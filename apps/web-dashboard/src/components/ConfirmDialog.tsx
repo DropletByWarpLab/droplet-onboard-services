@@ -99,13 +99,6 @@ export function ConfirmDialog({
       ? "type-subheadline px-4 py-1.5 rounded-md bg-system-red text-white hover:bg-system-red/90 disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[36px]"
       : "dp-btn-primary type-subheadline !min-h-[36px] !py-1.5";
 
-  // Destructive variant gets a slightly warmer description tone so the
-  // body copy reinforces "this is consequential."
-  const descriptionClass =
-    variant === "destructive"
-      ? "type-subheadline text-label-secondary"
-      : "type-subheadline text-label-secondary";
-
   return (
     <Dialog
       open={open}
@@ -121,7 +114,7 @@ export function ConfirmDialog({
           <h2 id={headingId} className="type-headline text-label-primary">
             {title}
           </h2>
-          <p id={descId} className={`${descriptionClass} mt-1.5`}>
+          <p id={descId} className="type-subheadline text-label-secondary mt-1.5">
             {description}
           </p>
           {confirmedIdentifier && (
