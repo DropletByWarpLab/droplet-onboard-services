@@ -2043,6 +2043,29 @@ export interface KnowledgeSearchHit {
   snippet: string;
   // WARP-214: surfaced verbatim from the orchestrator. Null on legacy rows.
   metadata?: ChunkMetadata | null;
+  /**
+   * WARP-287: opaque Nextcloud file id, surfaced so the dashboard can
+   * build canonical refs (downloads, admin reindex). Optional because
+   * legacy hits / brain hits may not carry it yet — callers fall back
+   * to `path` for routing when this is missing.
+   */
+  ncFileId?: string | null;
+  /**
+   * WARP-287: per-chunk anchor decoded by the orchestrator. `null` on
+   * legacy chunks; the dashboard renders those via `<FileCitation>`.
+   * Loose type here because the wire schema is owned by the
+   * `@droplet/shared-types` `AnchorSchema` — we trust the orchestrator
+   * to validate before publishing.
+   */
+  anchor?: unknown;
+  /**
+   * WARP-287: full chunk text (not the snippet — the citation viewer
+   * for emails renders this in the modal). Optional; falls back to
+   * `snippet` when absent.
+   */
+  chunkText?: string | null;
+  /** WARP-287: MIME type of the underlying file (derived path fallback in UI). */
+  mimeType?: string | null;
 }
 
 export interface SearchKnowledgeResponse {

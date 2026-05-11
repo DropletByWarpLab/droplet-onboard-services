@@ -3,8 +3,9 @@
 /**
  * "Search" tab — semantic search across the indexed file chunks.
  * Submits to `/api/files/knowledge/search`. Results render as a list
- * with a CitationChip for each hit so the surface stays visually
- * aligned with the chat citations.
+ * with a CitationCard for each hit so the surface stays visually
+ * aligned with the chat citations and respects the per-chunk anchor
+ * (WARP-287 deep-link: PDF page, audio timestamp, email part, ...).
  *
  * The 503 "search-not-yet-available" response from the orchestrator
  * (when WARP-202's file-search.service hasn't been merged yet) is
@@ -13,12 +14,13 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { Search as SearchIcon } from "lucide-react";
+import type { Anchor } from "@droplet/shared-types";
 import {
   searchKnowledge,
   type KnowledgeSearchHit,
   type SearchKnowledgeResponse,
 } from "@/lib/api";
-import { CitationChip } from "@/components/CitationChip";
+import { CitationCard } from "@/components/citations/CitationCard";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { SourceChannelBadge } from "@/components/SourceChannelBadge";
 import { mimeFromPath } from "@/lib/mime-icons";
@@ -164,20 +166,28 @@ export function SearchTab({
       {status.kind === "ready" && status.hits.length > 0 && (
         <ul className="space-y-2" data-testid="knowledge-search-results">
           {status.hits.map((hit, i) => {
-            // WARP-214: feed the chip a derived MIME so the icon matches
-            // the file's true type instead of the source-based fallback.
-            const mime = mimeFromPath(hit.path);
+            // WARP-287: project the wire-shaped hit into the canonical
+            // CitationHit DTO. `fileId` falls back to `path` for legacy
+            // responses that don't carry `ncFileId` yet; the FileCitation
+            // fall-through still produces a working link in that case.
+            const mime =
+              (typeof hit.mimeType === "string" ? hit.mimeType : null) ??
+              mimeFromPath(hit.path);
+            const filename = hit.path.split("/").pop() || hit.path;
+            const fileId = hit.ncFileId ? String(hit.ncFileId) : hit.path;
+            const anchor = (hit.anchor ?? null) as Anchor | null;
             return (
               <li key={`${hit.path}-${i}`} className="dp-card p-3">
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
-                  <CitationChip
-                    source={hit.source}
-                    path={hit.path}
-                    pageNumber={hit.pageNumber}
-                    score={hit.score}
-                    brainItemId={hit.brainItemId}
-                    snippet={hit.snippet}
-                    mimeType={mime}
+                  <CitationCard
+                    hit={{
+                      fileId,
+                      filename,
+                      mimeType: mime,
+                      chunkText: hit.chunkText ?? hit.snippet ?? "",
+                      score: hit.score,
+                      anchor,
+                    }}
                   />
                   <SourceChannelBadge
                     subtitleSource={hit.metadata?.subtitle_source ?? null}
