@@ -58,7 +58,7 @@ describe("<DeviceCard> Block → ConfirmDialog (WARP-291 / WARP-41)", () => {
         <DeviceCard device={device()} onOpen={() => {}} />
       </Wrap>,
     );
-    const blockBtn = screen.getByRole("button", { name: /^Block device$/i });
+    const blockBtn = screen.getByRole("button", { name: /^Block device\b/i });
     fireEvent.click(blockBtn);
 
     expect(screen.getByText("Block Alice's iPad?")).toBeInTheDocument();

@@ -56,22 +56,19 @@ function renderCard(
 // WARP-291: click the row's Block/Unblock affordance, then click the
 // confirm button inside the <ConfirmDialog>. Returns the trigger node
 // so per-test assertions on aria-label / textContent still work.
+// WARP-292 sharpened the row trigger aria-label to include the device
+// displayName ("Block device Romain's MacBook"), so we match by regex
+// to keep these tests resilient to the suffix.
 function clickThroughConfirm(
-  triggerName: "Block device" | "Unblock device",
+  triggerKind: "Block device" | "Unblock device",
   confirmName: "Block" | "Unblock",
 ): HTMLElement {
-  const trigger = screen.getByRole("button", { name: triggerName });
+  const trigger = screen.getByRole("button", {
+    name: new RegExp(`^${triggerKind}\\b`, "i"),
+  });
   fireEvent.click(trigger);
   // The dialog confirm button shares the same accessible name as the
-  // row trigger label minus the "device" suffix — the dialog opens
-  // synchronously under the reduced-motion stub, so we can grab it
-  // directly. getAllByRole picks up both the row chip and the dialog
-  // confirm; the dialog's is index [0] because it's painted into the
-  // portal which comes after the card in DOM order? In practice
-  // testing-library returns them in document order. We pick by name
-  // match — index 1 is the dialog button (the row trigger has
-  // aria-label "Block device" / "Unblock device" not "Block" /
-  // "Unblock").
+  // row trigger label minus the "device" suffix.
   const confirmBtn = screen.getByRole("button", { name: confirmName });
   fireEvent.click(confirmBtn);
   return trigger;
@@ -95,7 +92,7 @@ describe("DeviceCard block/unblock mutation", () => {
 
     renderCard(device);
 
-    const trigger = screen.getByRole("button", { name: "Block device" });
+    const trigger = screen.getByRole("button", { name: /^Block device\b/i });
     expect(trigger.textContent).toBe("Block");
 
     clickThroughConfirm("Block device", "Block");
@@ -119,7 +116,7 @@ describe("DeviceCard block/unblock mutation", () => {
 
     renderCard(device);
 
-    const trigger = screen.getByRole("button", { name: "Unblock device" });
+    const trigger = screen.getByRole("button", { name: /^Unblock device\b/i });
     expect(trigger.textContent).toBe("Unblock");
 
     clickThroughConfirm("Unblock device", "Unblock");
@@ -154,7 +151,7 @@ describe("DeviceCard block/unblock mutation", () => {
     const onOpen = vi.fn();
     mockFetchOnceJson(fetchMock, {});
     renderCard(makeDevice({ isBlocked: false }), onOpen);
-    const blockBtn = screen.getByRole("button", { name: "Block device" });
+    const blockBtn = screen.getByRole("button", { name: /^Block device\b/i });
     fireEvent.keyDown(blockBtn, { key: "Enter" });
     // Buttons fire onClick from Enter natively; simulate to take the
     // open-confirm path and click the dialog's confirm.
