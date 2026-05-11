@@ -1,6 +1,13 @@
 "use client";
 
-import { createContext, useCallback, useContext, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { X, AlertCircle, CheckCircle2, Info } from "lucide-react";
 
 type ToastType = "error" | "success" | "info";
@@ -25,19 +32,25 @@ export function useToast() {
 
 let nextId = 0;
 
+// Auto-dismiss timeout for non-error toasts. Error toasts intentionally
+// persist until the user dismisses them — see WCAG 2.2.1 "Timing
+// Adjustable" and WARP-297.
+const AUTO_DISMISS_MS = 5_000;
+
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const dismiss = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const dismissAll = useCallback(() => {
+    setToasts([]);
+  }, []);
 
   const toast = useCallback((message: string, type: ToastType = "error") => {
     const id = ++nextId;
     setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 5000);
-  }, []);
-
-  const dismiss = useCallback((id: number) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
   const icons = {
@@ -55,25 +68,121 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
-      {/* Toast container */}
-      <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 max-w-sm">
-        {toasts.map((t) => (
-          <div
-            key={t.id}
-            className={`flex items-start gap-2.5 px-4 py-3 rounded-lg border shadow-lg
-              backdrop-blur-xl type-footnote animate-slide-up ${colors[t.type]}`}
-          >
-            <span className="flex-shrink-0 mt-0.5">{icons[t.type]}</span>
-            <span className="flex-1">{t.message}</span>
+      {/* Toast region — landmark for screen readers + aria-live polite so
+          additions are announced. role="alert" is set per-toast for errors
+          to upgrade them to assertive. */}
+      <div
+        role="region"
+        aria-live="polite"
+        aria-atomic="false"
+        aria-label="Notifications"
+        className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 max-w-sm"
+      >
+        {toasts.length >= 3 && (
+          <div className="flex justify-end">
             <button
-              onClick={() => dismiss(t.id)}
-              className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+              type="button"
+              onClick={dismissAll}
+              className="type-footnote px-2.5 py-1 rounded-md border border-separator
+                bg-surface-secondary/80 backdrop-blur-xl text-label-secondary
+                hover:text-label-primary transition-colors"
             >
-              <X size={14} />
+              Dismiss all
             </button>
           </div>
+        )}
+        {toasts.map((t) => (
+          <ToastItem
+            key={t.id}
+            toast={t}
+            icon={icons[t.type]}
+            colorClass={colors[t.type]}
+            onDismiss={() => dismiss(t.id)}
+          />
         ))}
       </div>
     </ToastContext.Provider>
+  );
+}
+
+interface ToastItemProps {
+  toast: Toast;
+  icon: React.ReactNode;
+  colorClass: string;
+  onDismiss: () => void;
+}
+
+function ToastItem({ toast, icon, colorClass, onDismiss }: ToastItemProps) {
+  // Error toasts never auto-dismiss (WCAG 2.2.1). Other variants run a 5s
+  // timer that pauses while the user is hovering or focused on the toast.
+  // On mouseleave/blur we restart from a fresh 5s rather than resume —
+  // simpler and more forgiving than tracking elapsed time.
+  const isPersistent = toast.type === "error";
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
+
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pausedRef = useRef(false);
+
+  const clearTimer = () => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const startTimer = () => {
+    if (isPersistent) return;
+    clearTimer();
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      onDismissRef.current();
+    }, AUTO_DISMISS_MS);
+  };
+
+  useEffect(() => {
+    startTimer();
+    return clearTimer;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPersistent]);
+
+  const handlePause = () => {
+    if (isPersistent) return;
+    pausedRef.current = true;
+    clearTimer();
+  };
+
+  const handleResume = () => {
+    if (isPersistent) return;
+    if (!pausedRef.current) return;
+    pausedRef.current = false;
+    startTimer();
+  };
+
+  const dismissLabel = `Dismiss ${toast.message || "notification"}`;
+
+  return (
+    <div
+      data-toast
+      role={toast.type === "error" ? "alert" : undefined}
+      tabIndex={0}
+      onMouseEnter={handlePause}
+      onMouseLeave={handleResume}
+      onFocus={handlePause}
+      onBlur={handleResume}
+      className={`flex items-start gap-2.5 px-4 py-3 rounded-lg border shadow-lg
+        backdrop-blur-xl type-footnote animate-slide-up ${colorClass}`}
+    >
+      <span className="flex-shrink-0 mt-0.5">{icon}</span>
+      <span className="flex-1">{toast.message}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label={dismissLabel}
+        className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </div>
   );
 }
