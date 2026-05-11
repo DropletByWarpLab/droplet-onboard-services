@@ -346,3 +346,154 @@ def start_brain_ingest() -> None:
     """Wire the MQTT subscription. Idempotent."""
     subscribe(BRAIN_UPLOADED_TOPIC, handle_brain_uploaded)
     logger.info("brain_ingest: subscribed to %s", BRAIN_UPLOADED_TOPIC)
+
+
+def reindex_one(nc_file_id: str) -> dict:
+    """WARP-287 — re-extract + re-chunk a single file (BrainMemoryItem).
+
+    Atomic chunk replacement: DELETE + N×INSERT runs inside a single
+    Postgres transaction on a private (non-autocommit) connection.
+    Either every new chunk lands together with the old ones gone, or
+    nothing changes. Mid-flight failure ROLLBACKs.
+
+    Why a private connection rather than `db.get_conn()`: the module-
+    level connection is set to `autocommit=True` for the existing
+    watcher/MQTT path, which would commit each INSERT individually and
+    leave partial rows on failure. We open a fresh psycopg2 connection
+    here so we can BEGIN/COMMIT/ROLLBACK explicitly.
+
+    Looks up the file by BrainMemoryItem.id (the orchestrator's
+    `/api/admin/files/:id/reindex` route passes that id through). Files
+    indexed exclusively via the Nextcloud watcher (no BrainMemoryItem
+    row) aren't reachable here — those go through the watcher's normal
+    rescan path and aren't a v1 admin-reindex target.
+
+    Returns: {"chunksWritten": int}
+    Raises:
+        ValueError: item not found / file missing / dispatch returned None.
+        RuntimeError: extractor produced no text or no chunks.
+        Any psycopg2 / extractor / embedder error propagates (rolled back).
+    """
+    import json as _json
+
+    import psycopg2
+
+    from config import DATABASE_URL
+    from db import fetch_item
+
+    # Reuse the autocommit conn just for the item lookup (read-only).
+    from db import get_conn as _get_conn
+
+    info = fetch_item(_get_conn(), item_id=nc_file_id)
+    if info is None:
+        raise ValueError(f"reindex_one: BrainMemoryItem {nc_file_id} not found")
+    user_id = info["userId"]
+    path = info["storagePath"]
+    mime = info["mimeType"] or "application/octet-stream"
+
+    if not os.path.exists(path):
+        raise ValueError(f"reindex_one: file missing on disk: {path}")
+
+    logger.info(
+        "reindex_one: re-indexing item=%s user=%s mime=%s",
+        nc_file_id,
+        user_id,
+        mime,
+    )
+
+    # Re-run extractor → spans → chunks → embeddings. These steps are
+    # idempotent (no DB side effects), so doing them BEFORE the
+    # transaction keeps the lock window small.
+    doc = dispatch(path, mime)
+    if doc is None:
+        raise ValueError(
+            f"reindex_one: extractor returned None for {path} ({mime})"
+        )
+    full_text = _full_text_from_doc(doc)
+    if not full_text or len(full_text.strip()) < 10:
+        raise RuntimeError(f"reindex_one: empty extraction for {path}")
+    chunks = _chunk_spans_from_doc(doc)
+    if not chunks:
+        raise RuntimeError(f"reindex_one: chunker produced 0 chunks for {path}")
+    chunk_texts = [c.text for c in chunks]
+    vectors = embed_texts(chunk_texts)
+    if len(vectors) != len(chunks):
+        raise RuntimeError(
+            f"reindex_one: embedding count mismatch ({len(vectors)} vs {len(chunks)})"
+        )
+
+    doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    warnings = list(doc.get("warnings", []))
+    synthetic_nc_file_id = _synthetic_nc_file_id(nc_file_id)
+
+    # Atomic DELETE + INSERT inside a single private transaction. A
+    # mid-flight failure rolls everything back, including the DELETE,
+    # leaving the file's pre-reindex chunks intact — strictly better
+    # than the watcher/MQTT path's per-chunk autocommit.
+    from pgvector.psycopg2 import register_vector
+
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        conn.autocommit = False
+        register_vector(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                'DELETE FROM "FileContentChunk" WHERE "brainItemId" = %s',
+                (nc_file_id,),
+            )
+            for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+                chunk_metadata = dict(doc_metadata or {})
+                chunk_metadata["anchor"] = chunk.anchor.model_dump()
+                cur.execute(
+                    """
+                    INSERT INTO "FileContentChunk"
+                        ("userId", "ncFileId", "path", "chunkIdx", "text",
+                         "embedding", "indexedAt", "source", "brainItemId",
+                         "pageNumber", "warnings", "metadata")
+                    VALUES (%s, %s, %s, %s, %s, %s::vector, NOW(),
+                            %s::"FileContentSource", %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        user_id,
+                        synthetic_nc_file_id,
+                        path,
+                        idx,
+                        chunk.text,
+                        vec,
+                        "brain",
+                        nc_file_id,
+                        None,
+                        warnings,
+                        _json.dumps(chunk_metadata),
+                    ),
+                )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # mark_brain_item_indexed uses the autocommit module conn — safe to
+    # call OUTSIDE the private transaction. A failure here leaves the
+    # new chunks in place but doesn't bump indexedAt, which is the
+    # benign direction (a follow-up reindex / watcher pass will retry).
+    try:
+        from db import mark_brain_item_indexed
+
+        mark_brain_item_indexed(nc_file_id, warnings=warnings)
+    except Exception:
+        logger.exception(
+            "reindex_one: mark_brain_item_indexed failed for %s", nc_file_id
+        )
+
+    logger.info(
+        "reindex_one: indexed item=%s -> %d chunks", nc_file_id, len(chunks)
+    )
+    return {"chunksWritten": len(chunks)}
