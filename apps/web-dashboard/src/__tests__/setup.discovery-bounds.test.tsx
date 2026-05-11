@@ -119,4 +119,63 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     });
     expect(fetchDevicesMock.mock.calls.length).toBe(beforeStopCount);
   });
+
+  // ── WARP-302 ─────────────────────────────────────────────────────────
+  // The stopped state previously left the user with no way back to
+  // active scanning short of refreshing the setup flow. Surface a
+  // "Scan again" button that re-arms startDiscovery() so a late-arriving
+  // device still has a path to discovery without a full reload.
+  it("renders a 'Scan again' button in the stopped state (WARP-302)", async () => {
+    render(<SetupPage />);
+    await advanceToDiscovery();
+
+    for (let i = 0; i < 305; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+    const scanAgain = screen.getByRole("button", { name: /scan again/i });
+    expect(scanAgain).toBeInTheDocument();
+    // UX: the button must be reachable as a real tap target — assert
+    // it carries the secondary button token so styling stays consistent
+    // with the rest of the setup flow.
+    expect(scanAgain.className).toMatch(/dp-btn-secondary/);
+  });
+
+  it("'Scan again' returns to the active scan phase and resumes polling (WARP-302)", async () => {
+    render(<SetupPage />);
+    await advanceToDiscovery();
+
+    for (let i = 0; i < 305; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+    const callsBefore = fetchDevicesMock.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /scan again/i }));
+      await Promise.resolve();
+    });
+
+    // After the click the stopped banner must disappear (phase is active
+    // again).
+    expect(screen.queryByTestId("discovery-stopped")).not.toBeInTheDocument();
+
+    // Advance a few seconds and verify fetchMatterDevices was called
+    // again — i.e. polling actually restarted.
+    for (let i = 0; i < 6; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    expect(fetchDevicesMock.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
 });
