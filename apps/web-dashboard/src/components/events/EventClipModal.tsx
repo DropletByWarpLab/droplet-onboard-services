@@ -25,6 +25,12 @@ interface Props {
   onToggleRetain?: (event: EventDetail, retain: boolean) => Promise<void>;
 }
 
+// TODO(WARP-291): migrate this modal onto the shared <Dialog> primitive
+// from WARP-289. Deferred to WARP-291 (native-dialog scrub +
+// <ConfirmDialog>) because EventClipModal additionally needs to drop its
+// native `alert()` / `prompt()` calls (lines 67–106) and surface those
+// flows through the new <ConfirmDialog>, which doesn't exist yet.
+
 /**
  * Inline player for an event. Renders the clip if Frigate saved one,
  * falls back to the high-res snapshot otherwise. Esc closes; the
