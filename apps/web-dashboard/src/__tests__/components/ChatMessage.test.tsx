@@ -397,6 +397,45 @@ describe("ChatMessage", () => {
       expect(toolbar.className).toMatch(/\bmt-1\b/);
     });
 
+    // WARP-301 hit-target audit (WCAG 2.5.5 AA). The hover toolbar buttons
+    // were `px-2 py-1` (~24 px). Bumped to `px-3 py-2` so the height
+    // crosses the 32 px floor (≈ 36-40 px depending on icon + label) while
+    // preserving the row's visual rhythm under the bubble.
+    it("Copy / Quote / Regenerate use ≥ 32 px hit-target padding (px-3 py-2, WARP-301)", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+      for (const name of [/copy message/i, /quote message/i, /regenerate response/i]) {
+        const btn = screen.getByRole("button", { name });
+        expect(btn.className).toMatch(/(^|\s)px-3(\s|$)/);
+        expect(btn.className).toMatch(/(^|\s)py-2(\s|$)/);
+        // Regression guard against the old sub-WCAG sizing.
+        expect(btn.className).not.toMatch(/(^|\s)px-2(\s|$)/);
+        expect(btn.className).not.toMatch(/(^|\s)py-1(\s|$)/);
+      }
+    });
+
+    it("toolbar still reveals on focus-within (keyboard reachable)", () => {
+      // Preserve the WARP-295 behavior: opacity-0 default, focus-within
+      // surfaces it. Regression guard while bumping padding.
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      const toolbar = screen.getByTestId("message-actions");
+      expect(toolbar.className).toMatch(/focus-within:opacity-100/);
+      expect(toolbar.className).toMatch(/opacity-0/);
+    });
+
     it("toolbar does NOT add `mt-1` when there are no citations to crowd against", () => {
       render(
         <ChatMessage

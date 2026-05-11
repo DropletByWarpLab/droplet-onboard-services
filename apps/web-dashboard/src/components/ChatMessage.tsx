@@ -245,7 +245,7 @@ export const ChatMessage = memo(function ChatMessage({
               onClick={handleCopy}
               aria-label={copyState === "copied" ? "Copied" : "Copy message"}
               className="
-                inline-flex items-center gap-1 px-2 py-1 rounded-md
+                inline-flex items-center gap-1 px-3 py-2 rounded-md
                 type-caption-1 text-label-tertiary
                 hover:text-label-primary hover:bg-surface-secondary
                 focus:outline-none focus:ring-2 focus:ring-accent/40
@@ -266,7 +266,7 @@ export const ChatMessage = memo(function ChatMessage({
               onClick={() => onQuote(message.content)}
               aria-label="Quote message"
               className="
-                inline-flex items-center gap-1 px-2 py-1 rounded-md
+                inline-flex items-center gap-1 px-3 py-2 rounded-md
                 type-caption-1 text-label-tertiary
                 hover:text-label-primary hover:bg-surface-secondary
                 focus:outline-none focus:ring-2 focus:ring-accent/40
@@ -283,7 +283,7 @@ export const ChatMessage = memo(function ChatMessage({
               onClick={() => onRegenerate(message.id)}
               aria-label="Regenerate response"
               className="
-                inline-flex items-center gap-1 px-2 py-1 rounded-md
+                inline-flex items-center gap-1 px-3 py-2 rounded-md
                 type-caption-1 text-label-tertiary
                 hover:text-label-primary hover:bg-surface-secondary
                 focus:outline-none focus:ring-2 focus:ring-accent/40
