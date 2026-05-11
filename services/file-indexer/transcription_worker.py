@@ -75,7 +75,7 @@ def _dispatch_and_index(item: dict) -> None:
     test collection time).
     """
     from extractors.registry import dispatch
-    from chunker import chunk_text
+    from chunker import chunk_spans
     from embedder import embed_texts
     from brain_ingest import _synthetic_nc_file_id
 
@@ -88,14 +88,17 @@ def _dispatch_and_index(item: dict) -> None:
     if doc is None:
         raise RuntimeError(f"extractor refused mime={mime}")
 
-    text = doc.get("text", "") if isinstance(doc, dict) else ""
-    chunks = chunk_text(text)
+    # WARP-287: extractors emit spans; chunker now consumes spans and
+    # attaches each chunk's anchor.
+    spans = doc.get("spans") if isinstance(doc, dict) else None
+    chunks = chunk_spans(spans or [])
     if not chunks:
         # Empty transcript is fine — extractor succeeded but produced no text.
         # Caller transitions to 'ready' so the chip stops spinning.
         return
 
-    vectors = embed_texts(chunks)
+    chunk_texts = [c.text for c in chunks]
+    vectors = embed_texts(chunk_texts)
     if len(vectors) != len(chunks):
         raise RuntimeError(
             f"embedding count mismatch: {len(vectors)} vs {len(chunks)}"
@@ -107,17 +110,19 @@ def _dispatch_and_index(item: dict) -> None:
     warnings = list(doc.get("warnings", [])) if isinstance(doc, dict) else []
     metadata = doc.get("metadata") if isinstance(doc, dict) else None
     for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        chunk_metadata = dict(metadata or {})
+        chunk_metadata["anchor"] = chunk.anchor.model_dump()
         db.upsert_chunk(
             user_id=user_id,
             nc_file_id=_synthetic_nc_file_id(item_id),
             path=storage_path,
             chunk_idx=idx,
-            text=chunk,
+            text=chunk.text,
             embedding=vec,
             source="brain",
             brain_item_id=item_id,
             warnings=warnings,
-            metadata=metadata,
+            metadata=chunk_metadata,
         )
 
 

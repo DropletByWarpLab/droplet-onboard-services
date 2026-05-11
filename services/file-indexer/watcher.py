@@ -22,7 +22,7 @@ from watchdog.observers.polling import PollingObserver
 
 from config import NEXTCLOUD_DATA_ROOT
 from extractors.registry import dispatch
-from chunker import chunk_text
+from chunker import chunk_spans
 from embedder import embed_texts
 from db import upsert_chunk, delete_chunks_for_file, prune_excess_chunks
 from mqtt_client import publish
@@ -194,8 +194,11 @@ class IndexHandler(FileSystemEventHandler):
         doc = dispatch(path, mime)
         if doc is None:
             return
-        text = doc.get("text", "")
-        if not text or len(text.strip()) < 10:
+        # WARP-287: extractors emit spans; derive the empty-extraction
+        # guard's input from them rather than the now-removed `text` key.
+        spans = doc.get("spans") if isinstance(doc, dict) else None
+        full_text = "\n\n".join(s.text for s in (spans or []) if getattr(s, "text", ""))
+        if not full_text or len(full_text.strip()) < 10:
             return
 
         # Resolve Nextcloud file ID
@@ -205,12 +208,13 @@ class IndexHandler(FileSystemEventHandler):
             return
 
         # Chunk
-        chunks = chunk_text(text)
+        chunks = chunk_spans(spans or [])
         if not chunks:
             return
 
         # Embed
-        vectors = embed_texts(chunks)
+        chunk_texts = [c.text for c in chunks]
+        vectors = embed_texts(chunk_texts)
         if len(vectors) != len(chunks):
             logger.warning("Embedding count mismatch for %s/%s", user, relpath)
             return
@@ -219,16 +223,19 @@ class IndexHandler(FileSystemEventHandler):
         # WARP-214: forward ExtractedDoc.metadata (chain[], subtitle_source) to
         # the chunk row so the dashboard can render breadcrumbs + source-channel
         # badges from /api/files/knowledge/{recent,search}.
+        # WARP-287: also overlay each chunk's anchor under metadata.anchor.
         doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
         for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+            chunk_metadata = dict(doc_metadata or {})
+            chunk_metadata["anchor"] = chunk.anchor.model_dump()
             upsert_chunk(
                 user,
                 file_id,
                 f"/{relpath}",
                 idx,
-                chunk,
+                chunk.text,
                 vec,
-                metadata=doc_metadata,
+                metadata=chunk_metadata,
             )
 
         # Prune excess chunks if the file shrunk

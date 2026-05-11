@@ -26,7 +26,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from chunker import chunk_text
+from chunker import Chunk, chunk_spans
 from db import (
     delete_chunks_for_brain_item,
     mark_brain_item_indexed,
@@ -103,6 +103,23 @@ def _manifest_path(storage_path: str) -> Path:
     return Path(storage_path).parent / "manifest.json"
 
 
+def _full_text_from_doc(doc: dict) -> str:
+    """Concatenate every span's text for the empty-extraction guard +
+    extracted.txt side file. Spans are joined with blank lines so the
+    output stays human-readable when re-read from the side file."""
+    spans = doc.get("spans") if isinstance(doc, dict) else None
+    if not spans:
+        return ""
+    return "\n\n".join(s.text for s in spans if getattr(s, "text", ""))
+
+
+def _chunk_spans_from_doc(doc: dict) -> list[Chunk]:
+    """Test seam: lets `tests/test_brain_ingest_anchor.py` substitute a
+    fixed list of `Chunk`s without standing up a real extractor."""
+    spans = doc.get("spans") if isinstance(doc, dict) else None
+    return chunk_spans(spans or [])
+
+
 def handle_brain_uploaded(payload: dict) -> None:
     """Process one `droplet/files/brain/uploaded` event end-to-end.
 
@@ -175,9 +192,13 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    text = doc.get("text", "")
     warnings = list(doc.get("warnings", []))
-    if not text or len(text.strip()) < 10:
+    # WARP-287: extractors emit `spans: list[Span]` rather than a flat
+    # `text` blob. Derive the full text from the spans for the
+    # empty-extraction guard + extracted.txt side file; the chunker
+    # consumes spans directly so it can attach each chunk's anchor.
+    full_text = _full_text_from_doc(doc)
+    if not full_text or len(full_text.strip()) < 10:
         logger.info("brain_ingest: extracted text too small for %s", path)
         warnings.append("empty_extraction")
         _publish_status(user_id, item_id, "failed", reason="empty_extraction")
@@ -187,8 +208,10 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    # Chunk + embed.
-    chunks = chunk_text(text)
+    # Chunk + embed. Chunks are `Chunk(text, anchor)` — anchor flows into
+    # per-chunk metadata so the dashboard can cite "Page N of foo.pdf"
+    # rather than a bare chunk index.
+    chunks = _chunk_spans_from_doc(doc)
     if not chunks:
         logger.info("brain_ingest: chunker produced 0 chunks for %s", path)
         warnings.append("no_chunks")
@@ -199,8 +222,9 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
+    chunk_texts = [c.text for c in chunks]
     try:
-        vectors = embed_texts(chunks)
+        vectors = embed_texts(chunk_texts)
     except Exception as e:
         logger.warning("brain_ingest: embedding failed for %s: %s", path, e)
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
@@ -218,6 +242,9 @@ def handle_brain_uploaded(payload: dict) -> None:
     # WARP-214: surface the extractor's metadata (chain[], subtitle_source) so
     # the dashboard can render breadcrumbs + source-channel badges from
     # /api/files/knowledge/{recent,search}.
+    # WARP-287: also overlay each chunk's anchor under metadata.anchor so the
+    # dashboard's citation surfaces can show "Page N of foo.pdf" rather than
+    # a bare chunk index.
     doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
 
     # Upsert (delete-then-insert to keep brain rows independent of the
@@ -225,6 +252,8 @@ def handle_brain_uploaded(payload: dict) -> None:
     try:
         delete_chunks_for_brain_item(item_id)
         for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+            chunk_metadata = dict(doc_metadata or {})
+            chunk_metadata["anchor"] = chunk.anchor.model_dump()
             upsert_chunk(
                 user_id=user_id,
                 # Use a deterministic synthetic ncFileId so the existing
@@ -236,12 +265,12 @@ def handle_brain_uploaded(payload: dict) -> None:
                 nc_file_id=_synthetic_nc_file_id(item_id),
                 path=path,
                 chunk_idx=idx,
-                text=chunk,
+                text=chunk.text,
                 embedding=vec,
                 source="brain",
                 brain_item_id=item_id,
                 warnings=warnings,
-                metadata=doc_metadata,
+                metadata=chunk_metadata,
             )
         mark_brain_item_indexed(item_id, warnings=warnings)
     except Exception as e:
@@ -252,7 +281,7 @@ def handle_brain_uploaded(payload: dict) -> None:
     # Persist extracted.txt + updated manifest so backups + the
     # WARP-205 export route can reconstruct without DB access.
     try:
-        _extract_text_path(path).write_text(text, encoding="utf-8")
+        _extract_text_path(path).write_text(full_text, encoding="utf-8")
         manifest_p = _manifest_path(path)
         manifest = {
             "itemId": item_id,

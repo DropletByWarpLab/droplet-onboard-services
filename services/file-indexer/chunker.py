@@ -1,46 +1,56 @@
-"""Fixed-window text chunker with overlap.
+"""Span-aware chunker.
 
-Splits text into chunks of approximately `chunk_size` tokens with
-`overlap_ratio` overlap between consecutive chunks. "Tokens" are
-approximated as whitespace-split words (1 token ≈ 0.75 words for
-English text), which is close enough for the purpose of embedding-window
-sizing without importing a real tokenizer.
+Replaces the old `chunk_text(str)` — every caller now passes spans, and
+the chunker chunks *within* each span (anchor stays attached) and *never
+across* (which would make the anchor ambiguous).
+
+Token counting is approximated as whitespace-split words; same as the
+prior implementation. The output is a list of `Chunk(text, anchor)`
+tuples; downstream the DB writer serializes `anchor` into the existing
+FileContentChunk.metadata JSONB column under the `anchor` key.
 """
-
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from anchor_schema import Anchor
 from config import CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_RATIO
+from extractors.spans import Span
 
 
-def chunk_text(
-    text: str,
+@dataclass(frozen=True)
+class Chunk:
+    text: str
+    anchor: Anchor  # type: ignore[valid-type]
+
+
+def chunk_spans(
+    spans: list[Span],
     chunk_size: int = CHUNK_SIZE_TOKENS,
     overlap_ratio: float = CHUNK_OVERLAP_RATIO,
-) -> list[str]:
-    """Split text into overlapping chunks.
+) -> list[Chunk]:
+    """Chunk each span independently; chunks inherit their span's anchor.
 
-    Returns a list of non-empty strings, each roughly `chunk_size` tokens
-    long. The last chunk may be shorter.
+    A chunk never spans two source spans — that would make the anchor
+    ambiguous.
     """
-    if not text or not text.strip():
+    if not spans:
         return []
 
-    words = text.split()
-    if not words:
-        return []
-
-    # Approximate tokens ≈ words * 1.33 (inverse of 0.75 words/token)
     word_chunk = max(1, int(chunk_size * 0.75))
     word_overlap = max(0, int(word_chunk * overlap_ratio))
     step = max(1, word_chunk - word_overlap)
 
-    chunks: list[str] = []
-    i = 0
-    while i < len(words):
-        window = words[i : i + word_chunk]
-        chunk = " ".join(window).strip()
-        if chunk:
-            chunks.append(chunk)
-        i += step
-
-    return chunks
+    out: list[Chunk] = []
+    for span in spans:
+        words = span.text.split()
+        if not words:
+            continue
+        i = 0
+        while i < len(words):
+            window = words[i : i + word_chunk]
+            chunk_text_value = " ".join(window).strip()
+            if chunk_text_value:
+                out.append(Chunk(text=chunk_text_value, anchor=span.anchor))
+            i += step
+    return out
