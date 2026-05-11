@@ -379,6 +379,35 @@ describe("ChatMessage", () => {
         screen.getByRole("button", { name: /copy message/i }),
       ).toBeInTheDocument();
     });
+
+    it("toolbar gets `mt-1` spacing when citations also render — breathing room between the two rows (UX fold-in)", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-cite",
+            role: "assistant",
+            content: "Answered with sources.",
+            citations: [{ source: "brain", path: "x.md" }],
+          }}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      const toolbar = screen.getByTestId("message-actions");
+      expect(toolbar.className).toMatch(/\bmt-1\b/);
+    });
+
+    it("toolbar does NOT add `mt-1` when there are no citations to crowd against", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      const toolbar = screen.getByTestId("message-actions");
+      expect(toolbar.className).not.toMatch(/\bmt-1\b/);
+    });
   });
 
   describe("markdown polish (WARP-295)", () => {

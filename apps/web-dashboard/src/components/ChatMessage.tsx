@@ -226,15 +226,18 @@ export const ChatMessage = memo(function ChatMessage({
       ) : null}
       {/* WARP-295: message-actions toolbar. focus-within keeps the
           toolbar reachable by keyboard — Tab into the bubble's button
-          row surfaces it without requiring hover. */}
+          row surfaces it without requiring hover. When citations
+          render above, add a small `mt-1` so the toolbar isn't crowded
+          right under the chip row. */}
       {showToolbar ? (
         <div
           data-testid="message-actions"
-          className="
+          className={`
             flex items-center gap-1
             opacity-0 group-hover/message:opacity-100 focus-within:opacity-100
             transition-opacity duration-150
-          "
+            ${hasCitations ? "mt-1" : ""}
+          `}
         >
           {onCopy ? (
             <button
