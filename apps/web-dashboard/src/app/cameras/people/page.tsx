@@ -110,8 +110,9 @@ export default function PeoplePage() {
         <div className="flex-1 min-w-0">
           <h1 className="type-large-title text-label-primary">People</h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
-            Faces Frigate has been trained to recognise. Add new ones from the{" "}
-            <span className="font-mono">Events</span> page by tagging a person.
+            Faces this Droplet has been trained to recognise. Add new ones
+            from the <span className="font-mono">Events</span> page by tagging
+            a person.
           </p>
         </div>
         <button
@@ -144,9 +145,8 @@ export default function PeoplePage() {
             No known faces
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Either Frigate&apos;s <span className="font-mono">face_recognition</span> isn&apos;t
-            enabled in config, or no one has been tagged yet. Tag someone from
-            an event on the Events page to start.
+            Face recognition isn&apos;t enabled, or no one has been tagged
+            yet. Tag someone from an event on the Events page to start.
           </p>
         </div>
       ) : (

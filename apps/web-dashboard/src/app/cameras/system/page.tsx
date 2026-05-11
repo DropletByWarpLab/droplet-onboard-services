@@ -67,12 +67,12 @@ export default function CameraSystemPage() {
         );
         const second = await restartFrigate();
         if (second.status === "restarting") {
-          setRestartMsg("Restarting Frigate — cameras back in ~15 seconds.");
+          setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
         } else {
           setRestartMsg(`Unexpected response: ${second.status}`);
         }
       } else if (first.status === "restarting") {
-        setRestartMsg("Restarting Frigate — cameras back in ~15 seconds.");
+        setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
       }
       void mutate();
     } catch (e) {
@@ -104,7 +104,7 @@ export default function CameraSystemPage() {
           <ArrowLeft size={20} />
         </button>
         <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary">Frigate system</h1>
+          <h1 className="type-large-title text-label-primary">Camera system</h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
             Live health for the camera engine. Refreshes every 5 seconds.
           </p>
@@ -123,7 +123,7 @@ export default function CameraSystemPage() {
         <div className="dp-card p-4 mb-4 text-system-red flex items-center gap-2">
           <AlertTriangle size={16} />
           <p className="type-subheadline">
-            Couldn&apos;t reach Frigate:{" "}
+            Couldn&apos;t reach the camera service:{" "}
             {error instanceof Error ? error.message : String(error)}
           </p>
         </div>
@@ -141,7 +141,7 @@ export default function CameraSystemPage() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
             <StatCard
               icon={Server}
-              label="Frigate"
+              label="Engine"
               value={data.version}
               hint={`Uptime ${fmtUptime(data.uptimeSec)}`}
             />
@@ -166,7 +166,7 @@ export default function CameraSystemPage() {
               icon={Cpu}
               label="CPU"
               value={`${data.cpuPct.toFixed(0)}%`}
-              hint="Across Frigate processes"
+              hint="Across camera service processes"
               tone={data.cpuPct > 200 ? "warn" : "ok"}
             />
             <StatCard
@@ -232,8 +232,8 @@ export default function CameraSystemPage() {
               </div>
               {data.gpus.length === 0 ? (
                 <p className="type-caption-1 text-label-tertiary">
-                  No GPU stats reported. (CPU detector? Frigate without nvidia
-                  runtime?)
+                  No GPU stats reported. (CPU detector? Camera service
+                  without nvidia runtime?)
                 </p>
               ) : (
                 <ul className="space-y-2">
@@ -379,7 +379,7 @@ export default function CameraSystemPage() {
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="type-headline text-label-primary mb-1">
-                  Restart Frigate
+                  Restart camera service
                 </h2>
                 <p className="type-caption-1 text-label-tertiary">
                   Drops every camera stream while the engine reloads. Roughly

@@ -153,12 +153,21 @@ export default function CamerasPage() {
         <div className="dp-card text-center py-12">
           <Video size={32} className="mx-auto text-label-quaternary mb-3" />
           <h2 className="type-title-3 text-label-primary mb-1">
-            Frigate NVR Not Connected
+            Camera service is offline
           </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Make sure Frigate is running. Check the Docker compose configuration
-            or visit the health endpoint for details.
+          <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
+            Make sure this Droplet is powered on and the camera service is
+            running. Try again in a moment, or contact support if this
+            persists.
           </p>
+          <button
+            onClick={refresh}
+            disabled={isRefreshing}
+            className="dp-btn-secondary inline-flex items-center gap-2 px-4 py-2 rounded-lg"
+          >
+            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+            <span className="type-subheadline">Retry</span>
+          </button>
         </div>
       </div>
     );
@@ -240,7 +249,7 @@ export default function CamerasPage() {
           <button
             onClick={() => router.push("/cameras/system")}
             className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Frigate engine health"
+            title="Recognition engine health"
           >
             <Server size={16} />
             <span className="type-subheadline">System</span>
@@ -297,8 +306,8 @@ export default function CamerasPage() {
             No Cameras Yet
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
-            Frigate NVR is running and ready. Add a camera manually with its
-            RTSP URL, or scan your network to auto-discover ONVIF cameras.
+            The camera service is running and ready. Add a camera manually with
+            its RTSP URL, or scan your network to auto-discover ONVIF cameras.
           </p>
           <div className="flex items-center justify-center gap-3">
             <button
