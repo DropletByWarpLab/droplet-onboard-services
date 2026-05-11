@@ -24,6 +24,8 @@ import { createHash } from "node:crypto";
 
 import type { PrismaClient } from "@prisma/client";
 
+import { AnchorSchema, type Anchor } from "@droplet/shared-types";
+
 export type FileContentSource = "nextcloud" | "brain";
 
 export interface SearchHit {
@@ -541,4 +543,104 @@ export async function listRecent(
   // indexedAt DESC for the dashboard's "newest first" expectation,
   // since DISTINCT ON's ORDER BY is for partitioning, not display order.
   return [...rows].sort((a, b) => b.indexedAt.getTime() - a.indexedAt.getTime());
+}
+
+/**
+ * WARP-287 — route-layer hit shape that exposes per-chunk `anchor` to API
+ * consumers (LLM `search_content` result, dashboard `/knowledge` search).
+ *
+ * Distinct from {@link SearchHit} (the internal retrieval-pipeline shape):
+ *   - Carries the full `chunkText` rather than a `LEFT(text, 280)` snippet.
+ *   - Carries `ncFileId` so callers can build a canonical reference.
+ *   - Surfaces `anchor` extracted from `metadata.anchor` via Zod, so the
+ *     wire shape stays typed even though the column is `jsonb`.
+ *
+ * The retrieval functions in this module still return `SearchHit`. Routes
+ * that want to publish the anchored shape join the chunk rows back to the
+ * FileContentChunk table (or pass through raw rows) and call
+ * {@link shapeHitsForResponse}.
+ */
+export interface FileSearchHit {
+  ncFileId: string;
+  chunkIdx: number;
+  score: number;
+  chunkText: string;
+  source: FileContentSource;
+  path: string;
+  pageNumber: number | null;
+  brainItemId: string | null;
+  /** Free-form metadata as stored on the chunk (incl. `anchor` JSON). */
+  metadata: Record<string, unknown> | null;
+  /**
+   * Per-chunk anchor decoded from `metadata.anchor` via {@link AnchorSchema}.
+   * `null` when the column is missing (legacy rows pre-WARP-287) or
+   * malformed (logged at warn level, hit kept so a single bad row never
+   * drops a result).
+   */
+  anchor: Anchor | null;
+}
+
+/**
+ * Raw input rows for {@link shapeHitsForResponse}.
+ *
+ * Loose-typed so callers can pass through either the watcher-shaped row
+ * or a route-layer DTO without an upstream cast — the helper only reads
+ * the fields it surfaces.
+ */
+interface FileSearchHitRow {
+  ncFileId: string;
+  chunkIdx: number;
+  score: number;
+  chunkText: string;
+  source: FileContentSource;
+  path: string;
+  pageNumber: number | null;
+  brainItemId: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+/**
+ * WARP-287 — surface a validated `anchor` on each hit.
+ *
+ * Failure modes:
+ *   - `metadata.anchor` missing / `null` → `anchor: null` silently
+ *     (legacy rows; common during migration).
+ *   - `metadata.anchor` present but malformed → `anchor: null`, single
+ *     `console.warn` per offending chunk. The hit IS kept; one bad row
+ *     must not drop a result, that would be a worse UX than a missing
+ *     citation.
+ *
+ * Cross-cutting note: the warning includes the chunk id so log readers
+ * can backtrack to the producer (extractor or chunker) that emitted the
+ * malformed anchor without grepping for textual content.
+ */
+export function shapeHitsForResponse(rows: FileSearchHitRow[]): FileSearchHit[] {
+  return rows.map((r) => {
+    const rawAnchor = (r.metadata as Record<string, unknown> | null)?.anchor;
+    let anchor: Anchor | null = null;
+    if (rawAnchor !== undefined && rawAnchor !== null) {
+      const parsed = AnchorSchema.safeParse(rawAnchor);
+      if (parsed.success) {
+        anchor = parsed.data;
+      } else {
+        console.warn("anchor.validation.failed", {
+          chunkId: `${r.ncFileId}:${r.chunkIdx}`,
+          rawAnchor,
+          error: parsed.error.issues,
+        });
+      }
+    }
+    return {
+      ncFileId: r.ncFileId,
+      chunkIdx: r.chunkIdx,
+      score: r.score,
+      chunkText: r.chunkText,
+      source: r.source,
+      path: r.path,
+      pageNumber: r.pageNumber,
+      brainItemId: r.brainItemId,
+      metadata: r.metadata ?? null,
+      anchor,
+    };
+  });
 }
