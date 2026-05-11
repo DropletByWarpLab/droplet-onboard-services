@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://droplet.local/schemas/anchor.schema.json",
+  "title": "Anchor",
+  "description": "Per-chunk positional anchor. Discriminated by `kind`. archive-member.innerAnchor is recursive, bounded at runtime by MAX_ARCHIVE_ANCHOR_DEPTH=3.",
+  "oneOf": [
+    { "$ref": "#/$defs/PdfPage" },
+    { "$ref": "#/$defs/MediaTimestamp" },
+    { "$ref": "#/$defs/EmailPart" },
+    { "$ref": "#/$defs/ArchiveMember" },
+    { "$ref": "#/$defs/NoneAnchor" }
+  ],
+  "$defs": {
+    "PdfPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "page"],
+      "properties": {
+        "kind": { "const": "pdf-page" },
+        "page": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "MediaTimestamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "startMs", "endMs"],
+      "properties": {
+        "kind": { "const": "media-timestamp" },
+        "startMs": { "type": "integer", "minimum": 0 },
+        "endMs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "EmailPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messageId", "partIndex"],
+      "properties": {
+        "kind": { "const": "email-part" },
+        "messageId": { "type": "string", "minLength": 1 },
+        "partIndex": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ArchiveMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "member"],
+      "properties": {
+        "kind": { "const": "archive-member" },
+        "member": { "type": "string", "minLength": 1 },
+        "innerAnchor": {
+          "oneOf": [
+            { "$ref": "#/$defs/PdfPage" },
+            { "$ref": "#/$defs/MediaTimestamp" },
+            { "$ref": "#/$defs/EmailPart" },
+            { "$ref": "#/$defs/ArchiveMember" },
+            { "$ref": "#/$defs/NoneAnchor" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "NoneAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "none" }
+      }
+    }
+  }
+}
