@@ -268,6 +268,14 @@ main() {
   # No-ops on a fresh install; recovers stale installs without --regenerate-env.
   migrate_env
   materialize_artifacts
+  # WARP-230 device-identity first-boot enrollment. Idempotent —
+  # exits 0 when /var/lib/droplet/tpm/provisioned.json already exists
+  # or when running in dev with no TPM (mock backend, sidecar handles
+  # the actual provisioning on first start).
+  if [ -x "$SCRIPT_DIR/provision-device-identity.sh" ]; then
+    bash "$SCRIPT_DIR/provision-device-identity.sh" \
+      || log_warn "device-identity provisioning script exited non-zero (continuing)"
+  fi
 
   # --- Phase 5: Build ---
   log_step 5 $total_steps "Build"
