@@ -26,9 +26,11 @@ import { createNotificationsRouter } from "./routes/notifications.js";
 import { createVpnRouter } from "./routes/vpn.js";
 import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
+import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createFipsRouter } from "./routes/fips.js";
+import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
 
@@ -91,6 +93,12 @@ export function createApp(prisma: PrismaClient) {
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
   app.use("/api", createAdminClaudeActivityRouter());
+  // WARP-230: device-identity admin routes. GET /status + POST /reseal,
+  // both gated by admin role; reseal additionally requires recent MFA.
+  // The gRPC client is constructed once per orchestrator instance; the
+  // underlying Unix-socket channel is opened lazily by grpc-js on first
+  // call so process startup doesn't fail when the sidecar isn't ready.
+  app.use("/api", createAdminDeviceIdentityRouter(createDeviceIdentityClient()));
   // WARP-286: retrieval-eval endpoint — exposes vector/rrf/hybrid pipelines
   // to the offline NDCG@10 harness. 404 in production.
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
