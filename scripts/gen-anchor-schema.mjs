@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_ARCHIVE_ANCHOR_DEPTH = 3
 
@@ -48,6 +48,14 @@ class MediaTimestampAnchor(BaseModel):
     kind: Literal["media-timestamp"] = "media-timestamp"
     startMs: int = Field(..., ge=0)
     endMs: int = Field(..., ge=1)
+
+    # Cross-field invariant: endMs > startMs (strict). JSON Schema 2020-12
+    # can't express this; enforced here and in the Zod schema via .refine().
+    @model_validator(mode="after")
+    def _check_end_after_start(self) -> "MediaTimestampAnchor":
+        if self.endMs <= self.startMs:
+            raise ValueError("endMs must be strictly greater than startMs")
+        return self
 
 
 class EmailPartAnchor(BaseModel):
@@ -94,10 +102,17 @@ export const PdfPageAnchorSchema = z.object({
   page: z.number().int().min(1),
 });
 
+// Cross-field invariant: endMs > startMs (strict). JSON Schema 2020-12 can't
+// express this; enforced here via .refine() and in Pydantic via @model_validator.
+// .refine() turns the schema into a ZodEffects, which is incompatible with
+// z.discriminatedUnion — AnchorSchema below uses z.union for that reason.
 export const MediaTimestampAnchorSchema = z.object({
   kind: z.literal("media-timestamp"),
   startMs: z.number().int().min(0),
   endMs: z.number().int().min(1),
+}).refine((d) => d.endMs > d.startMs, {
+  message: "endMs must be strictly greater than startMs",
+  path: ["endMs"],
 });
 
 export const EmailPartAnchorSchema = z.object({
@@ -125,7 +140,11 @@ export const ArchiveMemberAnchorSchema: z.ZodType<ArchiveMemberAnchor> = z.lazy(
   })
 );
 
-export const AnchorSchema = z.discriminatedUnion("kind", [
+// z.union rather than z.discriminatedUnion: the latter requires raw
+// ZodObject members, but MediaTimestampAnchorSchema is a ZodEffects (refined)
+// and ArchiveMemberAnchorSchema is a ZodLazy. Each member's \`kind\` is still
+// a z.literal, so misses fail fast on the discriminator either way.
+export const AnchorSchema: z.ZodType<Anchor> = z.union([
   PdfPageAnchorSchema,
   MediaTimestampAnchorSchema,
   EmailPartAnchorSchema,
@@ -138,7 +157,12 @@ export type MediaTimestampAnchor = z.infer<typeof MediaTimestampAnchorSchema>;
 export type EmailPartAnchor = z.infer<typeof EmailPartAnchorSchema>;
 export type NoneAnchor = z.infer<typeof NoneAnchorSchema>;
 export type { ArchiveMemberAnchor };
-export type Anchor = z.infer<typeof AnchorSchema>;
+export type Anchor =
+  | PdfPageAnchor
+  | MediaTimestampAnchor
+  | EmailPartAnchor
+  | ArchiveMemberAnchor
+  | NoneAnchor;
 `;
 
 mkdirSync(dirname(PY_OUT), { recursive: true });

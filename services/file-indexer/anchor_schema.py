@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_ARCHIVE_ANCHOR_DEPTH = 3
 
@@ -22,6 +22,14 @@ class MediaTimestampAnchor(BaseModel):
     kind: Literal["media-timestamp"] = "media-timestamp"
     startMs: int = Field(..., ge=0)
     endMs: int = Field(..., ge=1)
+
+    # Cross-field invariant: endMs > startMs (strict). JSON Schema 2020-12
+    # can't express this; enforced here and in the Zod schema via .refine().
+    @model_validator(mode="after")
+    def _check_end_after_start(self) -> "MediaTimestampAnchor":
+        if self.endMs <= self.startMs:
+            raise ValueError("endMs must be strictly greater than startMs")
+        return self
 
 
 class EmailPartAnchor(BaseModel):

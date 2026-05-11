@@ -22,6 +22,7 @@
     },
     "MediaTimestamp": {
       "type": "object",
+      "description": "Anchors a chunk to a time range in audio/video. Additional runtime invariant: endMs > startMs (strict). Enforced in Pydantic via @model_validator and in Zod via .refine() — JSON Schema 2020-12 can't express cross-field arithmetic.",
       "additionalProperties": false,
       "required": ["kind", "startMs", "endMs"],
       "properties": {
