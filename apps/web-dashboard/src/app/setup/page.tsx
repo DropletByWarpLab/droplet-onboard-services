@@ -452,6 +452,19 @@ export default function SetupPage() {
                   Stopped automatic scanning after 5 minutes. You can add
                   devices manually from the Devices page later.
                 </p>
+                {/* WARP-302: give the user a way back to active scanning
+                    without reloading the setup flow. Re-arms startDiscovery,
+                    which resets scanPhase to "active" and re-mounts the 3s
+                    poll. min-h hits the 44px tap target heuristic and the
+                    focus-visible ring inherits from the dp-btn-secondary
+                    token. */}
+                <button
+                  type="button"
+                  onClick={startDiscovery}
+                  className="dp-btn-secondary mt-3 min-h-[44px]"
+                >
+                  Scan again
+                </button>
               </div>
             )}
 
