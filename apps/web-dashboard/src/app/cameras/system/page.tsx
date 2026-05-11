@@ -19,6 +19,7 @@ import {
 import { fetchCameraSystemStatus, restartFrigate } from "@/lib/api";
 import { confirmNetworkCommand } from "@/lib/api";
 import type { CameraSystemStatus } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 /**
  * /cameras/system — Frigate-wide health surface (Phase 5).
@@ -43,6 +44,13 @@ export default function CameraSystemPage() {
 
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
+  // WARP-291: holds the tier-2 confirmation token + reason between the
+  // first restartFrigate() call (which returns confirmation_required)
+  // and the user's click on the <ConfirmDialog>. Null while no confirm
+  // is pending.
+  const [pendingRestart, setPendingRestart] = useState<
+    { confirmationToken: string; reason: string } | null
+  >(null);
 
   const handleRestart = async () => {
     setRestarting(true);
@@ -50,36 +58,56 @@ export default function CameraSystemPage() {
     try {
       const first = await restartFrigate();
       if (first.status === "confirmation_required" && first.confirmationToken) {
-        // Tier-2 confirm dance — surface the reason and require a click.
-        if (
-          !confirm(
-            `${first.reason ?? "This will drop every camera for ~10 seconds."}\n\nProceed with restart?`,
-          )
-        ) {
-          setRestartMsg("Cancelled.");
-          setRestarting(false);
-          return;
-        }
-        await confirmNetworkCommand(
-          first.confirmationToken,
-          "restart_frigate",
-          "frigate.system",
-        );
-        const second = await restartFrigate();
-        if (second.status === "restarting") {
-          setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
-        } else {
-          setRestartMsg(`Unexpected response: ${second.status}`);
-        }
+        // Surface the reason and require a click. The ConfirmDialog flow
+        // continues in performRestartConfirm().
+        setPendingRestart({
+          confirmationToken: first.confirmationToken,
+          reason:
+            first.reason ?? "This will drop every camera for ~10 seconds.",
+        });
+        // Hold the spinner open while the user decides — they may be
+        // reading the consequence copy.
+        return;
       } else if (first.status === "restarting") {
         setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
       }
       void mutate();
+      setRestarting(false);
     } catch (e) {
       setRestartMsg(e instanceof Error ? e.message : "Restart failed");
-    } finally {
       setRestarting(false);
     }
+  };
+
+  const performRestartConfirm = async () => {
+    const ctx = pendingRestart;
+    if (!ctx) return;
+    try {
+      await confirmNetworkCommand(
+        ctx.confirmationToken,
+        "restart_frigate",
+        "frigate.system",
+      );
+      const second = await restartFrigate();
+      if (second.status === "restarting") {
+        setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
+      } else {
+        setRestartMsg(`Unexpected response: ${second.status}`);
+      }
+      setPendingRestart(null);
+      setRestarting(false);
+      void mutate();
+    } catch (e) {
+      setRestartMsg(e instanceof Error ? e.message : "Restart failed");
+      setRestarting(false);
+      throw e;
+    }
+  };
+
+  const cancelRestart = () => {
+    setPendingRestart(null);
+    setRestartMsg("Cancelled.");
+    setRestarting(false);
   };
 
   const totalStorage = useMemo(() => {
@@ -416,6 +444,19 @@ export default function CameraSystemPage() {
           </div>
         </>
       )}
+
+      <ConfirmDialog
+        open={pendingRestart !== null}
+        onConfirm={performRestartConfirm}
+        onCancel={cancelRestart}
+        title="Restart the camera service?"
+        description={
+          pendingRestart?.reason ??
+          "Every camera will drop for about 10 seconds. Live feeds and recordings resume automatically."
+        }
+        confirmLabel="Restart"
+        variant="destructive"
+      />
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
 } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function SubscriptionsPanel() {
   const { sources, refresh, isLoading } = useCalendarSources();
@@ -24,6 +25,9 @@ export function SubscriptionsPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [publishUrl, setPublishUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(
+    null,
+  );
 
   async function handleAdd() {
     if (!name.trim() || !url.trim()) {
@@ -79,16 +83,23 @@ export function SubscriptionsPanel() {
     }
   }
 
-  async function handleDelete(id: string, name: string) {
-    if (!confirm(`Remove subscription "${name}" and all its synced events?`)) return;
-    setBusy(id);
+  function handleDelete(id: string, name: string) {
+    setDeleteTarget({ id, name });
+  }
+
+  async function performDelete() {
+    const target = deleteTarget;
+    if (!target) return;
+    setBusy(target.id);
     try {
-      await deleteSource(id);
+      await deleteSource(target.id);
+      setDeleteTarget(null);
       toast("Subscription removed", "success");
       refresh();
     } catch (err) {
       // WARP-294: friendly translation; never raw err.message.
       toast(translateError(err, "subscription"), "error");
+      throw err;
     } finally {
       setBusy(null);
     }
@@ -252,6 +263,20 @@ export function SubscriptionsPanel() {
           events will appear automatically.
         </p>
       </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onConfirm={performDelete}
+        onCancel={() => setDeleteTarget(null)}
+        title={
+          deleteTarget
+            ? `Remove subscription "${deleteTarget.name}"?`
+            : "Remove subscription?"
+        }
+        description="All synced events from this calendar are removed from your dashboard. You can re-add the subscription later."
+        confirmLabel="Remove"
+        variant="destructive"
+      />
     </div>
   );
 }
