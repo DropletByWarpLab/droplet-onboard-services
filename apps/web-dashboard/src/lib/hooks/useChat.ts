@@ -130,6 +130,14 @@ export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  // AbortController for the in-flight stream (WARP-295). Stored in a
+  // ref so `stop()` can read the current controller synchronously
+  // without re-renders. `isStoppingRef` lets the SSE reader loop's
+  // catch/finally distinguish a user-initiated abort (preserve partial
+  // content, mark `stopped: true`) from a genuine fetch failure
+  // (`friendlyErrorMessage` path).
+  const abortRef = useRef<AbortController | null>(null);
+  const isStoppingRef = useRef(false);
   // The chatId can change between renders; freeze the latest value in
   // a ref so `attach` (a stable callback) reads the current value.
   const chatIdRef = useRef<string | undefined>(options.chatId);
@@ -274,12 +282,21 @@ export function useChat(options: UseChatOptions = {}) {
       });
 
       setIsStreaming(true);
+      // Mint a fresh AbortController for this turn. Any previous one
+      // is stale — sendMessage isn't called while a stream is in flight
+      // because the input is disabled, but we still defensively abort
+      // the old controller so dangling listeners don't leak.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      isStoppingRef.current = false;
 
       try {
         const response = await sendChat({
           model,
           messages: replayMessages,
           stream: true,
+          signal: controller.signal,
         });
 
         if (!response.body) {
@@ -317,27 +334,67 @@ export function useChat(options: UseChatOptions = {}) {
           if (evt) applyEvent(setMessages, assistantMessage.id, evt, content);
         }
       } catch (err) {
-        const friendly = friendlyErrorMessage(err);
-        setMessages((prev) => {
-          const updated = [...prev];
-          const idx = updated.findIndex((m) => m.id === assistantMessage.id);
-          if (idx !== -1) {
-            const last = updated[idx];
-            if (last.role === "assistant" && !last.content) {
-              updated[idx] = {
-                ...last,
-                error: { message: friendly, retryPrompt: content },
-              };
+        // WARP-295: a user-initiated stop() aborts the underlying
+        // fetch, which surfaces here as an AbortError. That is NOT an
+        // error condition from the UX's perspective — we preserve any
+        // partial content the model already streamed and mark the
+        // bubble with `stopped: true` so the ChatMessage layer can
+        // render the "Stopped by you" tag.
+        const isAbort =
+          isStoppingRef.current ||
+          controller.signal.aborted ||
+          (err instanceof DOMException && err.name === "AbortError");
+        if (isAbort) {
+          setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === assistantMessage.id);
+            if (idx === -1) return prev;
+            const last = prev[idx];
+            if (last.role !== "assistant") return prev;
+            const updated = [...prev];
+            updated[idx] = { ...last, stopped: true };
+            return updated;
+          });
+        } else {
+          const friendly = friendlyErrorMessage(err);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantMessage.id);
+            if (idx !== -1) {
+              const last = updated[idx];
+              if (last.role === "assistant" && !last.content) {
+                updated[idx] = {
+                  ...last,
+                  error: { message: friendly, retryPrompt: content },
+                };
+              }
             }
-          }
-          return updated;
-        });
+            return updated;
+          });
+        }
       } finally {
         setIsStreaming(false);
+        isStoppingRef.current = false;
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
       }
     },
     [],
   );
+
+  /**
+   * Cancel the in-flight stream (WARP-295). Aborts the underlying
+   * fetch via the per-turn AbortController and signals the SSE reader
+   * catch block to treat the abort as user-initiated. No-op when no
+   * stream is in flight — the button may still be visible for a frame
+   * after the stream ends if React hasn't re-rendered yet.
+   */
+  const stop = useCallback(() => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    isStoppingRef.current = true;
+    controller.abort();
+  }, []);
 
   /**
    * Re-send the prompt that drove a failed assistant turn. Drops the
@@ -430,6 +487,7 @@ export function useChat(options: UseChatOptions = {}) {
     setMessages,
     isStreaming,
     sendMessage,
+    stop,
     retryMessage,
     clearMessages,
     attachments,

@@ -31,6 +31,35 @@ export interface ChatMessage {
    * drove this turn — clicking retry re-sends it.
    */
   error?: { message: string; retryPrompt: string };
+  /**
+   * Set on an assistant message when the user clicked the Stop button
+   * mid-stream (WARP-295). Distinct from `error`: stopping is intentional,
+   * the partial content is kept verbatim, and the UI tags the bubble with
+   * a plain "Stopped by you" marker rather than an error chrome.
+   */
+  stopped?: boolean;
+  /**
+   * Citations attached to this assistant turn — extracted from
+   * retrieval-tool results during the stream (WARP-295). Rendered as
+   * `<CitationChip>` chips below the message bubble.
+   */
+  citations?: ChatCitation[];
+}
+
+/**
+ * One retrieval source surfaced by an MCP retrieval tool (brain search,
+ * file search). Mirrors the shape `CitationChip` already consumes in
+ * `/knowledge/SearchTab`, so the same component is reused without
+ * adapter code on the chat surface.
+ */
+export interface ChatCitation {
+  source: "nextcloud" | "brain";
+  path: string;
+  pageNumber?: number | null;
+  score?: number;
+  brainItemId?: string | null;
+  snippet?: string;
+  mimeType?: string;
 }
 
 /**

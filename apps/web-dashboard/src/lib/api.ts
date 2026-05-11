@@ -1313,11 +1313,15 @@ export async function fetchModels(): Promise<ModelsResponse> {
   return res.json();
 }
 
-export async function sendChat(request: ChatRequest): Promise<Response> {
+export async function sendChat(
+  request: ChatRequest & { signal?: AbortSignal },
+): Promise<Response> {
+  const { signal, ...body } = request;
   return authFetch(`${BASE}/api/llm/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
+    signal,
   });
 }
 
