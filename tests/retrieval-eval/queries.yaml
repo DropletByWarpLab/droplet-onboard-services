@@ -1,0 +1,174 @@
+# WARP-286 retrieval eval — manually curated.
+# Each query has 1-3 relevant chunks. "Relevant" means a reasonable
+# user reading the chunk text would consider it answering the query.
+# Match rules:
+#   - source + path + chunk_idx exact = the strictest
+#   - path_contains + chunk_idx_any = looser; any chunk from that doc counts
+#   - The metric is NDCG@10, so partial relevance via DCG works fine.
+#
+# Growth path (post-WARP-286): once Phase B (activity graph + click data)
+# lands, extend with (query, clicked_chunk) pairs mined from
+# ActivityEvent. Until then, manual curation.
+
+queries:
+  - id: q01
+    query: "what is the budget for Q4"
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "lexical hit on 'Q4' + transcript synonym"
+
+  - id: q02
+    query: "alphahotel"
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+    notes: "single-token rare match — pure lexical win"
+
+  - id: q03
+    query: "budget meeting kickoff"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "exact phrase from subtitle stream"
+
+  - id: q04
+    query: "what does the screenshot say"
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+    notes: "OCR-recovered text"
+
+  - id: q05
+    query: "echofoxtrot"
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+    notes: "rare token from OCR"
+
+  - id: q06
+    query: "bob attached the proposal"
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+    notes: "email body retrieval"
+
+  - id: q07
+    query: "attached PDF for the full proposal"
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+
+  - id: q08
+    query: "ONE HUNDRED THOUSAND"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "appears in both frame OCR and subtitle — multi-hit"
+
+  - id: q09
+    query: "budget kickoff slide"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+
+  - id: q10
+    query: "note inside the zip"
+    relevant:
+      - source: nextcloud
+        path_contains: "simple.zip"
+        chunk_idx_any: true
+    notes: "archive-member retrieval"
+
+  - id: q11
+    query: "the budget for q4 is one hundred thousand"
+    relevant:
+      - source: nextcloud
+        path_contains: "simple.zip"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "exact phrase across multiple sources"
+
+  - id: q12
+    query: "Tesseract OCR"
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+
+  - id: q13
+    query: "q4 revenue"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+
+  - id: q14
+    query: "rfc822 email message"
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+
+  - id: q15
+    query: "frame OCR sentinel"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+
+  - id: q16
+    query: "audio transcript faster-whisper"
+    relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+
+  - id: q17
+    query: "image extracted text screenshot"
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+
+  - id: q18
+    query: "test-rag-end-to-end folder PDF"
+    relevant:
+      - source: nextcloud
+        path_contains: "test-rag-end-to-end"
+        chunk_idx_any: true
+    notes: "path/name token query — pure lexical win"
+
+  - id: q19
+    query: "zip archive note budget"
+    relevant:
+      - source: nextcloud
+        path_contains: "simple.zip"
+        chunk_idx_any: true
+
+  - id: q20
+    query: "video clip on-screen text slide"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true

@@ -87,6 +87,20 @@ export interface FloatArray {
   values: number[];
 }
 
+export interface RerankRequest {
+  /** The user query. */
+  query: string;
+  /** Candidate passages to score, in caller-defined order. */
+  passages: string[];
+  /** Model id. Default: "bge-reranker-base". */
+  model?: string | undefined;
+}
+
+export interface RerankResponse {
+  /** One float per input passage, same order. */
+  scores: number[];
+}
+
 function createBaseChatRequest(): ChatRequest {
   return { model: "", messages: [], temperature: 0, maxTokens: undefined, provider: undefined, priority: 0 };
 }
@@ -1020,6 +1034,170 @@ export const FloatArray: MessageFns<FloatArray> = {
   },
 };
 
+function createBaseRerankRequest(): RerankRequest {
+  return { query: "", passages: [], model: undefined };
+}
+
+export const RerankRequest: MessageFns<RerankRequest> = {
+  encode(message: RerankRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.query !== "") {
+      writer.uint32(10).string(message.query);
+    }
+    for (const v of message.passages) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.model !== undefined) {
+      writer.uint32(26).string(message.model);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RerankRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRerankRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.query = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.passages.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.model = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RerankRequest {
+    return {
+      query: isSet(object.query) ? globalThis.String(object.query) : "",
+      passages: globalThis.Array.isArray(object?.passages) ? object.passages.map((e: any) => globalThis.String(e)) : [],
+      model: isSet(object.model) ? globalThis.String(object.model) : undefined,
+    };
+  },
+
+  toJSON(message: RerankRequest): unknown {
+    const obj: any = {};
+    if (message.query !== "") {
+      obj.query = message.query;
+    }
+    if (message.passages?.length) {
+      obj.passages = message.passages;
+    }
+    if (message.model !== undefined) {
+      obj.model = message.model;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<RerankRequest>): RerankRequest {
+    return RerankRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<RerankRequest>): RerankRequest {
+    const message = createBaseRerankRequest();
+    message.query = object.query ?? "";
+    message.passages = object.passages?.map((e) => e) || [];
+    message.model = object.model ?? undefined;
+    return message;
+  },
+};
+
+function createBaseRerankResponse(): RerankResponse {
+  return { scores: [] };
+}
+
+export const RerankResponse: MessageFns<RerankResponse> = {
+  encode(message: RerankResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    writer.uint32(10).fork();
+    for (const v of message.scores) {
+      writer.float(v);
+    }
+    writer.join();
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RerankResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRerankResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag === 13) {
+            message.scores.push(reader.float());
+
+            continue;
+          }
+
+          if (tag === 10) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.scores.push(reader.float());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RerankResponse {
+    return {
+      scores: globalThis.Array.isArray(object?.scores) ? object.scores.map((e: any) => globalThis.Number(e)) : [],
+    };
+  },
+
+  toJSON(message: RerankResponse): unknown {
+    const obj: any = {};
+    if (message.scores?.length) {
+      obj.scores = message.scores;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<RerankResponse>): RerankResponse {
+    return RerankResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<RerankResponse>): RerankResponse {
+    const message = createBaseRerankResponse();
+    message.scores = object.scores?.map((e) => e) || [];
+    return message;
+  },
+};
+
 export type InferenceServiceService = typeof InferenceServiceService;
 export const InferenceServiceService = {
   /** Unary chat completion */
@@ -1062,6 +1240,19 @@ export const InferenceServiceService = {
     responseSerialize: (value: EmbedResponse): Buffer => Buffer.from(EmbedResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): EmbedResponse => EmbedResponse.decode(value),
   },
+  /**
+   * Text reranker — used by the orchestrator for hybrid retrieval (WARP-286).
+   * Scores each passage against the query using a cross-encoder.
+   */
+  rerank: {
+    path: "/droplet.inference.InferenceService/Rerank" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RerankRequest): Buffer => Buffer.from(RerankRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RerankRequest => RerankRequest.decode(value),
+    responseSerialize: (value: RerankResponse): Buffer => Buffer.from(RerankResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RerankResponse => RerankResponse.decode(value),
+  },
 } as const;
 
 export interface InferenceServiceServer extends UntypedServiceImplementation {
@@ -1073,6 +1264,11 @@ export interface InferenceServiceServer extends UntypedServiceImplementation {
   listModels: handleUnaryCall<Empty, ModelList>;
   /** Text embedding — used by the file-indexer for semantic search (Phase 4) */
   embedText: handleUnaryCall<EmbedRequest, EmbedResponse>;
+  /**
+   * Text reranker — used by the orchestrator for hybrid retrieval (WARP-286).
+   * Scores each passage against the query using a cross-encoder.
+   */
+  rerank: handleUnaryCall<RerankRequest, RerankResponse>;
 }
 
 export interface InferenceServiceClient extends Client {
@@ -1124,6 +1320,25 @@ export interface InferenceServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: EmbedResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * Text reranker — used by the orchestrator for hybrid retrieval (WARP-286).
+   * Scores each passage against the query using a cross-encoder.
+   */
+  rerank(
+    request: RerankRequest,
+    callback: (error: ServiceError | null, response: RerankResponse) => void,
+  ): ClientUnaryCall;
+  rerank(
+    request: RerankRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RerankResponse) => void,
+  ): ClientUnaryCall;
+  rerank(
+    request: RerankRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RerankResponse) => void,
   ): ClientUnaryCall;
 }
 

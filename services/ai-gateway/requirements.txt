@@ -10,3 +10,15 @@ grpcio>=1.62.0
 grpcio-tools>=1.62.0
 sentence-transformers>=3.0.0
 torch --index-url https://download.pytorch.org/whl/cpu
+
+# WARP-286: BGE-reranker-base int8 via optimum + onnxruntime.
+# Used by the Rerank gRPC handler for hybrid retrieval.
+#
+# Pin both packages explicitly without using optimum's [onnxruntime] extras
+# syntax. The extras marker confuses pip's resolver when combined with our
+# version range (>=1.21,<2.0) + sentence-transformers's transitive deps,
+# producing a tautological "optimum 1.27.0 depends on optimum 1.27.0"
+# conflict. Listing onnxruntime as a sibling package sidesteps it.
+onnxruntime>=1.18,<2.0
+optimum>=1.21,<2.0
+huggingface_hub>=0.24,<1.0

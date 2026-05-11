@@ -34,6 +34,29 @@ export interface ToolContext {
    *  a direct call. May be undefined when the embedder is unavailable —
    *  handlers should fall through to a clean error in that case. */
   embedText?: (texts: string[]) => Promise<number[][]>;
+  /**
+   * WARP-286 — hybrid retrieval shim. Orchestrator binds this to
+   * `file-search.service.ts`'s `searchHybrid` so the MCP tool handler
+   * doesn't reach into Prisma + pgvector directly. Returns results
+   * already filtered by the calling user's RBAC boundary. When absent
+   * (e.g. embedder unavailable at context-build time) the handler
+   * returns `SEARCH_UNAVAILABLE`.
+   */
+  searchHybrid?: (args: {
+    query: string;
+    limit: number;
+  }) => Promise<
+    Array<{
+      source: "nextcloud" | "brain";
+      path: string;
+      chunkIdx: number;
+      pageNumber: number | null;
+      brainItemId: string | null;
+      score: number;
+      snippet: string;
+      metadata: Record<string, unknown> | null;
+    }>
+  >;
   userId?: string;
   role?: Role;
   ncToken?: string;

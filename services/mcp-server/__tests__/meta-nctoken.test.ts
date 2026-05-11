@@ -109,17 +109,19 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     await server.close();
   });
 
-  it("threads _meta.userId into ctx.userId so search_content scopes to that user (WARP-202)", async () => {
+  it("threads _meta.userId into ctx.userId so search_content scopes to that user (WARP-202 / WARP-286)", async () => {
     // Stdio path: no claims, but the orchestrator passes the calling
     // user's username via _meta.userId. search-content.ts gates on
     // ctx.userId, so this test pins the trusted-stdio plumbing.
-    const embedSpy = vi.fn().mockResolvedValue([[0.1]]);
-    const queryResult: unknown[] = [];
+    //
+    // WARP-286: the tool now calls ctx.searchHybrid (with userId bound
+    // at context build time) instead of embedText + raw SQL.
+    const searchSpy = vi.fn().mockResolvedValue([]);
     const deps: ContextDeps = {
-      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue(queryResult) } as never,
+      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as never,
       matter: {} as never,
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
-      embedText: embedSpy,
+      searchHybrid: searchSpy,
     };
     const server = createServer(deps);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -133,25 +135,24 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     });
 
     expect(res.isError).toBe(false);
-    expect(embedSpy).toHaveBeenCalledWith(["hello world"]);
-    // The userId reached the handler — verified indirectly via the
-    // SQL execution path. Check the prisma stub was invoked with
-    // alice as a parameter.
-    const queryCall = (deps.prisma as unknown as {
-      $queryRawUnsafe: ReturnType<typeof vi.fn>;
-    }).$queryRawUnsafe.mock.calls[0];
-    expect(queryCall).toContain("alice");
+    // The userId reached the shim — verified by the bound first arg.
+    expect(searchSpy).toHaveBeenCalledWith({
+      userId: "alice",
+      query: "hello world",
+      limit: 10,
+    });
 
     await client.close();
     await server.close();
   });
 
   it("rejects empty / non-string _meta.userId (defensive)", async () => {
+    const searchSpy = vi.fn().mockResolvedValue([]);
     const deps: ContextDeps = {
       prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as never,
       matter: {} as never,
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
-      embedText: vi.fn().mockResolvedValue([[0.1]]),
+      searchHybrid: searchSpy,
     };
     const server = createServer(deps);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
