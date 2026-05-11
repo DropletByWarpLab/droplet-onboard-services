@@ -1,0 +1,46 @@
+<resources>
+    <string name="app_name">Droplet</string>
+    <string name="app_tagline">Your private AI appliance, in your pocket</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_title">Connect your Droplet</string>
+    <string name="onboarding_subtitle">Scan the pairing QR from the dashboard, pick a Droplet on your network, or paste a server URL manually.</string>
+    <string name="onboarding_scan">Scan pairing QR</string>
+    <string name="onboarding_discover">Find Droplet on this Wi-Fi</string>
+    <string name="onboarding_manual">Enter server URL</string>
+
+    <!-- Manual URL -->
+    <string name="manual_title">Server URL</string>
+    <string name="manual_hint">https://droplet.local</string>
+    <string name="manual_invalid">That doesn\'t look like a valid Droplet URL. Try https://droplet.local or the IP shown on the appliance OLED.</string>
+    <string name="manual_continue">Continue</string>
+
+    <!-- QR -->
+    <string name="qr_title">Point camera at the pairing QR</string>
+    <string name="qr_hint">The dashboard shows it under Devices → Pair new device.</string>
+    <string name="qr_perm_denied_title">Camera access is off</string>
+    <string name="qr_perm_denied_body">Without camera access we can\'t scan the pairing QR. You can still pair manually.</string>
+    <string name="qr_perm_grant">Grant camera access</string>
+    <string name="qr_perm_manual">Enter URL instead</string>
+
+    <!-- Discovery -->
+    <string name="discovery_title">Droplets on this network</string>
+    <string name="discovery_empty">No Droplets visible yet. Make sure your phone and the appliance are on the same Wi-Fi.</string>
+    <string name="discovery_retry">Scan again</string>
+
+    <!-- Switcher -->
+    <string name="switcher_title">Switch Droplet</string>
+    <string name="switcher_add">Add another Droplet</string>
+    <string name="switcher_forget">Forget this Droplet</string>
+
+    <!-- WebView errors -->
+    <string name="webview_offline_title">Can\'t reach Droplet</string>
+    <string name="webview_offline_body">Your phone can\'t talk to %1$s right now. Check that the appliance is powered on and you\'re on the same network.</string>
+    <string name="webview_retry">Retry</string>
+    <string name="webview_switch">Switch Droplet</string>
+
+    <!-- Pair deep link -->
+    <string name="pair_handoff_title">Pairing Droplet</string>
+    <string name="pair_handoff_body">Completing pairing with the appliance — this should only take a second.</string>
+    <string name="pair_handoff_error">Pairing failed: %1$s</string>
+</resources>

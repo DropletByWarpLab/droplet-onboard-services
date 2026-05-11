@@ -1,0 +1,18 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Real theming happens in Compose (ui/theme/Theme.kt). This XML theme
+         only exists to give the system a sane pre-Compose appearance during
+         cold start so we don't flash an Android default skin before
+         setContent runs. -->
+    <style name="Theme.Droplet" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!-- Used as the launcher theme: shows the icon as a centered windowBackground
+         splash during cold start, then MainActivity swaps to Theme.Droplet via
+         installSplashScreen() equivalent in code. -->
+    <style name="Theme.Droplet.Splash" parent="Theme.Droplet">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
+</resources>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand palette mirrors warp-lab.ai. Real values to be reconciled with
+         Romain (CPO) once the brand book ships; placeholders below are pulled
+         from the Webflow site's primary blue + neutrals. -->
+    <color name="droplet_primary">#0A84FF</color>
+    <color name="droplet_primary_dark">#0064D1</color>
+    <color name="droplet_on_primary">#FFFFFF</color>
+    <color name="droplet_surface_light">#FFFFFF</color>
+    <color name="droplet_surface_dark">#0B0E13</color>
+    <color name="droplet_on_surface_light">#0B0E13</color>
+    <color name="droplet_on_surface_dark">#F4F5F7</color>
+    <color name="droplet_outline">#3A4150</color>
+</resources>

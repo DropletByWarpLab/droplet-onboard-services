@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup is OFF (allowBackup=false in manifest) but we still need this
+  file to silence the lint warning + to declare *what* would be excluded if
+  it were on. The paired-server DataStore is per-device and tied to a
+  session cookie that wouldn't survive a restore, so backing it up is
+  worse than useless — it'd let an attacker who restores a stolen
+  cloud backup to a fresh device see a list of customer appliance URLs.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="." />
+</full-backup-content>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Two-tier network policy:
+    1. Public domains (warp-lab.ai, *.warp-lab.ai) — strict HTTPS only,
+       system CA roots only.
+    2. LAN / mDNS hostnames (.local) + RFC1918 ranges — allow cleartext
+       AND allow the user's installed CA store (so a user who imports
+       the appliance's self-signed root cert can browse over HTTPS).
+       This is the realistic deployment for a freshly-shipped Droplet on
+       a customer LAN before they've set up DDNS.
+
+  Production hardening: once the appliance ships with a real cert from
+  the Warp Lab managed PKI, we'll drop the cleartext exception and pin
+  to the Warp Lab root in trust-anchors. Tracked as a TODO in README.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">local</domain>
+        <domain includeSubdomains="true">droplet.local</domain>
+        <domain includeSubdomains="true">10.0.0.0/8</domain>
+        <domain includeSubdomains="true">172.16.0.0/12</domain>
+        <domain includeSubdomains="true">192.168.0.0/16</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" overridePins="false" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

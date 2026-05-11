@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder droplet shape: a teardrop in white on the brand-blue
+     background. Replace with the official Warp Lab asset once the brand book
+     ships. Adaptive icon viewport is 108x108 with a 72x72 safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28
+            C 54,28 36,52 36,68
+            C 36,78 44,86 54,86
+            C 64,86 72,78 72,68
+            C 72,52 54,28 54,28
+            Z" />
+</vector>
