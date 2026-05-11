@@ -41,7 +41,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,8 +52,6 @@ import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import ai.warplab.droplet.R
 import ai.warplab.droplet.data.ServerRepository
-import kotlinx.coroutines.flow.firstOrNull
-import kotlinx.coroutines.launch
 
 /**
  * Dashboard host. Renders the appliance's Next.js dashboard inside a WebView
@@ -88,7 +85,6 @@ fun DashboardWebViewScreen(
     onOpenSwitcher: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val activeUrl by serverRepository.activeServerUrl.collectAsState(initial = null)
 
     var webView by remember { mutableStateOf<WebView?>(null) }

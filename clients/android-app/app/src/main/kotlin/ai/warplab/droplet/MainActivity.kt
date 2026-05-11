@@ -14,7 +14,6 @@ import ai.warplab.droplet.data.PairedServer
 import ai.warplab.droplet.nav.DropletNavHost
 import ai.warplab.droplet.nav.DropletRoute
 import ai.warplab.droplet.pair.PairUrl
-import ai.warplab.droplet.pair.UrlValidator
 import ai.warplab.droplet.ui.theme.DropletTheme
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.flow.firstOrNull

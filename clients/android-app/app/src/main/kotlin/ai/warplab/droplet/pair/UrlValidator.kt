@@ -1,6 +1,6 @@
 package ai.warplab.droplet.pair
 
-import android.net.Uri
+import java.net.URI
 
 /**
  * Common validation for any "server URL" the user might give us: a manual
@@ -8,6 +8,11 @@ import android.net.Uri
  * a [PairUrl]. We normalise to a canonical form so two semantically-identical
  * URLs hash to the same paired-device record (i.e. `droplet.local` and
  * `droplet.local/` and `https://droplet.local:443` all collapse).
+ *
+ * Pure-Kotlin / JVM-only — no `android.net.Uri` so this slice is unit-testable
+ * without Robolectric. Android's Uri parser is more lenient than RFC 3986 but
+ * for our narrow URL shape (`<scheme>://<host>[:<port>][/]`) the difference
+ * doesn't matter.
  */
 object UrlValidator {
 
@@ -37,7 +42,7 @@ object UrlValidator {
         // who want plain HTTP on LAN have to type it.
         val withScheme = if (!trimmed.contains("://")) "https://$trimmed" else trimmed
 
-        val uri = runCatching { Uri.parse(withScheme) }.getOrNull() ?: return null
+        val uri = runCatching { URI(withScheme) }.getOrNull() ?: return null
         val scheme = uri.scheme?.lowercase() ?: return null
         if (scheme !in ALLOWED_SCHEMES) return null
 
