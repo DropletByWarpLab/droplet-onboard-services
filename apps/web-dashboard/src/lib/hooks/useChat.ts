@@ -428,6 +428,46 @@ export function useChat(options: UseChatOptions = {}) {
     [sendMessage],
   );
 
+  /**
+   * WARP-295: re-run an assistant turn. Drops the targeted assistant
+   * message plus the immediately-preceding user prompt (the
+   * sendMessage updater will re-append both), then re-sends the
+   * prompt. Distinct from retryMessage: regenerate is invoked from
+   * the message-actions toolbar on a successful turn, retry is the
+   * affordance on a failed turn. The two paths share a common
+   * "drop-and-resend" shape.
+   *
+   * No-op when handed a non-assistant id — the page wires this to a
+   * button rendered only on the last assistant turn, but defensive
+   * guards are cheap and protect against runaway calls if the wiring
+   * regresses.
+   */
+  const regenerate = useCallback(
+    async (messageId: string, model: string, systemPrompt?: string) => {
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      const target = snapshot[idx];
+      if (target.role !== "assistant") return;
+      const prevUser =
+        idx > 0 && snapshot[idx - 1].role === "user" ? snapshot[idx - 1] : null;
+      if (!prevUser) return;
+      const prompt = prevUser.content;
+
+      // Drop both the assistant turn and the user prompt before it;
+      // sendMessage will re-append a fresh pair.
+      setMessages((prev) => {
+        const i = prev.findIndex((m) => m.id === messageId);
+        if (i === -1) return prev;
+        const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
+        return prev.filter((_, k) => k !== i && k !== userIdx);
+      });
+
+      await sendMessage(prompt, model, systemPrompt);
+    },
+    [sendMessage],
+  );
+
   const clearMessages = useCallback(() => {
     setMessages([]);
   }, []);
@@ -489,6 +529,7 @@ export function useChat(options: UseChatOptions = {}) {
     sendMessage,
     stop,
     retryMessage,
+    regenerate,
     clearMessages,
     attachments,
     attach,

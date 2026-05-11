@@ -248,6 +248,159 @@ describe("ChatMessage", () => {
     });
   });
 
+  describe("message-actions toolbar (WARP-295)", () => {
+    function assistantMsg(): ChatMessageType {
+      return {
+        id: "asst-1",
+        role: "assistant",
+        content: "Two plus two is four.",
+      };
+    }
+
+    it("renders Copy / Quote / Regenerate buttons on the last assistant turn with aria-labels", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /copy message/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /quote message/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /regenerate response/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("hides Regenerate on non-last assistant turns (Copy + Quote still shown)", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant={false}
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /copy message/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /quote message/i })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /regenerate response/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not render the toolbar on user messages", () => {
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "Hi" }}
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+          isLastAssistant
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /copy message/i })).not.toBeInTheDocument();
+    });
+
+    it("Copy button calls onCopy with the assistant message text and shows a transient 'Copied' state", async () => {
+      const onCopy = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={onCopy}
+        />,
+      );
+      const btn = screen.getByRole("button", { name: /copy message/i });
+      btn.click();
+      expect(onCopy).toHaveBeenCalledWith("Two plus two is four.");
+      // After the async copy promise resolves, the button flips to a
+      // "Copied" affordance. Use findByRole so we wait for the microtask
+      // chain to finish before asserting.
+      const copied = await screen.findByRole("button", { name: /copied/i });
+      expect(copied).toBeInTheDocument();
+    });
+
+    it("Quote button calls onQuote with the assistant message text", () => {
+      const onQuote = vi.fn();
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onQuote={onQuote}
+        />,
+      );
+      screen.getByRole("button", { name: /quote message/i }).click();
+      expect(onQuote).toHaveBeenCalledWith("Two plus two is four.");
+    });
+
+    it("Regenerate button calls onRegenerate with the message id", () => {
+      const onRegenerate = vi.fn();
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onRegenerate={onRegenerate}
+        />,
+      );
+      screen.getByRole("button", { name: /regenerate response/i }).click();
+      expect(onRegenerate).toHaveBeenCalledWith("asst-1");
+    });
+
+    it("toolbar buttons exist for an assistant message with neither error nor streaming state", () => {
+      // Regression guard: pre-WARP-295 the only buttons on the message
+      // were the failed-turn retry. Make sure the toolbar isn't hidden
+      // behind some `hasError` discriminator.
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /copy message/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  describe("stopped marker (WARP-295)", () => {
+    it("renders a 'Stopped by you' tag on an assistant message with stopped=true", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-stop",
+            role: "assistant",
+            content: "Partial answer",
+            stopped: true,
+          }}
+        />,
+      );
+      expect(screen.getByText(/stopped by you/i)).toBeInTheDocument();
+      // The partial content is preserved.
+      expect(screen.getByText(/partial answer/i)).toBeInTheDocument();
+    });
+
+    it("no stopped tag when the flag is unset", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-ok",
+            role: "assistant",
+            content: "Full answer",
+          }}
+        />,
+      );
+      expect(screen.queryByText(/stopped by you/i)).not.toBeInTheDocument();
+    });
+  });
+
   describe("ARIA on streaming bubble", () => {
     it("sets role='status' + aria-live='polite' on streaming assistant bubble", () => {
       const { container } = render(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   MessageSquare,
@@ -8,7 +8,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { ChatMessage } from "@/components/ChatMessage";
-import { ChatInput } from "@/components/ChatInput";
+import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { useChat } from "@/lib/hooks/useChat";
@@ -32,12 +32,14 @@ export default function ChatPage() {
     sendMessage,
     stop,
     retryMessage,
+    regenerate,
     clearMessages,
     attachments,
     attach,
     removeAttachment,
     clearAttachments,
   } = useChat({ chatId });
+  const chatInputRef = useRef<ChatInputHandle>(null);
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -110,6 +112,42 @@ export default function ChatPage() {
     [retryMessage, selectedModel, systemPrompt],
   );
 
+  // WARP-295: message-actions (Copy / Quote / Regenerate). Copy is
+  // delegated to the Clipboard API; Quote feeds the composer through
+  // ChatInputHandle.insertQuote; Regenerate threads through to
+  // useChat.regenerate() which owns the drop-and-resend slice surgery.
+  const handleCopy = useCallback(async (text: string) => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API rejects in unfocused tabs / cross-origin frames —
+      // silently no-op; the toolbar still flips its transient "Copied"
+      // state so the UI doesn't get stuck.
+    }
+  }, []);
+
+  const handleQuote = useCallback((text: string) => {
+    chatInputRef.current?.insertQuote(text);
+  }, []);
+
+  const handleRegenerate = useCallback(
+    (messageId: string) => {
+      if (!selectedModel) return;
+      regenerate(messageId, selectedModel, systemPrompt || undefined);
+    },
+    [regenerate, selectedModel, systemPrompt],
+  );
+
+  // Index of the last assistant message — the page passes
+  // `isLastAssistant` to each ChatMessage so the Regenerate button
+  // only surfaces on that one row.
+  const lastAssistantIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
 
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
@@ -231,7 +269,11 @@ export default function ChatPage() {
               isStreaming={
                 isStreaming && idx === messages.length - 1 && msg.role === "assistant"
               }
+              isLastAssistant={idx === lastAssistantIdx}
               onRetry={handleRetry}
+              onCopy={handleCopy}
+              onQuote={handleQuote}
+              onRegenerate={handleRegenerate}
             />
           ))}
         </div>
@@ -263,6 +305,7 @@ export default function ChatPage() {
 
         {/* Input */}
         <ChatInput
+          ref={chatInputRef}
           onSend={handleSend}
           disabled={isStreaming || !selectedModel}
           attachments={attachments}

@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -10,8 +10,12 @@ import {
   AlertTriangle,
   ShieldAlert,
   RefreshCcw,
+  Copy as CopyIcon,
+  Quote as QuoteIcon,
+  RotateCcw,
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
+import { CitationChip } from "@/components/CitationChip";
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -22,17 +26,52 @@ interface ChatMessageProps {
    * original user prompt is re-sent.
    */
   onRetry?: (messageId: string) => void;
+  /**
+   * WARP-295: message-actions toolbar callbacks. Wired by the page
+   * from clipboard / ChatInputHandle.insertQuote / useChat.regenerate
+   * respectively. `isLastAssistant` gates Regenerate so a multi-turn
+   * chat doesn't surface "re-run this old answer" affordances all the
+   * way back through the thread.
+   */
+  isLastAssistant?: boolean;
+  onCopy?: (text: string) => void | Promise<void>;
+  onQuote?: (text: string) => void;
+  onRegenerate?: (messageId: string) => void;
 }
 
 export const ChatMessage = memo(function ChatMessage({
   message,
   isStreaming,
   onRetry,
+  isLastAssistant,
+  onCopy,
+  onQuote,
+  onRegenerate,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
   const toolCalls = message.toolCalls;
   const hasToolCalls = !isUser && toolCalls && toolCalls.length > 0;
   const hasError = !isUser && Boolean(message.error);
+  const isStopped = !isUser && Boolean(message.stopped);
+  const citations = !isUser ? message.citations : undefined;
+  const hasCitations = Boolean(citations && citations.length > 0);
+  const showToolbar =
+    !isUser && !isStreaming && (Boolean(onCopy) || Boolean(onQuote) || Boolean(onRegenerate));
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+
+  const handleCopy = async () => {
+    if (!onCopy) return;
+    try {
+      await onCopy(message.content);
+    } catch {
+      // The page-level handler swallows clipboard errors; we mirror
+      // the optimistic UX here either way.
+    }
+    setCopyState("copied");
+    // Flip back after 2s — matches the share-link copy pattern used in
+    // app/users/page.tsx.
+    window.setTimeout(() => setCopyState("idle"), 2000);
+  };
 
   // Surface the confirmation_required message text inline on the
   // assistant turn — even before the model continues — so the user
@@ -52,9 +91,12 @@ export const ChatMessage = memo(function ChatMessage({
         {isUser ? <User size={14} /> : <Bot size={14} />}
       </div>
 
-      {/* Bubble */}
+      {/* Bubble + meta. group/message lets the action toolbar surface on
+          hover OR keyboard focus (focus-within) without prop-drilling
+          state up. */}
+      <div className={`flex flex-col gap-1 max-w-[70%] group/message ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`max-w-[70%] px-4 py-2.5 type-body
+        className={`px-4 py-2.5 type-body
           ${
             isUser
               ? "bg-accent text-white rounded-[20px] rounded-tr-[6px]"
@@ -117,13 +159,127 @@ export const ChatMessage = memo(function ChatMessage({
               </div>
             )}
             {isStreaming && (
-              <span
-                className="inline-block w-[2px] h-[18px] ml-0.5 -mb-[3px] bg-accent animate-pulse rounded-full"
-                aria-hidden="true"
-              />
+              <>
+                <span
+                  className="inline-block w-[2px] h-[18px] ml-0.5 -mb-[3px] bg-accent animate-pulse rounded-full motion-reduce:hidden"
+                  aria-hidden="true"
+                />
+                {/* WARP-295: text fallback for reduced-motion users.
+                    The animate-pulse cursor disappears for them, so we
+                    swap in a visually-equivalent ellipsis they can
+                    actually see, plus an SR-only "Working…" cue so
+                    screen-reader users get the streaming-state signal
+                    without the live region spamming on every token. */}
+                <span
+                  className="hidden motion-reduce:inline ml-1 type-caption-1 text-label-tertiary"
+                  aria-hidden="true"
+                >
+                  …
+                </span>
+                <span className="sr-only">Working…</span>
+              </>
             )}
           </div>
         )}
+      </div>
+      {/* WARP-295: citation chips below the assistant bubble.
+          Rendered through the shared <CitationChip> component for
+          visual parity with /knowledge/SearchTab. */}
+      {!isUser && hasCitations ? (
+        <div
+          data-testid="chat-citations"
+          className="flex flex-wrap gap-1.5 mt-0.5"
+        >
+          {citations!.map((c, i) => (
+            <CitationChip
+              key={`${c.source}:${c.path}:${c.pageNumber ?? ""}:${i}`}
+              source={c.source}
+              path={c.path}
+              pageNumber={c.pageNumber}
+              score={c.score}
+              brainItemId={c.brainItemId}
+              snippet={c.snippet}
+              mimeType={c.mimeType}
+            />
+          ))}
+        </div>
+      ) : null}
+      {/* WARP-295: "Stopped by you" marker — preserves the partial
+          content while making clear it didn't run to completion. */}
+      {isStopped ? (
+        <p className="type-caption-1 text-label-tertiary italic">
+          Stopped by you
+        </p>
+      ) : null}
+      {/* WARP-295: message-actions toolbar. focus-within keeps the
+          toolbar reachable by keyboard — Tab into the bubble's button
+          row surfaces it without requiring hover. */}
+      {showToolbar ? (
+        <div
+          data-testid="message-actions"
+          className="
+            flex items-center gap-1
+            opacity-0 group-hover/message:opacity-100 focus-within:opacity-100
+            transition-opacity duration-150
+          "
+        >
+          {onCopy ? (
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label={copyState === "copied" ? "Copied" : "Copy message"}
+              className="
+                inline-flex items-center gap-1 px-2 py-1 rounded-md
+                type-caption-1 text-label-tertiary
+                hover:text-label-primary hover:bg-surface-secondary
+                focus:outline-none focus:ring-2 focus:ring-accent/40
+                transition-colors
+              "
+            >
+              {copyState === "copied" ? (
+                <Check size={12} aria-hidden="true" />
+              ) : (
+                <CopyIcon size={12} aria-hidden="true" />
+              )}
+              <span>{copyState === "copied" ? "Copied" : "Copy"}</span>
+            </button>
+          ) : null}
+          {onQuote ? (
+            <button
+              type="button"
+              onClick={() => onQuote(message.content)}
+              aria-label="Quote message"
+              className="
+                inline-flex items-center gap-1 px-2 py-1 rounded-md
+                type-caption-1 text-label-tertiary
+                hover:text-label-primary hover:bg-surface-secondary
+                focus:outline-none focus:ring-2 focus:ring-accent/40
+                transition-colors
+              "
+            >
+              <QuoteIcon size={12} aria-hidden="true" />
+              <span>Quote</span>
+            </button>
+          ) : null}
+          {onRegenerate && isLastAssistant ? (
+            <button
+              type="button"
+              onClick={() => onRegenerate(message.id)}
+              aria-label="Regenerate response"
+              className="
+                inline-flex items-center gap-1 px-2 py-1 rounded-md
+                type-caption-1 text-label-tertiary
+                hover:text-label-primary hover:bg-surface-secondary
+                focus:outline-none focus:ring-2 focus:ring-accent/40
+                transition-colors
+              "
+            >
+              <RotateCcw size={12} aria-hidden="true" />
+              <span>Regenerate</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       </div>
     </div>
   );
