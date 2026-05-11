@@ -2,13 +2,17 @@
 
 HTML uses readability-lxml to strip nav/ads/boilerplate before chunking;
 falls back to a crude tag-strip if readability is missing or chokes.
+
+WARP-287: emits a single `Span` with `NoneAnchor` — text/markdown/etc.
+don't carry positional info, so the whole body lives in one span.
 """
 from __future__ import annotations
 
 import os
 import re
-from typing import cast
 
+from anchor_schema import NoneAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 
@@ -54,17 +58,23 @@ def extract(path: str) -> ExtractedDoc:
     text = text.strip()
     word_count = len(text.split())
 
-    return cast(
-        ExtractedDoc,
-        {
-            "text": text,
-            "page_breaks": [],
-            "language": None,
-            "metadata": {
-                "extractor_name": "text",
-                "extractor_version": "1.0",
-                "word_count": word_count,
-            },
-            "warnings": [],
-        },
+    metadata = {
+        "extractor_name": "text",
+        "extractor_version": "2",
+        "word_count": word_count,
+    }
+
+    if not text:
+        return ExtractedDoc(
+            spans=[],
+            language=None,
+            metadata=metadata,
+            warnings=[],
+        )
+
+    return ExtractedDoc(
+        spans=[Span(text=text, anchor=NoneAnchor())],
+        language=None,
+        metadata=metadata,
+        warnings=[],
     )

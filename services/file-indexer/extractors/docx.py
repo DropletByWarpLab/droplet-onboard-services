@@ -3,13 +3,16 @@
 Flattens paragraphs and table rows into a single document body. Tables
 are joined with `" | "` between cells so column structure survives the
 chunker.
+
+WARP-287: emits a single `Span` with `NoneAnchor` — python-docx doesn't
+track page breaks reliably, so the whole body lives in one span.
 """
 from __future__ import annotations
 
-from typing import cast
-
 from docx import Document
 
+from anchor_schema import NoneAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 
@@ -32,18 +35,24 @@ def extract(path: str) -> ExtractedDoc:
 
     full_text = "\n\n".join(parts)
 
-    return cast(
-        ExtractedDoc,
-        {
-            "text": full_text,
-            "page_breaks": [],  # python-docx doesn't track page breaks reliably
-            "language": None,
-            "metadata": {
-                "extractor_name": "docx",
-                "extractor_version": "1.0",
-                "paragraph_count": len(document.paragraphs),
-                "word_count": len(full_text.split()),
-            },
-            "warnings": [],
-        },
+    metadata = {
+        "extractor_name": "docx",
+        "extractor_version": "2",
+        "paragraph_count": len(document.paragraphs),
+        "word_count": len(full_text.split()),
+    }
+
+    if not full_text or not full_text.strip():
+        return ExtractedDoc(
+            spans=[],
+            language=None,
+            metadata=metadata,
+            warnings=[],
+        )
+
+    return ExtractedDoc(
+        spans=[Span(text=full_text, anchor=NoneAnchor())],
+        language=None,
+        metadata=metadata,
+        warnings=[],
     )
