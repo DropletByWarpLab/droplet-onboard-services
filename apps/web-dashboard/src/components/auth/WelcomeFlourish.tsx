@@ -25,7 +25,7 @@ import { motion, useReducedMotion } from "framer-motion";
 import { DropletMark } from "@/components/DropletMark";
 
 export interface WelcomeFlourishProps {
-  /** Used in "Welcome, {displayName}" headline. Falls back to "Welcome to Droplet". */
+  /** Used in "Welcome, {displayName}" headline. Falls back to "You're all set". */
   displayName?: string;
   /** Second-line copy. Defaults to "Your Droplet is ready." */
   subtitle?: string;
@@ -55,7 +55,10 @@ export function WelcomeFlourish({
   // resolves before the component unmounts).
   const firedRef = useRef(false);
 
-  const headline = displayName ? `Welcome, ${displayName}` : "Welcome to Droplet";
+  // WARP-298: the setup welcome step already shows an <h1>"Welcome to Droplet";
+  // duplicating it inside this flourish reads as a glitch. Fallback to a
+  // distinct "you're done" line when displayName is missing.
+  const headline = displayName ? `Welcome, ${displayName}` : "You're all set";
 
   const handleComplete = useCallback(() => {
     if (firedRef.current) return;
