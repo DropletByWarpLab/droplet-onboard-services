@@ -80,7 +80,7 @@ export default function PlatesPage() {
   const handleDelete = async (plate: KnownPlate) => {
     if (
       !confirm(
-        `Forget plate "${plate.plate}"${plate.name ? ` (${plate.name})` : ""}? Frigate will re-detect it next time it appears.`,
+        `Forget plate "${plate.plate}"${plate.name ? ` (${plate.name})` : ""}? It will be re-detected next time it appears.`,
       )
     )
       return;
@@ -108,7 +108,7 @@ export default function PlatesPage() {
         <div className="flex-1 min-w-0">
           <h1 className="type-large-title text-label-primary">License plates</h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
-            Plates Frigate&apos;s LPR has read. Name them so notifications
+            License plates this Droplet has read. Name them so notifications
             show <span className="font-mono">&ldquo;Alice&apos;s Civic
             arrived&rdquo;</span> instead of a string of characters.
           </p>
@@ -143,7 +143,7 @@ export default function PlatesPage() {
             No plates read yet
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Either Frigate&apos;s LPR isn&apos;t enabled, or no vehicle has
+            License-plate recognition isn&apos;t enabled, or no vehicle has
             driven by yet. Plates appear here after the first event with a
             readable plate.
           </p>

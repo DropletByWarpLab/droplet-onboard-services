@@ -240,7 +240,7 @@ export default function CamerasPage() {
           <button
             onClick={() => router.push("/cameras/system")}
             className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Frigate engine health"
+            title="Recognition engine health"
           >
             <Server size={16} />
             <span className="type-subheadline">System</span>
@@ -297,8 +297,8 @@ export default function CamerasPage() {
             No Cameras Yet
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
-            Frigate NVR is running and ready. Add a camera manually with its
-            RTSP URL, or scan your network to auto-discover ONVIF cameras.
+            The camera service is running and ready. Add a camera manually with
+            its RTSP URL, or scan your network to auto-discover ONVIF cameras.
           </p>
           <div className="flex items-center justify-center gap-3">
             <button
