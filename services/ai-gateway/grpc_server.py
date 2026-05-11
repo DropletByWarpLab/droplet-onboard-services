@@ -30,6 +30,11 @@ GRPC_PORT = 50051
 class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     """gRPC implementation of the InferenceService."""
 
+    # WARP-286: Rerank handler accepts an empty model field (proto default)
+    # or the canonical name. Unknown ids fail closed with INVALID_ARGUMENT
+    # rather than silently falling back to a default.
+    _RERANK_SUPPORTED_MODELS = frozenset({"", "bge-reranker-base"})
+
     def __init__(self, provider_router: ProviderRouter, scheduler: InferenceScheduler):
         self._router = provider_router
         self._scheduler = scheduler
@@ -196,6 +201,42 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Embedding error: {str(e)}")
             return inference_pb2.EmbedResponse()
+
+    async def Rerank(self, request, context):
+        """WARP-286 — score (query, passage) pairs via a cross-encoder.
+
+        Delegates to `reranker.RerankerSingleton`. The first call lazy-loads
+        BGE-reranker-base from the on-disk cache (or downloads ~280 MB
+        from HF on a cold appliance). The model `compute_score` step runs
+        on CPU; we offload to a threadpool to avoid blocking the asyncio
+        loop while batches are running.
+        """
+        # Validate model id up-front. Empty (proto default) maps to the
+        # canonical name; anything else is rejected.
+        if request.model not in self._RERANK_SUPPORTED_MODELS:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                f"Unsupported reranker model {request.model!r}. "
+                f"Supported: {sorted(m for m in self._RERANK_SUPPORTED_MODELS if m)}"
+            )
+            return inference_pb2.RerankResponse()
+        passages = list(request.passages)
+        if not passages:
+            return inference_pb2.RerankResponse(scores=[])
+        try:
+            from reranker import RerankerSingleton
+
+            pairs = [[request.query, p] for p in passages]
+            loop = asyncio.get_running_loop()
+            scores = await loop.run_in_executor(
+                None, RerankerSingleton.instance().compute_score, pairs
+            )
+            return inference_pb2.RerankResponse(scores=scores)
+        except Exception as e:
+            logger.error("gRPC Rerank error: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Rerank error: {str(e)}")
+            return inference_pb2.RerankResponse()
 
 
 async def start_grpc_server(
