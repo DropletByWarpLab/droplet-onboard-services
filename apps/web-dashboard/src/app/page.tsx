@@ -194,8 +194,14 @@ export default function DashboardPage() {
           </h1>
 
           {/* Chat capsule */}
+          {/*
+            WARP-298: focus-within ring on the capsule so keyboard users can
+            see where focus is when the textarea is active. focus:outline-none
+            on the textarea was unreplaced — now the capsule itself gains a
+            visible ring whenever any of its children has focus.
+          */}
           <div
-            className="aurora-ring rounded-[22px] shadow-[var(--shadow-hero)]"
+            className="aurora-ring rounded-[22px] shadow-[var(--shadow-hero)] focus-within:ring-2 focus-within:ring-accent/40 transition-shadow"
             style={{ background: "var(--color-surface-raised)" }}
           >
             <div className="flex items-end gap-3 p-3 pl-5">
@@ -207,6 +213,7 @@ export default function DashboardPage() {
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={handleKey}
                 placeholder="Ask anything — run a command, search your files, control a device…"
+                aria-label="Ask Droplet"
                 className="flex-1 resize-none bg-transparent py-3 type-body text-label-primary
                            placeholder:text-label-tertiary focus:outline-none min-h-[44px] max-h-[180px]"
               />

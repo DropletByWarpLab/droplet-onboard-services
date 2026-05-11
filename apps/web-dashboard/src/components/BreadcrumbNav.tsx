@@ -9,12 +9,16 @@ export function BreadcrumbNav({ path, onNavigate }: BreadcrumbNavProps) {
   const segments = path.split("/").filter(Boolean);
 
   return (
-    <nav className="flex items-center gap-1 bg-surface-tertiary rounded-sm px-3 py-2 overflow-x-auto">
+    <nav
+      aria-label="Breadcrumbs"
+      className="flex items-center gap-1 bg-surface-tertiary rounded-sm px-3 py-2 overflow-x-auto"
+    >
       <button
         onClick={() => onNavigate("/")}
+        aria-label="Home"
         className="flex items-center gap-1 type-subheadline text-accent hover:text-accent-hover transition-colors flex-shrink-0 min-h-[28px]"
       >
-        <Home size={14} />
+        <Home size={14} aria-hidden="true" />
         <span>Home</span>
       </button>
 

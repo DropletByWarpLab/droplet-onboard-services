@@ -284,8 +284,9 @@ export default function CameraFullscreenPage() {
             }}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
             title="Toggle browser fullscreen"
+            aria-label="Toggle fullscreen"
           >
-            <Maximize2 size={16} />
+            <Maximize2 size={16} aria-hidden="true" />
           </button>
           <button
             onClick={() => setRemoveOpen(true)}

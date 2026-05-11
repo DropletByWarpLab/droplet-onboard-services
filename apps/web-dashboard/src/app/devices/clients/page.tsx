@@ -125,9 +125,10 @@ export default function DeviceClientsPage() {
         <button
           onClick={() => void refresh()}
           disabled={loading}
+          aria-label="Refresh device list"
           className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
         >
-          <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+          <RefreshCw size={16} className={loading ? "animate-spin" : ""} aria-hidden="true" />
         </button>
       </div>
 
@@ -249,8 +250,9 @@ function ClientList({
                   disabled={revoking === c.id}
                   className="p-2 rounded-lg text-label-tertiary hover:text-system-red hover:bg-system-red/10 disabled:opacity-50"
                   title="Revoke this device"
+                  aria-label={`Revoke ${c.deviceName}`}
                 >
-                  <Trash2 size={14} />
+                  <Trash2 size={14} aria-hidden="true" />
                 </button>
               )}
             </li>

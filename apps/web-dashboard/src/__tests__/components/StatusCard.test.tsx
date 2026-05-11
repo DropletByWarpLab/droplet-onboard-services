@@ -45,4 +45,22 @@ describe("StatusCard", () => {
     const indicator = container.querySelector(".bg-system-red");
     expect(indicator).toBeInTheDocument();
   });
+
+  it("uses human-readable aria-label for status dot (not raw enum)", () => {
+    // WARP-298: aria-label was previously the raw enum ("ok"/"warning"); now
+    // mapped to plain English so SR users get useful announcements.
+    const { rerender } = render(
+      <StatusCard title="DB" value="Connected" status="ok" />
+    );
+    expect(screen.getByLabelText("All good")).toBeInTheDocument();
+
+    rerender(<StatusCard title="DB" value="Warn" status="warning" />);
+    expect(screen.getByLabelText("Needs attention")).toBeInTheDocument();
+
+    rerender(<StatusCard title="DB" value="Down" status="error" />);
+    expect(screen.getByLabelText("Error")).toBeInTheDocument();
+
+    rerender(<StatusCard title="DB" value="Offline" status="offline" />);
+    expect(screen.getByLabelText("Offline")).toBeInTheDocument();
+  });
 });

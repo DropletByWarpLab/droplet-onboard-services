@@ -41,10 +41,11 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
         <div className="flex items-center justify-center gap-4">
           <button
             onClick={() => adjustTemp(-0.5)}
+            aria-label="Lower target temperature by 0.5°C"
             className="w-10 h-10 rounded-full bg-surface-secondary flex items-center justify-center
               hover:bg-surface-tertiary transition-colors"
           >
-            <Minus size={18} />
+            <Minus size={18} aria-hidden="true" />
           </button>
           <div className="text-center min-w-[80px]">
             <span className="type-caption-1 text-label-tertiary">Target</span>
@@ -52,10 +53,11 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
           </div>
           <button
             onClick={() => adjustTemp(0.5)}
+            aria-label="Raise target temperature by 0.5°C"
             className="w-10 h-10 rounded-full bg-surface-secondary flex items-center justify-center
               hover:bg-surface-tertiary transition-colors"
           >
-            <Plus size={18} />
+            <Plus size={18} aria-hidden="true" />
           </button>
         </div>
       )}

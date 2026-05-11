@@ -316,15 +316,55 @@ export default function NetworkPage() {
         </div>
       )}
 
-      {/* Tabs */}
-      <div className="flex gap-1 mb-6 border-b border-separator">
+      {/* Tabs — WAI-ARIA tabs pattern (WARP-298). Arrow keys + Home/End
+          move + activate; only the active tab is in the tab sequence. */}
+      <div
+        role="tablist"
+        aria-label="Network view tabs"
+        className="flex gap-1 mb-6 border-b border-separator"
+      >
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.id;
           return (
             <button
               key={tab.id}
+              type="button"
+              role="tab"
+              id={`network-tab-${tab.id}`}
+              aria-selected={active}
+              aria-controls={`network-panel-${tab.id}`}
+              tabIndex={active ? 0 : -1}
               onClick={() => setActiveTab(tab.id)}
+              onKeyDown={(e) => {
+                const i = tabs.findIndex((t) => t.id === activeTab);
+                if (i === -1) return;
+                const n = tabs.length;
+                let next: number | null = null;
+                switch (e.key) {
+                  case "ArrowRight":
+                  case "ArrowDown":
+                    next = (i + 1) % n;
+                    break;
+                  case "ArrowLeft":
+                  case "ArrowUp":
+                    next = (i - 1 + n) % n;
+                    break;
+                  case "Home":
+                    next = 0;
+                    break;
+                  case "End":
+                    next = n - 1;
+                    break;
+                }
+                if (next !== null) {
+                  e.preventDefault();
+                  setActiveTab(tabs[next].id);
+                  document
+                    .getElementById(`network-tab-${tabs[next].id}`)
+                    ?.focus();
+                }
+              }}
               className={`
                 flex items-center gap-2 px-4 py-2.5 type-subheadline transition-colors
                 border-b-2 -mb-px
@@ -334,20 +374,70 @@ export default function NetworkPage() {
                 }
               `}
             >
-              <Icon size={16} />
+              <Icon size={16} aria-hidden="true" />
               {tab.label}
             </button>
           );
         })}
       </div>
 
-      {/* Tab Content */}
-      {activeTab === "overview" && <OverviewTab overview={overview} />}
-      {activeTab === "devices" && <DevicesTab />}
-      {activeTab === "schedules" && <SchedulesTab />}
-      {activeTab === "wifi" && <WifiTab />}
-      {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
-      {activeTab === "system" && <SystemTab overview={overview} />}
+      {/* Tab Content — one tabpanel per tab, contents lazily mounted when
+          the tab is active. `hidden` removes inactive panels from the
+          accessibility tree + layout flow. */}
+      <div
+        role="tabpanel"
+        id="network-panel-overview"
+        aria-labelledby="network-tab-overview"
+        tabIndex={0}
+        hidden={activeTab !== "overview"}
+      >
+        {activeTab === "overview" && <OverviewTab overview={overview} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-devices"
+        aria-labelledby="network-tab-devices"
+        tabIndex={0}
+        hidden={activeTab !== "devices"}
+      >
+        {activeTab === "devices" && <DevicesTab />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-schedules"
+        aria-labelledby="network-tab-schedules"
+        tabIndex={0}
+        hidden={activeTab !== "schedules"}
+      >
+        {activeTab === "schedules" && <SchedulesTab />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-wifi"
+        aria-labelledby="network-tab-wifi"
+        tabIndex={0}
+        hidden={activeTab !== "wifi"}
+      >
+        {activeTab === "wifi" && <WifiTab />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-firewall"
+        aria-labelledby="network-tab-firewall"
+        tabIndex={0}
+        hidden={activeTab !== "firewall"}
+      >
+        {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-system"
+        aria-labelledby="network-tab-system"
+        tabIndex={0}
+        hidden={activeTab !== "system"}
+      >
+        {activeTab === "system" && <SystemTab overview={overview} />}
+      </div>
     </div>
   );
 }
