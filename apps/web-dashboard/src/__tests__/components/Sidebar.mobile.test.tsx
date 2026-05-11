@@ -15,7 +15,7 @@
  * pick up desktop sidebar links of the same name.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within, fireEvent, act } from "@testing-library/react";
+import { render, screen, within, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 
 // Local override: the global setup.ts mock for next/link returns a string
@@ -171,15 +171,17 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(themeControls.length).toBeGreaterThan(0);
   });
 
-  it("dismisses the drawer via Escape (WARP-289 primitive behaviour)", () => {
+  it("dismisses the drawer via Escape (WARP-289 primitive behaviour)", async () => {
     render(<Sidebar />);
     const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
     fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    act(() => {
-      fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    // The <Dialog> primitive unmounts via AnimatePresence; waitFor lets
+    // the exit phase finish before we assert.
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("sets aria-current='page' on the active mobile bottom tab", () => {

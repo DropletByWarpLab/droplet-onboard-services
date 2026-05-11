@@ -1,5 +1,6 @@
 "use client";
 
+import { useId, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -14,6 +15,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageSquare,
+  MoreHorizontal,
   Network,
   Settings,
   Sparkles,
@@ -26,6 +28,7 @@ import {
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
+import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 
 type NavItem = {
@@ -68,7 +71,12 @@ const adminNav: NavItem[] = [
   { href: "/admin/claude-activity", label: "Activity", icon: Activity },
 ];
 
-const navItems: NavItem[] = [...primaryNav, ...secondaryNav];
+// WARP-290: the mobile bottom tab bar is capped at 5 surfaces (iOS
+// convention; 7 tabs at 360px crowded each label to ~51px). These four
+// hrefs win a tab spot — the fifth slot is the "More" trigger that
+// opens the drawer (see below). Everything else from primaryNav and
+// the entirety of secondaryNav routes through the drawer.
+const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
 
 // Sub-navigation rendered under Files when we're on a /files/* route.
 const filesSubNav = [
@@ -85,12 +93,18 @@ export function Sidebar() {
   const router = useRouter();
   const { user, logout } = useAuth();
 
+  // WARP-290: drawer state for the mobile "More" trigger.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const moreHeadingId = useId();
+
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
 
   const showFilesSubNav = pathname.startsWith("/files");
 
   async function handleLogout() {
+    setMoreOpen(false);
     await logout();
     router.push("/login");
   }
@@ -104,10 +118,28 @@ export function Sidebar() {
         .slice(0, 2)
     : user?.username?.slice(0, 2).toUpperCase() ?? "?";
 
+  // WARP-290: items the bottom tab bar can't fit get folded into the
+  // drawer. Order: displaced primaries (preserving primaryNav order)
+  // then secondaryNav, then admin-only entries.
+  const drawerNav: NavItem[] = [
+    ...primaryNav.filter(
+      (item) => !MOBILE_PRIMARY_HREFS.includes(item.href as typeof MOBILE_PRIMARY_HREFS[number]),
+    ),
+    ...secondaryNav,
+    ...(user?.role === "owner" || user?.role === "admin" ? adminNav : []),
+  ];
+
+  // The four hrefs that survive into the bottom tab bar, looked up
+  // against primaryNav so the icon + label match the desktop sidebar.
+  const mobileTabs: NavItem[] = MOBILE_PRIMARY_HREFS.map(
+    (href) => primaryNav.find((item) => item.href === href)!,
+  );
+
   return (
     <>
       {/* ── Desktop Sidebar ── */}
       <aside
+        aria-label="Primary navigation"
         className="
           hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0 lg:left-0 lg:w-[260px]
           bg-[var(--color-sidebar-bg)] dp-material
@@ -191,6 +223,7 @@ export function Sidebar() {
                 onClick={handleLogout}
                 className="p-1.5 rounded-sm text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
                 title="Sign out"
+                aria-label="Sign out"
               >
                 <LogOut size={14} />
               </button>
@@ -203,8 +236,13 @@ export function Sidebar() {
         </div>
       </aside>
 
-      {/* ── Mobile Bottom Tab Bar (primary items only for density) ── */}
+      {/* ── Mobile Bottom Tab Bar — WARP-290: 5 surfaces max ──
+          Home / Ask AI / Files / Devices / More. The "More" trigger
+          opens a side-panel dialog (placement="right") via the WARP-289
+          <Dialog> primitive that hosts every displaced primaryNav item
+          + every secondaryNav destination + theme toggle + sign-out. */}
       <nav
+        aria-label="Bottom navigation"
         className="
           lg:hidden fixed bottom-0 inset-x-0 z-40
           bg-[var(--color-toolbar-bg)] dp-material
@@ -213,17 +251,19 @@ export function Sidebar() {
         "
       >
         <div className="flex items-stretch h-[56px]">
-          {primaryNav.map((item) => {
+          {mobileTabs.map((item) => {
             const Icon = item.icon;
             const active = isActive(item.href);
             return (
               <Link
                 key={item.href}
                 href={item.href}
+                aria-current={active ? "page" : undefined}
                 className={`
                   flex-1 flex flex-col items-center justify-center gap-0.5
                   min-h-[44px] transition-colors duration-200 ease-smooth
-                  ${active ? "text-accent" : "text-label-tertiary"}
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                  ${active ? "bg-accent-subtle text-accent" : "text-label-tertiary"}
                 `}
               >
                 <Icon size={22} strokeWidth={active ? 2 : 1.5} />
@@ -231,8 +271,119 @@ export function Sidebar() {
               </Link>
             );
           })}
+
+          <button
+            ref={moreTriggerRef}
+            type="button"
+            onClick={() => setMoreOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={moreOpen}
+            className={`
+              flex-1 flex flex-col items-center justify-center gap-0.5
+              min-h-[44px] transition-colors duration-200 ease-smooth
+              text-label-tertiary
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+              ${moreOpen ? "bg-accent-subtle text-accent" : ""}
+            `}
+          >
+            <MoreHorizontal size={22} strokeWidth={moreOpen ? 2 : 1.5} />
+            <span className="type-caption-2">More</span>
+          </button>
         </div>
       </nav>
+
+      {/* ── Mobile "More" drawer — WARP-290 ── */}
+      <Dialog
+        open={moreOpen}
+        onClose={() => setMoreOpen(false)}
+        triggerRef={moreTriggerRef}
+        labelledBy={moreHeadingId}
+        placement="right"
+      >
+        <div className="flex flex-col h-full">
+          <div className="flex items-center justify-between px-5 h-16 border-b border-separator">
+            <h2 id={moreHeadingId} className="type-headline text-label-primary">
+              More
+            </h2>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
+            {drawerNav.map((item) => {
+              const Icon = item.icon;
+              const active = isActive(item.href);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onClick={() => setMoreOpen(false)}
+                  aria-current={active ? "page" : undefined}
+                  className={`
+                    flex items-center gap-3 px-3 min-h-[44px] rounded-lg
+                    type-subheadline transition-all duration-200 ease-smooth
+                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                    ${
+                      active
+                        ? "bg-accent-subtle text-accent font-medium"
+                        : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
+                    }
+                  `}
+                >
+                  <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+                  {item.label}
+                </Link>
+              );
+            })}
+
+            <div className="px-3 pt-4 pb-2">
+              <div className="h-px bg-separator" />
+            </div>
+
+            {/* Theme toggle rendered as a full-height row so it reads as
+                a peer of the nav items, not a hidden subnav. The toggle
+                component owns its own internal layout (light/dark/system
+                segmented control). */}
+            <div className="flex items-center min-h-[44px] px-3">
+              <ThemeToggle />
+            </div>
+          </div>
+
+          {/* User identity card + sign-out — destructive-emphasis
+              text-system-red, mirroring the desktop sidebar logout
+              affordance. */}
+          {user && (
+            <div className="px-3 py-3 border-t border-separator">
+              <div className="flex items-center gap-2.5 px-2 py-2">
+                <div className="w-8 h-8 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
+                  <span className="type-caption-1 text-accent font-semibold">
+                    {initials}
+                  </span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="type-footnote text-label-primary font-medium truncate">
+                    {user.displayName || user.username}
+                  </p>
+                  <p className="type-caption-2 text-label-tertiary truncate">
+                    {user.username}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="
+                  mt-1 w-full flex items-center gap-3 px-3 min-h-[44px] rounded-lg
+                  type-subheadline text-system-red hover:bg-system-red/10
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                  transition-colors duration-200 ease-smooth
+                "
+              >
+                <LogOut size={18} strokeWidth={1.75} />
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
+      </Dialog>
     </>
   );
 }
@@ -257,6 +408,7 @@ function NavLink({
     <div>
       <Link
         href={item.href}
+        aria-current={active ? "page" : undefined}
         className={`
           flex items-center gap-3 px-3 h-9 rounded-lg
           type-subheadline transition-all duration-200 ease-smooth
@@ -282,6 +434,7 @@ function NavLink({
               <Link
                 key={sub.href}
                 href={sub.href}
+                aria-current={subActive ? "page" : undefined}
                 className={`
                   flex items-center gap-2 px-2 h-8 rounded-md
                   type-footnote transition-all duration-200 ease-smooth
