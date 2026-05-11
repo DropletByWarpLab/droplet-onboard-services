@@ -163,11 +163,18 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     // We don't assume the exact role choice — just that at least one
     // matchable control for each appearance mode is inside the drawer.
     expect(within(dialog).getByRole("button", { name: /sign out/i })).toBeInTheDocument();
-    // ThemeToggle renders some control matching 'light'|'dark'|'system' —
+    // ThemeToggle renders some control matching 'light'|'dark'|'auto' —
     // exact role is implementation-detail; assert at least one is there.
-    const themeControls = within(dialog).queryAllByRole("button", {
-      name: /light|dark|system/i,
-    });
+    // (WARP-298 promoted these to role=radio inside a radiogroup; the older
+    // shape was role=button. Query both so this test survives either shape.)
+    const themeControls = [
+      ...within(dialog).queryAllByRole("radio", {
+        name: /light|dark|auto|system/i,
+      }),
+      ...within(dialog).queryAllByRole("button", {
+        name: /light|dark|auto|system/i,
+      }),
+    ];
     expect(themeControls.length).toBeGreaterThan(0);
   });
 
