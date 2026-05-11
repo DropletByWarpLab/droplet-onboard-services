@@ -45,9 +45,21 @@ export default function SetupPage() {
   const [discoveredDevices, setDiscoveredDevices] = useState<MatterDevice[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [scanSeconds, setScanSeconds] = useState(0);
+  // WARP-298: polling lifecycle. Starts "active" at 3s intervals; if 60s
+  // pass with no new devices we downshift to 10s + show a hint. At 5min
+  // total elapsed we stop entirely so the dashboard isn't pegging the
+  // Matter controller forever while the user wanders off.
+  const [scanPhase, setScanPhase] = useState<"active" | "downshifted" | "stopped">(
+    "active",
+  );
   const pollRef = useRef<ReturnType<typeof setInterval>>();
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const seenIdsRef = useRef<Set<string>>(new Set());
+  const lastFoundAtSecRef = useRef<number>(0);
+  // Polling bound constants. Pulled out so tests can reference them by
+  // value and future tweaks live in one place.
+  const DOWNSHIFT_AFTER_IDLE_SEC = 60;
+  const STOP_AFTER_TOTAL_SEC = 300;
 
   async function handleCreateAccount() {
     setError(null);
@@ -92,38 +104,88 @@ export default function SetupPage() {
   }
 
   // --- Discovery polling ---
+  // Read latest scanSeconds inside pollOnce via a ref so the callback's
+  // identity stays stable across re-renders (we don't want startDiscovery
+  // re-firing every second).
+  const scanSecondsRef = useRef(0);
+  useEffect(() => {
+    scanSecondsRef.current = scanSeconds;
+  }, [scanSeconds]);
+
+  // Single poll tick — shared by both the 3s "active" and 10s "downshifted"
+  // intervals. Captures *new* devices, advances lastFoundAtSec when one
+  // arrives.
+  const pollOnce = useCallback(async () => {
+    try {
+      const grouped = await fetchMatterDevices();
+      const allDevices = flattenGrouped(grouped);
+      const newDevices: MatterDevice[] = [];
+      for (const d of allDevices) {
+        if (!seenIdsRef.current.has(d.nodeId)) {
+          seenIdsRef.current.add(d.nodeId);
+          newDevices.push(d);
+        }
+      }
+      if (newDevices.length > 0) {
+        setDiscoveredDevices((prev) => [...prev, ...newDevices]);
+        // Reset the idle clock — fresh devices means there's reason to
+        // believe more are coming.
+        lastFoundAtSecRef.current = scanSecondsRef.current;
+      }
+    } catch {
+      // Matter controller may still be booting — keep polling.
+    }
+  }, []);
+
   const startDiscovery = useCallback(() => {
     setIsScanning(true);
     setScanSeconds(0);
+    setScanPhase("active");
     seenIdsRef.current.clear();
     setDiscoveredDevices([]);
+    lastFoundAtSecRef.current = 0;
 
-    // Poll for devices every 3 seconds
-    pollRef.current = setInterval(async () => {
-      try {
-        const grouped = await fetchMatterDevices();
-        const allDevices = flattenGrouped(grouped);
-        // Only add truly new devices (not seen before)
-        const newDevices: MatterDevice[] = [];
-        for (const d of allDevices) {
-          if (!seenIdsRef.current.has(d.nodeId)) {
-            seenIdsRef.current.add(d.nodeId);
-            newDevices.push(d);
-          }
-        }
-        if (newDevices.length > 0) {
-          setDiscoveredDevices((prev) => [...prev, ...newDevices]);
-        }
-      } catch {
-        // Matter controller may still be booting — keep polling.
-      }
-    }, 3000);
+    // Poll for devices every 3 seconds (active phase).
+    pollRef.current = setInterval(pollOnce, 3000);
 
-    // Count seconds for UX
+    // Count seconds for UX.
     timerRef.current = setInterval(() => {
       setScanSeconds((s) => s + 1);
     }, 1000);
-  }, []);
+  }, [pollOnce]);
+
+  // WARP-298: transition between scan phases based on elapsed time +
+  // last-found-at. Lives in its own effect so we never end up with two
+  // overlapping intervals on a stale closure.
+  useEffect(() => {
+    if (!isScanning) return;
+    if (step !== "discovery") return;
+
+    // Total-elapsed stopper: cap the polling window. The user can still
+    // continue manually; we just stop pegging the controller.
+    if (scanSeconds >= STOP_AFTER_TOTAL_SEC && scanPhase !== "stopped") {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = undefined;
+      }
+      setScanPhase("stopped");
+      return;
+    }
+
+    // Idle downshift: if nothing's been found for DOWNSHIFT_AFTER_IDLE_SEC,
+    // drop to a 10s interval and surface a "make sure it's in pairing
+    // mode" hint to the user.
+    const idleFor = scanSeconds - lastFoundAtSecRef.current;
+    if (
+      scanPhase === "active" &&
+      idleFor >= DOWNSHIFT_AFTER_IDLE_SEC &&
+      scanSeconds < STOP_AFTER_TOTAL_SEC
+    ) {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(pollOnce, 10000);
+      setScanPhase("downshifted");
+    }
+  }, [scanSeconds, scanPhase, isScanning, step, pollOnce]);
 
   useEffect(() => {
     if (step === "discovery") {
@@ -364,11 +426,33 @@ export default function SetupPage() {
               )}
             </div>
 
-            {/* Scanning timer */}
-            {isScanning && (
+            {/* Scanning timer + lifecycle hints (WARP-298). */}
+            {isScanning && scanPhase === "active" && (
               <p className="type-caption-1 text-label-quaternary text-center mb-4">
                 Scanning... {scanSeconds}s
               </p>
+            )}
+            {isScanning && scanPhase === "downshifted" && (
+              <div
+                className="type-caption-1 text-label-tertiary text-center mb-4"
+                data-testid="discovery-downshift-hint"
+              >
+                <p>Still scanning every 10s. Not seeing your device?</p>
+                <p className="text-label-quaternary">
+                  Make sure it&apos;s in pairing mode.
+                </p>
+              </div>
+            )}
+            {scanPhase === "stopped" && (
+              <div
+                className="type-caption-1 text-label-tertiary text-center mb-4"
+                data-testid="discovery-stopped"
+              >
+                <p>
+                  Stopped automatic scanning after 5 minutes. You can add
+                  devices manually from the Devices page later.
+                </p>
+              </div>
             )}
 
             {/* Actions */}
