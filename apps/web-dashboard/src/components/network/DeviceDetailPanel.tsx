@@ -314,7 +314,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
         >
           {data?.device.isBlocked ? "Unblock" : "Block"}
         </button>
-        {data?.device && (
+        {data?.device && blockConfirmOpen && (
           <ConfirmDialog
             open={blockConfirmOpen}
             triggerRef={blockTriggerRef}
