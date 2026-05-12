@@ -1837,6 +1837,38 @@ export async function searchFileContent(
   return data.results ?? [];
 }
 
+/**
+ * WARP-310: readiness probe for the AI / semantic search toggle. The
+ * Files page's SearchBar polls this when the user flips the toggle so
+ * it can show a green / yellow / red status pill rather than letting
+ * the user type into a search box that returns nothing because the
+ * indexer never ran or pgvector isn't installed.
+ */
+export interface SearchReadinessStatus {
+  /** ready = gateway + pgvector + ≥1 indexed chunk; indexing = still empty; unavailable = something is down. */
+  state: "ready" | "indexing" | "unavailable";
+  gatewayHealthy: boolean;
+  pgvectorReady: boolean;
+  indexedCount: number;
+  lastIndexedAt: string | null;
+}
+
+export async function fetchSearchStatus(): Promise<SearchReadinessStatus> {
+  const res = await authFetch(`${BASE}/api/files/search/status`);
+  if (!res.ok) {
+    // Treat any non-200 as "unavailable" so a misconfigured deployment
+    // surfaces clearly in the UI rather than throwing an error toast.
+    return {
+      state: "unavailable",
+      gatewayHealthy: false,
+      pgvectorReady: false,
+      indexedCount: 0,
+      lastIndexedAt: null,
+    };
+  }
+  return (await res.json()) as SearchReadinessStatus;
+}
+
 // --- Phase 3: device clients + pairing + user admin ---
 
 export async function createPairingCode(data: {

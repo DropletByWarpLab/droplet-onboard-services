@@ -3,7 +3,12 @@
 import { useState, useRef, useEffect } from "react";
 import { Search, X, Loader2, Sparkles } from "lucide-react";
 import { useFileSearch } from "@/lib/hooks/useFileSearch";
-import { searchFileContent, type SemanticSearchResult } from "@/lib/api";
+import {
+  searchFileContent,
+  fetchSearchStatus,
+  type SemanticSearchResult,
+  type SearchReadinessStatus,
+} from "@/lib/api";
 import { Thumbnail } from "./Thumbnail";
 import type { FileEntryInfo } from "@/lib/types";
 
@@ -49,6 +54,24 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
   const [semanticLoading, setSemanticLoading] = useState(false);
   const [semanticError, setSemanticError] = useState<string | null>(null);
   const semanticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // WARP-310: readiness probe. Fires once when the toggle flips on, so a
+  // user enabling AI search sees the green/yellow/red signal before
+  // they've even started typing.
+  const [readiness, setReadiness] = useState<SearchReadinessStatus | null>(null);
+  useEffect(() => {
+    if (!semantic) {
+      setReadiness(null);
+      return;
+    }
+    let cancelled = false;
+    fetchSearchStatus().then((s) => {
+      if (!cancelled) setReadiness(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [semantic]);
 
   useEffect(() => {
     if (!semantic || query.trim().length < 2) {
@@ -208,6 +231,42 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
         >
           <Sparkles size={12} />
           {semantic ? "Semantic" : "AI"}
+          {/* WARP-310: readiness traffic light. Renders only when the
+              toggle is on AND we've gotten an answer back; otherwise
+              the button stays uncluttered. ARIA-live so screen readers
+              hear the status change, since the visual is just a dot. */}
+          {semantic && readiness && (
+            <span
+              data-testid="search-readiness"
+              data-state={readiness.state}
+              aria-live="polite"
+              aria-label={
+                readiness.state === "ready"
+                  ? `AI search ready — ${readiness.indexedCount} indexed`
+                  : readiness.state === "indexing"
+                    ? "AI search initializing — no files indexed yet"
+                    : "AI search unavailable — check indexer"
+              }
+              title={
+                readiness.state === "ready"
+                  ? `Searching ${readiness.indexedCount} indexed chunks`
+                  : readiness.state === "indexing"
+                    ? "Indexer is up but hasn't processed any files yet"
+                    : !readiness.gatewayHealthy
+                      ? "AI gateway not reachable"
+                      : !readiness.pgvectorReady
+                        ? "pgvector extension missing"
+                        : "AI search unavailable"
+              }
+              className={`inline-block w-1.5 h-1.5 rounded-full ${
+                readiness.state === "ready"
+                  ? "bg-system-green"
+                  : readiness.state === "indexing"
+                    ? "bg-system-orange"
+                    : "bg-system-red"
+              }`}
+            />
+          )}
         </button>
       </div>
 
