@@ -476,13 +476,13 @@ export default function SetupPage() {
                 {/* WARP-302: give the user a way back to active scanning
                     without reloading the setup flow. Re-arms startDiscovery,
                     which resets scanPhase to "active" and re-mounts the 3s
-                    poll. min-h hits the 44px tap target heuristic and the
-                    focus-visible ring inherits from the dp-btn-secondary
-                    token. */}
+                    poll. dp-btn-secondary already enforces the 44px tap
+                    target and focus-visible ring, so no extra classes are
+                    needed. */}
                 <button
                   type="button"
                   onClick={startDiscovery}
-                  className="dp-btn-secondary mt-3 min-h-[44px]"
+                  className="dp-btn-secondary mt-3"
                 >
                   Scan again
                 </button>
