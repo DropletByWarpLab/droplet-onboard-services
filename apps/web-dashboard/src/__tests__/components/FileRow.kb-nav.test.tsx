@@ -85,7 +85,10 @@ describe("FileRow keyboard nav (WARP-298)", () => {
   it("Enter triggers onOpen", () => {
     const h = makeHandlers();
     render(<FileRow {...rowProps(makeFile("hello.txt"), h)} />);
-    const row = screen.getByRole("button", { name: /hello.txt/i });
+    // Exact-match the row's aria-label — WARP-292 added the filename to
+    // the action-button labels ("Download hello.txt", "Delete hello.txt"),
+    // so a bare /hello.txt/ regex matches the row AND every action button.
+    const row = screen.getByRole("button", { name: "File hello.txt" });
     fireEvent.keyDown(row, { key: "Enter" });
     expect(h.onOpen).toHaveBeenCalledTimes(1);
   });
@@ -93,7 +96,7 @@ describe("FileRow keyboard nav (WARP-298)", () => {
   it("Space triggers onOpen and prevents default", () => {
     const h = makeHandlers();
     render(<FileRow {...rowProps(makeFile("hello.txt"), h)} />);
-    const row = screen.getByRole("button", { name: /hello.txt/i });
+    const row = screen.getByRole("button", { name: "File hello.txt" });
     fireEvent.keyDown(row, { key: " " });
     expect(h.onOpen).toHaveBeenCalledTimes(1);
   });
@@ -101,7 +104,7 @@ describe("FileRow keyboard nav (WARP-298)", () => {
   it("Delete triggers onDelete", () => {
     const h = makeHandlers();
     render(<FileRow {...rowProps(makeFile("hello.txt"), h)} />);
-    const row = screen.getByRole("button", { name: /hello.txt/i });
+    const row = screen.getByRole("button", { name: "File hello.txt" });
     fireEvent.keyDown(row, { key: "Delete" });
     expect(h.onDelete).toHaveBeenCalledTimes(1);
   });
@@ -109,7 +112,7 @@ describe("FileRow keyboard nav (WARP-298)", () => {
   it("Backspace does NOT trigger onDelete (too easy to hit by accident)", () => {
     const h = makeHandlers();
     render(<FileRow {...rowProps(makeFile("hello.txt"), h)} />);
-    const row = screen.getByRole("button", { name: /hello.txt/i });
+    const row = screen.getByRole("button", { name: "File hello.txt" });
     fireEvent.keyDown(row, { key: "Backspace" });
     expect(h.onDelete).not.toHaveBeenCalled();
   });
@@ -117,7 +120,7 @@ describe("FileRow keyboard nav (WARP-298)", () => {
   it("Shift+F10 opens context menu at the row's bounding rect", () => {
     const h = makeHandlers();
     render(<FileRow {...rowProps(makeFile("hello.txt"), h)} />);
-    const row = screen.getByRole("button", { name: /hello.txt/i });
+    const row = screen.getByRole("button", { name: "File hello.txt" });
     // JSDOM's getBoundingClientRect returns zeros; we just assert the
     // handler was called with two numeric args.
     fireEvent.keyDown(row, { key: "F10", shiftKey: true });
