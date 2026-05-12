@@ -28,6 +28,70 @@ import {
   syncSource,
 } from "../services/calendar.service.js";
 import { serializeIcs } from "../services/ics.js";
+import { cacheGet, cacheSet } from "../services/cache.service.js";
+
+/**
+ * WARP-307: minimal place suggestion shape. Includes lat/lon so a future
+ * column on CalendarEvent can persist coordinates without changing the
+ * route's wire shape.
+ */
+export interface PlaceSuggestion {
+  displayName: string;
+  lat: string;
+  lon: string;
+  type: string | null;
+}
+
+const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
+// OSM ToS requires a real User-Agent that identifies the app. Pin a
+// stable string so OSM ops can correlate any rate-limit complaints back
+// to this project.
+const NOMINATIM_UA = "DropletByWarpLab/1.0 (https://warp-lab.com)";
+
+async function fetchNominatim(
+  q: string,
+  limit: number,
+): Promise<PlaceSuggestion[]> {
+  const url =
+    `${NOMINATIM_URL}?format=jsonv2&addressdetails=0&limit=${limit}` +
+    `&q=${encodeURIComponent(q)}`;
+  const resp = await fetch(url, {
+    headers: {
+      "User-Agent": NOMINATIM_UA,
+      Accept: "application/json",
+      // OSM asks for English-language results when there's no preference;
+      // letting it default would pick locale-of-server which is unpredictable
+      // in a container.
+      "Accept-Language": "en",
+    },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!resp.ok) return [];
+  const raw = (await resp.json()) as Array<{
+    display_name?: unknown;
+    lat?: unknown;
+    lon?: unknown;
+    type?: unknown;
+  }>;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r): PlaceSuggestion | null => {
+      if (
+        typeof r.display_name !== "string" ||
+        typeof r.lat !== "string" ||
+        typeof r.lon !== "string"
+      ) {
+        return null;
+      }
+      return {
+        displayName: r.display_name,
+        lat: r.lat,
+        lon: r.lon,
+        type: typeof r.type === "string" ? r.type : null,
+      };
+    })
+    .filter((r): r is PlaceSuggestion => r !== null);
+}
 
 function getUser(req: Request): string {
   return req.user?.username || "admin";
@@ -316,6 +380,52 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       error: "not_implemented",
       hint: "rotate DEVICE_SECRET to invalidate all subscription tokens; per-user rotation is a follow-up",
     });
+  });
+
+  // ── WARP-307: location autocomplete via OSM Nominatim ──
+  //
+  // Backs the event-form location combobox. Proxies to nominatim.openstreetmap.org
+  // so the dashboard never makes cross-origin requests itself and so we can
+  // be a good citizen with OSM's policy:
+  //
+  //   - 1 req/sec/IP from the orchestrator (the de-facto IP for all users
+  //     on this device).
+  //   - Identifying User-Agent string (mandatory per OSM ToS).
+  //   - Cache identical queries for 10 minutes in Redis to soak up repeat
+  //     keystrokes from the same user.
+  //
+  // Result shape is intentionally narrow: just enough for the combobox to
+  // render a list and persist a string. Lat/lon are included so a follow-up
+  // can store coordinates without changing the wire.
+  router.get("/calendar/places", async (req, res, next) => {
+    try {
+      const q = String(req.query.q ?? "").trim();
+      if (q.length < 2) {
+        res.json({ places: [] });
+        return;
+      }
+      const limit = Math.max(1, Math.min(10, Number(req.query.limit) || 5));
+      const cacheKey = `places:${limit}:${q.toLowerCase()}`;
+      const cached = await cacheGet<PlaceSuggestion[]>(cacheKey);
+      if (cached) {
+        res.json({ places: cached });
+        return;
+      }
+
+      const places = await fetchNominatim(q, limit);
+      // 10 minutes — the same prefix lookup is going to repeat as a user
+      // types; longer TTLs risk staleness for fast-moving entities (renamed
+      // venues, etc.) but 10 min is a sane compromise.
+      await cacheSet(cacheKey, places, 600);
+      res.json({ places });
+    } catch (err) {
+      // Surface a clean empty list rather than a 5xx — the combobox falls
+      // back to free-text entry. The error still hits the logger for
+      // operators.
+      // eslint-disable-next-line no-console
+      console.warn("[calendar/places] lookup failed:", err);
+      res.json({ places: [] });
+    }
   });
 
   return router;

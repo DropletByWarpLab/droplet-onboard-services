@@ -7,6 +7,7 @@ import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
 
 interface Props {
   open: boolean;
@@ -234,13 +235,17 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
 
           <label className="flex flex-col gap-1">
             <span className="type-caption-1 text-label-secondary">Location</span>
-            <input
-              type="text"
+            {/* WARP-307: fuzzy autocomplete via the orchestrator's
+                Nominatim proxy. Falls back to plain free-text entry
+                whenever the proxy returns no suggestions (offline,
+                rate-limited, OSM down) — the field stays usable. */}
+            <PlaceCombobox
               value={location}
-              onChange={(e) => setLocation(e.target.value)}
+              onChange={setLocation}
               disabled={externallySynced}
               className="dp-input"
               maxLength={500}
+              placeholder="Location"
             />
           </label>
 
