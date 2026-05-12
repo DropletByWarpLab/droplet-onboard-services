@@ -7,6 +7,7 @@ import {
   Activity,
   BookOpen,
   Calendar as CalendarIcon,
+  Cpu,
   Film,
   FolderOpen,
   Globe,
@@ -48,7 +49,11 @@ const primaryNav: NavItem[] = [
   // /knowledge is "what's indexed" by file, /context is "what's
   // indexed" by capability density.
   { href: "/context", label: "Context", icon: Sparkles },
-  { href: "/devices", label: "Devices", icon: Home },
+  // WARP-302: Devices uses `Cpu` (not `Home`) so it doesn't visually
+  // collide with the actual Home tab's `LayoutDashboard` glyph at thumb
+  // distance on mobile. `Cpu` reads as "hardware/devices" — the page
+  // covers both smart-home Matter devices and paired client hardware.
+  { href: "/devices", label: "Devices", icon: Cpu },
 ];
 
 const secondaryNav: NavItem[] = [

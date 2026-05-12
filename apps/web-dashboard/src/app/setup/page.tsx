@@ -138,6 +138,16 @@ export default function SetupPage() {
   }, []);
 
   const startDiscovery = useCallback(() => {
+    // WARP-302: defensively clear any pre-existing intervals before
+    // re-arming. Without this, clicking "Scan again" overwrites the refs
+    // with new setInterval handles while the old intervals keep firing —
+    // scanSeconds advances at 2 Hz, the 5-min auto-stop fires at ~2:30,
+    // and every subsequent click compounds the leak. pollRef is already
+    // cleared at the stop transition, but timerRef was not; clear both
+    // here for symmetry and safety.
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+
     setIsScanning(true);
     setScanSeconds(0);
     setScanPhase("active");
@@ -167,6 +177,17 @@ export default function SetupPage() {
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = undefined;
+      }
+      // WARP-302: also stop the 1-Hz scanSeconds ticker at the stop
+      // transition. Without this the timer kept running between "stopped"
+      // and a subsequent "Scan again" click, which then leaked the old
+      // interval when startDiscovery re-armed timerRef. startDiscovery
+      // now also defensively clears both refs on entry, but stopping
+      // the ticker here is the right semantic — there's nothing to
+      // count once polling has ceased.
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = undefined;
       }
       setScanPhase("stopped");
       return;
@@ -452,6 +473,19 @@ export default function SetupPage() {
                   Stopped automatic scanning after 5 minutes. You can add
                   devices manually from the Devices page later.
                 </p>
+                {/* WARP-302: give the user a way back to active scanning
+                    without reloading the setup flow. Re-arms startDiscovery,
+                    which resets scanPhase to "active" and re-mounts the 3s
+                    poll. dp-btn-secondary already enforces the 44px tap
+                    target and focus-visible ring, so no extra classes are
+                    needed. */}
+                <button
+                  type="button"
+                  onClick={startDiscovery}
+                  className="dp-btn-secondary mt-3"
+                >
+                  Scan again
+                </button>
               </div>
             )}
 

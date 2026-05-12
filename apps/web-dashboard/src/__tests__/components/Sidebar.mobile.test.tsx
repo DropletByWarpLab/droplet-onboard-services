@@ -70,6 +70,26 @@ vi.mock("framer-motion", async () => {
 });
 
 import { Sidebar } from "@/components/Sidebar";
+import { Home as HomeIcon } from "lucide-react";
+
+// WARP-302: fingerprint the lucide <Home> glyph by rendering it once
+// at module load. The Devices tab's icon path must NOT match this
+// fingerprint (it previously did, colliding with the Home tab visually
+// at thumb distance on mobile).
+function homeIconPath(): string {
+  const div = document.createElement("div");
+  // Render via React DOM by mounting the element synchronously through
+  // testing-library; cheaper than booting react-dom here. Use a one-off
+  // container so it doesn't leak into other tests.
+  const { render: rtlRender } = require("@testing-library/react");
+  const { container, unmount } = rtlRender(
+    require("react").createElement(HomeIcon),
+    { container: div },
+  );
+  const d = container.querySelector("path")?.getAttribute("d") ?? "";
+  unmount();
+  return d;
+}
 
 function setMatchMedia(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -257,6 +277,37 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
     expect(between).toBe(true);
   });
 
+  // ── WARP-302 ─────────────────────────────────────────────────────────
+  // The Devices tab previously borrowed the `Home` glyph, colliding with
+  // the actual Home tab's icon at thumb distance ("two homes"). Swap to
+  // `Cpu` to communicate hardware/devices unambiguously. The mobile and
+  // desktop branches both render the same primaryNav entry, so this test
+  // pins the change on the mobile bottom tab and a sibling test below
+  // pins it on the desktop sidebar.
+  it("the mobile Devices tab does NOT use the lucide Home glyph (WARP-302)", () => {
+    const homePath = homeIconPath();
+    expect(homePath).not.toBe("");
+
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    const devicesLink = within(bottomNav).getByRole("link", {
+      name: /devices/i,
+    });
+
+    // Each link renders exactly one lucide <svg> for its icon. Read the
+    // first path's `d` attribute as a fingerprint of the glyph — if it
+    // matches the standalone <Home> render, the tab is using the Home
+    // glyph and we've regressed.
+    const devicesSvg = devicesLink.querySelector("svg");
+    expect(devicesSvg).not.toBeNull();
+    const devicesPath =
+      devicesSvg!.querySelector("path")?.getAttribute("d") ?? "";
+    expect(devicesPath).not.toBe("");
+    expect(devicesPath).not.toBe(homePath);
+  });
+
   it("bottom tab bar labels carry whitespace-nowrap so they never wrap on narrow viewports", () => {
     render(<Sidebar />);
     const bottomNav = screen.getByRole("navigation", { name: /bottom navigation/i });
@@ -296,6 +347,23 @@ describe("<Sidebar> desktop branch a11y (WARP-290)", () => {
     // We assert by aria-label.
     const aside = document.querySelector("aside[aria-label='Primary navigation']");
     expect(aside).not.toBeNull();
+  });
+
+  it("the desktop Devices nav item does NOT use the lucide Home glyph (WARP-302)", () => {
+    const homePath = homeIconPath();
+    expect(homePath).not.toBe("");
+
+    render(<Sidebar />);
+    const aside = document.querySelector(
+      "aside[aria-label='Primary navigation']",
+    ) as HTMLElement;
+    expect(aside).not.toBeNull();
+    const devicesLink = within(aside).getByRole("link", { name: /devices/i });
+
+    const devicesPath =
+      devicesLink.querySelector("svg path")?.getAttribute("d") ?? "";
+    expect(devicesPath).not.toBe("");
+    expect(devicesPath).not.toBe(homePath);
   });
 
   it("sets aria-current='page' on the active desktop nav item", () => {

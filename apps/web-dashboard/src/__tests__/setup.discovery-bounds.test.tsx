@@ -119,4 +119,126 @@ describe("setup discovery polling bounds (WARP-298)", () => {
     });
     expect(fetchDevicesMock.mock.calls.length).toBe(beforeStopCount);
   });
+
+  // ── WARP-302 ─────────────────────────────────────────────────────────
+  // The stopped state previously left the user with no way back to
+  // active scanning short of refreshing the setup flow. Surface a
+  // "Scan again" button that re-arms startDiscovery() so a late-arriving
+  // device still has a path to discovery without a full reload.
+  it("renders a 'Scan again' button in the stopped state (WARP-302)", async () => {
+    render(<SetupPage />);
+    await advanceToDiscovery();
+
+    for (let i = 0; i < 305; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+    const scanAgain = screen.getByRole("button", { name: /scan again/i });
+    expect(scanAgain).toBeInTheDocument();
+    // UX: the button must be reachable as a real tap target — assert
+    // it carries the secondary button token so styling stays consistent
+    // with the rest of the setup flow.
+    expect(scanAgain.className).toMatch(/dp-btn-secondary/);
+  });
+
+  // WARP-302 fix-up: scanSeconds ticker was leaking across "Scan again".
+  // Original bug: timerRef.current was never cleared at the stop transition
+  // and startDiscovery overwrote it with a new setInterval without clearing
+  // the old one — scanSeconds advanced at 2 Hz post-click, halving the
+  // recovery window before the next auto-stop. Regression test: after
+  // clicking "Scan again", advance fake timers N seconds and assert
+  // scanSeconds equals N, not 2N.
+  it("'Scan again' resets the 1Hz scanSeconds ticker without leaking the prior interval (WARP-302)", async () => {
+    render(<SetupPage />);
+    await advanceToDiscovery();
+
+    // Drive to the stopped state.
+    for (let i = 0; i < 305; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+
+    // Click "Scan again" — startDiscovery should clear the old timer
+    // (which had been left running on the buggy version) and arm a
+    // fresh 1Hz ticker.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /scan again/i }));
+      await Promise.resolve();
+    });
+
+    // Advance exactly 5 seconds and assert the visible counter shows 5,
+    // not 10. The "Scanning... Ns" caption is the user-facing tell — if
+    // the ticker were doubled it would read "Scanning... 10s" here.
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    expect(screen.getByText(/Scanning\.\.\. 5s/)).toBeInTheDocument();
+    expect(screen.queryByText(/Scanning\.\.\. 10s/)).not.toBeInTheDocument();
+
+    // Belt + braces: click "Scan again" once more after driving back to
+    // the stopped state, and verify the ticker still advances at 1 Hz —
+    // the original bug compounded with each click.
+    for (let i = 0; i < 305; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /scan again/i }));
+      await Promise.resolve();
+    });
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    expect(screen.getByText(/Scanning\.\.\. 3s/)).toBeInTheDocument();
+  });
+
+  it("'Scan again' returns to the active scan phase and resumes polling (WARP-302)", async () => {
+    render(<SetupPage />);
+    await advanceToDiscovery();
+
+    for (let i = 0; i < 305; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+
+    expect(screen.getByTestId("discovery-stopped")).toBeInTheDocument();
+    const callsBefore = fetchDevicesMock.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /scan again/i }));
+      await Promise.resolve();
+    });
+
+    // After the click the stopped banner must disappear (phase is active
+    // again).
+    expect(screen.queryByTestId("discovery-stopped")).not.toBeInTheDocument();
+
+    // Advance a few seconds and verify fetchMatterDevices was called
+    // again — i.e. polling actually restarted.
+    for (let i = 0; i < 6; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    expect(fetchDevicesMock.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
 });
