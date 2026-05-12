@@ -212,7 +212,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 transition-colors duration-150
                 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Paperclip size={16} strokeWidth={2.5} />
+              <Paperclip size={18} strokeWidth={2.5} />
             </button>
           </>
         ) : null}
