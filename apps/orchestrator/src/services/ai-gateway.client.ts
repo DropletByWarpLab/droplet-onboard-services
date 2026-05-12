@@ -1,12 +1,5 @@
 import { config } from "../config.js";
-import type {
-  ChatRequest,
-  ModelsResponse,
-  SessionInfo,
-  SessionDetail,
-  SessionListResponse,
-  SessionChatRequest,
-} from "../types/index.js";
+import type { ChatRequest, ModelsResponse } from "../types/index.js";
 
 const BASE_URL = config.AI_GATEWAY_URL;
 
@@ -117,90 +110,10 @@ export async function healthCheck(): Promise<boolean> {
   }
 }
 
-// --- Sessions ---
-
-export async function createSession(body: {
-  model: string;
-  title?: string;
-  system_prompt?: string | null;
-}): Promise<SessionInfo> {
-  const res = await fetch(`${BASE_URL}/ai/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: timeout(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to create session: ${text}`);
-  }
-  return res.json() as Promise<SessionInfo>;
-}
-
-export async function listSessions(
-  limit = 50,
-  offset = 0
-): Promise<SessionListResponse> {
-  const res = await fetch(
-    `${BASE_URL}/ai/sessions?limit=${limit}&offset=${offset}`,
-    { signal: timeout() }
-  );
-  if (!res.ok) throw new Error(`AI Gateway error: ${res.status}`);
-  return res.json() as Promise<SessionListResponse>;
-}
-
-export async function getSession(sessionId: string): Promise<SessionDetail> {
-  const res = await fetch(`${BASE_URL}/ai/sessions/${sessionId}`, {
-    signal: timeout(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to get session: ${text}`);
-  }
-  return res.json() as Promise<SessionDetail>;
-}
-
-export async function updateSession(
-  sessionId: string,
-  title: string
-): Promise<SessionInfo> {
-  const res = await fetch(`${BASE_URL}/ai/sessions/${sessionId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
-    signal: timeout(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to update session: ${text}`);
-  }
-  return res.json() as Promise<SessionInfo>;
-}
-
-export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/ai/sessions/${sessionId}`, {
-    method: "DELETE",
-    signal: timeout(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to delete session: ${text}`);
-  }
-}
-
-export async function sessionChat(
-  sessionId: string,
-  request: SessionChatRequest
-): Promise<Response> {
-  // Streaming chat: see `chat()` above for rationale on omitting timeout.
-  const res = await fetch(`${BASE_URL}/ai/sessions/${sessionId}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-  if (!res.ok && !request.stream) {
-    const body = await res.text();
-    throw new Error(`Session chat error ${res.status}: ${body}`);
-  }
-  return res;
-}
+// WARP-311: the ai-gateway session proxy helpers (createSession,
+// listSessions, getSession, updateSession, deleteSession, sessionChat)
+// were removed alongside the legacy `/llm/sessions/*` routes in
+// `routes/llm.ts`. Persistent conversation state now lives in the
+// orchestrator's own Postgres via WARP-304; direct callers of the
+// ai-gateway can still hit its session endpoints — the orchestrator
+// simply doesn't proxy them anymore.

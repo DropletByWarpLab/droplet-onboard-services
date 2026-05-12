@@ -30,7 +30,6 @@ import {
   listKeys,
   deleteKey,
   saveKey,
-  createSession,
   isTimeoutError,
 } from "./ai-gateway.client.js";
 
@@ -107,7 +106,11 @@ describe("ai-gateway.client — WARP-303 timeouts", () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("saveKey, deleteKey, createSession all attach an AbortSignal", async () => {
+  it("saveKey and deleteKey attach an AbortSignal", async () => {
+    // WARP-311: createSession was removed alongside the legacy
+    // `/llm/sessions/*` route. saveKey + deleteKey are the remaining
+    // non-streaming gateway proxies the orchestrator owns; both must
+    // honor the WARP-303 timeout contract.
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
 
     fetchMock.mockResolvedValueOnce(okResponse({}));
@@ -117,10 +120,6 @@ describe("ai-gateway.client — WARP-303 timeouts", () => {
     fetchMock.mockResolvedValueOnce(okResponse({}));
     await deleteKey("openai");
     expect(fetchMock.mock.calls[1][1].signal).toBeInstanceOf(AbortSignal);
-
-    fetchMock.mockResolvedValueOnce(okResponse({ id: "s1" }));
-    await createSession({ model: "llama3" });
-    expect(fetchMock.mock.calls[2][1].signal).toBeInstanceOf(AbortSignal);
   });
 
   it("isTimeoutError recognizes AbortSignal.timeout abort reasons", () => {

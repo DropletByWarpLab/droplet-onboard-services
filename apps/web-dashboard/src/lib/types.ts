@@ -100,35 +100,9 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
-// --- Session types ---
-
-export interface SessionInfo {
-  id: string;
-  title: string;
-  model: string;
-  created_at: number;
-  updated_at: number;
-  message_count: number;
-  system_prompt: string | null;
-}
-
-export interface SessionDetail extends SessionInfo {
-  messages: SessionMessageInfo[];
-}
-
-export interface SessionMessageInfo {
-  role: string;
-  content: string;
-  timestamp: number;
-}
-
-export interface SessionChatRequest {
-  message: string;
-  stream?: boolean;
-  temperature?: number;
-  max_tokens?: number;
-  provider?: string;
-}
+// WARP-311: legacy session types removed alongside the orchestrator
+// proxy routes. New persistence shape is `PersistedConversation` in
+// `lib/api.ts` (WARP-304).
 
 export interface DeviceInfo {
   id: string;
