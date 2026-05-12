@@ -139,35 +139,61 @@ export function SubscriptionsPanel() {
       </div>
 
       {showNew && (
+        // WARP-308: the previous form conflated protocol with auth ("No
+        // auth (public ICS)" vs "Basic auth (CalDAV)"), which implied
+        // every CalDAV server needs auth and every ICS feed is public.
+        // Neither is true. The new form has ONE auth question — the
+        // backend's CalDAV client (caldav.client.ts) already auto-detects
+        // protocol via a PROPFIND fallback, so the user doesn't need to
+        // declare it. We just need to know: does this feed require
+        // sign-in?
         <div className="mb-3 flex flex-col gap-2 p-2 rounded bg-surface-secondary">
-          <input
-            type="text"
-            placeholder="Display name (e.g. Personal iCloud)"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="dp-input text-sm"
-            maxLength={200}
-          />
-          <input
-            type="url"
-            placeholder="https://… (CalDAV or ICS feed URL)"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            className="dp-input text-sm"
-            maxLength={2048}
-          />
-          <select
-            value={authMode}
-            onChange={(e) => setAuthMode(e.target.value as "none" | "basic")}
-            className="dp-input text-sm"
+          <label className="flex flex-col gap-1">
+            <span className="type-caption-1 text-label-secondary">
+              Display name
+            </span>
+            <input
+              type="text"
+              placeholder="e.g. Personal iCloud"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="dp-input text-sm"
+              maxLength={200}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="type-caption-1 text-label-secondary">
+              Calendar URL
+            </span>
+            <input
+              type="url"
+              placeholder="https://…"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              className="dp-input text-sm"
+              maxLength={2048}
+            />
+            <span className="type-caption-2 text-label-tertiary">
+              Paste an ICS / iCal share link or a CalDAV server URL — we&rsquo;ll
+              auto-detect.
+            </span>
+          </label>
+          <label
+            data-testid="auth-toggle"
+            className="flex items-center gap-2 type-caption-1 text-label-secondary mt-1"
           >
-            <option value="none">No auth (public ICS)</option>
-            <option value="basic">Basic auth (CalDAV)</option>
-          </select>
+            <input
+              type="checkbox"
+              checked={authMode === "basic"}
+              onChange={(e) => setAuthMode(e.target.checked ? "basic" : "none")}
+            />
+            Requires a username and password
+          </label>
           {authMode === "basic" && (
-            <>
+            <div className="flex flex-col gap-2 pl-6">
               <input
                 type="text"
+                aria-label="Username"
                 placeholder="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -175,14 +201,23 @@ export function SubscriptionsPanel() {
               />
               <input
                 type="password"
-                placeholder="Password / app password"
+                aria-label="Password"
+                placeholder="Password or app password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="dp-input text-sm"
               />
-            </>
+            </div>
           )}
-          <button onClick={handleAdd} disabled={busy === "add"} className="dp-btn-primary text-sm">
+          <p className="type-caption-2 text-label-tertiary mt-1">
+            Most share links from Google, iCloud, or Outlook don&rsquo;t need
+            sign-in. CalDAV servers and private feeds usually do.
+          </p>
+          <button
+            onClick={handleAdd}
+            disabled={busy === "add"}
+            className="dp-btn-primary text-sm"
+          >
             {busy === "add" ? "Adding…" : "Add subscription"}
           </button>
         </div>
