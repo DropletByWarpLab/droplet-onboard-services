@@ -1314,7 +1314,13 @@ export async function fetchModels(): Promise<ModelsResponse> {
 }
 
 export async function sendChat(
-  request: ChatRequest & { signal?: AbortSignal },
+  request: ChatRequest & {
+    signal?: AbortSignal;
+    /** WARP-304: continue an existing conversation. Omitted on the first turn. */
+    conversationId?: string;
+    /** WARP-304: client-supplied idempotency key. Required after WARP-304. */
+    turnId?: string;
+  },
 ): Promise<Response> {
   const { signal, ...body } = request;
   return authFetch(`${BASE}/api/llm/chat`, {
@@ -1323,6 +1329,52 @@ export async function sendChat(
     body: JSON.stringify(body),
     signal,
   });
+}
+
+/**
+ * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
+ * dashboard hydrates `useChat.messages` from this on page mount when the
+ * URL carries a `?c=<id>` hash.
+ */
+export interface PersistedConversation {
+  id: string;
+  title: string | null;
+  model: string | null;
+  provider: string | null;
+  createdAt: string;
+  updatedAt: string;
+  messages: Array<{
+    id: string;
+    role: string;
+    content: string;
+    toolCalls:
+      | Array<{
+          id: string;
+          name: string;
+          args: Record<string, unknown>;
+          ok?: boolean;
+          status?: string;
+          message?: string;
+          data?: unknown;
+        }>
+      | null;
+    toolCallId: string | null;
+    turnId: string | null;
+    createdAt: string;
+  }>;
+}
+
+export async function fetchConversation(
+  conversationId: string,
+): Promise<PersistedConversation | null> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`Failed to fetch conversation: ${res.status}`);
+  }
+  return res.json() as Promise<PersistedConversation>;
 }
 
 // --- Brain memory (chat attachments) ---

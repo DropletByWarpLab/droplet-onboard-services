@@ -16,15 +16,12 @@ import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 
 export default function ChatPage() {
-  // WARP-104: chat is now a single rolling thread held in React state.
-  // Multi-session UX (history sidebar, server-side persistence) was
-  // dropped when /api/llm/chat became the canonical MCP-backed entry
-  // point — it's stateless. Reintroducing sessions needs an
-  // orchestrator-side persistence layer.
-  // WARP-203: pass `chatId` so chat-attached files (brain memory) carry the
-  // originating-conversation tag for the future "scope to this conversation"
-  // filter (Phase 2). The id is per-mount; clearing the chat (`handleNewChat`)
-  // mints a fresh one so attachments stay scoped to a single thread.
+  // WARP-104 dropped server-side persistence. WARP-304 restored it: every
+  // turn now hits `ChatSession` / `ChatMessage` and the server hands back
+  // the conversation id via the `X-Conversation-Id` response header.
+  //
+  // WARP-203's `chatId` (the brain-memory originating-chat tag) lives on
+  // alongside; consolidating with `conversationId` is left as a follow-up.
   const [chatId, setChatId] = useState(() => `chat-${Date.now()}`);
   const {
     messages,
@@ -38,7 +35,46 @@ export default function ChatPage() {
     attach,
     removeAttachment,
     clearAttachments,
+    conversationId,
+    loadConversation,
   } = useChat({ chatId });
+
+  // WARP-304: keep the URL hash and the live conversationId in sync so a
+  // page refresh restores the thread (`/chat?c=<id>`). The mount effect
+  // below loads the persisted conversation when the URL arrives with `c=`;
+  // the second effect keeps the URL up to date as turns mint or clear
+  // conversations.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("c");
+    if (!fromUrl) return;
+    void loadConversation(fromUrl).then((ok) => {
+      if (!ok) {
+        // Stale or revoked id — clear the hash so the page doesn't
+        // keep trying to load it on every reload.
+        const next = new URL(window.location.href);
+        next.searchParams.delete("c");
+        window.history.replaceState(null, "", next.toString());
+      }
+    });
+    // Only on first mount — subsequent `conversationId` changes are
+    // driven by the user, not by the URL.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const next = new URL(window.location.href);
+    if (conversationId) {
+      if (next.searchParams.get("c") === conversationId) return;
+      next.searchParams.set("c", conversationId);
+    } else {
+      if (!next.searchParams.has("c")) return;
+      next.searchParams.delete("c");
+    }
+    window.history.replaceState(null, "", next.toString());
+  }, [conversationId]);
   const chatInputRef = useRef<ChatInputHandle>(null);
   const { models } = useModels();
   const [selectedModel, setSelectedModel] = useState("");

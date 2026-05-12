@@ -20,21 +20,49 @@ model Device {
   updatedAt   DateTime @updatedAt
 }
 
+/// WARP-304: per-user persistent chat sessions for the /chat page.
+/// `userId` is the Nextcloud username from the auth middleware. The dashboard
+/// only ever lists / reads sessions for the requesting user — owner/admin do
+/// not get visibility into other users' chats (privacy boundary).
+///
+/// The pre-WARP-104 `model`/`provider` columns are kept (nullable now) for
+/// backwards compatibility with any existing rows; the new rows record them
+/// from the first turn's chat request.
 model ChatSession {
   id        String        @id @default(uuid())
-  model     String
-  provider  String
+  userId    String
+  title     String?
+  model     String?
+  provider  String?
   createdAt DateTime      @default(now())
+  updatedAt DateTime      @default(now()) @updatedAt
   messages  ChatMessage[]
+
+  @@index([userId, updatedAt(sort: Desc)])
 }
 
+/// WARP-304: persisted message in a `ChatSession`. Stored in order of
+/// `createdAt`; for the same millisecond the `id` (uuid) breaks the tie.
+/// `toolCalls` captures the assistant's tool-call requests on a turn so a
+/// rehydrated thread can render the same chips the user saw live;
+/// `toolCallId` ties a role=tool message back to the call it answered.
+/// `turnId` is a client-supplied UUID that lets us drop duplicate writes
+/// when a network retry resubmits the same turn — checked in code, not
+/// enforced at the DB level (a partial unique index is cleaner but Prisma
+/// doesn't model it nicely).
 model ChatMessage {
-  id        String      @id @default(uuid())
-  sessionId String
-  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role      String
-  content   String
-  createdAt DateTime    @default(now())
+  id         String      @id @default(uuid())
+  sessionId  String
+  session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role       String
+  content    String
+  toolCalls  Json?
+  toolCallId String?
+  turnId     String?
+  createdAt  DateTime    @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([sessionId, turnId])
 }
 
 // Per-user client devices (laptops, phones) paired via QR code flow.
