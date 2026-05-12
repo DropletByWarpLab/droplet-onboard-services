@@ -1024,5 +1024,83 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
     }
   });
 
+  // ── GET /api/files/search/status ── (WARP-310)
+  //
+  // Lightweight health probe for the AI-toggle in the Files page search
+  // bar. The dashboard polls this when the toggle is enabled so the
+  // user knows whether semantic search is actually wired up end-to-end:
+  //
+  //   - gRPC reachable?                  → `gatewayHealthy`
+  //   - pgvector extension installed?    → `pgvectorReady`
+  //   - any chunks for this user?        → `indexedCount`
+  //
+  // The composite `state` collapses the three into a single traffic
+  // light the UI can render directly:
+  //   "ready"      — gateway up + pgvector up + user has chunks
+  //   "indexing"   — gateway up + pgvector up + zero chunks (yet)
+  //   "unavailable"— gateway or pgvector down
+  //
+  // Per-user scope is intentional: it tells the *current* user whether
+  // their files are searchable. Owner/admin don't get visibility into
+  // other users' counts here.
+  router.get("/files/search/status", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+
+      // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
+      // which reflects the latest init attempt; a hot reload from "down"
+      // to "up" lands on the next probe without restart.
+      let gatewayHealthy = false;
+      try {
+        const { isGrpcAvailable } = await import(
+          "../services/ai-gateway.grpc-client.js"
+        );
+        gatewayHealthy = isGrpcAvailable();
+      } catch {
+        gatewayHealthy = false;
+      }
+
+      // Probe pgvector + indexed count in a single round trip. If the
+      // extension isn't installed, the query throws and we treat it as
+      // pgvectorReady=false.
+      let pgvectorReady = false;
+      let indexedCount = 0;
+      let lastIndexedAt: string | null = null;
+      try {
+        const rows: Array<{ count: bigint; last: Date | null }> =
+          await _prisma.$queryRawUnsafe(
+            'SELECT COUNT(*)::bigint AS count, MAX("createdAt") AS last ' +
+              'FROM "FileContentChunk" WHERE "userId" = $1',
+            user,
+          );
+        pgvectorReady = true;
+        if (rows[0]) {
+          indexedCount = Number(rows[0].count);
+          lastIndexedAt = rows[0].last ? rows[0].last.toISOString() : null;
+        }
+      } catch (err) {
+        logger.warn({ err }, "search/status: pgvector probe failed");
+        pgvectorReady = false;
+      }
+
+      const state: "ready" | "indexing" | "unavailable" =
+        !gatewayHealthy || !pgvectorReady
+          ? "unavailable"
+          : indexedCount > 0
+            ? "ready"
+            : "indexing";
+
+      res.json({
+        state,
+        gatewayHealthy,
+        pgvectorReady,
+        indexedCount,
+        lastIndexedAt,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
