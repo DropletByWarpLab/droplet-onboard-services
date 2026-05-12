@@ -136,7 +136,7 @@ async function performRemove() {
                 */}
                 <button
                   onClick={() => toggle(r.id, !completed)}
-                  className="p-2.5 -m-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="p-2.5 -m-1.5 rounded-sm hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   aria-label={completed ? `Mark ${label} as not done` : `Mark ${label} as done`}
                 >
                   <span

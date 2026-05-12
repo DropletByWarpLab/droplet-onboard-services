@@ -145,6 +145,25 @@ describe("RemindersPanel — per-row delete (WARP-292)", () => {
     expect(checkbox.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
   });
 
+  // WARP-301 fold-in: the expanded p-2.5 hit-target had no hover
+  // background, making the tap area invisible to mouse users. Add a
+  // subtle `hover:bg-surface-secondary` so the affordance is
+  // discoverable on pointer devices.
+  it("checkbox wrapper has hover:bg-surface-secondary for affordance discoverability (WARP-301)", () => {
+    useRemindersMock.mockReturnValue({
+      reminders: [makeReminder()],
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+
+    render(<RemindersPanel />);
+
+    const checkbox = screen.getByRole("button", {
+      name: /mark walk the dog as done/i,
+    });
+    expect(checkbox.className).toMatch(/\bhover:bg-surface-secondary\b/);
+  });
+
   it("checked-state visual cue is preserved (system-green inner square)", () => {
     useRemindersMock.mockReturnValue({
       reminders: [makeReminder({ completedAt: new Date().toISOString() })],
