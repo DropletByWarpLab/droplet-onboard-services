@@ -11,7 +11,7 @@ apps/orchestrator/      Express + Prisma — central API and device control
 apps/web-dashboard/     Next.js 14 — admin UI
 packages/tools-core/    @droplet/tools-core — single canonical LLM tool registry (TypeScript)
 services/mcp-server/    @droplet/mcp-server — MCP server (stdio + streamable-HTTP)
-services/ai-gateway/    FastAPI + LiteLLM — model routing proxy (no longer dispatches tools)
+services/ai-gateway/    FastAPI provider router — LiteLLM for cloud (OpenAI, Anthropic), direct httpx for local Ollama (no tool dispatch)
 services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-indexer/  Python watchdog — filesystem indexer + embedder (formerly `file-sync`)
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
@@ -26,7 +26,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 - **Web dashboard:** Next.js 14, React
 - **Tools-core:** TypeScript, JSON-Schema; canonical registry consumed by orchestrator + mcp-server
 - **MCP server:** TypeScript, `@modelcontextprotocol/sdk`; stdio (in-process child) + streamable-HTTP (external clients)
-- **AI gateway:** Python, FastAPI, LiteLLM (provider router only — no tool dispatch)
+- **AI gateway:** Python, FastAPI. Multi-provider router with **mixed transports**: LiteLLM (`litellm.acompletion`) for cloud providers — `services/ai-gateway/providers/openai_cloud.py`, `anthropic_cloud.py` — and a custom httpx-based provider for local Ollama (`providers/ollama_local.py`) hitting the OpenAI-compat `/v1/chat/completions` endpoint. Also exposes a gRPC `EmbedText` service on port 50051 (used by `services/file-indexer/`). Provider router only — does NOT dispatch tools (orchestrator owns that via MCP).
 - **Routing service:** Python, FastAPI, OpenWrt ubus JSON-RPC SDK
 - **File indexer:** Python, watchdog (was `file-sync`; renamed to reflect its indexer+embedder role)
 - **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
@@ -71,7 +71,8 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
   (MCP, stdio child process). External MCP clients (inference-engine,
   Claude Desktop, etc.) reach the same server over streamable HTTP with
   JWT auth and per-tool RBAC. `services/ai-gateway/` is a thin provider
-  router (LiteLLM only); it does NOT dispatch tools.
+  router (LiteLLM for cloud, direct httpx for local Ollama); it does NOT
+  dispatch tools.
 - The dashboard's `/chat` page hits `POST /api/llm/chat` which drives the
   orchestrator's MCP-backed agent loop. `GET /api/llm/tools` proxies
   `mcp-client.service.ts → listTools()` so the wire shape matches what
@@ -83,6 +84,43 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
   automatically. The orchestrator's `WRITE_TOOLS` set in
   `apps/orchestrator/src/routes/llm.ts` is derived from `requiresWrite`,
   so RBAC tracks per-tool intent without manual sync.
+
+## Ollama call path (chat vs lifecycle)
+
+The sibling repo `droplet-jetson-ai` ships two services on the inference
+host: **Ollama** (`:11434`, the inference engine) and **ollama-manager**
+(`:8002`, a lifecycle + opt-in observability sidecar). They are NOT
+interchangeable proxy layers — each owns separate concerns:
+
+- **Chat path is direct to Ollama** (`JETSON_OLLAMA_URL=http://...:11434`).
+  ai-gateway's `OllamaLocalProvider` posts straight to Ollama's
+  OpenAI-compat `/v1/chat/completions`. Production's `.env` and the
+  `OllamaLocalProvider` code default both point here. Going direct
+  matters because ollama-manager's `TIMEOUT_PROXY` read leg is 120 s
+  (see `droplet-jetson-ai/services/ollama-manager/timeouts.py`), which
+  the orchestrator's agent loop blows past on CPU inference and on
+  cold-loads of larger models — surfacing as 502 from the manager and
+  500 from the orchestrator. ADR-004 in `droplet-jetson-ai` records the
+  original rationale for the sidecar's `/proxy` endpoint, but the chat
+  path in production deliberately does not use it.
+- **ollama-manager owns model lifecycle**: `GET/POST /models/*`,
+  `GET /health` (limits contract that `OllamaLocalProvider._LimitsCache`
+  reads), `GET /metrics`. These are NOT exposed through ai-gateway —
+  they're called directly by setup scripts and observability tooling.
+- **ollama-manager's `/proxy/v1/chat/completions` is opt-in observability**
+  (tool-call counter, JSON repair, circuit breaker). Point
+  `JETSON_OLLAMA_URL` at `http://...:8002/proxy` ONLY when you want those
+  signals and your prompts fit inside the 120 s read budget — typical
+  for production on the Orin Nano with warm models, NOT for CPU dev or
+  heavy first-call cold loads.
+
+If you're debugging an "AI not reachable" issue, the first thing to
+check is `JETSON_OLLAMA_URL` inside the running ai-gateway container
+(`docker exec droplet-pi-platform-ai-gateway-1 env | grep JETSON`).
+A trailing `/proxy` is the smoking gun for "manager timed out my agent
+loop"; a stale `inference-engine.local` is the smoking gun for "mDNS
+doesn't resolve from inside Docker on macOS" (use
+`host.docker.internal:11434` locally).
 
 ## Device setup
 
