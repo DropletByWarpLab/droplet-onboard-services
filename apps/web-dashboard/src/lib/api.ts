@@ -35,9 +35,6 @@ import type {
   ModelsResponse,
   NetworkCommandResult,
   NetworkOverview,
-  SessionChatRequest,
-  SessionDetail,
-  SessionInfo,
   StorageStats,
   DrivesResponse,
   WirelessScanResult,
@@ -1461,69 +1458,13 @@ export async function deleteProviderKey(provider: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete key: ${res.status}`);
 }
 
-// --- Sessions ---
-
-export async function createSession(body: {
-  model: string;
-  title?: string;
-  system_prompt?: string | null;
-}): Promise<SessionInfo> {
-  const res = await authFetch(`${BASE}/api/llm/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
-  return res.json();
-}
-
-export async function listSessions(
-  limit = 50,
-  offset = 0
-): Promise<{ sessions: SessionInfo[] }> {
-  const res = await authFetch(
-    `${BASE}/api/llm/sessions?limit=${limit}&offset=${offset}`
-  );
-  if (!res.ok) throw new Error(`Failed to list sessions: ${res.status}`);
-  return res.json();
-}
-
-export async function getSession(sessionId: string): Promise<SessionDetail> {
-  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`);
-  if (!res.ok) throw new Error(`Failed to get session: ${res.status}`);
-  return res.json();
-}
-
-export async function updateSessionTitle(
-  sessionId: string,
-  title: string
-): Promise<SessionInfo> {
-  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
-  });
-  if (!res.ok) throw new Error(`Failed to update session: ${res.status}`);
-  return res.json();
-}
-
-export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) throw new Error(`Failed to delete session: ${res.status}`);
-}
-
-export async function sendSessionChat(
-  sessionId: string,
-  request: SessionChatRequest
-): Promise<Response> {
-  return authFetch(`${BASE}/api/llm/sessions/${sessionId}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-}
+// WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
+// listSessions, getSession, updateSessionTitle, deleteSession,
+// sendSessionChat) targeted the orchestrator's removed
+// `/api/llm/sessions/*` proxy routes. They were never imported by any
+// page after WARP-104; persistent conversation state now lives behind
+// `/api/llm/conversations/*` (WARP-304) — `fetchConversation` above is
+// the only consumer.
 
 // --- File operations ---
 

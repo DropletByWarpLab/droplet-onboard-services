@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { Readable } from "node:stream";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
@@ -10,7 +9,7 @@ import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
-import type { ModelsResponse, SessionChatRequest } from "../types/index.js";
+import type { ModelsResponse } from "../types/index.js";
 import {
   ChatPersistenceService,
   type PersistedToolCall,
@@ -514,116 +513,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // --- Sessions ---
-  // Session routes still proxy to ai-gateway-owned persistent
-  // conversation state. WARP-104 switched the dashboard's /chat page
-  // to /api/llm/chat (the MCP-backed orchestrator agent loop) — these
-  // session routes are no longer hit by the in-tree dashboard. They
-  // remain available for direct API callers that want server-side
-  // history; deletion is a separate decision once any out-of-tree
-  // consumers have migrated.
-
-  router.post("/llm/sessions", async (req, res, next) => {
-    try {
-      const { model, title, system_prompt } = req.body;
-      if (!model) {
-        res.status(400).json({ error: "model is required" });
-        return;
-      }
-      const session = await aiGateway.createSession({ model, title, system_prompt });
-      res.status(201).json(session);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.get("/llm/sessions", async (req, res, next) => {
-    try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
-      const sessions = await aiGateway.listSessions(limit, offset);
-      res.json(sessions);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.get("/llm/sessions/:sessionId", async (req, res, next) => {
-    try {
-      const session = await aiGateway.getSession(req.params.sessionId);
-      res.json(session);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.patch("/llm/sessions/:sessionId", async (req, res, next) => {
-    try {
-      const { title } = req.body;
-      if (!title) {
-        res.status(400).json({ error: "title is required" });
-        return;
-      }
-      const session = await aiGateway.updateSession(req.params.sessionId, title);
-      res.json(session);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.delete("/llm/sessions/:sessionId", async (req, res, next) => {
-    try {
-      await aiGateway.deleteSession(req.params.sessionId);
-      res.json({ status: "deleted" });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.post("/llm/sessions/:sessionId/chat", async (req, res, next) => {
-    try {
-      const { message, stream, temperature, max_tokens, provider } = req.body;
-      if (!message) {
-        res.status(400).json({ error: "message is required" });
-        return;
-      }
-
-      const chatReq: SessionChatRequest = {
-        message,
-        stream: stream ?? false,
-        temperature,
-        max_tokens,
-        provider,
-      };
-
-      const gatewayRes = await aiGateway.sessionChat(
-        req.params.sessionId,
-        chatReq
-      );
-
-      if (chatReq.stream && gatewayRes.body) {
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-          "X-Accel-Buffering": "no",
-        });
-
-        const reader = gatewayRes.body as ReadableStream<Uint8Array>;
-        const nodeStream = Readable.fromWeb(reader as never);
-        nodeStream.pipe(res);
-
-        req.on("close", () => {
-          nodeStream.destroy();
-        });
-      } else {
-        const data = await gatewayRes.json();
-        res.json(data);
-      }
-    } catch (err) {
-      next(err);
-    }
-  });
+  // WARP-311: the legacy `/llm/sessions/*` routes that proxied to
+  // ai-gateway-owned session state have been removed. The dashboard
+  // moved off them in WARP-104; nothing in the orchestrator, the
+  // dashboard, or any other tree consumer reaches them anymore, and
+  // persistent conversation state now lives in the orchestrator's own
+  // Postgres via WARP-304 (`/llm/conversations/*` above). The
+  // ai-gateway's session endpoints stay available for direct callers
+  // of the gateway, but the orchestrator no longer fronts them.
 
   return router;
 }

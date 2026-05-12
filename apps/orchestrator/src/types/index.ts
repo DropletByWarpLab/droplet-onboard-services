@@ -74,39 +74,11 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
-// --- Session types ---
-
-export interface SessionInfo {
-  id: string;
-  title: string;
-  model: string;
-  created_at: number;
-  updated_at: number;
-  message_count: number;
-  system_prompt: string | null;
-}
-
-export interface SessionDetail extends SessionInfo {
-  messages: SessionMessage[];
-}
-
-export interface SessionMessage {
-  role: string;
-  content: string;
-  timestamp: number;
-}
-
-export interface SessionListResponse {
-  sessions: SessionInfo[];
-}
-
-export interface SessionChatRequest {
-  message: string;
-  stream?: boolean;
-  temperature?: number;
-  max_tokens?: number;
-  provider?: string;
-}
+// WARP-311: legacy SessionInfo / SessionDetail / SessionListResponse /
+// SessionChatRequest types were removed alongside the
+// `/api/llm/sessions/*` proxy routes. Persistent conversation state
+// now lives in the orchestrator's own Postgres (see
+// `services/chat-persistence.service.ts`).
 
 // --- Device types ---
 
