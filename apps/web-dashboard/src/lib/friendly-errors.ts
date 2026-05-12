@@ -93,6 +93,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     UNSUPPORTED_TYPE: "That attachment type isn't supported in chat yet.",
     INDEX_FAILED:
       "We couldn't index that attachment. The chat will keep working without it.",
+    // WARP-305: brain-ingest emits these on image-only or text-extraction-empty
+    // files. The chat itself is fine; only the search-inside-the-file path
+    // doesn't have anything to index. Copy reflects reality — the chip is
+    // soft-warning, not red — and tells the user the attachment is still
+    // attached.
+    IMAGE_ONLY:
+      "Image stored — we can't search inside an image yet, but it's still attached to this chat.",
+    EMPTY_EXTRACTION:
+      "We couldn't pull text out of that file. It's still attached to this chat, but the AI can't search inside it.",
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
     TIMEOUT: "That took too long. Try again, or simplify the request.",
@@ -205,6 +214,15 @@ function inferCodeFromMessage(
   }
   if (/timeout|timed out/.test(m)) return "TIMEOUT";
   if (/abort/.test(m)) return "ABORT";
+  // WARP-305: brain-ingest reasons come through as raw lowercase strings
+  // (`empty_extraction`, `image_only`) on the AttachmentChip's `error`
+  // field. Match them here so the chat-domain copy fires instead of
+  // falling through to the generic "Something went wrong on this turn"
+  // toast.
+  if (domain === "chat") {
+    if (/image[_ ]only/.test(m)) return "IMAGE_ONLY";
+    if (/empty[_ ]extraction|no[_ ]text/.test(m)) return "EMPTY_EXTRACTION";
+  }
   if (domain === "push") {
     if (/not configured/.test(m)) return "NOT_CONFIGURED";
     if (/denied|permission/.test(m)) return "PERMISSION_DENIED";

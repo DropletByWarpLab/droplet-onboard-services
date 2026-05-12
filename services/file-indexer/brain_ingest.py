@@ -159,6 +159,55 @@ def handle_brain_uploaded(payload: dict) -> None:
         "brain_ingest: indexing item=%s user=%s mime=%s", item_id, user_id, mime
     )
 
+    # WARP-305: image-only attachments. There's no text to extract from a
+    # bare PNG/JPEG/HEIC, so running the extractor → "< 10 chars" check
+    # used to mark the chip as `failed` with reason=`empty_extraction`.
+    # That bubbled up as the "Something went wrong on this turn" toast in
+    # the chat surface because `empty_extraction` had no friendly mapping.
+    #
+    # The image IS successfully stored (the bytes live under the item dir
+    # for future retrieval and the row is in BrainMemoryItem) — it just
+    # isn't searchable by text content. Mark it `ready` with an
+    # `image_only` warning so the dashboard chip renders ✓ Ready with a
+    # softer subtitle instead of ⚠ Failed. Multimodal chat (sending
+    # images straight to the model as content_parts) is a separate
+    # follow-up; this fix is about not lying to the user.
+    if isinstance(mime, str) and mime.startswith("image/"):
+        logger.info(
+            "brain_ingest: image-only attachment, skipping text extraction for %s",
+            path,
+        )
+        try:
+            mark_brain_item_indexed(item_id, warnings=["image_only"])
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark image-only item ready"
+            )
+        _publish_status(user_id, item_id, "ready", reason="image_only")
+        # Persist a tiny manifest so the export route can still surface
+        # the attachment metadata — no extracted.txt because there's no
+        # text to write.
+        try:
+            manifest_p = _manifest_path(path)
+            manifest = {
+                "itemId": item_id,
+                "userId": user_id,
+                "filename": payload.get("filename"),
+                "mimeType": mime,
+                "originatingChatId": payload.get("originatingChatId"),
+                "storagePath": path,
+                "chunks": 0,
+                "extractorWarnings": ["image_only"],
+            }
+            manifest_p.write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            logger.warning(
+                "brain_ingest: failed to write image-only manifest: %s", e
+            )
+        return
+
     # Extract.
     doc = dispatch(path, mime)
     if doc is None:
