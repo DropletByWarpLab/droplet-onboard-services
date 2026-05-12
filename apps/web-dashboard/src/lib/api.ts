@@ -1814,6 +1814,37 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   return data.shares ?? [];
 }
 
+// --- WARP-307: Calendar place autocomplete ---
+
+export interface PlaceSuggestion {
+  displayName: string;
+  lat: string;
+  lon: string;
+  type: string | null;
+}
+
+/**
+ * Hit the orchestrator's Nominatim proxy for fuzzy location suggestions.
+ * Returns `[]` on any error so the combobox falls back to free-text.
+ */
+export async function fetchPlaces(
+  query: string,
+  limit = 5,
+  signal?: AbortSignal,
+): Promise<PlaceSuggestion[]> {
+  const q = query.trim();
+  if (q.length < 2) return [];
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  try {
+    const res = await authFetch(`${BASE}/api/calendar/places?${params}`, { signal });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.places) ? (data.places as PlaceSuggestion[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 // --- Phase 4: Semantic content search ---
 
 export interface SemanticSearchResult {
