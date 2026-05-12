@@ -61,11 +61,12 @@ describe("SubscriptionsPanel — typed error → friendly toast (WARP-294)", () 
       )!,
     );
 
-    // Fill required name + url.
-    fireEvent.change(screen.getByPlaceholderText(/display name/i), {
+    // WARP-308: the form label is now a visible `<span>` ("Display name",
+    // "Calendar URL") and the placeholder carries example copy only.
+    fireEvent.change(screen.getByPlaceholderText(/Personal iCloud/i), {
       target: { value: "iCloud" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/CalDAV or ICS/i), {
+    fireEvent.change(screen.getByPlaceholderText("https://…"), {
       target: { value: "https://example.com/cal.ics" },
     });
 
