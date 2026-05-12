@@ -11,6 +11,10 @@ import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import type { ModelsResponse, SessionChatRequest } from "../types/index.js";
+import {
+  ChatPersistenceService,
+  type PersistedToolCall,
+} from "../services/chat-persistence.service.js";
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
@@ -18,6 +22,13 @@ const MODELS_CACHE_TTL = 30;
 // /llm/chat accepts tool-role messages on replay so a client can resume a
 // session that already went through the agent loop. tool_call_id / tool_calls
 // are optional so plain chat callers don't have to care.
+//
+// WARP-304: `conversationId` lets the caller continue an existing thread.
+// When absent, the server mints a new one and returns it via the
+// `X-Conversation-Id` response header (set for both streaming and
+// non-streaming paths so the dashboard can read it identically). `turnId`
+// is a client-supplied idempotency key — re-submitting the same turn is a
+// no-op on the persisted side.
 const chatRequestSchema = z.object({
   model: z.string(),
   messages: z.array(
@@ -33,7 +44,11 @@ const chatRequestSchema = z.object({
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
+  conversationId: z.string().uuid().optional(),
+  turnId: z.string().min(1).max(128).optional(),
 });
+
+const CONVERSATION_ID_HEADER = "X-Conversation-Id";
 
 // Which tool names require the caller to have owner/admin role. Read-only
 // tools (list_*, get_*, search_*) are fine for any authenticated user; write
@@ -107,8 +122,43 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
     });
 }
 
-export function createLlmRouter(_prisma: PrismaClient): Router {
+/**
+ * WARP-304: persist one user turn + the assistant turn it produced. Wraps
+ * the service call so the chat route stays readable, and so persistence
+ * failure can't surface as a chat-turn error (we log and move on; the
+ * user's response already streamed).
+ */
+async function persistTurn(args: {
+  persistence: ChatPersistenceService;
+  conversationId: string;
+  userContent: string;
+  assistantContent: string;
+  toolCalls: PersistedToolCall[];
+  turnId: string | undefined;
+}): Promise<void> {
+  try {
+    await args.persistence.appendMessages(args.conversationId, [
+      {
+        role: "user",
+        content: args.userContent,
+        turnId: args.turnId ?? null,
+      },
+      {
+        role: "assistant",
+        content: args.assistantContent,
+        toolCalls: args.toolCalls.length > 0 ? args.toolCalls : null,
+        turnId: args.turnId ?? null,
+      },
+    ]);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[llm/chat] failed to persist turn:", err);
+  }
+}
+
+export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
+  const persistence = new ChatPersistenceService(prisma);
 
   // List available models
   router.get("/llm/models", async (_req, res, next) => {
@@ -132,6 +182,15 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
   // defined in spec §8.2 (content_delta, tool_call, tool_result, done).
   // Non-streaming returns the AgentResult shape (assistant message +
   // trace + iterations + stop_reason).
+  //
+  // WARP-304: every turn is persisted to `ChatSession` / `ChatMessage`.
+  // On the very first turn (no `conversationId` in the body) the server
+  // creates a new session keyed to the authenticated user and returns
+  // its id via the `X-Conversation-Id` response header (header is set
+  // for both streaming and non-streaming so the dashboard reads it
+  // identically). Subsequent turns send the id back. `turnId` is a
+  // client-supplied idempotency key — re-submits skip the duplicate
+  // persist.
   router.post("/llm/chat", async (req, res, next) => {
     try {
       const parsed = chatRequestSchema.safeParse(req.body);
@@ -183,10 +242,48 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         ? { ...(ncToken ? { ncToken } : {}), ...(userId ? { userId } : {}) }
         : undefined;
 
+      // WARP-304: resolve (or create) the conversation BEFORE the agent
+      // runs. The user message that drove this turn is the LAST
+      // role="user" in the replay history; older user turns were
+      // persisted by their own requests. We seed the title from this
+      // first prompt when the session is brand new.
+      const lastUserMessage = [...chatReq.messages]
+        .reverse()
+        .find((m) => m.role === "user");
+      const persistedUserContent = lastUserMessage?.content ?? null;
+      let conversationId: string | null = null;
+      if (userId) {
+        const convo = await persistence
+          .ensureConversation({
+            conversationId: chatReq.conversationId,
+            userId,
+            model: chatReq.model,
+            provider: chatReq.provider,
+            firstUserContent: persistedUserContent,
+          })
+          .catch((err: unknown) => {
+            // Persistence failure must NOT block chat — the user can
+            // still talk to the model; we just lose history for this
+            // turn. Log and continue.
+            // eslint-disable-next-line no-console
+            console.error("[llm/chat] failed to ensure conversation:", err);
+            return null;
+          });
+        if (convo?.id) {
+          conversationId = convo.id;
+          res.setHeader(CONVERSATION_ID_HEADER, conversationId);
+        }
+      }
+
       const deps: AgentDeps = {
         mcp: mcpClient,
         aiGateway: { chat: aiGateway.chat },
       };
+
+      // Track tool calls observed during streaming so we can include
+      // them in the persisted assistant message at the end of the turn.
+      const liveToolCalls: PersistedToolCall[] = [];
+      let liveAssistantContent = "";
 
       if (chatReq.stream) {
         res.writeHead(200, {
@@ -204,6 +301,20 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
           } catch {
             /* client gone */
           }
+          // Mirror the events into the persistence buffer.
+          if (e.type === "content_delta") {
+            liveAssistantContent += e.text;
+          } else if (e.type === "tool_call") {
+            liveToolCalls.push({ id: e.id, name: e.name, args: e.args });
+          } else if (e.type === "tool_result") {
+            const existing = liveToolCalls.find((c) => c.id === e.id);
+            if (existing) {
+              existing.ok = e.ok;
+              existing.status = e.status;
+              existing.message = e.message;
+              existing.data = e.data;
+            }
+          }
         };
         try {
           await runAgent({ ...deps, onEvent }, {
@@ -217,6 +328,19 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         } finally {
           res.end();
         }
+        // Persist after the stream is flushed (still within the same
+        // request handler — the response is over but the user expects
+        // history on next page load).
+        if (conversationId && persistedUserContent) {
+          await persistTurn({
+            persistence,
+            conversationId,
+            userContent: persistedUserContent,
+            assistantContent: liveAssistantContent,
+            toolCalls: liveToolCalls,
+            turnId: chatReq.turnId,
+          });
+        }
         return;
       }
 
@@ -228,7 +352,94 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         allowed_tools: allowedForUser,
         toolCallContext,
       });
-      res.json(result);
+      if (conversationId && persistedUserContent) {
+        const toolCalls: PersistedToolCall[] = result.trace.map((t) => ({
+          id: t.tool_call_id,
+          name: t.tool,
+          args: t.args,
+          ok: true,
+          data: t.result,
+        }));
+        await persistTurn({
+          persistence,
+          conversationId,
+          userContent: persistedUserContent,
+          assistantContent: result.message.content,
+          toolCalls,
+          turnId: chatReq.turnId,
+        });
+      }
+      res.json({ ...result, conversationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── WARP-304: per-user conversation history ──
+  // The dashboard reads `/api/llm/conversations/:id` on mount when a
+  // `?c=<id>` URL hash is present, to rehydrate the thread. Listing is
+  // exposed for the future sidebar; deletion lets the user clear a
+  // thread they no longer want kept.
+  //
+  // All three endpoints scope by `req.user.username` — owner/admin do
+  // NOT get visibility into other users' chats (privacy boundary).
+  router.get("/llm/conversations", async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const limit = Number.parseInt(String(req.query.limit ?? "20"), 10) || 20;
+      const offset = Number.parseInt(String(req.query.offset ?? "0"), 10) || 0;
+      const conversations = await persistence.listConversationsForUser(
+        userId,
+        limit,
+        offset,
+      );
+      res.json({ conversations });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/llm/conversations/:id", async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const detail = await persistence.getConversationForUser(
+        req.params.id,
+        userId,
+      );
+      if (!detail) {
+        res.status(404).json({ error: "conversation_not_found" });
+        return;
+      }
+      res.json(detail);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/llm/conversations/:id", async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const deleted = await persistence.deleteConversationForUser(
+        req.params.id,
+        userId,
+      );
+      if (!deleted) {
+        res.status(404).json({ error: "conversation_not_found" });
+        return;
+      }
+      res.json({ deleted: true });
     } catch (err) {
       next(err);
     }

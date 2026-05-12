@@ -1,13 +1,35 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { sendChat, uploadBrainFile } from "../api";
+import { sendChat, uploadBrainFile, fetchConversation } from "../api";
 import type {
   ChatAttachment,
   ChatCitation,
   ChatMessage,
   ChatToolCall,
 } from "../types";
+
+/** WARP-304: response header carrying the server-assigned conversation id. */
+const CONVERSATION_ID_HEADER = "x-conversation-id";
+
+/**
+ * WARP-304: short, collision-resistant per-turn idempotency key. Native
+ * `crypto.randomUUID()` is available everywhere we run (jsdom 24, modern
+ * browsers, secure contexts on iOS/Android). Falls back to a v4-shaped
+ * Math.random string if `randomUUID` isn't reachable so non-secure-context
+ * test harnesses don't crash.
+ */
+function createTurnId(): string {
+  const cryptoObj: Crypto | undefined =
+    typeof crypto !== "undefined" ? crypto : undefined;
+  if (cryptoObj?.randomUUID) return cryptoObj.randomUUID();
+  // RFC4122 v4 fallback. Not cryptographically secure but the only
+  // consumer is server-side dedup; a UUID-shaped string is sufficient.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
 
 /**
  * WARP-295: tools whose `tool_result.data.results[]` carries
@@ -194,6 +216,17 @@ export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  /**
+   * WARP-304: server-assigned conversation id. Null until the first turn
+   * returns the `X-Conversation-Id` header. The chat page reflects this
+   * into the URL (`?c=<id>`) so a refresh restores the thread; downstream
+   * turns send it back so persistence stays glued to the same row.
+   */
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const conversationIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
   // AbortController for the in-flight stream (WARP-295). Stored in a
   // ref so `stop()` can read the current controller synchronously
   // without re-renders. `isStoppingRef` lets the SSE reader loop's
@@ -355,13 +388,26 @@ export function useChat(options: UseChatOptions = {}) {
       abortRef.current = controller;
       isStoppingRef.current = false;
 
+      const turnId = createTurnId();
       try {
         const response = await sendChat({
           model,
           messages: replayMessages,
           stream: true,
           signal: controller.signal,
+          conversationId: conversationIdRef.current ?? undefined,
+          turnId,
         });
+
+        // WARP-304: capture the server-assigned conversation id from the
+        // very first turn. Headers are available before the streaming
+        // body resolves, so we can reflect it back to the page (and the
+        // URL) immediately — no waiting for the stream to end.
+        const headerId = response.headers.get(CONVERSATION_ID_HEADER);
+        if (headerId && conversationIdRef.current !== headerId) {
+          conversationIdRef.current = headerId;
+          setConversationId(headerId);
+        }
 
         if (!response.body) {
           throw new Error("No response body");
@@ -534,7 +580,55 @@ export function useChat(options: UseChatOptions = {}) {
 
   const clearMessages = useCallback(() => {
     setMessages([]);
+    // WARP-304: starting a new chat must detach from the prior persisted
+    // conversation — subsequent sends will mint a fresh one server-side.
+    setConversationId(null);
+    conversationIdRef.current = null;
   }, []);
+
+  /**
+   * WARP-304: rehydrate a persisted conversation by id. Used on page
+   * mount when the URL carries `?c=<id>`. Replaces the in-memory thread
+   * and pins `conversationId` so the next turn appends to the right
+   * server-side row. Returns `false` when the conversation doesn't exist
+   * (or belongs to another user) so the caller can clear the URL hash.
+   */
+  const loadConversation = useCallback(
+    async (id: string): Promise<boolean> => {
+      const persisted = await fetchConversation(id).catch(() => null);
+      if (!persisted) return false;
+      // Filter to user/assistant only — the chat surface doesn't render
+      // system or tool messages directly; tool calls live inside the
+      // assistant message's `toolCalls` chip row.
+      const rebuilt: ChatMessage[] = [];
+      for (const m of persisted.messages) {
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        rebuilt.push({
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          ...(m.role === "assistant" && m.toolCalls?.length
+            ? {
+                toolCalls: m.toolCalls.map((c) => ({
+                  id: c.id,
+                  name: c.name,
+                  args: c.args,
+                  ok: c.ok,
+                  status: c.status,
+                  message: c.message,
+                  data: c.data,
+                })),
+              }
+            : {}),
+        });
+      }
+      setMessages(rebuilt);
+      setConversationId(persisted.id);
+      conversationIdRef.current = persisted.id;
+      return true;
+    },
+    [],
+  );
 
   /**
    * Upload a chat-attached file. Adds a pending chip immediately so
@@ -599,6 +693,9 @@ export function useChat(options: UseChatOptions = {}) {
     attach,
     removeAttachment,
     clearAttachments,
+    // WARP-304
+    conversationId,
+    loadConversation,
   };
 }
 
