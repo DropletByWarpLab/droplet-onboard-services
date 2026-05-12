@@ -185,6 +185,19 @@ export function FileRow({
       data-filerow="1"
       onClick={(e) => {
         if (isRenaming) return;
+        // WARP-309: a plain single-click on a folder navigates into it,
+        // matching Finder/File Explorer breadcrumb-style browsing (the
+        // double-click requirement was a Files-page quirk, not a global
+        // dashboard pattern). Modifier-clicks still go to selection so
+        // Cmd/Ctrl + click and Shift + range-select work on folders for
+        // bulk operations (move, delete, share). Files keep the previous
+        // single-click-selects / double-click-opens behavior because that
+        // preview sidebar is the primary affordance for them.
+        if (file.isDirectory && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+          e.stopPropagation();
+          onOpen();
+          return;
+        }
         onSelect(e);
       }}
       onDoubleClick={(e) => {
