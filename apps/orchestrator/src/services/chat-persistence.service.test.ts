@@ -25,6 +25,8 @@ interface MockMessage {
   toolCalls: unknown;
   toolCallId: string | null;
   turnId: string | null;
+  status: string;
+  completedAt: Date | null;
   createdAt: Date;
 }
 
@@ -88,7 +90,12 @@ function makePrismaMock() {
         ) ?? null
       );
     }),
-    create: vi.fn(async (args: { data: Omit<MockMessage, "id" | "createdAt"> }) => {
+    create: vi.fn(async (args: {
+      data: Omit<MockMessage, "id" | "createdAt" | "status" | "completedAt"> & {
+        status?: string;
+        completedAt?: Date | null;
+      };
+    }) => {
       const row: MockMessage = {
         id: `msg-${messages.length + 1}`,
         sessionId: args.data.sessionId,
@@ -97,9 +104,20 @@ function makePrismaMock() {
         toolCalls: args.data.toolCalls,
         toolCallId: args.data.toolCallId ?? null,
         turnId: args.data.turnId ?? null,
+        status: args.data.status ?? "completed",
+        completedAt: args.data.completedAt ?? null,
         createdAt: new Date(),
       };
       messages.push(row);
+      return row;
+    }),
+    update: vi.fn(async (args: {
+      where: { id: string };
+      data: Partial<MockMessage>;
+    }) => {
+      const row = messages.find((m) => m.id === args.where.id);
+      if (!row) throw new Error(`message ${args.where.id} not found`);
+      Object.assign(row, args.data);
       return row;
     }),
   };
@@ -269,5 +287,227 @@ describe("ChatPersistenceService (WARP-304)", () => {
     const ok = await svc.deleteConversationForUser("s-bob", "alice");
     expect(ok).toBe(false);
     expect(sessions.length).toBe(1);
+  });
+
+  // ── WARP-329: save-on-send + finalize ──
+
+  it("createTurnRows persists user as completed and assistant as streaming", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(2026, 0, 1),
+      updatedAt: new Date(2026, 0, 1),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { userMessageId, assistantMessageId, assistantAlreadyFinal } =
+      await svc.createTurnRows({
+        conversationId: "s1",
+        userContent: "hello",
+        turnId: "t1",
+      });
+
+    expect(userMessageId).toBeTruthy();
+    expect(assistantMessageId).toBeTruthy();
+    expect(assistantAlreadyFinal).toBe(false);
+    expect(messages).toHaveLength(2);
+
+    const userRow = messages.find((m) => m.id === userMessageId);
+    const assistantRow = messages.find((m) => m.id === assistantMessageId);
+    expect(userRow).toMatchObject({
+      role: "user",
+      content: "hello",
+      status: "completed",
+    });
+    expect(userRow?.completedAt).toBeInstanceOf(Date);
+    expect(assistantRow).toMatchObject({
+      role: "assistant",
+      content: "",
+      status: "streaming",
+      completedAt: null,
+    });
+    expect(sessions[0].updatedAt.getTime()).toBeGreaterThan(
+      new Date(2026, 0, 1).getTime(),
+    );
+  });
+
+  it("createTurnRows is idempotent on the same (sessionId, turnId)", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const first = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "ping",
+      turnId: "t1",
+    });
+    const second = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "ping",
+      turnId: "t1",
+    });
+
+    expect(first.assistantMessageId).toBe(second.assistantMessageId);
+    expect(first.userMessageId).toBe(second.userMessageId);
+    expect(messages).toHaveLength(2); // no duplicates
+  });
+
+  it("createTurnRows flags assistantAlreadyFinal when a prior turn already finished", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // Pre-seed a completed pair for turnId t1 — simulates a duplicate
+    // re-submit AFTER the original turn already finished.
+    messages.push(
+      {
+        id: "u-old",
+        sessionId: "s1",
+        role: "user",
+        content: "ping",
+        toolCalls: null,
+        toolCallId: null,
+        turnId: "t1",
+        status: "completed",
+        completedAt: new Date(),
+        createdAt: new Date(),
+      },
+      {
+        id: "a-old",
+        sessionId: "s1",
+        role: "assistant",
+        content: "pong",
+        toolCalls: null,
+        toolCallId: null,
+        turnId: "t1",
+        status: "completed",
+        completedAt: new Date(),
+        createdAt: new Date(),
+      },
+    );
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { assistantAlreadyFinal, assistantMessageId } =
+      await svc.createTurnRows({
+        conversationId: "s1",
+        userContent: "ping",
+        turnId: "t1",
+      });
+
+    expect(assistantAlreadyFinal).toBe(true);
+    expect(assistantMessageId).toBe("a-old");
+  });
+
+  it("finalizeAssistantMessage flips status + sets completedAt", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(2026, 0, 1),
+      updatedAt: new Date(2026, 0, 1),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { assistantMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "ping",
+      turnId: "t1",
+    });
+
+    await svc.finalizeAssistantMessage({
+      conversationId: "s1",
+      messageId: assistantMessageId,
+      content: "pong",
+      toolCalls: [{ id: "c1", name: "get_time", args: {} }],
+      status: "completed",
+    });
+
+    const row = messages.find((m) => m.id === assistantMessageId);
+    expect(row).toMatchObject({
+      content: "pong",
+      status: "completed",
+    });
+    expect(row?.completedAt).toBeInstanceOf(Date);
+    expect(sessions[0].updatedAt.getTime()).toBeGreaterThan(
+      new Date(2026, 0, 1).getTime(),
+    );
+  });
+
+  it("finalizeAssistantMessage propagates failed/aborted status", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { assistantMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "ping",
+      turnId: "t-fail",
+    });
+    await svc.finalizeAssistantMessage({
+      conversationId: "s1",
+      messageId: assistantMessageId,
+      content: "partial",
+      toolCalls: [],
+      status: "aborted",
+    });
+    const row = messages.find((m) => m.id === assistantMessageId);
+    expect(row?.status).toBe("aborted");
+    expect(row?.content).toBe("partial");
+  });
+
+  it("updateAssistantStreaming flushes content without touching status", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+
+    const { assistantMessageId } = await svc.createTurnRows({
+      conversationId: "s1",
+      userContent: "hi",
+      turnId: "t-stream",
+    });
+    await svc.updateAssistantStreaming(assistantMessageId, "Hel");
+    await svc.updateAssistantStreaming(assistantMessageId, "Hello");
+
+    const row = messages.find((m) => m.id === assistantMessageId);
+    expect(row?.content).toBe("Hello");
+    expect(row?.status).toBe("streaming");
+    expect(row?.completedAt).toBeNull();
   });
 });

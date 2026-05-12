@@ -12,6 +12,31 @@ import type {
 /** WARP-304: response header carrying the server-assigned conversation id. */
 const CONVERSATION_ID_HEADER = "x-conversation-id";
 
+/** WARP-329: response header carrying the server-side `ChatMessage.id` for
+ *  this turn's assistant row. The client uses it to match incoming
+ *  `turn-completed` MQTT events back to the right in-flight message. */
+const ASSISTANT_MESSAGE_ID_HEADER = "x-assistant-message-id";
+
+/**
+ * WARP-329: ask for `Notification` permission lazily on the user's first
+ * send, never on page load. Permission popups on load are widely disliked
+ * and Safari is particularly punitive about them. Returns the current
+ * permission state so callers don't need to re-read `Notification.permission`.
+ */
+async function ensureNotificationPermission(): Promise<NotificationPermission> {
+  if (typeof window === "undefined" || !("Notification" in window)) {
+    return "denied";
+  }
+  if (Notification.permission === "default") {
+    try {
+      return await Notification.requestPermission();
+    } catch {
+      return "denied";
+    }
+  }
+  return Notification.permission;
+}
+
 /**
  * WARP-304: short, collision-resistant per-turn idempotency key. Native
  * `crypto.randomUUID()` is available everywhere we run (jsdom 24, modern
@@ -270,28 +295,92 @@ export function useChat(options: UseChatOptions = {}) {
 
     const apply = (data: { topic?: string; payload?: unknown }) => {
       if (typeof data.topic !== "string") return;
-      // Match the per-user brain/indexed namespace; `<user>` is variable
-      // so we end-anchor on the suffix.
-      if (!data.topic.endsWith("/brain/indexed")) return;
-      const payload = data.payload as
-        | { itemId?: string; status?: string; reason?: string }
-        | undefined;
-      if (!payload?.itemId || typeof payload.status !== "string") return;
-      setAttachments((prev) =>
-        prev.map((a) =>
-          a.itemId === payload.itemId
-            ? {
-                ...a,
-                status:
-                  payload.status === "ready"
-                    ? "ready"
-                    : ("failed" as ChatAttachment["status"]),
-                error:
-                  payload.status === "failed" ? payload.reason : undefined,
+
+      // WARP-203 brain-memory chip status updates.
+      if (data.topic.endsWith("/brain/indexed")) {
+        const payload = data.payload as
+          | { itemId?: string; status?: string; reason?: string }
+          | undefined;
+        if (!payload?.itemId || typeof payload.status !== "string") return;
+        setAttachments((prev) =>
+          prev.map((a) =>
+            a.itemId === payload.itemId
+              ? {
+                  ...a,
+                  status:
+                    payload.status === "ready"
+                      ? "ready"
+                      : ("failed" as ChatAttachment["status"]),
+                  error:
+                    payload.status === "failed" ? payload.reason : undefined,
+                }
+              : a,
+          ),
+        );
+        return;
+      }
+
+      // WARP-329: chat turn-completed events. The orchestrator publishes
+      // `droplet/chat/<user>/turn-completed` when an in-flight LLM turn
+      // settles (completed / failed / aborted). When the tab is hidden,
+      // surface a browser Notification so the user knows their reply
+      // landed. Click → focus + deep-link to the conversation.
+      if (data.topic.endsWith("/turn-completed")) {
+        const payload = data.payload as
+          | {
+              conversationId?: string;
+              messageId?: string;
+              status?: "completed" | "failed" | "aborted";
+              snippet?: string;
+              completedAt?: string;
+            }
+          | undefined;
+        if (!payload?.conversationId || !payload.messageId) return;
+        // Only surface a notification when the tab is hidden. If the
+        // user is staring at the chat surface, the streaming UI already
+        // told them everything they need to know.
+        const hidden =
+          typeof document !== "undefined" && document.hidden === true;
+        if (!hidden) return;
+        if (
+          typeof window === "undefined" ||
+          !("Notification" in window) ||
+          Notification.permission !== "granted"
+        ) {
+          return;
+        }
+        try {
+          const body =
+            payload.status === "failed"
+              ? "The turn couldn't complete. Try again from the chat surface."
+              : payload.status === "aborted"
+                ? "The turn was cancelled."
+                : (payload.snippet ?? "").trim() || "Your reply is ready.";
+          const n = new Notification("Droplet AI replied", {
+            body: body.slice(0, 140),
+            // `tag: conversationId` collapses multiple notifications for
+            // the same chat into one — re-firing replaces the prior.
+            tag: payload.conversationId,
+            data: {
+              conversationId: payload.conversationId,
+              messageId: payload.messageId,
+            },
+          });
+          n.onclick = () => {
+            try {
+              window.focus();
+              const target = `/chat?c=${encodeURIComponent(payload.conversationId!)}`;
+              if (window.location.pathname + window.location.search !== target) {
+                window.location.href = target;
               }
-            : a,
-        ),
-      );
+            } finally {
+              n.close();
+            }
+          };
+        } catch {
+          // ignore — Notification can throw under tight tab focus rules
+        }
+      }
     };
 
     const connect = () => {
@@ -389,6 +478,12 @@ export function useChat(options: UseChatOptions = {}) {
       isStoppingRef.current = false;
 
       const turnId = createTurnId();
+      // WARP-329: lazy-ask for Notification permission on the user's first
+      // send (never on page load — too aggressive, and Safari is harsh
+      // about it). Awaiting here is intentional: we want the prompt to
+      // appear right after the user takes a clear action. Don't block on
+      // a denial — chat keeps working without notifications.
+      void ensureNotificationPermission();
       try {
         const response = await sendChat({
           model,
@@ -407,6 +502,19 @@ export function useChat(options: UseChatOptions = {}) {
         if (headerId && conversationIdRef.current !== headerId) {
           conversationIdRef.current = headerId;
           setConversationId(headerId);
+        }
+        // WARP-329: the server's assistant ChatMessage.id, captured from
+        // the same response. Not surfaced to the page today — kept on the
+        // hook so a future "regenerate this exact reply" UX has a stable
+        // handle, and so the WS-driven cross-tab sync (follow-up) can
+        // match incoming turn-completed events to a known message.
+        const headerAssistantId = response.headers.get(
+          ASSISTANT_MESSAGE_ID_HEADER,
+        );
+        if (headerAssistantId) {
+          // No state to set today; reserved for follow-up cross-tab sync.
+          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+          headerAssistantId;
         }
 
         if (!response.body) {
