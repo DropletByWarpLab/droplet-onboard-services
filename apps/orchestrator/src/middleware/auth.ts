@@ -33,6 +33,16 @@ declare global {
 
 const TOKEN_CACHE_PREFIX = "auth:token:";
 const TOKEN_CACHE_TTL = 300; // 5 minutes
+/**
+ * WARP-303: bound the Nextcloud OCS validation fetch. On a Redis cache miss
+ * (every 5 min idle, or after a restart), this fetch is the only thing
+ * standing between the request and the route handler — and Nextcloud
+ * occasionally takes long enough to hang the middleware indefinitely,
+ * which surfaced to users as intermittent 401s on `/api/llm/models`. 5 s is
+ * generous for an OCS user lookup; on timeout we fail closed (treat the
+ * token as invalid) so the client retries or re-auths cleanly.
+ */
+const OCS_VALIDATION_TIMEOUT_MS = 5_000;
 
 // ── Cookie configuration ──
 // Cookie max-ages derive from the TTL constants in jwt.service (single source
@@ -164,6 +174,7 @@ async function validateNextcloudToken(token: string): Promise<AuthUser | null> {
         "OCS-APIRequest": "true",
         Accept: "application/json",
       },
+      signal: AbortSignal.timeout(OCS_VALIDATION_TIMEOUT_MS),
     });
 
     if (!resp.ok) return null;
