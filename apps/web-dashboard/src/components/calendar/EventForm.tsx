@@ -43,6 +43,37 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
 
   const headingId = useId();
 
+  /**
+   * WARP-306: when the user moves the start time, slide the end time by the
+   * same delta so the event's duration is preserved. The previous behavior
+   * left the end pinned, which meant a quick "push this meeting an hour
+   * later" became a two-field operation (and silently created start>end
+   * validation errors when the user forgot the second edit).
+   *
+   * Editing the end field directly is not overridden — `setEndsAt` is still
+   * the bare setter on that input, so a user explicitly stretching or
+   * shortening the duration keeps full control.
+   */
+  function handleStartChange(nextStart: string) {
+    const prevStartMs = new Date(startsAt).getTime();
+    const prevEndMs = new Date(endsAt).getTime();
+    const nextStartMs = new Date(nextStart).getTime();
+    // Only slide when every input parses cleanly AND the previous duration
+    // was non-negative; otherwise leave end alone so the validation toast
+    // at save time still fires for genuinely broken states.
+    if (
+      Number.isFinite(prevStartMs) &&
+      Number.isFinite(prevEndMs) &&
+      Number.isFinite(nextStartMs) &&
+      prevEndMs >= prevStartMs
+    ) {
+      const durationMs = prevEndMs - prevStartMs;
+      const nextEnd = new Date(nextStartMs + durationMs);
+      setEndsAt(isoToLocalInput(nextEnd.toISOString()));
+    }
+    setStartsAt(nextStart);
+  }
+
   useEffect(() => {
     if (!open) return;
     if (initial) {
@@ -184,7 +215,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
               <input
                 type="datetime-local"
                 value={startsAt}
-                onChange={(e) => setStartsAt(e.target.value)}
+                onChange={(e) => handleStartChange(e.target.value)}
                 disabled={externallySynced}
                 className="dp-input"
               />
