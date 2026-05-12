@@ -92,7 +92,7 @@ export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
               {file.mimeType || "Unknown type"}
             </p>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <button
               onClick={onDownload}
               className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"

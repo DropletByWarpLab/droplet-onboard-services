@@ -86,4 +86,20 @@ describe("PreviewPane header actions (WARP-301)", () => {
     screen.getByLabelText("Download").click();
     expect(onDownload).toHaveBeenCalledTimes(1);
   });
+
+  // WARP-301 fold-in: the action row wrapping Close + Download used
+  // `gap-1` (4 px). UX flagged this as too tight — bumped to `gap-1.5`
+  // (6 px) for slightly more breathing room between the two icon
+  // buttons.
+  it("action row uses gap-1.5 between Close + Download (WARP-301)", () => {
+    render(
+      <PreviewPane file={file()} onClose={vi.fn()} onDownload={vi.fn()} />,
+    );
+    const close = screen.getByLabelText("Close preview");
+    const row = close.parentElement;
+    expect(row).not.toBeNull();
+    expect(row!.className).toMatch(/(^|\s)gap-1\.5(\s|$)/);
+    // Regression guard against the old tight spacing.
+    expect(row!.className).not.toMatch(/(^|\s)gap-1(\s|$)/);
+  });
 });
