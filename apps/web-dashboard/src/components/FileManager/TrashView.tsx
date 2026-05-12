@@ -179,11 +179,20 @@ export function TrashView({
                 {formatDate(item.deletedAt)}
               </span>
 
-              <div className="flex items-center gap-0.5 w-20 justify-end flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+              {/*
+                WARP-300: row actions are always rendered (no opacity-0
+                hover gate) so touch + keyboard users can discover the
+                actions. p-2.5 → 34 px hit-target, clears the 32 px
+                ui-ux floor. aria-labels name the file so screen-reader
+                users hear which entry they're about to restore or
+                permanently delete.
+              */}
+              <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
                 <button
                   onClick={() => handleRestore(item)}
                   disabled={busy === item.name}
-                  className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors disabled:opacity-50"
+                  className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-50"
+                  aria-label={`Restore ${item.originalName}`}
                   title="Restore"
                 >
                   <RotateCcw size={14} />
@@ -191,7 +200,8 @@ export function TrashView({
                 <button
                   onClick={() => handleDelete(item)}
                   disabled={busy === item.name}
-                  className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors disabled:opacity-50"
+                  className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-50"
+                  aria-label={`Delete forever ${item.originalName}`}
                   title="Delete forever"
                 >
                   <Trash2 size={14} />

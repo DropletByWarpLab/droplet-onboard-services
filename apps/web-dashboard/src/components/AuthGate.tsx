@@ -49,7 +49,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <div className="min-h-screen bg-surface-primary flex items-center justify-center">
         <div className="text-center">
           <div className="flex items-center justify-center mx-auto mb-3 animate-pulse">
-            <DropletMark size={32} className="text-accent" />
+            <DropletMark size={32} className="text-accent" aria-label="Droplet" />
           </div>
           <p className="type-subheadline text-label-tertiary">Loading...</p>
         </div>

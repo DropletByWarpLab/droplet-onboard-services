@@ -157,7 +157,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
     return (
       <div className="min-h-screen bg-surface-primary flex items-center justify-center p-6">
         <div className="w-full max-w-sm text-center">
-          <DropletMark size={40} className="text-accent mx-auto mb-4" />
+          <DropletMark size={40} className="text-accent mx-auto mb-4" aria-label="Droplet" />
           <p className="type-subheadline text-label-tertiary">
             Loading your invitation...
           </p>
@@ -173,7 +173,7 @@ export default function InviteAcceptPage({ params }: PageProps) {
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="flex items-center justify-center mx-auto mb-4">
-            <DropletMark size={40} className="text-accent" />
+            <DropletMark size={40} className="text-accent" aria-label="Droplet" />
           </div>
           <h1 className="type-title-1 text-label-primary">
             You've been invited

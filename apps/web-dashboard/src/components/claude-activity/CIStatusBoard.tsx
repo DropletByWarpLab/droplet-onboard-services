@@ -82,11 +82,25 @@ export function CIStatusBoard({ runs }: { runs: GitHubCIRun[] | null }) {
                 </div>
                 <div className="flex items-center justify-between type-caption-2 text-label-tertiary">
                   <span className={`${TONE_FG[tone]}`}>{label}</span>
+                  {/*
+                    WARP-300 audit: the opacity-0 group-hover:opacity-100
+                    here is preserved intentionally. This ExternalLink
+                    icon is a decorative hover cue layered inside the
+                    parent <a> — the entire card is already a single
+                    actionable target with its accessible name supplied
+                    by `run.workflow_name`, and the icon carries
+                    `aria-hidden="true"` so it's not announced. Touch +
+                    keyboard users reach the action by activating the
+                    card itself (tab to focus, enter to open), not by
+                    targeting this glyph, so the hover-only reveal is a
+                    progressive-enhancement affordance rather than the
+                    sole discovery channel for a destructive action.
+                  */}
                   <span className="text-label-quaternary flex items-center gap-1">
                     {relativeTime(run.updated_at)}
                     <ExternalLink
                       size={10}
-                      className="opacity-0 group-hover:opacity-100"
+                      className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
                       aria-hidden="true"
                     />
                   </span>
