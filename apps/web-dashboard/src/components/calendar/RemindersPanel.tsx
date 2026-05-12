@@ -128,16 +128,26 @@ async function performRemove() {
             const label = r.title?.trim() ? r.title : r.id;
             return (
               <li key={r.id} className="flex items-start gap-2 group">
+                {/*
+                  WARP-301: bumped to a p-2.5 hit-target wrapper (≥ 32 px)
+                  so the checkbox is reliably tappable on touch. The
+                  rendered 16 px (w-4 h-4) check itself stays the same
+                  visual size — only the surrounding tap area grew.
+                */}
                 <button
                   onClick={() => toggle(r.id, !completed)}
-                  className={`mt-0.5 w-4 h-4 rounded border flex items-center justify-center ${
-                    completed
-                      ? "bg-system-green border-system-green text-white"
-                      : "border-label-tertiary"
-                  }`}
+                  className="p-2.5 -m-1.5 rounded-sm hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   aria-label={completed ? `Mark ${label} as not done` : `Mark ${label} as done`}
                 >
-                  {completed && <Check size={10} />}
+                  <span
+                    className={`block w-4 h-4 rounded border flex items-center justify-center ${
+                      completed
+                        ? "bg-system-green border-system-green text-white"
+                        : "border-label-tertiary"
+                    }`}
+                  >
+                    {completed && <Check size={10} />}
+                  </span>
                 </button>
                 <div className="flex-1 min-w-0">
                   <div className={`type-subheadline truncate ${completed ? "line-through text-label-tertiary" : "text-label-primary"}`}>

@@ -206,13 +206,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled}
               aria-label="Attach a file"
-              className="w-9 h-9 rounded-full flex items-center justify-center
+              className="w-11 h-11 rounded-full flex items-center justify-center
                 bg-surface-secondary text-label-secondary
                 hover:text-label-primary hover:bg-label-quaternary/40
                 transition-colors duration-150
                 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Paperclip size={16} strokeWidth={2.5} />
+              <Paperclip size={18} strokeWidth={2.5} />
             </button>
           </>
         ) : null}
@@ -237,7 +237,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             onClick={onStop}
             aria-label="Stop generating"
             className="
-              w-9 h-9 rounded-full flex items-center justify-center
+              w-11 h-11 rounded-full flex items-center justify-center
               bg-surface-secondary text-system-red
               hover:bg-system-red/10
               transition-all duration-200 ease-smooth
@@ -252,7 +252,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             disabled={disabled || !hasText}
             aria-label="Send message"
             className={`
-              w-9 h-9 rounded-full flex items-center justify-center
+              w-11 h-11 rounded-full flex items-center justify-center
               transition-all duration-200 ease-smooth
               ${
                 hasText
