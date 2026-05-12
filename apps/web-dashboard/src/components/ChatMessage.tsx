@@ -233,7 +233,7 @@ export const ChatMessage = memo(function ChatMessage({
         <div
           data-testid="message-actions"
           className={`
-            flex items-center gap-1
+            flex items-center gap-1 flex-wrap
             opacity-0 group-hover/message:opacity-100 focus-within:opacity-100
             transition-opacity duration-150
             ${hasCitations ? "mt-1" : ""}

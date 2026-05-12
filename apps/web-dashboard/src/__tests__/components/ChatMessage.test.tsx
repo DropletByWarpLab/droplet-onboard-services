@@ -447,6 +447,25 @@ describe("ChatMessage", () => {
       const toolbar = screen.getByTestId("message-actions");
       expect(toolbar.className).not.toMatch(/\bmt-1\b/);
     });
+
+    // WARP-301 fold-in: at < ~345 px viewports (or when the assistant
+    // column is narrow), 3 buttons at px-3 py-2 (~242 px combined) can
+    // exceed the bubble's max-w-[70%] cap and push it wider. Adding
+    // `flex-wrap` lets the toolbar stack gracefully instead of forcing
+    // the bubble to grow.
+    it("toolbar carries `flex-wrap` so it stacks on narrow viewports (WARP-301)", () => {
+      render(
+        <ChatMessage
+          message={assistantMsg()}
+          isLastAssistant
+          onCopy={vi.fn()}
+          onQuote={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+      const toolbar = screen.getByTestId("message-actions");
+      expect(toolbar.className).toMatch(/\bflex-wrap\b/);
+    });
   });
 
   describe("markdown polish (WARP-295)", () => {
