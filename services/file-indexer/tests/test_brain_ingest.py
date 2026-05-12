@@ -185,6 +185,76 @@ def test_synthetic_nc_file_id_is_deterministic():
     assert a < (1 << 31)
 
 
+def test_handle_uploaded_image_only_is_ready_not_failed(
+    fake_io, tmp_path, monkeypatch
+):
+    """WARP-305: image-only attachments (PNG / JPEG / HEIC) have no text
+    to extract. The previous behavior published status='failed' with
+    reason='empty_extraction', which surfaced as "Something went wrong on
+    this turn" in the chat surface. The fix: skip text extraction entirely
+    for image MIME types, mark the row indexed with warning 'image_only',
+    and publish status='ready' so the chip shows ✓ instead of ⚠.
+    """
+    import brain_ingest
+
+    # Drop a fake "image" file at the expected path. The handler doesn't
+    # actually read the bytes when the MIME is image/* — it just records
+    # the manifest and marks the row ready.
+    item_dir = tmp_path / "alice" / "item-img"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    fake_image = item_dir / "original.png"
+    fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+    # Track whether the extractor / embedder ran — they MUST NOT for
+    # image-only files.
+    dispatch_calls: list[tuple] = []
+    monkeypatch.setattr(
+        brain_ingest,
+        "dispatch",
+        lambda *a, **k: dispatch_calls.append((a, k)) or None,
+    )
+    # Bypass the status lookup so we don't need Postgres.
+    monkeypatch.setattr(brain_ingest, "_fetch_item_status", lambda _i: None)
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-img",
+            "userId": "alice",
+            "path": str(fake_image),
+            "mimeType": "image/png",
+            "filename": "screenshot.png",
+        }
+    )
+
+    # No text extraction attempted.
+    assert dispatch_calls == []
+    # No chunks upserted.
+    assert fake_io["upserts"] == []
+    # Row IS marked indexed with the image_only warning so the chip stops
+    # spinning.
+    assert any(
+        m["item_id"] == "item-img" and "image_only" in m["warnings"]
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
+    # The published status is "ready", NOT "failed".
+    indexed_topics = [
+        (t, p)
+        for t, p in fake_io["published"]
+        if t.endswith("/brain/indexed")
+    ]
+    assert indexed_topics, "expected an /brain/indexed publish"
+    assert all(
+        p["status"] == "ready" for _, p in indexed_topics
+    ), indexed_topics
+    # Manifest landed on disk for the export route.
+    manifest = item_dir / "manifest.json"
+    assert manifest.exists()
+    parsed = json.loads(manifest.read_text(encoding="utf-8"))
+    assert parsed["mimeType"] == "image/png"
+    assert parsed["chunks"] == 0
+    assert "image_only" in parsed["extractorWarnings"]
+
+
 def test_handle_uploaded_skips_when_status_is_queued_for_transcription(
     fake_io, tmp_path, monkeypatch
 ):

@@ -99,6 +99,27 @@ describe("translateError — chat domain", () => {
     expect(result.length).toBeGreaterThan(0);
     expect(result).not.toMatch(/GIBBERISH/);
   });
+
+  // WARP-305: brain-ingest reasons land on AttachmentChip's `error`
+  // string in their raw lowercase form. They must NOT fall through to
+  // the generic "Something went wrong on this turn" copy — that lies
+  // to the user about a chat that's actually fine.
+  it("maps `empty_extraction` (raw reason) to a friendly 'still attached, can't search' string", () => {
+    const result = translateError({ message: "empty_extraction" }, "chat");
+    expect(result).not.toMatch(/Something went wrong on this turn/i);
+    expect(result.toLowerCase()).toMatch(/text|search|attached/);
+  });
+
+  it("maps `image_only` (raw reason) to an image-stored friendly string", () => {
+    const result = translateError({ message: "image_only" }, "chat");
+    expect(result).not.toMatch(/Something went wrong on this turn/i);
+    expect(result.toLowerCase()).toMatch(/image|stored|attached/);
+  });
+
+  it("maps the IMAGE_ONLY code directly when it comes in as a typed error", () => {
+    const result = translateError({ code: "IMAGE_ONLY" }, "chat");
+    expect(result.toLowerCase()).toMatch(/image|stored/);
+  });
 });
 
 describe("translateError — provider-key domain", () => {
