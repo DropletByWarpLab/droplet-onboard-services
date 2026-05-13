@@ -579,11 +579,14 @@ export async function listConversations(args: {
   return body.conversations;
 }
 
-/** WARP-331 — rename a conversation. Server trims + clamps to 64 chars. */
+/** WARP-331 — rename a conversation. Server trims + clamps to 64 chars.
+ *  Returns the canonical stored title. No `updatedAt` is returned because
+ *  the service intentionally does not bump the DB column on rename (rename
+ *  is metadata; see chat-persistence.service.ts). */
 export async function renameConversation(
   conversationId: string,
   title: string,
-): Promise<{ id: string; title: string; updatedAt: string }> {
+): Promise<{ id: string; title: string }> {
   const res = await authFetch(
     `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
     {
@@ -601,7 +604,7 @@ export async function renameConversation(
     }
     throw new Error(body.error || `Failed to rename conversation: ${res.status}`);
   }
-  return res.json() as Promise<{ id: string; title: string; updatedAt: string }>;
+  return res.json() as Promise<{ id: string; title: string }>;
 }
 
 /** WARP-331 — delete a conversation. Returns true on 200, false on 404. */
