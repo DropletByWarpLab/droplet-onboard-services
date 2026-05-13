@@ -846,12 +846,22 @@ export function useChat(options: UseChatOptions = {}) {
     [sendMessage],
   );
 
+  /**
+   * WARP-331: increments every time the messages array is replaced
+   * wholesale (loadConversation, clearMessages) rather than appended/
+   * mutated by a streaming chunk. The chat page watches this to force a
+   * scroll-to-bottom on discrete refresh events without yanking the
+   * user mid-stream-citation-read.
+   */
+  const [messagesEpoch, setMessagesEpoch] = useState(0);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     // WARP-304: starting a new chat must detach from the prior persisted
     // conversation — subsequent sends will mint a fresh one server-side.
     setConversationId(null);
     conversationIdRef.current = null;
+    setMessagesEpoch((e) => e + 1);
   }, []);
 
   /**
@@ -893,6 +903,7 @@ export function useChat(options: UseChatOptions = {}) {
       setMessages(rebuilt);
       setConversationId(persisted.id);
       conversationIdRef.current = persisted.id;
+      setMessagesEpoch((e) => e + 1);
       return true;
     },
     [],
@@ -1009,6 +1020,11 @@ export function useChat(options: UseChatOptions = {}) {
     // WARP-304
     conversationId,
     loadConversation,
+    // WARP-331 — increments on every wholesale message-array replacement
+    // (load, clear). The chat page watches this to force a scroll-to-
+    // bottom on discrete refresh events without yanking the user
+    // mid-stream-citation-read.
+    messagesEpoch,
   };
 }
 

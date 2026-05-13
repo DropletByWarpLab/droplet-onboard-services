@@ -47,6 +47,7 @@ export default function ChatPage() {
     clearAttachments,
     conversationId,
     loadConversation,
+    messagesEpoch,
   } = useChat({ chatId, historyHandleRef });
 
   // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
@@ -157,6 +158,17 @@ export default function ChatPage() {
   useEffect(() => {
     stickyScrollToBottom();
   }, [messages, stickyScrollToBottom]);
+
+  // WARP-331: force-scroll to the bottom on discrete refresh events —
+  // conversation switched, persisted thread reloaded (manual or via the
+  // MQTT turn-completed auto-refresh), or "+ New chat" cleared the list.
+  // The sticky-scroll above already covers streaming; this is the
+  // override for "the conversation just changed, the user expects to
+  // see the latest message regardless of where they were scrolled in
+  // the prior chat".
+  useEffect(() => {
+    scrollToBottom();
+  }, [messagesEpoch, scrollToBottom]);
 
   const handleSend = useCallback(
     (content: string) => {
