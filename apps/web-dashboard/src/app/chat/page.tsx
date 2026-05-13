@@ -8,7 +8,7 @@ import {
   RotateCcw,
   Settings2,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -49,30 +49,47 @@ export default function ChatPage() {
     loadConversation,
   } = useChat({ chatId, historyHandleRef });
 
-  // WARP-304: keep the URL hash and the live conversationId in sync so a
-  // page refresh restores the thread (`/chat?c=<id>`). The mount effect
-  // below loads the persisted conversation when the URL arrives with `c=`;
-  // the second effect keeps the URL up to date as turns mint or clear
-  // conversations.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const fromUrl = params.get("c");
-    if (!fromUrl) return;
-    void loadConversation(fromUrl).then((ok) => {
-      if (!ok) {
-        // Stale or revoked id — clear the hash so the page doesn't
-        // keep trying to load it on every reload.
-        const next = new URL(window.location.href);
-        next.searchParams.delete("c");
-        window.history.replaceState(null, "", next.toString());
-      }
-    });
-    // Only on first mount — subsequent `conversationId` changes are
-    // driven by the user, not by the URL.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
+  // sync, both directions. The history panel calls router.push("/chat?c=X")
+  // when the user clicks a row; we react to that by loading the thread.
+  // Conversely, when conversationId changes for any other reason (new chat
+  // minted server-side, message sent, clearMessages), we mirror it into the
+  // URL so a refresh restores the same thread.
+  const searchParams = useSearchParams();
+  const urlConversationId = searchParams?.get("c") ?? null;
 
+  // URL → state: when ?c=<id> changes (sidebar click, deep link, browser
+  // back/forward), rehydrate that conversation. When `c` is removed (e.g.
+  // "+ New chat" pushed "/chat"), reset to a fresh empty chat.
+  useEffect(() => {
+    if (urlConversationId) {
+      if (urlConversationId === conversationId) return; // already loaded
+      void loadConversation(urlConversationId).then((ok) => {
+        if (!ok && typeof window !== "undefined") {
+          // Stale or revoked id — strip from URL so we don't keep
+          // trying to load it on every reload / re-render.
+          const next = new URL(window.location.href);
+          next.searchParams.delete("c");
+          window.history.replaceState(null, "", next.toString());
+        }
+      });
+    } else if (conversationId !== null) {
+      // URL cleared — reset the in-memory chat so the right column
+      // doesn't keep showing the messages of a now-orphaned id.
+      clearMessages();
+      clearAttachments();
+      setChatId(`chat-${Date.now()}`);
+    }
+    // Intentionally only depend on urlConversationId. Including
+    // conversationId / loadConversation / clearMessages would re-fire
+    // this effect after every load (those callbacks are stable, the
+    // conversationId comparison handles dedup via the early return).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlConversationId]);
+
+  // state → URL: when the hook updates conversationId for any reason
+  // (server response after a send, clearMessages, etc.), mirror it into
+  // the URL via replaceState so the panel and a refresh both stay aligned.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const next = new URL(window.location.href);
