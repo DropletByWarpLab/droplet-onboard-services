@@ -3,15 +3,9 @@ name: camera-discovery-tests
 # Pytest for services/camera-discovery. Path-filtered.
 
 on:
-  pull_request:
-    paths:
-      - "services/camera-discovery/**"
-      - ".github/workflows/camera-discovery-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "services/camera-discovery/**"
-      - ".github/workflows/camera-discovery-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: camera-discovery-tests-${{ github.ref }}
