@@ -36,8 +36,25 @@ def fake_io(monkeypatch, tmp_path):
     def _delete(item_id: str) -> None:
         deleted.append(item_id)
 
-    def _mark(item_id: str, warnings: list[str] | None = None) -> None:
-        marked.append({"item_id": item_id, "warnings": warnings or []})
+    def _mark(
+        item_id: str,
+        *,
+        status: str = "ready",
+        failure_reason: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        # WARP-330: the production helper now writes BrainMemoryItem.status
+        # atomically with indexedAt. Capture status + failure_reason so
+        # tests can assert the row's persistent state matches the MQTT
+        # publish (was previously divergent).
+        marked.append(
+            {
+                "item_id": item_id,
+                "status": status,
+                "failure_reason": failure_reason,
+                "warnings": warnings or [],
+            }
+        )
 
     def _publish(topic: str, payload: dict) -> None:
         published.append((topic, payload))
@@ -98,9 +115,13 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
         assert u["user_id"] == "alice"
         assert u["nc_file_id"] >= (1 << 30)  # synthetic, not real
 
-    # BrainMemoryItem marked indexed.
+    # BrainMemoryItem marked indexed with status='ready' (WARP-330) —
+    # the dashboard's pipeline-health aggregate filters on status='ready',
+    # so the row's persistent state must match the MQTT publish.
     assert len(fake_io["marked"]) == 1
     assert fake_io["marked"][0]["item_id"] == "item-A"
+    assert fake_io["marked"][0]["status"] == "ready"
+    assert fake_io["marked"][0]["failure_reason"] is None
 
     # Published ready status — per-user topic so the orchestrator's
     # WS bridge (subscribed to `droplet/files/<user>/#`) forwards it
@@ -143,6 +164,15 @@ def test_handle_uploaded_publishes_failed_when_file_missing(fake_io, tmp_path):
     statuses = [(t, p) for t, p in fake_io["published"] if "status" in p]
     assert any(p.get("status") == "failed" for _, p in statuses)
     assert fake_io["upserts"] == []
+    # WARP-330: the row's status column must be flipped to 'failed' too,
+    # not just the MQTT publish. Otherwise file_missing rows show as
+    # "still indexing" on /context until the daily reconciler picks them up.
+    assert any(
+        m["item_id"] == "item-missing"
+        and m["status"] == "failed"
+        and m["failure_reason"] == "file_missing"
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
 
 
 def test_handle_uploaded_marks_failed_when_extractor_unavailable(
@@ -166,8 +196,14 @@ def test_handle_uploaded_marks_failed_when_extractor_unavailable(
     )
     assert fake_io["upserts"] == []
     # The handler still marks the item indexed=NOW with a warning, so
-    # the chip flips from "indexing…" to ⚠.
-    assert any(m["item_id"] == "item-B" for m in fake_io["marked"])
+    # the chip flips from "indexing…" to ⚠. WARP-330: status='failed'
+    # is now persisted explicitly, not just published over MQTT.
+    assert any(
+        m["item_id"] == "item-B"
+        and m["status"] == "failed"
+        and m["failure_reason"] == "extractor_unavailable"
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
     assert any(p.get("status") == "failed" for _, p in fake_io["published"])
 
 
@@ -231,9 +267,12 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
     # No chunks upserted.
     assert fake_io["upserts"] == []
     # Row IS marked indexed with the image_only warning so the chip stops
-    # spinning.
+    # spinning. WARP-330: status='ready' is now persisted explicitly so
+    # the dashboard's pipeline-health aggregate counts it.
     assert any(
-        m["item_id"] == "item-img" and "image_only" in m["warnings"]
+        m["item_id"] == "item-img"
+        and m["status"] == "ready"
+        and "image_only" in m["warnings"]
         for m in fake_io["marked"]
     ), fake_io["marked"]
     # The published status is "ready", NOT "failed".
@@ -294,3 +333,105 @@ def test_handle_uploaded_skips_when_status_is_queued_for_transcription(
     # No mark + no chunk upserts — leaves the row in queued state.
     assert fake_io["marked"] == []
     assert fake_io["upserts"] == []
+
+
+# ── WARP-330: every failure path must persist status='failed' ──
+#
+# These regressions are pinned because the original bug was that several
+# failure paths only emitted MQTT and left BrainMemoryItem.status at
+# 'indexing'. The dashboard reads status, not MQTT history, so under-
+# reporting was silent.
+
+
+def test_handle_uploaded_persists_failed_on_empty_extraction(
+    fake_io, tmp_path, monkeypatch
+):
+    """A doc whose extractor returns < 10 chars of text should land at
+    status='failed' with reason='empty_extraction'."""
+    import brain_ingest
+
+    monkeypatch.setattr(
+        brain_ingest, "dispatch", lambda *a, **k: {"text": "x", "warnings": []}
+    )
+    text_path = _write_text_payload(tmp_path, "item-empty", "x")
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-empty",
+            "userId": "alice",
+            "path": str(text_path),
+            "mimeType": "text/plain",
+        }
+    )
+
+    assert any(
+        m["item_id"] == "item-empty"
+        and m["status"] == "failed"
+        and m["failure_reason"] == "empty_extraction"
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
+
+
+def test_handle_uploaded_persists_failed_on_embed_failure(
+    fake_io, tmp_path, monkeypatch
+):
+    """Embedding throws → row must be marked failed; previously only
+    published over MQTT and the row stayed at status='indexing'."""
+    import brain_ingest
+
+    def _boom(_chunks):
+        raise RuntimeError("ai-gateway 503")
+
+    monkeypatch.setattr(brain_ingest, "embed_texts", _boom)
+    text_path = _write_text_payload(
+        tmp_path, "item-embed", "alpha beta gamma delta epsilon zeta eta theta"
+    )
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-embed",
+            "userId": "alice",
+            "path": str(text_path),
+            "mimeType": "text/plain",
+        }
+    )
+
+    assert any(
+        m["item_id"] == "item-embed"
+        and m["status"] == "failed"
+        and m["failure_reason"] == "embed_failed"
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
+    # No chunks should have been upserted.
+    assert fake_io["upserts"] == []
+
+
+def test_handle_uploaded_persists_failed_on_db_write_failure(
+    fake_io, tmp_path, monkeypatch
+):
+    """upsert_chunk raises → mark row failed with reason='db_failed'."""
+    import brain_ingest
+
+    def _boom(**_kwargs):
+        raise RuntimeError("connection reset by peer")
+
+    monkeypatch.setattr(brain_ingest, "upsert_chunk", _boom)
+    text_path = _write_text_payload(
+        tmp_path, "item-db", "alpha beta gamma delta epsilon zeta eta theta"
+    )
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-db",
+            "userId": "alice",
+            "path": str(text_path),
+            "mimeType": "text/plain",
+        }
+    )
+
+    assert any(
+        m["item_id"] == "item-db"
+        and m["status"] == "failed"
+        and m["failure_reason"] == "db_failed"
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
