@@ -3,17 +3,9 @@ name: ai-gateway-tests
 # Pytest for services/ai-gateway. Path-filtered.
 
 on:
-  pull_request:
-    paths:
-      - "services/ai-gateway/**"
-      - "proto/**"
-      - ".github/workflows/ai-gateway-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "services/ai-gateway/**"
-      - "proto/**"
-      - ".github/workflows/ai-gateway-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: ai-gateway-tests-${{ github.ref }}

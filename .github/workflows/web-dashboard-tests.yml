@@ -4,21 +4,9 @@ name: web-dashboard-tests
 # changes trigger a run.
 
 on:
-  pull_request:
-    paths:
-      - "apps/web-dashboard/**"
-      - "package.json"
-      - "package-lock.json"
-      - "scripts/check-dashboard-classes.sh"
-      - ".github/workflows/web-dashboard-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "apps/web-dashboard/**"
-      - "package.json"
-      - "package-lock.json"
-      - "scripts/check-dashboard-classes.sh"
-      - ".github/workflows/web-dashboard-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: web-dashboard-tests-${{ github.ref }}

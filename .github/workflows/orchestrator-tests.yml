@@ -9,25 +9,9 @@ name: orchestrator-tests
 # both workspace packages before running vitest.
 
 on:
-  pull_request:
-    paths:
-      - "apps/orchestrator/**"
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/orchestrator-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "apps/orchestrator/**"
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/orchestrator-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: orchestrator-tests-${{ github.ref }}
