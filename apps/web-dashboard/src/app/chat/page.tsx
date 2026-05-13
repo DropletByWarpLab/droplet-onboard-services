@@ -4,18 +4,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   MessageSquare,
+  PanelLeftOpen,
   RotateCcw,
   Settings2,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
+import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
+import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 
 export default function ChatPage() {
+  // WARP-331: history panel imperative handle + mobile drawer state.
+  const router = useRouter();
+  const historyHandleRef = useRef<ChatHistoryPanelHandle | null>(null);
+  const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
+  const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   // WARP-104 dropped server-side persistence. WARP-304 restored it: every
   // turn now hits `ChatSession` / `ChatMessage` and the server hands back
   // the conversation id via the `X-Conversation-Id` response header.
@@ -37,7 +47,7 @@ export default function ChatPage() {
     clearAttachments,
     conversationId,
     loadConversation,
-  } = useChat({ chatId });
+  } = useChat({ chatId, historyHandleRef });
 
   // WARP-304: keep the URL hash and the live conversationId in sync so a
   // page refresh restores the thread (`/chat?c=<id>`). The mount effect
@@ -140,6 +150,19 @@ export default function ChatPage() {
     setChatId(`chat-${Date.now()}`);
   }, [clearMessages, clearAttachments]);
 
+  // WARP-331: history panel interaction handlers.
+  const handleSelectConversation = useCallback(
+    (id: string) => {
+      setMobileHistoryOpen(false);
+      router.push(`/chat?c=${encodeURIComponent(id)}`);
+    },
+    [router],
+  );
+  const handleNewChatFromPanel = useCallback(() => {
+    setMobileHistoryOpen(false);
+    router.push("/chat");
+  }, [router]);
+
   const handleRetry = useCallback(
     (messageId: string) => {
       if (!selectedModel) return;
@@ -193,11 +216,37 @@ export default function ChatPage() {
     // overflow-x-hidden: guard against horizontal overflow on narrow phones.
     // Underscores inside calc() are Tailwind's whitespace marker (CSS spec requires spaces around -).
     <div className="flex h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden">
+      {/* WARP-331: desktop chat history panel — fixed 280px left column on lg+. */}
+      <aside
+        className="hidden lg:flex lg:flex-col lg:w-[280px] lg:flex-shrink-0 border-r border-separator bg-surface-secondary"
+        aria-label="Chat history"
+      >
+        <ChatHistoryPanel
+          activeConversationId={conversationId}
+          onSelect={handleSelectConversation}
+          onNewChat={handleNewChatFromPanel}
+          handleRef={historyHandleRef}
+        />
+      </aside>
+
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
         <header className="flex items-center justify-between px-4 h-14 border-b border-separator bg-[var(--color-toolbar-bg)] dp-material">
           <div className="flex items-center gap-2 min-w-0 flex-1">
+            {/* WARP-331: mobile-only history-drawer trigger. */}
+            <button
+              ref={historyTriggerRef}
+              type="button"
+              onClick={() => setMobileHistoryOpen(true)}
+              aria-label="Open chat history"
+              aria-haspopup="dialog"
+              aria-expanded={mobileHistoryOpen}
+              className="lg:hidden p-1.5 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+              title="Chat history"
+            >
+              <PanelLeftOpen size={18} aria-hidden="true" />
+            </button>
             <ModelSelector value={selectedModel} onChange={setSelectedModel} />
           </div>
           <div className="flex items-center gap-2">
@@ -359,6 +408,30 @@ export default function ChatPage() {
           onStop={stop}
         />
       </div>
+
+      {/* WARP-331: mobile drawer — same ChatHistoryPanel, hosted in the
+          Dialog placement=right primitive. No handleRef here: useChat
+          only needs one consumer (the desktop panel), and both writing
+          the ref would race. Rename / delete / loadMore still work
+          because they don't depend on the handle. */}
+      <Dialog
+        open={mobileHistoryOpen}
+        onClose={() => setMobileHistoryOpen(false)}
+        triggerRef={historyTriggerRef}
+        labelledBy="mobile-history-heading"
+        placement="right"
+      >
+        <div className="flex flex-col h-full w-[320px] max-w-[85vw]">
+          <h2 id="mobile-history-heading" className="sr-only">
+            Chat history
+          </h2>
+          <ChatHistoryPanel
+            activeConversationId={conversationId}
+            onSelect={handleSelectConversation}
+            onNewChat={handleNewChatFromPanel}
+          />
+        </div>
+      </Dialog>
     </div>
   );
 }
