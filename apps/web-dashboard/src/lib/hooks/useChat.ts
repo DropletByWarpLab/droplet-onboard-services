@@ -319,6 +319,16 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const attachmentsByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
   /**
+   * WARP-331: track conversation ids whose stream JUST finished locally.
+   * The MQTT turn-completed handler uses this to skip an auto-refresh
+   * when the local stream already wrote the final content — the reload
+   * would otherwise remount the message bubbles with server ids and
+   * cause a visible flash. 5-second grace covers the network hop between
+   * the orchestrator's finalize and the client's MQTT delivery.
+   */
+  const recentlyLocallyCompletedRef = useRef<Map<string, number>>(new Map());
+  const LOCAL_COMPLETE_GRACE_MS = 5000;
+  /**
    * WARP-304: server-assigned conversation id. Null until the first turn
    * returns the `X-Conversation-Id` header. The chat page reflects this
    * into the URL (`?c=<id>`) so a refresh restores the thread; downstream
@@ -427,6 +437,25 @@ export function useChat(options: UseChatOptions = {}) {
           options.historyHandleRef?.current ?? null,
           historyId,
         );
+        // WARP-331: if the user is currently viewing this conversation
+        // AND we didn't just stream it locally, refetch the persisted
+        // state so the freshly-finalized assistant turn appears without
+        // a manual page reload. Covers the "I switched away mid-stream
+        // and came back" case where the local stream was abandoned but
+        // the orchestrator continued to persist server-side.
+        if (payload.conversationId === conversationIdRef.current) {
+          const recentlyAt = recentlyLocallyCompletedRef.current.get(
+            payload.conversationId,
+          );
+          const isStillStreamingLocally =
+            streamingConversationIdRef.current === payload.conversationId;
+          const justLocallyCompleted =
+            recentlyAt !== undefined &&
+            Date.now() - recentlyAt < LOCAL_COMPLETE_GRACE_MS;
+          if (!isStillStreamingLocally && !justLocallyCompleted) {
+            void loadConversation(payload.conversationId);
+          }
+        }
         // Only surface a notification when the tab is hidden. If the
         // user is staring at the chat surface, the streaming UI already
         // told them everything they need to know.
@@ -707,9 +736,19 @@ export function useChat(options: UseChatOptions = {}) {
           });
         }
       } finally {
-        // WARP-331: clear both stream-state shards. The exposed
-        // `isStreaming` flips false on the next render — for any chat
-        // the user is currently viewing.
+        // WARP-331: stamp the just-finished conversation so the MQTT
+        // turn-completed handler can skip its auto-refresh — the local
+        // stream already wrote the final content, refetching would just
+        // remount the bubbles. We stamp the streaming id rather than the
+        // current conversationId because the user may have already
+        // navigated away (background completion is the whole point).
+        const justFinished = streamingConversationIdRef.current;
+        if (justFinished) {
+          recentlyLocallyCompletedRef.current.set(justFinished, Date.now());
+        }
+        // Clear both stream-state shards. The exposed `isStreaming` flips
+        // false on the next render — for any chat the user is currently
+        // viewing.
         setStreamActive(false);
         setStreamingConversationId(null);
         isStoppingRef.current = false;
