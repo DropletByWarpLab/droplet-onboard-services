@@ -1,8 +1,53 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
+import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
+
+// Stub auth middleware — pulls a role from `x-test-role` so tests can
+// exercise both authenticated and unauthenticated paths. Matches the
+// pattern in `llm-chat.integration.test.ts` and `llm-tools-route.test.ts`.
+vi.mock("../middleware/auth.js", () => ({
+  authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
+    const role = req.headers["x-test-role"];
+    if (typeof role === "string" && role.length > 0) {
+      (req as unknown as { user?: { username: string; role: string } }).user = {
+        username: "test",
+        role,
+      };
+    }
+    next();
+  },
+}));
+
+// Stub ChatPersistenceService so tests can spy on individual methods
+// without a live Postgres connection. The factory captures the instance
+// so each test can re-configure per-method behaviour via the exported
+// mock functions below.
+const mockRenameConversationForUser = vi.fn();
+const mockCreateTurnRows = vi.fn().mockResolvedValue({
+  conversationId: "conv-1",
+  userMessageId: "user-1",
+  assistantMessageId: "asst-1",
+  created: true,
+});
+const mockFinalizeAssistantMessage = vi.fn().mockResolvedValue(undefined);
+const mockListConversationsForUser = vi.fn().mockResolvedValue([]);
+const mockGetConversationForUser = vi.fn().mockResolvedValue(null);
+const mockDeleteConversationForUser = vi.fn().mockResolvedValue(false);
+
+vi.mock("../services/chat-persistence.service.js", () => ({
+  ChatPersistenceService: vi.fn().mockImplementation(() => ({
+    renameConversationForUser: mockRenameConversationForUser,
+    createTurnRows: mockCreateTurnRows,
+    finalizeAssistantMessage: mockFinalizeAssistantMessage,
+    listConversationsForUser: mockListConversationsForUser,
+    getConversationForUser: mockGetConversationForUser,
+    deleteConversationForUser: mockDeleteConversationForUser,
+    ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
+  })),
+}));
 
 // Mock the ai-gateway client with controllable implementations
 const mockListModels = vi.fn().mockResolvedValue({
@@ -168,6 +213,71 @@ describe("LLM routes", () => {
       const res = await request(app).delete("/api/llm/keys/anthropic");
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("deleted");
+    });
+  });
+
+  describe("PATCH /api/llm/conversations/:id", () => {
+    it("renames a conversation owned by the caller", async () => {
+      mockRenameConversationForUser.mockResolvedValue("Frigate ports");
+
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: "  Frigate ports  " });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: "abc", title: "Frigate ports" });
+      expect(res.body).not.toHaveProperty("updatedAt");
+      expect(mockRenameConversationForUser).toHaveBeenCalledWith(
+        "abc",
+        "test",
+        "  Frigate ports  ",
+      );
+    });
+
+    it("returns 400 when title is missing or not a string", async () => {
+      const res1 = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({});
+      expect(res1.status).toBe(400);
+      expect(res1.body).toMatchObject({ error: "title_required" });
+
+      const res2 = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: 42 });
+      expect(res2.status).toBe(400);
+      expect(res2.body).toMatchObject({ error: "title_required" });
+    });
+
+    it("returns 400 when service rejects an empty title", async () => {
+      mockRenameConversationForUser.mockRejectedValue(new Error("title_required"));
+
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: "   " });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "title_required" });
+    });
+
+    it("returns 404 when the row doesn't belong to the caller", async () => {
+      mockRenameConversationForUser.mockResolvedValue(null);
+
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: "Whatever" });
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({ error: "conversation_not_found" });
+    });
+
+    it("returns 401 when unauthenticated", async () => {
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .send({ title: "Whatever" });
+      expect(res.status).toBe(401);
     });
   });
 });
