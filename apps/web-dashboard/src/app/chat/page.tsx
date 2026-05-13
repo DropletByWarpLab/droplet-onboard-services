@@ -153,8 +153,11 @@ export default function ChatPage() {
 
   // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
   // attached (within ~80px of the bottom). When they've scrolled up to
-  // re-read a citation, new tokens land off-screen and the Jump-to-latest
-  // pill below appears as the affordance to catch up.
+  // re-read a citation mid-stream, fresh tokens for the SAME assistant
+  // message land off-screen and the Jump-to-latest pill below appears
+  // as the affordance to catch up. Length-grow and discrete refreshes
+  // are handled by the two effects below — they unconditionally snap to
+  // the bottom regardless of where the user is.
   useEffect(() => {
     stickyScrollToBottom();
   }, [messages, stickyScrollToBottom]);
@@ -162,13 +165,24 @@ export default function ChatPage() {
   // WARP-331: force-scroll to the bottom on discrete refresh events —
   // conversation switched, persisted thread reloaded (manual or via the
   // MQTT turn-completed auto-refresh), or "+ New chat" cleared the list.
-  // The sticky-scroll above already covers streaming; this is the
-  // override for "the conversation just changed, the user expects to
-  // see the latest message regardless of where they were scrolled in
-  // the prior chat".
   useEffect(() => {
     scrollToBottom();
   }, [messagesEpoch, scrollToBottom]);
+
+  // WARP-331: also force-scroll whenever a new message appears in the
+  // array (user submits a turn, assistant placeholder is appended, a
+  // second turn lands, etc.). Sticky-scroll above would skip the snap
+  // if the user happened to be scrolled up at the moment the message
+  // arrived — that's the wrong default the user explicitly asked us to
+  // override. Per-token deltas don't grow the array, so they keep
+  // following the sticky rule.
+  const prevMessagesLengthRef = useRef(0);
+  useEffect(() => {
+    if (messages.length > prevMessagesLengthRef.current) {
+      scrollToBottom();
+    }
+    prevMessagesLengthRef.current = messages.length;
+  }, [messages, scrollToBottom]);
 
   const handleSend = useCallback(
     (content: string) => {
