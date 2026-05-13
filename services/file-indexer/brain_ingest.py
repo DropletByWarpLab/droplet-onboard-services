@@ -131,6 +131,15 @@ def handle_brain_uploaded(payload: dict) -> None:
 
     if not os.path.exists(path):
         logger.warning("brain_ingest: file missing on disk: %s", path)
+        # WARP-330: the MQTT publish alone is not enough — the dashboard's
+        # pipeline-health query reads BrainMemoryItem.status. Persist the
+        # failure so the row stops looking like it's still indexing.
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="file_missing"
+            )
+        except Exception:
+            logger.exception("brain_ingest: failed to mark item file_missing")
         _publish_status(user_id, item_id, "failed", reason="file_missing")
         return
 
@@ -178,7 +187,9 @@ def handle_brain_uploaded(payload: dict) -> None:
             path,
         )
         try:
-            mark_brain_item_indexed(item_id, warnings=["image_only"])
+            mark_brain_item_indexed(
+                item_id, status="ready", warnings=["image_only"]
+            )
         except Exception:
             logger.exception(
                 "brain_ingest: failed to mark image-only item ready"
@@ -217,9 +228,15 @@ def handle_brain_uploaded(payload: dict) -> None:
         )
         _publish_status(user_id, item_id, "failed", reason="extractor_unavailable")
         # Mark indexed=NOW with no chunks so the chip doesn't spin
-        # forever; the failed status flips the chip to ⚠.
+        # forever; status='failed' flips the chip to ⚠ AND keeps the
+        # dashboard's failed-count aggregate honest (WARP-330).
         try:
-            mark_brain_item_indexed(item_id, warnings=["extractor_unavailable"])
+            mark_brain_item_indexed(
+                item_id,
+                status="failed",
+                failure_reason="extractor_unavailable",
+                warnings=["extractor_unavailable"],
+            )
         except Exception:
             logger.exception("brain_ingest: failed to mark item failed")
         return
@@ -231,7 +248,12 @@ def handle_brain_uploaded(payload: dict) -> None:
         warnings.append("empty_extraction")
         _publish_status(user_id, item_id, "failed", reason="empty_extraction")
         try:
-            mark_brain_item_indexed(item_id, warnings=warnings)
+            mark_brain_item_indexed(
+                item_id,
+                status="failed",
+                failure_reason="empty_extraction",
+                warnings=warnings,
+            )
         except Exception:
             logger.exception("brain_ingest: failed to mark item failed")
         return
@@ -243,7 +265,12 @@ def handle_brain_uploaded(payload: dict) -> None:
         warnings.append("no_chunks")
         _publish_status(user_id, item_id, "failed", reason="no_chunks")
         try:
-            mark_brain_item_indexed(item_id, warnings=warnings)
+            mark_brain_item_indexed(
+                item_id,
+                status="failed",
+                failure_reason="no_chunks",
+                warnings=warnings,
+            )
         except Exception:
             logger.exception("brain_ingest: failed to mark item failed")
         return
@@ -252,6 +279,17 @@ def handle_brain_uploaded(payload: dict) -> None:
         vectors = embed_texts(chunks)
     except Exception as e:
         logger.warning("brain_ingest: embedding failed for %s: %s", path, e)
+        # WARP-330: persist the failure on the row so the dashboard's
+        # status-derived aggregates (pipeline-health, failed-count) stay
+        # in sync with what we just emitted over MQTT.
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="embed_failed"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item embed_failed"
+            )
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
     if len(vectors) != len(chunks):
@@ -261,6 +299,14 @@ def handle_brain_uploaded(payload: dict) -> None:
             len(vectors),
             len(chunks),
         )
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="embed_failed"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item embed_failed (count mismatch)"
+            )
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
 
@@ -292,9 +338,20 @@ def handle_brain_uploaded(payload: dict) -> None:
                 warnings=warnings,
                 metadata=doc_metadata,
             )
-        mark_brain_item_indexed(item_id, warnings=warnings)
+        mark_brain_item_indexed(item_id, status="ready", warnings=warnings)
     except Exception as e:
         logger.exception("brain_ingest: db write failed for %s: %s", item_id, e)
+        # Best-effort persist of the failure status. If this second write
+        # also fails the row stays at status='indexing' — the daily
+        # reconciler (`reconcile_stuck_items`) will eventually surface it.
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="db_failed"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item db_failed after upsert error"
+            )
         _publish_status(user_id, item_id, "failed", reason="db_failed")
         return
 

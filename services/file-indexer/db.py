@@ -132,21 +132,75 @@ def delete_chunks_for_brain_item(brain_item_id: str) -> None:
         )
 
 
-def mark_brain_item_indexed(brain_item_id: str, warnings: Optional[list[str]] = None) -> None:
-    """Set BrainMemoryItem.indexedAt = NOW() and merge extractor warnings.
+def mark_brain_item_indexed(
+    brain_item_id: str,
+    *,
+    status: str = "ready",
+    failure_reason: Optional[str] = None,
+    warnings: Optional[list[str]] = None,
+) -> None:
+    """Mark a BrainMemoryItem as finished — atomically writes indexedAt,
+    status, extractorWarnings, and (for status='failed') failureReason.
 
-    Idempotent — safe to call on items that are already marked indexed.
+    Idempotent — safe to call repeatedly on the same row.
+
+    WARP-330: previously this helper only set ``indexedAt`` + warnings, which
+    left the row at ``status='indexing'`` (the default) forever. The
+    dashboard's pipeline-health aggregate filters on ``status='ready'``,
+    so all chat-attached items showed "never reached ready" on /context
+    even though they were fully indexed. The CLAUDE.md "no guessing"
+    rule applies: persistent state lives in explicit columns, not in
+    "indexedAt is set so it must be ready" inference.
+
+    Side effects per status (mirrors ``update_item_status`` for parity):
+
+    - ``status='ready'``  → indexedAt=NOW, failureReason=NULL, retry-window
+      cleared (recentAttemptCount=0, recentAttemptWindowStartedAt=NULL),
+      extractorWarnings replaced with the supplied list.
+    - ``status='failed'`` → indexedAt=NOW, failureReason set (truncated to
+      200 chars to match ``update_item_status``), extractorWarnings
+      replaced. Retry-window left alone — claim_attempt owns those.
     """
     conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE "BrainMemoryItem"
-            SET "indexedAt"         = NOW(),
-                "extractorWarnings" = %s
-            WHERE "id" = %s
-            """,
-            (warnings or [], brain_item_id),
+    if status == "ready":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "indexedAt" = NOW(),
+                       "status" = 'ready',
+                       "failureReason" = NULL,
+                       "recentAttemptCount" = 0,
+                       "recentAttemptWindowStartedAt" = NULL,
+                       "extractorWarnings" = %s
+                 WHERE "id" = %s
+                """,
+                (warnings or [], brain_item_id),
+            )
+    elif status == "failed":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "indexedAt" = NOW(),
+                       "status" = 'failed',
+                       "failureReason" = %s,
+                       "extractorWarnings" = %s
+                 WHERE "id" = %s
+                """,
+                (
+                    (failure_reason or "")[:200],
+                    warnings or [],
+                    brain_item_id,
+                ),
+            )
+    else:
+        # Defensive fallback. No production caller should land here —
+        # raises so a typo'd status='Ready' surfaces in tests instead of
+        # silently leaving the row stuck.
+        raise ValueError(
+            f"mark_brain_item_indexed: unsupported status={status!r}; "
+            "expected 'ready' or 'failed'"
         )
 
 
