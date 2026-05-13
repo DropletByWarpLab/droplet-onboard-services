@@ -60,14 +60,15 @@ export default function ChatPage() {
 
   // URL → state: when ?c=<id> changes (sidebar click, deep link, browser
   // back/forward), rehydrate that conversation. When `c` is removed (e.g.
-  // "+ New chat" pushed "/chat"), reset to a fresh empty chat. In both
-  // cases we first abort any in-flight stream — leaving it running would
-  // leak content_delta chunks into the new chat's messages array and
-  // keep isStreaming pinned `true`, locking the input.
+  // "+ New chat" pushed "/chat"), reset to a fresh empty chat. The
+  // in-flight stream (if any) is NOT aborted — the orchestrator continues
+  // to persist the assistant turn server-side, so the answer is saved
+  // even when the user navigates away. `useChat` decouples the visible
+  // `isStreaming` lock from the underlying stream by tagging each stream
+  // with its conversationId, so the new chat's input unlocks immediately.
   useEffect(() => {
     if (urlConversationId) {
       if (urlConversationId === conversationId) return; // already loaded
-      stop(); // no-op when nothing is streaming
       void loadConversation(urlConversationId).then((ok) => {
         if (!ok && typeof window !== "undefined") {
           // Stale or revoked id — strip from URL so we don't keep
@@ -80,15 +81,14 @@ export default function ChatPage() {
     } else if (conversationId !== null) {
       // URL cleared — reset the in-memory chat so the right column
       // doesn't keep showing the messages of a now-orphaned id.
-      stop();
       clearMessages();
       clearAttachments();
       setChatId(`chat-${Date.now()}`);
     }
     // Intentionally only depend on urlConversationId. Including
-    // conversationId / loadConversation / clearMessages / stop would
-    // re-fire this effect after every load (those callbacks are stable,
-    // the conversationId comparison handles dedup via the early return).
+    // conversationId / loadConversation / clearMessages would re-fire
+    // this effect after every load (those callbacks are stable, the
+    // conversationId comparison handles dedup via the early return).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlConversationId]);
 

@@ -281,10 +281,43 @@ export interface UseChatOptions {
   historyHandleRef?: MutableRefObject<ChatHistoryPanelHandle | null>;
 }
 
+/**
+ * WARP-331: key for the per-conversation attachment cache while a chat is
+ * still a draft (no server-assigned conversationId yet). On the first
+ * turn's `X-Conversation-Id` header we rename this bucket to the real id
+ * so the chips don't visibly flicker.
+ */
+const DRAFT_CONV_KEY = "__draft__";
+
 export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isStreaming, setIsStreaming] = useState(false);
+  /**
+   * WARP-331: the conversationId of the currently-in-flight assistant
+   * stream, or `null` when nothing is streaming. The exposed `isStreaming`
+   * is derived as `streamActive && streamingConversationId === conversationId`
+   * — i.e. the UI lock follows the user's active chat, not the underlying
+   * fetch. Switching chats mid-stream therefore unlocks the new chat's
+   * input immediately; the prior chat's stream keeps running (the
+   * orchestrator persists the assistant turn server-side via WARP-329).
+   * Returning to the streaming chat re-locks the input until the stream
+   * completes.
+   */
+  const [streamActive, setStreamActive] = useState(false);
+  const [streamingConversationId, setStreamingConversationId] = useState<
+    string | null
+  >(null);
+  const streamingConversationIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    streamingConversationIdRef.current = streamingConversationId;
+  }, [streamingConversationId]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  /**
+   * WARP-331: per-conversation attachment cache. Keyed by conversationId
+   * or `DRAFT_CONV_KEY` for a pre-first-turn pending state. Switching
+   * conversations swaps the visible attachments via the effect below,
+   * so chips uploaded in chat A don't bleed into chat B's composer.
+   */
+  const attachmentsByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
   /**
    * WARP-304: server-assigned conversation id. Null until the first turn
    * returns the `X-Conversation-Id` header. The chat page reflects this
@@ -346,21 +379,28 @@ export function useChat(options: UseChatOptions = {}) {
           | { itemId?: string; status?: string; reason?: string }
           | undefined;
         if (!payload?.itemId || typeof payload.status !== "string") return;
-        setAttachments((prev) =>
-          prev.map((a) =>
-            a.itemId === payload.itemId
-              ? {
-                  ...a,
-                  status:
-                    payload.status === "ready"
-                      ? "ready"
-                      : ("failed" as ChatAttachment["status"]),
-                  error:
-                    payload.status === "failed" ? payload.reason : undefined,
-                }
-              : a,
-          ),
-        );
+        const itemId = payload.itemId;
+        const rawStatus = payload.status;
+        const reason = payload.reason;
+        const flip = (a: ChatAttachment): ChatAttachment =>
+          a.itemId === itemId
+            ? {
+                ...a,
+                status:
+                  rawStatus === "ready"
+                    ? "ready"
+                    : ("failed" as ChatAttachment["status"]),
+                error: rawStatus === "failed" ? reason : undefined,
+              }
+            : a;
+        // WARP-331: a status flip can arrive for an itemId that lives
+        // in another conversation's bucket while the user is viewing a
+        // different chat. Apply the updater across every bucket so the
+        // chip is up to date the moment the user navigates back.
+        for (const [key, list] of attachmentsByConvRef.current) {
+          attachmentsByConvRef.current.set(key, list.map(flip));
+        }
+        setAttachments((prev) => prev.map(flip));
         return;
       }
 
@@ -518,7 +558,16 @@ export function useChat(options: UseChatOptions = {}) {
         return [...prev, userMessage, assistantMessage];
       });
 
-      setIsStreaming(true);
+      // WARP-331: tag the in-flight stream with the conversationId it
+      // belongs to. `null` here means "this is a draft chat that hasn't
+      // received its X-Conversation-Id header yet"; we update it as soon
+      // as the header arrives below. The exposed `isStreaming` is derived
+      // from whether this id matches the user's active conversationId,
+      // so switching chats mid-stream unlocks the new chat's input
+      // immediately (the orchestrator persists the assistant turn
+      // server-side via WARP-329 even if the client navigates away).
+      setStreamActive(true);
+      setStreamingConversationId(conversationIdRef.current);
       // Mint a fresh AbortController for this turn. Any previous one
       // is stale — sendMessage isn't called while a stream is in flight
       // because the input is disabled, but we still defensively abort
@@ -554,7 +603,17 @@ export function useChat(options: UseChatOptions = {}) {
           const wasNew = conversationIdRef.current === null;
           conversationIdRef.current = headerId;
           setConversationId(headerId);
+          // WARP-331: re-tag the in-flight stream with the real server id
+          // so isStreaming derives correctly while the stream is still
+          // running. Also migrate any draft-bucket attachments to the
+          // new id so the chip row doesn't visibly reset.
+          setStreamingConversationId(headerId);
           if (wasNew) {
+            const drafted = attachmentsByConvRef.current.get(DRAFT_CONV_KEY);
+            if (drafted && drafted.length > 0) {
+              attachmentsByConvRef.current.set(headerId, drafted);
+            }
+            attachmentsByConvRef.current.delete(DRAFT_CONV_KEY);
             notifyHistoryOfNewConversation(
               options.historyHandleRef?.current ?? null,
               { id: headerId, firstUserContent: content },
@@ -648,7 +707,11 @@ export function useChat(options: UseChatOptions = {}) {
           });
         }
       } finally {
-        setIsStreaming(false);
+        // WARP-331: clear both stream-state shards. The exposed
+        // `isStreaming` flips false on the next render — for any chat
+        // the user is currently viewing.
+        setStreamActive(false);
+        setStreamingConversationId(null);
         isStoppingRef.current = false;
         if (abortRef.current === controller) {
           abortRef.current = null;
@@ -797,6 +860,24 @@ export function useChat(options: UseChatOptions = {}) {
   );
 
   /**
+   * WARP-331: every attachment mutation routes through this helper so
+   * the per-conversation cache stays in sync with the visible state.
+   * The cache is keyed by `conversationId` (or `DRAFT_CONV_KEY` before
+   * the first turn returns its server-assigned id).
+   */
+  const mutateAttachments = useCallback(
+    (updater: (prev: ChatAttachment[]) => ChatAttachment[]) => {
+      const key = conversationIdRef.current ?? DRAFT_CONV_KEY;
+      setAttachments((prev) => {
+        const next = updater(prev);
+        attachmentsByConvRef.current.set(key, next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  /**
    * Upload a chat-attached file. Adds a pending chip immediately so
    * the user sees feedback within a frame, kicks off the upload, then
    * flips the chip to "indexing" once the orchestrator returns 202.
@@ -805,46 +886,73 @@ export function useChat(options: UseChatOptions = {}) {
    *
    * Returns the `localId` of the chip so callers can track / remove it.
    */
-  const attach = useCallback(async (file: File): Promise<string> => {
-    const localId = createAttachmentId();
-    const pending: ChatAttachment = {
-      localId,
-      filename: file.name,
-      bytes: file.size,
-      status: "uploading",
-    };
-    setAttachments((prev) => [...prev, pending]);
+  const attach = useCallback(
+    async (file: File): Promise<string> => {
+      const localId = createAttachmentId();
+      const pending: ChatAttachment = {
+        localId,
+        filename: file.name,
+        bytes: file.size,
+        status: "uploading",
+      };
+      mutateAttachments((prev) => [...prev, pending]);
 
-    try {
-      const res = await uploadBrainFile(file, chatIdRef.current);
-      setAttachments((prev) =>
-        prev.map((a) =>
-          a.localId === localId
-            ? { ...a, itemId: res.itemId, status: "indexing" }
-            : a,
-        ),
-      );
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Upload failed";
-      setAttachments((prev) =>
-        prev.map((a) =>
-          a.localId === localId
-            ? { ...a, status: "failed", error: message }
-            : a,
-        ),
-      );
-    }
-    return localId;
-  }, []);
+      try {
+        const res = await uploadBrainFile(file, chatIdRef.current);
+        mutateAttachments((prev) =>
+          prev.map((a) =>
+            a.localId === localId
+              ? { ...a, itemId: res.itemId, status: "indexing" }
+              : a,
+          ),
+        );
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Upload failed";
+        mutateAttachments((prev) =>
+          prev.map((a) =>
+            a.localId === localId
+              ? { ...a, status: "failed", error: message }
+              : a,
+          ),
+        );
+      }
+      return localId;
+    },
+    [mutateAttachments],
+  );
 
-  const removeAttachment = useCallback((localId: string) => {
-    setAttachments((prev) => prev.filter((a) => a.localId !== localId));
-  }, []);
+  const removeAttachment = useCallback(
+    (localId: string) => {
+      mutateAttachments((prev) => prev.filter((a) => a.localId !== localId));
+    },
+    [mutateAttachments],
+  );
 
   const clearAttachments = useCallback(() => {
+    const key = conversationIdRef.current ?? DRAFT_CONV_KEY;
+    attachmentsByConvRef.current.delete(key);
     setAttachments([]);
   }, []);
+
+  // WARP-331: when the active conversationId changes, swap the visible
+  // attachments to the bucket the user is now looking at. The MQTT-driven
+  // "indexed" updates from chat A continue to mutate chat A's cache slot
+  // even while the user is viewing chat B (via mutateAttachments), so
+  // switching back doesn't lose a status flip that landed in the
+  // meantime.
+  useEffect(() => {
+    const key = conversationId ?? DRAFT_CONV_KEY;
+    const stored = attachmentsByConvRef.current.get(key) ?? [];
+    setAttachments(stored);
+  }, [conversationId]);
+
+  // WARP-331: derive the visible streaming lock. The in-flight stream
+  // keeps running on the conversation it started for, regardless of
+  // where the user navigates; the composer only locks when the user
+  // is actually viewing that conversation.
+  const isStreaming =
+    streamActive && streamingConversationId === conversationId;
 
   return {
     messages,
