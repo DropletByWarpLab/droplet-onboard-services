@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { sendChat, uploadBrainFile, fetchConversation } from "../api";
 import type {
   ChatAttachment,
@@ -129,9 +129,9 @@ function extractCitations(toolName: string, data: unknown): ChatCitation[] {
  *   - `tool_result`   → fill in the chip with `ok`/`data`/`status`/`message`
  *   - `done`          → end of stream
  *
- * The session-based UX (server-side history, sidebar of past chats)
- * went away with WARP-104. If reintroduced it would need an
- * orchestrator-side persistence layer; see the WARP-104 PR body.
+ * Conversation history is rendered by ChatHistoryPanel (WARP-331),
+ * which receives optimistic inserts + turn-completed refetches via
+ * the `historyHandleRef` option on this hook.
  */
 
 let messageCounter = 0;
@@ -227,6 +227,44 @@ function createAttachmentId(): string {
   return `att-${Date.now()}-${++attachmentCounter}`;
 }
 
+import type { ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
+
+const TITLE_MAX_LEN = 64;
+
+/** WARP-331 — derive the optimistic title from the first user message. */
+function deriveOptimisticTitle(firstUserContent: string): string {
+  const trimmed = firstUserContent.trim().replace(/\s+/g, " ");
+  if (trimmed.length <= TITLE_MAX_LEN) return trimmed;
+  // Reserve 1 char for the ellipsis so the final string is ≤ TITLE_MAX_LEN.
+  const slice = trimmed.slice(0, TITLE_MAX_LEN - 1);
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > TITLE_MAX_LEN / 2 ? slice.slice(0, lastSpace) : slice) + "…";
+}
+
+export function notifyHistoryOfNewConversation(
+  handle: ChatHistoryPanelHandle | null,
+  args: { id: string; firstUserContent: string },
+): void {
+  if (!handle) return;
+  const now = new Date().toISOString();
+  handle.optimisticInsert({
+    id: args.id,
+    title: deriveOptimisticTitle(args.firstUserContent),
+    model: null,
+    provider: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+export async function notifyHistoryOfTurnCompleted(
+  handle: ChatHistoryPanelHandle | null,
+  conversationId: string,
+): Promise<void> {
+  if (!handle) return;
+  await handle.applyTurnCompleted(conversationId);
+}
+
 export interface UseChatOptions {
   /**
    * The originating chat id sent up with each brain-memory upload so a
@@ -235,6 +273,12 @@ export interface UseChatOptions {
    * component owns it.
    */
   chatId?: string;
+  /**
+   * WARP-331: optional ref to the ChatHistoryPanel imperative handle.
+   * When set, useChat will call `optimisticInsert` on the first turn of a
+   * new conversation, and `applyTurnCompleted` when turn-completed fires.
+   */
+  historyHandleRef?: MutableRefObject<ChatHistoryPanelHandle | null>;
 }
 
 export function useChat(options: UseChatOptions = {}) {
@@ -336,6 +380,13 @@ export function useChat(options: UseChatOptions = {}) {
             }
           | undefined;
         if (!payload?.conversationId || !payload.messageId) return;
+        // WARP-331: always notify the history panel (tab visibility is
+        // irrelevant for sidebar refreshes).
+        const historyId = payload.conversationId;
+        void notifyHistoryOfTurnCompleted(
+          options.historyHandleRef?.current ?? null,
+          historyId,
+        );
         // Only surface a notification when the tab is hidden. If the
         // user is staring at the chat surface, the streaming UI already
         // told them everything they need to know.
@@ -500,8 +551,15 @@ export function useChat(options: UseChatOptions = {}) {
         // URL) immediately — no waiting for the stream to end.
         const headerId = response.headers.get(CONVERSATION_ID_HEADER);
         if (headerId && conversationIdRef.current !== headerId) {
+          const wasNew = conversationIdRef.current === null;
           conversationIdRef.current = headerId;
           setConversationId(headerId);
+          if (wasNew) {
+            notifyHistoryOfNewConversation(
+              options.historyHandleRef?.current ?? null,
+              { id: headerId, firstUserContent: content },
+            );
+          }
         }
         // WARP-329: the server's assistant ChatMessage.id, captured from
         // the same response. Not surfaced to the page today — kept on the
