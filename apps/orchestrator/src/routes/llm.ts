@@ -567,6 +567,48 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // WARP-331: rename. Mirrors the GET/DELETE handlers above — scoped by
+  // req.user.username, service maps "no such row owned by this user"
+  // to a null return, and we surface that as 404.
+  router.patch("/llm/conversations/:id", async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const body = req.body as { title?: unknown };
+      if (typeof body?.title !== "string") {
+        res.status(400).json({ error: "title_required" });
+        return;
+      }
+      let finalTitle: string | null;
+      try {
+        finalTitle = await persistence.renameConversationForUser(
+          req.params.id,
+          userId,
+          body.title,
+        );
+      } catch (err) {
+        if (err instanceof Error && err.message === "title_required") {
+          res.status(400).json({ error: "title_required" });
+          return;
+        }
+        throw err;
+      }
+      if (finalTitle === null) {
+        res.status(404).json({ error: "conversation_not_found" });
+        return;
+      }
+      res.json({
+        id: req.params.id,
+        title: finalTitle,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // List every tool the agent can call. Useful for the dashboard to
   // render a "capabilities" pane and for debugging tool schemas.
   // Proxies `mcpClient.listTools()` so the wire shape matches the

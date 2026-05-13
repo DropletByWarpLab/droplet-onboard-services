@@ -4,18 +4,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   MessageSquare,
+  PanelLeftOpen,
   RotateCcw,
   Settings2,
 } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
+import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
+import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 
 export default function ChatPage() {
+  // WARP-331: history panel imperative handle + mobile drawer state.
+  const router = useRouter();
+  const historyHandleRef = useRef<ChatHistoryPanelHandle | null>(null);
+  const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
+  const historyTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   // WARP-104 dropped server-side persistence. WARP-304 restored it: every
   // turn now hits `ChatSession` / `ChatMessage` and the server hands back
   // the conversation id via the `X-Conversation-Id` response header.
@@ -37,32 +47,55 @@ export default function ChatPage() {
     clearAttachments,
     conversationId,
     loadConversation,
-  } = useChat({ chatId });
+    messagesEpoch,
+  } = useChat({ chatId, historyHandleRef });
 
-  // WARP-304: keep the URL hash and the live conversationId in sync so a
-  // page refresh restores the thread (`/chat?c=<id>`). The mount effect
-  // below loads the persisted conversation when the URL arrives with `c=`;
-  // the second effect keeps the URL up to date as turns mint or clear
-  // conversations.
+  // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
+  // sync, both directions. The history panel calls router.push("/chat?c=X")
+  // when the user clicks a row; we react to that by loading the thread.
+  // Conversely, when conversationId changes for any other reason (new chat
+  // minted server-side, message sent, clearMessages), we mirror it into the
+  // URL so a refresh restores the same thread.
+  const searchParams = useSearchParams();
+  const urlConversationId = searchParams?.get("c") ?? null;
+
+  // URL → state: when ?c=<id> changes (sidebar click, deep link, browser
+  // back/forward), rehydrate that conversation. When `c` is removed (e.g.
+  // "+ New chat" pushed "/chat"), reset to a fresh empty chat. The
+  // in-flight stream (if any) is NOT aborted — the orchestrator continues
+  // to persist the assistant turn server-side, so the answer is saved
+  // even when the user navigates away. `useChat` decouples the visible
+  // `isStreaming` lock from the underlying stream by tagging each stream
+  // with its conversationId, so the new chat's input unlocks immediately.
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const fromUrl = params.get("c");
-    if (!fromUrl) return;
-    void loadConversation(fromUrl).then((ok) => {
-      if (!ok) {
-        // Stale or revoked id — clear the hash so the page doesn't
-        // keep trying to load it on every reload.
-        const next = new URL(window.location.href);
-        next.searchParams.delete("c");
-        window.history.replaceState(null, "", next.toString());
-      }
-    });
-    // Only on first mount — subsequent `conversationId` changes are
-    // driven by the user, not by the URL.
+    if (urlConversationId) {
+      if (urlConversationId === conversationId) return; // already loaded
+      void loadConversation(urlConversationId).then((ok) => {
+        if (!ok && typeof window !== "undefined") {
+          // Stale or revoked id — strip from URL so we don't keep
+          // trying to load it on every reload / re-render.
+          const next = new URL(window.location.href);
+          next.searchParams.delete("c");
+          window.history.replaceState(null, "", next.toString());
+        }
+      });
+    } else if (conversationId !== null) {
+      // URL cleared — reset the in-memory chat so the right column
+      // doesn't keep showing the messages of a now-orphaned id.
+      clearMessages();
+      clearAttachments();
+      setChatId(`chat-${Date.now()}`);
+    }
+    // Intentionally only depend on urlConversationId. Including
+    // conversationId / loadConversation / clearMessages would re-fire
+    // this effect after every load (those callbacks are stable, the
+    // conversationId comparison handles dedup via the early return).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [urlConversationId]);
 
+  // state → URL: when the hook updates conversationId for any reason
+  // (server response after a send, clearMessages, etc.), mirror it into
+  // the URL via replaceState so the panel and a refresh both stay aligned.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const next = new URL(window.location.href);
@@ -120,11 +153,36 @@ export default function ChatPage() {
 
   // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
   // attached (within ~80px of the bottom). When they've scrolled up to
-  // re-read a citation, new tokens land off-screen and the Jump-to-latest
-  // pill below appears as the affordance to catch up.
+  // re-read a citation mid-stream, fresh tokens for the SAME assistant
+  // message land off-screen and the Jump-to-latest pill below appears
+  // as the affordance to catch up. Length-grow and discrete refreshes
+  // are handled by the two effects below — they unconditionally snap to
+  // the bottom regardless of where the user is.
   useEffect(() => {
     stickyScrollToBottom();
   }, [messages, stickyScrollToBottom]);
+
+  // WARP-331: force-scroll to the bottom on discrete refresh events —
+  // conversation switched, persisted thread reloaded (manual or via the
+  // MQTT turn-completed auto-refresh), or "+ New chat" cleared the list.
+  useEffect(() => {
+    scrollToBottom();
+  }, [messagesEpoch, scrollToBottom]);
+
+  // WARP-331: also force-scroll whenever a new message appears in the
+  // array (user submits a turn, assistant placeholder is appended, a
+  // second turn lands, etc.). Sticky-scroll above would skip the snap
+  // if the user happened to be scrolled up at the moment the message
+  // arrived — that's the wrong default the user explicitly asked us to
+  // override. Per-token deltas don't grow the array, so they keep
+  // following the sticky rule.
+  const prevMessagesLengthRef = useRef(0);
+  useEffect(() => {
+    if (messages.length > prevMessagesLengthRef.current) {
+      scrollToBottom();
+    }
+    prevMessagesLengthRef.current = messages.length;
+  }, [messages, scrollToBottom]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -139,6 +197,19 @@ export default function ChatPage() {
     clearAttachments();
     setChatId(`chat-${Date.now()}`);
   }, [clearMessages, clearAttachments]);
+
+  // WARP-331: history panel interaction handlers.
+  const handleSelectConversation = useCallback(
+    (id: string) => {
+      setMobileHistoryOpen(false);
+      router.push(`/chat?c=${encodeURIComponent(id)}`);
+    },
+    [router],
+  );
+  const handleNewChatFromPanel = useCallback(() => {
+    setMobileHistoryOpen(false);
+    router.push("/chat");
+  }, [router]);
 
   const handleRetry = useCallback(
     (messageId: string) => {
@@ -193,11 +264,37 @@ export default function ChatPage() {
     // overflow-x-hidden: guard against horizontal overflow on narrow phones.
     // Underscores inside calc() are Tailwind's whitespace marker (CSS spec requires spaces around -).
     <div className="flex h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden">
+      {/* WARP-331: desktop chat history panel — fixed 280px left column on lg+. */}
+      <aside
+        className="hidden lg:flex lg:flex-col lg:w-[280px] lg:flex-shrink-0 border-r border-separator bg-surface-secondary"
+        aria-label="Chat history"
+      >
+        <ChatHistoryPanel
+          activeConversationId={conversationId}
+          onSelect={handleSelectConversation}
+          onNewChat={handleNewChatFromPanel}
+          handleRef={historyHandleRef}
+        />
+      </aside>
+
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
         <header className="flex items-center justify-between px-4 h-14 border-b border-separator bg-[var(--color-toolbar-bg)] dp-material">
           <div className="flex items-center gap-2 min-w-0 flex-1">
+            {/* WARP-331: mobile-only history-drawer trigger. */}
+            <button
+              ref={historyTriggerRef}
+              type="button"
+              onClick={() => setMobileHistoryOpen(true)}
+              aria-label="Open chat history"
+              aria-haspopup="dialog"
+              aria-expanded={mobileHistoryOpen}
+              className="lg:hidden p-1.5 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+              title="Chat history"
+            >
+              <PanelLeftOpen size={18} aria-hidden="true" />
+            </button>
             <ModelSelector value={selectedModel} onChange={setSelectedModel} />
           </div>
           <div className="flex items-center gap-2">
@@ -359,6 +456,30 @@ export default function ChatPage() {
           onStop={stop}
         />
       </div>
+
+      {/* WARP-331: mobile drawer — same ChatHistoryPanel, hosted in the
+          Dialog placement=right primitive. No handleRef here: useChat
+          only needs one consumer (the desktop panel), and both writing
+          the ref would race. Rename / delete / loadMore still work
+          because they don't depend on the handle. */}
+      <Dialog
+        open={mobileHistoryOpen}
+        onClose={() => setMobileHistoryOpen(false)}
+        triggerRef={historyTriggerRef}
+        labelledBy="mobile-history-heading"
+        placement="right"
+      >
+        <div className="flex flex-col h-full w-[320px] max-w-[85vw]">
+          <h2 id="mobile-history-heading" className="sr-only">
+            Chat history
+          </h2>
+          <ChatHistoryPanel
+            activeConversationId={conversationId}
+            onSelect={handleSelectConversation}
+            onNewChat={handleNewChatFromPanel}
+          />
+        </div>
+      </Dialog>
     </div>
   );
 }

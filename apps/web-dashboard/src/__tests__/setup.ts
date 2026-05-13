@@ -10,6 +10,10 @@ vi.mock("next/navigation", () => ({
     replace: vi.fn(),
     back: vi.fn(),
   })),
+  // WARP-331: the /chat page reads ?c=<id> via useSearchParams to react to
+  // sidebar clicks. Default to an empty params bag — tests that need a
+  // populated `c` should override per-file.
+  useSearchParams: vi.fn(() => new URLSearchParams()),
 }));
 
 // Mock next/link to render a plain <a>

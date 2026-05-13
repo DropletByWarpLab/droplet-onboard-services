@@ -5,6 +5,10 @@ dist/
 .env
 .env.*
 !.env.example
+# Per-session brainstorming companion artifacts (HTML mockups, event
+# logs). Created by scripts/start-server.sh inside the active worktree
+# during design phases — never meant to be tracked.
+.superpowers/
 __pycache__/
 *.pyc
 .venv/
