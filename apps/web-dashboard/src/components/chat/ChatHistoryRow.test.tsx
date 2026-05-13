@@ -1,0 +1,81 @@
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { ChatHistoryRow } from "./ChatHistoryRow";
+
+const baseProps = {
+  id: "abc",
+  title: "Frigate ports",
+  active: false,
+  onSelect: vi.fn(),
+  onRenameSubmit: vi.fn().mockResolvedValue(undefined),
+  onDeleteRequest: vi.fn(),
+};
+
+describe("ChatHistoryRow", () => {
+  it("renders the title", () => {
+    render(<ChatHistoryRow {...baseProps} />);
+    expect(screen.getByText("Frigate ports")).toBeInTheDocument();
+  });
+
+  it("falls back to 'Untitled chat' when title is null", () => {
+    render(<ChatHistoryRow {...baseProps} title={null} />);
+    expect(screen.getByText("Untitled chat")).toBeInTheDocument();
+  });
+
+  it("fires onSelect when the row is clicked", () => {
+    const onSelect = vi.fn();
+    render(<ChatHistoryRow {...baseProps} onSelect={onSelect} />);
+    fireEvent.click(screen.getByRole("button", { name: /open chat/i }));
+    expect(onSelect).toHaveBeenCalled();
+  });
+
+  it("opens inline rename when the Rename menu item is chosen", () => {
+    render(<ChatHistoryRow {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /rename/i }));
+    expect(screen.getByRole("textbox", { name: /chat title/i })).toBeInTheDocument();
+  });
+
+  it("submits rename on Enter and calls onRenameSubmit with the trimmed value", async () => {
+    const onRenameSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<ChatHistoryRow {...baseProps} onRenameSubmit={onRenameSubmit} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /rename/i }));
+    const input = screen.getByRole("textbox", { name: /chat title/i }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "  New title  " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onRenameSubmit).toHaveBeenCalledWith("New title");
+  });
+
+  it("cancels rename on Escape and restores the original title", () => {
+    render(<ChatHistoryRow {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /rename/i }));
+    const input = screen.getByRole("textbox", { name: /chat title/i }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "abandoned" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByText("Frigate ports")).toBeInTheDocument();
+  });
+
+  it("calls onDeleteRequest when Delete menu item is chosen", () => {
+    const onDeleteRequest = vi.fn();
+    render(<ChatHistoryRow {...baseProps} onDeleteRequest={onDeleteRequest} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    expect(onDeleteRequest).toHaveBeenCalled();
+  });
+
+  it("applies the active highlight when active=true", () => {
+    render(<ChatHistoryRow {...baseProps} active />);
+    expect(screen.getByRole("button", { name: /open chat/i })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
+  it("forwards id as data-chat-id on the row container", () => {
+    const { container } = render(<ChatHistoryRow {...baseProps} />);
+    expect(container.querySelector('[data-chat-id="abc"]')).not.toBeNull();
+  });
+});
