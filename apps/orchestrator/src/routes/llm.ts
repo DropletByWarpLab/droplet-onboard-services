@@ -14,9 +14,67 @@ import {
   ChatPersistenceService,
   type PersistedToolCall,
 } from "../services/chat-persistence.service.js";
+import { publish as mqttPublish } from "../services/mqtt.service.js";
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
+
+/**
+ * WARP-329: per-stream debounce for flushing assistant content to Postgres.
+ * Trade-off: too short = thrashing the DB on every SSE delta; too long =
+ * mid-turn refresh shows stale content. 500 ms is the same cadence
+ * `services/file-indexer` uses for chunk persistence.
+ */
+const STREAM_FLUSH_INTERVAL_MS = 500;
+
+/**
+ * WARP-329 — MQTT contract documented for downstream consumers.
+ *
+ * Topic:   `droplet/chat/<userId>/turn-completed`
+ * QoS:     0 (best-effort; dashboard reconnects refresh state on its own)
+ * Payload:
+ *   {
+ *     conversationId:    string  // ChatSession.id
+ *     messageId:         string  // ChatMessage.id (the assistant row)
+ *     status:            "completed" | "failed" | "aborted"
+ *     snippet:           string  // first ~140 chars of assistant content
+ *     completedAt:       string  // ISO 8601
+ *   }
+ *
+ * Today the dashboard's WS bridge forwards this to the chat surface so
+ * background tabs can fire a Notification when an in-flight turn finishes.
+ * A future push-dispatcher service (mobile push, web-push for closed tabs)
+ * MUST subscribe to the same topic — the payload contract above is the
+ * stable wire.
+ */
+const CHAT_TURN_COMPLETED_TOPIC = (userId: string): string =>
+  `droplet/chat/${userId}/turn-completed`;
+
+interface TurnCompletedPayload {
+  conversationId: string;
+  messageId: string;
+  status: "completed" | "failed" | "aborted";
+  snippet: string;
+  completedAt: string;
+}
+
+function publishTurnCompleted(
+  userId: string | undefined,
+  payload: TurnCompletedPayload,
+): void {
+  if (!userId) return;
+  try {
+    // `publish` takes Record<string, unknown>; the typed payload above
+    // satisfies the shape at runtime, just not at the interface level.
+    mqttPublish(
+      CHAT_TURN_COMPLETED_TOPIC(userId),
+      payload as unknown as Record<string, unknown>,
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[llm/chat] MQTT publish failed (non-fatal):", err);
+  }
+}
 
 // /llm/chat accepts tool-role messages on replay so a client can resume a
 // session that already went through the agent loop. tool_call_id / tool_calls
@@ -48,6 +106,10 @@ const chatRequestSchema = z.object({
 });
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
+/** WARP-329: assistant row id, set alongside X-Conversation-Id on the same
+ *  response. The client uses it to update the matching `streaming` row when
+ *  the MQTT `turn-completed` event lands. */
+const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
 
 // Which tool names require the caller to have owner/admin role. Read-only
 // tools (list_*, get_*, search_*) are fine for any authenticated user; write
@@ -121,39 +183,9 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
     });
 }
 
-/**
- * WARP-304: persist one user turn + the assistant turn it produced. Wraps
- * the service call so the chat route stays readable, and so persistence
- * failure can't surface as a chat-turn error (we log and move on; the
- * user's response already streamed).
- */
-async function persistTurn(args: {
-  persistence: ChatPersistenceService;
-  conversationId: string;
-  userContent: string;
-  assistantContent: string;
-  toolCalls: PersistedToolCall[];
-  turnId: string | undefined;
-}): Promise<void> {
-  try {
-    await args.persistence.appendMessages(args.conversationId, [
-      {
-        role: "user",
-        content: args.userContent,
-        turnId: args.turnId ?? null,
-      },
-      {
-        role: "assistant",
-        content: args.assistantContent,
-        toolCalls: args.toolCalls.length > 0 ? args.toolCalls : null,
-        turnId: args.turnId ?? null,
-      },
-    ]);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("[llm/chat] failed to persist turn:", err);
-  }
-}
+// WARP-329 replaced the post-stream `persistTurn` helper with
+// save-on-send: see `persistence.createTurnRows` (pre-agent) +
+// `persistence.finalizeAssistantMessage` (post-agent) inline below.
 
 export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -241,17 +273,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         ? { ...(ncToken ? { ncToken } : {}), ...(userId ? { userId } : {}) }
         : undefined;
 
-      // WARP-304: resolve (or create) the conversation BEFORE the agent
-      // runs. The user message that drove this turn is the LAST
-      // role="user" in the replay history; older user turns were
-      // persisted by their own requests. We seed the title from this
-      // first prompt when the session is brand new.
+      // WARP-329: save-on-send.
+      // The user message that drove this turn is the LAST role="user" in
+      // the replay history. Older user turns were persisted by their own
+      // requests. We seed the title from this first prompt when the
+      // session is brand new.
       const lastUserMessage = [...chatReq.messages]
         .reverse()
         .find((m) => m.role === "user");
       const persistedUserContent = lastUserMessage?.content ?? null;
+
       let conversationId: string | null = null;
-      if (userId) {
+      let assistantMessageId: string | null = null;
+
+      if (userId && persistedUserContent) {
+        // ensureConversation: find-or-create the ChatSession row.
         const convo = await persistence
           .ensureConversation({
             conversationId: chatReq.conversationId,
@@ -270,7 +306,43 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           });
         if (convo?.id) {
           conversationId = convo.id;
-          res.setHeader(CONVERSATION_ID_HEADER, conversationId);
+
+          // WARP-329: persist user + assistant placeholder BEFORE running
+          // the agent. A mid-turn refresh now sees the user prompt + a
+          // "streaming" assistant row, instead of nothing at all.
+          const turn = await persistence
+            .createTurnRows({
+              conversationId,
+              userContent: persistedUserContent,
+              turnId: chatReq.turnId ?? null,
+            })
+            .catch((err: unknown) => {
+              // eslint-disable-next-line no-console
+              console.error("[llm/chat] failed to create turn rows:", err);
+              return null;
+            });
+          if (turn?.assistantMessageId) {
+            assistantMessageId = turn.assistantMessageId;
+            res.setHeader(CONVERSATION_ID_HEADER, conversationId);
+            res.setHeader(ASSISTANT_MESSAGE_ID_HEADER, assistantMessageId);
+            // If the client re-submitted a turn whose assistant message is
+            // already in a terminal state (completed/failed/aborted), short-
+            // circuit. The model has already replied; the cached row IS the
+            // answer. Replaying would charge another inference and confuse
+            // the user.
+            if (turn.assistantAlreadyFinal) {
+              res.status(409).json({
+                error: "turn_already_completed",
+                conversationId,
+                assistantMessageId,
+              });
+              return;
+            }
+          } else if (conversationId) {
+            // Couldn't create rows but conversation exists — still expose
+            // the id so the client can rehydrate later.
+            res.setHeader(CONVERSATION_ID_HEADER, conversationId);
+          }
         }
       }
 
@@ -283,7 +355,60 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // them in the persisted assistant message at the end of the turn.
       const liveToolCalls: PersistedToolCall[] = [];
       let liveAssistantContent = "";
+      let lastFlushedContent = "";
 
+      // WARP-329: debounced flush of streaming content to Postgres so
+      // refreshes mid-turn see progress. setInterval keeps the flush
+      // cadence steady regardless of token speed.
+      const flushTimer: NodeJS.Timeout | null = assistantMessageId
+        ? setInterval(() => {
+            if (
+              !assistantMessageId ||
+              liveAssistantContent === lastFlushedContent
+            ) {
+              return;
+            }
+            lastFlushedContent = liveAssistantContent;
+            persistence
+              .updateAssistantStreaming(assistantMessageId, liveAssistantContent)
+              .catch((err: unknown) => {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[llm/chat] streaming flush failed (non-fatal):",
+                  err,
+                );
+              });
+          }, STREAM_FLUSH_INTERVAL_MS)
+        : null;
+
+      const finalizeAndNotify = async (
+        status: "completed" | "failed" | "aborted",
+      ): Promise<void> => {
+        if (flushTimer) clearInterval(flushTimer);
+        if (!conversationId || !assistantMessageId) return;
+        const completedAt = new Date();
+        try {
+          await persistence.finalizeAssistantMessage({
+            conversationId,
+            messageId: assistantMessageId,
+            content: liveAssistantContent,
+            toolCalls: liveToolCalls,
+            status,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[llm/chat] failed to finalize assistant turn:", err);
+        }
+        publishTurnCompleted(userId, {
+          conversationId,
+          messageId: assistantMessageId,
+          status,
+          snippet: liveAssistantContent.slice(0, 140),
+          completedAt: completedAt.toISOString(),
+        });
+      };
+
+      // ── Streaming path ──
       if (chatReq.stream) {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
@@ -292,15 +417,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           "X-Accel-Buffering": "no",
         });
         const onEvent = (e: SSEEvent) => {
-          // Best-effort write — if the client disconnected mid-stream
-          // res.write throws ECONNRESET; swallow because the abort path
-          // (req.on("close")) handles the rest.
           try {
             res.write(encodeSSE(e));
           } catch {
             /* client gone */
           }
-          // Mirror the events into the persistence buffer.
           if (e.type === "content_delta") {
             liveAssistantContent += e.text;
           } else if (e.type === "tool_call") {
@@ -315,6 +436,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             }
           }
         };
+        let terminal: "completed" | "failed" | "aborted" = "completed";
+        // WARP-329: detect client-side abort. req.on("close") fires when
+        // the client disconnects mid-stream; we still finalize but flag
+        // the turn as aborted so the row reflects reality.
+        let clientAborted = false;
+        req.on("close", () => {
+          if (!res.writableEnded) clientAborted = true;
+        });
         try {
           await runAgent({ ...deps, onEvent }, {
             model: chatReq.model,
@@ -324,51 +453,45 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             allowed_tools: allowedForUser,
             toolCallContext,
           });
+        } catch (err) {
+          terminal = "failed";
+          // eslint-disable-next-line no-console
+          console.error("[llm/chat] agent loop failed:", err);
         } finally {
           res.end();
         }
-        // Persist after the stream is flushed (still within the same
-        // request handler — the response is over but the user expects
-        // history on next page load).
-        if (conversationId && persistedUserContent) {
-          await persistTurn({
-            persistence,
-            conversationId,
-            userContent: persistedUserContent,
-            assistantContent: liveAssistantContent,
-            toolCalls: liveToolCalls,
-            turnId: chatReq.turnId,
-          });
-        }
+        if (clientAborted) terminal = "aborted";
+        await finalizeAndNotify(terminal);
         return;
       }
 
-      const result = await runAgent(deps, {
-        model: chatReq.model,
-        messages: chatReq.messages,
-        temperature: chatReq.temperature,
-        max_iter: chatReq.max_iter,
-        allowed_tools: allowedForUser,
-        toolCallContext,
-      });
-      if (conversationId && persistedUserContent) {
-        const toolCalls: PersistedToolCall[] = result.trace.map((t) => ({
-          id: t.tool_call_id,
-          name: t.tool,
-          args: t.args,
-          ok: true,
-          data: t.result,
-        }));
-        await persistTurn({
-          persistence,
-          conversationId,
-          userContent: persistedUserContent,
-          assistantContent: result.message.content,
-          toolCalls,
-          turnId: chatReq.turnId,
+      // ── Non-streaming path ──
+      let result;
+      try {
+        result = await runAgent(deps, {
+          model: chatReq.model,
+          messages: chatReq.messages,
+          temperature: chatReq.temperature,
+          max_iter: chatReq.max_iter,
+          allowed_tools: allowedForUser,
+          toolCallContext,
         });
+        liveAssistantContent = result.message.content;
+        for (const t of result.trace) {
+          liveToolCalls.push({
+            id: t.tool_call_id,
+            name: t.tool,
+            args: t.args,
+            ok: true,
+            data: t.result,
+          });
+        }
+        await finalizeAndNotify("completed");
+      } catch (err) {
+        await finalizeAndNotify("failed");
+        throw err;
       }
-      res.json({ ...result, conversationId });
+      res.json({ ...result, conversationId, assistantMessageId });
     } catch (err) {
       next(err);
     }

@@ -41,28 +41,59 @@ model ChatSession {
   @@index([userId, updatedAt(sort: Desc)])
 }
 
-/// WARP-304: persisted message in a `ChatSession`. Stored in order of
-/// `createdAt`; for the same millisecond the `id` (uuid) breaks the tie.
+/// WARP-304 / WARP-329: persisted message in a `ChatSession`. Stored in
+/// order of `createdAt`; for the same millisecond the `id` (uuid) breaks
+/// the tie.
+///
 /// `toolCalls` captures the assistant's tool-call requests on a turn so a
 /// rehydrated thread can render the same chips the user saw live;
 /// `toolCallId` ties a role=tool message back to the call it answered.
 /// `turnId` is a client-supplied UUID that lets us drop duplicate writes
 /// when a network retry resubmits the same turn — checked in code, not
-/// enforced at the DB level (a partial unique index is cleaner but Prisma
-/// doesn't model it nicely).
+/// enforced at the DB level.
+///
+/// WARP-329: `status` + `completedAt` enable save-on-send. A user message
+/// is created with `status=completed` immediately on receipt; the matching
+/// assistant message is created with `status=streaming` BEFORE the LLM
+/// runs, then transitions to `completed` / `failed` / `aborted` when the
+/// agent loop ends. A mid-turn refresh sees the user message + the
+/// streaming-placeholder assistant row, and the WARP-329 MQTT signal
+/// fires when an in-flight turn finishes so other tabs / future mobile
+/// clients can update.
 model ChatMessage {
-  id         String      @id @default(uuid())
-  sessionId  String
-  session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role       String
-  content    String
-  toolCalls  Json?
-  toolCallId String?
-  turnId     String?
-  createdAt  DateTime    @default(now())
+  id          String      @id @default(uuid())
+  sessionId   String
+  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role        String
+  content     String
+  toolCalls   Json?
+  toolCallId  String?
+  turnId      String?
+  status      ChatMessageStatus @default(completed)
+  completedAt DateTime?
+  createdAt   DateTime    @default(now())
 
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
+  @@index([sessionId, status])
+}
+
+/// WARP-329: lifecycle of a single ChatMessage row.
+///   - `pending`   — user message that hasn't been dispatched yet (reserved
+///                   for a future client-driven optimistic path; not used
+///                   by the orchestrator route today).
+///   - `streaming` — assistant message in-flight; `content` is being
+///                   appended as SSE deltas arrive.
+///   - `completed` — terminal: turn finished cleanly. `completedAt` set.
+///   - `failed`    — terminal: agent loop errored. `completedAt` set.
+///   - `aborted`   — terminal: client cancelled mid-stream. `completedAt`
+///                   set; partial content preserved.
+enum ChatMessageStatus {
+  pending
+  streaming
+  completed
+  failed
+  aborted
 }
 
 // Per-user client devices (laptops, phones) paired via QR code flow.

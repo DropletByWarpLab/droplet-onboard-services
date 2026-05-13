@@ -101,6 +101,12 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       // Calendar/reminder/system toast notifications (PR #2). The
       // notifications service publishes here from sendNotification().
       `droplet/notifications/${user.username}`,
+      // WARP-329: chat turn-completed events. The orchestrator's
+      // /api/llm/chat publishes `droplet/chat/<user>/turn-completed`
+      // when an in-flight LLM response finishes, so a background tab
+      // can fire a browser notification (or, in the future, a mobile
+      // push when a push-dispatcher subscribes to the same topic).
+      `droplet/chat/${user.username}/#`,
     ];
 
     const unsubscribes = topics.map((t) =>

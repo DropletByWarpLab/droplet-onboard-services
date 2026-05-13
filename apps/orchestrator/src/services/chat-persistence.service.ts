@@ -188,6 +188,144 @@ export class ChatPersistenceService {
   }
 
   /**
+   * WARP-329: persist the user message + assistant placeholder for one turn
+   * BEFORE the agent loop runs. The user message lands as `status=completed`
+   * (it's already final the moment the route receives it); the assistant
+   * message lands as `status=streaming` with empty content, ready to be
+   * updated as SSE deltas arrive.
+   *
+   * Idempotency: if a row with the same `(sessionId, turnId, role)` already
+   * exists (client retried the same turn), we return the existing IDs and
+   * skip the insert. Callers MUST handle the "this turn already finalized"
+   * case — if the assistant row is already `completed`, it's safe to no-op
+   * the entire route.
+   *
+   * Returns the row IDs so the route can:
+   *   - put `X-Assistant-Message-Id` on the response header (lets the
+   *     client tie the in-flight stream to a persisted row), and
+   *   - reference the assistant ID for streaming updates + final flush.
+   */
+  async createTurnRows(args: {
+    conversationId: string;
+    userContent: string;
+    turnId: string | null;
+  }): Promise<{
+    userMessageId: string;
+    assistantMessageId: string;
+    assistantAlreadyFinal: boolean;
+  }> {
+    return this.prisma.$transaction(async (tx) => {
+      const findRow = async (role: "user" | "assistant") =>
+        args.turnId
+          ? tx.chatMessage.findFirst({
+              where: {
+                sessionId: args.conversationId,
+                turnId: args.turnId,
+                role,
+              },
+              select: { id: true, status: true },
+            })
+          : null;
+
+      const existingUser = await findRow("user");
+      const userRow =
+        existingUser ??
+        (await tx.chatMessage.create({
+          data: {
+            sessionId: args.conversationId,
+            role: "user",
+            content: args.userContent,
+            turnId: args.turnId,
+            status: "completed",
+            completedAt: new Date(),
+          },
+          select: { id: true, status: true },
+        }));
+
+      const existingAssistant = await findRow("assistant");
+      const assistantRow =
+        existingAssistant ??
+        (await tx.chatMessage.create({
+          data: {
+            sessionId: args.conversationId,
+            role: "assistant",
+            content: "",
+            turnId: args.turnId,
+            status: "streaming",
+          },
+          select: { id: true, status: true },
+        }));
+
+      await tx.chatSession.update({
+        where: { id: args.conversationId },
+        data: { updatedAt: new Date() },
+      });
+
+      return {
+        userMessageId: userRow.id,
+        assistantMessageId: assistantRow.id,
+        assistantAlreadyFinal:
+          assistantRow.status === "completed" ||
+          assistantRow.status === "failed" ||
+          assistantRow.status === "aborted",
+      };
+    });
+  }
+
+  /**
+   * WARP-329: flush the current accumulated content of a streaming
+   * assistant row. Called on a debounced timer from the chat route so a
+   * mid-turn refresh sees up-to-date content without thrashing Postgres.
+   *
+   * Only updates `content`; leaves `status` alone. Use
+   * {@link finalizeAssistantMessage} for the terminal transition.
+   */
+  async updateAssistantStreaming(
+    messageId: string,
+    content: string,
+  ): Promise<void> {
+    await this.prisma.chatMessage.update({
+      where: { id: messageId },
+      data: { content },
+    });
+  }
+
+  /**
+   * WARP-329: terminal write for an assistant turn. Locks the final
+   * `content` + `toolCalls` and flips `status` + `completedAt`.
+   *
+   * Also bumps `updatedAt` on the session so a sidebar sorted by recency
+   * surfaces the freshly-completed thread.
+   */
+  async finalizeAssistantMessage(args: {
+    conversationId: string;
+    messageId: string;
+    content: string;
+    toolCalls: PersistedToolCall[];
+    status: "completed" | "failed" | "aborted";
+  }): Promise<void> {
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.chatMessage.update({
+        where: { id: args.messageId },
+        data: {
+          content: args.content,
+          toolCalls:
+            args.toolCalls.length > 0
+              ? (args.toolCalls as unknown as Prisma.InputJsonValue)
+              : Prisma.JsonNull,
+          status: args.status,
+          completedAt: now,
+        },
+      });
+      await tx.chatSession.update({
+        where: { id: args.conversationId },
+        data: { updatedAt: now },
+      });
+    });
+  }
+
+  /**
    * Append one or more messages to an existing conversation. Honors the
    * client-supplied turnId for idempotency: if a row already exists with
    * the same (sessionId, turnId, role), the duplicate is skipped.
