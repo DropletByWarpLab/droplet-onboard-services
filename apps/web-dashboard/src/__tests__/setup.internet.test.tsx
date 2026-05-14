@@ -36,6 +36,8 @@ vi.mock("@/lib/api", () => ({
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
+  fetchDiscoveredCameras: vi.fn(async () => []),
+  acceptDiscoveredCamera: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],

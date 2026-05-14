@@ -44,6 +44,10 @@ vi.mock("@/lib/api", () => ({
   // expect.
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
+  // Cameras step is downstream of discovery — never reached by these
+  // tests but mocked so the import resolves.
+  fetchDiscoveredCameras: vi.fn(async () => []),
+  acceptDiscoveredCamera: vi.fn(),
   fetchMatterDevices: () => fetchDevicesMock(),
 }));
 

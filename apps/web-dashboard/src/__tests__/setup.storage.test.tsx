@@ -39,6 +39,8 @@ vi.mock("@/lib/api", () => ({
   fetchDrives: () => fetchDrivesMock(),
   updateDriveLabel: (uuid: string, patch: unknown) =>
     updateDriveLabelMock(uuid, patch),
+  fetchDiscoveredCameras: vi.fn(async () => []),
+  acceptDiscoveredCamera: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],

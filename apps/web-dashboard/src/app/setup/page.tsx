@@ -7,6 +7,7 @@ import { AccountStep } from "@/components/setup/steps/AccountStep";
 import { InternetStep } from "@/components/setup/steps/InternetStep";
 import { StorageStep } from "@/components/setup/steps/StorageStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
+import { CamerasStep } from "@/components/setup/steps/CamerasStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 
 /**
@@ -34,6 +35,7 @@ type Step =
   | "internet"
   | "storage"
   | "discovery"
+  | "cameras"
   | "done";
 const STEPS: Step[] = [
   "welcome",
@@ -41,6 +43,7 @@ const STEPS: Step[] = [
   "internet",
   "storage",
   "discovery",
+  "cameras",
   "done",
 ];
 
@@ -91,8 +94,15 @@ export default function SetupPage() {
           <DiscoveryStep
             onContinue={(count) => {
               setDiscoveredCount(count);
-              setStep("done");
+              setStep("cameras");
             }}
+          />
+        )}
+
+        {step === "cameras" && (
+          <CamerasStep
+            onComplete={() => setStep("done")}
+            onSkip={() => setStep("done")}
           />
         )}
 

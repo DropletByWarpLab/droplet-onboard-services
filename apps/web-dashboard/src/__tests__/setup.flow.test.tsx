@@ -37,6 +37,9 @@ vi.mock("@/lib/api", () => ({
   // so the flow test doesn't have to click anything on that step.
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
+  // Cameras step auto-skips when zero discovered cameras — same idea.
+  fetchDiscoveredCameras: vi.fn(async () => []),
+  acceptDiscoveredCamera: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
