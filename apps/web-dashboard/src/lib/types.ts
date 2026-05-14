@@ -346,12 +346,30 @@ export interface StorageStats {
 export interface DriveInfo {
   device: string;
   mount: string;
+  /** FS-provided label from the bridge (e.g. "TOSHIBA EXT") — different
+   *  from the customer-chosen displayName below. */
   label: string;
   uuid: string;
   size_bytes: number;
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-174: customer's friendly name from the setup wizard's Storage
+   *  step. `null` until a Drive row is upserted via
+   *  PATCH /api/storage/drives/:uuid. */
+  displayName?: string | null;
+  icon?: string | null;
+  notes?: string | null;
+}
+
+/** WARP-174: response shape for PATCH /api/storage/drives/:uuid. */
+export interface DriveLabel {
+  uuid: string;
+  displayName: string;
+  icon: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DrivesResponse {

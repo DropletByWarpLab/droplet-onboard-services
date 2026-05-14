@@ -5,6 +5,7 @@ import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
 import { InternetStep } from "@/components/setup/steps/InternetStep";
+import { StorageStep } from "@/components/setup/steps/StorageStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 
@@ -31,9 +32,17 @@ type Step =
   | "welcome"
   | "account"
   | "internet"
+  | "storage"
   | "discovery"
   | "done";
-const STEPS: Step[] = ["welcome", "account", "internet", "discovery", "done"];
+const STEPS: Step[] = [
+  "welcome",
+  "account",
+  "internet",
+  "storage",
+  "discovery",
+  "done",
+];
 
 export default function SetupPage() {
   const [step, setStep] = useState<Step>("welcome");
@@ -65,8 +74,15 @@ export default function SetupPage() {
           <InternetStep
             onComplete={(subdomain) => {
               setDuckdnsSubdomain(subdomain);
-              setStep("discovery");
+              setStep("storage");
             }}
+            onSkip={() => setStep("storage")}
+          />
+        )}
+
+        {step === "storage" && (
+          <StorageStep
+            onComplete={() => setStep("discovery")}
             onSkip={() => setStep("discovery")}
           />
         )}

@@ -79,7 +79,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
-  app.use("/api", createStorageRouter());
+  app.use("/api", createStorageRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   app.use("/api", createNetworkRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));

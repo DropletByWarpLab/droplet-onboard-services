@@ -37,6 +37,7 @@ import type {
   NetworkOverview,
   StorageStats,
   DrivesResponse,
+  DriveLabel,
   WirelessScanResult,
   AuthUser,
   InviteCreateRequest,
@@ -324,6 +325,37 @@ export async function fetchStorage(): Promise<StorageStats> {
 export async function fetchDrives(): Promise<DrivesResponse> {
   const res = await authFetch(`${BASE}/api/storage/drives`);
   if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-174: upsert the customer's friendly name (+ optional icon + notes)
+ * for a drive. Used by the setup wizard's Storage step and the
+ * post-setup `/storage` page.
+ *
+ * First call for a given UUID requires `displayName`; later calls can
+ * be partial. Server returns the full Drive row.
+ */
+export async function updateDriveLabel(
+  uuid: string,
+  patch: {
+    displayName?: string;
+    icon?: string | null;
+    notes?: string | null;
+  },
+): Promise<DriveLabel> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update drive: ${res.status}`);
+  }
   return res.json();
 }
 

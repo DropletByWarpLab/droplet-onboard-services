@@ -33,6 +33,10 @@ vi.mock("@/lib/api", () => ({
   loginUser: vi.fn(async () => undefined),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // Storage step auto-skips when zero drives — keep the bridge "empty"
+  // so the flow test doesn't have to click anything on that step.
+  fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
+  updateDriveLabel: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],

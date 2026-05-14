@@ -39,6 +39,11 @@ vi.mock("@/lib/api", () => ({
   loginUser: vi.fn(async () => undefined),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // Storage step auto-skips on empty drive list — let it pass straight
+  // through so the polling-bounds tests land on discovery as they
+  // expect.
+  fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
+  updateDriveLabel: vi.fn(),
   fetchMatterDevices: () => fetchDevicesMock(),
 }));
 
