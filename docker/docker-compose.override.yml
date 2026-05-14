@@ -1,0 +1,18 @@
+# POC override: no FIPS provider, no TPM hardware available.
+services:
+  orchestrator:
+    environment:
+      OPENSSL_CONF: ""
+      DROPLET_FIPS_REQUIRED: "false"
+  mcp-server:
+    environment:
+      OPENSSL_CONF: ""
+      DROPLET_FIPS_REQUIRED: "false"
+  ai-gateway:
+    environment:
+      OPENSSL_CONF: ""
+      DROPLET_FIPS_REQUIRED: "false"
+  device-identity-svc:
+    environment:
+      DROPLET_TPM_BACKEND: "mock"
+      DROPLET_FIPS_REQUIRED: "false"

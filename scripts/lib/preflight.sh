@@ -25,9 +25,9 @@ preflight_check() {
   # Factory reset re-runs setup.sh with --skip-docker, which must work
   # unattended — prompting for a password there would hang the device.
   if [ "${SKIP_DOCKER:-false}" != "true" ]; then
-    if ! sudo -v 2>/dev/null; then
+    if ! sudo -n true 2>/dev/null; then
       log_info "sudo access required. Please enter your password."
-      if ! sudo -v; then
+      if ! sudo -n true; then
         log_error "Could not obtain sudo access."
         return 1
       fi

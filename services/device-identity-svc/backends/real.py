@@ -1,4 +1,4 @@
-"""WARP-230 — Real TPM 2.0 backend via tpm2-pytss.
+"""WARP-230 - Real TPM 2.0 backend via tpm2-pytss.
 
 Generates an ECC P-256 device-identity key in the TPM, seals to PCR
 indices [0, 2, 4, 7] (or whatever sealing_pcrs the provisioner passes),
@@ -34,11 +34,11 @@ from storage import Storage
 
 logger = logging.getLogger(__name__)
 
-# Cert validity window — must match MockBackend so behavior is
+# Cert validity window - must match MockBackend so behavior is
 # observationally identical at the gRPC boundary.
 DEVICE_CERT_VALIDITY_DAYS = 365 * 5
 
-# SRK persistent handle — TCG-recommended location for the Storage
+# SRK persistent handle - TCG-recommended location for the Storage
 # Root Key derived from the Owner hierarchy.
 SRK_PERSISTENT_HANDLE = 0x81000001
 
@@ -61,7 +61,7 @@ class RealBackend:
     name = "real"
 
     def __init__(self, *, storage_root: Path) -> None:
-        # Lazy import — fails closed if tpm2-pytss is missing.
+        # Lazy import - fails closed if tpm2-pytss is missing.
         from tpm2_pytss import ESAPI  # type: ignore[import-not-found]
 
         self._ESAPI = ESAPI
@@ -188,7 +188,7 @@ class RealBackend:
 
     # ─── Helpers (TPM operations) ────────────────────────────────────
     # Split into separate methods to keep provision/sign/reseal readable.
-    # The actual tss2 API calls are nontrivial — each docstring points
+    # The actual tss2 API calls are nontrivial - each docstring points
     # at the canonical tpm2-pytss example file to consult when filling
     # the placeholder bodies in.
 
@@ -203,7 +203,7 @@ class RealBackend:
         """
         return (
             b"-----BEGIN CERTIFICATE-----\n"
-            b"# WARP-230 synth EK cert placeholder — replace via tpm2-pytss\n"
+            b"# WARP-230 synth EK cert placeholder - replace via tpm2-pytss\n"
             b"-----END CERTIFICATE-----\n"
         )
 
@@ -234,7 +234,7 @@ class RealBackend:
         Reference: tpm2-pytss/examples/keys.py + policy_pcr usage in
         examples/sealing.py.
         """
-        # Placeholder — returns a deterministic public key + sealed blob
+        # Placeholder - returns a deterministic public key + sealed blob
         # so the gRPC + storage layers can be smoke-tested end-to-end
         # before the tss2 wiring lands.
         public_key = ec.generate_private_key(ec.SECP256R1()).public_key()
@@ -274,7 +274,7 @@ class RealBackend:
         ``self._sealing_pcrs`` or the canonical default set.
         """
         pcrs = self._sealing_pcrs or [0, 2, 4, 7]
-        # Placeholder — returns all-zero digests so the status surface
+        # Placeholder - returns all-zero digests so the status surface
         # still reports a deterministic shape during the scaffold phase.
         return {str(i): "0" * 64 for i in pcrs}
 
@@ -286,7 +286,7 @@ class RealBackend:
                 handle = self._unseal_into_tpm(esapi)
                 esapi.flush_context(handle)
             return True
-        except Exception:  # noqa: BLE001 — tpm2-pytss raises many types
+        except Exception:  # noqa: BLE001 - tpm2-pytss raises many types
             return False
 
     def _self_sign_cert(self, device_id: str, public_key) -> bytes:
@@ -309,6 +309,6 @@ class RealBackend:
         _ = now + dt.timedelta(days=DEVICE_CERT_VALIDITY_DAYS)
         return (
             b"-----BEGIN CERTIFICATE-----\n"
-            b"# WARP-230 real-backend cert placeholder — TPM-signed body fills in\n"
+            b"# WARP-230 real-backend cert placeholder - TPM-signed body fills in\n"
             b"-----END CERTIFICATE-----\n"
         )
