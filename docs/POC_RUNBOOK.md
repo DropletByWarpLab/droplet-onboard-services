@@ -7,7 +7,7 @@
 > production stays on dual-CPU dev hardware (Pi + Jetson) and
 > ultimately ships on the v2.6 custom platform.
 
-## Status snapshot (last updated 2026-05-13 ~end of day)
+## Status snapshot (last updated 2026-05-14 after Phase C)
 
 | Area | State |
 |---|---|
@@ -16,11 +16,16 @@
 | Dashboard at `https://192.168.10.1/` | ✅ first-run wizard armed |
 | 2× 2 TB drives partitioned + mounted (`/mnt/nvr`, `/mnt/data`, `/mnt/data2`) with fstab UUIDs | ✅ |
 | Frigate bound to `/mnt/nvr` via `NVR_MEDIA_SOURCE` in `.env` | ✅ |
-| ROCm runtime | ⚠ partially installed — apt pin in place, dpkg interrupted, needs recovery + retry |
-| Ollama + local LLM (`llama3.1:8b-instruct-q8_0`) | ⛔ not started — blocked on ROCm |
-| ai-gateway CUDA wheels stripped | ⛔ not done — saves ~5 GB image size |
-| OpenWrt-in-container | ⛔ not started — top priority |
-| Routing service repointed at OpenWrt container | ⛔ not started |
+| Kernel upgraded to **6.17.0-23-generic HWE** (from 6.8.0-100) | ✅ |
+| **dGPU detected** by ROCm: `gfx1200`, 16 GB VRAM, PCI 0000:03:00.0 (Navi 48 / RDNA4 / R9070-class) | ✅ |
+| ROCm runtime (rocm-hip-runtime, hsa-rocr, rocminfo, rocm-smi-lib) | ✅ |
+| Ollama installed, pinned to dGPU only via systemd drop-in (`ROCR_VISIBLE_DEVICES=0`, `HSA_OVERRIDE_GFX_VERSION=11.0.0`) | ✅ |
+| Models: `llama3.1:8b-instruct-q8_0` + `nomic-embed-text` | ✅ pulled |
+| ai-gateway points at host Ollama via `JETSON_OLLAMA_URL=http://host.docker.internal:11434` | ✅ |
+| ai-gateway image rebuilt CPU-only (no CUDA wheels) | ✅ |
+| Frigate's `/dev/dri` remapped: host renderD129 (iGPU) → container renderD128. dGPU isolated. | ✅ |
+| OpenWrt-in-container | ⛔ next major lift |
+| Routing service repointed at OpenWrt container | ⛔ blocked on above |
 | First admin account in dashboard wizard | ⛔ user action — visit `https://192.168.10.1/` and walk through |
 
 ## Hardware map
@@ -213,34 +218,59 @@ sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a dpkg --configure -a
 sudo apt-get -f install -y
 ```
 
+## Phase C done (2026-05-14)
+
+Kernel upgrade unlocked the dGPU; Ollama runs as a compose service pinned to it.
+
+**Kernel upgrade:**
+- `apt install linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04` → kernel 6.17.0-23. Grub auto-picked it as default; old 6.8.0-100 kept as fallback.
+- After reboot, `rocminfo` (host) shows 3 agents: CPU, gfx1200 (dGPU), gfx1036 (iGPU).
+- `dmesg` confirms `amdgpu 0000:03:00.0: VRAM: 16304M`, IP blocks `soc24_common, gmc_v12_0, gfx_v12_0, vcn_v5_0_0, mes_v12_0` — all v12 = RDNA4 / Navi 4x.
+
+**Ollama runs as a compose service** (NOT a native systemd install). Mirrors the `droplet-jetson-ai` container pattern, but uses the official `ollama/ollama:rocm` image for AMD instead of NVIDIA:
+```yaml
+ollama:
+  image: ollama/ollama:rocm
+  container_name: droplet-ollama
+  devices:
+    - "/dev/kfd:/dev/kfd"
+    - "/dev/dri/renderD128:/dev/dri/renderD128"   # dGPU ONLY (renderD129 = iGPU, not mapped)
+  group_add: ["993", "44"]                         # NUMERIC GIDs (render, video) — names don't resolve from image's /etc/group
+  environment:
+    ROCR_VISIBLE_DEVICES: "0"
+    OLLAMA_HOST: "0.0.0.0:11434"
+    OLLAMA_KEEP_ALIVE: "24h"
+  volumes:
+    - ollama-data:/root/.ollama
+```
+
+**Lessons learned along the way (each a real trap):**
+1. **Initial native install was wrong.** `curl install.sh | sh` worked but drifts from the repo's container-first design. Stopped + uninstalled + redid as a compose service. Both approaches detect the GPU, but the container path is the canonical one.
+2. **`group_add` needs numeric GIDs**, not names. Docker resolves names against the *image's* `/etc/group`, where `render`/`video` don't exist. Host has `render:993, video:44` — pass those.
+3. **`HSA_OVERRIDE_GFX_VERSION=11.0.0` is wrong for the container.** The container's bundled ROCm 7.x (`libhipblas.so.3.2.70201`) natively supports `gfx1200, gfx1201` (RDNA4) — verified by listing `/usr/lib/ollama/rocm/rocblas/library/`. The override was needed only briefly when we tested the host-installed ROCm 6.2.4 which didn't list gfx1200. **Native gfx1200 works fine in the container — leave HSA_OVERRIDE unset.**
+4. **`ROCR_VISIBLE_DEVICES=0` is still needed** to hide the iGPU (gfx1036) from Ollama. The container's TensileLibrary doesn't include gfx1036 kernels (host's iGPU). Without this, Ollama tries both GPUs at boot and the iGPU init errors with "Illegal seek for GPU arch: gfx1036".
+5. **ai-gateway reaches Ollama via compose service DNS** (`http://ollama:11434`), not `host.docker.internal`. Cleaner. Upstream compose's `extra_hosts: host.docker.internal:host-gateway` remains for orchestrator/routing — unrelated.
+
+**ai-gateway requirements.txt rewrite** (before this fix it pulled 5+ GB of CUDA wheels even though `torch --index-url https://download.pytorch.org/whl/cpu` was specified per-line):
+```
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch>=2.3.0
+sentence-transformers>=3.0.0
+...
+```
+Top-level `--extra-index-url` directive + `torch` listed BEFORE `sentence-transformers` is the only combo that works reliably with modern pip. Verified after rebuild:
+- `pip list` shows `torch 2.12.0+cpu` (no `+cu`)
+- Image size dropped from ~7 GB to **2.23 GB** (saved ~4.5 GB)
+
+**End-to-end wiring verified:**
+- `docker exec ai-gateway python -c "import httpx; print(httpx.get('http://ollama:11434/api/version').text)"` → `{"version":"0.23.4"}`
+- `curl -k https://192.168.10.1/api/health` → `aiGateway:true`
+- Frigate's `/dev/dri` device mapped to host's `renderD129` (iGPU), leaving the dGPU truly LLM-only.
+
 ## Outstanding work (in priority order)
 
-1. **Recover dpkg state** (in progress).
-2. **Finish ROCm install** with the pin in place. Verify via `rocminfo`
-   showing 1 dGPU + iGPU agents. Reboot may be needed for KFD module to
-   load if not auto-loaded.
-3. **Install Ollama**, configure for ROCm:
-   ```bash
-   curl -fsSL https://ollama.com/install.sh | sh
-   sudo systemctl edit --full ollama.service
-   # add: Environment="ROCR_VISIBLE_DEVICES=0" (pin to dGPU only)
-   sudo systemctl restart ollama
-   ollama pull llama3.1:8b-instruct-q8_0
-   ollama pull nomic-embed-text
-   ```
-4. **Point ai-gateway at host Ollama** — uncomment the
-   `JETSON_OLLAMA_URL` line in `docker-compose.override.yml` and add
-   `extra_hosts: - "host.docker.internal:host-gateway"` if not already
-   in upstream compose.
-5. **Strip CUDA from `services/ai-gateway/requirements.txt`**:
-   ```
-   --extra-index-url https://download.pytorch.org/whl/cpu
-   torch>=2.3.0
-   sentence-transformers>=3.0.0
-   # ... rest unchanged
-   ```
-   Then `docker compose build --no-cache ai-gateway && docker compose up -d --force-recreate ai-gateway`. Saves ~5 GB.
-6. **OpenWrt-in-container** — the heaviest lift. Plan:
+1. **OpenWrt-in-container** — the heaviest remaining lift. Plan:
    - Pull `openwrtorg/rootfs:24.10.0-x86-64` (or build via repo's
      `openwrt/build.sh`). The image needs `--privileged` and macvlan
      network access; running with `NET_ADMIN`+`SYS_ADMIN` caps + a

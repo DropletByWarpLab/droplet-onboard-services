@@ -1,4 +1,10 @@
-# POC override: no FIPS provider, no TPM hardware available.
+# POC overrides on top of docker-compose.yml.
+#   - FIPS provider not layered on the host -> stock OpenSSL on all node services.
+#   - No /dev/tpm0 on consumer Ryzen -> mock TPM backend.
+#   - dGPU reserved 100% for Ollama -> Frigate's render node remapped to iGPU.
+#   - Ollama runs in-container (canonical droplet-jetson-ai pattern) with the
+#     ROCm image, pinned to the dGPU, models persisted in a named volume.
+#   - ai-gateway reaches ollama via compose service DNS.
 services:
   orchestrator:
     environment:
@@ -12,7 +18,54 @@ services:
     environment:
       OPENSSL_CONF: ""
       DROPLET_FIPS_REQUIRED: "false"
+      # Talk to the ollama compose service over the docker network.
+      # /health.limits will 404 (raw Ollama, no ollama-manager sidecar yet);
+      # ai-gateway falls back to default concurrency. Next iteration: add
+      # ollama-manager sidecar from droplet-jetson-ai for parity.
+      JETSON_OLLAMA_URL: "http://ollama:11434"
   device-identity-svc:
     environment:
       DROPLET_TPM_BACKEND: "mock"
       DROPLET_FIPS_REQUIRED: "false"
+  frigate:
+    # dGPU is reserved for Ollama. Map iGPU's render node (renderD129 on the
+    # host) in as renderD128 (Frigate's expected path).
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+      - "/dev/dri/renderD129:/dev/dri/renderD128"
+
+  # ============================================================
+  # Ollama (ROCm) - local LLM inference on the AMD dGPU.
+  # Mirrors the droplet-jetson-ai compose pattern but for AMD.
+  # ============================================================
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: droplet-ollama
+    restart: unless-stopped
+    expose:
+      - "11434"
+    # Loopback only on host - dev/debug from the box itself.
+    # Containers reach it via compose service DNS (http://ollama:11434).
+    ports:
+      - "127.0.0.1:11434:11434"
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri/renderD128:/dev/dri/renderD128"   # dGPU only
+    group_add:
+      - "993"   # host render GID
+      - "44"    # host video GID
+    environment:
+      ROCR_VISIBLE_DEVICES: "0"
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ollama-data:

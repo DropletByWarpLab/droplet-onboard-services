@@ -1,3 +1,10 @@
+# CPU-only torch: WARP-POC. Avoid pulling 5 GB of CUDA wheels that the
+# AMD dGPU can't use anyway ? Ollama on the host handles GPU inference.
+# Must be at the top + before sentence-transformers, otherwise pip's
+# resolver fetches CUDA torch as a transitive dep of sentence-transformers
+# before reading the per-line index override.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 fastapi>=0.110.0
 uvicorn>=0.29.0
 litellm>=1.30.0
@@ -8,17 +15,10 @@ sse-starlette>=2.0.0
 redis>=5.0.0
 grpcio>=1.62.0
 grpcio-tools>=1.62.0
+torch>=2.3.0
 sentence-transformers>=3.0.0
-torch --index-url https://download.pytorch.org/whl/cpu
 
-# WARP-286: BGE-reranker-base int8 via optimum + onnxruntime.
-# Used by the Rerank gRPC handler for hybrid retrieval.
-#
-# Pin both packages explicitly without using optimum's [onnxruntime] extras
-# syntax. The extras marker confuses pip's resolver when combined with our
-# version range (>=1.21,<2.0) + sentence-transformers's transitive deps,
-# producing a tautological "optimum 1.27.0 depends on optimum 1.27.0"
-# conflict. Listing onnxruntime as a sibling package sidesteps it.
+# BGE-reranker-base int8 via optimum + onnxruntime (CPU).
 onnxruntime>=1.18,<2.0
 optimum>=1.21,<2.0
 huggingface_hub>=0.24,<1.0
