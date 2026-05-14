@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Eye, EyeOff, Lock, User } from "lucide-react";
 import { setupAdmin, loginUser } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { StepShell } from "@/components/setup/StepShell";
 
 const RESERVED_USERNAMES = ["admin", "root"];
 
@@ -15,6 +16,11 @@ const RESERVED_USERNAMES = ["admin", "root"];
  * + `completeSetup` from the auth context, then bubbles the chosen
  * display name up via `onComplete` so the wizard's final `done` step can
  * personalise the WelcomeFlourish ("Welcome, Robin").
+ *
+ * Wraps `StepShell` for chrome (title / subtitle / primary CTA) so the
+ * layout matches the rest of the wizard's typed steps. The form fields
+ * + inline error live inside `children`; the "Create Account" button is
+ * StepShell's `primary` action.
  *
  * Validation rules are identical to the pre-refactor inline version —
  * tests assert on the exact error strings and the placeholder copy
@@ -81,14 +87,16 @@ export function AccountStep({
   }
 
   return (
-    <div className="animate-in fade-in duration-300">
-      <h1 className="type-title-1 text-label-primary mb-2 text-center">
-        Create your account
-      </h1>
-      <p className="type-subheadline text-label-secondary mb-8 text-center">
-        This will be the administrator account for your Droplet.
-      </p>
-
+    <StepShell
+      title="Create your account"
+      subtitle="This will be the administrator account for your Droplet."
+      primary={{
+        label: "Create Account",
+        loadingLabel: "Creating account...",
+        onClick: handleCreateAccount,
+        isLoading: isSubmitting,
+      }}
+    >
       <div className="space-y-4">
         <div>
           <label className="type-subheadline text-label-secondary block mb-1.5">
@@ -182,15 +190,7 @@ export function AccountStep({
             {error}
           </p>
         )}
-
-        <button
-          onClick={handleCreateAccount}
-          disabled={isSubmitting}
-          className="dp-btn-primary w-full mt-2"
-        >
-          {isSubmitting ? "Creating account..." : "Create Account"}
-        </button>
       </div>
-    </div>
+    </StepShell>
   );
 }
