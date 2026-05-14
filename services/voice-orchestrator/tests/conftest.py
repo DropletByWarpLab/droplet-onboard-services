@@ -53,11 +53,19 @@ def make_sysfs(
         card_dir = sys_root / f"card{n}"
         card_dir.mkdir(exist_ok=True)
         if bus == "usb":
-            device_dir = tmp_path / f"usb-card{n}"
-            device_dir.mkdir(exist_ok=True)
-            (device_dir / "idVendor").write_text("1234\n")
-            (device_dir / "idProduct").write_text("5678\n")
-            (card_dir / "device").symlink_to(device_dir)
+            # Mirror real Linux structure: card device symlink points
+            # into the USB interface node (like `usb5/5-2/5-2:1.0`),
+            # NOT the USB device root that holds idVendor.
+            # `detect_bus()` matches on the `usbN` controller name in
+            # the resolved path so it works regardless.
+            usb_dev = tmp_path / "fake_devices" / f"usb{n}" / f"{n}-2" / f"{n}-2.1.0"
+            usb_dev.mkdir(parents=True, exist_ok=True)
+            # idVendor lives at the device root (one level up from the
+            # interface node) — keep it here for future parents-walk
+            # logic, even though current detect_bus() doesn't need it.
+            (usb_dev.parent / "idVendor").write_text("1234\n")
+            (usb_dev.parent / "idProduct").write_text("5678\n")
+            (card_dir / "device").symlink_to(usb_dev)
         elif bus == "pci":
             # Real Linux path contains colons (pci0000:00 / 0000:00:1f.3),
             # but Windows filesystems can't create those — use safe names

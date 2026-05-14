@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libasound2-plugins \
         alsa-utils \
         ffmpeg \
+        curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

@@ -7,14 +7,14 @@ pydantic==2.9.2           # Schemas
 httpx==0.27.2             # Async HTTP client for orchestrator/LLM proxying (used in subsequent commits)
 python-multipart==0.0.10  # FastAPI form-upload support (mic-test endpoint accepts audio uploads)
 
-# Wake / STT / TTS land in subsequent commits — declared here so the
-# image build is one rebuild for the whole stack rather than three.
-openwakeword==0.6.0        # Wake-word detection (Apache 2.0)
-# wyoming-faster-whisper is a separate container in the compose stack
-# (not bundled into this service's pip set) — keeps STT model load
-# isolated from the always-on audio loop's lifecycle.
+# Wake / STT / TTS pull their own deps in subsequent commits:
+#   commit 2 — openwakeword + onnxruntime (NOT tflite-runtime; the
+#              latter has no Python 3.12 wheel and openWakeWord supports
+#              the ONNX backend natively)
+#   commit 3 — wyoming-faster-whisper is a separate container in the
+#              compose stack, not bundled here.
+#   commit 4 — piper-tts (uses bundled onnxruntime models)
 
 # Dev / test
 pytest==8.3.3
 pytest-asyncio==0.24.0
-httpx==0.27.2  # also serves as the FastAPI testclient transport

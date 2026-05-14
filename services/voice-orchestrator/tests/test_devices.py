@@ -62,7 +62,11 @@ class TestParseCardNumber:
 # ────────────────────────────────────────────────────────────────────
 
 class TestDetectBus:
-    def test_usb_when_idvendor_present(self, make_sysfs_root):
+    def test_usb_when_controller_in_path(self, make_sysfs_root):
+        """Real Linux exposes USB devices via a path like .../usbN/...
+        — `usbN` is the controller name. detect_bus() matches on that
+        component regardless of whether the leaf node (e.g. the USB
+        interface) carries idVendor itself."""
         root = make_sysfs_root({0: "usb"})
         assert detect_bus(0, sys_root=root) == "usb"
 

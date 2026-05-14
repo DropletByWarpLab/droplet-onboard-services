@@ -128,15 +128,34 @@ def parse_card_number(device_name: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+_USB_CONTROLLER_RE = re.compile(r"^usb\d+$")
+
+
 def detect_bus(
     card_number: Optional[int], sys_root: Path = Path("/sys/class/sound"),
 ) -> str:
     """Return "usb" / "pci" / "platform" / "unknown" for an ALSA card.
 
-    USB audio devices expose `device/idVendor` under the card's sysfs
-    entry; PCI devices don't (they have `vendor` directly). Platform
-    devices (I²S codecs on Jetson, etc.) typically have a `driver`
-    symlink pointing into platform-bus controllers.
+    Linux sysfs path structure on a real box (verified on POC droplet-sys):
+
+      USB device:
+        /sys/class/sound/card3 -> ../../devices/pci0000:00/0000:00:08.1/
+                                       0000:17:00.4/usb5/5-2/5-2:1.0/sound/card3
+
+      Pure PCI device:
+        /sys/class/sound/card1 -> ../../devices/pci0000:00/0000:00:08.1/
+                                       0000:17:00.1/sound/card1
+
+      Platform-bus codec (Jetson I/O Brick, etc.):
+        /sys/class/sound/card0 -> ../../devices/platform/snd-codec/sound/card0
+
+    The card/device symlink resolves into the *interface* node for USB
+    devices (e.g. `5-2:1.0`), which doesn't carry `idVendor` itself —
+    that lives a couple of levels up at the USB device root. So instead
+    of looking up the file tree, we check the resolved path's
+    components: a `usbN` controller in the chain means it's a USB
+    device regardless of whatever PCI host adapter the controller sits
+    on. Platform > PCI fall-through in the same way.
     """
     if card_number is None:
         return "unknown"
@@ -148,25 +167,21 @@ def detect_bus(
     if not device_link.exists():
         return "unknown"
 
-    # USB: device/idVendor + device/idProduct exist (and resolve into
-    # the USB bus topology).
-    if (device_link / "idVendor").exists():
-        return "usb"
-
-    # PCI: the resolved real path lives under /sys/devices/pci*. Platform-
-    # bus codecs (Jetson I/O Brick, etc.) live under /sys/devices/platform/.
-    # We split on path components rather than substring-matching the str
-    # form — keeps the check robust to Windows separators when running
-    # tests on a dev machine.
     try:
         real = device_link.resolve()
     except (OSError, RuntimeError):  # pragma: no cover — broken symlink
         return "unknown"
+
     parts = real.parts
-    if any(p.startswith("pci") for p in parts):
-        return "pci"
+    # USB controller component (`usb1`, `usb5`, etc.) anywhere in the
+    # chain → USB device. Wins over the PCI host adapter the controller
+    # may sit on, which is what we want.
+    if any(_USB_CONTROLLER_RE.match(p) for p in parts):
+        return "usb"
     if "platform" in parts:
         return "platform"
+    if any(p.startswith("pci") for p in parts):
+        return "pci"
     return "unknown"
 
 
