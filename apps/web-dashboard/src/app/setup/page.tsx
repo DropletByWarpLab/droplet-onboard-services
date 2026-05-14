@@ -9,6 +9,7 @@ import { StorageStep } from "@/components/setup/steps/StorageStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { CamerasStep } from "@/components/setup/steps/CamerasStep";
 import { VpnStep } from "@/components/setup/steps/VpnStep";
+import { AiStep } from "@/components/setup/steps/AiStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 
 /**
@@ -38,6 +39,7 @@ type Step =
   | "discovery"
   | "cameras"
   | "vpn"
+  | "ai"
   | "done";
 const STEPS: Step[] = [
   "welcome",
@@ -47,6 +49,7 @@ const STEPS: Step[] = [
   "discovery",
   "cameras",
   "vpn",
+  "ai",
   "done",
 ];
 
@@ -111,9 +114,16 @@ export default function SetupPage() {
 
         {step === "vpn" && (
           <VpnStep
+            onComplete={() => setStep("ai")}
+            onSkip={() => setStep("ai")}
+            onBackToInternet={() => setStep("internet")}
+          />
+        )}
+
+        {step === "ai" && (
+          <AiStep
             onComplete={() => setStep("done")}
             onSkip={() => setStep("done")}
-            onBackToInternet={() => setStep("internet")}
           />
         )}
 

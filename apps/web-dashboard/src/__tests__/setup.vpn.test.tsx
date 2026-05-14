@@ -40,6 +40,9 @@ vi.mock("@/lib/api", () => ({
   acceptDiscoveredCamera: vi.fn(),
   fetchVpnStatus: () => fetchVpnStatusMock(),
   createVpnPeer: (label: string) => createVpnPeerMock(label),
+  // AI step is downstream — empty mock so its Skip link is always present.
+  fetchModels: vi.fn(async () => ({ models: [] })),
+  sendChat: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -155,6 +158,12 @@ describe("setup VPN step (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 
+    // VPN finished → AI step. Skip it to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
@@ -274,6 +283,12 @@ describe("setup VPN step (WARP-174)", () => {
       );
     });
 
+    // VPN finished → AI step. Skip it to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
   });
 });

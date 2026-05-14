@@ -46,6 +46,8 @@ vi.mock("@/lib/api", () => ({
     endpointConfigured: false,
   })),
   createVpnPeer: vi.fn(),
+  fetchModels: vi.fn(async () => ({ models: [] })),
+  sendChat: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],

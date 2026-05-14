@@ -47,6 +47,9 @@ vi.mock("@/lib/api", () => ({
     endpointConfigured: false,
   })),
   createVpnPeer: vi.fn(),
+  // AI step: no models yet → "Skip for now" is always present.
+  fetchModels: vi.fn(async () => ({ models: [] })),
+  sendChat: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -117,7 +120,15 @@ describe("setup flow → done state", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
-    // VPN step preCheck → skip → done.
+    // VPN step preCheck → skip → AI.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    // AI step → skip → Done. fetchModels mocked empty so the picker
+    // just shows "No models available yet"; the Skip link is always
+    // rendered.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

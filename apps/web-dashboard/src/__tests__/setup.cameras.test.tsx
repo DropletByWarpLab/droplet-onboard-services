@@ -47,6 +47,8 @@ vi.mock("@/lib/api", () => ({
     endpointConfigured: false,
   })),
   createVpnPeer: vi.fn(),
+  fetchModels: vi.fn(async () => ({ models: [] })),
+  sendChat: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -136,7 +138,12 @@ describe("setup Cameras step (WARP-174)", () => {
     render(<SetupPage />);
     await advanceToCameras();
     // Skipped through to Done — WelcomeFlourish renders.
-    // Cameras step finished. Skip the VPN step's preCheck to reach Done.
+    // Cameras step finished. Skip VPN preCheck, then AI, to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -192,7 +199,12 @@ describe("setup Cameras step (WARP-174)", () => {
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-1");
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-2");
     // Landed on Done.
-    // Cameras step finished. Skip the VPN step's preCheck to reach Done.
+    // Cameras step finished. Skip VPN preCheck, then AI, to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -211,7 +223,12 @@ describe("setup Cameras step (WARP-174)", () => {
     });
 
     expect(acceptDiscoveredCameraMock).not.toHaveBeenCalled();
-    // Cameras step finished. Skip the VPN step's preCheck to reach Done.
+    // Cameras step finished. Skip VPN preCheck, then AI, to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
