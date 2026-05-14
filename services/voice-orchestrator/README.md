@@ -86,8 +86,9 @@ USB mic in after the box has already booted.
 | `DEVICE_RESCAN_INTERVAL` | `5` | Seconds between hot-plug rescans. |
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Where to POST chat turns. |
 | `ORCHESTRATOR_TOKEN` | *(empty)* | Bearer token for orchestrator. Set in compose from the same secret the rest of the stack uses. |
-| `WAKE_WORD` | `hey_droplet` | Wake-word model name. Falls back to a built-in if the custom `.onnx` isn't on disk yet. |
+| `WAKE_WORD` | `hey_jarvis` | Wake-word model name. openWakeWord ships several bundled models — `hey_jarvis`, `alexa`, `hey_mycroft`. To use a custom-trained model, drop `<name>.onnx` into `/app/models/` and set `WAKE_WORD=<name>`. The custom "Hey Droplet" model ships once Stefan's training data lands; until then the default is `hey_jarvis` for dev. Set to `__mock__` for a dev box with no real wake model. |
 | `WAKE_THRESHOLD` | `0.5` | Detector confidence threshold (0 – 1). Raise to reduce false-positives. |
+| `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Control API
@@ -101,7 +102,7 @@ reach it via the Docker network).
 | `/audio/devices` | GET | List of all detected ALSA devices with their score + the current pick |
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |
-| `/voice/status` | GET | Pipeline state (`listening`, `wake_detected`, `transcribing`, `responding`, `speaking`, `idle`). Subsequent commits add this. |
+| `/voice/status` | GET | Wake pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`. Read-only; safe to poll. |
 
 ## Running on the POC box
 
@@ -123,12 +124,14 @@ you don't expose 8086 externally.
 This README ships in commit 1; the layered functionality is broken
 into stacked commits per `docs/voice-assistant-plan.md`:
 
-1. **Foundation** (this commit) — hardware detection, audio I/O,
-   FastAPI shell, Docker. `/audio/devices`, `/audio/test-tone`,
-   `/audio/test-record` all work without any wake/STT/TTS yet.
-2. **openWakeWord** — wake-word detection loop. Default wake word
-   ships with the image; custom "Hey Droplet" `.onnx` swaps in
-   later once Stefan has training data ready.
+1. **Foundation** — hardware detection, audio I/O, FastAPI shell,
+   Docker. `/audio/devices`, `/audio/test-tone`, `/audio/test-record`
+   work without any wake/STT/TTS.
+2. **openWakeWord** (this commit) — wake-word detection loop on a
+   background thread; `/voice/status` surfaces state. Default wake
+   word `hey_jarvis` ships pre-baked in the image; custom
+   "Hey Droplet" `.onnx` swaps in later once Stefan has training
+   data ready.
 3. **STT** — wyoming-faster-whisper integration, reusing the same
    model files `services/file-indexer` already has on disk.
 4. **TTS** — Piper for the response audio.

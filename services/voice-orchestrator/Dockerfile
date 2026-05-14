@@ -30,7 +30,20 @@ WORKDIR /app
 COPY services/voice-orchestrator/requirements.txt \
      services/voice-orchestrator/requirements-dev.txt \
      /app/
-RUN pip install --no-cache-dir -r /app/requirements-dev.txt
+RUN pip install --no-cache-dir -r /app/requirements-dev.txt && \
+    # openWakeWord 0.6.0's setup.py pins `tflite-runtime` which has no
+    # Python 3.12 wheel for x86_64. The ONNX-side deps are already pinned
+    # in requirements.txt; here we install openwakeword itself with
+    # --no-deps so pip doesn't try to resolve tflite-runtime.
+    pip install --no-cache-dir --no-deps openwakeword==0.6.0
+
+# Pre-warm the bundled model cache so the first /voice/status hit
+# doesn't pay the model-download tax. openWakeWord stashes models in
+# ~/.local/share/openwakeword/resources/models — bake them in. If the
+# download fails (no network at build time) we don't fail the build;
+# the runtime lazy-load will retry on first predict().
+RUN python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis_v0.1', 'alexa_v0.1', 'hey_mycroft_v0.1'])" || \
+    echo "openwakeword model pre-fetch skipped (offline build OK; runtime will fetch)"
 
 # The service source.
 COPY services/voice-orchestrator/ /app/

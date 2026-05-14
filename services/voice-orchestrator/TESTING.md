@@ -18,9 +18,12 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-27 tests across `tests/test_devices.py`. Sub-second total. No real
-audio hardware required — the fixtures inject a fake `sounddevice`
-module + a synthetic `/sys/class/sound` tree under `tmp_path`.
+70 tests across `tests/test_devices.py`, `tests/test_wake.py`,
+`tests/test_pipeline.py`. Sub-second total. No real audio hardware
+required — the fixtures inject a fake `sounddevice` module + a
+synthetic `/sys/class/sound` tree under `tmp_path`, and the wake
+detector + pipeline tests inject mock detectors and a scripted
+fake sounddevice stream.
 
 ### Inside the same container that runs in production
 
@@ -73,6 +76,45 @@ service workflows pending the GitHub-Actions-minutes restoration.
     - POC + ReSpeaker 4-Mic USB array
     - Production v2.6 (Jetson + I/O Brick I²S codec)
     - Generic dev box (USB headset)
+
+`tests/test_wake.py` (18) — wake-word detector contract:
+  - `MockWakeWordDetector` replays scripted scores, then 0.0 once
+    exhausted. Drives pipeline tests deterministically.
+  - `DisabledWakeWordDetector` is `loaded=False`, `predict()` returns
+    `{}`. The "voice degraded" fallback when openwakeword fails to
+    load — pipeline still pumps audio so `/audio/test-record` keeps
+    working.
+  - `OpenWakeWordDetector` lazy-loads (construction never imports
+    openwakeword), and on import failure returns `{}` from predict
+    rather than raising. Load attempts are one-shot (`_load_attempted`)
+    so a missing wheel doesn't spam 80 ImportErrors/sec.
+  - `build_detector_from_env` routes `WAKE_WORD=__mock__` to the
+    mock; anything else to openWakeWord. Whitespace stripped
+    defensively (env arrives from docker-compose with stray
+    newlines occasionally).
+
+`tests/test_pipeline.py` (25) — wake pipeline state machine:
+  - Construction lands in `state='idle'` with all wake fields None.
+  - `start()` with `input_device_index=None` transitions to
+    `'no_mic'` and never spawns a worker thread.
+  - `stop()` is idempotent; calling it without `start()` is safe.
+  - Sub-threshold frames don't fire the callback or move state.
+  - Above-threshold frames fire `on_wake` exactly once, record the
+    wake event in status atomically.
+  - Detector + callback exceptions are caught — detector errors
+    transition to `'error'` state with `error_message` set; callback
+    errors are logged but never propagate.
+  - Debounce window coalesces rapid frames (one wake event per
+    `WAKE_DEBOUNCE_S`); re-fires once the window passes.
+  - Visual-decay computes at read-time: `'wake_detected'` reverts
+    to `'listening'` after `WAKE_VISUAL_DECAY_S` without any
+    background timer thread.
+  - `status()` snapshot is lock-coherent under concurrent reader +
+    writer threads (smoke test with 3 readers + 1 writer × 200
+    iterations).
+  - `_loop()` end-to-end with an injected fake sounddevice module
+    pumps a scripted frame sequence through, fires the callback,
+    exits cleanly when the fake stream signals EOF.
 
 ## Adding a test
 

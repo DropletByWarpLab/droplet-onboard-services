@@ -1,16 +1,15 @@
 """voice-orchestrator FastAPI control surface.
 
-Three responsibilities this commit:
+Live this commit:
 
-  1. Boot up, discover audio devices, log what we picked.
-  2. Expose /health + /audio/devices so the dashboard can show state.
-  3. Expose /audio/test-tone + /audio/test-record so operators can
-     answer "is my mic / speaker actually wired correctly?" without
-     SSH-ing into the host.
+  1. Boot up, discover audio devices, pick best, start wake pipeline.
+  2. /health + /audio/devices for the dashboard.
+  3. /audio/test-tone + /audio/test-record for hardware verification.
+  4. /voice/status — wake pipeline state machine.
 
-Wake / STT / TTS / pipeline come in subsequent commits — each ships a
-new sub-package and a small endpoint or two; the dashboard's voice
-settings page stays in sync via the same /health snapshot shape.
+Wake-word loop runs on a background thread spawned at FastAPI
+startup; shut down cleanly on shutdown event. STT / TTS / agent glue
+come in subsequent commits.
 """
 from __future__ import annotations
 
@@ -31,6 +30,12 @@ from voice.devices import (
     DeviceResolution,
     resolve_devices,
 )
+from voice.pipeline import (
+    DEFAULT_DEBOUNCE_S,
+    DEFAULT_THRESHOLD,
+    WakePipeline,
+)
+from voice.wake import build_detector_from_env
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -39,8 +44,16 @@ logging.basicConfig(
 logger = logging.getLogger("voice.main")
 
 SAMPLE_RATE = int(os.environ.get("VOICE_SAMPLE_RATE", "16000"))
+WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", str(DEFAULT_THRESHOLD)))
+WAKE_DEBOUNCE_S = float(
+    os.environ.get("WAKE_DEBOUNCE_S", str(DEFAULT_DEBOUNCE_S))
+)
 
 app = FastAPI(title="voice-orchestrator", version="0.1.0")
+
+# Pipeline lives at module scope so /voice/status can read its state
+# from the request thread while the worker thread is mid-prediction.
+_pipeline: Optional[WakePipeline] = None
 
 
 # Cached on first call; /audio/devices refreshes on demand.
@@ -84,13 +97,39 @@ def _resolve() -> DeviceResolution:
 
 @app.on_event("startup")
 async def startup() -> None:
-    # Resolve on boot so the first /health hit is cheap. Doesn't fail
-    # the boot if PortAudio is missing — we want the service running
-    # so operators can still hit /audio/devices and see "no audio".
+    # Resolve audio devices on boot so the first /health hit is cheap.
+    # Doesn't fail the boot if PortAudio is missing — we want the
+    # service running so operators can still hit /audio/devices and
+    # see "no audio".
     try:
-        _resolve()
+        r = _resolve()
     except Exception as exc:  # pragma: no cover — defensive
         logger.error("device resolution failed at startup: %s", exc)
+        return
+
+    # Spin up the wake-detection pipeline. The detector is constructed
+    # synchronously (cheap — model load is lazy) but the worker thread
+    # is what actually opens the mic stream + ONNX runtime.
+    global _pipeline
+    try:
+        detector = build_detector_from_env()
+        _pipeline = WakePipeline(
+            detector=detector,
+            input_device_index=r.input_device.index if r.input_device else None,
+            threshold=WAKE_THRESHOLD,
+            debounce_s=WAKE_DEBOUNCE_S,
+        )
+        _pipeline.start()
+    except Exception as exc:
+        logger.error("wake pipeline failed to start: %s", exc)
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    global _pipeline
+    if _pipeline is not None:
+        _pipeline.stop()
+        _pipeline = None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -101,10 +140,22 @@ class HealthResponse(BaseModel):
     ok: bool
     inputAvailable: bool
     outputAvailable: bool
-    # Subsequent commits flip these to true as their layers come online.
     wakeLoaded: bool = False
+    # Subsequent commits flip these to true as their layers come online.
     sttLoaded: bool = False
     ttsLoaded: bool = False
+
+
+class VoiceStatusResponse(BaseModel):
+    state: str
+    listening: bool
+    wake_loaded: bool
+    wake_model: Optional[str] = None
+    threshold: float
+    last_wake_at: Optional[float] = None
+    last_wake_score: Optional[float] = None
+    last_wake_model: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class TestRecordResponse(BaseModel):
@@ -127,10 +178,46 @@ class TestToneResponse(BaseModel):
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     r = _resolve()
+    wake_loaded = False
+    if _pipeline is not None:
+        # Cheap atomic read; no I/O on the pipeline thread.
+        wake_loaded = _pipeline.status().wake_loaded
     return HealthResponse(
         ok=True,
         inputAvailable=r.input_device is not None,
         outputAvailable=r.output_device is not None,
+        wakeLoaded=wake_loaded,
+    )
+
+
+@app.get("/voice/status", response_model=VoiceStatusResponse)
+def voice_status() -> VoiceStatusResponse:
+    """Snapshot of the wake-detection pipeline.
+
+    Read-only — never blocks the worker. The dashboard polls this on
+    the voice settings page to render the "listening" pulse + show
+    the last wake event for debugging.
+    """
+    if _pipeline is None:
+        # Pipeline never started (no mic, or startup() bailed). Surface
+        # a stable shape so the dashboard doesn't need a special case.
+        return VoiceStatusResponse(
+            state="no_mic",
+            listening=False,
+            wake_loaded=False,
+            threshold=WAKE_THRESHOLD,
+        )
+    s = _pipeline.status()
+    return VoiceStatusResponse(
+        state=s.state,
+        listening=s.listening,
+        wake_loaded=s.wake_loaded,
+        wake_model=s.wake_model,
+        threshold=s.threshold,
+        last_wake_at=s.last_wake_at,
+        last_wake_score=s.last_wake_score,
+        last_wake_model=s.last_wake_model,
+        error_message=s.error_message,
     )
 
 

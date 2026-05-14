@@ -8,10 +8,21 @@ pydantic==2.9.2           # Schemas
 httpx==0.27.2             # Async HTTP client for orchestrator/LLM proxying (used in subsequent commits)
 python-multipart==0.0.10  # FastAPI form-upload support (mic-test endpoint accepts audio uploads)
 
-# Wake / STT / TTS pull their own deps in subsequent commits:
-#   commit 2 — openwakeword + onnxruntime (NOT tflite-runtime; the
-#              latter has no Python 3.12 wheel and openWakeWord supports
-#              the ONNX backend natively)
-#   commit 3 — wyoming-faster-whisper is a separate container in the
+# Wake-word stack (commit 4, WARP-154).
+#
+# openWakeWord ships an ONNX backend natively — we do NOT use tflite-runtime
+# (the upstream default), which has no Python 3.12 wheel for x86_64. The
+# Dockerfile installs `openwakeword` with `--no-deps` to skip the tflite-runtime
+# pin in its setup.py, and we ship the ONNX-side deps explicitly here so
+# `pip install -r requirements.txt` from a dev box still works.
+onnxruntime==1.20.1       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
+scipy==1.14.1             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
+huggingface_hub==0.27.0   # First-run download of bundled models (hey_jarvis, alexa, etc.)
+tqdm==4.66.5              # Progress bar during model download
+pyyaml==6.0.2             # openWakeWord parses model config from YAML
+requests==2.32.3          # huggingface_hub's HTTP layer
+
+# STT / TTS pull their own deps in subsequent commits:
+#   commit 5 — wyoming-faster-whisper is a separate container in the
 #              compose stack, not bundled here.
-#   commit 4 — piper-tts (uses bundled onnxruntime models)
+#   commit 6 — piper-tts (uses bundled onnxruntime models)
