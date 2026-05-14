@@ -563,6 +563,12 @@ services:
       - STT_URL=${STT_URL:-tcp://wyoming-faster-whisper:10300}
       - STT_LANGUAGE=${STT_LANGUAGE:-en}
       - STT_MAX_RECORD_S=${STT_MAX_RECORD_S:-5.0}
+      # TTS — synthesizes the LLM's reply via Piper. Same Wyoming
+      # protocol as STT, different port. Set TTS_URL=__mock__ for a dev
+      # box with no Piper container (the pipeline will accept speak()
+      # calls but play silent audio).
+      - TTS_URL=${TTS_URL:-tcp://wyoming-piper:10200}
+      - TTS_VOICE=${TTS_VOICE:-en_US-ryan-medium}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.
@@ -601,6 +607,28 @@ services:
       # `docker compose down` doesn't redownload; mounted read-write so
       # the first-run download can land in the right place.
       - whisper-models:/data
+    restart: always
+
+  # --- Piper TTS sidecar (WARP-154) ---
+  # Rhasspy's wyoming-piper. Pairs with wyoming-faster-whisper to
+  # complete the voice loop: mic → STT (text) → LLM → reply text → TTS
+  # (audio) → speaker. Same Wyoming protocol on TCP/10200 by default.
+  # Voices download on first request and cache in the named volume.
+  wyoming-piper:
+    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-latest}
+    profiles: ["linux"]
+    expose:
+      - "10200"
+    environment:
+      - PIPER_VOICE=${TTS_VOICE:-en_US-ryan-medium}
+    command: >
+      --voice ${TTS_VOICE:-en_US-ryan-medium}
+      --uri tcp://0.0.0.0:10200
+    volumes:
+      # ~70 MB per voice — persistent so we don't redownload on every
+      # compose down/up. Multiple voices coexist; change TTS_VOICE in
+      # .env to switch.
+      - piper-voices:/data
     restart: always
 
   # --- TFT Display (3.5" front-panel) ---
@@ -665,3 +693,5 @@ volumes:
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.
   whisper-models:
+  # WARP-154 — Piper voice cache (~70 MB per voice).
+  piper-voices:

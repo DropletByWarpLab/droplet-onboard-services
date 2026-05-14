@@ -92,6 +92,8 @@ USB mic in after the box has already booted.
 | `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
 | `STT_LANGUAGE` | `en` | Language code for transcription. |
 | `STT_MAX_RECORD_S` | `5.0` | Seconds of audio captured per wake before sending audio-stop. VAD-based cutoff lands in a follow-up; for now this is a fixed window. |
+| `TTS_URL` | `tcp://wyoming-piper:10200` | Wyoming-protocol Piper server. Set to `__mock__` for silent playback (dev box without a Piper container). |
+| `TTS_VOICE` | `en_US-ryan-medium` | Piper voice name. ~70 MB per voice; downloads on first request and caches in the `piper-voices` volume. Other natural-sounding options: `en_US-lessac-medium`, `en_GB-jenny-medium`. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Control API
@@ -105,7 +107,8 @@ reach it via the Docker network).
 | `/audio/devices` | GET | List of all detected ALSA devices with their score + the current pick |
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |
-| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`. Read-only; safe to poll. |
+| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`. Read-only; safe to poll. |
+| `/voice/say` | POST | `{"text":"hello world","voice":"en_US-ryan-medium"}` — synthesize + play through the picked speaker. Test endpoint until commit 7 wires the LLM-reply path. Returns `{ok, duration_s, sample_rate}`. |
 
 ## Running on the POC box
 
@@ -134,13 +137,15 @@ into stacked commits per `docs/voice-assistant-plan.md`:
    thread; `/voice/status` surfaces state. Default wake word
    `hey_jarvis` ships pre-baked in the image; custom "Hey Droplet"
    `.onnx` swaps in later once Stefan has training data ready.
-3. **STT** (this commit) — wyoming-faster-whisper sidecar container
-   speaks Wyoming protocol over TCP. After wake, voice-orchestrator
-   streams the next 5 s of mic audio (fixed window — VAD-based cutoff
-   in a follow-up), receives the transcript, exposes it via
-   `/voice/status.last_transcript`. The next commit hooks this to
-   the LLM agent loop.
-4. **TTS** — Piper for the response audio.
+3. **STT** — wyoming-faster-whisper sidecar container speaks Wyoming
+   protocol over TCP. After wake, voice-orchestrator streams the next
+   5 s of mic audio (fixed window — VAD-based cutoff in a follow-up),
+   receives the transcript, exposes it via
+   `/voice/status.last_transcript`.
+4. **TTS** (this commit) — wyoming-piper sidecar speaks Wyoming
+   protocol on TCP/10200. `pipeline.speak(text)` synthesizes + plays
+   through the picked speaker; surface via `POST /voice/say` (testing)
+   and `pipeline.speak()` (commit 7 wires it to the LLM reply).
 5. **Agent glue** — pipeline.py wires capture → wake → STT → LLM →
    TTS → playback. Adds the four voice-control LLM tools
    (`set_volume`, `mute_mic`, `change_voice`, `mic_status`) called

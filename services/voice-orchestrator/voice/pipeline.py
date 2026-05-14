@@ -67,6 +67,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from voice.stt import STTUnavailable, StreamingSTT
+from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     WAKE_SAMPLE_RATE,
@@ -88,7 +89,8 @@ DEFAULT_STT_MAX_RECORD_S = 5.0  # captured audio per wake (no VAD yet — fixed 
 # than an Enum because all reads cross thread boundaries + JSON, and
 # string is what survives both without ceremony.
 PipelineState = str  # idle | loading | listening | wake_detected |
-                     # transcribing | transcript_ready | error | no_mic
+                     # transcribing | transcript_ready | speaking |
+                     # error | no_mic
 
 
 @dataclass
@@ -110,6 +112,13 @@ class PipelineStatus:
     stt_loaded: bool = False
     last_transcript: Optional[str] = None
     last_transcript_at: Optional[float] = None
+    # TTS fields (commit 6). `tts_loaded` is the at-startup reachability;
+    # `last_response` is the most recent text that got spoken. Commit 7
+    # populates last_response from the LLM reply; until then speak() can
+    # be called directly via POST /voice/say.
+    tts_loaded: bool = False
+    last_response: Optional[str] = None
+    last_response_at: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -140,6 +149,8 @@ class WakePipeline:
         stt: Optional[StreamingSTT] = None,
         on_transcript: Optional[Callable[[str], None]] = None,
         stt_max_record_s: float = DEFAULT_STT_MAX_RECORD_S,
+        tts: Optional[TextToSpeech] = None,
+        output_device_index: Optional[int] = None,
         sd_module: Any = None,
     ):
         self._detector = detector
@@ -151,6 +162,11 @@ class WakePipeline:
         self._stt = stt  # None disables STT entirely (commit 4 behaviour)
         self._on_transcript = on_transcript or self._default_on_transcript
         self._stt_max_record_s = stt_max_record_s
+        # TTS — commit 6 wires it up, commit 7 calls speak() from the
+        # LLM-reply path. Until commit 7, speak() is reachable only via
+        # POST /voice/say (test endpoint).
+        self._tts = tts
+        self._output_device_index = output_device_index
         self._sd_module = sd_module  # dependency injection for tests
 
         self._thread: Optional[threading.Thread] = None
@@ -164,6 +180,8 @@ class WakePipeline:
         self._last_wake_model: Optional[str] = None
         self._last_transcript: Optional[str] = None
         self._last_transcript_at: Optional[float] = None
+        self._last_response: Optional[str] = None
+        self._last_response_at: Optional[float] = None
         self._error_message: Optional[str] = None
         self._last_fire_at: float = 0.0  # debounce tracking
 
@@ -177,6 +195,8 @@ class WakePipeline:
         # use (start()), cached for the process lifetime. Surfaced via
         # status().stt_loaded and /health's sttLoaded.
         self._stt_available: bool = False
+        # Same idea for TTS — probed at start(), surfaced via tts_loaded.
+        self._tts_available: bool = False
 
     # ──────────────────────────────────────────────────────────────
     # Lifecycle
@@ -190,16 +210,23 @@ class WakePipeline:
             self._set_state("no_mic")
             logger.info("WakePipeline: no input device — not starting worker")
             return
-        # Probe STT reachability once up front so /voice/status' stt_loaded
-        # flag is meaningful. A failed probe doesn't block the worker —
+        # Probe STT + TTS reachability once up front so /voice/status'
+        # flags are meaningful. A failed probe doesn't block the worker —
         # we still want the wake loop running so the operator can see
-        # detections in /voice/status while diagnosing the STT side.
+        # detections in /voice/status while diagnosing.
         if self._stt is not None:
             self._stt_available = self._stt.available
             if not self._stt_available:
                 logger.warning(
                     "STT server unreachable at startup — wake detection "
                     "stays on but no transcripts will be produced",
+                )
+        if self._tts is not None:
+            self._tts_available = self._tts.available
+            if not self._tts_available:
+                logger.warning(
+                    "TTS server unreachable at startup — synthesis disabled "
+                    "until reachable",
                 )
         self._shutdown.clear()
         self._set_state("loading")
@@ -216,6 +243,91 @@ class WakePipeline:
             t.join(timeout=timeout)
         self._thread = None
         self._set_state("idle")
+
+    # ──────────────────────────────────────────────────────────────
+    # Speak — synthesize text + play through the speaker
+    # ──────────────────────────────────────────────────────────────
+
+    def speak(self, text: str, voice: Optional[str] = None) -> dict[str, Any]:
+        """Synthesize `text` to PCM and play it through the output device.
+
+        Returns a dict with the result for the API caller:
+          ok          — bool
+          duration_s  — float, playback length (0 if synthesize returned empty)
+          sample_rate — server-determined
+          error       — present iff ok=False
+
+        Blocks until playback finishes. Called from the FastAPI request
+        thread (POST /voice/say) and, in commit 7, from the LLM-reply
+        callback. Either way, while we're speaking we don't run wake
+        detection — that's anti-feedback by design (Piper's voice
+        otherwise wakes the wake-word detector).
+        """
+        if self._tts is None or not self._tts_available:
+            return {"ok": False, "error": "TTS unavailable", "duration_s": 0.0}
+        if not text or not text.strip():
+            return {"ok": False, "error": "empty text", "duration_s": 0.0}
+
+        # Record state + transition. The wake loop sees 'speaking' on
+        # its next frame and skips wake detection (handler is a no-op
+        # for that state).
+        with self._lock:
+            prev_state = self._state
+            self._state = "speaking"
+            self._last_response = text
+            self._last_response_at = time.time()
+
+        try:
+            audio = self._tts.synthesize(text, voice=voice)
+        except TTSUnavailable as exc:
+            self._set_error(f"TTS synthesize failed: {exc}")
+            return {"ok": False, "error": str(exc), "duration_s": 0.0}
+
+        # Play. Skip if the synthesized audio is empty (e.g. empty text).
+        if not audio.pcm:
+            self._restore_state_after_speak(prev_state)
+            return {"ok": True, "duration_s": 0.0, "sample_rate": audio.sample_rate}
+
+        try:
+            self._play_pcm(audio)
+        except Exception as exc:
+            self._set_error(f"playback failed: {exc}")
+            return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
+
+        self._restore_state_after_speak(prev_state)
+        return {
+            "ok": True,
+            "duration_s": audio.duration_s,
+            "sample_rate": audio.sample_rate,
+        }
+
+    def _play_pcm(self, audio: SynthesizedAudio) -> None:
+        """Hand the PCM to sounddevice. Blocking."""
+        # sounddevice wants a numpy array. We get int16 mono from Piper —
+        # the playback driver in audio_io.play handles dtype + rate.
+        import numpy as _np
+        from voice.audio_io import play as _play
+        pcm = _np.frombuffer(audio.pcm, dtype=_np.int16)
+        if audio.channels > 1:
+            pcm = pcm.reshape(-1, audio.channels)
+        _play(pcm, samplerate=audio.sample_rate, device=self._output_device_index)
+
+    def _restore_state_after_speak(self, prev_state: PipelineState) -> None:
+        """Return to whatever state we were in before speak() was called.
+
+        If we were called mid-flow from the LLM reply path (commit 7),
+        prev_state will be transcript_ready and we'll fall back into
+        that until visual-decay. For a manual POST /voice/say, prev_state
+        is usually 'listening' and we go straight back.
+        """
+        with self._lock:
+            # If something else flipped us to error during playback,
+            # don't clobber that with the previous state.
+            if self._state == "speaking":
+                self._state = (
+                    prev_state if prev_state in ("listening", "transcript_ready")
+                    else "listening"
+                )
 
     # ──────────────────────────────────────────────────────────────
     # Status — atomic snapshot
@@ -246,7 +358,8 @@ class WakePipeline:
                 # `listening` in the API means "actively consuming audio":
                 # true for listening, wake_detected, transcribing, and
                 # the transient transcript_ready state. False for
-                # idle/loading/error/no_mic.
+                # idle/loading/error/no_mic/speaking — while speaking, the
+                # mic isn't actively waking (anti-feedback by design).
                 listening=state in (
                     "listening", "wake_detected",
                     "transcribing", "transcript_ready",
@@ -261,6 +374,9 @@ class WakePipeline:
                 stt_loaded=self._stt_available,
                 last_transcript=self._last_transcript,
                 last_transcript_at=self._last_transcript_at,
+                tts_loaded=self._tts_available,
+                last_response=self._last_response,
+                last_response_at=self._last_response_at,
             )
 
     # ──────────────────────────────────────────────────────────────
@@ -331,6 +447,11 @@ class WakePipeline:
         if state == "transcript_ready":
             # Wait for visual-decay; the next frame after that will land
             # in 'listening' again via _maybe_decay_state above.
+            return
+        if state == "speaking":
+            # Anti-feedback: while we're driving the speaker, ignore
+            # incoming mic frames entirely. Piper's voice would otherwise
+            # tip the wake detector on a self-spoken "hey jarvis ...".
             return
 
         # state == "listening" (or 'loading' on the first tick — harmless,

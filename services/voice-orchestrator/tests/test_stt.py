@@ -359,3 +359,78 @@ class TestWireHelpers:
             assert data == b"abcdefghij"
         finally:
             rsock.close()
+
+
+class TestReadEventWireFormats:
+    """Wyoming has v1 (inline data) and v2 (separate JSON block via
+    `data_length`). Different rhasspy/wyoming-* image versions pick
+    differently — wyoming-piper-1.6+ uses v2, wyoming-whisper-current
+    uses v1. The parser MUST accept both transparently.
+    """
+
+    def test_v1_inline_data(self):
+        # `data` field carries the JSON inline; payload follows the newline.
+        from voice.stt import _read_event
+        rsock, wsock = socket.socketpair()
+        try:
+            wsock.sendall(
+                b'{"type": "transcript", "data": {"text": "hi"}, "payload_length": 0}\n'
+            )
+            wsock.close()
+            result = _read_event(rsock)
+            assert result is not None
+            header, payload = result
+            assert header["type"] == "transcript"
+            assert header["data"] == {"text": "hi"}
+            assert payload == b""
+        finally:
+            rsock.close()
+
+    def test_v2_separate_data_block(self):
+        # `data_length` says read N bytes of JSON after the header line.
+        from voice.stt import _read_event
+        rsock, wsock = socket.socketpair()
+        try:
+            data_json = b'{"rate": 22050, "width": 2, "channels": 1}'
+            wsock.sendall(
+                b'{"type":"audio-chunk","data_length":'
+                + str(len(data_json)).encode()
+                + b',"payload_length":4}\n'
+                + data_json
+                + b'\x01\x02\x03\x04'
+            )
+            wsock.close()
+            result = _read_event(rsock)
+            assert result is not None
+            header, payload = result
+            assert header["type"] == "audio-chunk"
+            assert header["data"] == {"rate": 22050, "width": 2, "channels": 1}
+            assert payload == b'\x01\x02\x03\x04'
+        finally:
+            rsock.close()
+
+    def test_v2_zero_payload(self):
+        # audio-stop typically has data_length=0 and payload_length=0.
+        from voice.stt import _read_event
+        rsock, wsock = socket.socketpair()
+        try:
+            wsock.sendall(
+                b'{"type":"audio-stop","data_length":0,"payload_length":0}\n'
+            )
+            wsock.close()
+            result = _read_event(rsock)
+            assert result is not None
+            header, payload = result
+            assert header["type"] == "audio-stop"
+            assert payload == b""
+        finally:
+            rsock.close()
+
+    def test_clean_close_returns_none(self):
+        from voice.stt import _read_event
+        rsock, wsock = socket.socketpair()
+        wsock.close()
+        try:
+            assert _read_event(rsock) is None
+        finally:
+            rsock.close()

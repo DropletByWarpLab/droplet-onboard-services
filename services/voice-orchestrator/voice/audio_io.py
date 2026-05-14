@@ -65,7 +65,11 @@ def play(
     samplerate: int,
     device: Optional[int],
 ) -> None:
-    """Blocking playback. Accepts int16 or float32; sounddevice handles both."""
+    """Blocking playback. Accepts int16 or float32; sounddevice handles
+    both. If the output device rejects the source samplerate (common
+    when Piper outputs 22050 Hz to a 16 kHz / 48 kHz-only USB sink),
+    we resample to the device's native rate via scipy and retry.
+    """
     _require_sd()
     if device is None:
         raise AudioUnavailable("no output device resolved")
@@ -73,8 +77,58 @@ def play(
         "playing %d samples @ %d Hz to device %s",
         len(audio), samplerate, device,
     )
-    _sd.play(audio, samplerate=samplerate, device=device)
+
+    # Pre-check: does the device accept this samplerate? `check_output_settings`
+    # raises PortAudioError(-9997) when not. We catch that, resample, retry.
+    channels = 1 if audio.ndim == 1 else int(audio.shape[1])
+    try:
+        _sd.check_output_settings(
+            device=device, samplerate=samplerate, channels=channels,
+            dtype=str(audio.dtype),
+        )
+        play_audio = audio
+        play_rate = samplerate
+    except Exception as exc:
+        # Resample to the device's preferred rate. If query_devices fails
+        # (very rare on Linux ALSA), fall back to 48000 — a near-universal
+        # USB-audio default.
+        try:
+            info = _sd.query_devices(device)
+            target_rate = int(info.get("default_samplerate") or 48000)
+        except Exception:
+            target_rate = 48000
+        logger.info(
+            "playback: device %s rejects %d Hz (%s); resampling to %d Hz",
+            device, samplerate, exc, target_rate,
+        )
+        play_audio = _resample_int16(audio, samplerate, target_rate)
+        play_rate = target_rate
+
+    _sd.play(play_audio, samplerate=play_rate, device=device)
     _sd.wait()
+
+
+def _resample_int16(
+    audio: np.ndarray, src_rate: int, dst_rate: int,
+) -> np.ndarray:
+    """Resample int16 PCM from src_rate to dst_rate via scipy's
+    polyphase filter. Preserves int16 dtype so PortAudio still gets
+    the type it expects.
+
+    scipy.signal.resample_poly is the right tool for integer-ratio
+    rate conversion (22050→48000 = 480/220.5, but poly_resample handles
+    arbitrary up/down factors via L/M reduction). Quality is sufficient
+    for spoken TTS — we're not chasing audiophile fidelity here.
+    """
+    if src_rate == dst_rate:
+        return audio
+    from scipy.signal import resample_poly
+    # scipy works in float; convert + scale to avoid clipping.
+    as_float = audio.astype(np.float32) / 32768.0
+    resampled = resample_poly(as_float, dst_rate, src_rate, axis=0)
+    # Clamp to int16 range and convert back.
+    np.clip(resampled, -1.0, 1.0, out=resampled)
+    return (resampled * 32767.0).astype(np.int16)
 
 
 def test_tone(

@@ -37,6 +37,7 @@ from voice.pipeline import (
     WakePipeline,
 )
 from voice.stt import build_stt_from_env
+from voice.tts import build_tts_from_env
 from voice.wake import build_detector_from_env
 
 logging.basicConfig(
@@ -114,17 +115,20 @@ async def startup() -> None:
 
     # Spin up the wake-detection pipeline. The detector is constructed
     # synchronously (cheap — model load is lazy) but the worker thread
-    # is what actually opens the mic stream + ONNX runtime. STT client
-    # is also lazy — `available` is probed by pipeline.start() once,
-    # not on every transcript.
+    # is what actually opens the mic stream + ONNX runtime. STT + TTS
+    # clients are also lazy — `available` is probed by pipeline.start()
+    # once, not on every transcript / synthesize.
     global _pipeline
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
+        tts = build_tts_from_env()
         _pipeline = WakePipeline(
             detector=detector,
             stt=stt,
+            tts=tts,
             input_device_index=r.input_device.index if r.input_device else None,
+            output_device_index=r.output_device.index if r.output_device else None,
             threshold=WAKE_THRESHOLD,
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
@@ -173,6 +177,25 @@ class VoiceStatusResponse(BaseModel):
     stt_loaded: bool = False
     last_transcript: Optional[str] = None
     last_transcript_at: Optional[float] = None
+    # TTS (commit 6). `tts_loaded` is the at-startup reachability flag;
+    # `last_response` is the most recent text we spoke aloud — set by
+    # pipeline.speak() (called from /voice/say today, the LLM agent
+    # loop in commit 7).
+    tts_loaded: bool = False
+    last_response: Optional[str] = None
+    last_response_at: Optional[float] = None
+
+
+class SayRequest(BaseModel):
+    text: str
+    voice: Optional[str] = None
+
+
+class SayResponse(BaseModel):
+    ok: bool
+    duration_s: float
+    sample_rate: Optional[int] = None
+    error: Optional[str] = None
 
 
 class TestRecordResponse(BaseModel):
@@ -197,17 +220,20 @@ def health() -> HealthResponse:
     r = _resolve()
     wake_loaded = False
     stt_loaded = False
+    tts_loaded = False
     if _pipeline is not None:
         # Cheap atomic read; no I/O on the pipeline thread.
         s = _pipeline.status()
         wake_loaded = s.wake_loaded
         stt_loaded = s.stt_loaded
+        tts_loaded = s.tts_loaded
     return HealthResponse(
         ok=True,
         inputAvailable=r.input_device is not None,
         outputAvailable=r.output_device is not None,
         wakeLoaded=wake_loaded,
         sttLoaded=stt_loaded,
+        ttsLoaded=tts_loaded,
     )
 
 
@@ -242,6 +268,44 @@ def voice_status() -> VoiceStatusResponse:
         stt_loaded=s.stt_loaded,
         last_transcript=s.last_transcript,
         last_transcript_at=s.last_transcript_at,
+        tts_loaded=s.tts_loaded,
+        last_response=s.last_response,
+        last_response_at=s.last_response_at,
+    )
+
+
+@app.post("/voice/say", response_model=SayResponse)
+def voice_say(req: SayRequest) -> SayResponse:
+    """Synthesize `req.text` and play it through the picked output device.
+
+    Test endpoint — commit 7 wires this same path from the LLM-reply
+    callback. For now it's manual: useful for "is the speaker hooked
+    up?" + "does Piper sound right?" without needing to wake-trigger.
+
+    Blocks for the full playback duration. The pipeline transitions
+    into the 'speaking' state during synthesis + playback, then back
+    to listening — wake detection is muted during that window
+    (anti-feedback).
+    """
+    if _pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="pipeline not started — usually means no input device at boot",
+        )
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text is empty")
+    if len(req.text) > 2000:
+        # Piper's typical phrase is <100 chars. 2 KB lets a longer reply
+        # through but bounds runaway requests.
+        raise HTTPException(status_code=400, detail="text too long (max 2000 chars)")
+
+    result = _pipeline.speak(req.text, voice=req.voice)
+    if not result["ok"]:
+        raise HTTPException(status_code=503, detail=result.get("error", "speak failed"))
+    return SayResponse(
+        ok=True,
+        duration_s=result["duration_s"],
+        sample_rate=result.get("sample_rate"),
     )
 
 

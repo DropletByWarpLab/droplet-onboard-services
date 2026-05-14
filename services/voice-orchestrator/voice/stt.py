@@ -197,14 +197,10 @@ class _WyomingSession(STTSession):
         self._sock.settimeout(self._transcript_timeout_s)
         try:
             while True:
-                header = _read_json_line(self._sock)
-                if header is None:
+                event = _read_event(self._sock)
+                if event is None:
                     raise STTUnavailable("server closed connection before transcript")
-                payload_len = int(header.get("payload_length") or 0)
-                # Always drain the payload even if we don't care about
-                # it, otherwise the next read sees stale bytes.
-                if payload_len > 0:
-                    _read_exactly(self._sock, payload_len)
+                header, _payload = event  # payload already drained by _read_event
                 if header.get("type") == "transcript":
                     text = (header.get("data") or {}).get("text", "")
                     return text.strip()
@@ -352,6 +348,47 @@ def _read_json_line(sock: socket.socket) -> Optional[dict]:
         return json.loads(buf.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise STTUnavailable(f"bad JSON from server: {buf!r}: {exc}") from exc
+
+
+def _read_event(
+    sock: socket.socket,
+) -> Optional[tuple[dict, bytes]]:
+    """Read one complete Wyoming event: header + optional data block +
+    optional binary payload. Returns (header_with_normalized_data, payload).
+
+    Wyoming has two wire formats for the `data` field:
+      v1: data inline in the header — `{"type":"x", "data":{...},
+          "payload_length":N}\\n` then N payload bytes.
+      v2: data in a separate JSON block — `{"type":"x", "data_length":M,
+          "payload_length":N}\\n<M bytes JSON><N bytes payload>`.
+
+    Different rhasspy/wyoming-* image versions pick different formats
+    (Whisper-current ships v1, Piper-current ships v2). The Wyoming
+    spec allows either; we normalize so callers only see one shape:
+    `header["data"]` is either the inline dict or the parsed v2 block,
+    whichever the server sent. Callers never have to know.
+
+    Returns None on clean peer close before any data arrived.
+    """
+    header = _read_json_line(sock)
+    if header is None:
+        return None
+    data_length = int(header.get("data_length") or 0)
+    if data_length > 0:
+        # v2 path: read the separate JSON data block. Overrides any
+        # inline `data` field (servers should send one or the other,
+        # not both — but if both, the v2 block is the authoritative
+        # one because it's the bytes that just hit the wire).
+        raw = _read_exactly(sock, data_length)
+        try:
+            header["data"] = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise STTUnavailable(
+                f"bad JSON data block from server: {raw!r}: {exc}"
+            ) from exc
+    payload_length = int(header.get("payload_length") or 0)
+    payload = _read_exactly(sock, payload_length) if payload_length > 0 else b""
+    return header, payload
 
 
 def _raise_partial(buf: bytearray) -> None:

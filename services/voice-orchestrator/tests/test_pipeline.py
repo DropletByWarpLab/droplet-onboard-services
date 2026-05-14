@@ -41,6 +41,7 @@ from voice.pipeline import (
     WakePipeline,
 )
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
+from voice.tts import MockTTS, SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     DisabledWakeWordDetector,
@@ -849,3 +850,235 @@ class TestTranscribingFlow:
         # Drift detector — make sure README's "5-second post-wake window"
         # documentation still matches the default.
         assert DEFAULT_STT_MAX_RECORD_S == 5.0
+
+
+# ────────────────────────────────────────────────────────────────────
+# TTS — speak() flow (commit 6)
+# ────────────────────────────────────────────────────────────────────
+
+class _RecordingTTS(TextToSpeech):
+    """MockTTS variant with knobs for failure injection + a counter for
+    how many times synthesize was called (and with what)."""
+
+    def __init__(
+        self,
+        scripted_audio: Optional[SynthesizedAudio] = None,
+        available: bool = True,
+        raise_on_synthesize: bool = False,
+    ):
+        self._scripted = scripted_audio or SynthesizedAudio(
+            pcm=b"\x00" * 200, sample_rate=22050, sample_width=2, channels=1,
+        )
+        self._available = available
+        self._raise_on_synthesize = raise_on_synthesize
+        self.texts_received: list[str] = []
+        self.voices_received: list[Optional[str]] = []
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def synthesize(self, text: str, voice: Optional[str] = None) -> SynthesizedAudio:
+        self.texts_received.append(text)
+        self.voices_received.append(voice)
+        if self._raise_on_synthesize:
+            raise TTSUnavailable("synth blew up (test)")
+        return self._scripted
+
+
+def _patch_play(monkeypatch):
+    """Replace voice.audio_io.play with a recorder. The pipeline imports
+    `play` inside `_play_pcm` (lazy import) so we patch the source
+    module, and the recorder captures every call.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def _fake_play(audio, samplerate, device):
+        calls.append(
+            {"len": len(audio), "samplerate": samplerate, "device": device}
+        )
+
+    import voice.audio_io as _audio_io
+    monkeypatch.setattr(_audio_io, "play", _fake_play)
+    return calls
+
+
+class TestSpeak:
+    def test_speak_synthesizes_and_plays(self, monkeypatch):
+        play_calls = _patch_play(monkeypatch)
+        tts = _RecordingTTS(scripted_audio=SynthesizedAudio(
+            pcm=b"\xaa\xbb" * 100, sample_rate=22050, sample_width=2, channels=1,
+        ))
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=7,
+            tts=tts,
+        )
+        pipe._tts_available = True  # simulate the start() probe
+
+        result = pipe.speak("the time is 3 pm")
+        assert result["ok"] is True
+        assert result["sample_rate"] == 22050
+        assert tts.texts_received == ["the time is 3 pm"]
+        # Played to the right device
+        assert play_calls[0]["device"] == 7
+        assert play_calls[0]["samplerate"] == 22050
+
+    def test_speak_records_last_response(self, monkeypatch):
+        _patch_play(monkeypatch)
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        pipe.speak("hello world")
+        s = pipe.status()
+        assert s.last_response == "hello world"
+        assert s.last_response_at is not None
+
+    def test_speak_with_voice_override_propagates(self, monkeypatch):
+        _patch_play(monkeypatch)
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        pipe.speak("hi", voice="en_GB-jenny-medium")
+        assert tts.voices_received == ["en_GB-jenny-medium"]
+
+    def test_speak_returns_error_when_tts_unavailable(self):
+        # tts=None case — pipeline gracefully refuses speak.
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            tts=None,
+        )
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+        assert "unavailable" in (result.get("error") or "").lower()
+
+    def test_speak_returns_error_when_tts_probe_failed(self):
+        tts = _RecordingTTS(available=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = False
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+
+    def test_speak_returns_error_on_empty_text(self):
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        result = pipe.speak("")
+        assert result["ok"] is False
+        # Make sure we didn't bother the TTS server with empty input
+        assert tts.texts_received == []
+
+    def test_speak_handles_synthesize_failure(self, monkeypatch):
+        tts = _RecordingTTS(raise_on_synthesize=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+        # Error message surfaces via /voice/status
+        assert pipe.status().state == "error"
+        assert "synth blew up" in (pipe.status().error_message or "")
+
+    def test_speak_transitions_into_and_out_of_speaking_state(self, monkeypatch):
+        # We can't observe the intermediate 'speaking' state from outside
+        # because speak() blocks for the duration. But we CAN verify the
+        # post-speak state restoration: starts at listening, ends at
+        # listening.
+        _patch_play(monkeypatch)
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        pipe._state = "listening"
+        pipe.speak("hello")
+        assert pipe.status().state == "listening"
+
+    def test_speaking_state_skips_wake_detect(self, monkeypatch):
+        # While in 'speaking' state, mic frames must NOT run wake-detect.
+        # We force the state manually + drive a frame that WOULD fire
+        # wake if dispatched, and confirm nothing happens.
+        _patch_play(monkeypatch)
+        fires: list[WakeEvent] = []
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            threshold=0.5,
+            on_wake=fires.append,
+        )
+        pipe._state = "speaking"
+        pipe._on_frame(_silence_frame())
+        assert fires == []
+        # State stays 'speaking' — _on_frame doesn't flip it.
+        assert pipe._state == "speaking"
+
+    def test_empty_pcm_from_tts_is_handled_cleanly(self, monkeypatch):
+        # Some Piper voices return zero audio for filtered text. Pipeline
+        # should report ok=True with duration_s=0 rather than crashing.
+        play_calls = _patch_play(monkeypatch)
+        tts = _RecordingTTS(scripted_audio=SynthesizedAudio(
+            pcm=b"", sample_rate=22050, sample_width=2, channels=1,
+        ))
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            output_device_index=0,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        result = pipe.speak("hello")
+        assert result["ok"] is True
+        assert result["duration_s"] == 0.0
+        # And we did NOT try to play empty audio (would crash sounddevice)
+        assert play_calls == []
+
+
+class TestSpeakStatus:
+    def test_status_exposes_tts_loaded_after_probe(self):
+        tts = _RecordingTTS(available=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            tts=tts,
+        )
+        pipe.start()
+        assert pipe.status().tts_loaded is True
+        pipe.stop()
+
+    def test_status_exposes_tts_loaded_false_when_unreachable(self):
+        tts = _RecordingTTS(available=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            tts=tts,
+        )
+        pipe.start()
+        assert pipe.status().tts_loaded is False
+        pipe.stop()
