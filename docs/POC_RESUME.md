@@ -6,11 +6,15 @@
 
 ## TL;DR — where things stand
 
-13 commits on the `poc/single-box` branch of
+14 commits on the `poc/single-box` branch of
 [DropletByWarpLab/droplet-pi-platform](https://github.com/DropletByWarpLab/droplet-pi-platform/tree/poc/single-box):
 
 ```
-<this>    Phase K   - LAN bridge: DNAT 192.168.20.1:80/443 -> gateway + dnsmasq
+<this>    Phase L   - routing service can finally drive OpenWrt: WG packages
+                       installed, root password set from docker secret, wg-sync
+                       poll loop pushes UCI peer changes to kernel. router:true
+                       at last in /api/health.
+55295c3  Phase K   - LAN bridge: DNAT 192.168.20.1:80/443 -> gateway + dnsmasq
                        points phones at openwrt for DNS, droplet.local maps locally
 9d4909c  Phase J   - docs/POC_RESUME.md session handoff guide
 995bc53  Phase I   - move Nextcloud user uploads to big SATA drive
@@ -39,10 +43,26 @@ a7b08bb  Phase A+B - baseline + preflight/em-dash fixes
   (DNS resolves, nft DNAT rules in place, forward+postrouting clean).
 
 **Doesn't work yet** (in priority for next session):
-1. **Router stats** — orchestrator's `/api/health` reports `router:false`. The dashboard's `/network` page partially works but device list / firewall rules / wireless clients return errors. Need to wire `services/routing/` to OpenWrt's `/ubus` (config is in `.env` from Phase E, but path not exercised).
-2. **Customer branding** — `Droplet-POC` SSID, `droplet-poc-password` PSK, no photo-studio name anywhere. Phase K added env knobs in the attach script (`DROPLET_AP_SSID`, `DROPLET_AP_PSK`, `DROPLET_AP_DOMAIN`, `DROPLET_AP_HOSTNAME`); just need `/etc/default/droplet-openwrt-attach` populated + a one-line `EnvironmentFile=-/etc/default/...` to the systemd unit + re-run.
-3. **VPN end-to-end** — `POST /api/vpn/setup` against the containerized OpenWrt. Audit says 6 of 12 gaps still open (see Phase E commit body).
+1. **Setup wizard (Phase M)** — Stefan asked for a customer-facing first-run
+   experience that walks the photo-studio owner through: welcome / how-it-works
+   → studio branding (SSID, PSK, hostname) → DuckDNS subdomain + token →
+   create admin → add first WG device → done. Persists state so the customer
+   can resume. Backend hooks: write to a config-store (sqlite?) and trigger
+   re-run of `droplet-openwrt-attach` with the new DROPLET_AP_* env vars.
+   POPULATE `WIREGUARD_ENDPOINT_HOST` from the DuckDNS step.
+2. **Help/manual + walkthrough (Phase N)** — global "?" button in nav, static
+   manual page (Files / Chat / Cameras / Remote Access / who to call),
+   replayable "how it works" cards.
+3. **Customer branding** — env knobs exist (`DROPLET_AP_*`); wizard from
+   Phase M will populate them via `/etc/default/droplet-openwrt-attach`.
 4. **Pre-ship hardening** — single checklist runthrough (NOPASSWD sudo, `Droplet123!`, host WiFi off, customer TLS, etc.).
+
+**Phase L unblocked**:
+- Router stats (orchestrator `/api/health` now returns `router:true`)
+- VPN end-to-end (full peer lifecycle works: setup wg0, add peers via API,
+  delete peers, kernel state matches UCI within ~2s via wg-sync poll loop)
+- DuckDNS endpoint config exists but `WIREGUARD_ENDPOINT_HOST` is still
+  unset — wizard (Phase M) populates it from the customer's DuckDNS entry.
 
 ## Where I/you are working from
 
@@ -108,32 +128,57 @@ to the box (`_droplet_put.py`). Both patterns are used in past commits.
 on origin. Either bundle ← Windows, or just SFTP individual files and `git
 checkout -- <file>` to clean up the box's working tree.
 
-## Top 3 things to do first
+## Top thing to do first (Phase M — setup wizard)
 
-### 1. Router stats wire-up (now-#1 since Phase K landed LAN bridge)
+Stefan asked for a customer-facing first-run experience. The photo studio
+owner sits down in front of the dashboard and the box walks him through:
 
-Right now `services/routing/` is up but the orchestrator's
-`device-reconcile-poller` returns 503s for DHCP / firewall / wireless
-endpoints. Means: env vars are set (Phase E), but services/routing/ isn't
-actually authing to the openwrt container's ubus correctly, OR the
-OpenWrt-side `droplet-ai` user doesn't exist.
+1. **Welcome / how-it-works** — short cards: "Your files live on this device,
+   not in the cloud", "AI runs locally on the dGPU", "Cameras record here,
+   not streamed out", "Remote access goes through WireGuard, encrypted
+   end-to-end". One sentence + an icon per card.
+2. **Studio branding** — text inputs for studio name, WiFi SSID (default
+   `Droplet-POC`), WiFi password (default `droplet-poc-password`),
+   hostname customers type in their phone (default `droplet.local`).
+   Writes to `/etc/default/droplet-openwrt-attach` and re-runs
+   `droplet-openwrt-attach` so the AP changes immediately.
+3. **Remote access setup** — DuckDNS subdomain + token (existing
+   `/api/duckdns/config` endpoint). Save the subdomain into
+   `WIREGUARD_ENDPOINT_HOST` so the WG conf served to peers includes the
+   right endpoint. Show "Why DuckDNS?" inline help.
+4. **Create admin** — username / password / email. Hooks into Nextcloud's
+   existing admin setup (Nextcloud already prompts for this on first
+   visit; the wizard either redirects there or wraps the same API).
+5. **Add first WG device** — name the device (`Stefan's iPhone`), display
+   QR code, "scan with the WireGuard app", "tap Connect", "done".
+6. **You're set** — summary screen showing WiFi name + password,
+   `droplet.local` URL for AP clients, DuckDNS URL for remote, "open Files
+   to upload your first photo" CTA.
 
-Start here:
-```bash
-sudo docker exec droplet-pi-platform-routing-1 sh -c '
-  curl -s http://openwrt:80/ubus -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"call\",\"params\":[\"00000000000000000000000000000000\",\"session\",\"login\",{\"username\":\"root\",\"password\":\"droplet-poc-router\"}]}"'
-```
-Compare against the working hostpath that I documented in Phase E (which
-used `OPENWRT_USERNAME=root`). Likely the routing service is configured
-for `OPENWRT_USERNAME=droplet-ai` which doesn't exist yet inside the
-container.
+State persists in a `setup_progress` row in the orchestrator's DB so the
+customer can navigate away and resume. Show a "Setup not complete" banner
+on every other page until step 6 lands.
 
-Fix: either provision a `droplet-ai` user inside OpenWrt (uci-defaults
-script + rpcd ACL — there's a template at `openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json`
-upstream that needs to be installed inside the container), or override
-the orchestrator's env to use `root` everywhere.
+Frontend lives at `apps/web-dashboard/src/app/setup/page.tsx` (new). It
+gates the rest of the dashboard via middleware that redirects to /setup
+when `setup_progress.completed = false`. Each step is its own subroute so
+back/forward in the browser works.
 
-### 2. Custom `droplet-openwrt` Dockerfile
+Backend additions:
+- `apps/orchestrator/src/routes/setup.ts` — GET /api/setup/status,
+  POST /api/setup/branding, POST /api/setup/complete
+- a small `apps/orchestrator/src/db/setup.ts` Prisma model
+- a host-side helper to write `/etc/default/droplet-openwrt-attach` and
+  trigger `systemctl restart droplet-openwrt-attach`
+
+### Phase N — help / manual
+
+After Phase M lands. Adds a global "?" button (`apps/web-dashboard/src/components/HelpButton.tsx`),
+a `/help` page rendering static markdown from `apps/web-dashboard/src/help/`,
+sections per feature, and a "replay how-it-works" link that re-shows the
+Phase M step-1 cards as a standalone modal.
+
+### Custom `droplet-openwrt` Dockerfile
 
 Right now every `docker compose up --force-recreate openwrt` wipes the
 container's writable layer, and the host-side `droplet-openwrt-attach`
@@ -150,7 +195,8 @@ docker/openwrt/Dockerfile:
       opkg update && \
       opkg install hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
                    uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys \
-                   rpcd-mod-iwinfo rpcd-mod-file && \
+                   rpcd-mod-iwinfo rpcd-mod-file \
+                   wireguard-tools kmod-wireguard luci-proto-wireguard && \
       rm /etc/resolv.conf
   CMD ["/sbin/init"]
 ```

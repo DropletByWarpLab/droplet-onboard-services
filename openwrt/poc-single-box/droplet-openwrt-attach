@@ -5,6 +5,11 @@
 # https://droplet.local/ (DNS served by openwrt's dnsmasq) which resolves
 # to 192.168.20.1, openwrt DNATs :443/:80 to the docker gateway container.
 # No cross-subnet TCP needed from the phone's perspective.
+#
+# Phase L: routing service can now actually drive OpenWrt — installs
+# WireGuard packages, sets root password from the docker secret, and runs
+# a wg-sync poll loop that pushes UCI peer changes into the kernel wg0
+# (netifd's reload path times out in this container; wg syncconf works).
 set +e
 
 # --- Customer-facing knobs (override via env) -----------------------------
@@ -13,6 +18,9 @@ AP_PSK="${DROPLET_AP_PSK:-droplet-poc-password}"
 AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
 AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
 GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-pi-platform-gateway-1}"
+# Phase L: root password for OpenWrt rpcd. Read from the docker secret
+# the routing service also reads, so both sides stay in lockstep.
+OPENWRT_PASSWORD_FILE="${OPENWRT_PASSWORD_FILE:-/home/droplet/edge-platform/docker/secrets/openwrt_password}"
 # --------------------------------------------------------------------------
 
 for i in $(seq 1 60); do
@@ -31,18 +39,36 @@ GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' 
 GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null)
 [ -z "$GATEWAY_IP" ] && { echo "$GATEWAY_CONTAINER not found — cannot wire DNAT"; exit 1; }
 
+# Phase L: read OpenWrt root password from the docker secret so we can
+# (re)set it inside the container on every attach. Empty -> skip the set,
+# but log so the operator notices.
+OPENWRT_ROOT_PW=""
+if [ -r "$OPENWRT_PASSWORD_FILE" ]; then
+  OPENWRT_ROOT_PW=$(tr -d '\n' < "$OPENWRT_PASSWORD_FILE")
+fi
+if [ -z "$OPENWRT_ROOT_PW" ]; then
+  echo "warn: OpenWrt password secret at $OPENWRT_PASSWORD_FILE is empty or unreadable"
+  echo "       routing service will not be able to auth to ubus until this is set"
+fi
+
 # Move MT7921 PHY in if still on host
 [ -e /sys/class/ieee80211/phy1 ] && iw phy phy1 set netns "$PID"
 
-docker exec \
+docker exec -i \
   -e CONT_IP="$IP" -e CONT_GW="$GW" \
   -e GATEWAY_IP="$GATEWAY_IP" \
   -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
+  -e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW" \
   droplet-openwrt sh -c '
-  # Container network bootstrap (CONT_IP/CONT_GW/GATEWAY_IP/AP_* from env)
-  ip addr show eth0 | grep -q "$CONT_IP" || ip addr add "${CONT_IP}/16" dev eth0
-  ip route | grep -q "^default" || ip route add default via "$CONT_GW"
+  # Container network bootstrap (CONT_IP/CONT_GW/GATEWAY_IP/AP_* from env).
+  # NB: do this FIRST and again AFTER any /etc/init.d/network restart, since
+  # netifd restart wipes Dockers pre-assigned eth0 IP and breaks docker-proxy.
+  bootstrap_net() {
+    ip addr show eth0 | grep -q "$CONT_IP" || ip addr add "${CONT_IP}/16" dev eth0
+    ip route | grep -q "^default" || ip route add default via "$CONT_GW"
+  }
+  bootstrap_net
   grep -q 8.8.8.8 /etc/resolv.conf 2>/dev/null || {
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
@@ -51,10 +77,110 @@ docker exec \
 
   # Install packages if missing (wiped by --force-recreate; will move to a
   # custom Dockerfile baked into compose build context for production).
-  if ! command -v hostapd >/dev/null; then
+  # Phase L: added wireguard-tools, kmod-wireguard, luci-proto-wireguard
+  # so the routing service can mint VPN peers against this container.
+  NEED_INSTALL=0
+  command -v hostapd >/dev/null || NEED_INSTALL=1
+  command -v wg >/dev/null      || NEED_INSTALL=1
+  [ -f /lib/netifd/proto/wireguard.sh ] || NEED_INSTALL=1
+  if [ "$NEED_INSTALL" = 1 ]; then
     opkg update >/dev/null 2>&1
-    opkg install hostapd-mbedtls hostapd-utils wireless-regdb iw-full uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file >/dev/null 2>&1
+    opkg install \
+      hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
+      uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
+      wireguard-tools kmod-wireguard luci-proto-wireguard \
+      >/dev/null 2>&1
+    # netifd was started before luci-proto-wireguard arrived, so it didnt
+    # load the wireguard protocol handler. Restart it so ifup wg0 works
+    # for any subsequent peer-add via the routing service.
+    /etc/init.d/network restart >/dev/null 2>&1
+    sleep 2
+    # network restart wiped eth0s docker IP + default route — re-bootstrap.
+    bootstrap_net
+    # uhttpd binds to eth0 too; nudge it so docker-proxy can talk to ubus.
+    /etc/init.d/uhttpd restart >/dev/null 2>&1
   fi
+
+  # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
+  # rpcd login works. Idempotent: only re-set if the current password fails.
+  if [ -n "$OPENWRT_ROOT_PW" ]; then
+    if ! ubus call session login "{\"username\":\"root\",\"password\":\"$OPENWRT_ROOT_PW\"}" >/dev/null 2>&1; then
+      printf "%s\n%s\n" "$OPENWRT_ROOT_PW" "$OPENWRT_ROOT_PW" | passwd root >/dev/null 2>&1
+      # rpcd caches sometimes; nudge it to re-read shadow
+      /etc/init.d/rpcd restart >/dev/null 2>&1
+    fi
+  fi
+
+  # --- Phase L: wg-sync helper -----------------------------------------
+  # netifds wireguard.sh proto handler doesnt cleanly re-apply UCI peer
+  # changes to a running wg0 in this container (ubus call network reload
+  # times out). Workaround: when the routing service writes a peer via
+  # uci.apply, /etc/config/network is rewritten — we poll-watch UCI peer
+  # hash and call `wg syncconf wg0 <runtime-conf>` to push to the kernel.
+  # ~2s propagation, no interface bounce.
+  mkdir -p /usr/local/sbin
+  cat > /usr/local/sbin/wg-sync <<"WGSYNC"
+#!/bin/sh
+# Apply UCI WireGuard peer state to the running wg0 interface via wg syncconf.
+# Idempotent; safe to call on every network commit.
+IFACE="${1:-wg0}"
+ip link show "$IFACE" >/dev/null 2>&1 || exit 0
+SRV_PK=$(uci -q get network.$IFACE.private_key) || exit 0
+SRV_PORT=$(uci -q get network.$IFACE.listen_port)
+CONF=$(mktemp -t wg-runtime.XXXXXX)
+{
+  echo "[Interface]"
+  echo "PrivateKey = $SRV_PK"
+  [ -n "$SRV_PORT" ] && echo "ListenPort = $SRV_PORT"
+  i=0
+  while uci -q get network.@wireguard_${IFACE}[$i].public_key >/dev/null 2>&1; do
+    PK=$(uci -q get network.@wireguard_${IFACE}[$i].public_key)
+    AIP=$(uci -q get network.@wireguard_${IFACE}[$i].allowed_ips)
+    KA=$(uci -q get network.@wireguard_${IFACE}[$i].persistent_keepalive)
+    EP=$(uci -q get network.@wireguard_${IFACE}[$i].endpoint_host)
+    EPP=$(uci -q get network.@wireguard_${IFACE}[$i].endpoint_port)
+    echo ""
+    echo "[Peer]"
+    echo "PublicKey = $PK"
+    [ -n "$AIP" ] && echo "AllowedIPs = $AIP"
+    [ -n "$KA" ]  && echo "PersistentKeepalive = $KA"
+    if [ -n "$EP" ]; then
+      [ -n "$EPP" ] && echo "Endpoint = $EP:$EPP" || echo "Endpoint = $EP"
+    fi
+    i=$((i+1))
+  done
+} > "$CONF"
+wg syncconf "$IFACE" "$CONF" 2>&1
+rc=$?
+rm -f "$CONF"
+exit $rc
+WGSYNC
+  chmod +x /usr/local/sbin/wg-sync
+
+  # 2-second poll loop — busybox in this image lacks inotifyd, so we just
+  # re-run wg-sync periodically. wg syncconf is idempotent, so the no-change
+  # case is a cheap noop. Wraps the call in a hash check so the log only
+  # records actual changes.
+  cat > /usr/local/sbin/wg-sync-loop <<"WGLOOP"
+#!/bin/sh
+LAST=""
+while true; do
+  HASH=$(uci show network 2>/dev/null | grep -E "^network\.(wg0\.|@wireguard_wg0\[)" | md5sum | cut -d" " -f1)
+  if [ "$HASH" != "$LAST" ]; then
+    /usr/local/sbin/wg-sync wg0 >>/tmp/wg-sync.log 2>&1
+    LAST="$HASH"
+  fi
+  sleep 2
+done
+WGLOOP
+  chmod +x /usr/local/sbin/wg-sync-loop
+
+  # Spawn the poll loop via start-stop-daemon (busybox applet) so it daemonizes
+  # cleanly under PID 1 = /sbin/init, surviving docker exec returns.
+  start-stop-daemon -K -q -p /var/run/wg-sync.pid 2>/dev/null
+  rm -f /var/run/wg-sync.pid
+  start-stop-daemon -S -b -m -p /var/run/wg-sync.pid -x /usr/local/sbin/wg-sync-loop
+  # ---------------------------------------------------------------------
 
   # --- ip nat table: masq egress + DNAT ingress for AP clients ----------
   nft list table ip nat >/dev/null 2>&1 || nft add table ip nat

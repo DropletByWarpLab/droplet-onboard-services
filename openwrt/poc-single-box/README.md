@@ -62,6 +62,43 @@ The mechanism does NOT depend on:
 - a static gateway-container IP (resolved at attach time, refreshed on
   every container recreate)
 
+### Phase L: routing service can drive OpenWrt + WireGuard works end-to-end
+
+The attach script now also:
+
+1. **Installs WireGuard packages** (`wireguard-tools`, `kmod-wireguard`,
+   `luci-proto-wireguard`) alongside the AP packages, then restarts netifd
+   so it loads the new protocol handler (re-bootstrapping eth0 afterwards,
+   since netifd restart wipes Docker's pre-assigned IP).
+2. **Sets the OpenWrt root password** from
+   `docker/secrets/openwrt_password` so the routing service can
+   authenticate against `rpcd`. Idempotent: only resets when the current
+   password fails a probe login.
+3. **Drops a `wg-sync` helper** at `/usr/local/sbin/wg-sync` that reads
+   UCI peers and applies them to the running `wg0` kernel interface via
+   `wg syncconf`. A 2-second poll loop (`wg-sync-loop`, started via
+   `start-stop-daemon`) detects UCI changes and runs the sync — netifd's
+   `ubus call network reload` path is unreliable in this container, so we
+   bypass it.
+
+On the compose side, [`docker-compose.override.yml`](../../docker/docker-compose.override.yml)
+adds `127.0.0.1:8081:80` to OpenWrt's port map and overrides the routing
+service env so `OPENWRT_HOST=127.0.0.1`, `OPENWRT_PORT=8081`,
+`OPENWRT_USERNAME=root` — keeping `network_mode: host` for the routing
+service while still letting it reach the in-container OpenWrt.
+
+End-to-end peer lifecycle (verified):
+
+```
+POST /vpn/setup     -> wg0 in UCI, server keypair generated
+                    -> netifd brings up wg0 (kernel interface live)
+POST /vpn/peers     -> UCI gets [Peer] entry, private_key returned once
+  ~2s later         -> wg-sync notices the UCI hash change, runs
+                       wg syncconf -> peer appears in `wg show`
+DELETE /vpn/peers   -> UCI entry removed
+  ~2s later         -> wg-sync removes the peer from kernel state
+```
+
 ### Customer branding (env overrides)
 
 ```

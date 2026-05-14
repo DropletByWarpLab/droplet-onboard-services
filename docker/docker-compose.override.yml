@@ -79,7 +79,9 @@ services:
   openwrt:
     image: openwrt/rootfs:x86_64-24.10.2
     ports:
-      - "51820:51820/udp"   # WireGuard listen
+      - "51820:51820/udp"      # WireGuard listen (customer-facing)
+      - "127.0.0.1:8081:80"    # uhttpd / ubus, host-only — routing service
+                               # talks to it on host net (Phase L).
     container_name: droplet-openwrt
     hostname: openwrt
     command: /sbin/init
@@ -94,6 +96,19 @@ services:
     volumes:
       - openwrt-config:/etc/config
       - openwrt-overlay:/overlay
+
+  # Phase L: routing service stays on host network mode (so camera-discovery
+  # paths still work), but now reaches the in-container OpenWrt via the
+  # 127.0.0.1:8081 host port that openwrt publishes. OPENWRT_USERNAME=root
+  # because the only authenticated rpcd user we provision in the POC is root
+  # (its password is in /run/secrets/openwrt_password, kept by attach script).
+  routing:
+    environment:
+      - OPENWRT_HOST=127.0.0.1
+      - OPENWRT_PORT=8081
+      - OPENWRT_USERNAME=root
+      - ROUTING_MODE=real
+      - PORT=8080
 
 volumes:
   ollama-data:
