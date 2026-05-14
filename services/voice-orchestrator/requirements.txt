@@ -21,6 +21,13 @@ huggingface_hub==0.27.0   # First-run download of bundled models (hey_jarvis, al
 tqdm==4.66.5              # Progress bar during model download
 pyyaml==6.0.2             # openWakeWord parses model config from YAML
 requests==2.32.3          # huggingface_hub's HTTP layer
+# openwakeword 0.6.0's package __init__ unconditionally imports
+# custom_verifier_model → sklearn.linear_model. Even though we never
+# call train_custom_verifier ourselves, ANY `import openwakeword.*`
+# triggers the chain. Without sklearn the runtime falls back to
+# DisabledWakeWordDetector — wake detection silently broken. ~30 MB
+# but unavoidable as long as we're on openwakeword < 0.7.
+scikit-learn==1.5.2
 
 # STT / TTS pull their own deps in subsequent commits:
 #   commit 5 — wyoming-faster-whisper is a separate container in the
