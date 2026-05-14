@@ -1,6 +1,20 @@
 #!/bin/bash
 # Bring up the OpenWrt container's AP after a (re)start. Idempotent.
+#
+# Phase K: AP clients reach the dashboard via DNAT — phone hits
+# https://droplet.local/ (DNS served by openwrt's dnsmasq) which resolves
+# to 192.168.20.1, openwrt DNATs :443/:80 to the docker gateway container.
+# No cross-subnet TCP needed from the phone's perspective.
 set +e
+
+# --- Customer-facing knobs (override via env) -----------------------------
+AP_SSID="${DROPLET_AP_SSID:-Droplet-POC}"
+AP_PSK="${DROPLET_AP_PSK:-droplet-poc-password}"
+AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
+AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
+GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-pi-platform-gateway-1}"
+# --------------------------------------------------------------------------
+
 for i in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)
   [ "$state" = "true" ] && break
@@ -12,16 +26,26 @@ PID=$(docker inspect -f '{{.State.Pid}}' droplet-openwrt)
 IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt)
 GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' droplet-openwrt)
 
+# Resolve dashboard gateway IP at attach time — it's stable in practice but
+# we read it fresh so a docker-compose recreate that shuffles IPs is handled.
+GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null)
+[ -z "$GATEWAY_IP" ] && { echo "$GATEWAY_CONTAINER not found — cannot wire DNAT"; exit 1; }
+
 # Move MT7921 PHY in if still on host
 [ -e /sys/class/ieee80211/phy1 ] && iw phy phy1 set netns "$PID"
 
-docker exec droplet-openwrt sh -c "
-  # Container network bootstrap
-  ip addr show eth0 | grep -q '$IP' || ip addr add ${IP}/16 dev eth0
-  ip route | grep -q '^default' || ip route add default via $GW
+docker exec \
+  -e CONT_IP="$IP" -e CONT_GW="$GW" \
+  -e GATEWAY_IP="$GATEWAY_IP" \
+  -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
+  -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
+  droplet-openwrt sh -c '
+  # Container network bootstrap (CONT_IP/CONT_GW/GATEWAY_IP/AP_* from env)
+  ip addr show eth0 | grep -q "$CONT_IP" || ip addr add "${CONT_IP}/16" dev eth0
+  ip route | grep -q "^default" || ip route add default via "$CONT_GW"
   grep -q 8.8.8.8 /etc/resolv.conf 2>/dev/null || {
-    echo 'nameserver 8.8.8.8' > /etc/resolv.conf
-    echo 'nameserver 1.1.1.1' >> /etc/resolv.conf
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
   }
   echo 1 > /proc/sys/net/ipv4/ip_forward
 
@@ -32,51 +56,97 @@ docker exec droplet-openwrt sh -c "
     opkg install hostapd-mbedtls hostapd-utils wireless-regdb iw-full uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file >/dev/null 2>&1
   fi
 
-  # NAT for AP clients
-  nft list table ip nat 2>/dev/null | grep -q '192.168.20.0/24' || {
-    nft add table ip nat 2>/dev/null
-    nft add chain ip nat postrouting '{ type nat hook postrouting priority 100 ; }' 2>/dev/null
-    nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
-  }
+  # --- ip nat table: masq egress + DNAT ingress for AP clients ----------
+  nft list table ip nat >/dev/null 2>&1 || nft add table ip nat
 
-  # Stop procd's dnsmasq so our manual one can bind 192.168.20.1
+  # postrouting: masq 192.168.20.0/24 going out eth0
+  nft list chain ip nat postrouting >/dev/null 2>&1 || \
+    nft add chain ip nat postrouting "{ type nat hook postrouting priority 100 ; }"
+  nft list chain ip nat postrouting | grep -q "192.168.20.0/24" || \
+    nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
+
+  # prerouting: DNAT wlp7s0:80/:443 -> gateway container so phones can hit
+  # https://droplet.local/ (which resolves to 192.168.20.1) and land on nginx
+  nft list chain ip nat prerouting >/dev/null 2>&1 || \
+    nft add chain ip nat prerouting "{ type nat hook prerouting priority -100 ; }"
+  # Flush prior DNAT rules so a gateway-IP change doesnt leave a stale target
+  for h in $(nft -a list chain ip nat prerouting 2>/dev/null | grep "dnat to" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
+    nft delete rule ip nat prerouting handle $h
+  done
+  nft add rule ip nat prerouting iifname \"wlp7s0\" tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"wlp7s0\" tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # ----------------------------------------------------------------------
+
+  # Stop procd dnsmasq so our manual one can bind 192.168.20.1
   /etc/init.d/dnsmasq stop 2>/dev/null
   /etc/init.d/dnsmasq disable 2>/dev/null
 
-  # hostapd config
-  [ -f /etc/hostapd.conf ] || cat > /etc/hostapd.conf <<HOSTAPD
+  # hostapd config — regenerate every run so SSID/PSK env changes propagate
+  cat > /etc/hostapd.conf.new <<HOSTAPD
 interface=wlp7s0
 driver=nl80211
-ssid=Droplet-POC
+ssid=$AP_SSID
 hw_mode=g
 channel=6
 country_code=US
 ieee80211d=1
 auth_algs=1
 wpa=2
-wpa_passphrase=droplet-poc-password
+wpa_passphrase=$AP_PSK
 wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 ieee80211w=1
 HOSTAPD
 
-  # dnsmasq-ap config (separate file so it doesn't conflict with /etc/config/dhcp)
-  [ -f /etc/dnsmasq-ap.conf ] || cat > /etc/dnsmasq-ap.conf <<DNSMASQ
+  HOSTAPD_CHANGED=0
+  if [ ! -f /etc/hostapd.conf ] || ! cmp -s /etc/hostapd.conf /etc/hostapd.conf.new; then
+    mv /etc/hostapd.conf.new /etc/hostapd.conf
+    HOSTAPD_CHANGED=1
+  else
+    rm -f /etc/hostapd.conf.new
+  fi
+
+  # dnsmasq-ap config — regenerate every run so name mappings propagate.
+  # NOTE dhcp-option=6 points phones at openwrt itself for DNS, NOT 8.8.8.8,
+  # so phones can resolve AP_DOMAIN / AP_HOSTNAME locally.
+  cat > /etc/dnsmasq-ap.conf.new <<DNSMASQ
 interface=wlp7s0
 bind-interfaces
 dhcp-range=192.168.20.10,192.168.20.100,255.255.255.0,12h
 dhcp-option=3,192.168.20.1
-dhcp-option=6,8.8.8.8,1.1.1.1
+dhcp-option=6,192.168.20.1
 server=8.8.8.8
 server=1.1.1.1
 no-resolv
+# Customer-facing hostnames -> openwrt IP (DNATs to dashboard)
+address=/$AP_HOSTNAME/192.168.20.1
+address=/$AP_DOMAIN/192.168.20.1
 DNSMASQ
 
-  # Bring up wlp7s0 + run hostapd + dnsmasq
+  DNSMASQ_CHANGED=0
+  if [ ! -f /etc/dnsmasq-ap.conf ] || ! cmp -s /etc/dnsmasq-ap.conf /etc/dnsmasq-ap.conf.new; then
+    mv /etc/dnsmasq-ap.conf.new /etc/dnsmasq-ap.conf
+    DNSMASQ_CHANGED=1
+  else
+    rm -f /etc/dnsmasq-ap.conf.new
+  fi
+
+  # Bring up wlp7s0 + (re)start daemons only if config changed or not running
   ip link set wlp7s0 up 2>/dev/null
   ip addr show wlp7s0 | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev wlp7s0
-  pgrep -f 'hostapd -B' >/dev/null || hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
-  pgrep -f 'dnsmasq -C /etc/dnsmasq-ap.conf' >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
-"
-echo "droplet-openwrt-attach: done"
+
+  if [ "$HOSTAPD_CHANGED" = 1 ]; then
+    pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
+    sleep 1
+  fi
+  pgrep -f "hostapd -B" >/dev/null || hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
+
+  if [ "$DNSMASQ_CHANGED" = 1 ]; then
+    pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
+    sleep 1
+  fi
+  pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
+'
+
+echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"

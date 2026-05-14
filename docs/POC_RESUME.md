@@ -6,10 +6,13 @@
 
 ## TL;DR — where things stand
 
-11 commits on the `poc/single-box` branch of
+13 commits on the `poc/single-box` branch of
 [DropletByWarpLab/droplet-pi-platform](https://github.com/DropletByWarpLab/droplet-pi-platform/tree/poc/single-box):
 
 ```
+<this>    Phase K   - LAN bridge: DNAT 192.168.20.1:80/443 -> gateway + dnsmasq
+                       points phones at openwrt for DNS, droplet.local maps locally
+9d4909c  Phase J   - docs/POC_RESUME.md session handoff guide
 995bc53  Phase I   - move Nextcloud user uploads to big SATA drive
 1a6c2a4  Phase H   - comprehensive POC_RUNBOOK rewrite
 fdb4cf2  Phase G   - mobile-responsive grid fixes
@@ -30,13 +33,16 @@ a7b08bb  Phase A+B - baseline + preflight/em-dash fixes
 - Mobile-responsive dashboard
 - Frigate ready (no cameras connected yet, but recording path is `/mnt/droplet/nvr`)
 - Drives auto-detect on first boot (fresh `setup.sh` produces all of this)
+- **Phase K**: AP clients can reach the dashboard at `https://droplet.local/`
+  (dnsmasq maps the name to openwrt, openwrt DNATs :443 -> gateway). Needs
+  one phone test from Stefan to confirm end-to-end; mechanism is verified
+  (DNS resolves, nft DNAT rules in place, forward+postrouting clean).
 
 **Doesn't work yet** (in priority for next session):
-1. **LAN bridge** — clients on the AP (192.168.20.x) can reach the internet but can't reach the dashboard. They have to plug into the management ethernet to admin the box. This is the customer-experience blocker.
-2. **Router stats** — orchestrator's `/api/health` reports `router:false`. The dashboard's `/network` page partially works but device list / firewall rules / wireless clients return errors. Need to wire `services/routing/` to OpenWrt's `/ubus` (config is in `.env` from Phase E, but path not exercised).
-3. **Customer branding** — `Droplet-POC` SSID, `droplet-poc-password` PSK, no photo-studio name anywhere. 1-line `.env` change + uci re-apply.
-4. **VPN end-to-end** — `POST /api/vpn/setup` against the containerized OpenWrt. Audit says 6 of 12 gaps still open (see Phase E commit body).
-5. **Pre-ship hardening** — single checklist runthrough (NOPASSWD sudo, `Droplet123!`, host WiFi off, customer TLS, etc.).
+1. **Router stats** — orchestrator's `/api/health` reports `router:false`. The dashboard's `/network` page partially works but device list / firewall rules / wireless clients return errors. Need to wire `services/routing/` to OpenWrt's `/ubus` (config is in `.env` from Phase E, but path not exercised).
+2. **Customer branding** — `Droplet-POC` SSID, `droplet-poc-password` PSK, no photo-studio name anywhere. Phase K added env knobs in the attach script (`DROPLET_AP_SSID`, `DROPLET_AP_PSK`, `DROPLET_AP_DOMAIN`, `DROPLET_AP_HOSTNAME`); just need `/etc/default/droplet-openwrt-attach` populated + a one-line `EnvironmentFile=-/etc/default/...` to the systemd unit + re-run.
+3. **VPN end-to-end** — `POST /api/vpn/setup` against the containerized OpenWrt. Audit says 6 of 12 gaps still open (see Phase E commit body).
+4. **Pre-ship hardening** — single checklist runthrough (NOPASSWD sudo, `Droplet123!`, host WiFi off, customer TLS, etc.).
 
 ## Where I/you are working from
 
@@ -104,27 +110,7 @@ checkout -- <file>` to clean up the box's working tree.
 
 ## Top 3 things to do first
 
-### 1. LAN bridge (biggest customer-experience win)
-
-Goal: clients on the `192.168.20.x` AP can reach the dashboard at
-`https://droplet-c4d4df.local/` without needing to plug into the
-management ethernet.
-
-The shape: a veth pair (or macvlan) between OpenWrt's `br-lan` (inside the
-container) and the pi-platform docker network (`droplet-pi-platform_default`
-at `172.18.0.0/16`). OpenWrt port-forwards `:80` and `:443` from its WAN
-side (or directly via a route) to the nginx gateway container.
-
-Simplest path to verify quickly: add a route inside OpenWrt:
-```
-ip route add 172.18.0.0/16 via 172.18.0.1 dev eth0
-```
-…then test from a phone on the AP: `curl -k https://172.18.0.<nginx-ip>/`.
-If that works, the customer-facing version is OpenWrt forwarding 80/443
-from a customer-facing hostname (likely `droplet-c4d4df.local` resolved
-via OpenWrt's dnsmasq).
-
-### 2. Router stats wire-up
+### 1. Router stats wire-up (now-#1 since Phase K landed LAN bridge)
 
 Right now `services/routing/` is up but the orchestrator's
 `device-reconcile-poller` returns 503s for DHCP / firewall / wireless
@@ -147,7 +133,7 @@ script + rpcd ACL — there's a template at `openwrt/files/usr/share/rpcd/acl.d/
 upstream that needs to be installed inside the container), or override
 the orchestrator's env to use `root` everywhere.
 
-### 3. Custom `droplet-openwrt` Dockerfile
+### 2. Custom `droplet-openwrt` Dockerfile
 
 Right now every `docker compose up --force-recreate openwrt` wipes the
 container's writable layer, and the host-side `droplet-openwrt-attach`
@@ -230,9 +216,12 @@ openwrt/poc-single-box/README.md                      ← theory of the host-sid
 
 Tell the customer:
 - **WiFi**: scan for `Droplet-POC`, password is `droplet-poc-password`
-- **Web UI**: open browser → `https://192.168.1.234/` (the host's WiFi IP
-  on FifteenFiftyShadesOfGrey, until the LAN bridge is up) → accept the
-  self-signed cert → setup wizard → create admin
+- **Web UI** (after Phase K): open browser → `https://droplet.local/` or
+  `https://droplet/` → accept the self-signed cert → setup wizard → create
+  admin. (Old fallback: `https://192.168.1.234/` from the host's WiFi IP
+  on FifteenFiftyShadesOfGrey if DNS doesn't take — phone may need to
+  forget+rejoin the AP once after Phase K landed, so it re-DHCPs and gets
+  192.168.20.1 as DNS server.)
 - **Upload photos**: drag-drop into `Files` → they land on 1.4 TB SATA
 - **Chat**: open `Chat` → pick `llama3.1:8b-instruct-q8_0` → ask anything
   → tokens stream from the dGPU
@@ -241,3 +230,19 @@ What NOT to show yet:
 - `/network` page (router stats incomplete)
 - `/cameras` page (no cameras configured)
 - `/remote-access` (VPN end-to-end not validated)
+
+## Phase K verification checklist (run once with a real phone)
+
+After Phase K, do this once to confirm AP-side dashboard reach works:
+
+1. Forget the `Droplet-POC` network on the phone (so the next connect
+   triggers a fresh DHCP lease — old leases still cache `8.8.8.8` as DNS).
+2. Reconnect to `Droplet-POC` / password `droplet-poc-password`.
+3. Confirm phone got `192.168.20.1` as DNS server (in iOS: Settings →
+   Wi-Fi → ⓘ → DNS; in Android: same path under network details).
+4. Open browser → `https://droplet.local/` → accept cert → dashboard.
+5. If it fails: on the box, `sudo docker exec droplet-openwrt cat /tmp/dhcp.leases`
+   should show the phone's MAC + IP; `nft list chain ip nat prerouting`
+   should show non-zero counters (TODO: add `counter` to the rules); and
+   `tcpdump -i wlp7s0 port 443` on the openwrt container should see SYN
+   packets arriving from the phone.
