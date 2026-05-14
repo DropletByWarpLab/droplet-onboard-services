@@ -40,6 +40,13 @@ vi.mock("@/lib/api", () => ({
   // Cameras step auto-skips when zero discovered cameras — same idea.
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
+  // VPN step: endpoint not configured → preCheck phase, "Skip for now"
+  // is always present.
+  fetchVpnStatus: vi.fn(async () => ({
+    configured: false,
+    endpointConfigured: false,
+  })),
+  createVpnPeer: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -104,8 +111,16 @@ describe("setup flow → done state", () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 
-    // We're now on `discovery`. Skip again to reach `done`.
+    // We're now on `discovery`. Skip again. Cameras auto-skips on 0,
+    // VPN lands on preCheck (endpointConfigured: false), one more skip
+    // gets us to `done`.
     await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    // VPN step preCheck → skip → done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 

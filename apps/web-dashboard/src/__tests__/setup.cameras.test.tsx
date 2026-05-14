@@ -40,6 +40,13 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: () => fetchDiscoveredCamerasMock(),
   acceptDiscoveredCamera: (id: string) => acceptDiscoveredCameraMock(id),
+  // VPN step is downstream; lands on preCheck (endpointConfigured: false)
+  // so tests can navigate it with one extra Skip click.
+  fetchVpnStatus: vi.fn(async () => ({
+    configured: false,
+    endpointConfigured: false,
+  })),
+  createVpnPeer: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -129,6 +136,12 @@ describe("setup Cameras step (WARP-174)", () => {
     render(<SetupPage />);
     await advanceToCameras();
     // Skipped through to Done — WelcomeFlourish renders.
+    // Cameras step finished. Skip the VPN step's preCheck to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
     expect(acceptDiscoveredCameraMock).not.toHaveBeenCalled();
   });
@@ -179,6 +192,12 @@ describe("setup Cameras step (WARP-174)", () => {
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-1");
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-2");
     // Landed on Done.
+    // Cameras step finished. Skip the VPN step's preCheck to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
   });
 
@@ -192,6 +211,12 @@ describe("setup Cameras step (WARP-174)", () => {
     });
 
     expect(acceptDiscoveredCameraMock).not.toHaveBeenCalled();
+    // Cameras step finished. Skip the VPN step's preCheck to reach Done.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
   });
 

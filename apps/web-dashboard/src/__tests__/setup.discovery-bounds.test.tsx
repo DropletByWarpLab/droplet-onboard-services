@@ -48,6 +48,13 @@ vi.mock("@/lib/api", () => ({
   // tests but mocked so the import resolves.
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
+  // VPN step is downstream of discovery; never reached in these tests
+  // but mocked for the import side-effect.
+  fetchVpnStatus: vi.fn(async () => ({
+    configured: false,
+    endpointConfigured: false,
+  })),
+  createVpnPeer: vi.fn(),
   fetchMatterDevices: () => fetchDevicesMock(),
 }));
 
