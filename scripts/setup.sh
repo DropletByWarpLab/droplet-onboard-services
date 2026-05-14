@@ -367,7 +367,7 @@ main() {
 
   # --- Phase 7: Verify ---
   log_step 7 $total_steps "Verify"
-  if [ "$SKIP_START" != "true" ] && [ -x register_nextcloud_externals || log_warn "External-storage registration had issues"
+  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh"
     "$SCRIPT_DIR/verify.sh" ]; then
     register_nextcloud_externals || log_warn "External-storage registration had issues"
     "$SCRIPT_DIR/verify.sh" || log_warn "Some verification checks failed — see output above"
