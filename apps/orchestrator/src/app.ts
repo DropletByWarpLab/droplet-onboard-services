@@ -32,6 +32,7 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
+import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
 
 export function createApp(prisma: PrismaClient) {
@@ -108,6 +109,12 @@ export function createApp(prisma: PrismaClient) {
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
   startRemindersPoller(prisma);
+
+  // PyPortal screen QR — context-switched display (setup URL on first boot,
+  // last-generated WireGuard peer for ~60 s after creation, WiFi-hotspot QR
+  // otherwise). 30 s poller; calls into Nextcloud + device-bridge.
+  // Failures in any leg leave the screen alone rather than blanking it.
+  startScreenQRPoller();
 
   // Web Push — initialise VAPID + log keys at startup. Idempotent;
   // safe to call before any subscribe/push attempt.
