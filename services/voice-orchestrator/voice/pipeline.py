@@ -66,6 +66,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from voice.llm import LLMClient, LLMUnavailable
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
@@ -106,6 +107,14 @@ class PipelineStatus:
     last_wake_score: Optional[float]
     last_wake_model: Optional[str]
     error_message: Optional[str]
+    # WAKE_WORD env value (what the operator asked for). If a custom
+    # model isn't on disk and isn't bundled, `wake_model` shows the
+    # fallback name and `using_wake_fallback` is True. Dashboard
+    # surfaces this as "wake configured: hey_droplet, currently:
+    # hey_jarvis (training pending)". Defaulted to None / False so the
+    # dataclass field-ordering rule (non-default before default) holds.
+    requested_wake_word: Optional[str] = None
+    using_wake_fallback: bool = False
     # STT fields (commit 5 onwards). `stt_loaded` reflects the at-startup
     # reachability check; transient send failures during a transcription
     # land in `error_message`, not here.
@@ -114,11 +123,16 @@ class PipelineStatus:
     last_transcript_at: Optional[float] = None
     # TTS fields (commit 6). `tts_loaded` is the at-startup reachability;
     # `last_response` is the most recent text that got spoken. Commit 7
-    # populates last_response from the LLM reply; until then speak() can
-    # be called directly via POST /voice/say.
+    # populates last_response from the LLM reply; speak() can also be
+    # called directly via POST /voice/say.
     tts_loaded: bool = False
     last_response: Optional[str] = None
     last_response_at: Optional[float] = None
+    # LLM fields (commit 7). `llm_loaded` reflects the at-startup
+    # reachability probe of the orchestrator's /api/llm/chat endpoint.
+    # When false the wake → STT path still works (transcripts land in
+    # last_transcript) but no spoken reply happens.
+    llm_loaded: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -151,6 +165,7 @@ class WakePipeline:
         stt_max_record_s: float = DEFAULT_STT_MAX_RECORD_S,
         tts: Optional[TextToSpeech] = None,
         output_device_index: Optional[int] = None,
+        llm: Optional[LLMClient] = None,
         sd_module: Any = None,
     ):
         self._detector = detector
@@ -163,10 +178,12 @@ class WakePipeline:
         self._on_transcript = on_transcript or self._default_on_transcript
         self._stt_max_record_s = stt_max_record_s
         # TTS — commit 6 wires it up, commit 7 calls speak() from the
-        # LLM-reply path. Until commit 7, speak() is reachable only via
-        # POST /voice/say (test endpoint).
+        # LLM-reply path; speak() is also still reachable via POST /voice/say.
         self._tts = tts
         self._output_device_index = output_device_index
+        # LLM — commit 7. None disables the closed-loop behaviour;
+        # transcript still lands in /voice/status but isn't spoken.
+        self._llm = llm
         self._sd_module = sd_module  # dependency injection for tests
 
         self._thread: Optional[threading.Thread] = None
@@ -197,6 +214,8 @@ class WakePipeline:
         self._stt_available: bool = False
         # Same idea for TTS — probed at start(), surfaced via tts_loaded.
         self._tts_available: bool = False
+        # And LLM — probed at start(), surfaced via llm_loaded.
+        self._llm_available: bool = False
 
     # ──────────────────────────────────────────────────────────────
     # Lifecycle
@@ -227,6 +246,14 @@ class WakePipeline:
                 logger.warning(
                     "TTS server unreachable at startup — synthesis disabled "
                     "until reachable",
+                )
+        if self._llm is not None:
+            self._llm_available = self._llm.available
+            if not self._llm_available:
+                logger.warning(
+                    "LLM (orchestrator) unreachable at startup — voice loop "
+                    "stays open-ended (transcripts land in /voice/status but "
+                    "nothing gets spoken back)",
                 )
         self._shutdown.clear()
         self._set_state("loading")
@@ -366,6 +393,13 @@ class WakePipeline:
                 ),
                 wake_loaded=self._detector.loaded,
                 wake_model=self._detector.model_name,
+                requested_wake_word=getattr(
+                    self._detector, "requested_wake_word",
+                    self._detector.model_name,
+                ),
+                using_wake_fallback=getattr(
+                    self._detector, "using_fallback", False,
+                ),
                 threshold=self._threshold,
                 last_wake_at=self._last_wake_at,
                 last_wake_score=self._last_wake_score,
@@ -377,6 +411,7 @@ class WakePipeline:
                 tts_loaded=self._tts_available,
                 last_response=self._last_response,
                 last_response_at=self._last_response_at,
+                llm_loaded=self._llm_available,
             )
 
     # ──────────────────────────────────────────────────────────────
@@ -620,9 +655,39 @@ class WakePipeline:
             "wake detected: model=%s score=%.3f", event.model_name, event.score,
         )
 
-    @staticmethod
-    def _default_on_transcript(transcript: str) -> None:
-        # Commit 7 swaps this for the orchestrator-LLM dispatcher. Until
-        # then we just log the transcript so it's visible in the service
-        # logs alongside /voice/status's `last_transcript` field.
-        logger.info("transcript ready (no LLM hook wired yet): %r", transcript)
+    def _default_on_transcript(self, transcript: str) -> None:
+        """Closed-loop default: send the transcript to the orchestrator's
+        LLM, then speak the reply.
+
+        Called from the pipeline thread after `_finish_transcription`
+        succeeded. Failures land in /voice/status's error_message; the
+        wake loop keeps running so the user can try again.
+
+        Any operator-supplied `on_transcript` callback REPLACES this
+        default. Set it via the constructor if you want different
+        behaviour (e.g. dashboard-driven dispatch in commit 8).
+        """
+        if not transcript:
+            return
+        if self._llm is None or not self._llm_available:
+            logger.info(
+                "transcript ready (LLM unavailable, not speaking): %r",
+                transcript,
+            )
+            return
+        try:
+            reply = self._llm.reply(transcript)
+        except LLMUnavailable as exc:
+            self._set_error(f"LLM call failed: {exc}")
+            logger.warning("LLM call failed for transcript %r: %s", transcript, exc)
+            return
+
+        if not reply:
+            logger.info("LLM returned empty reply for %r", transcript)
+            return
+
+        # Speak the reply. speak() handles its own state transitions +
+        # last_response field + post-speak state restoration.
+        result = self.speak(reply)
+        if not result.get("ok"):
+            logger.warning("speak after LLM reply failed: %s", result.get("error"))

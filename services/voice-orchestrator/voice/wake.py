@@ -102,14 +102,31 @@ class OpenWakeWordDetector(WakeWordDetector):
     file exists.
     """
 
+    # When the configured wake-word has neither a custom .onnx on disk
+    # nor a matching bundled model name, fall back to this so wake
+    # detection stays online while the custom model is in flight.
+    # Picked openwakeword's bundled 'hey_jarvis' because it's the
+    # closest phonetic shape to 'hey droplet' among the bundled set
+    # — both are two syllables starting with 'hey' followed by a hard
+    # consonant. Operators see the original wake word in /voice/status
+    # via `requested_wake_word`; the actively-loaded model is in
+    # `model_name` so the dashboard can surface "using hey_jarvis as
+    # fallback for hey_droplet" honestly.
+    FALLBACK_WAKE_WORD = "hey_jarvis"
+
     def __init__(
         self,
-        wake_word: str = "hey_jarvis",
+        wake_word: str = "hey_droplet",
         models_dir: str = "/app/models",
     ):
+        # `requested_wake_word` is what the operator asked for via
+        # WAKE_WORD env. `_wake_word` is what we actually loaded
+        # (may equal the fallback when the requested model isn't on disk).
+        self._requested_wake_word = wake_word
         self._wake_word = wake_word
         self._models_dir = models_dir
         self._loaded = False
+        self._using_fallback = False
         self._model: Any = None
         self._load_attempted = False
 
@@ -123,6 +140,8 @@ class OpenWakeWordDetector(WakeWordDetector):
             # MockWakeWordDetector instead).
             from openwakeword.model import Model  # type: ignore[import-not-found]
 
+            # Resolution order: custom ONNX on disk → bundled model →
+            # bundled fallback (last-resort so the system stays armed).
             custom_path = os.path.join(self._models_dir, f"{self._wake_word}.onnx")
             if os.path.exists(custom_path):
                 logger.info(
@@ -132,7 +151,13 @@ class OpenWakeWordDetector(WakeWordDetector):
                     wakeword_models=[custom_path],
                     inference_framework="onnx",
                 )
-            else:
+                self._loaded = True
+                return
+
+            # Try the wake-word name against openwakeword's bundled set.
+            # The library raises on unknown names — catch into the
+            # fallback branch so the system stays armed.
+            try:
                 logger.info(
                     "openwakeword: loading bundled model %r (ONNX backend)",
                     self._wake_word,
@@ -141,7 +166,28 @@ class OpenWakeWordDetector(WakeWordDetector):
                     wakeword_models=[self._wake_word],
                     inference_framework="onnx",
                 )
-            self._loaded = True
+                self._loaded = True
+                return
+            except Exception as exc:
+                # Custom-name path: no .onnx on disk AND not bundled.
+                # If the operator asked for the fallback already, give
+                # up — would loop infinitely. Otherwise fall back.
+                if self._wake_word == self.FALLBACK_WAKE_WORD:
+                    raise
+                logger.warning(
+                    "openwakeword: %r not a bundled model and no .onnx "
+                    "on disk — falling back to %r so wake stays armed. "
+                    "Drop a trained %s.onnx into %s to switch over.",
+                    self._wake_word, self.FALLBACK_WAKE_WORD,
+                    self._requested_wake_word, self._models_dir,
+                )
+                self._using_fallback = True
+                self._wake_word = self.FALLBACK_WAKE_WORD
+                self._model = Model(
+                    wakeword_models=[self._wake_word],
+                    inference_framework="onnx",
+                )
+                self._loaded = True
         except Exception as exc:
             logger.error(
                 "openwakeword failed to load %r: %s — wake detection disabled",
@@ -151,7 +197,21 @@ class OpenWakeWordDetector(WakeWordDetector):
 
     @property
     def model_name(self) -> str:
+        """Currently-loaded model name. Equals `requested_wake_word`
+        unless we fell back — then it's the fallback name so the
+        dashboard sees what's actually being matched."""
         return self._wake_word
+
+    @property
+    def requested_wake_word(self) -> str:
+        """What WAKE_WORD asked for. Differs from model_name iff we
+        fell back. The dashboard surfaces both so operators see
+        "configured: hey_droplet, currently: hey_jarvis (fallback)"."""
+        return self._requested_wake_word
+
+    @property
+    def using_fallback(self) -> bool:
+        return self._using_fallback
 
     @property
     def loaded(self) -> bool:
@@ -238,12 +298,18 @@ class DisabledWakeWordDetector(WakeWordDetector):
 def build_detector_from_env() -> WakeWordDetector:
     """Resolve env config → detector instance.
 
-    `WAKE_WORD` defaults to "hey_jarvis" (a generic dev wake phrase
-    that ships with openWakeWord). Set to "__mock__" for a dev box
-    without a real wake model. Anything else is treated as either a
-    bundled openWakeWord name or a filename in /app/models.
+    `WAKE_WORD` defaults to "hey_droplet" — the product's branded wake
+    phrase. We don't ship a trained `hey_droplet.onnx` yet; Stefan's
+    voice samples + the openWakeWord training notebook produce it.
+    Until that .onnx lands in /app/models/, `OpenWakeWordDetector`
+    falls back to a bundled model so wake detection still works.
+
+    Set `WAKE_WORD=__mock__` for a dev box with no openwakeword
+    available. Set to any other string to override (custom .onnx
+    filename in /app/models, or one of openwakeword's bundled names:
+    hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
     """
-    wake_word = os.environ.get("WAKE_WORD", "hey_jarvis").strip()
+    wake_word = os.environ.get("WAKE_WORD", "hey_droplet").strip()
     if wake_word == "__mock__":
         logger.info("WAKE_WORD=__mock__ → MockWakeWordDetector (dev only)")
         return MockWakeWordDetector()

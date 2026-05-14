@@ -187,27 +187,145 @@ class TestOpenWakeWordDetector:
 # ────────────────────────────────────────────────────────────────────
 
 class TestBuildDetectorFromEnv:
-    def test_default_is_openwakeword(self, monkeypatch):
+    def test_default_is_hey_droplet(self, monkeypatch):
+        # Branded wake word as the default. The actual model load
+        # falls back to a bundled openwakeword model at runtime if the
+        # trained .onnx isn't on disk yet — that's tested in
+        # TestFallback below.
         monkeypatch.delenv("WAKE_WORD", raising=False)
         det = build_detector_from_env()
         assert isinstance(det, OpenWakeWordDetector)
-        assert det.model_name == "hey_jarvis"
+        assert det.requested_wake_word == "hey_droplet"
 
     def test_mock_when_wake_word_is_double_underscore_mock(self, monkeypatch):
         monkeypatch.setenv("WAKE_WORD", "__mock__")
         det = build_detector_from_env()
         assert isinstance(det, MockWakeWordDetector)
 
-    def test_custom_wake_word_routes_to_openwakeword(self, monkeypatch):
-        # "Hey Droplet" once Stefan ships the trained model.
-        monkeypatch.setenv("WAKE_WORD", "hey_droplet")
+    def test_custom_wake_word_propagates(self, monkeypatch):
+        monkeypatch.setenv("WAKE_WORD", "my_custom_word")
         det = build_detector_from_env()
         assert isinstance(det, OpenWakeWordDetector)
-        assert det.model_name == "hey_droplet"
+        assert det.requested_wake_word == "my_custom_word"
 
     def test_whitespace_stripped(self, monkeypatch):
         # Env vars from systemd units / docker-compose often arrive
         # with trailing newlines. Strip them defensively.
         monkeypatch.setenv("WAKE_WORD", "  hey_droplet  \n")
         det = build_detector_from_env()
+        assert det.requested_wake_word == "hey_droplet"
+
+
+# ────────────────────────────────────────────────────────────────────
+# Wake-word fallback — when WAKE_WORD has no on-disk .onnx + isn't bundled
+# ────────────────────────────────────────────────────────────────────
+
+class TestFallback:
+    """The branded default 'hey_droplet' has no openwakeword bundled
+    model AND no .onnx on disk until training data lands. The detector
+    must NOT crash — it falls back to a bundled model so wake stays
+    armed, and surfaces that via `using_fallback`.
+    """
+
+    def _install_fake_model(self, monkeypatch, accepts: set[str]):
+        """Patch `openwakeword.model.Model` so that constructing with
+        a model name in `accepts` succeeds, anything else raises.
+        Returns a list of (kwargs, succeeded) for each attempted
+        construction so tests can assert load order."""
+        attempts: list[tuple[dict, bool]] = []
+
+        class _FakeModel:
+            def __init__(self, **kwargs):
+                import os as _os
+                models = kwargs.get("wakeword_models") or []
+                def _accepts_one(m: str) -> bool:
+                    if m in accepts:
+                        return True
+                    # Tolerate \\ on Windows + / on POSIX.
+                    base = _os.path.basename(m)
+                    stem = base[:-5] if base.endswith(".onnx") else base
+                    return stem in accepts
+                ok = bool(models) and all(_accepts_one(m) for m in models)
+                attempts.append((kwargs, ok))
+                if not ok:
+                    raise ValueError(f"Unknown wake-word model: {models}")
+            def predict(self, _audio):
+                return {}
+
+        # Provide a fake openwakeword.model module surface.
+        import sys
+        import types as _types
+        fake_mod = _types.ModuleType("openwakeword.model")
+        fake_mod.Model = _FakeModel  # type: ignore[attr-defined]
+        # Make the parent package available too (the detector does
+        # `from openwakeword.model import Model`, which triggers
+        # `import openwakeword` first).
+        fake_parent = _types.ModuleType("openwakeword")
+        sys.modules["openwakeword"] = fake_parent
+        sys.modules["openwakeword.model"] = fake_mod
+        return attempts
+
+    def test_falls_back_to_hey_jarvis_when_custom_missing(self, monkeypatch, tmp_path):
+        # 'hey_droplet' isn't bundled and no .onnx on disk → fallback
+        # to 'hey_jarvis' (bundled), wake stays armed.
+        attempts = self._install_fake_model(monkeypatch, accepts={"hey_jarvis"})
+        det = OpenWakeWordDetector(
+            wake_word="hey_droplet", models_dir=str(tmp_path),
+        )
+        det._ensure_loaded()
+        assert det.loaded is True
+        assert det.using_fallback is True
+        assert det.model_name == "hey_jarvis"
+        assert det.requested_wake_word == "hey_droplet"
+        # First attempt was hey_droplet (failed), second was hey_jarvis (succeeded)
+        assert len(attempts) == 2
+        assert "hey_droplet" in attempts[0][0]["wakeword_models"]
+        assert attempts[0][1] is False
+        assert "hey_jarvis" in attempts[1][0]["wakeword_models"]
+        assert attempts[1][1] is True
+
+    def test_no_fallback_when_custom_onnx_on_disk(self, monkeypatch, tmp_path):
+        # Drop a (fake) hey_droplet.onnx on disk. Detector should use
+        # that path, no bundled lookup, no fallback.
+        (tmp_path / "hey_droplet.onnx").write_bytes(b"fake-onnx-bytes")
+        attempts = self._install_fake_model(
+            monkeypatch,
+            # Accept the path-based load (any caller of the fake's
+            # Model() with the .onnx path).
+            accepts={"hey_droplet"},
+        )
+        det = OpenWakeWordDetector(
+            wake_word="hey_droplet", models_dir=str(tmp_path),
+        )
+        det._ensure_loaded()
+        assert det.loaded is True
+        assert det.using_fallback is False
         assert det.model_name == "hey_droplet"
+        # Only one attempt — the custom path load
+        assert len(attempts) == 1
+
+    def test_no_fallback_when_wake_word_is_bundled(self, monkeypatch, tmp_path):
+        # If WAKE_WORD is one of the bundled names, no fallback needed.
+        attempts = self._install_fake_model(monkeypatch, accepts={"alexa"})
+        det = OpenWakeWordDetector(
+            wake_word="alexa", models_dir=str(tmp_path),
+        )
+        det._ensure_loaded()
+        assert det.loaded is True
+        assert det.using_fallback is False
+        assert det.model_name == "alexa"
+        assert len(attempts) == 1
+
+    def test_disabled_when_even_fallback_fails(self, monkeypatch, tmp_path):
+        # Pathological: even hey_jarvis isn't loadable (e.g. corrupt
+        # bundled cache). Detector goes to loaded=False, predict
+        # returns {}, pipeline keeps running.
+        self._install_fake_model(monkeypatch, accepts=set())
+        det = OpenWakeWordDetector(
+            wake_word="hey_droplet", models_dir=str(tmp_path),
+        )
+        det._ensure_loaded()
+        assert det.loaded is False
+        # predict() must not crash even after a failed load
+        import numpy as np
+        assert det.predict(np.zeros(WAKE_FRAME_SAMPLES, dtype=np.int16)) == {}

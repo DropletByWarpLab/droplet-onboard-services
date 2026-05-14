@@ -40,6 +40,7 @@ from voice.pipeline import (
     PipelineStatus,
     WakePipeline,
 )
+from voice.llm import LLMClient, LLMUnavailable, MockLLM
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
 from voice.tts import MockTTS, SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
@@ -1082,3 +1083,228 @@ class TestSpeakStatus:
         pipe.start()
         assert pipe.status().tts_loaded is False
         pipe.stop()
+
+
+# ────────────────────────────────────────────────────────────────────
+# Commit 7 — closed-loop transcript → LLM → speak
+# ────────────────────────────────────────────────────────────────────
+
+class _RecordingLLM(LLMClient):
+    """MockLLM variant with failure injection."""
+
+    def __init__(
+        self,
+        scripted_replies: Optional[list[str]] = None,
+        available: bool = True,
+        raise_on_reply: bool = False,
+    ):
+        self._scripts = list(scripted_replies or [])
+        self._available = available
+        self._raise_on_reply = raise_on_reply
+        self.requests: list[str] = []
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def reply(self, user_text: str) -> str:
+        self.requests.append(user_text)
+        if self._raise_on_reply:
+            raise LLMUnavailable("LLM blew up (test)")
+        return self._scripts.pop(0) if self._scripts else ""
+
+
+class TestClosedLoop:
+    """End-to-end through the default callback: a transcript arrives,
+    LLM is asked, reply is spoken. These are the most behaviorally
+    important tests in the file — they exercise the same code path the
+    user will hit at runtime when they say "hey jarvis, what time is
+    it" and hear an answer back.
+    """
+
+    def test_transcript_triggers_llm_then_speak(self, monkeypatch):
+        play_calls = _patch_play(monkeypatch)
+        llm = _RecordingLLM(scripted_replies=["it is three p.m."])
+        tts = _RecordingTTS(scripted_audio=SynthesizedAudio(
+            pcm=b"\x00" * 200, sample_rate=22050, sample_width=2, channels=1,
+        ))
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=7,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        # Drive the same frame sequence the real loop would deliver.
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin transcription + chunk
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())  # exceed window → finish
+
+        # LLM received the transcript:
+        assert llm.requests == ["what time is it"]
+        # TTS got the LLM reply:
+        assert tts.texts_received == ["it is three p.m."]
+        # Speaker got the synthesized audio:
+        assert play_calls[0]["device"] == 7
+        # Status reflects the whole loop:
+        s = pipe.status()
+        assert s.last_transcript == "what time is it"
+        assert s.last_response == "it is three p.m."
+
+    def test_llm_unavailable_does_not_break_wake_loop(self, monkeypatch):
+        # If the orchestrator is down, the wake → STT → transcript path
+        # still works (transcript visible in status), just no spoken
+        # reply. Pipeline must NOT enter error state.
+        _patch_play(monkeypatch)
+        llm = _RecordingLLM(available=False)  # never reachable
+        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = False  # simulated probe-fail at startup
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())
+
+        # Transcript landed:
+        assert pipe.status().last_transcript == "hi"
+        # No LLM call attempted (because llm_available is False, skip):
+        assert llm.requests == []
+        # No TTS playback:
+        assert tts.texts_received == []
+        # Pipeline NOT in error state:
+        s = pipe.status()
+        assert s.state in ("transcript_ready", "listening")
+
+    def test_llm_raises_lands_in_error_state(self, monkeypatch):
+        # Hard failure during reply() — orchestrator returned 500. The
+        # error message surfaces via /voice/status.
+        _patch_play(monkeypatch)
+        llm = _RecordingLLM(raise_on_reply=True)
+        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())
+
+        s = pipe.status()
+        assert s.state == "error"
+        assert "LLM blew up" in (s.error_message or "")
+        # No speaking happened:
+        assert tts.texts_received == []
+
+    def test_llm_empty_reply_doesnt_speak(self, monkeypatch):
+        # Operator could configure a model that returns "" on irrelevant
+        # input. We should NOT push empty audio through Piper.
+        _patch_play(monkeypatch)
+        llm = _RecordingLLM(scripted_replies=[""])
+        stt = _RecordingSTT(scripted_transcripts=["..."])
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())
+
+        assert llm.requests == ["..."]
+        assert tts.texts_received == []  # no Piper call for empty reply
+
+    def test_status_exposes_llm_loaded_after_probe(self):
+        llm = _RecordingLLM(available=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            llm=llm,
+        )
+        pipe.start()
+        assert pipe.status().llm_loaded is True
+        pipe.stop()
+
+    def test_status_exposes_llm_loaded_false_when_unreachable(self):
+        llm = _RecordingLLM(available=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            llm=llm,
+        )
+        pipe.start()
+        assert pipe.status().llm_loaded is False
+        pipe.stop()
+
+    def test_operator_supplied_on_transcript_overrides_default(self, monkeypatch):
+        # When the operator passes a custom on_transcript callback, the
+        # default closed-loop behaviour is NOT invoked. Commit 8 may
+        # want to dispatch via a different path; this contract pins it.
+        _patch_play(monkeypatch)
+        captured: list[str] = []
+        llm = _RecordingLLM(scripted_replies=["should not be heard"])
+        stt = _RecordingSTT(scripted_transcripts=["hello"])
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            on_transcript=captured.append,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())
+
+        assert captured == ["hello"]
+        # And the LLM was NOT called (operator's callback is in charge now):
+        assert llm.requests == []
+        assert tts.texts_received == []

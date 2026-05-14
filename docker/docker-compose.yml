@@ -554,7 +554,7 @@ services:
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
       - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
       - ORCHESTRATOR_TOKEN=${ORCHESTRATOR_TOKEN:-}
-      - WAKE_WORD=${WAKE_WORD:-hey_jarvis}
+      - WAKE_WORD=${WAKE_WORD:-hey_droplet}
       - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.5}
       # STT — wake → next 5 s of audio gets streamed here for transcription.
       # `wyoming-faster-whisper` is the sibling container below (Rhasspy's
@@ -569,6 +569,13 @@ services:
       # calls but play silent audio).
       - TTS_URL=${TTS_URL:-tcp://wyoming-piper:10200}
       - TTS_VOICE=${TTS_VOICE:-en_US-ryan-medium}
+      # LLM — orchestrator's /api/llm/chat is where transcripts go for
+      # response generation. The agent loop on the orchestrator side
+      # owns conversation state + tool dispatch. Set LLM_URL=__mock__
+      # for a dev box with no orchestrator (transcript echoes as the
+      # spoken reply).
+      - LLM_URL=${LLM_URL:-http://orchestrator:3000}
+      - LLM_MODEL=${LLM_MODEL:-ollama:llama3.2:3b}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.

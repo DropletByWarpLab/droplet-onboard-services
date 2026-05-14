@@ -36,6 +36,7 @@ from voice.pipeline import (
     DEFAULT_THRESHOLD,
     WakePipeline,
 )
+from voice.llm import build_llm_from_env
 from voice.stt import build_stt_from_env
 from voice.tts import build_tts_from_env
 from voice.wake import build_detector_from_env
@@ -123,10 +124,12 @@ async def startup() -> None:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
         tts = build_tts_from_env()
+        llm = build_llm_from_env()
         _pipeline = WakePipeline(
             detector=detector,
             stt=stt,
             tts=tts,
+            llm=llm,
             input_device_index=r.input_device.index if r.input_device else None,
             output_device_index=r.output_device.index if r.output_device else None,
             threshold=WAKE_THRESHOLD,
@@ -155,9 +158,12 @@ class HealthResponse(BaseModel):
     inputAvailable: bool
     outputAvailable: bool
     wakeLoaded: bool = False
-    # Subsequent commits flip these to true as their layers come online.
     sttLoaded: bool = False
     ttsLoaded: bool = False
+    # Commit 7. True iff the orchestrator's /api/llm/chat was reachable
+    # at startup. Wake + STT still work when this is false, but no
+    # spoken replies happen.
+    llmLoaded: bool = False
 
 
 class VoiceStatusResponse(BaseModel):
@@ -165,6 +171,14 @@ class VoiceStatusResponse(BaseModel):
     listening: bool
     wake_loaded: bool
     wake_model: Optional[str] = None
+    # Reflects the wake-word fallback: when WAKE_WORD asks for a model
+    # whose .onnx isn't on disk and isn't bundled, OpenWakeWordDetector
+    # falls back to a bundled model. requested_wake_word shows what was
+    # asked for; using_wake_fallback is the bool. Dashboard shows
+    # "configured: hey_droplet (currently using hey_jarvis — training
+    # pending)" when both differ.
+    requested_wake_word: Optional[str] = None
+    using_wake_fallback: bool = False
     threshold: float
     last_wake_at: Optional[float] = None
     last_wake_score: Optional[float] = None
@@ -179,11 +193,14 @@ class VoiceStatusResponse(BaseModel):
     last_transcript_at: Optional[float] = None
     # TTS (commit 6). `tts_loaded` is the at-startup reachability flag;
     # `last_response` is the most recent text we spoke aloud — set by
-    # pipeline.speak() (called from /voice/say today, the LLM agent
-    # loop in commit 7).
+    # pipeline.speak() (called from the LLM-reply path or /voice/say).
     tts_loaded: bool = False
     last_response: Optional[str] = None
     last_response_at: Optional[float] = None
+    # LLM (commit 7). Reflects whether the orchestrator's /api/llm/chat
+    # was reachable at startup. The dashboard surfaces this so a
+    # degraded LLM is visible.
+    llm_loaded: bool = False
 
 
 class SayRequest(BaseModel):
@@ -221,12 +238,14 @@ def health() -> HealthResponse:
     wake_loaded = False
     stt_loaded = False
     tts_loaded = False
+    llm_loaded = False
     if _pipeline is not None:
         # Cheap atomic read; no I/O on the pipeline thread.
         s = _pipeline.status()
         wake_loaded = s.wake_loaded
         stt_loaded = s.stt_loaded
         tts_loaded = s.tts_loaded
+        llm_loaded = s.llm_loaded
     return HealthResponse(
         ok=True,
         inputAvailable=r.input_device is not None,
@@ -234,6 +253,7 @@ def health() -> HealthResponse:
         wakeLoaded=wake_loaded,
         sttLoaded=stt_loaded,
         ttsLoaded=tts_loaded,
+        llmLoaded=llm_loaded,
     )
 
 
@@ -260,6 +280,8 @@ def voice_status() -> VoiceStatusResponse:
         listening=s.listening,
         wake_loaded=s.wake_loaded,
         wake_model=s.wake_model,
+        requested_wake_word=s.requested_wake_word,
+        using_wake_fallback=s.using_wake_fallback,
         threshold=s.threshold,
         last_wake_at=s.last_wake_at,
         last_wake_score=s.last_wake_score,
@@ -271,6 +293,7 @@ def voice_status() -> VoiceStatusResponse:
         tts_loaded=s.tts_loaded,
         last_response=s.last_response,
         last_response_at=s.last_response_at,
+        llm_loaded=s.llm_loaded,
     )
 
 
