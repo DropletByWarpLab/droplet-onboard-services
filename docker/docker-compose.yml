@@ -516,6 +516,55 @@ services:
     profiles: ["full"]
     restart: always
 
+  # --- Voice assistant (WARP-154) ---
+  # Always-on voice loop: mic capture -> wake-word -> STT -> orchestrator
+  # agent loop -> TTS -> speaker. Hardware-agnostic device discovery in
+  # services/voice-orchestrator/voice/devices.py picks the best mic/speaker
+  # at startup (USB > platform-bus I²S codec > onboard PCI > HDMI). Env
+  # overrides (VOICE_INPUT_DEVICE / VOICE_OUTPUT_DEVICE) pin specific
+  # hardware for production. See services/voice-orchestrator/README.md
+  # §"Hardware compatibility" for the supported configurations.
+  #
+  # Profile-gated to "linux" because /dev/snd doesn't exist on Docker
+  # Desktop for macOS; dev installs there skip it. POC + production both
+  # run Linux so the profile is on by default via setup.sh.
+  voice-orchestrator:
+    build:
+      context: ..
+      dockerfile: services/voice-orchestrator/Dockerfile
+    # /dev/snd is the ALSA device tree; mounting it gives the container
+    # access to whatever the host kernel sees. No need to enumerate
+    # specific devices — sounddevice picks them up via PortAudio.
+    devices:
+      - "/dev/snd:/dev/snd"
+    # The host's audio group GID. On Ubuntu/Debian (POC + Jetson) it's 29;
+    # docker-compose's numeric group_add doesn't care if a name exists
+    # in the container's /etc/group as long as the kernel sees the GID
+    # match for /dev/snd's owner.
+    group_add:
+      - "29"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - VOICE_INPUT_DEVICE=${VOICE_INPUT_DEVICE:-}
+      - VOICE_OUTPUT_DEVICE=${VOICE_OUTPUT_DEVICE:-}
+      - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
+      - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
+      - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
+      - ORCHESTRATOR_TOKEN=${ORCHESTRATOR_TOKEN:-}
+      - WAKE_WORD=${WAKE_WORD:-hey_jarvis}
+      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.5}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
+    # reaches it. Port intentionally not published to the host.
+    expose:
+      - "8086"
+    # Skip on macOS Docker Desktop (no /dev/snd).
+    profiles: ["linux"]
+    restart: always
+
   # --- TFT Display (3.5" front-panel) ---
   # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
   # accepts: auto (probe PyPortal, fall back to sim), pyportal, or sim.
