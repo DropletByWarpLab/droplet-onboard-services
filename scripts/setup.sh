@@ -222,6 +222,44 @@ fi
 # =============================================================================
 # Main
 # =============================================================================
+
+
+# Register external storages in Nextcloud for each /mnt/droplet/<name>
+# (which is bind-mounted into the nextcloud container as /host/<name>).
+# Idempotent: skips entries that are already registered.
+register_nextcloud_externals() {
+  local nc=droplet-pi-platform-nextcloud-1
+  if ! sudo docker ps --format '{{.Names}}' | grep -qx "$nc"; then
+    log_info "Nextcloud container not running; skipping external-storage registration"
+    return 0
+  fi
+
+  log_info "Waiting for Nextcloud to be ready..."
+  local i
+  for i in $(seq 1 60); do
+    if sudo docker exec -u www-data "$nc" php occ status 2>/dev/null | grep -q 'installed: true'; then
+      break
+    fi
+    sleep 2
+  done
+
+  log_info "Enabling files_external app (idempotent)..."
+  sudo docker exec -u www-data "$nc" php occ app:enable files_external >/dev/null
+
+  log_info "Registering /mnt/droplet/<name> as Nextcloud external storage..."
+  for d in /mnt/droplet/*/; do
+    [ -d "$d" ] || continue
+    local name
+    name=$(basename "$d")
+    if sudo docker exec -u www-data "$nc" php occ files_external:list 2>/dev/null | grep -qE "/$name\b"; then
+      log_info "  /$name already registered, skipping"
+    else
+      sudo docker exec -u www-data "$nc" php occ files_external:create "/$name" local null::null -c "datadir=/host/$name" >/dev/null
+      log_success "  /$name registered (datadir=/host/$name)"
+    fi
+  done
+}
+
 main() {
   trap _on_error ERR
 
@@ -244,6 +282,20 @@ main() {
   #   first drive: 20% NVR + 80% data; subsequent drives: single ext4.
   # Idempotent: drives already partitioned per our layout are adopted as-is.
   detect_and_mount_drives
+
+  # Install host-side openwrt-attach systemd unit (handles PHY netns +
+  # AP bring-up on every docker start of the openwrt container). Versioned
+  # under openwrt/poc-single-box/ ? see that dir's README for details.
+  if [ -f "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach.service" ] && \
+     [ ! -f /etc/systemd/system/droplet-openwrt-attach.service ]; then
+    log_info "Installing host-side openwrt-attach systemd unit..."
+    sudo cp "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach.service" /etc/systemd/system/
+    sudo cp "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach" /usr/local/sbin/
+    sudo chmod +x /usr/local/sbin/droplet-openwrt-attach
+    sudo systemctl daemon-reload
+    sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
+    log_success "droplet-openwrt-attach.service installed and enabled"
+  fi
   # Persist the detected NVR path into .env so Frigate picks it up via
   # NVR_MEDIA_SOURCE (defaults to docker named volume \"nvrdata\" otherwise).
   if [ -n "${STORAGE_NVR_PATH:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
@@ -315,7 +367,9 @@ main() {
 
   # --- Phase 7: Verify ---
   log_step 7 $total_steps "Verify"
-  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
+  if [ "$SKIP_START" != "true" ] && [ -x register_nextcloud_externals || log_warn "External-storage registration had issues"
+    "$SCRIPT_DIR/verify.sh" ]; then
+    register_nextcloud_externals || log_warn "External-storage registration had issues"
     "$SCRIPT_DIR/verify.sh" || log_warn "Some verification checks failed — see output above"
   else
     log_info "Skipping verification (stack not started or verify.sh not found)"

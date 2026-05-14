@@ -5,12 +5,12 @@
 # box and works for the customer install):
 #
 #   The first detected non-OS data drive becomes the "NVR drive":
-#     - sda1 = 20% (e.g., 400 GiB of a 2 TB drive)   label=nvr   /mnt/nvr
-#     - sda2 = 80% remaining                          label=data  /mnt/data
+#     - sda1 = 20% (e.g., 400 GiB of a 2 TB drive)   label=nvr   /mnt/droplet/nvr
+#     - sda2 = 80% remaining                          label=data  /mnt/droplet/data
 #
 #   Subsequent drives become single-partition data drives:
-#     - sdb1 = 100%   label=data2   /mnt/data2
-#     - sdc1 = 100%   label=data3   /mnt/data3
+#     - sdb1 = 100%   label=data2   /mnt/droplet/data2
+#     - sdc1 = 100%   label=data3   /mnt/droplet/data3
 #     - ...
 #
 # Idempotent: drives that already have a partition table OR are already in
@@ -109,10 +109,10 @@ _adopt_existing_nvr_layout() {
   l1=$(sudo blkid -s LABEL -o value "$p1" 2>/dev/null || echo "")
   l2=$(sudo blkid -s LABEL -o value "$p2" 2>/dev/null || echo "")
   if [ "$l1" = "nvr" ] && [ "$l2" = "data" ]; then
-    _mount_and_persist "$p1" /mnt/nvr  nvr
-    _mount_and_persist "$p2" /mnt/data data
-    STORAGE_NVR_PATH=/mnt/nvr
-    STORAGE_DATA_PATHS+=("/mnt/data")
+    _mount_and_persist "$p1" /mnt/droplet/nvr  nvr
+    _mount_and_persist "$p2" /mnt/droplet/data data
+    STORAGE_NVR_PATH=/mnt/droplet/nvr
+    STORAGE_DATA_PATHS+=("/mnt/droplet/data")
     return 0
   fi
   return 1
@@ -177,10 +177,10 @@ detect_and_mount_drives() {
         log_info "  $dev: raw — partitioning 20% NVR + 80% data..."
         local parts; parts=$(_layout_nvr_split "$dev")
         local p1 p2; read -r p1 p2 <<< "$parts"
-        _mount_and_persist "$p1" /mnt/nvr  nvr
-        _mount_and_persist "$p2" /mnt/data data
-        STORAGE_NVR_PATH=/mnt/nvr
-        STORAGE_DATA_PATHS+=("/mnt/data")
+        _mount_and_persist "$p1" /mnt/droplet/nvr  nvr
+        _mount_and_persist "$p2" /mnt/droplet/data data
+        STORAGE_NVR_PATH=/mnt/droplet/nvr
+        STORAGE_DATA_PATHS+=("/mnt/droplet/data")
       fi
     else
       # Subsequent drives: single ext4 with label data2, data3, ...
