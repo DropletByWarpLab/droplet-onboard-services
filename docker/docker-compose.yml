@@ -576,6 +576,15 @@ services:
       # spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
       - LLM_MODEL=${LLM_MODEL:-ollama:llama3.2:3b}
+      # Context the LLM gets in its system prompt at every reply():
+      # current local time + the device's configured location. Without
+      # these, the model freelances ("the time is around 3pm" with no
+      # actual clock access). Operator sets DROPLET_LOCATION in .env
+      # ("Greenwich, CT, USA" — free-form, the model just reads it
+      # back). TZ is a standard IANA name (e.g. "America/New_York");
+      # falls back to UTC if the container's tzdata can't resolve it.
+      - DROPLET_LOCATION=${DROPLET_LOCATION:-}
+      - TZ=${TZ:-UTC}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.

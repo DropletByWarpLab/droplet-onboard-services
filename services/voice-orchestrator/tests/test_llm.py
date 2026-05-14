@@ -20,7 +20,9 @@ without a real network. No external orchestrator needed.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -33,6 +35,7 @@ from voice.llm import (
     _extract_assistant_text,
     _extract_error_detail,
     build_llm_from_env,
+    build_system_prompt,
 )
 
 
@@ -182,6 +185,9 @@ class TestOrchestratorReply:
         assert seen == ["hello there"]
 
     def test_system_prompt_propagates(self, monkeypatch):
+        # The base system prompt is the persona text. The time + location
+        # footer is appended at reply() time (see TestBuildSystemPrompt).
+        # We just check the base is the prefix here.
         seen_system: list[str] = []
         def handler(req):
             body = json.loads(req.content)
@@ -193,7 +199,8 @@ class TestOrchestratorReply:
         OrchestratorLLM(
             base_url="http://test", system_prompt="you are a tiny robot",
         ).reply("hi")
-        assert seen_system == ["you are a tiny robot"]
+        assert len(seen_system) == 1
+        assert seen_system[0].startswith("you are a tiny robot")
 
 
 class TestOrchestratorReplyErrors:
@@ -341,3 +348,166 @@ class TestBuildLLMFromEnv:
         llm = build_llm_from_env()
         assert isinstance(llm, OrchestratorLLM)
         assert llm._bearer_token == "shared-secret"
+
+    def test_droplet_location_and_tz_env_propagate(self, monkeypatch):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("DROPLET_LOCATION", "Greenwich, CT, USA")
+        monkeypatch.setenv("TZ", "America/New_York")
+        llm = build_llm_from_env()
+        assert isinstance(llm, OrchestratorLLM)
+        assert llm._location == "Greenwich, CT, USA"
+        assert llm._timezone == "America/New_York"
+
+    def test_missing_location_env_is_none_not_empty_string(self, monkeypatch):
+        # A None location skips the "located in" line in the prompt
+        # entirely. An empty string ("") would render as
+        # "The Droplet is located in ." which is worse than silent.
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.delenv("DROPLET_LOCATION", raising=False)
+        llm = build_llm_from_env()
+        assert llm._location is None
+
+
+# ────────────────────────────────────────────────────────────────────
+# Time + location context — system prompt builder
+# ────────────────────────────────────────────────────────────────────
+
+class TestBuildSystemPrompt:
+    """The system prompt has to embed live time + location so the model
+    can answer "what time is it?" / "what's the date?" / "what's the
+    weather in our area?" without making up the answer. These tests
+    pin that the placeholder + the values land where expected."""
+
+    def test_includes_current_time_for_injected_now(self):
+        now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
+        prompt = build_system_prompt(
+            "BASE", location=None, timezone="UTC", now=now,
+        )
+        assert "Right now it is" in prompt
+        assert "May 14, 2026" in prompt
+        assert "9:17 PM" in prompt  # 21:17 → 9:17 PM
+        assert "Thursday" in prompt  # 2026-05-14 was a Thursday
+
+    def test_omits_location_line_when_none(self):
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
+        prompt = build_system_prompt(
+            "BASE", location=None, timezone="UTC", now=now,
+        )
+        assert "located in" not in prompt
+
+    def test_omits_location_line_when_empty_string(self):
+        # Defensive: "" should be treated like None, not rendered as
+        # "located in ." which is uglier than silent.
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
+        prompt = build_system_prompt(
+            "BASE", location="  ", timezone="UTC", now=now,
+        )
+        assert "located in" not in prompt
+
+    def test_includes_location_when_set(self):
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
+        prompt = build_system_prompt(
+            "BASE", location="Greenwich, CT", timezone="UTC", now=now,
+        )
+        assert "located in Greenwich, CT" in prompt
+
+    def test_converts_naive_now_to_target_timezone(self):
+        # Naive datetime — should be treated as local-in-target-tz.
+        naive = datetime(2026, 5, 14, 12, 0)
+        prompt = build_system_prompt(
+            "BASE", location=None, timezone="America/New_York", now=naive,
+        )
+        # Friendly format uses %Z which renders the TZ abbrev.
+        assert "EDT" in prompt or "EST" in prompt
+
+    def test_converts_aware_now_to_target_timezone(self):
+        # UTC noon → 7 or 8 AM in New York depending on DST.
+        utc_noon = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
+        prompt = build_system_prompt(
+            "BASE", location=None, timezone="America/New_York", now=utc_noon,
+        )
+        # May → EDT → UTC-4, so 12:00 UTC → 08:00 EDT.
+        assert "8:00 AM" in prompt
+        assert "Thursday" in prompt  # date doesn't shift either way
+
+    def test_unknown_timezone_falls_back_to_utc(self):
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
+        # "Mars/Olympus" isn't an IANA zone — should fall back to UTC
+        # silently rather than crash the LLM call.
+        prompt = build_system_prompt(
+            "BASE", location=None, timezone="Mars/Olympus", now=now,
+        )
+        assert "UTC" in prompt
+        assert "Right now it is" in prompt
+
+    def test_explicit_instruction_to_use_the_time(self):
+        # Without an explicit instruction, smaller models often respond
+        # with "I don't have access to the current time" even when the
+        # time IS in their system prompt. Make the steer overt.
+        prompt = build_system_prompt(
+            "BASE", location="X", timezone="UTC",
+            now=datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
+        )
+        assert "do not say you don't have access" in prompt.lower()
+
+    def test_base_prompt_is_preserved_intact_at_top(self):
+        prompt = build_system_prompt(
+            "You are X.",
+            location="Y", timezone="UTC",
+            now=datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
+        )
+        assert prompt.startswith("You are X.\n\n")
+
+
+class TestSystemPromptWiringIntoReply:
+    """End-to-end: when reply() sends a request to the LLM endpoint,
+    the system message has the time + location baked in."""
+
+    def test_reply_sends_enriched_system_prompt(self, monkeypatch):
+        captured_system: list[str] = []
+        def handler(req):
+            body = json.loads(req.content)
+            captured_system.append(body["messages"][0]["content"])
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+            })
+        _install_mock_transport(monkeypatch, handler)
+        fixed_now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
+        llm = OrchestratorLLM(
+            base_url="http://test",
+            location="Greenwich, CT",
+            timezone="America/New_York",
+            now_provider=lambda: fixed_now,
+        )
+        llm.reply("hi")
+        assert len(captured_system) == 1
+        prompt = captured_system[0]
+        # Time present + location present + tz-converted (UTC 21:17 → EDT 17:17)
+        assert "5:17 PM" in prompt
+        assert "Greenwich, CT" in prompt
+        assert "EDT" in prompt
+
+    def test_each_reply_gets_fresh_time(self, monkeypatch):
+        # No tickless caching of the system prompt — every call resamples
+        # the clock so a long-lived service stays accurate.
+        captured: list[str] = []
+        def handler(req):
+            body = json.loads(req.content)
+            captured.append(body["messages"][0]["content"])
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+            })
+        _install_mock_transport(monkeypatch, handler)
+        times = iter([
+            datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
+            datetime(2026, 5, 14, 13, 0, tzinfo=ZoneInfo("UTC")),
+        ])
+        llm = OrchestratorLLM(
+            base_url="http://test",
+            timezone="UTC",
+            now_provider=lambda: next(times),
+        )
+        llm.reply("a")
+        llm.reply("b")
+        assert "12:00 PM" in captured[0]
+        assert "1:00 PM" in captured[1]

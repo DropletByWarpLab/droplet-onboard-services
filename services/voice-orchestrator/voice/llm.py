@@ -30,8 +30,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -54,6 +57,65 @@ DEFAULT_LLM_SYSTEM_PROMPT = (
     "suitable for spoken playback. No markdown, no formatting, no lists. "
     "If you don't know something, say so plainly."
 )
+
+# Fallback timezone when neither `TZ` nor a system zoneinfo is usable.
+# UTC is honest — if we don't know where we are, we don't lie about
+# what time we say it is.
+DEFAULT_TIMEZONE = "UTC"
+
+
+def build_system_prompt(
+    base: str,
+    *,
+    location: Optional[str],
+    timezone: str,
+    now: Optional[datetime] = None,
+) -> str:
+    """Compose the system prompt for ONE LLM call.
+
+    The base prompt (a constant) defines the voice persona. We append a
+    fresh "Right now" footer with current local time + the device's
+    configured location so the model can answer "what time is it?" or
+    "what's the weather in our area?" without freelancing.
+
+    Pure function — `now` is injectable for tests + the timezone is an
+    explicit arg so we can construct prompts deterministically.
+    """
+    tz = _safe_zone(timezone)
+    if now is None:
+        now = datetime.now(tz)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=tz)
+    else:
+        now = now.astimezone(tz)
+    # Friendly format the model can read aloud directly.
+    # "Wednesday, May 14, 2026 at 9:34 PM EDT" — explicit weekday lets
+    # the model handle "is it the weekend?" without extra reasoning.
+    when = now.strftime("%A, %B %d, %Y at %I:%M %p %Z").replace(" 0", " ")
+    parts = [base, f"\n\nRight now it is {when}."]
+    if location and location.strip():
+        parts.append(f"\nThe Droplet is located in {location.strip()}.")
+    parts.append(
+        "\nIf the user asks for the time, the date, or anything tied "
+        "to location, use the information above directly — do not say "
+        "you don't have access to the time or location."
+    )
+    return "".join(parts)
+
+
+def _safe_zone(name: str) -> ZoneInfo:
+    """Get a ZoneInfo for `name`, falling back to UTC if the tz database
+    doesn't know it. Containers without tzdata installed and dev boxes
+    with typo'd `TZ` env both hit this."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(
+            "unknown timezone %r — falling back to UTC. Set TZ to an "
+            "IANA name (e.g. America/New_York) in .env.",
+            name,
+        )
+        return ZoneInfo(DEFAULT_TIMEZONE)
 
 
 class LLMUnavailable(Exception):
@@ -100,6 +162,9 @@ class OrchestratorLLM(LLMClient):
         bearer_token: Optional[str] = None,
         system_prompt: str = DEFAULT_LLM_SYSTEM_PROMPT,
         timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
+        location: Optional[str] = None,
+        timezone: str = DEFAULT_TIMEZONE,
+        now_provider: Optional[Callable[[], datetime]] = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._chat_path = chat_path
@@ -108,6 +173,16 @@ class OrchestratorLLM(LLMClient):
         self._bearer_token = bearer_token
         self._system_prompt = system_prompt
         self._timeout_s = timeout_s
+        # Context-enrichment fields. `location` is a free-form string
+        # ("Greenwich, CT, USA") — what the operator set in env, no
+        # geocoding. `timezone` is an IANA name; we resolve it to a
+        # ZoneInfo at call time (in build_system_prompt) so a typo
+        # falls back to UTC instead of crashing reply().
+        self._location = location
+        self._timezone = timezone
+        # `now_provider` lets tests inject a deterministic clock without
+        # patching datetime globally. Production passes None → real time.
+        self._now_provider = now_provider
 
     @property
     def available(self) -> bool:
@@ -128,10 +203,20 @@ class OrchestratorLLM(LLMClient):
     def reply(self, user_text: str) -> str:
         if not user_text or not user_text.strip():
             return ""
+        # Build a fresh system prompt on every call so the embedded
+        # "right now" timestamp is current. Cheap (string concat +
+        # one datetime.now()) — no need to cache.
+        now = self._now_provider() if self._now_provider else None
+        system_msg = build_system_prompt(
+            self._system_prompt,
+            location=self._location,
+            timezone=self._timezone,
+            now=now,
+        )
         body: dict[str, Any] = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": self._system_prompt},
+                {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_text.strip()},
             ],
             "stream": False,
@@ -273,15 +358,25 @@ def build_llm_from_env() -> LLMClient:
                                          dev triggering)
       - empty/unset                  → OrchestratorLLM against the
                                          compose-default DNS
-    """
-    import os
 
+    `DROPLET_LOCATION` (free-form, e.g. "Greenwich, CT, USA") +
+    `TZ` (IANA, e.g. "America/New_York") feed into the system prompt
+    so the model can answer time/location questions directly.
+    """
     raw = (os.environ.get("LLM_URL") or "").strip()
     model = (os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL).strip() or DEFAULT_LLM_MODEL
     token = (os.environ.get("ORCHESTRATOR_TOKEN") or "").strip() or None
+    location = (os.environ.get("DROPLET_LOCATION") or "").strip() or None
+    timezone = (os.environ.get("TZ") or "").strip() or DEFAULT_TIMEZONE
     if raw == "__mock__":
         logger.info("LLM_URL=__mock__ → MockLLM (echoes the user transcript)")
         return MockLLM(echo=True)
     if not raw:
         raw = DEFAULT_LLM_URL
-    return OrchestratorLLM(base_url=raw, model=model, bearer_token=token)
+    return OrchestratorLLM(
+        base_url=raw,
+        model=model,
+        bearer_token=token,
+        location=location,
+        timezone=timezone,
+    )
