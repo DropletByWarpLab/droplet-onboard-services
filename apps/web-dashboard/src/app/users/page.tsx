@@ -572,7 +572,7 @@ export default function UsersPage() {
                       className="dp-input"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="type-caption-1 text-label-tertiary mb-1.5 block">
                         Role

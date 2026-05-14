@@ -899,7 +899,7 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
     <div className="space-y-4">
       <div className="dp-card">
         <h3 className="type-headline text-label-primary mb-4">Hardware</h3>
-        <div className="grid grid-cols-2 gap-y-3 gap-x-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-6">
           <InfoRow label="Model" value={board?.model ?? "Unknown"} />
           <InfoRow label="Hostname" value={board?.hostname ?? "Unknown"} />
           <InfoRow label="Kernel" value={board?.kernel ?? "Unknown"} />
@@ -911,7 +911,7 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
 
       <div className="dp-card">
         <h3 className="type-headline text-label-primary mb-4">Resources</h3>
-        <div className="grid grid-cols-2 gap-y-3 gap-x-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-6">
           <InfoRow label="Uptime" value={`${days}d ${hours}h ${minutes}m`} />
           <InfoRow label="Load Average" value={`${load1} / ${load5} / ${load15}`} />
           <InfoRow label="Memory Total" value={`${memTotalMB} MB`} />

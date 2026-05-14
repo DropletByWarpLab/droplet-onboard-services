@@ -145,7 +145,7 @@ export default function SettingsPage() {
         {showAddUser && (
           <div className="dp-card p-4 mb-3 space-y-3">
             <p className="type-headline text-label-primary">New User</p>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <input
                 value={newUsername}
                 onChange={(e) => setNewUsername(e.target.value.toLowerCase())}
