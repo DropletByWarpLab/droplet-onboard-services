@@ -268,7 +268,88 @@ Top-level `--extra-index-url` directive + `torch` listed BEFORE `sentence-transf
 - `curl -k https://192.168.10.1/api/health` → `aiGateway:true`
 - Frigate's `/dev/dri` device mapped to host's `renderD129` (iGPU), leaving the dGPU truly LLM-only.
 
-## Outstanding work (in priority order)
+## Phase D — OpenWrt container with WiFi AP (2026-05-14)
+
+Real `openwrt/rootfs:x86_64-24.10.2` running as a compose service. MT7921 WiFi card passed into the container's network namespace. hostapd broadcasting `Droplet-POC` SSID on 2.4 GHz channel 6.
+
+**Compose service** (`openwrt` in `docker-compose.override.yml`):
+- Image: `openwrt/rootfs:x86_64-24.10.2` (4.5 MB rootfs, official OpenWrt org)
+- `command: /sbin/init` (procd)
+- `privileged: true`, plus `NET_ADMIN`+`SYS_ADMIN` caps
+- `tmpfs: /tmp, /run`, `volumes: openwrt-config /etc/config, openwrt-overlay /overlay` (uci configs + opkg state survive restart)
+
+**MT7921 PHY passthrough** (manual for now, needs scripting):
+```bash
+OWRT_PID=$(sudo docker inspect droplet-openwrt --format '{{.State.Pid}}')
+sudo iw phy phy1 set netns $OWRT_PID    # phy1 is the MT7921 (host's iwlwifi phy0 stays put)
+```
+
+**Inside-container bootstrap** (also ad-hoc; persist via uci next iteration):
+```bash
+# Network bootstrap (Docker's IP was wiped by procd's netifd):
+ip addr add 172.18.0.15/16 dev eth0      # whatever Docker had assigned; check `docker inspect`
+ip route add default via 172.18.0.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+/etc/init.d/firewall stop && /etc/init.d/firewall disable   # POC: open. Configure zones properly later.
+
+# Install hostapd
+opkg update
+opkg install hostapd-mbedtls hostapd-utils wireless-regdb iw-full
+
+# Hostapd config (POC; rotate the password before customer ship)
+cat > /etc/hostapd.conf <<EOF
+interface=wlp7s0
+driver=nl80211
+ssid=Droplet-POC
+hw_mode=g
+channel=6
+country_code=US
+ieee80211d=1
+auth_algs=1
+wpa=2
+wpa_passphrase=droplet-poc-password
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+ieee80211w=1
+EOF
+
+ip link set wlp7s0 up
+ip addr add 192.168.20.1/24 dev wlp7s0
+hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
+```
+
+**Verified:** `iw dev wlp7s0 info` shows `ssid Droplet-POC, type AP, channel 6`. Phone scanning the WiFi sees `Droplet-POC` broadcasting.
+
+## Outstanding for OpenWrt-container (in priority order)
+
+These are required before customer-shippable. Each is a separate small task:
+
+1. **uci-persist the network/firewall/hostapd config.** Replace the ad-hoc `ip addr` and `/etc/hostapd.conf` commands above with `/etc/config/network`, `/etc/config/wireless`, `/etc/config/firewall` entries. Then OpenWrt's procd brings everything up automatically on container restart. Specifics:
+   - `/etc/config/network`: add `lan` interface on `wlp7s0` (192.168.20.1/24), `wan` interface on a Realtek port (enp10s0 when added later via passthrough), keep eth0 = docker DHCP
+   - `/etc/config/wireless`: define `radio0` for phy1 with the SSID/password/encryption
+   - `/etc/config/firewall`: zones `lan` (accept), `wan` (drop), with masquerade
+2. **Auto-attach the MT7921 PHY on container start.** Currently manual. Need a systemd unit on the host that runs on every `docker start droplet-openwrt`:
+   ```
+   [Unit]
+   Description=Attach MT7921 PHY to droplet-openwrt container
+   After=docker.service
+   [Service]
+   ExecStartPre=/bin/bash -c 'while ! docker inspect -f "{{.State.Running}}" droplet-openwrt 2>/dev/null | grep -q true; do sleep 1; done'
+   ExecStart=/bin/bash -c 'iw phy phy1 set netns $(docker inspect -f "{{.State.Pid}}" droplet-openwrt)'
+   [Install]
+   WantedBy=multi-user.target
+   ```
+3. **Add dnsmasq for DHCP + DNS to clients on 192.168.20.0/24.** Already installed in OpenWrt; just needs `/etc/config/dhcp` entry pointing at `lan` interface.
+4. **Move the 4 Realtek ports into the container's netns too** (or use macvlan), so the OpenWrt container owns the WAN port + LAN bridge ports. Plan:
+   - enp10s0 → WAN (DHCP from upstream)
+   - enp11s0–enp13s0 → bridged into `br-lan` alongside `wlp7s0`
+5. **Bridge OpenWrt's customer LAN (192.168.20.0/24) to the Pi-platform docker network** so customer clients reach the Droplet's dashboard at https://192.168.20.1/ (port-forwarded by OpenWrt to host's Nginx).
+6. **Expose ubus over HTTP** so `services/routing/` can call it. Install `rpcd`, `rpcd-mod-rpcsys`, `uhttpd`, `uhttpd-mod-ubus`. Configure orchestrator's `OPENWRT_HOST` env to point at the openwrt container. Verify `/api/health` flips `router:false → true`.
+7. **Rotate the placeholder WiFi password** `droplet-poc-password` to something customer-specific. Bring secret into `.env` and reference from uci.
+
+## Outstanding work (in priority order — non-OpenWrt)
 
 1. **OpenWrt-in-container** — the heaviest remaining lift. Plan:
    - Pull `openwrtorg/rootfs:24.10.0-x86-64` (or build via repo's
