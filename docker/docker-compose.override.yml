@@ -59,6 +59,20 @@ services:
       retries: 5
       start_period: 30s
 
+
+  # Move /var/www/html/data (user uploads) to the 1.4 TB SATA drive.
+  # Upstream compose mounts nextcloud-data:/var/www/html ? the bind below
+  # overlays just the data subdir, so app code + config stay on the OS volume.
+  # On first start with this override, /mnt/droplet/data/nextcloud-data must
+  # contain the rsync'd /data content from the nextcloud-data Docker volume.
+  nextcloud:
+    volumes:
+      - nextcloud-data:/var/www/html
+      - ./nextcloud-skeleton:/skeleton:ro
+      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      - /mnt/droplet:/host
+      - /mnt/droplet/data/nextcloud-data:/var/www/html/data:rw
+
   # ============================================================
   # OpenWrt router-in-container (POC).
   # ============================================================
