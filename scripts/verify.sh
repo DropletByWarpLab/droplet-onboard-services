@@ -165,6 +165,19 @@ if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'voice-io-1$'; then
       curl -sf -o /dev/null --max-time 5 http://localhost:8086/audio/devices
 fi
 
+# --- PyPortal screen service (oled-display) ---
+# Runs with `network_mode: host` listening on :8082. Service auto-falls
+# back to "simulated" backend (PNG file) when no /dev/ttyACM* device is
+# found, so /health stays green even with the PyPortal unplugged — the
+# operator distinguishes by hitting /display/status for the backend
+# (pyportal | simulated). `check_warn` rather than `check` because the
+# screen is opt-in hardware: the appliance ships without one on installs
+# that don't need a local display.
+if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'oled-display-1$'; then
+  check_warn "PyPortal screen /health" \
+    curl -sf -o /dev/null --max-time 5 http://localhost:8082/health
+fi
+
 # --- .env file ---
 check ".env exists (chmod 600)" \
   bash -c '

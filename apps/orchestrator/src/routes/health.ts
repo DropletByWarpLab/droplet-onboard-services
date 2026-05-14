@@ -6,6 +6,7 @@ import { isMatterInitialized } from "../services/matter.service.js";
 import { isRouterHealthy } from "../services/network.service.js";
 import { isFrigateHealthy } from "../services/camera.service.js";
 import { healthCheck as switchHealthCheck } from "../services/switch.client.js";
+import { healthCheck as displayHealthCheck } from "../services/display.client.js";
 import { getAggregateHealth } from "../services/health-monitor.service.js";
 import type { HealthResponse } from "../types/index.js";
 
@@ -15,7 +16,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/health", async (_req, res) => {
-    const [dbOk, redisOk, aiOk, routerOk, frigateOk, switchOk] = await Promise.all([
+    const [dbOk, redisOk, aiOk, routerOk, frigateOk, switchOk, displayOk] = await Promise.all([
       prisma.$queryRaw`SELECT 1`
         .then(() => true)
         .catch(() => false),
@@ -24,6 +25,11 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       isRouterHealthy(),
       isFrigateHealthy(),
       switchHealthCheck(),
+      // PyPortal Titano screen service. Stays `true` in simulated-mode too
+      // — the FastAPI app is up regardless of whether USB-serial probe
+      // found a physical device. /display/status surfaces the backend
+      // (pyportal | simulated) if the dashboard wants to distinguish.
+      displayHealthCheck(),
     ]);
 
     const matterOk = isMatterInitialized();
@@ -40,6 +46,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
         router: routerOk,
         frigate: frigateOk,
         switch: switchOk,
+        display: displayOk,
       },
     };
 

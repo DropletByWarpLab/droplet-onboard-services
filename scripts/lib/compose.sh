@@ -141,10 +141,19 @@ prepare_and_build() {
     file-indexer
     switch
     camera-discovery
+    oled-display
+    # linux profile (audio-facing services; the OS-specific gate keeps
+    # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
+    voice-orchestrator
   )
+  # Both profiles active so compose sees every profile-gated service.
+  # Without --profile linux, `build voice-orchestrator` errors out because
+  # the service is invisible to compose's view of the project. The default-
+  # profile services are visible regardless of --profile flags.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux \
+        -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix

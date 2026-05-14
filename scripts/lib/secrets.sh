@@ -119,12 +119,12 @@ DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Compose profiles ---
-# Linux: include "linux" so Frigate (which needs /dev/dri/renderD128 and
-# /dev/bus/usb) is part of the default \`docker compose up\`.
+# Linux: include both "linux" + "full":
+#   linux → Frigate (needs /dev/dri/renderD128), voice-orchestrator (needs /dev/snd)
+#   full  → switch driver, camera-discovery, oled-display (PyPortal screen)
 # macOS: leave empty — Frigate is skipped, dashboard remains reachable via
-# the gateway. Add "full" by hand to opt into the switch + camera-discovery
-# services on either OS.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux' || printf '')
+# the gateway. Add "full" by hand if you want the hardware-facing services.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,full' || printf '')
 EOF
 
   chmod 600 "$env_file"
@@ -186,11 +186,17 @@ migrate_env() {
   local routing_mode_default="real"
   [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
 
-  # COMPOSE_PROFILES: "linux" on Linux turns on the Frigate service (gated
-  # by `profiles: ["linux"]` in docker-compose.yml because it needs Linux-
-  # only device nodes). macOS gets an empty default so frigate is skipped.
+  # COMPOSE_PROFILES on Linux defaults to "linux,full" — covers both the
+  # linux-only services (Frigate, voice-orchestrator; need /dev/dri or
+  # /dev/snd) and the hardware-facing "full" services (switch driver,
+  # camera-discovery, oled-display PyPortal). macOS leaves it empty so
+  # neither set tries to mount Linux-only device nodes.
+  #
+  # Only appended when missing — existing installs that pinned a narrower
+  # COMPOSE_PROFILES keep their value. To pull in the new default, edit
+  # .env manually: COMPOSE_PROFILES=linux,full
   local compose_profiles_default=""
-  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux"
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,full"
 
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
