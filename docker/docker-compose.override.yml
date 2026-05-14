@@ -64,6 +64,8 @@ services:
   # ============================================================
   openwrt:
     image: openwrt/rootfs:x86_64-24.10.2
+    ports:
+      - "51820:51820/udp"   # WireGuard listen
     container_name: droplet-openwrt
     hostname: openwrt
     command: /sbin/init

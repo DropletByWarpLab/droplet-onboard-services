@@ -89,6 +89,9 @@ source "$SCRIPT_DIR/lib/preflight.sh"
 source "$SCRIPT_DIR/lib/docker.sh"
 # shellcheck source=lib/secrets.sh
 source "$SCRIPT_DIR/lib/secrets.sh"
+
+# shellcheck source=lib/storage.sh
+source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck source=lib/compose.sh
 source "$SCRIPT_DIR/lib/compose.sh"
 # shellcheck source=lib/systemd.sh
@@ -236,6 +239,21 @@ main() {
   # --- Phase 1: Preflight ---
   log_step 1 $total_steps "Preflight checks"
   preflight_check
+
+  # Auto-detect data drives and mount with the canonical layout:
+  #   first drive: 20% NVR + 80% data; subsequent drives: single ext4.
+  # Idempotent: drives already partitioned per our layout are adopted as-is.
+  detect_and_mount_drives
+  # Persist the detected NVR path into .env so Frigate picks it up via
+  # NVR_MEDIA_SOURCE (defaults to docker named volume \"nvrdata\" otherwise).
+  if [ -n "${STORAGE_NVR_PATH:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
+    if grep -q "^NVR_MEDIA_SOURCE=" "$REPO_ROOT/.env"; then
+      sed -i "s|^NVR_MEDIA_SOURCE=.*|NVR_MEDIA_SOURCE=$STORAGE_NVR_PATH|" "$REPO_ROOT/.env"
+    else
+      echo "NVR_MEDIA_SOURCE=$STORAGE_NVR_PATH" >> "$REPO_ROOT/.env"
+    fi
+    log_info "NVR_MEDIA_SOURCE -> $STORAGE_NVR_PATH (.env updated)"
+  fi
 
   # --- Phase 2: Docker ---
   log_step 2 $total_steps "Docker"

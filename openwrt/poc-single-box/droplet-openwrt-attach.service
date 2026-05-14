@@ -1,0 +1,11 @@
+[Unit]
+Description=Attach MT7921 PHY + restore route/dns/NAT in droplet-openwrt
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/droplet-openwrt-attach
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,82 @@
+#!/bin/bash
+# Bring up the OpenWrt container's AP after a (re)start. Idempotent.
+set +e
+for i in $(seq 1 60); do
+  state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)
+  [ "$state" = "true" ] && break
+  sleep 1
+done
+[ "$state" = "true" ] || { echo "droplet-openwrt not running"; exit 1; }
+
+PID=$(docker inspect -f '{{.State.Pid}}' droplet-openwrt)
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt)
+GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' droplet-openwrt)
+
+# Move MT7921 PHY in if still on host
+[ -e /sys/class/ieee80211/phy1 ] && iw phy phy1 set netns "$PID"
+
+docker exec droplet-openwrt sh -c "
+  # Container network bootstrap
+  ip addr show eth0 | grep -q '$IP' || ip addr add ${IP}/16 dev eth0
+  ip route | grep -q '^default' || ip route add default via $GW
+  grep -q 8.8.8.8 /etc/resolv.conf 2>/dev/null || {
+    echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+    echo 'nameserver 1.1.1.1' >> /etc/resolv.conf
+  }
+  echo 1 > /proc/sys/net/ipv4/ip_forward
+
+  # Install packages if missing (wiped by --force-recreate; will move to a
+  # custom Dockerfile baked into compose build context for production).
+  if ! command -v hostapd >/dev/null; then
+    opkg update >/dev/null 2>&1
+    opkg install hostapd-mbedtls hostapd-utils wireless-regdb iw-full uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file >/dev/null 2>&1
+  fi
+
+  # NAT for AP clients
+  nft list table ip nat 2>/dev/null | grep -q '192.168.20.0/24' || {
+    nft add table ip nat 2>/dev/null
+    nft add chain ip nat postrouting '{ type nat hook postrouting priority 100 ; }' 2>/dev/null
+    nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
+  }
+
+  # Stop procd's dnsmasq so our manual one can bind 192.168.20.1
+  /etc/init.d/dnsmasq stop 2>/dev/null
+  /etc/init.d/dnsmasq disable 2>/dev/null
+
+  # hostapd config
+  [ -f /etc/hostapd.conf ] || cat > /etc/hostapd.conf <<HOSTAPD
+interface=wlp7s0
+driver=nl80211
+ssid=Droplet-POC
+hw_mode=g
+channel=6
+country_code=US
+ieee80211d=1
+auth_algs=1
+wpa=2
+wpa_passphrase=droplet-poc-password
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+ieee80211w=1
+HOSTAPD
+
+  # dnsmasq-ap config (separate file so it doesn't conflict with /etc/config/dhcp)
+  [ -f /etc/dnsmasq-ap.conf ] || cat > /etc/dnsmasq-ap.conf <<DNSMASQ
+interface=wlp7s0
+bind-interfaces
+dhcp-range=192.168.20.10,192.168.20.100,255.255.255.0,12h
+dhcp-option=3,192.168.20.1
+dhcp-option=6,8.8.8.8,1.1.1.1
+server=8.8.8.8
+server=1.1.1.1
+no-resolv
+DNSMASQ
+
+  # Bring up wlp7s0 + run hostapd + dnsmasq
+  ip link set wlp7s0 up 2>/dev/null
+  ip addr show wlp7s0 | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev wlp7s0
+  pgrep -f 'hostapd -B' >/dev/null || hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
+  pgrep -f 'dnsmasq -C /etc/dnsmasq-ap.conf' >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
+"
+echo "droplet-openwrt-attach: done"
