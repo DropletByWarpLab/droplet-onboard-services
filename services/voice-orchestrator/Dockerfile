@@ -22,9 +22,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Pip layer cached separately from source — re-runs only when
-# requirements.txt changes, not on every code edit.
-COPY services/voice-orchestrator/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# requirements*.txt changes, not on every code edit. We install BOTH
+# the runtime and dev (pytest) deps so `docker compose run
+# voice-orchestrator pytest tests/` works against the same image
+# that's running in production. Image size impact: tiny
+# (pytest + pluggy + iniconfig + packaging, ~3 MB).
+COPY services/voice-orchestrator/requirements.txt \
+     services/voice-orchestrator/requirements-dev.txt \
+     /app/
+RUN pip install --no-cache-dir -r /app/requirements-dev.txt
 
 # The service source.
 COPY services/voice-orchestrator/ /app/
@@ -38,5 +44,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8086
+
+# Container-level healthcheck. `docker ps` reports healthy / unhealthy
+# from this; scripts/verify.sh and the dashboard's roll-up rely on
+# the same signal. Interval kept conservative (15 s) — checking the
+# in-process FastAPI is cheap, no need to hammer it.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:8086/health || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8086", "--no-server-header"]
