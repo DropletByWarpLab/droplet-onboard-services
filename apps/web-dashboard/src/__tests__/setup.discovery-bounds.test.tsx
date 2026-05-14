@@ -37,6 +37,8 @@ const fetchDevicesMock = vi.fn(async () => ({
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchMatterDevices: () => fetchDevicesMock(),
 }));
 
@@ -63,6 +65,15 @@ async function advanceToDiscovery() {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
+  });
+  // Account → Internet. The Internet step (WARP-174) sits between account
+  // and discovery — skip it so the polling-bounds tests can land on the
+  // discovery surface they exercise. Flush once for InternetStep's
+  // fetchDuckDnsStatus effect, then click the always-rendered skip link.
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
 }
 

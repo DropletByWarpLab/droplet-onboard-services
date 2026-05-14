@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
+import { InternetStep } from "@/components/setup/steps/InternetStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 
@@ -16,21 +17,30 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
  *
  * Each step is its own component under `components/setup/steps/`. This
  * page only owns:
- *   - the current step + cross-step values (displayName, discoveredCount)
- *     that later steps need to render
+ *   - the current step + cross-step values (displayName, duckdnsSubdomain,
+ *     discoveredCount) that later steps need to render
  *   - the per-step callback wiring that advances `step` on completion
  *
  * The 4-step base flow (welcome → account → discovery → done) shipped in
- * WARP-216 / WARP-298 / WARP-302. The walkthrough extension (internet,
- * storage, cameras, vpn, ai) — see `docs/SETUP_WIZARD_WALKTHROUGH.md` —
- * slots in between discovery and done.
+ * WARP-216 / WARP-298 / WARP-302. The walkthrough extension (WARP-174)
+ * slots Internet / Storage / Cameras / VPN / AI between discovery and
+ * done in subsequent commits — see `docs/SETUP_WIZARD_WALKTHROUGH.md`
+ * and its addendum for the contract.
  */
-type Step = "welcome" | "account" | "discovery" | "done";
-const STEPS: Step[] = ["welcome", "account", "discovery", "done"];
+type Step =
+  | "welcome"
+  | "account"
+  | "internet"
+  | "discovery"
+  | "done";
+const STEPS: Step[] = ["welcome", "account", "internet", "discovery", "done"];
 
 export default function SetupPage() {
   const [step, setStep] = useState<Step>("welcome");
   const [displayName, setDisplayName] = useState("");
+  /** Captured from the Internet step so the VPN step (later commit) can
+   *  surface it. Empty string when the customer skipped Internet. */
+  const [, setDuckdnsSubdomain] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
   return (
@@ -46,8 +56,18 @@ export default function SetupPage() {
           <AccountStep
             onComplete={(name) => {
               setDisplayName(name);
+              setStep("internet");
+            }}
+          />
+        )}
+
+        {step === "internet" && (
+          <InternetStep
+            onComplete={(subdomain) => {
+              setDuckdnsSubdomain(subdomain);
               setStep("discovery");
             }}
+            onSkip={() => setStep("discovery")}
           />
         )}
 

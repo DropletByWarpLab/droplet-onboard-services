@@ -24,10 +24,15 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 // API stubs. setupAdmin + loginUser must resolve so the page advances to
-// `discovery`; fetchMatterDevices keeps the discovery polling loop quiet.
+// `internet`; fetchDuckDnsStatus returns "unconfigured" so the wizard's
+// Internet step renders its form (and its "Skip for now" button) without
+// reaching the network; fetchMatterDevices keeps the discovery polling
+// loop quiet.
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -81,7 +86,18 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
     });
 
-    // We should now be on `discovery`. Skip straight to done.
+    // We're now on `internet`. Skip to `discovery`. Need to flush again so
+    // the InternetStep's fetchDuckDnsStatus effect resolves before the
+    // "Skip for now" button is queried — the button is present regardless,
+    // but the form's loading-disabled state can briefly mask the primary
+    // CTA; the skip link is always rendered.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // We're now on `discovery`. Skip again to reach `done`.
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
