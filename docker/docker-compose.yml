@@ -103,6 +103,16 @@ services:
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
+      # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
+      # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
+      # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
+      # libpq then fails to open ANY connection with P1011: "library has
+      # no ciphers". The dev/POC compromise: override the openssl config
+      # back to the system default so Prisma can talk to the sibling-
+      # container Postgres over TLS. Production FIPS for orchestrator is
+      # a separate effort (split migration into init container without
+      # FIPS, or get Postgres to use FIPS-approved ciphers server-side).
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
     volumes:
       - matter-data:/data/matter-storage
       # WARP-203: chat-attached "brain memory" files. Per-user dirs at
@@ -120,7 +130,13 @@ services:
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/orchestrator/health >/dev/null 2>&1"]
+      # `wget` isn't installed in the orchestrator image (only `node`).
+      # The original wget-based check has been silently failing forever
+      # — Docker has been reporting `(unhealthy)` regardless of actual
+      # service state. Use node directly since it's guaranteed present.
+      # Exits 0 on 2xx, 1 on any error (including 5xx body responses
+      # the orchestrator returns when it's truly degraded).
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/api/orchestrator/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 5s
       start_period: 60s
@@ -273,10 +289,18 @@ services:
       - POSTGRES_USER=droplet
       - POSTGRES_DB=droplet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      # `pg_isready` flips to "accepting connections" before Postgres
+      # finishes internal recovery — clients that connect during that
+      # window see "FATAL: the database system is starting up" and
+      # crash. Caught file-indexer hitting it on every cold boot
+      # (RestartCount=4 even with depends_on: service_healthy). Run an
+      # actual SELECT 1 instead so the check fails until the query
+      # path is genuinely ready.
+      test: ["CMD-SHELL", "psql -U droplet -d droplet -c 'SELECT 1' >/dev/null 2>&1"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     restart: always
 
   cache:

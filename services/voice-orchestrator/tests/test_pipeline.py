@@ -1276,6 +1276,205 @@ class TestClosedLoop:
         assert pipe.status().llm_loaded is False
         pipe.stop()
 
+
+# ────────────────────────────────────────────────────────────────────
+# Upstream re-probing — post-reboot resilience.
+# Without this, an STT/TTS/LLM container that's slow to bind on boot
+# leaves voice-orchestrator stuck at *_available=False forever, even
+# after the container becomes ready. Boot races are common: whisper
+# takes ~5 min on first run to download the small.en model; piper
+# takes ~30 s to download a voice; ai-gateway needs Postgres up first.
+# ────────────────────────────────────────────────────────────────────
+
+class _FlippableSTT(StreamingSTT):
+    """STT mock whose `available` flips at our command. Lets tests
+    simulate an upstream that goes from down → up between probes."""
+
+    def __init__(self, initial: bool = False):
+        self._available = initial
+        self.probe_count = 0
+
+    @property
+    def available(self) -> bool:
+        self.probe_count += 1
+        return self._available
+
+    def session(self):
+        raise NotImplementedError
+
+
+class _FlippableTTS(TextToSpeech):
+    def __init__(self, initial: bool = False):
+        self._available = initial
+        self.probe_count = 0
+
+    @property
+    def available(self) -> bool:
+        self.probe_count += 1
+        return self._available
+
+    def synthesize(self, text, voice=None):
+        raise NotImplementedError
+
+
+class _FlippableLLM(LLMClient):
+    def __init__(self, initial: bool = False):
+        self._available = initial
+        self.probe_count = 0
+
+    @property
+    def available(self) -> bool:
+        self.probe_count += 1
+        return self._available
+
+    def reply(self, user_text):
+        return ""
+
+
+class TestUpstreamReprobing:
+    def test_initial_probe_sets_flags_synchronously(self):
+        # The first probe runs in start() — caller can read truthful
+        # _stt_available immediately after, no waiting on the bg thread.
+        stt = _FlippableSTT(initial=True)
+        tts = _FlippableTTS(initial=True)
+        llm = _FlippableLLM(initial=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt, tts=tts, llm=llm,
+            upstream_probe_interval_s=0,  # disable bg loop for this test
+        )
+        pipe.start()
+        s = pipe.status()
+        assert s.stt_loaded is True
+        assert s.tts_loaded is True
+        assert s.llm_loaded is False
+        # Each upstream probed exactly once (the initial sync probe).
+        assert stt.probe_count == 1
+        assert tts.probe_count == 1
+        assert llm.probe_count == 1
+        pipe.stop()
+
+    def test_periodic_reprobe_picks_up_late_upstream(self):
+        # An STT that comes online AFTER startup must be detected by
+        # the next bg probe tick. Without the bg loop, this regresses
+        # to the cold-boot bug.
+        stt = _FlippableSTT(initial=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0.05,  # 50 ms tick for the test
+        )
+        pipe.start()
+        # Initially down.
+        assert pipe.status().stt_loaded is False
+        # Simulate the upstream coming online.
+        stt._available = True
+        # Wait for the bg loop to tick at least once.
+        time.sleep(0.15)
+        assert pipe.status().stt_loaded is True
+        pipe.stop()
+
+    def test_periodic_reprobe_picks_up_lost_upstream(self):
+        # The reverse: an upstream that goes DOWN after start should
+        # also be detected so we surface it via /voice/status.
+        stt = _FlippableSTT(initial=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0.05,
+        )
+        pipe.start()
+        assert pipe.status().stt_loaded is True
+        stt._available = False
+        time.sleep(0.15)
+        assert pipe.status().stt_loaded is False
+        pipe.stop()
+
+    def test_zero_probe_interval_disables_bg_loop(self):
+        # Tests + dev contexts can disable the periodic re-probe by
+        # passing 0. The initial sync probe still runs.
+        stt = _FlippableSTT(initial=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0,
+        )
+        pipe.start()
+        baseline = stt.probe_count  # 1, from initial probe
+        time.sleep(0.2)
+        assert stt.probe_count == baseline  # no further probes
+        pipe.stop()
+
+    def test_bg_thread_stops_cleanly_on_pipeline_stop(self):
+        # No leaked timer threads — leaks would break test parallelism.
+        stt = _FlippableSTT(initial=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0.05,
+        )
+        pipe.start()
+        time.sleep(0.1)  # let bg loop run a tick
+        assert pipe._probe_thread is not None
+        assert pipe._probe_thread.is_alive()
+        pipe.stop()
+        # stop() joins the thread.
+        assert pipe._probe_thread is None
+
+    def test_stable_state_doesnt_log_every_tick(self, caplog):
+        # An always-down upstream shouldn't spam the log every interval.
+        # Initial probe logs once; subsequent ticks where state is
+        # unchanged should be silent.
+        import logging as _logging
+        stt = _FlippableSTT(initial=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0.03,
+        )
+        with caplog.at_level(_logging.WARNING, logger="voice.pipeline"):
+            pipe.start()
+            time.sleep(0.15)  # ~5 bg ticks
+            pipe.stop()
+        # Initial "unreachable at startup" line, then nothing further
+        # — same down state, no transitions.
+        warnings_seen = [
+            r for r in caplog.records
+            if r.name == "voice.pipeline" and "STT" in r.message
+        ]
+        assert len(warnings_seen) == 1
+        assert "at startup" in warnings_seen[0].message
+
+    def test_transition_logs_on_recovery(self, caplog):
+        # Down → up transition should emit ONE info line.
+        import logging as _logging
+        stt = _FlippableSTT(initial=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+            upstream_probe_interval_s=0.03,
+        )
+        with caplog.at_level(_logging.INFO, logger="voice.pipeline"):
+            pipe.start()
+            stt._available = True
+            time.sleep(0.1)
+            pipe.stop()
+        recovery_lines = [
+            r for r in caplog.records
+            if r.name == "voice.pipeline"
+            and "STT" in r.message
+            and "reachable" in r.message
+            and "unreachable" not in r.message
+        ]
+        assert len(recovery_lines) == 1
+
     def test_operator_supplied_on_transcript_overrides_default(self, monkeypatch):
         # When the operator passes a custom on_transcript callback, the
         # default closed-loop behaviour is NOT invoked. Commit 8 may

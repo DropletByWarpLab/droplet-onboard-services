@@ -84,6 +84,7 @@ DEFAULT_THRESHOLD = 0.5
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
 DEFAULT_STT_MAX_RECORD_S = 5.0  # captured audio per wake (no VAD yet — fixed window)
+DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
@@ -166,6 +167,7 @@ class WakePipeline:
         tts: Optional[TextToSpeech] = None,
         output_device_index: Optional[int] = None,
         llm: Optional[LLMClient] = None,
+        upstream_probe_interval_s: float = DEFAULT_UPSTREAM_PROBE_INTERVAL_S,
         sd_module: Any = None,
     ):
         self._detector = detector
@@ -184,9 +186,17 @@ class WakePipeline:
         # LLM — commit 7. None disables the closed-loop behaviour;
         # transcript still lands in /voice/status but isn't spoken.
         self._llm = llm
+        # How often the background probe thread re-checks STT/TTS/LLM
+        # reachability. Without this, an upstream that came up AFTER
+        # voice-orchestrator (common at boot when whisper / piper / ai-
+        # gateway take longer to bind) stays stuck at 'unavailable'
+        # forever — the user sees /voice/status.stt_loaded=false and
+        # the closed loop never fires even though everything works.
+        self._upstream_probe_interval_s = upstream_probe_interval_s
         self._sd_module = sd_module  # dependency injection for tests
 
         self._thread: Optional[threading.Thread] = None
+        self._probe_thread: Optional[threading.Thread] = None
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
 
@@ -229,47 +239,102 @@ class WakePipeline:
             self._set_state("no_mic")
             logger.info("WakePipeline: no input device — not starting worker")
             return
-        # Probe STT + TTS reachability once up front so /voice/status'
-        # flags are meaningful. A failed probe doesn't block the worker —
-        # we still want the wake loop running so the operator can see
-        # detections in /voice/status while diagnosing.
-        if self._stt is not None:
-            self._stt_available = self._stt.available
-            if not self._stt_available:
-                logger.warning(
-                    "STT server unreachable at startup — wake detection "
-                    "stays on but no transcripts will be produced",
-                )
-        if self._tts is not None:
-            self._tts_available = self._tts.available
-            if not self._tts_available:
-                logger.warning(
-                    "TTS server unreachable at startup — synthesis disabled "
-                    "until reachable",
-                )
-        if self._llm is not None:
-            self._llm_available = self._llm.available
-            if not self._llm_available:
-                logger.warning(
-                    "LLM (orchestrator) unreachable at startup — voice loop "
-                    "stays open-ended (transcripts land in /voice/status but "
-                    "nothing gets spoken back)",
-                )
+        # Probe STT + TTS + LLM reachability synchronously now so the
+        # first /voice/status read after start() has accurate flags. A
+        # failed probe doesn't block the worker — we still want the
+        # wake loop running so the operator can see detections in
+        # /voice/status while diagnosing.
+        self._probe_upstreams(initial=True)
         self._shutdown.clear()
         self._set_state("loading")
         self._thread = threading.Thread(
             target=self._loop, name="wake-pipeline", daemon=True,
         )
         self._thread.start()
+        # Background re-probe so an upstream that comes up AFTER us
+        # (whisper / piper / ai-gateway slow to bind on boot) is
+        # noticed within `upstream_probe_interval_s`. Without this,
+        # `_*_available` stays False forever after a cold-boot race.
+        # Daemon thread — process exit doesn't wait on it.
+        if self._upstream_probe_interval_s > 0:
+            self._probe_thread = threading.Thread(
+                target=self._probe_loop,
+                name="upstream-probe",
+                daemon=True,
+            )
+            self._probe_thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Signal shutdown and join the thread. Idempotent."""
+        """Signal shutdown and join the threads. Idempotent."""
         self._shutdown.set()
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
         self._thread = None
+        pt = self._probe_thread
+        if pt is not None and pt.is_alive():
+            pt.join(timeout=timeout)
+        self._probe_thread = None
         self._set_state("idle")
+
+    # ──────────────────────────────────────────────────────────────
+    # Upstream probes (STT/TTS/LLM) — periodic re-check
+    # ──────────────────────────────────────────────────────────────
+
+    def _probe_upstreams(self, initial: bool = False) -> None:
+        """Re-check whether STT, TTS, LLM are reachable + update the
+        cached `_*_available` flags. Called once synchronously by
+        start(), then periodically by `_probe_loop` so the user-visible
+        /voice/status converges to truth after a boot race.
+
+        On `initial=True` we log warnings for any upstream that's down
+        (matches pre-fix behaviour). On subsequent re-probes we only
+        log on state TRANSITIONS (down→up, up→down) so a chronically
+        unavailable upstream doesn't spam the log every interval.
+        """
+        for label, client_attr, flag_attr, hint in (
+            ("STT", "_stt", "_stt_available",
+             "wake detection stays on but no transcripts will be produced"),
+            ("TTS", "_tts", "_tts_available",
+             "synthesis disabled until reachable"),
+            ("LLM", "_llm", "_llm_available",
+             "transcripts land in /voice/status but nothing gets spoken back"),
+        ):
+            client = getattr(self, client_attr)
+            if client is None:
+                continue
+            try:
+                now_ok = bool(client.available)
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning("%s probe raised %r — treating as down", label, exc)
+                now_ok = False
+            prev_ok = getattr(self, flag_attr)
+            if now_ok != prev_ok:
+                if now_ok:
+                    logger.info(
+                        "%s server reachable — %s", label,
+                        "ready" if not initial else "up at startup",
+                    )
+                else:
+                    logger.warning(
+                        "%s server unreachable — %s", label, hint,
+                    )
+            elif initial and not now_ok:
+                # Match pre-fix: log on every cold-boot fail so the
+                # operator sees the situation in the boot logs.
+                logger.warning(
+                    "%s server unreachable at startup — %s", label, hint,
+                )
+            setattr(self, flag_attr, now_ok)
+
+    def _probe_loop(self) -> None:
+        """Background thread: re-probe upstreams every
+        `upstream_probe_interval_s`. Exits when shutdown is set."""
+        while not self._shutdown.wait(self._upstream_probe_interval_s):
+            try:
+                self._probe_upstreams()
+            except Exception:  # pragma: no cover
+                logger.exception("upstream probe loop iteration crashed")
 
     # ──────────────────────────────────────────────────────────────
     # Speak — synthesize text + play through the speaker
