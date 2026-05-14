@@ -320,7 +320,165 @@ ip addr add 192.168.20.1/24 dev wlp7s0
 hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
 ```
 
-**Verified:** `iw dev wlp7s0 info` shows `ssid Droplet-POC, type AP, channel 6`. Phone scanning the WiFi sees `Droplet-POC` broadcasting.
+**Verified end-to-end** (2026-05-14 03:55 UTC):
+- `iw dev wlp7s0 info`: `ssid Droplet-POC, type AP, channel 6`
+- Stefan's Galaxy S25 Ultra connected, DHCP lease `192.168.20.59`, RSSI `-49 dBm`, MFP/PMF active
+- `ubus call iwinfo assoclist {"device":"wlp7s0"}` returned the client correctly
+- ubus over HTTP authenticated from host (172.18.0.1) using root + `droplet-poc-router` — `system.board` returns OpenWrt 24.10.2 on `Gigabyte B650 GAMING X AX V2`
+
+### uci configs (persisted in `/etc/config/` inside the container — `openwrt-config` named volume)
+
+These are what survives a `docker restart droplet-openwrt`. The container's procd reads them at boot. Note: bring-up still depends on the host script moving phy1 into the container's netns first (see "host-side automation" below).
+
+```
+# /etc/config/network
+config interface "loopback"
+	option device "lo"
+	option proto "static"
+	option ipaddr "127.0.0.1"
+	option netmask "255.0.0.0"
+
+config globals "globals"
+	option ula_prefix "fd4a:4a28:f13a::/48"
+
+# Docker-managed eth0 — proto 'none' tells netifd not to touch it.
+# Docker has already assigned the IP via netlink before procd ran.
+config interface "docker"
+	option device "eth0"
+	option proto "none"
+
+config device "br_lan_dev"
+	option type "bridge"
+	option name "br-lan"
+
+config interface "lan"
+	option device "br-lan"
+	option proto "static"
+	option ipaddr "192.168.20.1"
+	option netmask "255.255.255.0"
+```
+
+```
+# /etc/config/wireless
+config wifi-device "radio0"
+	option type "mac80211"
+	option path "platform/?wlp7s0"
+	option channel "6"
+	option band "2g"
+	option htmode "HT20"
+	option country "US"
+	option disabled "0"
+
+config wifi-iface "default_radio0"
+	option device "radio0"
+	option network "lan"
+	option mode "ap"
+	option ssid "Droplet-POC"
+	option encryption "psk2"
+	option key "droplet-poc-password"
+	option ieee80211w "1"
+```
+
+```
+# /etc/config/dhcp (DHCP+DNS server on lan interface; ignore on docker side)
+config dnsmasq
+	option domainneeded "1"
+	option authoritative "1"
+	option localise_queries "1"
+	option local "/lan/"
+	option domain "lan"
+	option leasefile "/tmp/dhcp.leases"
+
+config dhcp "lan"
+	option interface "lan"
+	option start "10"
+	option limit "150"
+	option leasetime "12h"
+	option dhcpv4 "server"
+
+config dhcp "docker"
+	option interface "docker"
+	option ignore "1"
+```
+
+```
+# /etc/config/firewall (POC: permissive between lan and docker; tighten for customer)
+config defaults
+	option syn_flood "1"
+	option input "ACCEPT"
+	option output "ACCEPT"
+	option forward "ACCEPT"
+
+config zone
+	option name "lan"
+	list network "lan"
+	option input "ACCEPT"
+	option output "ACCEPT"
+	option forward "ACCEPT"
+
+config zone
+	option name "wan"
+	list network "docker"
+	option input "ACCEPT"
+	option output "ACCEPT"
+	option forward "ACCEPT"
+	option masq "1"
+	option mtu_fix "1"
+
+config forwarding
+	option src "lan"
+	option dest "wan"
+```
+
+```
+# /etc/config/uhttpd (HTTP only on :80, /ubus exposed for ubus-over-HTTP)
+config uhttpd "main"
+	list listen_http "0.0.0.0:80"
+	option home "/www"
+	option rfc1918_filter "0"
+	option script_timeout "60"
+	option network_timeout "30"
+	option ubus_prefix "/ubus"
+```
+
+### Root password (for ubus-over-HTTP auth)
+
+OpenWrt's default root has no password — uhttpd-mod-ubus's `session.login` rejects empty-password logins. POC password set inside the container:
+```
+echo -e "droplet-poc-router\ndroplet-poc-router" | passwd root
+```
+This needs to be rotated before customer ship + the password committed into the secrets pipeline (DROPLET_ENV `OPENWRT_PASSWORD` already exists in setup.sh's secrets — wire to a uci script).
+
+### Host-side automation — STILL NEEDED
+
+The PHY netns move and the inside-container default-route fix are currently manual. A systemd unit on the host should run them automatically:
+
+```
+# /etc/systemd/system/droplet-openwrt-attach.service
+[Unit]
+Description=Attach MT7921 PHY + restore route in droplet-openwrt
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/bash -c 'until docker inspect -f "{{.State.Running}}" droplet-openwrt 2>/dev/null | grep -q true; do sleep 1; done'
+ExecStart=/bin/bash -c '\
+  PID=$(docker inspect -f "{{.State.Pid}}" droplet-openwrt); \
+  iw phy phy1 set netns $PID; \
+  IP=$(docker inspect -f "{{(index (index .NetworkSettings.Networks).IPAMConfig).IPv4Address}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" droplet-openwrt); \
+  GW=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}" droplet-openwrt); \
+  docker exec droplet-openwrt sh -c "ip addr add ${IP}/16 dev eth0 2>/dev/null; ip route add default via ${GW} 2>/dev/null; echo nameserver 8.8.8.8 > /etc/resolv.conf; echo nameserver 1.1.1.1 >> /etc/resolv.conf"; \
+  docker exec droplet-openwrt /etc/init.d/network restart; \
+  docker exec droplet-openwrt /etc/init.d/dnsmasq restart; \
+  docker exec droplet-openwrt /etc/init.d/firewall restart \
+'
+[Install]
+WantedBy=multi-user.target
+```
+
+This stays a TODO — write the file, `systemctl enable droplet-openwrt-attach.service`, validate via a container restart.
 
 ## Outstanding for OpenWrt-container (in priority order)
 
