@@ -18,12 +18,16 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-70 tests across `tests/test_devices.py`, `tests/test_wake.py`,
-`tests/test_pipeline.py`. Sub-second total. No real audio hardware
-required — the fixtures inject a fake `sounddevice` module + a
-synthetic `/sys/class/sound` tree under `tmp_path`, and the wake
-detector + pipeline tests inject mock detectors and a scripted
-fake sounddevice stream.
+106 tests across `tests/test_devices.py`, `tests/test_wake.py`,
+`tests/test_pipeline.py`, `tests/test_stt.py`. Sub-second total. No
+real audio hardware or Wyoming server required — the fixtures inject:
+
+  - a fake `sounddevice` module + a synthetic `/sys/class/sound` tree
+    under `tmp_path` (device discovery tests)
+  - mock detectors that replay scripted scores (wake tests)
+  - a scripted fake sounddevice stream (pipeline _loop tests)
+  - an in-process Wyoming-protocol server on an ephemeral port that
+    speaks the real wire format (STT tests)
 
 ### Inside the same container that runs in production
 

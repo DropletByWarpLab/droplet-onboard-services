@@ -34,11 +34,13 @@ import pytest
 
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
     DEFAULT_VISUAL_DECAY_S,
     PipelineStatus,
     WakePipeline,
 )
+from voice.stt import MockSTT, STTUnavailable, StreamingSTT
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     DisabledWakeWordDetector,
@@ -364,17 +366,23 @@ class TestDebounce:
         assert len(fires) == 1
 
     def test_fires_again_after_debounce_window_passes(self):
+        # As of commit 5, re-firing wake requires BOTH the debounce
+        # window AND the visual-decay window to pass — wake_detected
+        # is now an actual pipeline state, not just a display flag,
+        # so a re-wake while in wake_detected would compete with the
+        # transcription path. Set both windows short for the test.
         fires: list[WakeEvent] = []
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
             input_device_index=0,
             threshold=0.5,
-            debounce_s=0.1,  # short window for the test
+            debounce_s=0.05,
+            visual_decay_s=0.05,
             on_wake=fires.append,
         )
         pipe._on_frame(_silence_frame())
         assert len(fires) == 1
-        time.sleep(0.15)  # pass the debounce window
+        time.sleep(0.1)  # pass both windows
         pipe._on_frame(_silence_frame())
         assert len(fires) == 2
 
@@ -540,3 +548,304 @@ class TestLoopIntegration:
         s = pipe.status()
         assert s.state == "error"
         assert "PortAudio" in (s.error_message or "")
+
+
+# ────────────────────────────────────────────────────────────────────
+# STT — post-wake transcription flow (commit 5)
+# ────────────────────────────────────────────────────────────────────
+
+class _RecordingSTT(StreamingSTT):
+    """MockSTT variant that exposes chunks-received counter + a hook to
+    raise on a configurable call. Tests use this to verify the wire-up
+    between pipeline and STT.
+    """
+
+    def __init__(
+        self,
+        scripted_transcripts: Optional[list[str]] = None,
+        available: bool = True,
+        raise_on_session: bool = False,
+        raise_on_send_after: Optional[int] = None,
+        raise_on_finish: bool = False,
+    ):
+        self._scripts = scripted_transcripts or []
+        self._available = available
+        self._raise_on_session = raise_on_session
+        self._raise_on_send_after = raise_on_send_after
+        self._raise_on_finish = raise_on_finish
+        self.chunks_received: list[bytes] = []
+        self.sessions_opened = 0
+        self.finished = False
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def session(self):
+        self.sessions_opened += 1
+        if self._raise_on_session:
+            raise STTUnavailable("session refused (test)")
+        outer = self
+
+        class _S:
+            def __init__(self): self._closed = False
+            def __enter__(self): return self
+            def __exit__(self, *a): self.close()
+            def send_chunk(self, b):
+                if (
+                    outer._raise_on_send_after is not None
+                    and len(outer.chunks_received) >= outer._raise_on_send_after
+                ):
+                    raise STTUnavailable("send blew up (test)")
+                outer.chunks_received.append(b)
+            def finish(self):
+                if outer._raise_on_finish:
+                    raise STTUnavailable("finish blew up (test)")
+                outer.finished = True
+                return outer._scripts.pop(0) if outer._scripts else ""
+            def close(self): self._closed = True
+        return _S()
+
+
+class TestSTTWiring:
+    def test_stt_available_probe_flips_stt_loaded(self):
+        """Pipeline.start() probes STT once; status reflects it."""
+        stt = _RecordingSTT(available=True)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+        )
+        # Before start, stt_loaded is False (probe hasn't run).
+        assert pipe.status().stt_loaded is False
+        pipe.start()  # probes + spawns worker
+        # The worker thread doesn't matter for this — we're checking
+        # the synchronous probe.
+        assert pipe.status().stt_loaded is True
+        pipe.stop()
+
+    def test_unreachable_stt_keeps_pipeline_running(self):
+        # A degraded STT server must NOT kill wake detection. The wake
+        # loop should keep going, just no transcripts.
+        stt = _RecordingSTT(available=False)
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            stt=stt,
+        )
+        pipe.start()
+        assert pipe.status().stt_loaded is False
+        pipe.stop()
+
+
+class TestTranscribingFlow:
+    def test_wake_then_next_frame_opens_stt_session(self):
+        stt = _RecordingSTT(scripted_transcripts=["the answer"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,  # long window — we'll manually finish
+        )
+        # Pretend the start-up probe already ran (in real life, start() does this).
+        pipe._stt_available = True
+
+        # Frame 1: wake fires (state → wake_detected)
+        pipe._on_frame(_silence_frame())
+        assert pipe.status().state == "wake_detected"
+        assert stt.sessions_opened == 0  # session opens on the NEXT frame
+
+        # Frame 2: state is wake_detected → begin transcription, send first chunk
+        pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert s.state == "transcribing"
+        assert stt.sessions_opened == 1
+        assert len(stt.chunks_received) == 1
+
+    def test_max_record_window_triggers_finish(self):
+        stt = _RecordingSTT(scripted_transcripts=["seven o'clock"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=0.05,  # tiny window so test is fast
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin transcription, chunk #1
+        # Wait past the window
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())  # this frame triggers finish
+        s = pipe.status()
+        assert stt.finished is True
+        assert s.last_transcript == "seven o'clock"
+        assert s.last_transcript_at is not None
+        assert s.state == "transcript_ready"
+
+    def test_transcript_ready_decays_to_listening(self):
+        stt = _RecordingSTT(scripted_transcripts=["test"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=0.01,
+            visual_decay_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin
+        time.sleep(0.05)
+        pipe._on_frame(_silence_frame())  # finish → transcript_ready
+        assert pipe.status().state == "transcript_ready"
+        time.sleep(0.1)
+        # Read-time decay flips it back to listening
+        assert pipe.status().state == "listening"
+
+    def test_transcript_callback_fires_with_text(self):
+        captured: list[str] = []
+        stt = _RecordingSTT(scripted_transcripts=["turn the lights off"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            on_transcript=captured.append,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())
+        assert captured == ["turn the lights off"]
+
+    def test_transcript_callback_exception_does_not_propagate(self):
+        def bad_callback(_t: str) -> None:
+            raise RuntimeError("callback bug")
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            on_transcript=bad_callback,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.1)
+        # MUST NOT raise:
+        pipe._on_frame(_silence_frame())
+        # And the transcript was still saved:
+        assert pipe.status().last_transcript == "x"
+
+    def test_session_open_failure_lands_in_error_state(self):
+        stt = _RecordingSTT(raise_on_session=True)
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # tries to open session → fails
+        s = pipe.status()
+        assert s.state == "error"
+        assert "session refused" in (s.error_message or "")
+        # And stt_available flipped to False so subsequent wakes don't
+        # retry the same broken connection on every frame.
+        assert s.stt_loaded is False
+
+    def test_send_failure_aborts_transcription(self):
+        # After a few chunks, send_chunk starts raising. Pipeline should
+        # transition to error state, drop the session, and not crash.
+        stt = _RecordingSTT(
+            scripted_transcripts=["never reached"],
+            raise_on_send_after=3,
+        )
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin + chunk 1
+        pipe._on_frame(_silence_frame())  # chunk 2
+        pipe._on_frame(_silence_frame())  # chunk 3
+        pipe._on_frame(_silence_frame())  # tries chunk 4 → raises → abort
+        s = pipe.status()
+        assert s.state == "error"
+        assert "send blew up" in (s.error_message or "")
+
+    def test_finish_failure_aborts_transcription(self):
+        stt = _RecordingSTT(
+            scripted_transcripts=["never used"],
+            raise_on_finish=True,
+        )
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin + chunk
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())  # tries finish → raises
+        s = pipe.status()
+        assert s.state == "error"
+        assert "finish blew up" in (s.error_message or "")
+
+    def test_stt_none_keeps_pre_commit_4_behaviour(self):
+        """No STT wired up → wake fires + state decays back without transcribing."""
+        fires: list[WakeEvent] = []
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=None,  # explicit — same as before commit 5
+            on_wake=fires.append,
+            visual_decay_s=0.05,
+        )
+        pipe._on_frame(_silence_frame())  # wake fires
+        assert pipe.status().state == "wake_detected"
+        # Next frame: state is wake_detected, but stt is None — should NOT
+        # transition to transcribing.
+        pipe._on_frame(_silence_frame())
+        assert pipe.status().state == "wake_detected"
+        # And visual decay returns us to listening.
+        time.sleep(0.1)
+        assert pipe.status().state == "listening"
+
+    def test_listening_flag_true_for_transcribing(self):
+        # The dashboard's "listening" pulse animation should stay on during
+        # transcription, not just for wake_detected.
+        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())
+        pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert s.state == "transcribing"
+        assert s.listening is True
+
+    def test_default_stt_max_record_constant(self):
+        # Drift detector — make sure README's "5-second post-wake window"
+        # documentation still matches the default.
+        assert DEFAULT_STT_MAX_RECORD_S == 5.0

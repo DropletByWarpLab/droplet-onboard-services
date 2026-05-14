@@ -89,6 +89,9 @@ USB mic in after the box has already booted.
 | `WAKE_WORD` | `hey_jarvis` | Wake-word model name. openWakeWord ships several bundled models — `hey_jarvis`, `alexa`, `hey_mycroft`. To use a custom-trained model, drop `<name>.onnx` into `/app/models/` and set `WAKE_WORD=<name>`. The custom "Hey Droplet" model ships once Stefan's training data lands; until then the default is `hey_jarvis` for dev. Set to `__mock__` for a dev box with no real wake model. |
 | `WAKE_THRESHOLD` | `0.5` | Detector confidence threshold (0 – 1). Raise to reduce false-positives. |
 | `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
+| `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
+| `STT_LANGUAGE` | `en` | Language code for transcription. |
+| `STT_MAX_RECORD_S` | `5.0` | Seconds of audio captured per wake before sending audio-stop. VAD-based cutoff lands in a follow-up; for now this is a fixed window. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Control API
@@ -102,7 +105,7 @@ reach it via the Docker network).
 | `/audio/devices` | GET | List of all detected ALSA devices with their score + the current pick |
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |
-| `/voice/status` | GET | Wake pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`. Read-only; safe to poll. |
+| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`. Read-only; safe to poll. |
 
 ## Running on the POC box
 
@@ -127,13 +130,16 @@ into stacked commits per `docs/voice-assistant-plan.md`:
 1. **Foundation** — hardware detection, audio I/O, FastAPI shell,
    Docker. `/audio/devices`, `/audio/test-tone`, `/audio/test-record`
    work without any wake/STT/TTS.
-2. **openWakeWord** (this commit) — wake-word detection loop on a
-   background thread; `/voice/status` surfaces state. Default wake
-   word `hey_jarvis` ships pre-baked in the image; custom
-   "Hey Droplet" `.onnx` swaps in later once Stefan has training
-   data ready.
-3. **STT** — wyoming-faster-whisper integration, reusing the same
-   model files `services/file-indexer` already has on disk.
+2. **openWakeWord** — wake-word detection loop on a background
+   thread; `/voice/status` surfaces state. Default wake word
+   `hey_jarvis` ships pre-baked in the image; custom "Hey Droplet"
+   `.onnx` swaps in later once Stefan has training data ready.
+3. **STT** (this commit) — wyoming-faster-whisper sidecar container
+   speaks Wyoming protocol over TCP. After wake, voice-orchestrator
+   streams the next 5 s of mic audio (fixed window — VAD-based cutoff
+   in a follow-up), receives the transcript, exposes it via
+   `/voice/status.last_transcript`. The next commit hooks this to
+   the LLM agent loop.
 4. **TTS** — Piper for the response audio.
 5. **Agent glue** — pipeline.py wires capture → wake → STT → LLM →
    TTS → playback. Adds the four voice-control LLM tools

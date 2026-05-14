@@ -556,6 +556,13 @@ services:
       - ORCHESTRATOR_TOKEN=${ORCHESTRATOR_TOKEN:-}
       - WAKE_WORD=${WAKE_WORD:-hey_jarvis}
       - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.5}
+      # STT — wake → next 5 s of audio gets streamed here for transcription.
+      # `wyoming-faster-whisper` is the sibling container below (Rhasspy's
+      # Wyoming-protocol wrapper around faster-whisper). Set STT_URL=__mock__
+      # to disable STT (wake fires but no transcription).
+      - STT_URL=${STT_URL:-tcp://wyoming-faster-whisper:10300}
+      - STT_LANGUAGE=${STT_LANGUAGE:-en}
+      - STT_MAX_RECORD_S=${STT_MAX_RECORD_S:-5.0}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.
@@ -563,6 +570,37 @@ services:
       - "8086"
     # Skip on macOS Docker Desktop (no /dev/snd).
     profiles: ["linux"]
+    restart: always
+
+  # --- Whisper STT sidecar (WARP-154) ---
+  # Rhasspy's wyoming-faster-whisper — TCP-protocol Whisper server that
+  # voice-orchestrator streams post-wake audio to. Same `small.en` default
+  # the file-indexer service uses; the named volume mount shares the
+  # download path so we don't pay the 470 MB download twice. Whisper
+  # itself is pure CPU here; if a future profile needs CUDA, set
+  # WHISPER_DEVICE=cuda (image auto-detects).
+  wyoming-faster-whisper:
+    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-latest}
+    # Profile gate matches voice-orchestrator — same Linux-only audio
+    # stack. On macOS dev installs the whole voice path is skipped.
+    profiles: ["linux"]
+    # Wyoming protocol on TCP/10300 (default). Bound to the compose
+    # network only — voice-orchestrator reaches it by service name.
+    expose:
+      - "10300"
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+    command: >
+      --model ${WHISPER_MODEL:-small.en}
+      --language ${WHISPER_LANGUAGE:-en}
+      --uri tcp://0.0.0.0:10300
+      --beam-size 1
+    volumes:
+      # Whisper model cache (~470 MB for small.en). Named volume so a
+      # `docker compose down` doesn't redownload; mounted read-write so
+      # the first-run download can land in the right place.
+      - whisper-models:/data
     restart: always
 
   # --- TFT Display (3.5" front-panel) ---
@@ -623,3 +661,7 @@ volumes:
   nextcloud-data:
   matter-data:
   brain-memory-data:
+  # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
+  # Persists across `docker compose down`/`up`. Manual reset:
+  # `docker volume rm <project>_whisper-models`.
+  whisper-models:

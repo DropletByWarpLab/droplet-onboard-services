@@ -32,9 +32,11 @@ from voice.devices import (
 )
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
     WakePipeline,
 )
+from voice.stt import build_stt_from_env
 from voice.wake import build_detector_from_env
 
 logging.basicConfig(
@@ -47,6 +49,9 @@ SAMPLE_RATE = int(os.environ.get("VOICE_SAMPLE_RATE", "16000"))
 WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", str(DEFAULT_THRESHOLD)))
 WAKE_DEBOUNCE_S = float(
     os.environ.get("WAKE_DEBOUNCE_S", str(DEFAULT_DEBOUNCE_S))
+)
+STT_MAX_RECORD_S = float(
+    os.environ.get("STT_MAX_RECORD_S", str(DEFAULT_STT_MAX_RECORD_S))
 )
 
 app = FastAPI(title="voice-orchestrator", version="0.1.0")
@@ -109,15 +114,20 @@ async def startup() -> None:
 
     # Spin up the wake-detection pipeline. The detector is constructed
     # synchronously (cheap — model load is lazy) but the worker thread
-    # is what actually opens the mic stream + ONNX runtime.
+    # is what actually opens the mic stream + ONNX runtime. STT client
+    # is also lazy — `available` is probed by pipeline.start() once,
+    # not on every transcript.
     global _pipeline
     try:
         detector = build_detector_from_env()
+        stt = build_stt_from_env()
         _pipeline = WakePipeline(
             detector=detector,
+            stt=stt,
             input_device_index=r.input_device.index if r.input_device else None,
             threshold=WAKE_THRESHOLD,
             debounce_s=WAKE_DEBOUNCE_S,
+            stt_max_record_s=STT_MAX_RECORD_S,
         )
         _pipeline.start()
     except Exception as exc:
@@ -156,6 +166,13 @@ class VoiceStatusResponse(BaseModel):
     last_wake_score: Optional[float] = None
     last_wake_model: Optional[str] = None
     error_message: Optional[str] = None
+    # STT (commit 5). `stt_loaded` is the at-startup reachability flag;
+    # `last_transcript` is the most recent transcribed utterance, kept
+    # in memory until the next wake clears it. The dashboard tails this
+    # endpoint to display what the user just said.
+    stt_loaded: bool = False
+    last_transcript: Optional[str] = None
+    last_transcript_at: Optional[float] = None
 
 
 class TestRecordResponse(BaseModel):
@@ -179,14 +196,18 @@ class TestToneResponse(BaseModel):
 def health() -> HealthResponse:
     r = _resolve()
     wake_loaded = False
+    stt_loaded = False
     if _pipeline is not None:
         # Cheap atomic read; no I/O on the pipeline thread.
-        wake_loaded = _pipeline.status().wake_loaded
+        s = _pipeline.status()
+        wake_loaded = s.wake_loaded
+        stt_loaded = s.stt_loaded
     return HealthResponse(
         ok=True,
         inputAvailable=r.input_device is not None,
         outputAvailable=r.output_device is not None,
         wakeLoaded=wake_loaded,
+        sttLoaded=stt_loaded,
     )
 
 
@@ -218,6 +239,9 @@ def voice_status() -> VoiceStatusResponse:
         last_wake_score=s.last_wake_score,
         last_wake_model=s.last_wake_model,
         error_message=s.error_message,
+        stt_loaded=s.stt_loaded,
+        last_transcript=s.last_transcript,
+        last_transcript_at=s.last_transcript_at,
     )
 
 
