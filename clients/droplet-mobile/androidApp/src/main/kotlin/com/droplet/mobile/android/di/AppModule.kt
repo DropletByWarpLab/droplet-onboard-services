@@ -5,9 +5,12 @@ import com.droplet.mobile.DeviceInfo
 import com.droplet.mobile.DropletApiClient
 import com.droplet.mobile.PairingRepository
 import com.droplet.mobile.android.BuildConfig
+import com.droplet.mobile.android.autoupload.AutoUploadSettings
+import com.droplet.mobile.android.autoupload.UploadScheduler
 import com.droplet.mobile.android.ui.files.FilesViewModel
 import com.droplet.mobile.android.ui.home.HomeViewModel
 import com.droplet.mobile.android.ui.pairflow.PairFlowViewModel
+import com.droplet.mobile.android.ui.upload.AutoUploadViewModel
 import com.droplet.mobile.android.ui.upload.UploadViewModel
 import com.droplet.mobile.createPlatformHttpClient
 import com.droplet.mobile.files.FilesRepository
@@ -25,6 +28,8 @@ val appModule = module {
             appVersion = BuildConfig.VERSION_NAME,
         )
     }
+    single { AutoUploadSettings(androidContext()) }
+    single { UploadScheduler(androidContext()) }
 
     // ── Pair-flow scoped: a fresh repository per scanned server ──
     factory { (serverUrl: String) ->
@@ -63,6 +68,7 @@ val appModule = module {
     viewModel { HomeViewModel(credentialStore = get()) }
     viewModel { FilesViewModel(repository = get()) }
     viewModel { UploadViewModel(repository = get()) }
+    viewModel { AutoUploadViewModel(settings = get(), scheduler = get()) }
 }
 
 private fun hostnameOf(url: String): String? = runCatching {

@@ -156,32 +156,65 @@ OkHttp engine's `hostnameVerifier`. There's no runtime opt-in.
 
 Both stores are excluded from cloud backup and device-to-device transfer.
 
+## Auto-upload (Android)
+
+Watermark-driven WorkManager job. **Watch mode only — does not back-fill
+history** on first enable. The watermark starts at `now`; only photos
+with `MediaStore.DATE_ADDED >= watermark` are eligible.
+
+```
+PhotoUploadWorker (every 6h, UNMETERED + battery-not-low)
+  → AutoUploadSettings.lastRunAtSeconds()
+  → PhotoEnumerator.queryImagesSince(watermark)
+  → for each photo:
+      • setForeground(progress notif)
+      • FilesRepository.upload("Photos/<displayName>", bytes, mime)
+      • on success: bump watermark to that photo's DATE_ADDED + 1
+  → settings.setLastSuccessAtSeconds(now)
+```
+
+The watermark advances **after each successful PUT** so a killed run
+loses at most one in-flight file. WebDAV PUTs are idempotent (replace),
+so any re-upload simply overwrites the same path — no duplicates.
+
+UI: `UploadScreen` has an "Auto-upload new photos" card at the top with
+a Switch, last-sync timestamp, and "Run now" button. First flip-on
+triggers a permission rationale + request for `READ_MEDIA_IMAGES` (or
+`READ_EXTERNAL_STORAGE` on pre-13) and `POST_NOTIFICATIONS`. Manual
+picker still ships below for one-off uploads.
+
 ## What's NOT here yet
 
-- **Auto-upload** (WorkManager periodic check of `MediaStore` for new
-  photos). Foundation is there in `UploadViewModel` — the path forward
-  is: add `androidx.work:work-runtime-ktx`, write a `PhotoUploadWorker`,
-  persist a "last-uploaded-id" cursor, schedule daily/hourly. Skipped
-  for v1.5 to keep permission prompts to zero. The manual picker covers
-  the inbound-photo use case for now.
-- **iOS file browser + upload** — iOS shell covers pairing only. The
-  shared module's `FilesRepository` works on iOS today; what's missing
-  is the SwiftUI views and a Photos.framework picker.
-- **Two-way sync** — clearly v2+. The current architecture is
-  download-on-demand only.
+- **iOS file download.** The shared `FilesRepository.download(path)`
+  returns Ktor's `ByteReadChannel`; Swift can call it but the bridge
+  to write into `FileManager.urls(for: .documentDirectory)` needs an
+  iosMain helper (likely `FilesRepository.downloadToFile(remote, local)`)
+  that this pass skipped.
+- **iOS auto-upload.** No PHPicker-style background watcher; the iOS
+  shell ships manual upload only. `BGTaskScheduler` + `PHPhotoLibrary`
+  observer is the path forward.
+- **Two-way sync** — clearly v2+. Architecture is download-on-demand
+  only.
 - **Push notifications** — explicitly out of scope per the
   "no webhooks" project doctrine.
+- **Server-side device revoke on Forget** — the client currently
+  clears local credentials but doesn't `DELETE /api/devices/clients/:id`.
+  Tracked in [SECURITY.md](SECURITY.md).
 
 ## Notes for someone picking this up
 
 - The `PairingRepository` is intentionally short-lived (one per pair
   flow). Each instance has its own Ktor `HttpClient` + cookie jar.
-- The `FilesRepository` is rebuilt every time you enter the Files or
-  Upload screen — that picks up the current paired session's URL +
-  TLS allow-list. Switching paired Droplets just works.
-- The shared module's iOS targets compile cleanly today (KVault wraps
-  the Keychain dance); the iOS app shell exercises pairing but not
-  file flows yet.
+- The `FilesRepository` is rebuilt every time you enter the Files,
+  Upload, or auto-upload Worker — that picks up the current paired
+  session's URL + TLS allow-list. Switching paired Droplets just works.
 - `PropFindParser` returns a "self" entry for the directory the user
   PROPFIND'd. `WebDavClient.list` strips it before handing entries
   to the UI.
+- `PhotoUploadWorker` uses `KoinComponent` + `inject()` for its deps
+  (FilesRepository, AutoUploadSettings). WorkManager constructs the
+  worker itself; Koin's `koin-androidx-workmanager` artifact is on
+  the classpath in case the worker DSL is needed later.
+- `AutoUploadSettings.lastRunAtSeconds()` and `MediaStore.DATE_ADDED`
+  are both seconds-since-epoch (NOT milliseconds). The DataStore key
+  is named explicitly to remind future-you.

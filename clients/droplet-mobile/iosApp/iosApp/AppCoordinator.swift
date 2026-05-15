@@ -5,7 +5,7 @@ import DropletShared
 /// Top-level state machine: which screen is currently shown.
 ///
 /// Mirrors the Android nav graph rules: a saved session lands us on
-/// `paired`; a `droplet://pair?...` deep link jumps straight to `pairFlow`;
+/// `home`; a `droplet://pair?...` deep link jumps straight to `pairFlow`;
 /// otherwise we show the welcome screen.
 @MainActor
 final class AppCoordinator: ObservableObject {
@@ -14,12 +14,14 @@ final class AppCoordinator: ObservableObject {
         case welcome
         case scan
         case pairFlow(server: String, code: String)
-        case paired
+        case home
+        case files(path: String)
+        case upload
     }
 
     @Published var route: Route
 
-    private let credentialStore = CredentialStore()
+    let credentialStore = CredentialStore()
     private let deviceInfo = DeviceInfo(
         ownerName: nil,
         appVersion: Bundle.main.shortVersion ?? "0.1.0"
@@ -27,15 +29,19 @@ final class AppCoordinator: ObservableObject {
 
     init() {
         if credentialStore.load() != nil {
-            self.route = .paired
+            self.route = .home
         } else {
             self.route = .welcome
         }
     }
 
-    func startPairing() {
-        route = .scan
-    }
+    // ── Navigation actions ──
+
+    func startPairing() { route = .scan }
+    func openFiles(path: String = "") { route = .files(path: path) }
+    func openUpload() { route = .upload }
+    func backToHome() { route = .home }
+    func cancel() { route = .welcome }
 
     func handleScanResult(_ raw: String) {
         guard let pair = DropletPairUri.companion.parseOrNull(raw: raw) else { return }
@@ -47,13 +53,7 @@ final class AppCoordinator: ObservableObject {
         route = .pairFlow(server: pair.server, code: pair.code)
     }
 
-    func completePair() {
-        route = .paired
-    }
-
-    func cancel() {
-        route = .welcome
-    }
+    func completePair() { route = .home }
 
     func forget() {
         credentialStore.clear()
@@ -64,10 +64,11 @@ final class AppCoordinator: ObservableObject {
         credentialStore.load()
     }
 
+    // ── Repository factories ──
+
     /// Build a `PairingRepository` for the given server. Each call constructs
-    /// a fresh underlying `HttpClient` (and cookie jar), so login + claim
-    /// must use the same instance — the PairFlowView holds it for its
-    /// lifetime.
+    /// a fresh underlying `HttpClient` (and cookie jar) so login + claim
+    /// must use the same instance — `PairFlowView` holds it for its lifetime.
     func makeRepository(for serverUrl: String) -> PairingRepository {
         let rawClient = HttpClientFactoryKt.createPlatformHttpClient(allowSelfSignedHosts: [])
         let api = DropletApiClient(baseUrl: serverUrl, rawClient: rawClient)
@@ -76,6 +77,17 @@ final class AppCoordinator: ObservableObject {
             credentialStore: credentialStore,
             deviceInfo: deviceInfo,
             serverUrl: serverUrl
+        )
+    }
+
+    /// Build a `FilesRepository` bound to the currently-paired session.
+    /// Each screen-entry constructs a fresh one so a re-pair picks up the
+    /// new TLS allow-list automatically.
+    func makeFilesRepository() -> FilesRepository {
+        let httpClient = HttpClientFactoryKt.createPlatformHttpClient(allowSelfSignedHosts: [])
+        return FilesRepository(
+            credentialStore: credentialStore,
+            httpClient: httpClient
         )
     }
 }

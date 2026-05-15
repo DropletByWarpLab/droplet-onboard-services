@@ -77,4 +77,19 @@
     <string name="upload_error_unauthorized">The Droplet rejected your device credentials. Forget and re-pair.</string>
     <string name="upload_error_forbidden">Your account isn\'t allowed to upload there.</string>
     <string name="upload_error_conflict">There was a conflict creating the Photos folder. Try again.</string>
+
+    <!-- Auto-upload -->
+    <string name="autoupload_card_title">Auto-upload new photos</string>
+    <string name="autoupload_card_body">When new photos appear in your library, Droplet copies them to Photos/ on Wi-Fi while charging.</string>
+    <string name="autoupload_permission_rationale">Droplet needs access to your photo library to watch for new images, and notification permission to show a small upload progress notification.</string>
+    <string name="autoupload_permission_grant">Allow access</string>
+    <string name="autoupload_last_success">Last sync: %1$s</string>
+    <string name="autoupload_never_run">Waiting for the next scheduled run…</string>
+    <string name="autoupload_run_now">Run now</string>
+    <string name="autoupload_channel_name">Photo auto-upload</string>
+    <string name="autoupload_channel_description">Quiet notification while Droplet uploads new photos to your home server.</string>
+    <string name="autoupload_notif_title">Droplet — uploading photos</string>
+    <string name="autoupload_notif_starting">Starting: %1$d new photos</string>
+    <string name="autoupload_notif_progress">%1$d of %2$d</string>
+    <string name="autoupload_notif_running">Uploading…</string>
 </resources>

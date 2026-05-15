@@ -11,8 +11,12 @@ struct ContentView: View {
             ScanView()
         case .pairFlow(let server, let code):
             PairFlowView(serverUrl: server, code: code)
-        case .paired:
-            PairedView()
+        case .home:
+            HomeView()
+        case .files(let path):
+            FilesView(path: path)
+        case .upload:
+            UploadView()
         }
     }
 }

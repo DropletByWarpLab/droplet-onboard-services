@@ -126,6 +126,11 @@ dependencies {
     // DI
     implementation(libs.koin.android)
     implementation(libs.koin.androidx.compose)
+    implementation(libs.koin.androidx.workmanager)
+
+    // WorkManager + DataStore (auto-upload pipeline)
+    implementation(libs.work.runtime.ktx)
+    implementation(libs.datastore.preferences)
 
     // CameraX + ML Kit
     implementation(libs.camerax.core)
