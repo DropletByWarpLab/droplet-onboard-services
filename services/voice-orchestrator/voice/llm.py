@@ -359,6 +359,13 @@ def build_llm_from_env() -> LLMClient:
       - empty/unset                  → OrchestratorLLM against the
                                          compose-default DNS
 
+    Tool calling:
+      - When `voice.tools.build_tool_client_from_env()` returns a
+        client (i.e. `VOICE_TOOLS_ENABLED=1`), we wrap the
+        OrchestratorLLM in a tool-iterating shell — see
+        `OrchestratorLLMWithTools` below. Otherwise we return the
+        plain text-only client and the voice loop stays single-shot.
+
     Location + timezone resolution order (via voice.geo.get_geo()):
       1. `DROPLET_LOCATION` env (free-form, e.g. "Greenwich, CT, USA")
          + `TZ` env (IANA, e.g. "America/New_York"). Operator-pin wins.
@@ -384,10 +391,250 @@ def build_llm_from_env() -> LLMClient:
     from voice.geo import get_geo
     geo = get_geo()
 
-    return OrchestratorLLM(
+    base_llm = OrchestratorLLM(
         base_url=raw,
         model=model,
         bearer_token=token,
         location=geo.description,
         timezone=geo.timezone,
     )
+
+    # Optional tool-calling wrapper (WARP-102 phase 2). Disabled by
+    # default — set VOICE_TOOLS_ENABLED=1 in env to opt in.
+    from voice.tools import build_tool_client_from_env
+    tools = build_tool_client_from_env()
+    if tools is None:
+        return base_llm
+    logger.info("voice tools enabled — LLM responses can invoke smart-home tools")
+    return OrchestratorLLMWithTools(base_llm, tools)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Tool-iterating LLM wrapper
+# ────────────────────────────────────────────────────────────────────
+
+
+# Hard cap on the LLM ↔ tool feedback loop. Most useful smart-home
+# requests resolve in one tool call (control_device) or two (list →
+# control). The cap is a safety net against pathological loops where
+# the LLM repeatedly re-tries a failing tool — at 5 we bail with a
+# spoken "I tried but couldn't complete that" rather than burning the
+# Pi's CPU.
+MAX_TOOL_ITERATIONS = 5
+
+
+class OrchestratorLLMWithTools(LLMClient):
+    """LLMClient that does tool-calling against an MCP server.
+
+    Wraps a base OrchestratorLLM (which still owns the HTTP plumbing,
+    system-prompt construction, and response parsing) and adds the
+    tool-iteration loop on top. Single responsibility: orchestrate
+    multi-turn between the LLM and the MCP server until the LLM
+    returns plain text.
+
+    Pipeline integration: ``pipeline.py`` already calls ``reply()``
+    once per voice turn; this class makes that one call expand into
+    up to MAX_TOOL_ITERATIONS HTTP round-trips internally.
+    """
+
+    def __init__(self, base: "OrchestratorLLM", tools: "Any"):
+        """`tools` is a voice.tools.ToolClient — typed as Any here to
+        avoid a forward-import cycle (tools.py doesn't import llm.py;
+        this file imports tools.py lazily in build_llm_from_env)."""
+        self._base = base
+        self._tools = tools
+        # Cache the tool list. We re-fetch on first call rather than
+        # at construction so a brief MCP outage at startup doesn't kill
+        # voice — the first reply() that gets to tool-iteration warms it.
+        self._tool_defs: list[Any] | None = None
+
+    @property
+    def available(self) -> bool:
+        # We're "available" as soon as the base LLM is — tool-calling
+        # is a soft enhancement, not a hard dependency. If the MCP
+        # server is down, we fall through to text-only replies.
+        return self._base.available
+
+    def _get_tool_defs(self) -> list[Any]:
+        if self._tool_defs is None:
+            try:
+                self._tool_defs = self._tools.list_tools()
+            except Exception as exc:  # noqa: BLE001 — tool fetch must not crash voice
+                logger.warning(
+                    "voice tools list_tools() failed; running text-only this turn: %s",
+                    exc,
+                )
+                # Cache an empty list for THIS process lifetime is
+                # wrong — a transient MCP blip would lose tools forever.
+                # Return [] for this call only; next reply() retries.
+                return []
+        return self._tool_defs
+
+    def reply(self, user_text: str) -> str:
+        """Run the LLM ↔ MCP tool loop. Returns the final assistant
+        text once the LLM emits a response with no tool_calls."""
+        if not user_text or not user_text.strip():
+            return ""
+
+        tool_defs = self._get_tool_defs()
+        if not tool_defs:
+            # No tools available — degrade gracefully to text-only.
+            # This is how a Tier 2 lock request also ends up: the LLM
+            # has no control_device tool, so it just talks about it.
+            return self._base.reply(user_text)
+
+        # Conversation history starts with the user's turn. We build
+        # the system prompt the same way OrchestratorLLM does so the
+        # "right now" timestamp and location are present.
+        now = self._base._now_provider() if self._base._now_provider else None
+        system_msg = build_system_prompt(
+            self._base._system_prompt,
+            location=self._base._location,
+            timezone=self._base._timezone,
+            now=now,
+        )
+        history: list[dict[str, Any]] = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_text.strip()},
+        ]
+
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            try:
+                resp = self._call_with_tools(history, tool_defs)
+            except LLMUnavailable as exc:
+                logger.warning("LLM call failed mid-tool-loop: %s", exc)
+                # Surface the error as a spoken reply so the user knows
+                # something happened. Pipeline still gets a non-empty
+                # string to feed to TTS.
+                return "Sorry, I had trouble reaching the assistant. Please try again."
+
+            assistant_msg = resp.get("message") or _first_choice_message(resp)
+            tool_calls = assistant_msg.get("tool_calls") if assistant_msg else None
+
+            if not tool_calls:
+                # Plain text reply — done.
+                content = (assistant_msg or {}).get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+                # Some providers stream content as a list of parts.
+                return _extract_assistant_text(resp)
+
+            # Tool path — append the assistant's tool-call message
+            # verbatim so the next LLM call has the full thread, then
+            # dispatch each tool and append its result.
+            history.append(assistant_msg)
+            for tc in tool_calls:
+                inv = _normalize_tool_call(tc)
+                if inv is None:
+                    continue
+                try:
+                    result = self._tools.invoke(inv)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "tool dispatch threw (%s); feeding error back to LLM",
+                        exc,
+                    )
+                    result_content = json.dumps({
+                        "ok": False,
+                        "error": {"code": "TOOL_EXCEPTION", "message": str(exc)},
+                    })
+                    call_id = inv.call_id
+                    tool_name = inv.name
+                else:
+                    result_content = result.content
+                    call_id = result.call_id
+                    tool_name = result.name
+                history.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": tool_name,
+                    "content": result_content,
+                })
+            logger.debug("tool iteration %d completed, looping back to LLM", iteration + 1)
+
+        # Cap exceeded — bail with a spoken apology so the user
+        # doesn't hear silence.
+        logger.warning(
+            "voice tool loop exceeded MAX_TOOL_ITERATIONS=%d", MAX_TOOL_ITERATIONS,
+        )
+        return "I tried to do that but couldn't finish. Please try the dashboard."
+
+    def _call_with_tools(
+        self,
+        history: list[dict[str, Any]],
+        tool_defs: list[Any],
+    ) -> dict[str, Any]:
+        """One HTTP round-trip to ai-gateway with `tools=[...]` set.
+        Reaches into the base OrchestratorLLM's transport so we keep
+        timeout / auth / URL discipline in one place."""
+        body: dict[str, Any] = {
+            "model": self._base._model,
+            "messages": history,
+            "stream": False,
+            "tools": [t.to_chat_format() for t in tool_defs],
+        }
+        try:
+            resp = httpx.post(
+                f"{self._base._base_url}{self._base._chat_path}",
+                json=body,
+                timeout=self._base._timeout_s,
+                headers=self._base._headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise LLMUnavailable(
+                f"POST {self._base._chat_path} (with tools) failed: {exc}",
+            ) from exc
+        if not resp.is_success:
+            raise LLMUnavailable(
+                f"{self._base._chat_path} returned {resp.status_code}: "
+                f"{_extract_error_detail(resp)}",
+            )
+        try:
+            return resp.json()
+        except json.JSONDecodeError as exc:
+            raise LLMUnavailable(f"non-JSON response: {exc}") from exc
+
+
+def _first_choice_message(payload: dict[str, Any]) -> dict[str, Any]:
+    """OpenAI-shape: choices[0].message. Ollama-shape returns top-level
+    `message`. Either path yields a dict here for the tool-call parser."""
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            msg = first.get("message")
+            if isinstance(msg, dict):
+                return msg
+    return {}
+
+
+def _normalize_tool_call(raw: dict[str, Any]) -> "Any":
+    """Coerce one of the LLM provider's tool_call shapes into our
+    ToolInvocation. OpenAI / ai-gateway:
+      {id, type:"function", function:{name, arguments:"<json-str>"}}
+    Ollama native:
+      {function:{name, arguments:{...}}}  (id may be absent)
+    """
+    from voice.tools import ToolInvocation
+    if not isinstance(raw, dict):
+        return None
+    fn = raw.get("function") or {}
+    name = fn.get("name") or raw.get("name")
+    if not isinstance(name, str):
+        return None
+    args_raw = fn.get("arguments") if "arguments" in fn else raw.get("arguments")
+    if isinstance(args_raw, str):
+        try:
+            args = json.loads(args_raw) if args_raw else {}
+        except json.JSONDecodeError:
+            # Some smaller models occasionally emit slightly malformed
+            # JSON args. Surface empty rather than crash — the tool
+            # will return an INVALID_ARGS error and the LLM can retry.
+            logger.warning("malformed tool_call arguments: %r", args_raw)
+            args = {}
+    elif isinstance(args_raw, dict):
+        args = args_raw
+    else:
+        args = {}
+    call_id = raw.get("id") or fn.get("name", "anon") + "-call"
+    return ToolInvocation(call_id=str(call_id), name=name, arguments=args)
