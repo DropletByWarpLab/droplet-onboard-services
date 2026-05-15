@@ -78,7 +78,7 @@ describe("matter.controller.listDevices", () => {
     expect(result).toEqual(body);
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe("get");
-    expect(calls[0].path).toBe("/matter/devices");
+    expect(calls[0].path).toBe("/api/matter/devices");
   });
 
   it("returns the disconnected stub when orchestrator says so", async () => {
@@ -115,7 +115,7 @@ describe("matter.controller.getDevice", () => {
     const ctrl = createMatterController(client);
     const result = await ctrl.getDevice("12345");
     expect(result).toEqual(device);
-    expect(calls[0].path).toBe("/matter/devices/12345");
+    expect(calls[0].path).toBe("/api/matter/devices/12345");
   });
 
   it("throws on 404 (no such device)", async () => {
@@ -132,7 +132,7 @@ describe("matter.controller.getDevice", () => {
     // Real Matter node IDs are decimal-only and the orchestrator
     // validates that, but the wrapper shouldn't trust the caller.
     await ctrl.getDevice("1/2/etc/passwd");
-    expect(calls[0].path).toBe("/matter/devices/1%2F2%2Fetc%2Fpasswd");
+    expect(calls[0].path).toBe("/api/matter/devices/1%2F2%2Fetc%2Fpasswd");
   });
 });
 
@@ -149,7 +149,7 @@ describe("matter.controller.sendCommand", () => {
     const result = await ctrl.sendCommand("12345", "turn_on", { brightness: 75 });
     expect(result).toEqual({ ok: true, tier: 1 });
     expect(calls[0].method).toBe("post");
-    expect(calls[0].path).toBe("/matter/devices/12345/command");
+    expect(calls[0].path).toBe("/api/matter/devices/12345/command");
     expect(calls[0].body).toEqual({ command: "turn_on", data: { brightness: 75 } });
   });
 
@@ -209,7 +209,7 @@ describe("matter.controller.discover", () => {
     const ctrl = createMatterController(client);
     const result = await ctrl.discover();
     expect(result).toEqual(body);
-    expect(calls[0].path).toBe("/matter/discover");
+    expect(calls[0].path).toBe("/api/matter/discover");
   });
 
   it("returns empty when no devices discovered (count: 0)", async () => {
@@ -236,7 +236,7 @@ describe("matter.controller.commission", () => {
     const ctrl = createMatterController(client);
     // 11-digit short Matter pairing code
     await ctrl.commission("34970112332");
-    expect(calls[0].path).toBe("/matter/commission");
+    expect(calls[0].path).toBe("/api/matter/commission");
     expect(calls[0].body).toEqual({ pairing_code: "34970112332" });
   });
 
@@ -276,7 +276,7 @@ describe("matter.controller.getAuditLog", () => {
     const ctrl = createMatterController(client);
     const result = await ctrl.getAuditLog({ entityId: "light.12345", limit: 50 });
     expect(result).toEqual(body);
-    expect(calls[0].path).toBe("/matter/audit");
+    expect(calls[0].path).toBe("/api/matter/audit");
     expect(calls[0].opts).toMatchObject({ params: { entityId: "light.12345", limit: 50 } });
   });
 

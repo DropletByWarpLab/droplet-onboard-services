@@ -1,6 +1,26 @@
 /**
  * MatterController implementation that proxies to the orchestrator's
- * `/matter/*` REST API.
+ * `/api/matter/*` REST API.
+ *
+ * AUTH GAP (WARP-339 follow-up — surfaced during POC deploy 2026-05-15)
+ * -------------------------------------------------------------------
+ * The orchestrator's `/api/*` routes require an authenticated user
+ * (session cookie OR Bearer JWT — see middleware/auth.ts). When the
+ * mcp-server calls these from the LLM tool-dispatch path, there is
+ * NO session — voice and chat both reach mcp-server via service-to-
+ * service paths.
+ *
+ * Today this means: chat tool calls go through the orchestrator's
+ * in-process agent loop (no HTTP round-trip; session flows naturally
+ * from the dashboard cookie). Voice tool calls (VOICE_TOOLS_ENABLED=1)
+ * and any future direct MCP client would fail with 401 until a
+ * service-auth path is added.
+ *
+ * Next step: mint a service JWT in mcp-server signed with the shared
+ * JWT_SECRET (claims: { sub: "service:mcp-server", role: "owner" }),
+ * attached as Authorization: Bearer on every request below. Then
+ * orchestrator's verifyAccessToken accepts it like any user JWT.
+ * Tracked separately; not in this commit.
  *
  * Background (WARP-102)
  * ---------------------
@@ -26,7 +46,7 @@
  *
  * Auth posture
  * ------------
- * The orchestrator's `/matter/*` routes do not enforce per-user auth
+ * The orchestrator's `/api/matter/*` routes do not enforce per-user auth
  * today — anything that can reach `orchestrator:3000` inside the
  * compose network can issue commands. The trust boundary is the
  * mcp-server's tools/call dispatch (RBAC + JWT). When the orchestrator
@@ -90,7 +110,7 @@ export function createMatterController(http: HttpClient): MatterController {
   return {
     /** GET /matter/devices — grouped list. */
     async listDevices() {
-      const resp = await http.get("/matter/devices");
+      const resp = await http.get("/api/matter/devices");
       return readJsonOrThrow(resp, "listDevices");
     },
 
@@ -99,7 +119,7 @@ export function createMatterController(http: HttpClient): MatterController {
       // Path-safe: matter route validates the format via isValidNodeId
       // (digits only, max 20), so we don't need to encode beyond what
       // joinUrl already does.
-      const resp = await http.get(`/matter/devices/${encodeURIComponent(nodeId)}`);
+      const resp = await http.get(`/api/matter/devices/${encodeURIComponent(nodeId)}`);
       if (resp.status === 404) {
         // Tool handlers expect getDevice to either return the device or
         // throw; 404 is a real condition, not a transient error.
@@ -117,7 +137,7 @@ export function createMatterController(http: HttpClient): MatterController {
      */
     async sendCommand(nodeId: string, command: string, data?: unknown) {
       const resp = await http.post(
-        `/matter/devices/${encodeURIComponent(nodeId)}/command`,
+        `/api/matter/devices/${encodeURIComponent(nodeId)}/command`,
         { command, data },
       );
       return readJsonOrThrow(resp, "sendCommand");
@@ -131,7 +151,7 @@ export function createMatterController(http: HttpClient): MatterController {
      * the interface with an optional `timeoutMs` param.
      */
     async discover() {
-      const resp = await http.get("/matter/discover");
+      const resp = await http.get("/api/matter/discover");
       return readJsonOrThrow(resp, "discover");
     },
 
@@ -143,7 +163,7 @@ export function createMatterController(http: HttpClient): MatterController {
      * `ManualPairingCodeCodec` / `QrPairingCodeCodec`.
      */
     async commission(pairingCode: string) {
-      const resp = await http.post("/matter/commission", {
+      const resp = await http.post("/api/matter/commission", {
         pairing_code: pairingCode,
       });
       return readJsonOrThrow(resp, "commission");
@@ -159,7 +179,7 @@ export function createMatterController(http: HttpClient): MatterController {
       const params: Record<string, unknown> = {};
       if (opts.entityId) params.entityId = opts.entityId;
       if (opts.limit !== undefined) params.limit = opts.limit;
-      const resp = await http.get("/matter/audit", { params });
+      const resp = await http.get("/api/matter/audit", { params });
       return readJsonOrThrow(resp, "getAuditLog");
     },
   };
