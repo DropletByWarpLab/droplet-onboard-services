@@ -1,5 +1,9 @@
 # ops-console
 
+> Bound on the appliance at `127.0.0.1:8089` (host) → `:8087` (container).
+> Reach via SSH tunnel: `ssh -L 8089:127.0.0.1:8089 droplet@<poc>`
+> then open <http://localhost:8089/> and paste your `OPS_TOKEN`.
+
 Operator-side monitoring + remote-troubleshooting console for a deployed
 Droplet appliance. NOT customer-facing — this is the surface Stefan /
 Warp Lab uses to see what's happening on a unit in the field.

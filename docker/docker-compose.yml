@@ -795,7 +795,12 @@ services:
       # tunnel or (future) the WireGuard reverse tunnel. Never expose
       # this on the customer-facing IP, even with the bearer token,
       # because docker.sock = host root.
-      - "127.0.0.1:8087:8087"
+      #
+      # Host port 8089 (not 8087) to stay outside the 808x service
+      # cluster (gateway/routing/switch/mcp/voice all live there) and
+      # avoid any chance of colliding with oled-display which runs in
+      # host network mode. Container still listens on 8087 internally.
+      - "127.0.0.1:8089:8087"
     volumes:
       # The whole point of this container — read container state +
       # restart sick ones. Mount as :ro is NOT possible because the
