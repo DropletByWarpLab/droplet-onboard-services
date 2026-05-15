@@ -359,24 +359,35 @@ def build_llm_from_env() -> LLMClient:
       - empty/unset                  → OrchestratorLLM against the
                                          compose-default DNS
 
-    `DROPLET_LOCATION` (free-form, e.g. "Greenwich, CT, USA") +
-    `TZ` (IANA, e.g. "America/New_York") feed into the system prompt
-    so the model can answer time/location questions directly.
+    Location + timezone resolution order (via voice.geo.get_geo()):
+      1. `DROPLET_LOCATION` env (free-form, e.g. "Greenwich, CT, USA")
+         + `TZ` env (IANA, e.g. "America/New_York"). Operator-pin wins.
+      2. IP-geolocation lookup (ipapi.co default). Auto-detects city/
+         region/country/timezone based on egress IP.
+      3. UTC + no description if both fail. System prompt just omits
+         the location line and uses UTC for time formatting.
     """
     raw = (os.environ.get("LLM_URL") or "").strip()
     model = (os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL).strip() or DEFAULT_LLM_MODEL
     token = (os.environ.get("ORCHESTRATOR_TOKEN") or "").strip() or None
-    location = (os.environ.get("DROPLET_LOCATION") or "").strip() or None
-    timezone = (os.environ.get("TZ") or "").strip() or DEFAULT_TIMEZONE
     if raw == "__mock__":
         logger.info("LLM_URL=__mock__ → MockLLM (echoes the user transcript)")
         return MockLLM(echo=True)
     if not raw:
         raw = DEFAULT_LLM_URL
+
+    # Resolve location + timezone via voice.geo (env override → web
+    # lookup → fallback). Done at startup; the result is held for the
+    # process lifetime. To force a re-lookup after a move, restart
+    # voice-orchestrator. Lazy import keeps tests that mock `os.environ`
+    # but don't care about geo from triggering an HTTP call.
+    from voice.geo import get_geo
+    geo = get_geo()
+
     return OrchestratorLLM(
         base_url=raw,
         model=model,
         bearer_token=token,
-        location=location,
-        timezone=timezone,
+        location=geo.description,
+        timezone=geo.timezone,
     )

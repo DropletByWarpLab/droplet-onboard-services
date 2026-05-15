@@ -579,7 +579,12 @@ services:
       - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
       - ORCHESTRATOR_TOKEN=${ORCHESTRATOR_TOKEN:-}
       - WAKE_WORD=${WAKE_WORD:-hey_droplet}
-      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.5}
+      # Threshold tuned from POC live use: 0.5 was too high to fire on
+      # speech at typical room distance (~3-6 ft). 0.3 catches real
+      # wakes while still rejecting most background talk. Raise back
+      # toward 0.5 once a custom-trained `hey_droplet.onnx` lands —
+      # bundled-model fallbacks need the lower floor.
+      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.3}
       # STT — wake → next 5 s of audio gets streamed here for transcription.
       # `wyoming-faster-whisper` is the sibling container below (Rhasspy's
       # Wyoming-protocol wrapper around faster-whisper). Set STT_URL=__mock__
@@ -598,17 +603,22 @@ services:
       # owns conversation state + tool dispatch. Set LLM_URL=__mock__
       # for a dev box with no orchestrator (transcript echoes as the
       # spoken reply).
-      - LLM_URL=${LLM_URL:-http://orchestrator:3000}
-      - LLM_MODEL=${LLM_MODEL:-ollama:llama3.2:3b}
+      # ai-gateway directly, not orchestrator's /api/llm/chat — the
+      # latter requires session-cookie auth designed for dashboard users
+      # (service-to-service auth path is commit 7b territory). Default
+      # model matches what the POC's local Ollama actually has installed
+      # (8 B instruct quantized) so a reflash doesn't fall back to a
+      # missing model name.
+      - LLM_URL=${LLM_URL:-http://ai-gateway:8000}
+      - LLM_MODEL=${LLM_MODEL:-llama3.1:8b-instruct-q8_0}
       # Context the LLM gets in its system prompt at every reply():
-      # current local time + the device's configured location. Without
-      # these, the model freelances ("the time is around 3pm" with no
-      # actual clock access). Operator sets DROPLET_LOCATION in .env
-      # ("Greenwich, CT, USA" — free-form, the model just reads it
-      # back). TZ is a standard IANA name (e.g. "America/New_York");
-      # falls back to UTC if the container's tzdata can't resolve it.
+      # current local time + the device's location. Both auto-detected
+      # via voice/geo.py (free IP-geolocation lookup at startup,
+      # cached for the process lifetime). Set DROPLET_LOCATION here to
+      # pin manually and skip the lookup; same for TZ. Empty default
+      # means "auto-detect — let the geo lookup fill it in".
       - DROPLET_LOCATION=${DROPLET_LOCATION:-}
-      - TZ=${TZ:-UTC}
+      - TZ=${TZ:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.
