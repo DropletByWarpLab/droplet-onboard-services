@@ -703,7 +703,7 @@ export function useChat(options: UseChatOptions = {}) {
         // error condition from the UX's perspective — we preserve any
         // partial content the model already streamed and mark the
         // bubble with `stopped: true` so the ChatMessage layer can
-        // render the "Stopped by you" tag.
+        // render the aborted FailureChip.
         const isAbort =
           isStoppingRef.current ||
           controller.signal.aborted ||

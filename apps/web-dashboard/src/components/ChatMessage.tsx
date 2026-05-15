@@ -156,6 +156,15 @@ export const ChatMessage = memo(function ChatMessage({
                 {message.content}
               </ReactMarkdown>
             )}
+            {message.content && (failureKind === "aborted" || failureKind === "interrupted") && (
+              <span
+                className="text-label-tertiary"
+                aria-hidden="true"
+                data-testid="partial-ellipsis"
+              >
+                …
+              </span>
+            )}
             {hasFailure && (
               <FailureChip
                 kind={failureKind!}
