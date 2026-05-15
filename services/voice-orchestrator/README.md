@@ -94,7 +94,61 @@ USB mic in after the box has already booted.
 | `STT_MAX_RECORD_S` | `5.0` | Seconds of audio captured per wake before sending audio-stop. VAD-based cutoff lands in a follow-up; for now this is a fixed window. |
 | `TTS_URL` | `tcp://wyoming-piper:10200` | Wyoming-protocol Piper server. Set to `__mock__` for silent playback (dev box without a Piper container). |
 | `TTS_VOICE` | `en_US-ryan-medium` | Piper voice name. ~70 MB per voice; downloads on first request and caches in the `piper-voices` volume. Other natural-sounding options: `en_US-lessac-medium`, `en_GB-jenny-medium`. |
+| `VOICE_TOOLS_ENABLED` | `0` | Opt-in to LLM tool-calling. When `1`/`true`, the voice loop fetches the smart-home tool subset from `mcp-server` at startup and the LLM can invoke `control_device`, `list_smart_home_devices`, etc. — so "turn off the office lamp" actually turns it off instead of just being talked about. Locks are refused via voice regardless (no speaker auth). See "Tool calling" section below. |
+| `MCP_URL` | `http://mcp-server:9090` | MCP server's HTTP transport. Only consulted when `VOICE_TOOLS_ENABLED=1`. |
+| `VOICE_MCP_TOKEN` | *(empty)* | Bearer token the voice service presents to the MCP server. Service-to-service auth; mint at startup via setup.sh (TODO). |
+| `MCP_TIMEOUT_S` | `10` | Per-call timeout for MCP tool dispatch. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
+
+## Tool calling (smart-home Matter control)
+
+When `VOICE_TOOLS_ENABLED=1`, the voice loop pipes the LLM through
+`voice/tools.py` (the MCP HTTP client) so it can act on the user's
+smart-home devices, not just describe them.
+
+### What the LLM gets
+
+Six tools, filtered from the MCP server's 60+ tool registry to the
+smart-home subset:
+
+| Tool | What it does |
+|---|---|
+| `list_smart_home_devices` | Return all commissioned Matter devices grouped by category (lights/switches/etc.) |
+| `get_smart_home_device` | Detail on a single device by node ID |
+| `control_device` | Send a command (turn_on / turn_off / set_brightness / set_temperature / lock / unlock) |
+| `discover_matter_devices` | mDNS scan for uncommissioned devices |
+| `commission_device` | Commission a new device by pairing code (rarely used via voice — dashboard QR scanner is the canonical UX) |
+| `get_command_history` | Audit-log slice for one device |
+
+### Iteration loop
+
+1. STT → user text.
+2. LLM call with `tools=[...]`.
+3. If the LLM returns `tool_calls`, dispatch each via the MCP server,
+   append the results to history, and loop back to step 2.
+4. Once the LLM returns plain text, hand it to TTS.
+
+Capped at `MAX_TOOL_ITERATIONS = 5` so a pathological loop bails to a
+spoken apology rather than burning CPU.
+
+### Safety policy (voice-side)
+
+| Tier | Server says | Voice handling |
+|---|---|---|
+| 1 (lights, switches, plugs) | Execute | Execute + speak result |
+| 2 non-lock (climate extremes, covers) | `confirmation_required` | LLM relays the prompt; the user must use the dashboard to confirm (verbal-confirm flow lands in a follow-up commit — stateful pipeline change). |
+| 2 **lock** | Would auto-confirm in the dashboard | **REFUSED in `voice/tools.py` before the network call**: no speaker authentication means anyone in earshot could unlock the front door by saying "yes". Returns `VOICE_LOCK_REFUSED`; the LLM relays a polite "use the dashboard" message. |
+| 3 (audit-only) | Execute + log | Execute + speak |
+
+### Disabling tools (downgrade path)
+
+Set `VOICE_TOOLS_ENABLED=0`. The voice loop reverts to the original
+text-only behaviour (the LLM can talk about devices but not act on
+them). Useful for:
+
+- First-time deployments before tool-selection is validated
+- Debugging the LLM in isolation from MCP
+- Customer sites where Matter devices aren't commissioned yet
 
 ## Control API
 

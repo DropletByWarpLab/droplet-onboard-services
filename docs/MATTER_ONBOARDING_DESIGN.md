@@ -222,3 +222,81 @@ Matter device" affordance during first-run.
 * **2026-05-15:** WARP-102 decision — MCP-server proxies to
   orchestrator over HTTP, does NOT host its own Matter controller
   (orchestrator stays the single fabric-state owner).
+
+## Implementation log — shipped 2026-05-15
+
+### Day 1 (commit 3c19f8f) — MCP matter HTTP proxy
+
+* `services/mcp-server/src/matter.controller.ts` (new) implements
+  `MatterController` over HTTP, mapping the 6 interface methods
+  to orchestrator routes.
+* `services/mcp-server/src/index.ts`:
+  - Added `orchestrator` to the `HttpTarget` union; default URL
+    `http://orchestrator:3000` overridable via `ORCHESTRATOR_URL`.
+  - Replaced the 7-line no-op stub with
+    `createMatterController(createHttpClient("orchestrator"))`.
+* 21 new unit tests in
+  `services/mcp-server/__tests__/matter.controller.test.ts`.
+* Key behaviour: HTTP 202 (Tier-2 `confirmation_required`) is passed
+  through, not thrown — `control-device.ts` pattern-matches on the
+  body shape to surface the confirmation prompt.
+
+### Day 2-3 (commit pending) — Dashboard QR scanner
+
+* New `apps/web-dashboard/src/components/smart-home/MatterQrScanner.tsx`
+  using `@zxing/library` for camera-based decoding with a manual-entry
+  fallback. Always renders the textbox below the viewport — graceful
+  degradation when camera permission is denied or no camera exists.
+* New `apps/web-dashboard/src/app/devices/add-matter/page.tsx`:
+  three-state flow (scan → commission → done) with live progress UI
+  and failure-back-to-scan.
+* `apps/web-dashboard/src/app/devices/page.tsx`: "Add device" primary
+  CTA in header + first-run empty-state CTA.
+* `apps/web-dashboard/src/components/smart-home/DiscoveryBanner.tsx`:
+  copy updated to link to the scanner.
+* `apps/web-dashboard/src/app/setup/page.tsx`: "Have a device's QR
+  code handy?" affordance in the wizard's discovery step.
+* Dependencies: `@zxing/browser ^0.1.5` + `@zxing/library ^0.21.3`.
+* 14 new tests (`MatterQrScanner.test.tsx`, `add-matter.flow.test.tsx`).
+
+### Day 3-4 (commit pending) — Voice tool-calling
+
+* New `services/voice-orchestrator/voice/tools.py` (350 lines):
+  MCP HTTP client, smart-home tool filter, lock-via-voice refusal,
+  hallucinated-tool refusal. Opt-in via `VOICE_TOOLS_ENABLED=1`.
+* `services/voice-orchestrator/voice/llm.py`: new
+  `OrchestratorLLMWithTools` wrapper class — tool-iteration loop
+  capped at `MAX_TOOL_ITERATIONS = 5`. Handles both OpenAI-shape
+  (top-level `choices`) and Ollama-native (top-level `message`)
+  tool-call wire formats. Malformed JSON args become `{}` rather
+  than crashing.
+* `build_llm_from_env()` opts into the wrapper when
+  `VOICE_TOOLS_ENABLED=1`, otherwise returns the plain text-only
+  client (current production behaviour preserved as default).
+* 32 new tests (`test_tools.py` 21, `test_llm_tools.py` 11).
+* Full voice suite: 255 pass (223 prior + 32 new).
+
+### Day 5 (commit pending) — Polish
+
+* `docker/docker-compose.yml`: 4 new env knobs on voice-orchestrator
+  (`VOICE_TOOLS_ENABLED`, `MCP_URL`, `VOICE_MCP_TOKEN`,
+  `MCP_TIMEOUT_S`) with safe defaults.
+* `services/voice-orchestrator/README.md`: new "Tool calling"
+  section + 4 rows added to the env table.
+* This decision log.
+
+### Deferred (not in v1)
+
+* **Verbal confirmation for Tier 2 non-lock commands.** Today the
+  server returns `confirmation_required` and the LLM relays it
+  verbally; the user must use the dashboard to confirm. The
+  voice-yes-no flow needs stateful pipeline state (pending
+  confirmation token across STT → LLM → TTS cycles); deferred to a
+  follow-up.
+* **Voice-triggered "Hey Jarvis, add a device".** Listed in this
+  doc but not implemented today — it requires the LLM to emit a
+  short URL that TTS speaks back. Trivial extension; tracked
+  separately so it can land independently of this PR's review.
+* **Audit log filter UI** on the dashboard. The backend route
+  exists (`/api/matter/audit` and the MCP proxy); a UI for filtering
+  by node-id or command class hasn't shipped here.

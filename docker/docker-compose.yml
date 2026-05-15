@@ -619,6 +619,15 @@ services:
       # means "auto-detect — let the geo lookup fill it in".
       - DROPLET_LOCATION=${DROPLET_LOCATION:-}
       - TZ=${TZ:-}
+      # Tool-calling: opt-in so the v1 voice rollout stays text-only
+      # until we've validated tool selection on the live POC. Set to
+      # 1/true to enable; voice/tools.py then fetches the smart-home
+      # subset from mcp-server and the LLM can invoke control_device
+      # etc. Locks via voice are refused regardless (no speaker auth).
+      - VOICE_TOOLS_ENABLED=${VOICE_TOOLS_ENABLED:-0}
+      - MCP_URL=${MCP_URL:-http://mcp-server:9090}
+      - VOICE_MCP_TOKEN=${VOICE_MCP_TOKEN:-}
+      - MCP_TIMEOUT_S=${MCP_TIMEOUT_S:-10}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.
