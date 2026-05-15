@@ -26,6 +26,7 @@ interface ProbeValue {
   sendMessage: ReturnType<typeof useChat>["sendMessage"];
   clearMessages: ReturnType<typeof useChat>["clearMessages"];
   loadConversation: ReturnType<typeof useChat>["loadConversation"];
+  retryMessage: ReturnType<typeof useChat>["retryMessage"];
   conversationId: string | null;
 }
 
@@ -36,6 +37,7 @@ function Probe({ onValue }: { onValue: (v: ProbeValue) => void }) {
     sendMessage: hook.sendMessage,
     clearMessages: hook.clearMessages,
     loadConversation: hook.loadConversation,
+    retryMessage: hook.retryMessage,
     conversationId: hook.conversationId,
   });
   return null;
@@ -294,6 +296,55 @@ describe("useChat — conversation persistence (WARP-304)", () => {
 
     expect(probe!.messages).toHaveLength(3);
     expect(probe!.messages.find((m) => m.failureKind === "missing")).toBeUndefined();
+  });
+
+  it("retryMessage drops the failed assistant + preceding user and re-sends, using failureKind-derived prompt", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-retry",
+      title: "Retry me",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "the original prompt", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "", toolCalls: null, toolCallId: null, turnId: "t1", status: "failed", createdAt: new Date().toISOString() },
+      ],
+    });
+    // sendChat returns a stream that ends immediately so retry resolves.
+    mockSendChat.mockResolvedValue({
+      headers: new Headers({ "x-conversation-id": "conv-retry" }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(`event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`),
+          );
+          controller.close();
+        },
+      }),
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-retry");
+    });
+
+    expect(probe!.messages[1].failureKind).toBe("failed");
+
+    await act(async () => {
+      await probe!.retryMessage("a1", "llama3");
+    });
+
+    expect(mockSendChat).toHaveBeenCalledTimes(1);
+    const sendArgs = mockSendChat.mock.calls[0][0];
+    // The replay messages should END with the re-sent user turn —
+    // confirming we derived the prompt from u1.
+    expect(sendArgs.messages.at(-1)).toEqual({
+      role: "user",
+      content: "the original prompt",
+    });
   });
 
   it("loadConversation returns false when the server has no such conversation", async () => {

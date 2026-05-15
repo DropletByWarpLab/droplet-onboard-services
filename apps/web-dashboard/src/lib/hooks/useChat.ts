@@ -784,21 +784,29 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const retryMessage = useCallback(
     async (messageId: string, model: string, systemPrompt?: string) => {
-      // Read the failed message from the ref-mirror — the updater
-      // pattern doesn't work here because in this test/runtime
-      // environment React batches the updater AFTER the surrounding
-      // async code reads back closure-captured state.
-      const target = messagesRef.current.find((m) => m.id === messageId);
-      if (!target?.error) return;
-      const retryPrompt = target.error.retryPrompt;
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      const target = snapshot[idx];
+      // Derive the prompt to re-send. Live failures carry retryPrompt on
+      // the error field; history-loaded failures (failureKind) don't, so
+      // fall back to the preceding user message's content.
+      let retryPrompt: string | null = null;
+      if (target.error) {
+        retryPrompt = target.error.retryPrompt;
+      } else if (target.failureKind) {
+        const prev = idx > 0 ? snapshot[idx - 1] : null;
+        if (prev && prev.role === "user") retryPrompt = prev.content;
+      }
+      if (retryPrompt == null) return;
 
       // Drop the failed assistant + the user turn immediately before it
       // so the new turn replays a clean thread.
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.id === messageId);
-        if (idx === -1) return prev;
-        const userIdx = idx > 0 && prev[idx - 1].role === "user" ? idx - 1 : idx;
-        return prev.filter((_, i) => i !== idx && i !== userIdx);
+        const i = prev.findIndex((m) => m.id === messageId);
+        if (i === -1) return prev;
+        const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
+        return prev.filter((_, k) => k !== i && k !== userIdx);
       });
 
       await sendMessage(retryPrompt, model, systemPrompt);
