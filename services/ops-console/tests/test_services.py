@@ -72,19 +72,31 @@ def patched_httpx(monkeypatch):
 
 class TestBuildRegistry:
     def test_default_registry_has_known_services(self, monkeypatch):
-        # Clear all OPS_PROBE_* envs so we get pure defaults
-        for k in list(monkeypatch._setitem):
-            pass  # noqa: monkeypatch impl detail
+        # Clear OPS_PROBE_* envs we care about so we get pure defaults
+        for envvar in [
+            "OPS_PROBE_ORCHESTRATOR", "OPS_PROBE_AI_GATEWAY",
+            "OPS_PROBE_VOICE", "OPS_PROBE_FRIGATE",
+        ]:
+            monkeypatch.delenv(envvar, raising=False)
         reg = svc.build_registry()
+        # All known services in the registry
         assert "orchestrator" in reg
         assert "ai-gateway" in reg
         assert "voice-orchestrator" in reg
         assert "web-dashboard" in reg
-        # Defaults should look like compose DNS
-        assert reg["ai-gateway"].startswith("http://ai-gateway:")
-        # Infra services without HTTP /health default to empty
+        assert "db" in reg
+        # Defaults for verified-live services point at their real paths
+        # (see services.py docstring — these were empirically validated)
+        assert reg["orchestrator"] == "http://orchestrator:3000/api/orchestrator/health"
+        assert reg["ai-gateway"] == "http://ai-gateway:8000/ai/health"
+        assert reg["voice-orchestrator"] == "http://voice-orchestrator:8086/health"
+        assert reg["frigate"] == "http://frigate:5000/healthz"
+        # Services without HTTP /health (workers, infra) default to empty
+        # and therefore surface as `unknown` rather than `down`
         assert reg["db"] == ""
         assert reg["broker"] == ""
+        assert reg["file-indexer"] == ""
+        assert reg["web-dashboard"] == ""
 
     def test_env_override_wins(self, monkeypatch):
         monkeypatch.setenv("OPS_PROBE_AI_GATEWAY", "http://override:1234/x")

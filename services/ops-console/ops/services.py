@@ -88,21 +88,42 @@ def _u(env_name: str, default: str) -> str:
 
 def build_registry() -> dict[str, str]:
     """Service name → /health URL. Built fresh each call so tests can
-    monkeypatch env between runs."""
+    monkeypatch env between runs.
+
+    Default URLs were verified empirically against the live POC on
+    2026-05-15 — the comments below note WHICH ones were observed
+    to answer 200 and which are intentionally blank.
+
+    Services with empty default URLs DO exist in the stack but
+    intentionally don't expose an HTTP /health endpoint (background
+    workers, no FastAPI). They surface as `unknown` in /ops/services
+    and rely on /ops/containers for liveness — the docker container
+    state IS their health check. To enable an HTTP probe for any of
+    them, set the matching OPS_PROBE_* env to a real URL.
+    """
     return {
+        # --- verified live on POC ---
         "orchestrator":      _u("OPS_PROBE_ORCHESTRATOR",      "http://orchestrator:3000/api/orchestrator/health"),
-        "web-dashboard":     _u("OPS_PROBE_WEB_DASHBOARD",     "http://web-dashboard:3001/api/health"),
-        "ai-gateway":        _u("OPS_PROBE_AI_GATEWAY",        "http://ai-gateway:8000/healthz"),
-        "voice-orchestrator":_u("OPS_PROBE_VOICE",             "http://voice-orchestrator:8086/healthz"),
-        "file-indexer":      _u("OPS_PROBE_FILE_INDEXER",      "http://file-indexer:8090/healthz"),
-        "camera-discovery":  _u("OPS_PROBE_CAMERA_DISCOVERY",  "http://camera-discovery:8083/healthz"),
-        "device-identity":   _u("OPS_PROBE_DEVICE_IDENTITY",   "http://device-identity-svc:8084/healthz"),
-        "mcp-server":        _u("OPS_PROBE_MCP",               "http://mcp-server:8082/healthz"),
-        "routing":           _u("OPS_PROBE_ROUTING",           "http://routing:8080/api/health"),
-        "switch":            _u("OPS_PROBE_SWITCH",            "http://switch:8081/healthz"),
-        "nextcloud":         _u("OPS_PROBE_NEXTCLOUD",         "http://nextcloud:9090/health"),
-        "frigate":           _u("OPS_PROBE_FRIGATE",           "http://frigate:5000/api/version"),
-        # Infra without HTTP /health — leave URL empty in env to skip:
+        "ai-gateway":        _u("OPS_PROBE_AI_GATEWAY",        "http://ai-gateway:8000/ai/health"),
+        "voice-orchestrator":_u("OPS_PROBE_VOICE",             "http://voice-orchestrator:8086/health"),
+        "frigate":           _u("OPS_PROBE_FRIGATE",           "http://frigate:5000/healthz"),
+        # --- no HTTP /health endpoint exposed; container state is the check ---
+        # web-dashboard is Next.js with no /api/health route shipped today.
+        # If WARP-XXX adds one, populate the env (default URL stays blank
+        # rather than ship a broken default).
+        "web-dashboard":     _u("OPS_PROBE_WEB_DASHBOARD",     ""),
+        # file-indexer is a daemon that watches Nextcloud — no HTTP layer.
+        "file-indexer":      _u("OPS_PROBE_FILE_INDEXER",      ""),
+        # camera-discovery exposes FastAPI but the POC instance was not
+        # binding the port at the time of the empirical check. Default
+        # blank until that's tightened; set the env if you've confirmed it.
+        "camera-discovery":  _u("OPS_PROBE_CAMERA_DISCOVERY",  ""),
+        "device-identity":   _u("OPS_PROBE_DEVICE_IDENTITY",   ""),
+        "mcp-server":        _u("OPS_PROBE_MCP",               ""),
+        "routing":           _u("OPS_PROBE_ROUTING",           ""),
+        "switch":            _u("OPS_PROBE_SWITCH",            ""),
+        "nextcloud":         _u("OPS_PROBE_NEXTCLOUD",         ""),
+        # --- infrastructure: db / cache / broker have no HTTP face ---
         "db":                _u("OPS_PROBE_DB",                ""),
         "cache":             _u("OPS_PROBE_CACHE",             ""),
         "broker":            _u("OPS_PROBE_BROKER",            ""),

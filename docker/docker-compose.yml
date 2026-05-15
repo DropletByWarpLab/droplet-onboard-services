@@ -775,21 +775,23 @@ services:
       # hex string to .env; if missing the container generates an
       # ephemeral one and logs it loudly (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
-      # Per-service probe URLs. Defaults match compose service DNS so the
-      # POC needs no overrides. Set to empty string in .env to skip a
-      # service that isn't deployed in your profile.
+      # Per-service probe URLs. Defaults verified live on POC 2026-05-15.
+      # Empty default = container exists but exposes no HTTP /health
+      # endpoint; surfaces as `unknown` (relies on /ops/containers for
+      # liveness). Override any with a real URL via .env to enable.
       - OPS_PROBE_ORCHESTRATOR=${OPS_PROBE_ORCHESTRATOR:-http://orchestrator:3000/api/orchestrator/health}
-      - OPS_PROBE_WEB_DASHBOARD=${OPS_PROBE_WEB_DASHBOARD:-http://web-dashboard:3001/api/health}
-      - OPS_PROBE_AI_GATEWAY=${OPS_PROBE_AI_GATEWAY:-http://ai-gateway:8000/healthz}
-      - OPS_PROBE_VOICE=${OPS_PROBE_VOICE:-http://voice-orchestrator:8086/healthz}
-      - OPS_PROBE_FILE_INDEXER=${OPS_PROBE_FILE_INDEXER:-http://file-indexer:8090/healthz}
-      - OPS_PROBE_CAMERA_DISCOVERY=${OPS_PROBE_CAMERA_DISCOVERY:-http://camera-discovery:8083/healthz}
-      - OPS_PROBE_DEVICE_IDENTITY=${OPS_PROBE_DEVICE_IDENTITY:-http://device-identity-svc:8084/healthz}
-      - OPS_PROBE_MCP=${OPS_PROBE_MCP:-http://mcp-server:8082/healthz}
-      - OPS_PROBE_ROUTING=${OPS_PROBE_ROUTING:-http://routing:8080/api/health}
-      - OPS_PROBE_SWITCH=${OPS_PROBE_SWITCH:-http://switch:8081/healthz}
-      - OPS_PROBE_NEXTCLOUD=${OPS_PROBE_NEXTCLOUD:-http://nextcloud:9090/health}
-      - OPS_PROBE_FRIGATE=${OPS_PROBE_FRIGATE:-http://frigate:5000/api/version}
+      - OPS_PROBE_AI_GATEWAY=${OPS_PROBE_AI_GATEWAY:-http://ai-gateway:8000/ai/health}
+      - OPS_PROBE_VOICE=${OPS_PROBE_VOICE:-http://voice-orchestrator:8086/health}
+      - OPS_PROBE_FRIGATE=${OPS_PROBE_FRIGATE:-http://frigate:5000/healthz}
+      # Workers / no-HTTP-by-design — leave defaults empty:
+      - OPS_PROBE_WEB_DASHBOARD=${OPS_PROBE_WEB_DASHBOARD:-}
+      - OPS_PROBE_FILE_INDEXER=${OPS_PROBE_FILE_INDEXER:-}
+      - OPS_PROBE_CAMERA_DISCOVERY=${OPS_PROBE_CAMERA_DISCOVERY:-}
+      - OPS_PROBE_DEVICE_IDENTITY=${OPS_PROBE_DEVICE_IDENTITY:-}
+      - OPS_PROBE_MCP=${OPS_PROBE_MCP:-}
+      - OPS_PROBE_ROUTING=${OPS_PROBE_ROUTING:-}
+      - OPS_PROBE_SWITCH=${OPS_PROBE_SWITCH:-}
+      - OPS_PROBE_NEXTCLOUD=${OPS_PROBE_NEXTCLOUD:-}
     ports:
       # Bind to 127.0.0.1 only — the operator reaches it through an SSH
       # tunnel or (future) the WireGuard reverse tunnel. Never expose

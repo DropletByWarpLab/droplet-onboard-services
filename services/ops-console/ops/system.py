@@ -4,6 +4,25 @@ Scope: things the OPERATOR cares about when remote-debugging an
 appliance in the field. Not customer-visible (the dashboard already
 exposes a sanitised "is everything healthy?" view).
 
+Container-vs-host caveat
+------------------------
+psutil reads /proc — which in a containerised deployment shows the
+CONTAINER's view, not the host's. Concretely:
+
+  * CPU + memory   — accurate to host (cgroup-shared by default)
+  * load avg       — accurate to host (kernel-scope)
+  * processes      — container-local (shows only ops-console's pid 1)
+  * uptime         — container-local (since container start, not host)
+  * disks          — container-local (overlay rootfs, not host fs)
+  * network ifaces — container-local (eth0 = bridge endpoint, no eth*)
+
+To get host-accurate readings, add to docker-compose.yml's ops-console
+service: `pid: host` (real process list + uptime) and
+`volumes: - /:/hostfs:ro` (real disk usage; system.py would then need
+to scan /hostfs/proc/mounts). Deliberately NOT enabled today — it
+expands the attack surface for a tool that already mounts docker.sock.
+Revisit when ops needs disk-full alerting.
+
 Design notes
 ------------
 * psutil works the same on Linux + Windows, so dev box and POC produce
