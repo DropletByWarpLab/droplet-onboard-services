@@ -44,6 +44,18 @@ export interface ChatMessage {
    * `<CitationChip>` chips below the message bubble.
    */
   citations?: ChatCitation[];
+  /**
+   * Set when an assistant message rehydrated from history did not finish
+   * cleanly. Drives the FailureChip variant in <ChatMessage>.
+   *   - "failed"       — server-side error (status=failed)
+   *   - "aborted"      — user-cancelled mid-stream (status=aborted)
+   *   - "interrupted"  — server died mid-stream (status=streaming on load)
+   *   - "missing"      — synthetic placeholder for a tail-orphan user turn
+   *                      whose assistant row was never persisted
+   * Live-streaming turns continue to use `error` / `stopped`; this field
+   * is populated exclusively by `loadConversation`.
+   */
+  failureKind?: "failed" | "aborted" | "interrupted" | "missing";
 }
 
 /**
