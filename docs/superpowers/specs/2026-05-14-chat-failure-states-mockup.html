@@ -1,0 +1,159 @@
+<h2>Chat failure states — proposed UX</h2>
+<p class="subtitle">For each failure mode, the left column is what renders today; the right column is the proposed fix.</p>
+
+<style>
+  .state { margin-bottom: 28px; padding: 16px; background: #f8f9fb; border-radius: 12px; border: 1px solid #e5e7eb; }
+  .state h3 { margin: 0 0 4px 0; font-size: 16px; }
+  .state .desc { margin: 0 0 14px 0; font-size: 13px; color: #6b7280; }
+  .state code { background: #eef0f3; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .compare { grid-template-columns: 1fr; } }
+
+  .panel { background: #fff; border-radius: 10px; padding: 12px 14px; }
+  .panel.now { border: 1px solid #fecaca; }
+  .panel.fix { border: 1px solid #86efac; }
+  .panel-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; font-weight: 600; }
+  .panel.now .panel-label { color: #b91c1c; }
+  .panel.fix .panel-label { color: #15803d; }
+
+  .mock-chat { font-family: -apple-system, system-ui, sans-serif; color: #1d1d1f; }
+  .row { display: flex; gap: 8px; margin-bottom: 10px; align-items: flex-start; }
+  .row.user { flex-direction: row-reverse; }
+  .avatar { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; font-weight: 600; }
+  .avatar.bot { background: #eef0f3; color: #6b7280; }
+  .avatar.user { background: #e3edff; color: #2563eb; }
+  .bubble { padding: 8px 12px; border-radius: 16px; max-width: 280px; font-size: 13px; line-height: 1.4; }
+  .bubble.user { background: #2563eb; color: #fff; border-top-right-radius: 6px; }
+  .bubble.bot { background: #f2f3f5; border-top-left-radius: 6px; }
+  .bubble.empty { min-height: 16px; min-width: 50px; }
+  .col { display: flex; flex-direction: column; gap: 6px; }
+
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 10px; font-size: 12px; line-height: 1.3; }
+  .chip.failed { background: rgba(239,68,68,.10); color: #b91c1c; }
+  .chip.aborted { background: rgba(107,114,128,.12); color: #4b5563; }
+  .chip.interrupted { background: rgba(245,158,11,.14); color: #b45309; }
+  .chip.missing { background: rgba(107,114,128,.06); color: #6b7280; border: 1px dashed rgba(107,114,128,.5); }
+  .retry { margin-left: 8px; font-weight: 600; text-decoration: underline; cursor: pointer; }
+  .partial { color: #6b7280; }
+  .empty-note { color: #b91c1c; font-size: 11px; font-style: italic; margin-top: 4px; }
+</style>
+
+<!-- ── 1. FAILED ─────────────────────────────────────────────── -->
+<div class="state">
+  <h3>1 · Failed turn</h3>
+  <p class="desc">Agent loop errored server-side. <code>status = failed</code>.</p>
+  <div class="compare">
+
+    <div class="panel now">
+      <div class="panel-label">Today</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">Summarize this report</div></div>
+        <div class="row"><div class="avatar bot">AI</div><div class="bubble bot empty"></div></div>
+        <div class="empty-note">↑ empty bubble, no indication, no retry</div>
+      </div>
+    </div>
+
+    <div class="panel fix">
+      <div class="panel-label">Proposed</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">Summarize this report</div></div>
+        <div class="row"><div class="avatar bot">AI</div>
+          <div class="chip failed">⚠ Something went wrong on this turn.<span class="retry">Try again</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 2. ABORTED ────────────────────────────────────────────── -->
+<div class="state">
+  <h3>2 · Aborted turn</h3>
+  <p class="desc">User (or another tab) hit Stop. <code>status = aborted</code>. Partial content preserved.</p>
+  <div class="compare">
+
+    <div class="panel now">
+      <div class="panel-label">Today</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">Write a long poem</div></div>
+        <div class="row"><div class="avatar bot">AI</div><div class="bubble bot">Roses are red, violets are</div></div>
+        <div class="empty-note">↑ partial text shows, but no "Stopped" tag, no retry on reload</div>
+      </div>
+    </div>
+
+    <div class="panel fix">
+      <div class="panel-label">Proposed</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">Write a long poem</div></div>
+        <div class="row"><div class="avatar bot">AI</div>
+          <div class="col">
+            <div class="bubble bot">Roses are red, violets are<span class="partial">…</span></div>
+            <div class="chip aborted">◼ Stopped<span class="retry">Try again</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 3. INTERRUPTED (stale streaming) ──────────────────────── -->
+<div class="state">
+  <h3>3 · Interrupted turn</h3>
+  <p class="desc">Server restarted mid-stream — row stuck at <code>status = streaming</code> with no live stream. Detected client-side at load.</p>
+  <div class="compare">
+
+    <div class="panel now">
+      <div class="panel-label">Today</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">Explain PWM</div></div>
+        <div class="row"><div class="avatar bot">AI</div><div class="bubble bot">PWM is a technique where</div></div>
+        <div class="empty-note">↑ looks indistinguishable from a real but terse reply</div>
+      </div>
+    </div>
+
+    <div class="panel fix">
+      <div class="panel-label">Proposed</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">Explain PWM</div></div>
+        <div class="row"><div class="avatar bot">AI</div>
+          <div class="col">
+            <div class="bubble bot">PWM is a technique where<span class="partial">…</span></div>
+            <div class="chip interrupted">⟳ Interrupted — the reply didn't finish.<span class="retry">Try again</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 4. MISSING ASSISTANT ROW ──────────────────────────────── -->
+<div class="state">
+  <h3>4 · Missing assistant reply</h3>
+  <p class="desc">User turn persisted, assistant row never created. Synthesized client-side at load.</p>
+  <div class="compare">
+
+    <div class="panel now">
+      <div class="panel-label">Today</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">What's on my calendar?</div></div>
+        <div class="empty-note">↑ chat just ends — no follow-up at all</div>
+      </div>
+    </div>
+
+    <div class="panel fix">
+      <div class="panel-label">Proposed</div>
+      <div class="mock-chat">
+        <div class="row user"><div class="avatar user">R</div><div class="bubble user">What's on my calendar?</div></div>
+        <div class="row"><div class="avatar bot">AI</div>
+          <div class="chip missing">⊘ No reply was saved for this turn.<span class="retry">Try again</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:24px">Let me know in the terminal which of the four (if any) you'd like to revise — copy, color, layout, anything.</p>

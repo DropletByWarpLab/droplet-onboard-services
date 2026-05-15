@@ -63,6 +63,7 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
     toolCalls: PersistedToolCall[] | null;
     toolCallId: string | null;
     turnId: string | null;
+    status: "pending" | "streaming" | "completed" | "failed" | "aborted";
     createdAt: string;
   }>;
 }
@@ -110,6 +111,7 @@ export class ChatPersistenceService {
         toolCalls: (m.toolCalls as unknown as PersistedToolCall[] | null) ?? null,
         toolCallId: m.toolCallId,
         turnId: m.turnId,
+        status: m.status as "pending" | "streaming" | "completed" | "failed" | "aborted",
         createdAt: m.createdAt.toISOString(),
       })),
     };

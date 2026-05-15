@@ -703,7 +703,7 @@ export function useChat(options: UseChatOptions = {}) {
         // error condition from the UX's perspective — we preserve any
         // partial content the model already streamed and mark the
         // bubble with `stopped: true` so the ChatMessage layer can
-        // render the "Stopped by you" tag.
+        // render the aborted FailureChip.
         const isAbort =
           isStoppingRef.current ||
           controller.signal.aborted ||
@@ -784,21 +784,29 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const retryMessage = useCallback(
     async (messageId: string, model: string, systemPrompt?: string) => {
-      // Read the failed message from the ref-mirror — the updater
-      // pattern doesn't work here because in this test/runtime
-      // environment React batches the updater AFTER the surrounding
-      // async code reads back closure-captured state.
-      const target = messagesRef.current.find((m) => m.id === messageId);
-      if (!target?.error) return;
-      const retryPrompt = target.error.retryPrompt;
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      const target = snapshot[idx];
+      // Derive the prompt to re-send. Live failures carry retryPrompt on
+      // the error field; history-loaded failures (failureKind) don't, so
+      // fall back to the preceding user message's content.
+      let retryPrompt: string | null = null;
+      if (target.error) {
+        retryPrompt = target.error.retryPrompt;
+      } else if (target.failureKind) {
+        const prev = idx > 0 ? snapshot[idx - 1] : null;
+        if (prev && prev.role === "user") retryPrompt = prev.content;
+      }
+      if (retryPrompt == null) return;
 
       // Drop the failed assistant + the user turn immediately before it
       // so the new turn replays a clean thread.
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.id === messageId);
-        if (idx === -1) return prev;
-        const userIdx = idx > 0 && prev[idx - 1].role === "user" ? idx - 1 : idx;
-        return prev.filter((_, i) => i !== idx && i !== userIdx);
+        const i = prev.findIndex((m) => m.id === messageId);
+        if (i === -1) return prev;
+        const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
+        return prev.filter((_, k) => k !== i && k !== userIdx);
       });
 
       await sendMessage(retryPrompt, model, systemPrompt);
@@ -881,6 +889,16 @@ export function useChat(options: UseChatOptions = {}) {
       const rebuilt: ChatMessage[] = [];
       for (const m of persisted.messages) {
         if (m.role !== "user" && m.role !== "assistant") continue;
+        const failureKind: ChatMessage["failureKind"] =
+          m.role === "assistant"
+            ? m.status === "failed"
+              ? "failed"
+              : m.status === "aborted"
+                ? "aborted"
+                : m.status === "streaming"
+                  ? "interrupted"
+                  : undefined
+            : undefined;
         rebuilt.push({
           id: m.id,
           role: m.role as "user" | "assistant",
@@ -898,6 +916,22 @@ export function useChat(options: UseChatOptions = {}) {
                 })),
               }
             : {}),
+          ...(failureKind ? { failureKind } : {}),
+        });
+      }
+      // Tail-orphan: a user message at the END of the persisted list with no
+      // assistant follow-up — usually a server crash after the user row was
+      // committed but before the assistant row was created. Synthesize a
+      // placeholder so the UI can offer Try-again rather than ending the chat
+      // abruptly. Mid-conversation orphans are skipped on purpose (would
+      // inject a duplicate turn mid-thread on retry).
+      const tail = rebuilt[rebuilt.length - 1];
+      if (tail && tail.role === "user") {
+        rebuilt.push({
+          id: `missing-after-${tail.id}`,
+          role: "assistant",
+          content: "",
+          failureKind: "missing",
         });
       }
       setMessages(rebuilt);

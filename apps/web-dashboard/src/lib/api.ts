@@ -1357,6 +1357,13 @@ export interface PersistedConversation {
       | null;
     toolCallId: string | null;
     turnId: string | null;
+    /**
+     * Lifecycle status of the persisted row. The client uses
+     * it to drive failureKind on reloaded messages. Optional because
+     * older orchestrator builds didn't return it; treat missing as
+     * `completed` defensively.
+     */
+    status?: "pending" | "streaming" | "completed" | "failed" | "aborted";
     createdAt: string;
   }>;
 }

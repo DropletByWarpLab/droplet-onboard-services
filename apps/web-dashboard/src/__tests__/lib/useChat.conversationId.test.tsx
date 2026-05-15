@@ -26,6 +26,7 @@ interface ProbeValue {
   sendMessage: ReturnType<typeof useChat>["sendMessage"];
   clearMessages: ReturnType<typeof useChat>["clearMessages"];
   loadConversation: ReturnType<typeof useChat>["loadConversation"];
+  retryMessage: ReturnType<typeof useChat>["retryMessage"];
   conversationId: string | null;
 }
 
@@ -36,6 +37,7 @@ function Probe({ onValue }: { onValue: (v: ProbeValue) => void }) {
     sendMessage: hook.sendMessage,
     clearMessages: hook.clearMessages,
     loadConversation: hook.loadConversation,
+    retryMessage: hook.retryMessage,
     conversationId: hook.conversationId,
   });
   return null;
@@ -192,6 +194,157 @@ describe("useChat — conversation persistence (WARP-304)", () => {
     expect(probe!.messages[0]).toMatchObject({ role: "user", content: "ping" });
     expect(probe!.messages[1]).toMatchObject({ role: "assistant", content: "pong" });
     expect(probe!.messages[1].toolCalls?.[0]).toMatchObject({ id: "c1", name: "get_time" });
+  });
+
+  it("loadConversation maps server status to failureKind on assistant messages", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-statuses",
+      title: "Various failures",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "ok turn", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "fine", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "u2", role: "user", content: "boom turn", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a2", role: "assistant", content: "", toolCalls: null, toolCallId: null, turnId: "t2", status: "failed", createdAt: new Date().toISOString() },
+        { id: "u3", role: "user", content: "stop turn", toolCalls: null, toolCallId: null, turnId: "t3", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a3", role: "assistant", content: "partial", toolCalls: null, toolCallId: null, turnId: "t3", status: "aborted", createdAt: new Date().toISOString() },
+        { id: "u4", role: "user", content: "crash turn", toolCalls: null, toolCallId: null, turnId: "t4", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a4", role: "assistant", content: "mid", toolCalls: null, toolCallId: null, turnId: "t4", status: "streaming", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-statuses");
+    });
+
+    expect(probe!.messages).toHaveLength(8);
+    expect(probe!.messages[1]).toMatchObject({ id: "a1" });
+    expect(probe!.messages[1].failureKind).toBeUndefined();
+    expect(probe!.messages[3]).toMatchObject({ id: "a2", failureKind: "failed" });
+    expect(probe!.messages[5]).toMatchObject({
+      id: "a3",
+      failureKind: "aborted",
+      content: "partial",
+    });
+    expect(probe!.messages[7]).toMatchObject({
+      id: "a4",
+      failureKind: "interrupted",
+      content: "mid",
+    });
+  });
+
+  it("loadConversation synthesizes a missing-reply placeholder for a tail-orphan user message", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-orphan",
+      title: "Orphan",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "first", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "reply", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "u2", role: "user", content: "no reply ever came", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-orphan");
+    });
+
+    expect(probe!.messages).toHaveLength(4);
+    expect(probe!.messages[3]).toMatchObject({
+      id: "missing-after-u2",
+      role: "assistant",
+      content: "",
+      failureKind: "missing",
+    });
+  });
+
+  it("loadConversation does NOT synthesize a placeholder for a mid-conversation orphan", async () => {
+    // user → user → assistant: the first orphan is mid-stream. Per spec
+    // we only synthesize for TAIL orphans.
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-mid-orphan",
+      title: "Mid orphan",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "first", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "u2", role: "user", content: "second", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a2", role: "assistant", content: "reply", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-mid-orphan");
+    });
+
+    expect(probe!.messages).toHaveLength(3);
+    expect(probe!.messages.find((m) => m.failureKind === "missing")).toBeUndefined();
+  });
+
+  it("retryMessage drops the failed assistant + preceding user and re-sends, using failureKind-derived prompt", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-retry",
+      title: "Retry me",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "the original prompt", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "", toolCalls: null, toolCallId: null, turnId: "t1", status: "failed", createdAt: new Date().toISOString() },
+      ],
+    });
+    // sendChat returns a stream that ends immediately so retry resolves.
+    mockSendChat.mockResolvedValue({
+      headers: new Headers({ "x-conversation-id": "conv-retry" }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(`event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`),
+          );
+          controller.close();
+        },
+      }),
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-retry");
+    });
+
+    expect(probe!.messages[1].failureKind).toBe("failed");
+
+    await act(async () => {
+      await probe!.retryMessage("a1", "llama3");
+    });
+
+    expect(mockSendChat).toHaveBeenCalledTimes(1);
+    const sendArgs = mockSendChat.mock.calls[0][0];
+    // The replay messages should END with the re-sent user turn —
+    // confirming we derived the prompt from u1.
+    expect(sendArgs.messages.at(-1)).toEqual({
+      role: "user",
+      content: "the original prompt",
+    });
   });
 
   it("loadConversation returns false when the server has no such conversation", async () => {
