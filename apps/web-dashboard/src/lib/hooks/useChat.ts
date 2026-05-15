@@ -911,6 +911,21 @@ export function useChat(options: UseChatOptions = {}) {
           ...(failureKind ? { failureKind } : {}),
         });
       }
+      // Tail-orphan: a user message at the END of the persisted list with no
+      // assistant follow-up — usually a server crash after the user row was
+      // committed but before the assistant row was created. Synthesize a
+      // placeholder so the UI can offer Try-again rather than ending the chat
+      // abruptly. Mid-conversation orphans are skipped on purpose (would
+      // inject a duplicate turn mid-thread on retry).
+      const tail = rebuilt[rebuilt.length - 1];
+      if (tail && tail.role === "user") {
+        rebuilt.push({
+          id: `missing-after-${tail.id}`,
+          role: "assistant",
+          content: "",
+          failureKind: "missing",
+        });
+      }
       setMessages(rebuilt);
       setConversationId(persisted.id);
       conversationIdRef.current = persisted.id;

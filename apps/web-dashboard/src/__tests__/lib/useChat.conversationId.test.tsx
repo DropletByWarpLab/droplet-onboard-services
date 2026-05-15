@@ -237,6 +237,65 @@ describe("useChat — conversation persistence (WARP-304)", () => {
     });
   });
 
+  it("loadConversation synthesizes a missing-reply placeholder for a tail-orphan user message", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-orphan",
+      title: "Orphan",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "first", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "reply", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "u2", role: "user", content: "no reply ever came", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-orphan");
+    });
+
+    expect(probe!.messages).toHaveLength(4);
+    expect(probe!.messages[3]).toMatchObject({
+      id: "missing-after-u2",
+      role: "assistant",
+      content: "",
+      failureKind: "missing",
+    });
+  });
+
+  it("loadConversation does NOT synthesize a placeholder for a mid-conversation orphan", async () => {
+    // user → user → assistant: the first orphan is mid-stream. Per spec
+    // we only synthesize for TAIL orphans.
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-mid-orphan",
+      title: "Mid orphan",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "first", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "u2", role: "user", content: "second", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a2", role: "assistant", content: "reply", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-mid-orphan");
+    });
+
+    expect(probe!.messages).toHaveLength(3);
+    expect(probe!.messages.find((m) => m.failureKind === "missing")).toBeUndefined();
+  });
+
   it("loadConversation returns false when the server has no such conversation", async () => {
     mockFetchConversation.mockResolvedValueOnce(null);
 
