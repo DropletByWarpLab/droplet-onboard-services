@@ -282,6 +282,71 @@ describe("ChatPersistenceService (WARP-304)", () => {
     expect(detail).toBeNull();
   });
 
+  it("getConversationForUser returns the status of each message", async () => {
+    const { prisma } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+
+    await prisma.chatSession.create({
+      data: { userId: "alice", title: "T", model: "llama3", provider: "ollama" },
+    });
+    // Seed one message of each status so the mapping covers the enum.
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "user",
+        content: "hi",
+        turnId: "t1",
+        status: "completed",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "hello",
+        turnId: "t1",
+        status: "completed",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "",
+        turnId: "t2",
+        status: "failed",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "partial",
+        turnId: "t3",
+        status: "aborted",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "mid",
+        turnId: "t4",
+        status: "streaming",
+      },
+    });
+
+    const detail = await svc.getConversationForUser("sess-1", "alice");
+    expect(detail).not.toBeNull();
+    expect(detail!.messages.map((m) => m.status)).toEqual([
+      "completed",
+      "completed",
+      "failed",
+      "aborted",
+      "streaming",
+    ]);
+  });
+
   it("deleteConversationForUser refuses cross-user deletes", async () => {
     const { prisma, sessions } = makePrismaMock();
     sessions.push({
