@@ -5,10 +5,15 @@
 > `/fleet` page on warp-lab.com. Implementation will land over 3–4
 > focused weeks.
 >
-> **🟡 Awaiting Nahast review** on three blocking choices in the
+> **🟡 Awaiting Romain review** on three blocking choices in the
 > [Open questions](#open-questions-before-implementation-starts)
 > section below. Phase 1 day 1 unblocks the moment those three are
 > confirmed or overridden.
+>
+> Filed as: [WARP-333](https://warp-lab.atlassian.net/browse/WARP-333) (HQ host),
+> [WARP-334](https://warp-lab.atlassian.net/browse/WARP-334) (signing key),
+> [WARP-335](https://warp-lab.atlassian.net/browse/WARP-335) (manifest scope).
+> Parent ticket: [WARP-340](https://warp-lab.atlassian.net/browse/WARP-340).
 
 ## Problem statement
 
@@ -313,7 +318,7 @@ Every layer assumes the previous failed:
 
 ## Open questions before implementation starts
 
-> **Status: awaiting Nahast review.**
+> **Status: awaiting Romain review.**
 > The three blocking choices below each have a proposed answer
 > (rationale beneath). Phase 1 day 1 starts when these are confirmed
 > or overridden. Questions 4–5 have built-in answers; included for
@@ -411,7 +416,7 @@ key; agent applies and reconnects. Build this in phase 1.
 
 ---
 
-### Recommendation summary (for Nahast review)
+### Recommendation summary (for Romain review)
 
 | # | Question | Proposed answer | Cost |
 |---|---|---|---|
@@ -455,5 +460,5 @@ overridden.**
   domain, not on the ops box).
 * **2026-05-15:** Three remaining choices (HQ host, signing key,
   manifest scope) received Claude recommendations — Hetzner CX22 /
-  Yubikey × 2 / tag-based selectors. **Awaiting Nahast review.**
+  Yubikey × 2 / tag-based selectors. **Awaiting Romain review.**
   Phase 1 implementation paused until confirmed or overridden.
