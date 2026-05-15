@@ -11,6 +11,7 @@ import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
 import { RerankerClient } from "./reranker.client.js";
 import { searchHybrid } from "./file-search.service.js";
+import { createMatterController } from "./matter.controller.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -205,18 +206,13 @@ async function main(): Promise<void> {
   // first connection on demand.
   const deps: ContextDeps = {
     prisma,
-    // Matter stub stays minimal until WARP-102 decides whether the
-    // mcp-server hosts its own Matter controller or proxies HTTP back to
-    // the orchestrator. WARP-101 only exercises tools that don't touch
-    // Matter, so a no-op shim is the safest default.
-    matter: {
-      listDevices: async () => ({}),
-      getDevice: async () => ({}),
-      sendCommand: async () => ({}),
-      discover: async () => ({}),
-      commission: async () => ({}),
-      getAuditLog: async () => ({}),
-    },
+    // WARP-102 (resolved 2026-05-15): the Matter fabric lives inside
+    // the orchestrator process (matter.js + /data/matter-storage
+    // volume), so we DO NOT dual-host a controller here. The
+    // mcp-server proxies every Matter tool call back to
+    // `http://orchestrator:3000/matter/*` via the shared HttpClient
+    // factory. See `matter.controller.ts` for the route mapping.
+    matter: createMatterController(createHttpClient("orchestrator")),
     httpFactory: createHttpClient,
     embedText: (texts) => embeddingClient.embed(texts),
     // WARP-286: hybrid retrieval shim consumed by the `search_content`
