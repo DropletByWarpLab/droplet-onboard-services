@@ -489,6 +489,35 @@ export default function SetupPage() {
               </div>
             )}
 
+            {/* Add-by-QR affordance — for devices that aren't yet on the
+                LAN or that the customer wants to scan from packaging. The
+                /devices/add-matter page is the canonical scanner; we link
+                to it here so first-run customers find it without hunting.
+                Returns to the wizard via browser back. */}
+            <div className="border-t border-separator-default pt-4 mt-2">
+              <a
+                href="/devices/add-matter"
+                className="block w-full text-left p-3 bg-fill-tertiary hover:bg-fill-secondary border border-separator-default rounded-lg transition-colors"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="type-subheadline font-medium text-label-primary">
+                      Have a device's QR code handy?
+                    </p>
+                    <p className="type-footnote text-label-tertiary mt-0.5">
+                      Scan it now — most Matter devices ship with one on the
+                      packaging or label.
+                    </p>
+                  </div>
+                  <ArrowRight
+                    size={16}
+                    className="text-label-tertiary flex-shrink-0"
+                    aria-hidden="true"
+                  />
+                </div>
+              </a>
+            </div>
+
             {/* Actions */}
             <div className="space-y-3">
               <button
