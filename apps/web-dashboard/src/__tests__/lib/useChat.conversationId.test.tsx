@@ -194,6 +194,49 @@ describe("useChat — conversation persistence (WARP-304)", () => {
     expect(probe!.messages[1].toolCalls?.[0]).toMatchObject({ id: "c1", name: "get_time" });
   });
 
+  it("loadConversation maps server status to failureKind on assistant messages", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-statuses",
+      title: "Various failures",
+      model: "llama3",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "ok turn", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "fine", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "u2", role: "user", content: "boom turn", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a2", role: "assistant", content: "", toolCalls: null, toolCallId: null, turnId: "t2", status: "failed", createdAt: new Date().toISOString() },
+        { id: "u3", role: "user", content: "stop turn", toolCalls: null, toolCallId: null, turnId: "t3", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a3", role: "assistant", content: "partial", toolCalls: null, toolCallId: null, turnId: "t3", status: "aborted", createdAt: new Date().toISOString() },
+        { id: "u4", role: "user", content: "crash turn", toolCalls: null, toolCallId: null, turnId: "t4", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a4", role: "assistant", content: "mid", toolCalls: null, toolCallId: null, turnId: "t4", status: "streaming", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-statuses");
+    });
+
+    expect(probe!.messages).toHaveLength(8);
+    expect(probe!.messages[1]).toMatchObject({ id: "a1" });
+    expect(probe!.messages[1].failureKind).toBeUndefined();
+    expect(probe!.messages[3]).toMatchObject({ id: "a2", failureKind: "failed" });
+    expect(probe!.messages[5]).toMatchObject({
+      id: "a3",
+      failureKind: "aborted",
+      content: "partial",
+    });
+    expect(probe!.messages[7]).toMatchObject({
+      id: "a4",
+      failureKind: "interrupted",
+      content: "mid",
+    });
+  });
+
   it("loadConversation returns false when the server has no such conversation", async () => {
     mockFetchConversation.mockResolvedValueOnce(null);
 

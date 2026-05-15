@@ -881,6 +881,16 @@ export function useChat(options: UseChatOptions = {}) {
       const rebuilt: ChatMessage[] = [];
       for (const m of persisted.messages) {
         if (m.role !== "user" && m.role !== "assistant") continue;
+        const failureKind: ChatMessage["failureKind"] =
+          m.role === "assistant"
+            ? m.status === "failed"
+              ? "failed"
+              : m.status === "aborted"
+                ? "aborted"
+                : m.status === "streaming"
+                  ? "interrupted"
+                  : undefined
+            : undefined;
         rebuilt.push({
           id: m.id,
           role: m.role as "user" | "assistant",
@@ -898,6 +908,7 @@ export function useChat(options: UseChatOptions = {}) {
                 })),
               }
             : {}),
+          ...(failureKind ? { failureKind } : {}),
         });
       }
       setMessages(rebuilt);
