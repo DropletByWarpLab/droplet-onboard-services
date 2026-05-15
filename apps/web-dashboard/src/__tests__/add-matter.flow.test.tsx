@@ -16,12 +16,15 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushSpy }),
 }));
 
-// @zxing/library mocked at module scope — the scanner component imports it.
-vi.mock("@zxing/library", () => ({
+// @zxing mocked at module scope — BrowserMultiFormatReader from
+// @zxing/browser, NotFoundException from @zxing/library.
+vi.mock("@zxing/browser", () => ({
   BrowserMultiFormatReader: class {
     reset = vi.fn();
     decodeFromVideoElement = vi.fn();
   },
+}));
+vi.mock("@zxing/library", () => ({
   NotFoundException: class extends Error {},
 }));
 
