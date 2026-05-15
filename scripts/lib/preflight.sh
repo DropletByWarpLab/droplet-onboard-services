@@ -24,10 +24,17 @@ preflight_check() {
   # Only probe sudo when we actually need it (Docker install, usermod, apt).
   # Factory reset re-runs setup.sh with --skip-docker, which must work
   # unattended — prompting for a password there would hang the device.
+  #
+  # We use `sudo -n true` rather than `sudo -v` because on Ubuntu 24.04 with
+  # the default `Defaults use_pty` sudoers setting, `sudo -v` does NOT honor
+  # NOPASSWD entries and prompts for a password anyway — hanging
+  # non-interactive deploys (nohup, ansible, systemd-run). `sudo -n true`
+  # is the correct primitive for "can this user sudo without prompting":
+  # it actually runs a command non-interactively and respects NOPASSWD.
   if [ "${SKIP_DOCKER:-false}" != "true" ]; then
-    if ! sudo -v 2>/dev/null; then
+    if ! sudo -n true 2>/dev/null; then
       log_info "sudo access required. Please enter your password."
-      if ! sudo -v; then
+      if ! sudo -n true; then
         log_error "Could not obtain sudo access."
         return 1
       fi
