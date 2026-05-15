@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Smartphone, Wifi } from "lucide-react";
+import { Plus, RefreshCw, Smartphone, Wifi } from "lucide-react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
@@ -54,6 +54,15 @@ export default function DevicesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Primary CTA — scan QR / commission a new Matter device. */}
+          <button
+            onClick={() => router.push("/devices/add-matter")}
+            className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg"
+            title="Scan a Matter device QR code to add it"
+          >
+            <Plus size={16} />
+            <span className="type-subheadline">Add device</span>
+          </button>
           <button
             onClick={() => router.push("/devices/clients")}
             className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
@@ -116,7 +125,7 @@ export default function DevicesPage() {
               />
             ))}
 
-            {/* Empty state */}
+            {/* Empty state — most-likely first-run moment, biggest CTA. */}
             {totalDevices === 0 && (
               <div className="dp-card text-center py-12">
                 <Wifi
@@ -126,11 +135,18 @@ export default function DevicesPage() {
                 <h2 className="type-title-3 text-label-primary mb-1">
                   No smart home devices yet
                 </h2>
-                <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-                  Matter-compatible devices on your network will be discovered
-                  automatically. Commission new devices through the chat or by
-                  entering their pairing code.
+                <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
+                  Scan a Matter QR code to add your first device. Most plugs,
+                  lights, and switches that say{" "}
+                  <em>“Works with Matter”</em> on the box will work.
                 </p>
+                <button
+                  onClick={() => router.push("/devices/add-matter")}
+                  className="dp-btn-primary inline-flex items-center gap-2 px-4 py-2 rounded-lg"
+                >
+                  <Plus size={16} />
+                  <span className="type-subheadline">Add your first device</span>
+                </button>
               </div>
             )}
           </div>
