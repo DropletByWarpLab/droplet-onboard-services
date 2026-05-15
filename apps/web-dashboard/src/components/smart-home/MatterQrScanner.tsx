@@ -26,7 +26,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BrowserMultiFormatReader, NotFoundException } from "@zxing/library";
+// BrowserMultiFormatReader lives in @zxing/browser (split out from
+// @zxing/library in newer versions). Its decodeFromVideoElement takes
+// a (videoElement, callback) signature — the @zxing/library variant
+// is single-shot Promise-based and would fail to typecheck here.
+// NotFoundException stays in @zxing/library where the core exceptions live.
+import { BrowserMultiFormatReader } from "@zxing/browser";
+import { NotFoundException } from "@zxing/library";
 import { AlertCircle, Camera, CameraOff, KeyRound, Loader2 } from "lucide-react";
 
 export type ScanStatus =

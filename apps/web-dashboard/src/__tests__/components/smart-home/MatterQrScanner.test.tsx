@@ -19,13 +19,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MatterQrScanner } from "@/components/smart-home/MatterQrScanner";
 
-// @zxing/library imports a binary decode core that jsdom can't run.
-// Mock at module level — every test in this file gets the same stub.
-vi.mock("@zxing/library", () => ({
+// @zxing imports a binary decode core that jsdom can't run.
+// BrowserMultiFormatReader lives in @zxing/browser; NotFoundException
+// stays in @zxing/library. Mock both at module level.
+vi.mock("@zxing/browser", () => ({
   BrowserMultiFormatReader: class {
     reset = vi.fn();
     decodeFromVideoElement = vi.fn();
   },
+}));
+vi.mock("@zxing/library", () => ({
   NotFoundException: class extends Error {},
 }));
 
