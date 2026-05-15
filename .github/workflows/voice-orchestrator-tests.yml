@@ -1,0 +1,49 @@
+name: voice-orchestrator-tests
+
+# Pytest for services/voice-orchestrator. Path-filtered.
+
+on:
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
+
+concurrency:
+  group: voice-orchestrator-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/voice-orchestrator
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/voice-orchestrator/requirements-dev.txt
+
+      - name: Install system deps
+        # libportaudio2: sounddevice's runtime dynamic-link target. The
+        # device-discovery + scoring tests don't touch real audio (they
+        # inject a fake sounddevice module), but the package's top-level
+        # `import sounddevice` still tries to load libportaudio.so.2 at
+        # import time — having it installed lets the import succeed and
+        # the lazy-fallback path stays cleanly testable.
+        # alsa-utils: gives the test runner aplay/arecord for the
+        # follow-up commits that exercise audio capture.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 alsa-utils
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v

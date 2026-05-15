@@ -103,6 +103,16 @@ services:
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
+      # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
+      # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
+      # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
+      # libpq then fails to open ANY connection with P1011: "library has
+      # no ciphers". The dev/POC compromise: override the openssl config
+      # back to the system default so Prisma can talk to the sibling-
+      # container Postgres over TLS. Production FIPS for orchestrator is
+      # a separate effort (split migration into init container without
+      # FIPS, or get Postgres to use FIPS-approved ciphers server-side).
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
     volumes:
       - matter-data:/data/matter-storage
       # WARP-203: chat-attached "brain memory" files. Per-user dirs at
@@ -120,7 +130,13 @@ services:
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/orchestrator/health >/dev/null 2>&1"]
+      # `wget` isn't installed in the orchestrator image (only `node`).
+      # The original wget-based check has been silently failing forever
+      # — Docker has been reporting `(unhealthy)` regardless of actual
+      # service state. Use node directly since it's guaranteed present.
+      # Exits 0 on 2xx, 1 on any error (including 5xx body responses
+      # the orchestrator returns when it's truly degraded).
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/api/orchestrator/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 5s
       start_period: 60s
@@ -273,10 +289,18 @@ services:
       - POSTGRES_USER=droplet
       - POSTGRES_DB=droplet
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U droplet"]
+      # `pg_isready` flips to "accepting connections" before Postgres
+      # finishes internal recovery — clients that connect during that
+      # window see "FATAL: the database system is starting up" and
+      # crash. Caught file-indexer hitting it on every cold boot
+      # (RestartCount=4 even with depends_on: service_healthy). Run an
+      # actual SELECT 1 instead so the check fails until the query
+      # path is genuinely ready.
+      test: ["CMD-SHELL", "psql -U droplet -d droplet -c 'SELECT 1' >/dev/null 2>&1"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     restart: always
 
   cache:
@@ -516,6 +540,147 @@ services:
     profiles: ["full"]
     restart: always
 
+  # --- Voice assistant (WARP-154) ---
+  # Always-on voice loop: mic capture -> wake-word -> STT -> orchestrator
+  # agent loop -> TTS -> speaker. Hardware-agnostic device discovery in
+  # services/voice-orchestrator/voice/devices.py picks the best mic/speaker
+  # at startup (USB > platform-bus I²S codec > onboard PCI > HDMI). Env
+  # overrides (VOICE_INPUT_DEVICE / VOICE_OUTPUT_DEVICE) pin specific
+  # hardware for production. See services/voice-orchestrator/README.md
+  # §"Hardware compatibility" for the supported configurations.
+  #
+  # Profile-gated to "linux" because /dev/snd doesn't exist on Docker
+  # Desktop for macOS; dev installs there skip it. POC + production both
+  # run Linux so the profile is on by default via setup.sh.
+  voice-orchestrator:
+    build:
+      context: ..
+      dockerfile: services/voice-orchestrator/Dockerfile
+    # /dev/snd is the ALSA device tree; mounting it gives the container
+    # access to whatever the host kernel sees. No need to enumerate
+    # specific devices — sounddevice picks them up via PortAudio.
+    devices:
+      - "/dev/snd:/dev/snd"
+    # The host's audio group GID. On Ubuntu/Debian (POC + Jetson) it's 29;
+    # docker-compose's numeric group_add doesn't care if a name exists
+    # in the container's /etc/group as long as the kernel sees the GID
+    # match for /dev/snd's owner.
+    group_add:
+      - "29"
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - VOICE_INPUT_DEVICE=${VOICE_INPUT_DEVICE:-}
+      - VOICE_OUTPUT_DEVICE=${VOICE_OUTPUT_DEVICE:-}
+      - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
+      - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
+      - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
+      - ORCHESTRATOR_TOKEN=${ORCHESTRATOR_TOKEN:-}
+      - WAKE_WORD=${WAKE_WORD:-hey_droplet}
+      # Threshold tuned from POC live use: 0.5 was too high to fire on
+      # speech at typical room distance (~3-6 ft). 0.3 catches real
+      # wakes while still rejecting most background talk. Raise back
+      # toward 0.5 once a custom-trained `hey_droplet.onnx` lands —
+      # bundled-model fallbacks need the lower floor.
+      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.3}
+      # STT — wake → next 5 s of audio gets streamed here for transcription.
+      # `wyoming-faster-whisper` is the sibling container below (Rhasspy's
+      # Wyoming-protocol wrapper around faster-whisper). Set STT_URL=__mock__
+      # to disable STT (wake fires but no transcription).
+      - STT_URL=${STT_URL:-tcp://wyoming-faster-whisper:10300}
+      - STT_LANGUAGE=${STT_LANGUAGE:-en}
+      - STT_MAX_RECORD_S=${STT_MAX_RECORD_S:-5.0}
+      # TTS — synthesizes the LLM's reply via Piper. Same Wyoming
+      # protocol as STT, different port. Set TTS_URL=__mock__ for a dev
+      # box with no Piper container (the pipeline will accept speak()
+      # calls but play silent audio).
+      - TTS_URL=${TTS_URL:-tcp://wyoming-piper:10200}
+      - TTS_VOICE=${TTS_VOICE:-en_US-ryan-medium}
+      # LLM — orchestrator's /api/llm/chat is where transcripts go for
+      # response generation. The agent loop on the orchestrator side
+      # owns conversation state + tool dispatch. Set LLM_URL=__mock__
+      # for a dev box with no orchestrator (transcript echoes as the
+      # spoken reply).
+      # ai-gateway directly, not orchestrator's /api/llm/chat — the
+      # latter requires session-cookie auth designed for dashboard users
+      # (service-to-service auth path is commit 7b territory). Default
+      # model matches what the POC's local Ollama actually has installed
+      # (8 B instruct quantized) so a reflash doesn't fall back to a
+      # missing model name.
+      - LLM_URL=${LLM_URL:-http://ai-gateway:8000}
+      - LLM_MODEL=${LLM_MODEL:-llama3.1:8b-instruct-q8_0}
+      # Context the LLM gets in its system prompt at every reply():
+      # current local time + the device's location. Both auto-detected
+      # via voice/geo.py (free IP-geolocation lookup at startup,
+      # cached for the process lifetime). Set DROPLET_LOCATION here to
+      # pin manually and skip the lookup; same for TZ. Empty default
+      # means "auto-detect — let the geo lookup fill it in".
+      - DROPLET_LOCATION=${DROPLET_LOCATION:-}
+      - TZ=${TZ:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
+    # reaches it. Port intentionally not published to the host.
+    expose:
+      - "8086"
+    # Skip on macOS Docker Desktop (no /dev/snd).
+    profiles: ["linux"]
+    restart: always
+
+  # --- Whisper STT sidecar (WARP-154) ---
+  # Rhasspy's wyoming-faster-whisper — TCP-protocol Whisper server that
+  # voice-orchestrator streams post-wake audio to. Same `small.en` default
+  # the file-indexer service uses; the named volume mount shares the
+  # download path so we don't pay the 470 MB download twice. Whisper
+  # itself is pure CPU here; if a future profile needs CUDA, set
+  # WHISPER_DEVICE=cuda (image auto-detects).
+  wyoming-faster-whisper:
+    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-latest}
+    # Profile gate matches voice-orchestrator — same Linux-only audio
+    # stack. On macOS dev installs the whole voice path is skipped.
+    profiles: ["linux"]
+    # Wyoming protocol on TCP/10300 (default). Bound to the compose
+    # network only — voice-orchestrator reaches it by service name.
+    expose:
+      - "10300"
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+    command: >
+      --model ${WHISPER_MODEL:-small.en}
+      --language ${WHISPER_LANGUAGE:-en}
+      --uri tcp://0.0.0.0:10300
+      --beam-size 1
+    volumes:
+      # Whisper model cache (~470 MB for small.en). Named volume so a
+      # `docker compose down` doesn't redownload; mounted read-write so
+      # the first-run download can land in the right place.
+      - whisper-models:/data
+    restart: always
+
+  # --- Piper TTS sidecar (WARP-154) ---
+  # Rhasspy's wyoming-piper. Pairs with wyoming-faster-whisper to
+  # complete the voice loop: mic → STT (text) → LLM → reply text → TTS
+  # (audio) → speaker. Same Wyoming protocol on TCP/10200 by default.
+  # Voices download on first request and cache in the named volume.
+  wyoming-piper:
+    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-latest}
+    profiles: ["linux"]
+    expose:
+      - "10200"
+    environment:
+      - PIPER_VOICE=${TTS_VOICE:-en_US-ryan-medium}
+    command: >
+      --voice ${TTS_VOICE:-en_US-ryan-medium}
+      --uri tcp://0.0.0.0:10200
+    volumes:
+      # ~70 MB per voice — persistent so we don't redownload on every
+      # compose down/up. Multiple voices coexist; change TTS_VOICE in
+      # .env to switch.
+      - piper-voices:/data
+    restart: always
+
   # --- TFT Display (3.5" front-panel) ---
   # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
   # accepts: auto (probe PyPortal, fall back to sim), pyportal, or sim.
@@ -574,3 +739,9 @@ volumes:
   nextcloud-data:
   matter-data:
   brain-memory-data:
+  # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
+  # Persists across `docker compose down`/`up`. Manual reset:
+  # `docker volume rm <project>_whisper-models`.
+  whisper-models:
+  # WARP-154 — Piper voice cache (~70 MB per voice).
+  piper-voices:

@@ -1,0 +1,10 @@
+# Force LF line endings on Linux-runtime artifacts so Windows clones
+# with core.autocrlf=true don't break scripts deployed to the POC box.
+# Mirrors what the wizard branch (feat/setup-wizard-walkthrough) does
+# — keep both branches consistent.
+*.sh text eol=lf
+*.service text eol=lf
+*.py text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
