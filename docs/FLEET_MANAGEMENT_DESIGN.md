@@ -1,9 +1,14 @@
 # Fleet Management — Design Doc
 
-> **Status:** Spec only. Approved direction (2026-05-15): Pattern B with
-> git-tag auto-pull updates and a `/fleet` page on warp-lab.com.
-> Implementation will land over 3–4 focused weeks; this doc is the
-> contract Stefan can socialise with Romain / Sam before building.
+> **Status:** Spec only. Direction approved 2026-05-15 by Stefan:
+> Pattern B (central aggregator) + git-tag auto-pull updates +
+> `/fleet` page on warp-lab.com. Implementation will land over 3–4
+> focused weeks.
+>
+> **🟡 Awaiting Nahast review** on three blocking choices in the
+> [Open questions](#open-questions-before-implementation-starts)
+> section below. Phase 1 day 1 unblocks the moment those three are
+> confirmed or overridden.
 
 ## Problem statement
 
@@ -308,31 +313,126 @@ Every layer assumes the previous failed:
 
 ## Open questions before implementation starts
 
-1. **HQ host choice.** Hetzner CX22 ($5/mo, EU), Cloudflare Worker
-   + D1 (serverless, no host to maintain), or AWS Lightsail
-   ($3.50/mo, hub + spokes). Picks one before phase 1 day 1.
+> **Status: awaiting Nahast review.**
+> The three blocking choices below each have a proposed answer
+> (rationale beneath). Phase 1 day 1 starts when these are confirmed
+> or overridden. Questions 4–5 have built-in answers; included for
+> completeness but no decision needed.
 
-2. **Signing key custody.** Yubikey HW token? Or 1Password +
-   passphrase-encrypted? The former is harder to lose; the latter
-   is faster to set up.
+### 1. HQ host choice
 
-3. **Manifest scope per group.** Initially each customer is its own
-   group (1 device). At >10 customers, do we need richer grouping
-   (e.g. "all photo-studios on v2 hardware")? Probably yes. Build
-   the schema with that in mind.
+**Options considered:** Hetzner CX22 (€5/mo, Frankfurt), Cloudflare
+Worker + D1 (serverless), or AWS Lightsail ($3.50/mo).
 
-4. **Field-replaceable agent.** If the agent itself has a bug that
-   breaks heartbeat, how does it get updated? Answer: agent is
-   inside the same compose stack, so a normal git-tag rollout
-   updates it. BUT — if the agent breaks the rollout system, you
-   need an out-of-band recovery path. Bootstrap: cron job on the
-   host that resets to a known-good agent image if no successful
-   update poll in 24 h.
+**Proposed: Hetzner CX22, Frankfurt.**
 
-5. **Field-replaceable wg keys.** If wg key for one device leaks,
-   how does it get rotated? `/api/fleet/devices/{id}/rotate-wg-key`
-   endpoint that returns a new key; agent applies and reconnects.
-   Build this in phase 1.
+- Cloudflare is out — Workers cannot terminate WireGuard (no UDP,
+  no kernel access). Hard veto on the architecture.
+- Hetzner over Lightsail because:
+  - **EU residency** = one-line answer to "where does our operator
+    data live?" when customer auditors ask. Stays consistent with
+    the on-prem + 3yr lease compliance pitch.
+  - **No AWS lock-in.** CX22 → CX42 (€17/mo @ 50 units) → CX52
+    (€34/mo @ 200) is vertical-scale path on plain Linux. Movable
+    to any VPS in an afternoon if Hetzner ever disappoints.
+  - **Operator familiarity.** A €5 Ubuntu box matches how Stefan
+    already thinks; Lightsail's managed pieces add AWS-flavored
+    learning that pays off only at scale.
+
+**Cost over phase 1 (1 device):** €5/mo. Domain `hq.warp-lab.com`
+(or similar) pointed at the CX22 IP, certbot for TLS.
+
+### 2. Signing key custody
+
+**Options considered:** Yubikey 5 NFC (hardware token, $55 each) or
+1Password + passphrase-encrypted key file.
+
+**Proposed: Yubikey 5 NFC × 2 from day 1 ($110 one-time).**
+
+- **Migration cost asymmetry.** If we start with 1P and later an
+  enterprise customer's auditor asks "show me your signing key was
+  never on disk," we'd have to rotate trust on every deployed
+  Droplet. With Yubikey from day 1, the key was never on disk to
+  begin with — a one-line proof.
+- **Consistent with the compliance wedge.** Stefan signing
+  production releases off a Yubikey is the same story as the on-
+  prem appliance, scaled up. 1P-stored-key isn't wrong, just
+  weaker in front of a regulated-SMB auditor.
+- **Cost is rounding.** $55 × 2 (primary + backup) = $110 once.
+- **Setup cost:** ~half a day first time for gpg-agent / ssh-agent /
+  slot config. Single afternoon, never touched again.
+
+### 3. Manifest scope schema
+
+**Options considered:** fixed groups (each customer = a group), or
+tag-based selectors (each device has a set of tags, manifests target
+tag-expressions).
+
+**Proposed: tag-based selectors.**
+
+Every modern fleet system landed here for the same reason: groups
+become a schema migration the moment your slicing changes. Each
+device gets a `tags` JSONB column populated at provision:
+
+```json
+{
+  "customer": "photo-studio",
+  "region": "us-west",
+  "hw": "v2.6",
+  "channel": "stable",
+  "agent_version": "0.1.0"
+}
+```
+
+Manifests target with tag-expressions:
+- Canary: `{"device_id": "drp-photo-studio-001"}`
+- Customer rollout: `{"customer": "photo-studio"}`
+- Fleet-wide stable channel: `{"channel": "stable"}`
+- Future-proof: `{"channel": "beta", "region": "eu-central"}`
+
+Schema set once in phase 1. Phase 2-3 adds richer expression
+parsing as needed. No migration when "1 customer = 1 group"
+evolves to "regions matter."
+
+### 4. Field-replaceable agent (built-in answer, no decision needed)
+
+If the agent itself has a bug that breaks heartbeat, how does it get
+updated? Answer: agent is inside the same compose stack, so a normal
+git-tag rollout updates it. BUT — if the agent breaks the rollout
+system, you need an out-of-band recovery path. Bootstrap: cron job
+on the host that resets to a known-good agent image if no successful
+update poll in 24 h.
+
+### 5. Field-replaceable WG keys (built-in answer, no decision needed)
+
+If a WG key for one device leaks, how does it get rotated?
+`/api/fleet/devices/{id}/rotate-wg-key` endpoint that returns a new
+key; agent applies and reconnects. Build this in phase 1.
+
+---
+
+### Recommendation summary (for Nahast review)
+
+| # | Question | Proposed answer | Cost |
+|---|---|---|---|
+| 1 | HQ host | Hetzner CX22, Frankfurt | €5/mo |
+| 2 | Signing key | Yubikey 5 NFC × 2 | $110 one-time |
+| 3 | Manifest scope | Tag-based selectors | none |
+
+**Phase 1 day 1 unblocks the moment all three are confirmed or
+overridden.**
+
+### Proposed 3-day phase 1 ordering once unblocked
+
+| When | Who | What | Time |
+|---|---|---|---|
+| Day 1 | Stefan | Order 2× Yubikey 5 NFC | 5 min |
+| Day 1 | Stefan | Provision Hetzner CX22 Frankfurt, Ubuntu 24.04 | 10 min |
+| Day 1 | Stefan | Point `hq.warp-lab.com` DNS at the CX22 IP | 5 min |
+| Day 2 AM | Claude | Build `services/droplet-agent/` heartbeat-only | ~3 h |
+| Day 2 PM | Claude | Build `services/fleet-server/` ingest + Postgres schema | ~4 h |
+| Day 2 EVE | Stefan | `apt install wireguard postgresql-17`, `wg genkey`, `certbot` | 30 min |
+| Day 3 | Together | Deploy fleet-server to HQ, agent to POC, watch heartbeats land | ~1 h |
 
 ## What we have today
 
@@ -353,3 +453,7 @@ Every layer assumes the previous failed:
   update mechanism over watchtower, manual SSH, and deferring.
 * **2026-05-15:** /fleet lives on warp-lab.com (not a separate
   domain, not on the ops box).
+* **2026-05-15:** Three remaining choices (HQ host, signing key,
+  manifest scope) received Claude recommendations — Hetzner CX22 /
+  Yubikey × 2 / tag-based selectors. **Awaiting Nahast review.**
+  Phase 1 implementation paused until confirmed or overridden.
