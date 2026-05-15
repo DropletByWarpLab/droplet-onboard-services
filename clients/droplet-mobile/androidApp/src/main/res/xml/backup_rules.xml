@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Credentials and the encrypted prefs file MUST never end up in cloud
+  backup — re-pairing on a new device is the supported workflow.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="droplet_session.xml" />
+</full-backup-content>

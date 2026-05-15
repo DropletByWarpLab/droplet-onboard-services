@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Droplet</string>
+
+    <!-- Welcome -->
+    <string name="welcome_title">Pair your Droplet</string>
+    <string name="welcome_subtitle">Connect this device to your home Droplet to access your files, photos, and chats — all stored on your hardware.</string>
+    <string name="welcome_step_scan">Scan the QR code on your dashboard</string>
+    <string name="welcome_step_secure">Sign in once — credentials never leave the device</string>
+    <string name="welcome_step_local">Talks directly to your Droplet over your network</string>
+    <string name="welcome_cta">Pair with Droplet</string>
+
+    <!-- Scan -->
+    <string name="scan_hint">Point at the pair QR on your Droplet dashboard</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_try_again">Try again</string>
+
+    <!-- Permission -->
+    <string name="permission_camera_title">Camera access</string>
+    <string name="permission_camera_body">Droplet uses the camera only to read the pair QR. Frames are processed on-device and never uploaded.</string>
+    <string name="permission_camera_rationale">Droplet still needs camera access to read the pair QR. Open system settings to grant access if the prompt no longer appears.</string>
+    <string name="permission_grant">Grant access</string>
+
+    <!-- Login / pair flow -->
+    <string name="login_title">Sign in</string>
+    <string name="login_subtitle">Use your Droplet account at %1$s</string>
+    <string name="login_username">Username</string>
+    <string name="login_password">Password</string>
+    <string name="login_cta">Sign in &amp; pair</string>
+    <string name="login_pair_code_label">Pair code: %1$s</string>
+    <string name="login_error_empty">Enter your username and password.</string>
+    <string name="login_error_invalid">Username or password didn\'t match.</string>
+    <string name="login_error_rate_limited">Too many attempts — wait a moment, then try again.</string>
+    <string name="pair_phase_signing_in">Signing in…</string>
+    <string name="pair_phase_claiming">Pairing this device…</string>
+    <string name="pair_success">Paired!</string>
+    <string name="pair_error_not_logged_in">Your sign-in session expired. Sign in again to finish pairing.</string>
+    <string name="pair_error_owner_mismatch">This code was created for a different account. Generate a new one and try again.</string>
+    <string name="pair_error_unknown_code">That pair code wasn\'t recognised by the Droplet.</string>
+    <string name="pair_error_code_used">This code has already been used. Generate a fresh one from the dashboard.</string>
+    <string name="pair_error_code_expired">This code has expired. Generate a fresh one from the dashboard.</string>
+    <string name="pair_error_upstream">The Droplet couldn\'t issue credentials. Try again in a moment.</string>
+
+    <!-- Home -->
+    <string name="home_title">Your Droplet</string>
+    <string name="home_subtitle">This device is paired and ready.</string>
+    <string name="home_dest_files_title">Browse files</string>
+    <string name="home_dest_files_body">Open folders, view metadata, download to this device.</string>
+    <string name="home_dest_upload_title">Upload photos</string>
+    <string name="home_dest_upload_body">Pick from your library — uploads land in your Droplet\'s Photos folder.</string>
+    <string name="home_field_user">User</string>
+    <string name="home_field_server">Server</string>
+    <string name="home_field_device">Device</string>
+    <string name="home_unpair">Forget this Droplet</string>
+
+    <!-- Files browser -->
+    <string name="files_title_root">Files</string>
+    <string name="files_empty">This folder is empty.</string>
+    <string name="files_error_title">Couldn\'t load this folder</string>
+    <string name="files_error_unauthorized">The Droplet rejected your device credentials. Forget and re-pair.</string>
+    <string name="files_error_not_found">That folder no longer exists.</string>
+    <string name="files_error_forbidden">Your account isn\'t allowed to view that folder.</string>
+    <string name="files_error_conflict">The Droplet returned a conflict — that path may be in flux.</string>
+
+    <!-- Upload -->
+    <string name="upload_title">Upload photos</string>
+    <string name="upload_idle_title">Pick photos to upload</string>
+    <string name="upload_idle_body">Choose up to 50 photos from your library; they upload to the Photos folder on your Droplet.</string>
+    <string name="upload_pick_cta">Choose photos</string>
+    <string name="upload_progress">Uploading %1$d of %2$d</string>
+    <string name="upload_done_title">All done</string>
+    <string name="upload_done_summary">%1$d of %2$d uploaded.</string>
+    <string name="upload_done_failures_header">Couldn\'t upload</string>
+    <string name="upload_pick_more">Pick more photos</string>
+    <string name="upload_done_back">Back to Droplet</string>
+    <string name="upload_failed_title">Upload couldn\'t start</string>
+    <string name="upload_error_unauthorized">The Droplet rejected your device credentials. Forget and re-pair.</string>
+    <string name="upload_error_forbidden">Your account isn\'t allowed to upload there.</string>
+    <string name="upload_error_conflict">There was a conflict creating the Photos folder. Try again.</string>
+</resources>

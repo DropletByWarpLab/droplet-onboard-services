@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="droplet_blue">#FF2563EB</color>
+    <color name="droplet_deep">#FF0B1220</color>
+    <color name="droplet_surface">#FFFAFBFD</color>
+    <color name="ic_launcher_background">#FF0B1220</color>
+</resources>

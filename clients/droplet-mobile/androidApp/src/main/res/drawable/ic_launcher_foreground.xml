@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Stylised droplet glyph (vector). 108x108 viewport keeps it inside the
+  ~72dp adaptive-icon safe zone. Replace with the brand asset when one
+  is finalised.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M54,22 C54,22 30,50 30,68 a24,24 0 0 0 48,0 C78,50 54,22 54,22 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.65"
+        android:pathData="M45,62 a9,9 0 0 1 9,-9" />
+</vector>

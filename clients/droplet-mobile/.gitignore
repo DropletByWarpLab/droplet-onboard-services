@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+.kotlin/
+
+# Wrapper jar (generate per machine via `gradle wrapper`)
+gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+local.properties
+captures/
+
+# Native build outputs
+*.hprof
+shared/build/xcode-frameworks/
+
+# Signing — keystore must NEVER be committed
+*.jks
+*.keystore
+keystore.properties
+
+# iOS
+iosApp/iosApp.xcodeproj/project.xcworkspace/xcuserdata/
+iosApp/iosApp.xcodeproj/xcuserdata/
+iosApp/*.xcworkspace/xcuserdata/
+iosApp/Pods/
+DerivedData/
+
+# Mac/Windows clutter
+.DS_Store
+Thumbs.db
