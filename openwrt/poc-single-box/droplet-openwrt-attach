@@ -255,6 +255,11 @@ HOSTAPD
   cat > /etc/dnsmasq-ap.conf.new <<DNSMASQ
 interface=$AP_IFACE
 bind-interfaces
+# dnsmasq defaults to /var/lib/misc/dnsmasq.leases, which doesnt exist in
+# the openwrt minimal rootfs after a fresh container. Pin to /tmp/ where
+# it always exists and gets reset on container restart (which is what we
+# want — clients re-DHCP fresh after a reboot anyway).
+dhcp-leasefile=/tmp/dhcp.leases
 dhcp-range=192.168.20.10,192.168.20.100,255.255.255.0,12h
 dhcp-option=3,192.168.20.1
 dhcp-option=6,192.168.20.1
