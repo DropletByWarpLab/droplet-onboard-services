@@ -108,10 +108,19 @@ DELETE /vpn/peers   -> UCI entry removed
 ```
 DROPLET_AP_SSID            (default Droplet-POC)
 DROPLET_AP_PSK             (default droplet-poc-password, min 8 chars)
+DROPLET_AP_PHY             (default phy1 — AX210; set to phy0 for MT7922)
+DROPLET_AP_IFACE           (default wlp7s0 — AX210 iface name)
 DROPLET_AP_DOMAIN          (default droplet.local — resolves to 192.168.20.1)
 DROPLET_AP_HOSTNAME        (default droplet         — resolves to 192.168.20.1)
 DROPLET_GATEWAY_CONTAINER  (default droplet-pi-platform-gateway-1)
 ```
+
+`DROPLET_AP_PHY` + `DROPLET_AP_IFACE` always travel together — they describe
+the same radio from two angles (which phy to netns-move + what kernel name
+it surfaces with). The photo-studio box pins both to MT7922 because the
+AX210's iwlwifi firmware caps AP-mode TX at 3 dBm regardless of regulatory
+hints; MT7922 (mt7921e) is unaffected and broadcasts at the full regdb
+allowance (22 dBm on 2.4 GHz in US).
 
 Set in `/etc/default/droplet-openwrt-attach` (the systemd unit loads it
 via `EnvironmentFile=-/etc/default/droplet-openwrt-attach`, leading `-`

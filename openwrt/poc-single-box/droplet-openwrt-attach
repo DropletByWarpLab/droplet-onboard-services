@@ -12,6 +12,13 @@ AP_SSID="${DROPLET_AP_SSID:-Droplet-POC}"
 AP_PSK="${DROPLET_AP_PSK:-droplet-poc-password}"
 AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
 AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
+# Which wireless phy to move into the container netns, and what interface
+# name it surfaces with. On the photo-studio Ryzen box the MT7922 is phy0
+# (named wlp14s0) and supports Wi-Fi 6 at full 22 dBm on 2.4 GHz; the AX210
+# (phy1, wlp7s0) is firmware-capped at 3 dBm in AP mode. Defaults below keep
+# the original AX210 path; the env file overrides for this customer.
+AP_PHY="${DROPLET_AP_PHY:-phy1}"
+AP_IFACE="${DROPLET_AP_IFACE:-wlp7s0}"
 GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-pi-platform-gateway-1}"
 # Phase L: root password for OpenWrt rpcd. Read from the docker secret
 # the routing service also reads, so both sides stay in lockstep.
@@ -46,13 +53,17 @@ if [ -z "$OPENWRT_ROOT_PW" ]; then
   echo "       routing service will not be able to auth to ubus until this is set"
 fi
 
-# Move MT7921 PHY in if still on host
-[ -e /sys/class/ieee80211/phy1 ] && iw phy phy1 set netns "$PID"
+# Move the AP phy into the container netns (no-op if it's already there
+# from a prior attach run). Phy choice driven by $AP_PHY so the operator
+# picks which radio carries the customer AP — e.g. mt7921e/phy0 for full
+# 22 dBm and Wi-Fi 6, vs iwlwifi/phy1 capped at 3 dBm in AP mode.
+[ -e "/sys/class/ieee80211/$AP_PHY" ] && iw phy "$AP_PHY" set netns "$PID"
 
 docker exec -i \
   -e CONT_IP="$IP" -e CONT_GW="$GW" \
   -e GATEWAY_IP="$GATEWAY_IP" \
   -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
+  -e AP_IFACE="$AP_IFACE" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
   -e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW" \
   droplet-openwrt sh -c '
@@ -186,7 +197,7 @@ WGLOOP
   nft list chain ip nat postrouting | grep -q "192.168.20.0/24" || \
     nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
 
-  # prerouting: DNAT wlp7s0:80/:443 -> gateway container so phones can hit
+  # prerouting: DNAT $AP_IFACE:80/:443 -> gateway container so phones can hit
   # https://droplet.local/ (which resolves to 192.168.20.1) and land on nginx
   nft list chain ip nat prerouting >/dev/null 2>&1 || \
     nft add chain ip nat prerouting "{ type nat hook prerouting priority -100 ; }"
@@ -194,23 +205,33 @@ WGLOOP
   for h in $(nft -a list chain ip nat prerouting 2>/dev/null | grep "dnat to" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
     nft delete rule ip nat prerouting handle $h
   done
-  nft add rule ip nat prerouting iifname \"wlp7s0\" tcp dport 443 dnat to ${GATEWAY_IP}:443
-  nft add rule ip nat prerouting iifname \"wlp7s0\" tcp dport 80  dnat to ${GATEWAY_IP}:80
+  nft add rule ip nat prerouting iifname \"$AP_IFACE\" tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"$AP_IFACE\" tcp dport 80  dnat to ${GATEWAY_IP}:80
   # ----------------------------------------------------------------------
 
   # Stop procd dnsmasq so our manual one can bind 192.168.20.1
   /etc/init.d/dnsmasq stop 2>/dev/null
   /etc/init.d/dnsmasq disable 2>/dev/null
 
-  # hostapd config — regenerate every run so SSID/PSK env changes propagate
+  # hostapd config — regenerate every run so SSID/PSK env changes propagate.
+  # Wi-Fi 6 (HE) + HT enabled on 2.4 GHz ch 6; hostapd auto-falls back to
+  # HT20 if 40 MHz neighbours preclude it (CCA scan during HT_SCAN state).
+  # AC is intentionally absent — 802.11ac is 5 GHz only and would just emit
+  # warnings here.
   cat > /etc/hostapd.conf.new <<HOSTAPD
-interface=wlp7s0
+interface=$AP_IFACE
 driver=nl80211
 ssid=$AP_SSID
 hw_mode=g
 channel=6
 country_code=US
 ieee80211d=1
+ieee80211n=1
+ieee80211ax=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40][DSSS_CCK-40]
+he_oper_chwidth=0
+he_oper_centr_freq_seg0_idx=8
+wmm_enabled=1
 auth_algs=1
 wpa=2
 wpa_passphrase=$AP_PSK
@@ -232,7 +253,7 @@ HOSTAPD
   # NOTE dhcp-option=6 points phones at openwrt itself for DNS, NOT 8.8.8.8,
   # so phones can resolve AP_DOMAIN / AP_HOSTNAME locally.
   cat > /etc/dnsmasq-ap.conf.new <<DNSMASQ
-interface=wlp7s0
+interface=$AP_IFACE
 bind-interfaces
 dhcp-range=192.168.20.10,192.168.20.100,255.255.255.0,12h
 dhcp-option=3,192.168.20.1
@@ -253,9 +274,9 @@ DNSMASQ
     rm -f /etc/dnsmasq-ap.conf.new
   fi
 
-  # Bring up wlp7s0 + (re)start daemons only if config changed or not running
-  ip link set wlp7s0 up 2>/dev/null
-  ip addr show wlp7s0 | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev wlp7s0
+  # Bring up $AP_IFACE + (re)start daemons only if config changed or not running
+  ip link set "$AP_IFACE" up 2>/dev/null
+  ip addr show "$AP_IFACE" | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev "$AP_IFACE"
 
   if [ "$HOSTAPD_CHANGED" = 1 ]; then
     pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
