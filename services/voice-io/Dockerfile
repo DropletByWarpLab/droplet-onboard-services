@@ -1,4 +1,4 @@
-# voice-orchestrator — Droplet's always-on voice loop (WARP-154).
+# voice-io — Droplet's always-on voice loop (WARP-154).
 #
 # Multi-arch (x86 POC + Jetson production). Base is python:3.12-slim;
 # the audio stack adds ALSA + PortAudio + ffmpeg (for any audio
@@ -24,11 +24,11 @@ WORKDIR /app
 # Pip layer cached separately from source — re-runs only when
 # requirements*.txt changes, not on every code edit. We install BOTH
 # the runtime and dev (pytest) deps so `docker compose run
-# voice-orchestrator pytest tests/` works against the same image
+# voice-io pytest tests/` works against the same image
 # that's running in production. Image size impact: tiny
 # (pytest + pluggy + iniconfig + packaging, ~3 MB).
-COPY services/voice-orchestrator/requirements.txt \
-     services/voice-orchestrator/requirements-dev.txt \
+COPY services/voice-io/requirements.txt \
+     services/voice-io/requirements-dev.txt \
      /app/
 RUN pip install --no-cache-dir -r /app/requirements-dev.txt && \
     # openWakeWord 0.6.0's setup.py pins `tflite-runtime` which has no
@@ -46,7 +46,7 @@ RUN python -c "from openwakeword.utils import download_models; download_models([
     echo "openwakeword model pre-fetch skipped (offline build OK; runtime will fetch)"
 
 # The service source.
-COPY services/voice-orchestrator/ /app/
+COPY services/voice-io/ /app/
 
 # The container joins the host's audio group at compose-time (see
 # `group_add` in docker-compose.yml). We don't bake a hardcoded UID

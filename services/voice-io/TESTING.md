@@ -1,10 +1,10 @@
-# voice-orchestrator — testing
+# voice-io — testing
 
 Three layers, all part of the project's standard check flow:
 
 | Layer | What it covers | Where it runs |
 |---|---|---|
-| **Pytest unit tests** | `voice/devices.py` discovery + scoring + `resolve_devices()` with simulated hardware. No real audio needed. | Local (`pytest tests/`), in the container (`docker compose run voice-orchestrator pytest tests/`), and CI (`.github/workflows/voice-orchestrator-tests.yml`). |
+| **Pytest unit tests** | `voice/devices.py` discovery + scoring + `resolve_devices()` with simulated hardware. No real audio needed. | Local (`pytest tests/`), in the container (`docker compose run voice-io pytest tests/`), and CI (`.github/workflows/voice-io-tests.yml`). |
 | **Container healthcheck** | The service's `/health` endpoint replies 200 ok. Reported by `docker ps`. Interval 15 s, 3 retries before unhealthy. | The Docker engine on whatever host the service runs on. |
 | **`scripts/verify.sh` smoke** | Curls the in-container `/health` end-to-end, asserts `inputAvailable` matches reality (passes when a mic IS connected, warns when not). | Locally via `./scripts/verify.sh`, or as part of `setup.sh --verify`. |
 
@@ -13,7 +13,7 @@ Three layers, all part of the project's standard check flow:
 ### Locally (fast, no Docker)
 
 ```
-cd services/voice-orchestrator
+cd services/voice-io
 pip install -r requirements-dev.txt
 pytest -v
 ```
@@ -36,7 +36,7 @@ required — the fixtures inject:
 ### Inside the same container that runs in production
 
 ```
-docker compose --profile linux run --rm voice-orchestrator pytest -v
+docker compose --profile linux run --rm voice-io pytest -v
 ```
 
 Pytest + the dev deps are baked into the image (cheap — ~3 MB).
@@ -46,7 +46,7 @@ which libportaudio2 is actually loaded, etc.).
 
 ### CI
 
-`.github/workflows/voice-orchestrator-tests.yml` runs the same suite
+`.github/workflows/voice-io-tests.yml` runs the same suite
 on a fresh Ubuntu runner with `libportaudio2` apt-installed.
 Currently `workflow_dispatch:` only — matches all other Droplet
 service workflows pending the GitHub-Actions-minutes restoration.
@@ -168,6 +168,6 @@ Container is internal-only (port 8086 not host-exposed), so curl
 from inside the container or via `docker exec`:
 
 ```
-sudo docker exec droplet-pi-platform-voice-orchestrator-1 \
+sudo docker exec droplet-pi-platform-voice-io-1 \
   curl -s http://localhost:8086/audio/devices | python3 -m json.tool
 ```

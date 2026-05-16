@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 
-export type Role = "owner" | "admin" | "family" | "guest";
+export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
 export interface HttpClient {
   get(path: string, opts?: { params?: Record<string, unknown>; headers?: Record<string, string> }): Promise<Response>;

@@ -1,30 +1,40 @@
-"""LLM bridge — POST a transcript to an OpenAI-style chat endpoint,
+"""LLM bridge — POST a transcript to the **orchestrator's agent loop**,
 get back the assistant's reply.
 
-This is the glue layer that closes the voice loop. Commits 1-6 built
-mic → wake → STT → text. This module hands that text to an LLM and
-returns the response; the pipeline then feeds it through TTS to the
-speaker.
+This is the glue layer that closes the voice loop. The voice path
+mic → wake → STT → text now hands that text to the orchestrator's
+`/api/llm/chat` route; the orchestrator runs the full ReAct agent loop
+(MCP tool dispatch, ai-gateway → ollama-manager :8002 → Ollama) and
+returns the final assistant text. The pipeline then feeds that through
+TTS to the speaker.
 
-We point at the ai-gateway service (port 8000, `/ai/chat`) rather
-than the orchestrator's `/api/llm/chat` because:
+Why we call the orchestrator (not ai-gateway directly) — per shared_brain
+`projects/droplet-pi-platform/docs/agentic-workflows.md` and
+`projects/droplet-pi-platform/docs/LLM_AGENT.md`:
 
-  - ai-gateway is the OpenAI-compatible provider router. No auth on
-    the internal docker network. Voice loops are stateless calls;
-    we don't need (yet) the orchestrator's session/agent state.
-  - The orchestrator's `/api/llm/chat` requires a session JWT, which
-    is designed for logged-in dashboard users. Service-to-service
-    auth there is a separate fix (commit 7b — wires the agent loop
-    in so voice gets tool dispatch alongside the dashboard).
-  - For commit 7, "user asks → LLM answers" is enough to demo + ship.
-    Tool calls (set_volume, mute_mic, ...) land in commit 7b once
-    the auth path is sorted.
+  * The **orchestrator owns the agent loop**. ai-gateway forwards
+    `tools[]` to the model and returns the raw response untouched; it
+    does NOT dispatch tools. Calling ai-gateway directly means the
+    voice assistant can chat but cannot actually DO anything (no
+    `list_cameras`, `set_light`, none of the ~50 tools in
+    `packages/tools-core/`).
+  * The **MCP server** owns tool dispatch — stdio-child of the
+    orchestrator. There is no path to MCP that bypasses the
+    orchestrator's agent loop.
+  * So: voice → orchestrator `/api/llm/chat` → agent loop →
+    ai-gateway → ollama-manager → Ollama, with `mcpClient.callTool()`
+    fan-out for tool_calls. Single, canonical path.
+
+Auth — the orchestrator's `/api/llm/chat` requires a verified
+principal. Voice doesn't have a human session, so it uses a
+**service-principal bearer token** (`ORCHESTRATOR_TOKEN` env var below).
+The orchestrator-side `SERVICE_TOKEN_VOICE` constant must match;
+`authMiddleware` recognises it and sets `req.user.role = "service"`.
+RBAC then restricts voice to read-only tools (no destructive writes
+via voice in v1).
 
 `LLMClient` is the abstract interface (mockable for tests).
-`OrchestratorLLM` is the production HTTP client — the name is
-historical; it currently points at ai-gateway. Renaming will happen
-when commit 7b adds an OrchestratorAgentLLM variant. `MockLLM` for
-tests.
+`OrchestratorLLM` is the production HTTP client. `MockLLM` for tests.
 """
 from __future__ import annotations
 
@@ -41,21 +51,37 @@ import httpx
 logger = logging.getLogger("voice.llm")
 
 # Reasonable defaults; overridable via env in main.py.
-DEFAULT_LLM_URL = "http://ai-gateway:8000"
-DEFAULT_LLM_CHAT_PATH = "/ai/chat"
-DEFAULT_LLM_HEALTH_PATH = "/ai/health"
-# ai-gateway model name is raw (no `ollama:` prefix — that confuses the
-# OpenAI-compatible /v1 wrapper). Local Ollama on the POC currently has
-# llama3.1:8b-instruct-q8_0 and nomic-embed-text; pick the first.
-DEFAULT_LLM_MODEL = "llama3.1:8b-instruct-q8_0"
-DEFAULT_LLM_TIMEOUT_S = 60.0  # generous: 8 B-param model on CPU can take
-                              # 15-30 s for a short reply; first request
-                              # also waits for model warm-up.
+#
+# Default target is the orchestrator container on the compose network.
+# Service-to-service: voice-io reaches the orchestrator by service name;
+# no host gateway hop needed.
+DEFAULT_LLM_URL = "http://orchestrator:3000"
+DEFAULT_LLM_CHAT_PATH = "/api/llm/chat"
+DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
+# Model the orchestrator's agent loop will ask ai-gateway for. ai-gateway
+# routes `llama*`/`qwen*`/`mistral*`/`phi*` to the Jetson ollama-manager;
+# the model must already be installed on the appliance (see
+# `shared_brain/projects/droplet-jetson-ai/docs/model-management.md` for
+# `/models/sync`). `qwen2.5:3b-instruct` is the agent docs' default —
+# tool-calling-capable, fits Orin Nano 7 GB RAM budget. Override via
+# LLM_MODEL env if the appliance has a larger / different model loaded.
+DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
+# Agent loop can take noticeably longer than a single LLM call because
+# every tool_call adds an MCP round-trip + a re-prompt iteration.
+# 120 s covers a 3-iteration loop on the POC; raise for production with
+# slower models.
+DEFAULT_LLM_TIMEOUT_S = 120.0
+# Cap the agent loop. The orchestrator hard-caps at 10; we ask for a
+# lower number so voice replies stay snappy. Most useful voice prompts
+# resolve in 1-3 iterations.
+DEFAULT_LLM_MAX_ITER = 5
 DEFAULT_LLM_SYSTEM_PROMPT = (
     "You are the voice assistant inside a Droplet, a private on-device "
     "appliance running in the user's home. Reply in ONE short sentence "
     "suitable for spoken playback. No markdown, no formatting, no lists. "
-    "If you don't know something, say so plainly."
+    "If you don't know something, say so plainly. You may call read-only "
+    "tools (list_cameras, list_devices, etc.) when the user asks about "
+    "the appliance's state; you have no permission to make changes."
 )
 
 # Fallback timezone when neither `TZ` nor a system zoneinfo is usable.
@@ -136,10 +162,10 @@ class LLMClient(ABC):
     def reply(self, user_text: str) -> str:
         """Return the assistant's reply text for the given user turn.
 
-        Stateless from the voice-orchestrator's perspective — the
-        orchestrator owns conversation history. Each call uses an
-        anonymous conversation (commit 7b switches to a sticky voice
-        conversation id once the dashboard surfaces it).
+        Stateless from the voice-io perspective — the orchestrator owns
+        conversation history. Each call uses an anonymous conversation
+        (future: switch to a sticky voice conversation id once the
+        dashboard surfaces it).
         """
 
     @property
@@ -162,6 +188,7 @@ class OrchestratorLLM(LLMClient):
         bearer_token: Optional[str] = None,
         system_prompt: str = DEFAULT_LLM_SYSTEM_PROMPT,
         timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
+        max_iter: int = DEFAULT_LLM_MAX_ITER,
         location: Optional[str] = None,
         timezone: str = DEFAULT_TIMEZONE,
         now_provider: Optional[Callable[[], datetime]] = None,
@@ -173,6 +200,7 @@ class OrchestratorLLM(LLMClient):
         self._bearer_token = bearer_token
         self._system_prompt = system_prompt
         self._timeout_s = timeout_s
+        self._max_iter = max_iter
         # Context-enrichment fields. `location` is a free-form string
         # ("Greenwich, CT, USA") — what the operator set in env, no
         # geocoding. `timezone` is an IANA name; we resolve it to a
@@ -186,9 +214,17 @@ class OrchestratorLLM(LLMClient):
 
     @property
     def available(self) -> bool:
-        """Hit the health path quickly. Returns False (not raise) on
-        any transport or HTTP-error — /voice/status's llm_loaded flag
-        is meant to be a stable green/red signal."""
+        """Hit the orchestrator's public health endpoint. Returns False
+        (not raise) on any transport or HTTP-error — /voice/status's
+        llm_loaded flag is meant to be a stable green/red signal.
+
+        `/api/orchestrator/health` is in `authMiddleware`'s public-path
+        list, so the probe succeeds without a service token — but having
+        the token set is still required for `/api/llm/chat` to work, so
+        a green probe with a missing/wrong token will still 401 at first
+        reply(). That's intentional: the probe answers "is the
+        orchestrator process up?", not "are my credentials valid?".
+        """
         try:
             resp = httpx.get(
                 f"{self._base_url}{self._health_path}",
@@ -197,7 +233,11 @@ class OrchestratorLLM(LLMClient):
             )
             return resp.is_success
         except (httpx.HTTPError, OSError) as exc:
-            logger.info("LLM endpoint %s unreachable: %s", self._base_url, exc)
+            logger.info(
+                "orchestrator health endpoint %s unreachable: %s",
+                self._base_url,
+                exc,
+            )
             return False
 
     def reply(self, user_text: str) -> str:
@@ -213,6 +253,11 @@ class OrchestratorLLM(LLMClient):
             timezone=self._timezone,
             now=now,
         )
+        # Wire shape matches `apps/orchestrator/src/routes/llm.ts`
+        # `chatRequestSchema` (Zod). Unknown fields are stripped server-
+        # side; required: model + messages. `allowed_tools` deliberately
+        # omitted so the orchestrator's role-gated default applies —
+        # service-principal (this caller) gets all read tools, no writes.
         body: dict[str, Any] = {
             "model": self._model,
             "messages": [
@@ -220,6 +265,7 @@ class OrchestratorLLM(LLMClient):
                 {"role": "user", "content": user_text.strip()},
             ],
             "stream": False,
+            "max_iter": self._max_iter,
         }
         try:
             resp = httpx.post(
@@ -271,29 +317,26 @@ def _extract_error_detail(resp: "httpx.Response") -> str:
 
 
 def _extract_assistant_text(payload: dict) -> str:
-    """Pull the assistant's text out of the response, accepting both
-    of the shapes we may see:
+    """Pull the assistant's text out of the response.
 
-      ai-gateway / OpenAI-compatible:
-        {"choices": [{"message": {"role":"assistant","content":"..."}}]}
+    Primary shape (orchestrator `/api/llm/chat`, non-streaming AgentResult
+    per `shared_brain/.../LLM_AGENT.md`):
+      {
+        "message":     { "role": "assistant", "content": "..." },
+        "trace":       [...],
+        "iterations":  N,
+        "stop_reason": "model_done" | "iteration_limit" | "error"
+      }
 
-      orchestrator's /api/llm/chat (agent-loop result):
-        {"message": {"role":"assistant","content":"..."}, ...}
+    Legacy fallback (ai-gateway / OpenAI-compatible) — kept so the same
+    helper covers the few dev configurations that still point at
+    ai-gateway directly via LLM_URL override:
+      { "choices": [ { "message": { "role": "assistant", "content": "..." } } ] }
 
     Fall through to "" on unrecognised shapes — silent reply beats
     crashing the pipeline mid-call.
     """
-    # OpenAI / ai-gateway shape first.
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, dict):
-            msg = first.get("message") or {}
-            content = msg.get("content")
-            if isinstance(content, str):
-                return content.strip()
-
-    # Orchestrator agent-loop shape.
+    # Orchestrator agent-loop shape first (the canonical path).
     msg = payload.get("message") or {}
     content = msg.get("content")
     if isinstance(content, str):
@@ -307,6 +350,16 @@ def _extract_assistant_text(payload: dict) -> str:
                     parts.append(t)
         if parts:
             return " ".join(parts).strip()
+
+    # Legacy OpenAI / ai-gateway shape.
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            cmsg = first.get("message") or {}
+            ccontent = cmsg.get("content")
+            if isinstance(ccontent, str):
+                return ccontent.strip()
     return ""
 
 
@@ -359,6 +412,12 @@ def build_llm_from_env() -> LLMClient:
       - empty/unset                  → OrchestratorLLM against the
                                          compose-default DNS
 
+    `ORCHESTRATOR_TOKEN`:
+      - REQUIRED in production — must match the orchestrator's
+        `SERVICE_TOKEN_VOICE` env var. Empty default lets tests +
+        `__mock__` runs work without it; in production the orchestrator
+        rejects unauthenticated /api/llm/chat calls with 401.
+
     Location + timezone resolution order (via voice.geo.get_geo()):
       1. `DROPLET_LOCATION` env (free-form, e.g. "Greenwich, CT, USA")
          + `TZ` env (IANA, e.g. "America/New_York"). Operator-pin wins.
@@ -376,10 +435,19 @@ def build_llm_from_env() -> LLMClient:
     if not raw:
         raw = DEFAULT_LLM_URL
 
+    if not token:
+        # Loud at startup so a misconfigured deployment surfaces during
+        # boot rather than silently 401-ing every voice reply.
+        logger.warning(
+            "ORCHESTRATOR_TOKEN is empty — voice → orchestrator /api/llm/chat "
+            "will 401. Set ORCHESTRATOR_TOKEN to the orchestrator's "
+            "SERVICE_TOKEN_VOICE value before going live."
+        )
+
     # Resolve location + timezone via voice.geo (env override → web
     # lookup → fallback). Done at startup; the result is held for the
     # process lifetime. To force a re-lookup after a move, restart
-    # voice-orchestrator. Lazy import keeps tests that mock `os.environ`
+    # voice-io. Lazy import keeps tests that mock `os.environ`
     # but don't care about geo from triggering an HTTP call.
     from voice.geo import get_geo
     geo = get_geo()

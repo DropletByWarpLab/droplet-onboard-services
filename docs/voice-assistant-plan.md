@@ -27,17 +27,17 @@
 | TTS | [Piper](https://github.com/rhasspy/piper) (MIT) | Sub-second first-audio on CPU, ~50 MB voice models, multiple voices. |
 | Protocol | Wyoming (Apache 2.0) | TCP-based. Lets each component be a separate container, swappable. Home Assistant Voice's protocol — biggest OSS ecosystem in this space. |
 | Audio I/O | sounddevice (MIT) + PortAudio | Cross-platform, clean shutdown, native numpy. Better API than PyAudio. |
-| Glue | New `services/voice-orchestrator/` (this branch) | Captures audio, runs the wake loop, chains the Wyoming services, posts to `/api/llm/chat` (streaming), pipes response through TTS. |
+| Glue | New `services/voice-io/` (this branch) | Captures audio, runs the wake loop, chains the Wyoming services, posts to `/api/llm/chat` (streaming), pipes response through TTS. |
 
 **Privacy**: everything on-device. No cloud wake, no cloud STT, no
 cloud TTS. Matches the wizard's AI step messaging.
 
 ## Hardware compatibility — the abstraction
 
-`services/voice-orchestrator/voice/devices.py` discovers ALSA devices
+`services/voice-io/voice/devices.py` discovers ALSA devices
 at runtime, scores them by likely fit for voice (USB > I²S codec on
 platform bus > onboard PCI codec > HDMI), and picks defaults. Full
-docs in `services/voice-orchestrator/README.md` §"Hardware
+docs in `services/voice-io/README.md` §"Hardware
 compatibility".
 
 Real configurations the abstraction explicitly handles (with unit
@@ -74,7 +74,7 @@ auto-pick entirely — operators pin specific hardware for production.
 
 ## API surface (commit 1)
 
-All routes mounted on the voice-orchestrator container at port 8086.
+All routes mounted on the voice-io container at port 8086.
 Not exposed to the host; orchestrator's `/api/voice/*` proxies (later
 commit).
 
@@ -112,9 +112,9 @@ POST /audio/test-record[?duration_s=2.0]
 
 The POC box (`droplet-sys`, x86 Ryzen, no USB mic plugged in yet):
 
-1. SFTP `services/voice-orchestrator/` to the host.
-2. `docker compose --profile linux build voice-orchestrator`.
-3. `docker compose --profile linux up -d voice-orchestrator`.
+1. SFTP `services/voice-io/` to the host.
+2. `docker compose --profile linux build voice-io`.
+3. `docker compose --profile linux up -d voice-io`.
 4. `curl http://127.0.0.1:8086/health` → expect
    `{"ok": true, "inputAvailable": true, "outputAvailable": true, ...}` if
    the onboard ALC662 is unmuted and connected, or

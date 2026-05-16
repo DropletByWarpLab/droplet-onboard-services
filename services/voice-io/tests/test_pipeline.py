@@ -1280,7 +1280,7 @@ class TestClosedLoop:
 # ────────────────────────────────────────────────────────────────────
 # Upstream re-probing — post-reboot resilience.
 # Without this, an STT/TTS/LLM container that's slow to bind on boot
-# leaves voice-orchestrator stuck at *_available=False forever, even
+# leaves voice-io stuck at *_available=False forever, even
 # after the container becomes ready. Boot races are common: whisper
 # takes ~5 min on first run to download the small.en model; piper
 # takes ~30 s to download a voice; ai-gateway needs Postgres up first.

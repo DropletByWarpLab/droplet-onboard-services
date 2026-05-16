@@ -124,6 +124,23 @@ const envSchema = z.object({
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
 
+  // --- Service-principal bearer tokens (inbound) ---
+  // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that
+  // need LLM + MCP tool dispatch MUST call the orchestrator's `/api/llm/chat`
+  // route, not ai-gateway directly. The orchestrator is the only thing that
+  // owns the agent loop + tool routing.
+  //
+  // SERVICE_TOKEN_VOICE — recognised by authMiddleware for the
+  // voice-io / voice-assistant service. When the incoming Bearer matches,
+  // the request is treated as a `service` role principal (see jwt.service.ts
+  // Role union). Empty default means "no service token configured" — voice
+  // calls will 401 until an operator sets it (matches the safe default for
+  // SERVICE_SECRET above).
+  //
+  // To rotate: change the value here AND in voice-io's compose env in
+  // lockstep. Both must agree or voice → orchestrator handshake fails.
+  SERVICE_TOKEN_VOICE: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if

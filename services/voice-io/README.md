@@ -1,4 +1,4 @@
-# voice-orchestrator
+# voice-io
 
 The Droplet's always-on voice assistant. Captures mic audio, runs a
 wake-word detector, streams to local STT, hands the transcript to the
@@ -117,8 +117,8 @@ container fixes this by joining `audio` (GID 29 inside, mapped to
 host's `/dev/snd` permissions via the compose `group_add`).
 
 ```
-sudo docker compose up -d voice-orchestrator
-sudo docker compose logs -f voice-orchestrator
+sudo docker compose up -d voice-io
+sudo docker compose logs -f voice-io
 curl http://127.0.0.1:8086/audio/devices
 ```
 
@@ -138,7 +138,7 @@ into stacked commits per `docs/voice-assistant-plan.md`:
    `hey_jarvis` ships pre-baked in the image; custom "Hey Droplet"
    `.onnx` swaps in later once Stefan has training data ready.
 3. **STT** — wyoming-faster-whisper sidecar container speaks Wyoming
-   protocol over TCP. After wake, voice-orchestrator streams the next
+   protocol over TCP. After wake, voice-io streams the next
    5 s of mic audio (fixed window — VAD-based cutoff in a follow-up),
    receives the transcript, exposes it via
    `/voice/status.last_transcript`.

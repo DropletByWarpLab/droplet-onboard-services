@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { createHash, timingSafeEqual } from "node:crypto";
 import pino from "pino";
 import { config } from "../config.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
@@ -95,6 +96,22 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   if (!token) {
     res.status(401).json({ error: "Missing or invalid authentication" });
     return;
+  }
+
+  // Service principal first — fixed-string Bearer match against configured
+  // SERVICE_TOKEN_VOICE (and any future SERVICE_TOKEN_* additions). Constant-
+  // time string compare via `timingSafeEqual` so a token-guessing attacker
+  // can't time-slice their way to a match. Service principals get the
+  // `service` role; downstream RBAC (narrowAllowedToolsForRole, MCP tool
+  // surface) treats them as unprivileged — read tools only, no writes.
+  // Only header tokens are eligible — cookies are for human sessions.
+  if (headerToken) {
+    const servicePrincipal = matchServiceToken(headerToken);
+    if (servicePrincipal) {
+      req.user = servicePrincipal;
+      next();
+      return;
+    }
   }
 
   // Try JWT first — self-verifying, no network call
@@ -203,4 +220,42 @@ function hashToken(token: string): string {
   // Full SHA-256 output — a truncated hash would allow cache collisions that
   // could return the wrong user's identity (serious auth bypass).
   return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * Service-principal bearer tokens. Registry of `(envVarValue → AuthUser)`
+ * pairs, built once at module load. Empty token values are excluded so a
+ * misconfigured deployment can't accidentally accept an empty Bearer.
+ *
+ * To register a new service principal: add the env var to `config.ts` under
+ * "Service-principal bearer tokens", then push an entry below.
+ */
+interface ServicePrincipalDef {
+  /** The configured shared-secret value, e.g. `config.SERVICE_TOKEN_VOICE`. */
+  token: string;
+  /** The principal returned to req.user on match. */
+  principal: AuthUser;
+}
+
+const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
+  {
+    token: config.SERVICE_TOKEN_VOICE,
+    principal: {
+      id: "_service:voice",
+      username: "_service:voice",
+      displayName: "Voice Assistant",
+      role: "service",
+    },
+  },
+];
+
+function matchServiceToken(token: string): AuthUser | null {
+  const candidate = Buffer.from(token, "utf8");
+  for (const def of SERVICE_PRINCIPALS) {
+    if (!def.token) continue;
+    const expected = Buffer.from(def.token, "utf8");
+    if (candidate.length !== expected.length) continue;
+    if (timingSafeEqual(candidate, expected)) return def.principal;
+  }
+  return null;
 }

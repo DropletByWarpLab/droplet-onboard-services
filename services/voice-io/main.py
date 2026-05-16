@@ -1,4 +1,4 @@
-"""voice-orchestrator FastAPI control surface.
+"""voice-io FastAPI control surface.
 
 Live this commit:
 
@@ -56,7 +56,7 @@ STT_MAX_RECORD_S = float(
     os.environ.get("STT_MAX_RECORD_S", str(DEFAULT_STT_MAX_RECORD_S))
 )
 
-app = FastAPI(title="voice-orchestrator", version="0.1.0")
+app = FastAPI(title="voice-io", version="0.1.0")
 
 # Pipeline lives at module scope so /voice/status can read its state
 # from the request thread while the worker thread is mid-prediction.

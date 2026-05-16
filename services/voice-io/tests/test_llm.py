@@ -1,18 +1,23 @@
 """WARP-154 — LLM bridge contract.
 
-The contract these tests pin:
+The contract these tests pin (per shared_brain
+`projects/droplet-pi-platform/docs/LLM_AGENT.md`):
 
-  - `OrchestratorLLM.available` GETs /api/health; returns False (not
-    raise) on any transport or HTTP-error. Status endpoints depend on
-    this never throwing.
+  - `OrchestratorLLM.available` GETs /api/orchestrator/health; returns
+    False (not raise) on any transport or HTTP-error. /voice/status
+    depends on this never throwing.
   - `reply()` POSTs /api/llm/chat with the right model + messages +
-    stream:false, parses the assistant text from the response.
+    stream:false + max_iter, parses the assistant text from the
+    AgentResult shape (`{message: {content: "..."}, trace, iterations,
+    stop_reason}`). Legacy ai-gateway/OpenAI shape still parses for
+    dev configurations that override LLM_URL.
   - `reply("")` short-circuits with no network call.
   - HTTP errors raise LLMUnavailable with a readable detail.
   - The response-parser pulls the assistant text from both flat and
     segmented content shapes.
   - `MockLLM` records requests and replays scripted replies in order.
-  - `build_llm_from_env` honours LLM_URL=__mock__ + http://.
+  - `build_llm_from_env` honours LLM_URL=__mock__ + http://, and
+    propagates ORCHESTRATOR_TOKEN as a Bearer auth header.
 
 We swap in `httpx.MockTransport` so we exercise httpx end-to-end
 without a real network. No external orchestrator needed.
@@ -78,7 +83,7 @@ def _install_mock_transport(monkeypatch, handler) -> list:
 class TestOrchestratorAvailable:
     def test_available_true_on_healthy_response(self, monkeypatch):
         def handler(req):
-            assert req.url.path == "/ai/health"
+            assert req.url.path == "/api/orchestrator/health"
             return httpx.Response(200, json={"status": "ok"})
         _install_mock_transport(monkeypatch, handler)
         client = OrchestratorLLM(base_url="http://test")
@@ -104,49 +109,52 @@ class TestOrchestratorAvailable:
 class TestOrchestratorReply:
     def test_reply_posts_to_chat_path_with_model_messages(self, monkeypatch):
         def handler(req):
-            assert req.url.path == "/ai/chat"
+            # Canonical path per LLM_AGENT.md.
+            assert req.url.path == "/api/llm/chat"
             body = json.loads(req.content)
             assert body["model"] == "test-model"
             assert body["stream"] is False
+            assert body["max_iter"] >= 1  # cap the agent loop
             assert body["messages"][0]["role"] == "system"
             assert body["messages"][1]["role"] == "user"
             assert body["messages"][1]["content"] == "what time is it"
-            # OpenAI/ai-gateway response shape.
+            # AgentResult shape per shared_brain LLM_AGENT.md.
             return httpx.Response(
                 200,
                 json={
-                    "id": "chatcmpl-1",
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "it is 3 pm"},
-                        "finish_reason": "stop",
-                    }],
+                    "message": {"role": "assistant", "content": "it is 3 pm"},
+                    "trace": [],
+                    "iterations": 1,
+                    "stop_reason": "model_done",
                 },
             )
         _install_mock_transport(monkeypatch, handler)
         client = OrchestratorLLM(base_url="http://test", model="test-model")
         assert client.reply("what time is it") == "it is 3 pm"
 
-    def test_reply_handles_orchestrator_agent_shape_too(self, monkeypatch):
-        # Commit 7b will move to /api/llm/chat which returns the agent
-        # shape (message at top level). Parser must handle both.
+    def test_reply_handles_legacy_ai_gateway_shape(self, monkeypatch):
+        # Some dev configs still point LLM_URL at ai-gateway directly.
+        # The parser is intentionally back-compat: OpenAI choices[] shape
+        # also works.
         def handler(req):
             return httpx.Response(200, json={
-                "message": {"role": "assistant", "content": "agent reply"},
-                "conversationId": "c1",
+                "choices": [{"message": {"content": "legacy reply"}}],
             })
         _install_mock_transport(monkeypatch, handler)
         client = OrchestratorLLM(
-            base_url="http://test", chat_path="/api/llm/chat",
+            base_url="http://test", chat_path="/ai/chat",
         )
-        assert client.reply("hi") == "agent reply"
+        assert client.reply("hi") == "legacy reply"
 
     def test_bearer_token_attached_when_set(self, monkeypatch):
+        # The Bearer token IS the service-principal handshake the
+        # orchestrator's authMiddleware matches against
+        # SERVICE_TOKEN_VOICE — without it the request 401s.
         seen_auth: list[str] = []
         def handler(req):
             seen_auth.append(req.headers.get("authorization", ""))
             return httpx.Response(200, json={
-                "choices": [{"message": {"content": "ok"}}],
+                "message": {"role": "assistant", "content": "ok"},
             })
         _install_mock_transport(monkeypatch, handler)
         OrchestratorLLM(
@@ -178,7 +186,8 @@ class TestOrchestratorReply:
             body = json.loads(req.content)
             seen.append(body["messages"][1]["content"])
             return httpx.Response(200, json={
-                "choices": [{"message": {"content": "ok"}}],
+                "message": {"role": "assistant", "content": "ok"},
+                "trace": [], "iterations": 1, "stop_reason": "model_done",
             })
         _install_mock_transport(monkeypatch, handler)
         OrchestratorLLM(base_url="http://test").reply("  hello there  \n")
@@ -193,7 +202,8 @@ class TestOrchestratorReply:
             body = json.loads(req.content)
             seen_system.append(body["messages"][0]["content"])
             return httpx.Response(200, json={
-                "choices": [{"message": {"content": "ok"}}],
+                "message": {"role": "assistant", "content": "ok"},
+                "trace": [], "iterations": 1, "stop_reason": "model_done",
             })
         _install_mock_transport(monkeypatch, handler)
         OrchestratorLLM(
@@ -469,7 +479,8 @@ class TestSystemPromptWiringIntoReply:
             body = json.loads(req.content)
             captured_system.append(body["messages"][0]["content"])
             return httpx.Response(200, json={
-                "choices": [{"message": {"content": "ok"}}],
+                "message": {"role": "assistant", "content": "ok"},
+                "trace": [], "iterations": 1, "stop_reason": "model_done",
             })
         _install_mock_transport(monkeypatch, handler)
         fixed_now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
@@ -495,7 +506,8 @@ class TestSystemPromptWiringIntoReply:
             body = json.loads(req.content)
             captured.append(body["messages"][0]["content"])
             return httpx.Response(200, json={
-                "choices": [{"message": {"content": "ok"}}],
+                "message": {"role": "assistant", "content": "ok"},
+                "trace": [], "iterations": 1, "stop_reason": "model_done",
             })
         _install_mock_transport(monkeypatch, handler)
         times = iter([

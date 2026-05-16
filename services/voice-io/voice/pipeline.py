@@ -188,7 +188,7 @@ class WakePipeline:
         self._llm = llm
         # How often the background probe thread re-checks STT/TTS/LLM
         # reachability. Without this, an upstream that came up AFTER
-        # voice-orchestrator (common at boot when whisper / piper / ai-
+        # voice-io (common at boot when whisper / piper / ai-
         # gateway take longer to bind) stays stuck at 'unavailable'
         # forever — the user sees /voice/status.stt_loaded=false and
         # the closed loop never fires even though everything works.
