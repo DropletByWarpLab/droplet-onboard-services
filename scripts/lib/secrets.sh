@@ -34,7 +34,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -44,6 +44,12 @@ generate_env() {
   jwt_secret=$(openssl rand -hex 64)
   # Shared bearer for orchestrator and camera-discovery → routing service (WARP-36).
   routing_service_token=$(openssl rand -hex 32)
+  # WARP-154: shared bearer the voice-io service presents on the
+  # orchestrator's /api/llm/chat — the orchestrator's authMiddleware
+  # matches it via timingSafeEqual and sets req.user.role = "service".
+  # Both sides MUST read the same value (compose wires voice-io's
+  # ORCHESTRATOR_TOKEN to ${SERVICE_TOKEN_VOICE}).
+  service_token_voice=$(openssl rand -hex 32)
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -88,6 +94,13 @@ JWT_SECRET=$jwt_secret
 # --- Routing service bearer (orchestrator, camera-discovery → routing) ---
 ROUTING_SERVICE_TOKEN=$routing_service_token
 
+# --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
+# WARP-154. Read by orchestrator's authMiddleware (matchServiceToken in
+# apps/orchestrator/src/middleware/auth.ts) and by voice-io's
+# ORCHESTRATOR_TOKEN env (wired via docker-compose.yml). Rotate both
+# sides in lockstep — change here, restart both orchestrator + voice-io.
+SERVICE_TOKEN_VOICE=$service_token_voice
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -125,6 +138,7 @@ EOF
   log_info "  DEVICE_SECRET_KEY : ${device_secret_key:0:8}****"
   log_info "  JWT_SECRET        : ${jwt_secret:0:8}****"
   log_info "  ROUTING_TOKEN     : ${routing_service_token:0:8}****"
+  log_info "  VOICE_TOKEN       : ${service_token_voice:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -181,6 +195,9 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+  # WARP-154 backfill: existing installs predate the voice service-token
+  # path; without this key voice-io will 401 on every /api/llm/chat call.
+  _migrate_ensure_key SERVICE_TOKEN_VOICE "$(openssl rand -hex 32)"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — Jetson production hits 'real', everything else hits
