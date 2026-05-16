@@ -6,6 +6,11 @@ Wants=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Customer-facing AP overrides (SSID, PSK, etc.) — leading `-` makes the file
+# optional so a fresh box without /etc/default/droplet-openwrt-attach still
+# starts cleanly and falls back to the script's own defaults.
+EnvironmentFile=-/etc/default/droplet-openwrt-attach
 ExecStart=/usr/local/sbin/droplet-openwrt-attach
+
 [Install]
 WantedBy=multi-user.target

@@ -285,13 +285,23 @@ main() {
 
   # Install host-side openwrt-attach systemd unit (handles PHY netns +
   # AP bring-up on every docker start of the openwrt container). Versioned
-  # under openwrt/poc-single-box/ ? see that dir's README for details.
-  if [ -f "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach.service" ] && \
-     [ ! -f /etc/systemd/system/droplet-openwrt-attach.service ]; then
+  # under openwrt/poc-single-box/ — see that dir's README for details.
+  #
+  # Always re-copy the script + unit on every setup run so iterations on
+  # the attach logic land on the device without a manual install step. The
+  # env file is only copied when missing so a customer's tuned values stay
+  # put across upgrades.
+  if [ -f "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach.service" ]; then
     log_info "Installing host-side openwrt-attach systemd unit..."
     sudo cp "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach.service" /etc/systemd/system/
     sudo cp "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach" /usr/local/sbin/
     sudo chmod +x /usr/local/sbin/droplet-openwrt-attach
+    if [ ! -f /etc/default/droplet-openwrt-attach ]; then
+      sudo install -m 0644 \
+        "$REPO_ROOT/openwrt/poc-single-box/droplet-openwrt-attach.env" \
+        /etc/default/droplet-openwrt-attach
+      log_info "  installed /etc/default/droplet-openwrt-attach (edit to override SSID/PSK)"
+    fi
     sudo systemctl daemon-reload
     sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
     log_success "droplet-openwrt-attach.service installed and enabled"

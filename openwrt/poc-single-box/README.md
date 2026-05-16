@@ -1,8 +1,12 @@
 # poc/single-box host-side bring-up
 
-These two files belong on the **host** (not in the openwrt container) of a
+These three files belong on the **host** (not in the openwrt container) of a
 single-box POC deployment. They handle the parts that can't live in
 docker-compose because they require host-level operations on the wireless PHY.
+
+- `droplet-openwrt-attach` — the bring-up script (installed to `/usr/local/sbin/`)
+- `droplet-openwrt-attach.service` — systemd one-shot, fires after docker (installed to `/etc/systemd/system/`)
+- `droplet-openwrt-attach.env` — `EnvironmentFile=` template with SSID/PSK and DNS knobs (installed to `/etc/default/droplet-openwrt-attach`)
 
 ## What they do
 
@@ -109,18 +113,28 @@ DROPLET_AP_HOSTNAME        (default droplet         — resolves to 192.168.20.1
 DROPLET_GATEWAY_CONTAINER  (default droplet-pi-platform-gateway-1)
 ```
 
-Set in `/etc/default/droplet-openwrt-attach` (the systemd unit will load
-it via `EnvironmentFile=` once configured) or by exporting before
-invoking the script manually. Re-running the attach script picks up any
-change; config files in the container are diff'd against the new render
-and daemons restart only when the rendered file actually changed.
+Set in `/etc/default/droplet-openwrt-attach` (the systemd unit loads it
+via `EnvironmentFile=-/etc/default/droplet-openwrt-attach`, leading `-`
+making it optional) or by exporting before invoking the script manually.
+Re-running the attach script picks up any change; config files in the
+container are diff'd against the new render and daemons restart only when
+the rendered file actually changed.
+
+The shipped `droplet-openwrt-attach.env` template defaults to
+`DROPLET_AP_SSID=Droplet` / `DROPLET_AP_PSK=Droplet123!`. Edit
+`/etc/default/droplet-openwrt-attach` after `scripts/setup.sh` runs to
+override per-deployment (e.g. customer-branded SSID).
 
 ## Install on a fresh box
+
+`scripts/setup.sh` does this automatically. To install by hand:
 
 ```bash
 sudo cp openwrt/poc-single-box/droplet-openwrt-attach.service /etc/systemd/system/
 sudo cp openwrt/poc-single-box/droplet-openwrt-attach /usr/local/sbin/
 sudo chmod +x /usr/local/sbin/droplet-openwrt-attach
+sudo install -m 0644 openwrt/poc-single-box/droplet-openwrt-attach.env \
+  /etc/default/droplet-openwrt-attach     # safe to skip; defaults are baked into the script
 sudo systemctl daemon-reload
 sudo systemctl enable --now droplet-openwrt-attach.service
 ```

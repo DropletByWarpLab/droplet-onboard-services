@@ -5,11 +5,6 @@
 # https://droplet.local/ (DNS served by openwrt's dnsmasq) which resolves
 # to 192.168.20.1, openwrt DNATs :443/:80 to the docker gateway container.
 # No cross-subnet TCP needed from the phone's perspective.
-#
-# Phase L: routing service can now actually drive OpenWrt — installs
-# WireGuard packages, sets root password from the docker secret, and runs
-# a wg-sync poll loop that pushes UCI peer changes into the kernel wg0
-# (netifd's reload path times out in this container; wg syncconf works).
 set +e
 
 # --- Customer-facing knobs (override via env) -----------------------------
