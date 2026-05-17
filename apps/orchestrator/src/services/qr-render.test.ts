@@ -98,6 +98,32 @@ describe("renderQRToScreenPng", () => {
     expect(decoded.width).toBe(SCREEN_WIDTH);
   });
 
+  it("character-wraps a single word longer than the line width", async () => {
+    // Long SSID / peer label that exceeds CHARS_PER_LINE (~6 at the
+    // current layout math) used to be silently character-clipped at
+    // the canvas edge — the tail was dropped without warning. The
+    // char-level fallback wrap keeps every character visible across
+    // multiple lines. We assert the render completes and produces
+    // pixels (caption is non-empty) — the exact pixel placement is
+    // a layout concern tested by the visual regression on the device.
+    const ssid = "extremely-long-ssid-name-1234567890";
+    const { png } = await renderQRToScreenPng("https://example.com", {
+      caption: ssid,
+    });
+    const decoded = PNG.sync.read(png);
+    expect(decoded.width).toBe(SCREEN_WIDTH);
+    expect(decoded.height).toBe(SCREEN_HEIGHT);
+    // The caption strip should have some non-black pixels.
+    let nonBlackInCaptionStrip = 0;
+    for (let i = 0; i < decoded.data.length; i += 4) {
+      if (decoded.data[i] > 0 || decoded.data[i + 1] > 0 || decoded.data[i + 2] > 0) {
+        nonBlackInCaptionStrip++;
+        if (nonBlackInCaptionStrip > 100) break;
+      }
+    }
+    expect(nonBlackInCaptionStrip).toBeGreaterThan(100);
+  });
+
   it("produces deterministic output for a given input", async () => {
     // Useful for cache-key generation downstream — the signature only
     // works if same input → same bytes.

@@ -44,9 +44,37 @@ const POLL_INTERVAL_MS = 30_000;
 /** How long after a peer is created we keep the peer QR on screen. */
 const PEER_DISPLAY_WINDOW_MS = 60_000;
 
-/** device-bridge runs on the host with network_mode: host. */
+/**
+ * Trust-mode flag for the peer-QR-on-screen feature.
+ *
+ * Off by default. When a WireGuard peer is created, this service can
+ * render the peer's full WireGuard `.conf` (which includes the client
+ * `PrivateKey`) as a QR on the PyPortal for 60 s so the operator's
+ * phone can scan + import directly via the WireGuard mobile app's
+ * built-in QR scanner. That's slick UX in a trusted physical space
+ * (private home, locked office) — but in a shared-space deployment
+ * (photo studio, dealership showroom, kiosk) the same QR is a valid
+ * VPN credential that anyone in line-of-sight can photograph in the
+ * 60 s window.
+ *
+ * Default is `false` (off): the dashboard's authenticated /remote-access
+ * QR remains the canonical peer-import path; the screen falls through
+ * to the wifi/setup QR. Operators in trusted spaces flip
+ * `SCREEN_PEER_QR_ENABLED=true` in .env and accept the exposure
+ * trade-off in exchange for the WireGuard auto-import UX.
+ *
+ * The URL-redirect alternative (one-time token in QR → browser fetch)
+ * was rejected because it breaks the WireGuard mobile app's QR-scan
+ * auto-import, forcing customers into a "scan → browser → download →
+ * manual import" flow that loses the UX value of the screen QR in
+ * the first place.
+ */
+const PEER_QR_ENABLED =
+  (process.env.SCREEN_PEER_QR_ENABLED ?? "false").toLowerCase() === "true";
+
+/** device-bridge runs on the host with network_mode: host (port 9090). */
 const DEVICE_BRIDGE_URL =
-  process.env.DEVICE_BRIDGE_URL || "http://host.docker.internal:8083";
+  process.env.DEVICE_BRIDGE_URL || "http://host.docker.internal:9090";
 
 export type ScreenQRMode = "setup" | "peer" | "wifi" | "none";
 
@@ -77,14 +105,37 @@ let activeSignature = "";
 let pollerInterval: NodeJS.Timeout | null = null;
 
 /**
- * Note that a WireGuard peer was just generated. The poller's next
- * tick will push the peer's QR to the screen and hold it for
- * PEER_DISPLAY_WINDOW_MS.
+ * In-flight guard for `refreshNow()`. The poller interval keeps firing
+ * even if a previous tick is still in `pushCustomImage` (multipart
+ * upload over the host bridge). Without this guard, a slow display
+ * push can stack concurrent ticks that all race on `activeSignature`,
+ * double-push the same image to the PyPortal, and burn the display
+ * service's small worker pool. Single-flight is the right shape: if
+ * a refresh is already running, skip this tick.
+ */
+let refreshInFlight = false;
+
+/**
+ * Note that a WireGuard peer was just generated. When
+ * `SCREEN_PEER_QR_ENABLED=true` the poller's next tick will push the
+ * peer's QR to the screen and hold it for PEER_DISPLAY_WINDOW_MS.
+ *
+ * When the flag is off (the default for shared-space deployments)
+ * this is a no-op: we don't record the event so the screen's wifi/setup
+ * fall-through isn't perturbed and we don't briefly hold credential
+ * material in memory for nothing.
  *
  * Called from `apps/orchestrator/src/routes/vpn.ts` on successful
  * peer creation.
  */
 export function notePeerCreated(config: string, name?: string): void {
+  if (!PEER_QR_ENABLED) {
+    logger.debug(
+      { name },
+      "screen-qr: peer created but SCREEN_PEER_QR_ENABLED=false; not surfacing on screen",
+    );
+    return;
+  }
   lastPeerEvent = { config, createdAt: Date.now(), name };
   // Kick the poller ASAP so the user doesn't wait up to 30 s for the
   // QR to appear after generating a peer. Catches errors so a display
@@ -213,60 +264,73 @@ async function fetchWifiQRFromBridge(): Promise<
 /**
  * Re-evaluate state + push if the desired QR has changed.
  * Returns the decision for callers that want to log/inspect.
+ *
+ * Single-flight: if a previous refresh is still running, returns null
+ * immediately rather than queueing a second concurrent push. The
+ * poller and `notePeerCreated`'s kick share this guard.
  */
 async function refreshNow(): Promise<ScreenQRDecision | null> {
   if (!started) {
     // Not started yet — nothing to do.
     return null;
   }
-
-  const userCount = await countRealNextcloudUsers().catch((err) => {
-    // Treat "Nextcloud unreachable" as "first boot, still" — better
-    // to default to the setup-URL QR (which is the safe initial state)
-    // than to fail open and show the wifi QR when no admin exists.
-    logger.warn({ err }, "screen-qr: user-count failed; treating as 0 (first boot)");
-    return 0;
-  });
-
-  const decision = await decideScreenQR(
-    userCount,
-    lastPeerEvent,
-    Date.now(),
-    fetchWifiQRFromBridge,
-  );
-
-  // Skip re-push if signature unchanged.
-  if (decision.signature === activeSignature) {
-    return decision;
+  if (refreshInFlight) {
+    logger.debug("screen-qr: refresh already in flight; skipping tick");
+    return null;
   }
-  if (decision.mode === "none") {
-    // Nothing to push — but record the signature so we don't retry
-    // every tick on a flapping device-bridge.
-    activeSignature = decision.signature;
-    return decision;
-  }
+  refreshInFlight = true;
 
   try {
-    const { png } = await renderQRToScreenPng(decision.payload, {
-      caption: decision.caption,
+    const userCount = await countRealNextcloudUsers().catch((err) => {
+      // Treat "Nextcloud unreachable" as "first boot, still" — better
+      // to default to the setup-URL QR (which is the safe initial state)
+      // than to fail open and show the wifi QR when no admin exists.
+      logger.warn({ err }, "screen-qr: user-count failed; treating as 0 (first boot)");
+      return 0;
     });
-    const ok = await pushCustomImage(png, `qr-${decision.mode}.png`);
-    if (ok) {
-      activeSignature = decision.signature;
-      logger.info(
-        { mode: decision.mode, caption: decision.caption },
-        "screen-qr: pushed new QR",
-      );
-    } else {
-      logger.warn(
-        { mode: decision.mode },
-        "screen-qr: display service rejected the image",
-      );
+
+    const decision = await decideScreenQR(
+      userCount,
+      lastPeerEvent,
+      Date.now(),
+      fetchWifiQRFromBridge,
+    );
+
+    // Skip re-push if signature unchanged.
+    if (decision.signature === activeSignature) {
+      return decision;
     }
-  } catch (err) {
-    logger.warn({ err, mode: decision.mode }, "screen-qr: render or push failed");
+    if (decision.mode === "none") {
+      // Nothing to push — but record the signature so we don't retry
+      // every tick on a flapping device-bridge.
+      activeSignature = decision.signature;
+      return decision;
+    }
+
+    try {
+      const { png } = await renderQRToScreenPng(decision.payload, {
+        caption: decision.caption,
+      });
+      const ok = await pushCustomImage(png, `qr-${decision.mode}.png`);
+      if (ok) {
+        activeSignature = decision.signature;
+        logger.info(
+          { mode: decision.mode, caption: decision.caption },
+          "screen-qr: pushed new QR",
+        );
+      } else {
+        logger.warn(
+          { mode: decision.mode },
+          "screen-qr: display service rejected the image",
+        );
+      }
+    } catch (err) {
+      logger.warn({ err, mode: decision.mode }, "screen-qr: render or push failed");
+    }
+    return decision;
+  } finally {
+    refreshInFlight = false;
   }
-  return decision;
 }
 
 /** Set by start(); skips ticks before the app is up. */

@@ -117,10 +117,16 @@ export async function pushCustomImage(
     if (SERVICE_SECRET) {
       headers["Authorization"] = `Bearer ${SERVICE_SECRET}`;
     }
+    // 5s ceiling so a stalled display service can't pin the orchestrator's
+    // event loop on this multipart upload. The PyPortal write path is
+    // serial USB-serial; under normal load a push completes in ~200 ms.
+    // 5s is a generous upper bound that still lets the screen-qr
+    // single-flight guard reset and try again next tick.
     const res = await fetch(`${DISPLAY_URL}/display/custom`, {
       method: "POST",
       body: form,
       headers,
+      signal: AbortSignal.timeout(5_000),
     });
     return res.ok;
   } catch {

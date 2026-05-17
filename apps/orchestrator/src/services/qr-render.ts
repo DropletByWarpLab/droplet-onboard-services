@@ -1,15 +1,19 @@
 /**
  * QR code → PNG buffer for the PyPortal screen.
  *
- * The PyPortal Titano is 480×320. A QR sized at 320×320 gives a square
- * code with a 32 px top/bottom inset, leaving the right 160 px for a
- * caption strip. We compose both into one PNG so the display service's
- * `POST /display/custom` (which takes a single image) can render it
- * without needing a new endpoint.
+ * The PyPortal Titano is 480×320. The QR is sized at QR_SIZE (280) px
+ * and left-aligned with a 20 px inset, leaving ~164 px to the right
+ * for a caption strip. Both compose into one PNG so the display
+ * service's `POST /display/custom` (which takes a single image) can
+ * render it without needing a new endpoint.
  *
- * Module is small + dependency-light by design: just `qrcode` for the
- * QR encoding plus `pngjs` from qrcode's own dependency closure
- * (re-used here, no fresh top-level dep) for the caption-strip compose.
+ * Module is small + dependency-light by design: `qrcode` for the QR
+ * encoding plus `pngjs` for the caption-strip compose. `pngjs` is
+ * pinned as a direct dependency in apps/orchestrator/package.json
+ * (rather than relying on `qrcode`'s transitive pngjs@5) so its major
+ * version stays predictable across future `qrcode` bumps. `@types/pngjs`
+ * is still pinned to 6.x; the PNG.sync.read/write surface we use is
+ * API-compatible between pngjs 5 and 6.
  *
  * Used by `screen-qr.service.ts` which owns the "what should be on
  * the screen right now" state machine. This module is just the
@@ -61,8 +65,8 @@ export async function renderQRToScreenPng(
     color: { dark: "#000000", light: "#FFFFFF" },
   });
 
-  // Composite onto the full screen via pngjs (a transitive dep of qrcode,
-  // so no extra package.json entry needed).
+  // Composite onto the full screen via pngjs (direct dep — see the
+  // module docstring for why it's pinned independently of qrcode).
   const composed = await composeOnCanvas(qrPng, options.caption || "");
   return { png: composed, width: SCREEN_WIDTH, height: SCREEN_HEIGHT };
 }
@@ -73,8 +77,8 @@ export async function renderQRToScreenPng(
  * right in a simple bitmap font produced inline.
  *
  * We avoid Canvas / Sharp / node-gd because they pull native deps.
- * pngjs is pure JS, comes with qrcode, and is plenty for our needs:
- * we just need to place pixels.
+ * pngjs is pure JS and is plenty for our needs: we just need to place
+ * pixels. Pinned directly in package.json (see module docstring).
  */
 async function composeOnCanvas(qrPng: Buffer, caption: string): Promise<Buffer> {
   // Dynamic import so the test suite that mocks out qrcode doesn't
@@ -166,7 +170,25 @@ function renderCaption(
   const words = text.split(/\s+/);
   const lines: string[] = [];
   let current = "";
+  const pushCurrent = () => {
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+  };
   for (const w of words) {
+    // A single word longer than CHARS_PER_LINE (e.g. a 12-char SSID
+    // or peer label) used to get pushed as a too-long line and then
+    // character-clipped at the canvas edge — invisibly dropping the
+    // tail. Fall back to character-level wrapping for that word so
+    // the full text remains readable across multiple lines.
+    if (w.length > CHARS_PER_LINE) {
+      pushCurrent();
+      for (let i = 0; i < w.length; i += CHARS_PER_LINE) {
+        lines.push(w.slice(i, i + CHARS_PER_LINE));
+      }
+      continue;
+    }
     if (!current) {
       current = w;
     } else if ((current + " " + w).length <= CHARS_PER_LINE) {
@@ -176,7 +198,7 @@ function renderCaption(
       current = w;
     }
   }
-  if (current) lines.push(current);
+  pushCurrent();
 
   let cursorY = y;
   for (const line of lines) {
