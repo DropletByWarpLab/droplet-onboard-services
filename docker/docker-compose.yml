@@ -107,6 +107,10 @@ services:
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
+      # WARP-165: orchestrator → oled-display bearer. Read by
+      # display.client.ts; must equal the oled-display container's
+      # SERVICE_SECRET env (wired below to the same source).
+      - SERVICE_TOKEN_DISPLAY=${SERVICE_TOKEN_DISPLAY:-}
       # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
@@ -705,9 +709,14 @@ services:
       dockerfile: services/oled-display/Dockerfile
     network_mode: host
     environment:
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      # WARP-165: dedicated service-to-service bearer for the orchestrator
+      # → display path (was reusing DEVICE_SECRET_KEY, the FIPS-sealed
+      # AES-256 master encryption key). Both ends of the channel — the
+      # FastAPI app inside this container and the host-side device-bridge
+      # — verify the same value, wired below.
+      - SERVICE_SECRET=${SERVICE_TOKEN_DISPLAY:-}
       # Same token — the container talks to host-side device-bridge.
-      - BRIDGE_AUTH_TOKEN=${DEVICE_SECRET_KEY:-}
+      - BRIDGE_AUTH_TOKEN=${SERVICE_TOKEN_DISPLAY:-}
       - PORT=8082
       - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
       - LCD_WIDTH=480
@@ -731,7 +740,15 @@ services:
     # access control; this just blocks setuid binaries from flipping.
     security_opt:
       - no-new-privileges:true
-    profiles: ["full"]
+    # WARP-165: own profile (was `full` alongside switch + camera-discovery).
+    # The `display` profile defaults on for Linux installs because the
+    # service auto-falls back to a `simulated` backend (PNG file) when
+    # /dev/ttyACM* is absent, so a customer without a physical PyPortal
+    # still gets a working stack. Splitting it out of `full` means
+    # default Linux installs no longer drag in switch + camera-discovery,
+    # which both require real hardware + credentials and either error
+    # silently or scan the network on boot.
+    profiles: ["display"]
     restart: always
 
 secrets:

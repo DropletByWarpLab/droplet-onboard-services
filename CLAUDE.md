@@ -160,11 +160,13 @@ npm run test:ai-gateway     # ai-gateway only
 | broker         | —     | MQTT, internal only                       |
 | ai-gateway     | —     | Proxied at `/ai/`                         |
 | frigate        | —     | NVR + AI detection, profile `linux` (needs `/dev/dri/renderD128`) |
+| voice-io       | —     | Voice loop (wake → STT → orchestrator agent loop → TTS), profile `linux` (needs `/dev/snd`) |
+| oled-display   | —     | PyPortal screen service, profile `display` (auto-falls back to sim backend when no `/dev/ttyACM*`) |
 | switch         | :8081 | Managed switch control, profile `full`    |
 | camera-discovery | —   | ONVIF/RTSP scanner, profile `full`        |
 | routing        | :8080 | OpenWrt control, host network             |
 
-`COMPOSE_PROFILES=linux` is set in `.env` automatically by `setup.sh` on Linux so Frigate starts with the default stack; on macOS it's empty so the GPU device mount never trips. Add `full` to opt into switch/camera-discovery on either OS.
+`COMPOSE_PROFILES=linux,display` is set in `.env` automatically by `setup.sh` on Linux so Frigate + voice-io + oled-display all start with the default stack (PyPortal absence is a no-op via sim backend); on macOS it's empty so the GPU/audio device mounts never trip. Add `full` by hand to opt into switch/camera-discovery — both need real hardware + operator-supplied credentials and aren't default-on so a fresh install doesn't scan the LAN or hit a missing switch.
 
 ## Updating `.env` on a running stack
 

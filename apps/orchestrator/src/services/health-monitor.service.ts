@@ -20,11 +20,18 @@ import type { PrismaClient } from "@prisma/client";
 import { isRedisHealthy } from "./cache.service.js";
 import { healthCheck as aiGatewayHealth } from "./ai-gateway.client.js";
 import { healthCheck as routingHealth } from "./openwrt.client.js";
+import { healthCheck as displayHealth } from "./display.client.js";
 import { ncPing } from "./nextcloud.client.js";
 
 const logger = pino({ name: "health-monitor" });
 
-export type ComponentName = "postgres" | "redis" | "routing" | "ai-gateway" | "nextcloud";
+export type ComponentName =
+  | "postgres"
+  | "redis"
+  | "routing"
+  | "ai-gateway"
+  | "nextcloud"
+  | "display";
 export type ComponentHealthStatus = "ok" | "down";
 export type AggregateStatus = "ok" | "degraded" | "down";
 
@@ -94,6 +101,11 @@ function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: 
     { name: "routing", probe: routingHealth },
     { name: "ai-gateway", probe: aiGatewayHealth },
     { name: "nextcloud", probe: ncPing },
+    // WARP-165: display is degraded-class only — the service auto-falls
+    // back to a `simulated` PNG backend when no PyPortal is plugged in,
+    // and the appliance is still usable without a screen, so a down
+    // display never trips the aggregate to `down`.
+    { name: "display", probe: displayHealth },
   ];
 }
 

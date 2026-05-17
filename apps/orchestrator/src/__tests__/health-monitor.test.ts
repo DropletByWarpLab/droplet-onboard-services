@@ -46,6 +46,14 @@ vi.mock("../services/nextcloud.client.js", async () => {
   };
 });
 
+vi.mock("../services/display.client.js", async () => {
+  const actual: any = await vi.importActual("../services/display.client.js");
+  return {
+    ...actual,
+    healthCheck: vi.fn().mockResolvedValue(true),
+  };
+});
+
 import {
   classifyAggregate,
   runAllProbes,
@@ -225,7 +233,7 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
-    expect(res.body.components.length).toBe(5);
+    expect(res.body.components.length).toBe(6);
     expect(res.body.version).toBe("0.1.0");
     expect(typeof res.body.uptime).toBe("number");
   });

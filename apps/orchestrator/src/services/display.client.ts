@@ -8,7 +8,13 @@
 // alias must be used. Compose sets DISPLAY_SERVICE_URL explicitly; this
 // fallback only trips in local/unit-test contexts where the env isn't set.
 const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://host.docker.internal:8082";
-const SERVICE_SECRET = process.env.DEVICE_SECRET_KEY || "";
+// WARP-165: dedicated service-to-service bearer (previously reused
+// DEVICE_SECRET_KEY — the FIPS-sealed AES-256 master encryption key —
+// which put the master key on the wire on every display call). The
+// `secrets.sh` _migrate_ensure_key call backfills this on the next
+// `./scripts/setup.sh` run for installs that predate the rename, so
+// operators don't need to do anything manual besides re-running setup.
+const SERVICE_SECRET = process.env.SERVICE_TOKEN_DISPLAY || "";
 
 async function displayFetch(path: string, options: RequestInit = {}): Promise<Response> {
   const headers: Record<string, string> = {

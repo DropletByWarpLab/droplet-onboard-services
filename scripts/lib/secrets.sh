@@ -34,7 +34,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -50,6 +50,16 @@ generate_env() {
   # Both sides MUST read the same value (compose wires voice-io's
   # ORCHESTRATOR_TOKEN to ${SERVICE_TOKEN_VOICE}).
   service_token_voice=$(openssl rand -hex 32)
+  # WARP-165: shared bearer for orchestrator → oled-display HTTP calls
+  # (health probe, /display/*, /wifi/connect). Previously the path
+  # reused DEVICE_SECRET_KEY — the FIPS-sealed AES-256 master encryption
+  # key used by encryption.service.ts — which put the master key on the
+  # wire on every display call (every 15s via health-monitor). Dedicated
+  # token rotates independently and keeps DEVICE_SECRET_KEY off the wire.
+  # Both display.client.ts (orchestrator) and oled-display's SERVICE_SECRET
+  # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
+  # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
+  service_token_display=$(openssl rand -hex 32)
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -101,6 +111,16 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # sides in lockstep — change here, restart both orchestrator + voice-io.
 SERVICE_TOKEN_VOICE=$service_token_voice
 
+# --- Display service bearer (orchestrator → oled-display HTTP) ---
+# WARP-165. Used by display.client.ts to authenticate to the oled-display
+# /health, /display/*, /wifi/* endpoints. Replaces the prior reuse of
+# DEVICE_SECRET_KEY (the FIPS-sealed AES-256 master encryption key) on
+# this code path, so the master key no longer transits the wire on every
+# health probe. Both display.client.ts and oled-display container's
+# SERVICE_SECRET + device-bridge's BRIDGE_AUTH_TOKEN MUST read the same
+# value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
+SERVICE_TOKEN_DISPLAY=$service_token_display
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -119,12 +139,17 @@ DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Compose profiles ---
-# Linux: include both "linux" + "full":
-#   linux → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd)
-#   full  → switch driver, camera-discovery, oled-display (PyPortal screen)
+# Linux defaults to "linux,display":
+#   linux   → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd),
+#             wyoming-faster-whisper, wyoming-piper
+#   display → oled-display (PyPortal — safe default, auto-falls back to a
+#             simulated PNG backend when no /dev/ttyACM* is present)
+#   full    → switch driver, camera-discovery (both require real hardware
+#             and operator-supplied credentials; not default-on so a fresh
+#             install doesn't scan the LAN or hit a missing switch on boot)
 # macOS: leave empty — Frigate is skipped, dashboard remains reachable via
 # the gateway. Add "full" by hand if you want the hardware-facing services.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,full' || printf '')
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display' || printf '')
 EOF
 
   chmod 600 "$env_file"
@@ -139,6 +164,7 @@ EOF
   log_info "  JWT_SECRET        : ${jwt_secret:0:8}****"
   log_info "  ROUTING_TOKEN     : ${routing_service_token:0:8}****"
   log_info "  VOICE_TOKEN       : ${service_token_voice:0:8}****"
+  log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -186,17 +212,19 @@ migrate_env() {
   local routing_mode_default="real"
   [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
 
-  # COMPOSE_PROFILES on Linux defaults to "linux,full" — covers both the
-  # linux-only services (Frigate, voice-io; need /dev/dri or
-  # /dev/snd) and the hardware-facing "full" services (switch driver,
-  # camera-discovery, oled-display PyPortal). macOS leaves it empty so
-  # neither set tries to mount Linux-only device nodes.
+  # COMPOSE_PROFILES on Linux defaults to "linux,display":
+  #   linux   → Frigate, voice-io, wyoming-faster-whisper, wyoming-piper
+  #             (need /dev/dri or /dev/snd, gated on Linux only)
+  #   display → oled-display PyPortal (safe default via sim fallback when
+  #             /dev/ttyACM* is absent)
+  # `full` (switch, camera-discovery) is intentionally not in the default —
+  # both need real hardware + credentials. Operator opts in via .env.
   #
   # Only appended when missing — existing installs that pinned a narrower
   # COMPOSE_PROFILES keep their value. To pull in the new default, edit
-  # .env manually: COMPOSE_PROFILES=linux,full
+  # .env manually: COMPOSE_PROFILES=linux,display
   local compose_profiles_default=""
-  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,full"
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display"
 
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
@@ -204,6 +232,10 @@ migrate_env() {
   # WARP-154 backfill: existing installs predate the voice service-token
   # path; without this key voice-io will 401 on every /api/llm/chat call.
   _migrate_ensure_key SERVICE_TOKEN_VOICE "$(openssl rand -hex 32)"
+  # WARP-165 backfill: existing installs reused DEVICE_SECRET_KEY for the
+  # display bearer; without this key the orchestrator → oled-display path
+  # falls back to the empty-string bearer and 401s on every health probe.
+  _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — Jetson production hits 'real', everything else hits
