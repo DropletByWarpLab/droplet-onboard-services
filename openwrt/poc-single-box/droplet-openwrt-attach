@@ -205,8 +205,16 @@ WGLOOP
   for h in $(nft -a list chain ip nat prerouting 2>/dev/null | grep "dnat to" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
     nft delete rule ip nat prerouting handle $h
   done
-  nft add rule ip nat prerouting iifname \"$AP_IFACE\" tcp dport 443 dnat to ${GATEWAY_IP}:443
-  nft add rule ip nat prerouting iifname \"$AP_IFACE\" tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # Critical: scope DNAT to traffic destined for 192.168.20.1 (the openwrt
+  # AP IP) ONLY. Without the `ip daddr` predicate, every :80/:443 packet
+  # leaving the AP gets hijacked to the dashboard gateway — so a client
+  # browsing https://google.com ends up on the Droplet login page with a
+  # cert mismatch (looks like a captive portal). With the daddr filter,
+  # the rule only fires for clients explicitly hitting the router IP
+  # (droplet.local resolves to 192.168.20.1 -> rule kicks in -> dashboard),
+  # while everything else passes through to the real internet.
+  nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
   # ----------------------------------------------------------------------
 
   # Stop procd dnsmasq so our manual one can bind 192.168.20.1
