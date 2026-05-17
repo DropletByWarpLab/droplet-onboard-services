@@ -54,6 +54,26 @@ interface MatterQrScannerProps {
   disabled?: boolean;
 }
 
+// A real Matter QR payload starts with the `MT:` URI prefix
+// (Matter spec §5.1.5: "MT:" + Base38 payload). The bare numeric
+// pairing code is also valid input here because we accept both QR
+// strings and manually-typed pairing codes through the same callback.
+// Anything outside of those two shapes is a poisoned QR sticker — bail
+// before round-tripping through the orchestrator.
+function isValidMatterQrPayload(raw: string): boolean {
+  return /^MT:[A-Z0-9.\-]{1,256}$/.test(raw);
+}
+
+// Matter pairing codes are decimal digits in one of two forms (per
+// Matter Core spec §5.1.4):
+//   - 11-digit short manual code
+//   - 21-digit long manual code (used by devices that don't print a QR)
+// Hyphens are stripped before validation; we already strip them at the
+// call site, so this regex is digits-only.
+function isValidPairingCode(digits: string): boolean {
+  return /^(\d{11}|\d{21})$/.test(digits);
+}
+
 export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const readerRef = useRef<BrowserMultiFormatReader | null>(null);
@@ -101,9 +121,22 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
       // valid decode, ignore NotFoundException (no QR in this frame).
       reader.decodeFromVideoElement(videoRef.current, (result, err) => {
         if (result) {
+          const payload = result.getText();
+          if (!isValidMatterQrPayload(payload)) {
+            // Random QR sticker that happens to be in frame (Wi-Fi
+            // join code, business card, etc.) — keep scanning instead
+            // of forwarding the garbage to the orchestrator. Surface
+            // a hint so the customer knows the camera is working but
+            // the sticker isn't a Matter device. We don't stop the
+            // scanner — the user may pan over to the right sticker.
+            setErrorMsg(
+              "That doesn't look like a Matter QR code. Look for one that starts with “MT:”.",
+            );
+            return;
+          }
           setStatus("decoded");
           stopCamera();
-          onResult(result.getText());
+          onResult(payload);
           return;
         }
         if (err && !(err instanceof NotFoundException)) {
@@ -144,6 +177,17 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
     // Matter pairing codes are decimal digits; the long form has
     // hyphens for readability. Strip those before submitting.
     const normalized = code.replace(/-/g, "");
+    if (!isValidPairingCode(normalized)) {
+      // Format validation client-side — saves a network round-trip
+      // and surfaces "use 11 or 21 digits" before the orchestrator's
+      // matter.js parser emits a raw `Invalid manual code: non-numeric
+      // character at position N` message.
+      setErrorMsg(
+        "Pairing codes are 11 or 21 digits. Double-check the number on your device.",
+      );
+      return;
+    }
+    setErrorMsg(null);
     onResult(normalized);
   }, [manualCode, onResult]);
 
@@ -245,8 +289,12 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
           </button>
         </div>
 
-        {/* Camera-error hint, only shown when relevant */}
-        {(status === "denied" || status === "no-camera") && (
+        {/* Camera-error OR format-validation hint. Both flow through the
+            same `errorMsg` state — camera failures are surfaced as
+            graceful-degrade copy ("use the pairing code below"), QR
+            and manual-code rejections are surfaced as actionable copy
+            ("look for MT:…", "11 or 21 digits"). */}
+        {errorMsg && (status === "denied" || status === "no-camera" || status === "scanning" || status === "idle") && (
           <div
             id="matter-manual-help"
             className="flex items-start gap-2 type-footnote text-label-tertiary"
