@@ -13,6 +13,7 @@ come in subsequent commits.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -119,12 +120,20 @@ async def startup() -> None:
     # is what actually opens the mic stream + ONNX runtime. STT + TTS
     # clients are also lazy — `available` is probed by pipeline.start()
     # once, not on every transcript / synthesize.
+    #
+    # `build_llm_from_env()` does a synchronous httpx.get to ipapi.co
+    # for the geo lookup; `_pipeline.start()` does three sync
+    # socket.create_connection probes of STT / TTS / orchestrator. Both
+    # can each block the event loop for up to ~5 s each in the worst
+    # case (DNS failures, dropped packets). Run them in a worker thread
+    # so the FastAPI `/health` endpoint stays responsive within the
+    # Dockerfile `HEALTHCHECK --start-period=10s` window.
     global _pipeline
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
         tts = build_tts_from_env()
-        llm = build_llm_from_env()
+        llm = await asyncio.to_thread(build_llm_from_env)
         _pipeline = WakePipeline(
             detector=detector,
             stt=stt,
@@ -136,7 +145,7 @@ async def startup() -> None:
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
         )
-        _pipeline.start()
+        await asyncio.to_thread(_pipeline.start)
     except Exception as exc:
         logger.error("wake pipeline failed to start: %s", exc)
 

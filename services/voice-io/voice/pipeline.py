@@ -199,6 +199,13 @@ class WakePipeline:
         self._probe_thread: Optional[threading.Thread] = None
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
+        # Speak-path mutex — held across synthesize() + _play_pcm() so a
+        # concurrent POST /voice/say and a wake → LLM → speak callback
+        # can't both drive sounddevice's global stream state at once.
+        # Acquired non-blocking: second caller gets `already_speaking`
+        # rather than queueing (LLM replies are short enough that queue
+        # logic isn't worth the complexity). See review on PR #227.
+        self._speak_lock = threading.Lock()
 
         # Status snapshot — guarded by _lock for atomic /voice/status reads.
         self._state: PipelineState = "idle"
@@ -360,38 +367,49 @@ class WakePipeline:
         if not text or not text.strip():
             return {"ok": False, "error": "empty text", "duration_s": 0.0}
 
-        # Record state + transition. The wake loop sees 'speaking' on
-        # its next frame and skips wake detection (handler is a no-op
-        # for that state).
-        with self._lock:
-            prev_state = self._state
-            self._state = "speaking"
-            self._last_response = text
-            self._last_response_at = time.time()
+        # Serialize against concurrent speak() callers. If another speak
+        # is already in flight (POST /voice/say while wake → LLM → speak
+        # is mid-playback, or vice versa), bail out instead of stepping
+        # on sounddevice's global stream state. Non-blocking acquire so
+        # we never queue up requests we'd play out of order.
+        if not self._speak_lock.acquire(blocking=False):
+            return {"ok": False, "error": "already_speaking", "duration_s": 0.0}
 
         try:
-            audio = self._tts.synthesize(text, voice=voice)
-        except TTSUnavailable as exc:
-            self._set_error(f"TTS synthesize failed: {exc}")
-            return {"ok": False, "error": str(exc), "duration_s": 0.0}
+            # Record state + transition. The wake loop sees 'speaking' on
+            # its next frame and skips wake detection (handler is a no-op
+            # for that state).
+            with self._lock:
+                prev_state = self._state
+                self._state = "speaking"
+                self._last_response = text
+                self._last_response_at = time.time()
 
-        # Play. Skip if the synthesized audio is empty (e.g. empty text).
-        if not audio.pcm:
+            try:
+                audio = self._tts.synthesize(text, voice=voice)
+            except TTSUnavailable as exc:
+                self._set_error(f"TTS synthesize failed: {exc}")
+                return {"ok": False, "error": str(exc), "duration_s": 0.0}
+
+            # Play. Skip if the synthesized audio is empty (e.g. empty text).
+            if not audio.pcm:
+                self._restore_state_after_speak(prev_state)
+                return {"ok": True, "duration_s": 0.0, "sample_rate": audio.sample_rate}
+
+            try:
+                self._play_pcm(audio)
+            except Exception as exc:
+                self._set_error(f"playback failed: {exc}")
+                return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
+
             self._restore_state_after_speak(prev_state)
-            return {"ok": True, "duration_s": 0.0, "sample_rate": audio.sample_rate}
-
-        try:
-            self._play_pcm(audio)
-        except Exception as exc:
-            self._set_error(f"playback failed: {exc}")
-            return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
-
-        self._restore_state_after_speak(prev_state)
-        return {
-            "ok": True,
-            "duration_s": audio.duration_s,
-            "sample_rate": audio.sample_rate,
-        }
+            return {
+                "ok": True,
+                "duration_s": audio.duration_s,
+                "sample_rate": audio.sample_rate,
+            }
+        finally:
+            self._speak_lock.release()
 
     def _play_pcm(self, audio: SynthesizedAudio) -> None:
         """Hand the PCM to sounddevice. Blocking."""
