@@ -56,9 +56,6 @@ const STEPS: Step[] = [
 export default function SetupPage() {
   const [step, setStep] = useState<Step>("welcome");
   const [displayName, setDisplayName] = useState("");
-  /** Captured from the Internet step so the VPN step (later commit) can
-   *  surface it. Empty string when the customer skipped Internet. */
-  const [, setDuckdnsSubdomain] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
   return (
@@ -81,10 +78,7 @@ export default function SetupPage() {
 
         {step === "internet" && (
           <InternetStep
-            onComplete={(subdomain) => {
-              setDuckdnsSubdomain(subdomain);
-              setStep("storage");
-            }}
+            onComplete={() => setStep("storage")}
             onSkip={() => setStep("storage")}
           />
         )}

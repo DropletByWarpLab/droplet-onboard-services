@@ -99,6 +99,9 @@ export interface ChatRequest {
   temperature?: number;
   max_tokens?: number;
   provider?: string;
+  /** WARP-174: skip /chat history persistence for throwaway turns
+   * (setup wizard "Ask the AI" probe, health checks). Default false. */
+  ephemeral?: boolean;
 }
 
 export interface ModelInfo {

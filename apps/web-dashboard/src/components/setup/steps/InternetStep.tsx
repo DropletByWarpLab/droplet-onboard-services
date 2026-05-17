@@ -33,7 +33,11 @@ export function InternetStep({
   onComplete,
   onSkip,
 }: {
-  onComplete: (subdomain: string) => void;
+  // VpnStep re-fetches the live endpoint via `fetchVpnStatus()` on
+  // mount, so the parent doesn't need to thread the subdomain through.
+  // (The wizard used to pipe it as an early-paint placeholder; cleaner
+  // to let the server be the single source of truth.)
+  onComplete: () => void;
   onSkip: () => void;
 }) {
   const [subdomain, setSubdomain] = useState("");
@@ -115,7 +119,7 @@ export function InternetStep({
       if (!keepStored) payload.token = token.trim();
       const result = await setDuckDnsConfig(payload);
       setExisting(result);
-      onComplete(subdomain.trim());
+      onComplete();
     } catch (e) {
       const msg =
         e instanceof Error ? e.message : "Could not save. Try again in a moment.";

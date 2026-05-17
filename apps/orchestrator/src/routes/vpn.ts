@@ -65,13 +65,30 @@ const createPeerSchema = z.object({
  * override path is unaffected — if you set the env var you keep working
  * even if the routing service is down.
  */
+// In-process TTL cache for the DuckDNS lookup. The fallback fires
+// inside both `GET /vpn/status` (polled by the dashboard's
+// remote-access page) and `POST /vpn/peers` (one-shot per peer
+// creation). DuckDNS subdomains don't change minute-to-minute, and
+// hitting the routing service on every GET would amplify dashboard
+// polling onto a Python sidecar that already has plenty to do. 30s
+// strikes the balance between "operator just turned DuckDNS on and
+// expects to see the endpoint immediately" and "don't hammer the
+// routing service on the hot path".
+const ENDPOINT_CACHE_TTL_MS = 30_000;
+let _endpointCache: { value: string; expiresAt: number } | null = null;
+
 async function resolveEndpointHost(): Promise<string> {
   const envHost = config.WIREGUARD_ENDPOINT_HOST.trim();
   if (envHost) return envHost;
+  const now = Date.now();
+  if (_endpointCache && _endpointCache.expiresAt > now) {
+    return _endpointCache.value;
+  }
+  let value = "";
   try {
     const ddns = await fetchDuckDnsStatus();
     if (ddns.configured && ddns.enabled) {
-      return ddns.fullDomain || `${ddns.subdomain}.duckdns.org`;
+      value = ddns.fullDomain || `${ddns.subdomain}.duckdns.org`;
     }
   } catch (err) {
     logger.debug(
@@ -79,7 +96,14 @@ async function resolveEndpointHost(): Promise<string> {
       "vpn: could not check DuckDNS for endpoint fallback — treating as unconfigured",
     );
   }
-  return "";
+  _endpointCache = { value, expiresAt: now + ENDPOINT_CACHE_TTL_MS };
+  return value;
+}
+
+// Test-only: drop the in-process cache so unit tests can simulate a
+// DuckDNS config change without waiting out the TTL.
+export function _resetEndpointCacheForTests(): void {
+  _endpointCache = null;
 }
 
 function getUser(req: Request): { username: string; role: string } {
