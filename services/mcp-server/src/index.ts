@@ -45,7 +45,13 @@ function baseUrlFor(target: HttpTarget): string {
     case "routing":
       return process.env.ROUTING_SERVICE_URL ?? "http://host.docker.internal:8080";
     case "cameras":
-      return process.env.CAMERA_DISCOVERY_URL ?? "http://camera-discovery:8000";
+      // camera-discovery runs network_mode: host (binds privileged
+      // sockets for ONVIF WS-Discovery + RTSP scan); other compose-net
+      // containers can't resolve it by service DNS. Same pattern as
+      // routing/switch — reach it through the host-gateway hostname
+      // the orchestrator's `extra_hosts` already wires up. Real port
+      // is 8085 per services/camera-discovery/Dockerfile.
+      return process.env.CAMERA_DISCOVERY_URL ?? "http://host.docker.internal:8085";
     case "switchSvc":
       return process.env.SWITCH_SERVICE_URL ?? "http://host.docker.internal:8081";
     case "fileIndexer":

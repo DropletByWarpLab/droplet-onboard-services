@@ -26,6 +26,15 @@ export interface ToolContext {
     switchSvc: HttpClient;
     fileIndexer: HttpClient;
     nextcloud: HttpClient;
+    /**
+     * The orchestrator's own REST surface (`http://orchestrator:3000`).
+     * Use for handlers that need data the orchestrator already
+     * aggregates (e.g. `/api/cameras` wraps camera-discovery + Frigate
+     * state into a single canonical shape; `/api/matter/*` exposes the
+     * Matter fabric). The mcp-server's `createHttpClient` auto-injects
+     * a service-principal Bearer JWT on every call to this target.
+     */
+    orchestrator: HttpClient;
   };
   matter: MatterController;
   /** Embed one or more texts. Used by `search_content` to vectorize the

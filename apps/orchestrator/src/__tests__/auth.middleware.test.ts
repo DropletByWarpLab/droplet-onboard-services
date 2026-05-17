@@ -45,8 +45,13 @@ vi.mock("../services/jwt.service.js", async (importOriginal) => {
 const fetchSpy = vi.fn().mockResolvedValue(new Response("nope", { status: 500 }));
 vi.stubGlobal("fetch", fetchSpy);
 
-// Import AFTER mocks are set up so SERVICE_PRINCIPALS reads our config.
-const { authMiddleware } = await import("../middleware/auth.js");
+// Mocks above are hoisted by vitest's transform so they run before this
+// static import resolves. The earlier `await import` shape worked for
+// vitest but tripped `tsc` (the orchestrator project compiles to
+// CommonJS, where top-level await isn't valid). Static import + hoisted
+// vi.mock is the conventional vitest pattern and compiles cleanly under
+// either module target.
+import { authMiddleware } from "../middleware/auth.js";
 
 interface FakeReq {
   headers: Record<string, string | undefined>;
