@@ -17,6 +17,10 @@ vi.mock("../config.js", () => ({
     AUTH_ENABLED: true,
     NEXTCLOUD_URL: "http://nextcloud.test",
     SERVICE_TOKEN_VOICE: "test-voice-token-32chars-padding-xyz",
+    // WARP-339: distinct shared secret for mcp-server → orchestrator
+    // calls. Same shape as SERVICE_TOKEN_VOICE; the principal table
+    // maps each token to a different AuthUser.
+    SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
   },
 }));
 
@@ -207,6 +211,53 @@ describe("authMiddleware — service-principal bearer", () => {
 
     expect(next).toHaveBeenCalledTimes(1);
     expect((req as unknown as FakeReq).user).toBeUndefined();
+  });
+
+  // WARP-339: same contract as the voice principal above, just for the
+  // mcp-server's outbound calls to /api/matter/*, /api/audit-log/*,
+  // /api/safety-tier/*.
+  it("recognises SERVICE_TOKEN_MCP and sets req.user.id='_service:mcp'", async () => {
+    const req = buildReq({
+      path: "/api/matter/commission",
+      headers: { authorization: "Bearer test-mcp-token-32chars-padding-1234a" },
+    }) as unknown as Request;
+    const res = buildRes() as unknown as Response;
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await Promise.resolve();
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect((res as unknown as { statusCode: number }).statusCode).toBe(0);
+    const user = (req as unknown as FakeReq).user as { id: string; role: string };
+    expect(user.id).toBe("_service:mcp");
+    expect(user.role).toBe("service");
+    // Same short-circuit guarantee as the voice token.
+    expect(verifyAccessToken).not.toHaveBeenCalled();
+    expect(cacheGet).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("each service token maps to its own distinct principal (no cross-promotion)", async () => {
+    // Defense in depth: even if the mcp token leaked, it must not be
+    // accepted as the voice principal (or vice versa). The principal
+    // table is keyed by exact token match, not by role string, so the
+    // distinct AuthUser.id proves the rows are isolated.
+    const voiceReq = buildReq({
+      headers: { authorization: "Bearer test-voice-token-32chars-padding-xyz" },
+    }) as unknown as Request;
+    const mcpReq = buildReq({
+      headers: { authorization: "Bearer test-mcp-token-32chars-padding-1234a" },
+    }) as unknown as Request;
+    const voiceNext = vi.fn() as unknown as NextFunction;
+    const mcpNext = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(voiceReq, buildRes() as unknown as Response, voiceNext);
+    authMiddleware(mcpReq, buildRes() as unknown as Response, mcpNext);
+    await Promise.resolve();
+
+    expect((voiceReq as unknown as FakeReq).user).toMatchObject({ id: "_service:voice" });
+    expect((mcpReq as unknown as FakeReq).user).toMatchObject({ id: "_service:mcp" });
   });
 });
 

@@ -141,6 +141,22 @@ const envSchema = z.object({
   // lockstep. Both must agree or voice → orchestrator handshake fails.
   SERVICE_TOKEN_VOICE: z.string().default(""),
 
+  // SERVICE_TOKEN_MCP — WARP-339. Same shape as SERVICE_TOKEN_VOICE,
+  // for mcp-server's outbound calls back to the orchestrator's REST
+  // surface (matter, audit-log, safety-tier). The mcp-server runs as
+  // a sibling container and its `createHttpClient("orchestrator")`
+  // attaches this value as a Bearer on every request.
+  //
+  // The dual-token shape (one per service consumer) rather than a
+  // shared "internal" token gives us per-service rotation and a
+  // clean audit trail (matchServiceToken sets distinct AuthUser
+  // principals — `_service:voice` vs `_service:mcp` — so request
+  // logs attribute correctly even when both speak at the same time).
+  //
+  // To rotate: change the value here AND in mcp-server's compose
+  // env (ORCHESTRATOR_TOKEN) in lockstep.
+  SERVICE_TOKEN_MCP: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if

@@ -247,6 +247,18 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  {
+    // WARP-339: mcp-server presents this Bearer on outbound calls to
+    // the orchestrator's REST routes (matter, audit-log, safety-tier).
+    // See services/mcp-server/src/index.ts createHttpClient("orchestrator").
+    token: config.SERVICE_TOKEN_MCP,
+    principal: {
+      id: "_service:mcp",
+      username: "_service:mcp",
+      displayName: "MCP Server",
+      role: "service",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {
