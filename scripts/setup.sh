@@ -168,12 +168,14 @@ if [ "$DRY_RUN" = "true" ]; then
   log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
     log_info "  Would skip secret generation (.env already exists)"
-    log_info "  Would migrate .env: backfill ROUTING_SERVICE_TOKEN, ROUTING_MODE if missing"
+    log_info "  Would migrate .env: backfill ROUTING_SERVICE_TOKEN, ROUTING_MODE,"
+    log_info "                       SERVICE_TOKEN_VOICE if missing"
   else
     log_info "  Would generate secrets: POSTGRES_PASSWORD, REDIS_PASSWORD,"
     log_info "                  MQTT_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD,"
     log_info "                  DEVICE_SECRET, DEVICE_SECRET_KEY,"
-    log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN"
+    log_info "                  JWT_SECRET, ROUTING_SERVICE_TOKEN,"
+    log_info "                  SERVICE_TOKEN_VOICE"
     log_info "  Would write .env via heredoc (no .env.example dependency)"
   fi
   log_info "  Would materialize artifacts (idempotent): MQTT password file,"

@@ -16,6 +16,7 @@ export interface ContextDeps {
     | "switchSvc"
     | "fileIndexer"
     | "nextcloud"
+    | "orchestrator"
   ) => HttpClient;
   /**
    * Optional embedding RPC. Wired in `index.ts` to a singleton gRPC
@@ -102,6 +103,7 @@ export function buildContext(
       switchSvc: deps.httpFactory("switchSvc"),
       fileIndexer: deps.httpFactory("fileIndexer"),
       nextcloud: deps.httpFactory("nextcloud"),
+      orchestrator: deps.httpFactory("orchestrator"),
     },
     embedText: deps.embedText,
     searchHybrid,

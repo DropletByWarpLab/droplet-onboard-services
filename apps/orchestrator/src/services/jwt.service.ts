@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import { config } from "../config.js";
 import { cacheGet, cacheSet } from "./cache.service.js";
 
-export type Role = "owner" | "admin" | "family" | "guest";
+export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
 export interface JwtPayload {
   sub: string;
@@ -20,7 +20,7 @@ export const REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 const REFRESH_DENYLIST_PREFIX = "jwt:deny:";
 const REFRESH_LOCK_PREFIX = "jwt:rotate:";
 
-const VALID_ROLES: readonly Role[] = ["owner", "admin", "family", "guest"] as const;
+const VALID_ROLES: readonly Role[] = ["owner", "admin", "family", "guest", "service"] as const;
 
 /**
  * Derive a role from a Nextcloud group list.

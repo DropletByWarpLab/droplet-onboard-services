@@ -11,6 +11,7 @@ import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
 import { RerankerClient } from "./reranker.client.js";
 import { searchHybrid } from "./file-search.service.js";
+import { mintInternalToken } from "./auth/jwt.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -44,7 +45,13 @@ function baseUrlFor(target: HttpTarget): string {
     case "routing":
       return process.env.ROUTING_SERVICE_URL ?? "http://host.docker.internal:8080";
     case "cameras":
-      return process.env.CAMERA_DISCOVERY_URL ?? "http://camera-discovery:8000";
+      // camera-discovery runs network_mode: host (binds privileged
+      // sockets for ONVIF WS-Discovery + RTSP scan); other compose-net
+      // containers can't resolve it by service DNS. Same pattern as
+      // routing/switch — reach it through the host-gateway hostname
+      // the orchestrator's `extra_hosts` already wires up. Real port
+      // is 8085 per services/camera-discovery/Dockerfile.
+      return process.env.CAMERA_DISCOVERY_URL ?? "http://host.docker.internal:8085";
     case "switchSvc":
       return process.env.SWITCH_SERVICE_URL ?? "http://host.docker.internal:8081";
     case "fileIndexer":
@@ -74,11 +81,24 @@ function joinUrl(base: string, path: string, params?: Record<string, unknown>): 
  */
 function createHttpClient(target: HttpTarget): HttpClient {
   const base = baseUrlFor(target);
+  // When the target is the orchestrator, every request needs a Bearer
+  // token the orchestrator's auth middleware will accept. The mcp-server
+  // shares JWT_SECRET with the orchestrator, so we mint a short-lived
+  // service-principal access token here. Other targets (routing, switch)
+  // use their own service-token envs that callers pass via opts.headers.
+  // See ./auth/jwt.ts:mintInternalToken for the claims shape + rationale.
+  const injectAuth = (h: Record<string, string> = {}): Record<string, string> => {
+    if (target !== "orchestrator") return h;
+    if (h.Authorization || h.authorization) return h;
+    const secret = process.env.JWT_SECRET;
+    if (!secret) return h;
+    return { ...h, Authorization: `Bearer ${mintInternalToken(secret)}` };
+  };
   return {
     async get(path, opts) {
       return fetch(joinUrl(base, path, opts?.params), {
         method: "GET",
-        headers: opts?.headers,
+        headers: injectAuth(opts?.headers),
       });
     },
     async post(path, body, opts) {
@@ -86,7 +106,7 @@ function createHttpClient(target: HttpTarget): HttpClient {
       if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
       return fetch(joinUrl(base, path), {
         method: "POST",
-        headers,
+        headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     },
@@ -95,14 +115,14 @@ function createHttpClient(target: HttpTarget): HttpClient {
       if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
       return fetch(joinUrl(base, path), {
         method: "PATCH",
-        headers,
+        headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     },
     async delete(path, opts) {
       return fetch(joinUrl(base, path), {
         method: "DELETE",
-        headers: opts?.headers,
+        headers: injectAuth(opts?.headers),
       });
     },
   };
