@@ -1097,10 +1097,14 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             else:
                 raise
 
-        values = {
+        # When the caller omits the token, keep the value already on disk
+        # (the wizard's "keep stored token" path so returning customers
+        # don't have to re-type it). Only seed `password` when we have a
+        # new token to write; otherwise uci.set merges the remaining
+        # fields and leaves the existing password untouched.
+        values: dict[str, str] = {
             "service_name": "duckdns.org",
             "domain": req.subdomain,
-            "password": req.token,
             "enabled": "1" if req.enabled else "0",
             # Watch WAN for IP changes; DuckDNS is for IPv4 by default.
             "interface": "wan",
@@ -1122,6 +1126,21 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "force_interval": "72",
             "force_unit": "hours",
         }
+
+        if req.token is not None:
+            values["password"] = req.token
+        elif not section_exists:
+            # First-time setup with no token in the request body is a
+            # programming error: there's nothing on disk to keep, and
+            # ddns-scripts requires a non-empty password to do anything.
+            # Surface a clean 422 rather than write a half-formed section.
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "token is required on first DuckDNS setup; only re-saves "
+                    "of an already-configured DuckDNS section may omit it."
+                ),
+            )
 
         if section_exists:
             r.uci.set("ddns", DUCKDNS_SECTION, values)

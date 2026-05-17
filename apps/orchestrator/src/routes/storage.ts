@@ -1,10 +1,19 @@
-import { Router } from "express";
+import { Router, Request } from "express";
 import pino from "pino";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
+
+// Drive labels are device-wide config that any user (incl. family
+// accounts) shares, so PATCH is admin-only — mirrors the gate around
+// PUT /api/ddns/duckdns. Family users can still see the labels via the
+// existing GET routes; they just can't change them.
+function isAdmin(req: Request): boolean {
+  const role = req.user?.role;
+  return role === "owner" || role === "admin";
+}
 
 const logger = pino({ name: "storage-route" });
 
@@ -152,8 +161,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    */
   router.patch("/storage/drives/:uuid", async (req, res, next) => {
     try {
+      if (!isAdmin(req)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
       const { uuid } = req.params;
-      if (!/^[A-Za-z0-9-]{1,64}$/.test(uuid)) {
+      // FAT/exFAT UUIDs sometimes include `:` (rare on Linux blkid output,
+      // common on macOS/Windows-formatted disks); accept it alongside the
+      // hyphenated EXT/NTFS-style UUIDs the original regex covered.
+      if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid)) {
         return res
           .status(400)
           .json({ error: "Invalid drive UUID" });

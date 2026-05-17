@@ -104,11 +104,37 @@ export function VpnStep({
     }
   }
 
+  // Auto-clear the system clipboard 30 s after a successful copy. The
+  // `created.conf` body is a full WireGuard config — including the
+  // peer's PrivateKey — and writeText leaves it in the OS clipboard
+  // (visible to clipboard-history on macOS / Win11, other tabs, any
+  // extension with clipboard permission) until something else overwrites
+  // it. PR #232 review (Romain): "drop the affordance or schedule a
+  // clipboard wipe and surface a one-line expires-in-30s hint." 30 s is
+  // long enough to paste into WireGuard's Import-from-clipboard flow on
+  // desktop, short enough to bound exposure. We also surface a countdown
+  // hint next to the button so the customer isn't surprised when the
+  // value disappears.
+  const CLIPBOARD_TTL_MS = 30_000;
+
   function handleCopyConf() {
     if (!created) return;
     navigator.clipboard.writeText(created.conf).then(() => {
       setCopied(true);
+      // Reset the button label after 1.5 s (unchanged).
       setTimeout(() => setCopied(false), 1500);
+      // Wipe the clipboard after the TTL. We overwrite with an empty
+      // string rather than calling .reset()/.clear() because not every
+      // browser exposes those; writeText("") is universally supported.
+      // Best-effort: if the user's already copied something else in the
+      // meantime we just overwrite their newer value with empty, which
+      // is mildly annoying but strictly safer than leaving the conf.
+      setTimeout(() => {
+        navigator.clipboard.writeText("").catch(() => {
+          // Permission may have been revoked since the original write
+          // (focus loss, tab background); nothing meaningful we can do.
+        });
+      }, CLIPBOARD_TTL_MS);
     });
   }
 
@@ -297,23 +323,30 @@ export function VpnStep({
         </div>
       </div>
 
-      <div className="flex items-center justify-center gap-2 mb-5">
-        <button
-          type="button"
-          onClick={handleDownloadConf}
-          className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 !px-3"
-        >
-          <Download size={14} />
-          Download .conf
-        </button>
-        <button
-          type="button"
-          onClick={handleCopyConf}
-          className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 !px-3"
-        >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-          {copied ? "Copied" : "Copy"}
-        </button>
+      <div className="flex flex-col items-center justify-center gap-1 mb-5">
+        <div className="flex items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={handleDownloadConf}
+            className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 !px-3"
+          >
+            <Download size={14} />
+            Download .conf
+          </button>
+          <button
+            type="button"
+            onClick={handleCopyConf}
+            className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 !px-3"
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+        {copied && (
+          <p className="type-caption-1 text-label-tertiary">
+            Clipboard clears in 30 s for safety.
+          </p>
+        )}
       </div>
 
       <LearnMoreCard title="How to use this on your phone">

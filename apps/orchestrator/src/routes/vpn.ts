@@ -102,7 +102,17 @@ export function createVpnRouter(prisma: PrismaClient): Router {
   // count, and whether the endpoint host is configured. No private data
   // returned. Available to any authenticated user — they need to know
   // whether Remote Access is on before they hit "Add device".
-  router.get("/vpn/status", async (_req: Request, res: Response, next: NextFunction) => {
+  //
+  // The full `endpointHost` (i.e. the DuckDNS subdomain that resolves
+  // to the device's public IP) is admin-only: pre-WARP-174 this field
+  // came from the operator-set WIREGUARD_ENDPOINT_HOST env var and was
+  // never visible to family users. Now that resolveEndpointHost() falls
+  // back to DuckDNS, exposing it broadly would leak the device's public
+  // reachability to every authenticated account — same gate the
+  // PUT /api/ddns/duckdns route already enforces. Family users still
+  // get `endpointConfigured: boolean` so the "Add device" button can
+  // light up at the right time without leaking the hostname itself.
+  router.get("/vpn/status", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const status = await vpnStatus();
       // WARP-174: derive from DuckDNS as a fallback when the env override
@@ -110,6 +120,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       // "Add device" button enables the moment DuckDNS lands.
       const endpointHost = await resolveEndpointHost();
       const endpointConfigured = endpointHost !== "";
+      const exposeEndpointHost = isAdmin(req);
       if (!status) {
         return res.json({
           configured: false,
@@ -120,7 +131,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       res.json({
         configured: true,
         endpointConfigured,
-        endpointHost: endpointHost || null,
+        endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
         addresses: status.addresses,
@@ -165,8 +176,17 @@ export function createVpnRouter(prisma: PrismaClient): Router {
   // dashboard renders the .conf as a QR. The private key is in the .conf
   // text and is NEVER returned again — if the user loses it they revoke
   // and re-mint.
+  //
+  // Admin-gated: minting a VPN peer punches a route into the LAN with
+  // full network-layer access. Self-service enrolment isn't the intended
+  // policy — family users should ask an admin to add their device. Same
+  // posture as the rest of `/ddns/duckdns` (network-wide config is
+  // admin-only). The wizard's VPN step now also surfaces this in copy.
   router.post("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
     try {
+      if (!isAdmin(req)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
       const parsed = createPeerSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({

@@ -2132,7 +2132,10 @@ export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
 
 export async function setDuckDnsConfig(opts: {
   subdomain: string;
-  token: string;
+  // Optional: omit entirely when the customer is keeping a previously
+  // stored token. The orchestrator + routing service preserve the
+  // existing password value in that case rather than rewriting cleartext.
+  token?: string;
   enabled?: boolean;
 }): Promise<DuckDnsStatus> {
   const res = await authFetch(`${BASE}/api/ddns/duckdns`, {
