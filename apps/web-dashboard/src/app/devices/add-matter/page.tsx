@@ -19,7 +19,7 @@
  * can correct a typo without re-typing.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Lightbulb, Loader2 } from "lucide-react";
@@ -34,8 +34,20 @@ type FlowState =
 export default function AddMatterDevicePage() {
   const router = useRouter();
   const [state, setState] = useState<FlowState>({ phase: "scan", error: null });
+  // In-flight guard for `handleCode`. We can't rely on `state.phase`
+  // alone: the @zxing decode callback can fire a second time after
+  // `stopCamera()` is called (frame already in flight inside the worker),
+  // and the manual-entry submit can race the QR resolution. A ref is the
+  // canonical pattern for "is there a commissioning request open right
+  // now" — `state` is async, the ref isn't. We also pass
+  // `disabled={state.phase === "commission"}` into the scanner so the
+  // Commission button doesn't fire a duplicate manual submit on top of
+  // an in-flight QR commission. See PR #233 review.
+  const commissioningRef = useRef(false);
 
   const handleCode = useCallback(async (pairingCode: string) => {
+    if (commissioningRef.current) return;
+    commissioningRef.current = true;
     setState({ phase: "commission", pairingCode, startedAt: Date.now() });
     try {
       const result = await commissionMatterDevice(pairingCode);
@@ -45,8 +57,9 @@ export default function AddMatterDevicePage() {
       // Keep customer's manually-entered code in mind for retry — but
       // the textbox lives inside MatterQrScanner so we can't repopulate
       // without lifting state. For now, restart at scan with the error.
-      // TODO(WARP-XXX): persist last-attempted code for one-tap retry.
       setState({ phase: "scan", error: msg });
+    } finally {
+      commissioningRef.current = false;
     }
   }, []);
 
@@ -79,7 +92,10 @@ export default function AddMatterDevicePage() {
               onDismiss={() => setState({ phase: "scan", error: null })}
             />
           )}
-          <MatterQrScanner onResult={handleCode} disabled={false} />
+          <MatterQrScanner
+            onResult={handleCode}
+            disabled={state.phase !== "scan"}
+          />
         </>
       )}
 
