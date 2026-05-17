@@ -120,7 +120,7 @@ DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Compose profiles ---
 # Linux: include both "linux" + "full":
-#   linux → Frigate (needs /dev/dri/renderD128), voice-orchestrator (needs /dev/snd)
+#   linux → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd)
 #   full  → switch driver, camera-discovery, oled-display (PyPortal screen)
 # macOS: leave empty — Frigate is skipped, dashboard remains reachable via
 # the gateway. Add "full" by hand if you want the hardware-facing services.
@@ -187,7 +187,7 @@ migrate_env() {
   [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
 
   # COMPOSE_PROFILES on Linux defaults to "linux,full" — covers both the
-  # linux-only services (Frigate, voice-orchestrator; need /dev/dri or
+  # linux-only services (Frigate, voice-io; need /dev/dri or
   # /dev/snd) and the hardware-facing "full" services (switch driver,
   # camera-discovery, oled-display PyPortal). macOS leaves it empty so
   # neither set tries to mount Linux-only device nodes.

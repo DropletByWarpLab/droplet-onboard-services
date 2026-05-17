@@ -144,10 +144,10 @@ prepare_and_build() {
     oled-display
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
-    voice-orchestrator
+    voice-io
   )
   # Both profiles active so compose sees every profile-gated service.
-  # Without --profile linux, `build voice-orchestrator` errors out because
+  # Without --profile linux, `build voice-io` errors out because
   # the service is invisible to compose's view of the project. The default-
   # profile services are visible regardless of --profile flags.
   for svc in "${build_services[@]}"; do
