@@ -781,7 +781,7 @@ services:
       # liveness). Override any with a real URL via .env to enable.
       - OPS_PROBE_ORCHESTRATOR=${OPS_PROBE_ORCHESTRATOR:-http://orchestrator:3000/api/orchestrator/health}
       - OPS_PROBE_AI_GATEWAY=${OPS_PROBE_AI_GATEWAY:-http://ai-gateway:8000/ai/health}
-      - OPS_PROBE_VOICE=${OPS_PROBE_VOICE:-http://voice-orchestrator:8086/health}
+      - OPS_PROBE_VOICE=${OPS_PROBE_VOICE:-http://voice-io:8086/health}
       - OPS_PROBE_FRIGATE=${OPS_PROBE_FRIGATE:-http://frigate:5000/healthz}
       # Workers / no-HTTP-by-design — leave defaults empty:
       - OPS_PROBE_WEB_DASHBOARD=${OPS_PROBE_WEB_DASHBOARD:-}
@@ -806,9 +806,16 @@ services:
     volumes:
       # The whole point of this container — read container state +
       # restart sick ones. Mount as :ro is NOT possible because the
-      # daemon needs write to act on POSTs. The bearer-token gate
-      # restricts what callers can ask for.
+      # daemon needs write to act on POSTs. The bearer-token gate +
+      # the compose-project label scoping in ops/docker_client.py
+      # restrict what callers can ask for.
       - /var/run/docker.sock:/var/run/docker.sock
+      # WARP-337: persistent audit log. Every /ops/* request lands
+      # here as a JSONL line (timestamp, identity, method, path,
+      # status, latency, optional detail). Mount the named volume
+      # rather than a bind so the audit trail survives ops-console
+      # container restarts during a support engagement.
+      - ops-audit:/var/log/ops-console
     # No-new-privileges defence-in-depth — even with docker.sock the
     # container itself can't gain extra caps. Helpful if a future
     # ops-console exec path lands and we forget to harden it.
@@ -829,6 +836,10 @@ volumes:
   frigate-config:
   aikeys:
   nextcloud-data:
+  # WARP-337: ops-console JSONL audit trail. Named volume rather than a
+  # bind mount so the trail survives container restarts during support
+  # engagements and doesn't require operators to pre-create a host dir.
+  ops-audit:
   matter-data:
   brain-memory-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).

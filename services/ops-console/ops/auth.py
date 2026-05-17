@@ -23,17 +23,28 @@ from fastapi import Header, HTTPException, status
 
 logger = logging.getLogger("ops.auth")
 
-# Token loaded once at module import. setup.sh writes a 32-byte hex
-# string to .env as OPS_TOKEN; if missing we generate one at startup
-# so the dev box still works (logged loudly so operators don't ship
-# a generated-token deployment).
+# Token loaded once at module import. scripts/lib/secrets.sh (WARP-337)
+# generates OPS_TOKEN in `generate_env` and backfills it via
+# `_migrate_ensure_key` so existing installs get one on the next
+# `./scripts/setup.sh` run — production paths should never hit the
+# ephemeral fallback below.
+#
+# The ephemeral path stays as a developer escape hatch: running
+# `uvicorn main:app` against a bare repo without `.env` shouldn't 500
+# at every request. We log the value loudly so it's discoverable in
+# `docker logs` if support needs it during a misconfigured-deployment
+# fire drill, but the structured-log line carries an explicit "NOT
+# suitable for production — run ./scripts/setup.sh" hint so operators
+# never assume the ephemeral mode is the intended one.
 _OPS_TOKEN = (os.environ.get("OPS_TOKEN") or "").strip()
 if not _OPS_TOKEN:
     _OPS_TOKEN = secrets.token_hex(32)
     logger.warning(
         "OPS_TOKEN env not set — generated ephemeral token for this "
-        "process. NOT suitable for production. Set OPS_TOKEN in .env "
-        "to a stable secret. Generated value (this run only): %s",
+        "process (regenerates on every container restart, invalidating "
+        "any saved bearer). NOT suitable for production. Run "
+        "`./scripts/setup.sh` once on the host to provision a stable "
+        "OPS_TOKEN in .env. Generated value (this run only): %s",
         _OPS_TOKEN,
     )
 

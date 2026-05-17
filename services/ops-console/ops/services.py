@@ -42,7 +42,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
+import urllib.parse
 from dataclasses import dataclass, asdict
 from typing import Any, Literal
 
@@ -82,8 +84,63 @@ class ProbeResult:
 # profile" and emit unknown rather than down. Avoids spamming the UI
 # for services that legitimately aren't part of the photo-studio POC
 # (e.g. Frigate is only loaded when cameras are configured).
+#
+# URL validation: operator-controlled URLs are restricted to http(s)
+# scheme + compose-DNS-shaped hostnames (alphanumeric + hyphens, or
+# `host.docker.internal`). This prevents a misconfigured or
+# attacker-pre-planted OPS_PROBE_* env var from turning the
+# ops-console into an SSRF oracle (e.g. probing cloud metadata at
+# 169.254.169.254 or reading file:// URIs). Invalid URLs are logged
+# and treated as "not configured" rather than crashing the route.
+
+# Allow http and https only (no file://, ftp://, gopher://, etc.).
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+# Hostname grammar: bare DNS label (compose service name) or the
+# host.docker.internal alias for talking to the host gateway. No IP
+# literals, no public hostnames. Compose DNS names are
+# RFC 1035-shaped: start with a letter, then letters/digits/hyphens.
+_ALLOWED_HOST_RE = re.compile(
+    r"^(host\.docker\.internal|[a-z0-9][a-z0-9\-]*)$"
+)
+
+
+def _validate_probe_url(name: str, url: str) -> str:
+    """Return `url` if it points at an allowed scheme + host; else "" + log.
+
+    Empty input passes through (treated as "not configured" upstream).
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        logger.warning("OPS_PROBE_%s rejected: malformed URL", name.upper())
+        return ""
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        logger.warning(
+            "OPS_PROBE_%s rejected: scheme %r not in %s",
+            name.upper(), parsed.scheme, sorted(_ALLOWED_SCHEMES),
+        )
+        return ""
+    host = (parsed.hostname or "").lower()
+    if not _ALLOWED_HOST_RE.match(host):
+        logger.warning(
+            "OPS_PROBE_%s rejected: host %r not an allowed compose DNS name "
+            "(must match %s)", name.upper(), host, _ALLOWED_HOST_RE.pattern,
+        )
+        return ""
+    return url
+
+
 def _u(env_name: str, default: str) -> str:
-    return os.environ.get(env_name, default).strip()
+    """Read OPS_PROBE_* env, fall back to default, validate scheme + host.
+
+    Tolerates misconfiguration: an invalid URL falls back to empty (the
+    service surfaces as `unknown` rather than crashing the registry).
+    """
+    raw = os.environ.get(env_name, default).strip()
+    return _validate_probe_url(env_name, raw)
 
 
 def build_registry() -> dict[str, str]:
@@ -105,7 +162,10 @@ def build_registry() -> dict[str, str]:
         # --- verified live on POC ---
         "orchestrator":      _u("OPS_PROBE_ORCHESTRATOR",      "http://orchestrator:3000/api/orchestrator/health"),
         "ai-gateway":        _u("OPS_PROBE_AI_GATEWAY",        "http://ai-gateway:8000/ai/health"),
-        "voice-orchestrator":_u("OPS_PROBE_VOICE",             "http://voice-orchestrator:8086/health"),
+        # WARP-227: renamed voice-orchestrator → voice-io. Registry key
+        # tracks the compose service name so /ops/services output matches
+        # what the operator sees in `docker compose ps`.
+        "voice-io":          _u("OPS_PROBE_VOICE",             "http://voice-io:8086/health"),
         "frigate":           _u("OPS_PROBE_FRIGATE",           "http://frigate:5000/healthz"),
         # --- no HTTP /health endpoint exposed; container state is the check ---
         # web-dashboard is Next.js with no /api/health route shipped today.

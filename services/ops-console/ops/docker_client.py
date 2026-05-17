@@ -14,6 +14,22 @@ The mount is the privilege boundary: if you're inside the ops-console
 container, you ARE root on the host. The bearer-token gate in
 ops/auth.py is what prevents random /ops/* callers from reaching here.
 
+Project scoping (WARP-337)
+--------------------------
+docker.sock = host root, but the application layer should still scope
+its affordances to its own compose project. Every list / inspect /
+restart call filters / asserts on the
+`com.docker.compose.project=droplet-pi-platform` label. A bearer-token
+holder can therefore see and restart containers belonging to THIS
+stack, but cannot touch unrelated containers running on the same
+docker daemon (system containers, other compose stacks, etc.). This
+also makes the operator's view of `/ops/containers` match what they
+expect from `docker compose ps`.
+
+The project name is hard-coded to match the `name: droplet-pi-platform`
+top-level field in docker-compose.yml. If we ever ship a multi-stack
+appliance, lift this to an env var.
+
 Image / log volume
 ------------------
 Logs grow unbounded if no rotation policy is set on the daemon. We
@@ -47,6 +63,19 @@ logger = logging.getLogger("ops.docker")
 MAX_LOG_TAIL = int(os.environ.get("OPS_MAX_LOG_TAIL", "5000"))
 DEFAULT_LOG_TAIL = 200
 
+# Compose project label this service is allowed to act on. Matches the
+# top-level `name:` field in docker-compose.yml. Used by list / get /
+# restart to scope the docker.sock surface to our own stack.
+ALLOWED_PROJECT = os.environ.get(
+    "OPS_COMPOSE_PROJECT", "droplet-pi-platform"
+)
+
+# Cap the docker SDK's socket timeout so a hung daemon can't pin a
+# FastAPI threadpool worker for the SDK's default (60s). 30s is
+# enough for any legitimate op — list is <1s, restart waits for the
+# operator-supplied SIGTERM grace plus the SDK's own bookkeeping.
+_DOCKER_SOCKET_TIMEOUT_S = int(os.environ.get("OPS_DOCKER_TIMEOUT", "30"))
+
 # Module-level client. The docker SDK's client maintains a connection
 # pool to the daemon socket — instantiating per-request leaks fds.
 # from_env() reads DOCKER_HOST etc., default unix://var/run/docker.sock.
@@ -58,8 +87,36 @@ def _get_client() -> docker.DockerClient:
     reachable — caller should translate to HTTP 503."""
     global _client
     if _client is None:
-        _client = docker.from_env()
+        _client = docker.DockerClient.from_env(timeout=_DOCKER_SOCKET_TIMEOUT_S)
     return _client
+
+
+class NotInProject(Exception):
+    """Container exists but isn't in our compose project. Caller should
+    translate to HTTP 404 — we don't leak the existence of unrelated
+    containers via a different status code."""
+
+
+def _assert_in_project(container: Any) -> None:
+    """Refuse to act on containers outside our compose project.
+
+    Reads the `com.docker.compose.project` label from the container's
+    inspect data. Containers without the label (foreign / hand-run)
+    are also rejected.
+    """
+    attrs = container.attrs or {}
+    config = attrs.get("Config") or {}
+    labels = config.get("Labels") or {}
+    project = labels.get("com.docker.compose.project")
+    if project != ALLOWED_PROJECT:
+        logger.info(
+            "ops-console: refusing access to %s (project=%r, expected=%r)",
+            container.name, project, ALLOWED_PROJECT,
+        )
+        raise NotInProject(
+            f"container {container.name!r} not in compose project "
+            f"{ALLOWED_PROJECT!r}"
+        )
 
 
 @dataclass
@@ -109,11 +166,18 @@ def _summarise(c: Any) -> ContainerSummary:
 
 
 def list_containers(*, all_states: bool = True) -> list[ContainerSummary]:
-    """All containers known to the daemon. `all_states=False` returns
-    only running ones — match docker CLI default."""
+    """Containers in our compose project. `all_states=False` returns
+    only running ones — match docker CLI default.
+
+    Filtered server-side by the `com.docker.compose.project` label so
+    the operator never sees containers from unrelated stacks running
+    on the same daemon."""
     try:
         client = _get_client()
-        containers = client.containers.list(all=all_states)
+        containers = client.containers.list(
+            all=all_states,
+            filters={"label": f"com.docker.compose.project={ALLOWED_PROJECT}"},
+        )
     except DockerException as exc:
         logger.warning("docker list failed: %s", exc)
         raise
@@ -159,9 +223,14 @@ def get_logs(
     try:
         client = _get_client()
         container = client.containers.get(name_or_id)
+        _assert_in_project(container)
         raw: bytes = container.logs(**kwargs)
     except NotFound:
         raise
+    except NotInProject:
+        # Treat as 404 upstream — don't leak the existence of
+        # unrelated containers via a different status code.
+        raise NotFound(f"container {name_or_id!r} not found")
     except DockerException as exc:
         logger.warning("docker logs(%s) failed: %s", name_or_id, exc)
         raise
@@ -178,6 +247,7 @@ def restart_container(name_or_id: str, *, timeout: int = 10) -> ContainerSummary
     try:
         client = _get_client()
         container = client.containers.get(name_or_id)
+        _assert_in_project(container)
         logger.info("ops-console restarting container %s", container.name)
         container.restart(timeout=timeout)
         # Re-fetch — `attrs` is a snapshot, restart changes State /
@@ -185,6 +255,10 @@ def restart_container(name_or_id: str, *, timeout: int = 10) -> ContainerSummary
         container.reload()
     except NotFound:
         raise
+    except NotInProject:
+        # Same 404 mapping as the logs path — never leak that an
+        # out-of-project container exists.
+        raise NotFound(f"container {name_or_id!r} not found")
     except (APIError, DockerException) as exc:
         logger.warning("docker restart(%s) failed: %s", name_or_id, exc)
         raise

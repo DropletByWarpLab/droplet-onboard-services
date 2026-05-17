@@ -8,29 +8,36 @@ Two endpoint families:
                         is down, the container is genuinely sick.
 
   /ops/*                AUTH (bearer token from ops/auth.py). Every
-                        operator action lives here.
+                        operator action lives here, AND every request
+                        is audit-logged via ops.audit middleware
+                        (timestamp, identity, method, path, status,
+                        latency). The audit trail is the trust boundary
+                        with the customer — after a support engagement
+                        the JSONL log shows exactly what was looked at
+                        and what was changed.
 
 Why one router, not many: at this scale (single operator, ~10 endpoints)
 splitting into APIRouters per module adds indirection without paying
 for itself. Revisit when /ops/* grows past 30 routes.
 
-Static UI is mounted at /  (root). The single index.html does all the
-fetching client-side using the bearer token the operator pastes into
-a textbox. No cookie, no session — closing the tab forgets the token.
+Scope (WARP-337): this is the on-device SUPPORT CLIENT — an API
+surface for Warp Lab support to pull logs and machine state when a
+deployed Droplet needs hands-on troubleshooting. It is NOT the
+operator admin panel and NOT the fleet management plane (those live
+on warp-lab.com separately). No HTML UI is shipped — the API is
+consumed by support tooling over a reverse SSH/WireGuard tunnel.
 """
 from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
 from docker.errors import DockerException, NotFound
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 
-from ops import auth, docker_client, services as svc_probe, system as sys_probe
+from ops import audit, auth, docker_client, services as svc_probe, system as sys_probe
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -54,6 +61,15 @@ app = FastAPI(
     redoc_url=None,
     openapi_url="/openapi.json" if os.environ.get("OPS_ENABLE_DOCS") == "1" else None,
 )
+
+
+# WARP-337: install audit middleware before any route runs. Every
+# /ops/* request is recorded with status + latency + identity to
+# /var/log/ops-console/audit.jsonl (override with OPS_AUDIT_LOG) and
+# mirrored to the structured logger. /healthz and the static root are
+# skipped — they'd drown the support-relevant lines in healthcheck
+# noise.
+audit.install(app)
 
 
 # ---------------------------------------------------------------------------
@@ -181,27 +197,28 @@ async def ops_services() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Static UI — single-page operator console served at /
+# Root: explicit JSON 404
 # ---------------------------------------------------------------------------
+#
+# No static HTML / SPA is served from this service. The on-device
+# support client is API-only; any UI lives on the support side
+# (warp-lab.com fleet plane or local tooling) consuming /ops/* over a
+# reverse tunnel. Root hits get a JSON 404 so a misrouted browser
+# doesn't see a useful response that suggests a UI exists.
 
-_STATIC_DIR = Path(__file__).parent / "static"
-if _STATIC_DIR.is_dir():
-    # html=True makes /  serve index.html instead of 404. The UI is
-    # entirely client-side — it talks to /ops/* with the bearer token
-    # the operator pastes in. Static HTML cannot leak data even if
-    # the operator's browser cache gets snooped.
-    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
-else:
-    logger.warning(
-        "static UI directory %s not present — only the JSON API will be "
-        "available at /ops/*. Did you forget to COPY services/ops-console/"
-        "static/ in the Dockerfile?",
-        _STATIC_DIR,
+@app.get("/", include_in_schema=False)
+def _root() -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": "ops-console is an API-only support surface; no UI is served here",
+            "see": "/ops/health, /ops/system, /ops/containers, /ops/services",
+        },
     )
 
 
 # ---------------------------------------------------------------------------
-# Custom 404 / 500 — keep responses JSON for /ops/*, plain for static
+# Custom 404 / 500 — keep responses JSON for /ops/*
 # ---------------------------------------------------------------------------
 
 @app.exception_handler(404)

@@ -82,14 +82,14 @@ class TestBuildRegistry:
         # All known services in the registry
         assert "orchestrator" in reg
         assert "ai-gateway" in reg
-        assert "voice-orchestrator" in reg
+        assert "voice-io" in reg
         assert "web-dashboard" in reg
         assert "db" in reg
         # Defaults for verified-live services point at their real paths
         # (see services.py docstring — these were empirically validated)
         assert reg["orchestrator"] == "http://orchestrator:3000/api/orchestrator/health"
         assert reg["ai-gateway"] == "http://ai-gateway:8000/ai/health"
-        assert reg["voice-orchestrator"] == "http://voice-orchestrator:8086/health"
+        assert reg["voice-io"] == "http://voice-io:8086/health"
         assert reg["frigate"] == "http://frigate:5000/healthz"
         # Services without HTTP /health (workers, infra) default to empty
         # and therefore surface as `unknown` rather than `down`
@@ -107,6 +107,34 @@ class TestBuildRegistry:
         monkeypatch.setenv("OPS_PROBE_AI_GATEWAY", "  http://x:1/   ")
         reg = svc.build_registry()
         assert reg["ai-gateway"] == "http://x:1/"
+
+    def test_rejects_file_scheme(self, monkeypatch):
+        # SSRF guard: file:// would let a poisoned env var read host files.
+        monkeypatch.setenv("OPS_PROBE_AI_GATEWAY", "file:///etc/passwd")
+        reg = svc.build_registry()
+        assert reg["ai-gateway"] == ""
+
+    def test_rejects_ip_literal_host(self, monkeypatch):
+        # SSRF guard: IP literals (especially cloud metadata addresses)
+        # are not in the compose-DNS allowlist.
+        monkeypatch.setenv(
+            "OPS_PROBE_ORCHESTRATOR", "http://169.254.169.254/latest/meta-data/",
+        )
+        reg = svc.build_registry()
+        assert reg["orchestrator"] == ""
+
+    def test_rejects_external_dns_host(self, monkeypatch):
+        # SSRF guard: only compose service names + host.docker.internal.
+        monkeypatch.setenv("OPS_PROBE_FRIGATE", "http://attacker.example.com/")
+        reg = svc.build_registry()
+        assert reg["frigate"] == ""
+
+    def test_allows_host_docker_internal(self, monkeypatch):
+        # host.docker.internal is the only multi-label hostname allowed
+        # (used to reach host-mode services like the device-bridge).
+        monkeypatch.setenv("OPS_PROBE_ORCHESTRATOR", "http://host.docker.internal:3000/api/orchestrator/health")
+        reg = svc.build_registry()
+        assert reg["orchestrator"] == "http://host.docker.internal:3000/api/orchestrator/health"
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,10 @@ class _FakeContainer:
         self.short_id = short_id
         self.status = status
         self.image = _FakeImage(image_tag)
+        # Default project label matches what docker_client.ALLOWED_PROJECT
+        # expects (`droplet-pi-platform`, mirroring the top-level `name:`
+        # field in docker/docker-compose.yml). Tests that want to exercise
+        # the "not in our project" gate pass an explicit attrs dict.
         self.attrs = attrs or {
             "State": {
                 "Status": status,
@@ -49,7 +53,7 @@ class _FakeContainer:
             },
             "Config": {
                 "Labels": {
-                    "com.docker.compose.project": "droplet",
+                    "com.docker.compose.project": "droplet-pi-platform",
                     "com.docker.compose.service": name,
                 },
             },
@@ -79,11 +83,26 @@ class _FakeContainersAPI:
         self.list_calls: list[dict] = []
         self.get_calls: list[str] = []
 
-    def list(self, all=False):  # noqa: A002 — match docker SDK signature
-        self.list_calls.append({"all": all})
+    def list(self, all=False, filters=None):  # noqa: A002 — match docker SDK signature
+        # docker SDK accepts `filters={"label": "key=value"}` and the
+        # daemon does the filtering server-side. Emulate that here so
+        # the project-scoping in docker_client.list_containers is
+        # exercised end-to-end by these unit tests.
+        self.list_calls.append({"all": all, "filters": filters})
         if all:
-            return list(self._all)
-        return [c for c in self._all if c.status == "running"]
+            pool = list(self._all)
+        else:
+            pool = [c for c in self._all if c.status == "running"]
+        if filters and "label" in filters:
+            label_spec = filters["label"]
+            if "=" not in label_spec:
+                return pool
+            key, _, want = label_spec.partition("=")
+            return [
+                c for c in pool
+                if (((c.attrs.get("Config") or {}).get("Labels") or {}).get(key) == want)
+            ]
+        return pool
 
     def get(self, name_or_id):
         self.get_calls.append(name_or_id)
@@ -147,14 +166,18 @@ class TestListContainers:
         assert s.image == "myimage:latest"
         assert s.status == "running"
         assert s.health == "healthy"
-        assert s.project == "droplet"
+        assert s.project == "droplet-pi-platform"
         assert s.service == "orchestrator"
         assert s.restart_count == 0
 
     def test_no_health_check_returns_none_health(self, patch_client):
         patch_client([_FakeContainer(name="x", attrs={
             "State": {"Status": "running", "StartedAt": None, "RestartCount": 0},
-            "Config": {"Labels": {}},
+            # Project label still needs to be present — the
+            # `_summarise` path is what we're testing here, not the
+            # project-scoping. The "container belongs to our project
+            # but has no healthcheck" case is the real one.
+            "Config": {"Labels": {"com.docker.compose.project": "droplet-pi-platform"}},
         })])
         out = dc.list_containers()
         assert out[0].health is None
@@ -178,6 +201,71 @@ class TestListContainers:
         assert isinstance(out, list)
         assert isinstance(out[0], dict)
         assert out[0]["name"] == "ct1"
+
+    def test_filters_out_containers_from_other_compose_projects(self, patch_client):
+        # WARP-337: docker.sock can see every container on the host,
+        # including ones from unrelated compose stacks. list_containers
+        # must scope to its own project label so the operator never
+        # sees "neighbour" containers in /ops/containers.
+        ours = _FakeContainer(name="orchestrator")  # default project label
+        theirs = _FakeContainer(
+            name="someone-elses-redis",
+            attrs={
+                "State": {"Status": "running", "StartedAt": None, "RestartCount": 0},
+                "Config": {"Labels": {"com.docker.compose.project": "unrelated-stack"}},
+            },
+        )
+        unlabeled = _FakeContainer(
+            name="hand-run-thing",
+            attrs={
+                "State": {"Status": "running", "StartedAt": None, "RestartCount": 0},
+                "Config": {"Labels": {}},
+            },
+        )
+        patch_client([ours, theirs, unlabeled])
+        out = dc.list_containers()
+        names = [c.name for c in out]
+        assert names == ["orchestrator"]
+
+
+class TestProjectScoping:
+    """WARP-337: docker.sock is host-root but the application layer
+    must scope every list/get/restart to its own compose project."""
+
+    def _foreign_container(self, name: str = "foreign") -> _FakeContainer:
+        return _FakeContainer(
+            name=name,
+            attrs={
+                "State": {"Status": "running", "StartedAt": None, "RestartCount": 0},
+                "Config": {"Labels": {"com.docker.compose.project": "not-ours"}},
+            },
+        )
+
+    def test_get_logs_on_foreign_container_returns_404(self, patch_client):
+        from docker.errors import NotFound
+        patch_client([self._foreign_container("foreign")])
+        with pytest.raises(NotFound):
+            dc.get_logs("foreign")
+
+    def test_restart_on_foreign_container_returns_404(self, patch_client):
+        from docker.errors import NotFound
+        patch_client([self._foreign_container("foreign")])
+        with pytest.raises(NotFound):
+            dc.restart_container("foreign")
+
+    def test_get_logs_on_unlabeled_container_returns_404(self, patch_client):
+        from docker.errors import NotFound
+        # Hand-run containers (`docker run`) have no compose project
+        # label at all — still refused.
+        patch_client([_FakeContainer(
+            name="hand-run",
+            attrs={
+                "State": {"Status": "running", "StartedAt": None, "RestartCount": 0},
+                "Config": {"Labels": {}},
+            },
+        )])
+        with pytest.raises(NotFound):
+            dc.get_logs("hand-run")
 
 
 # ---------------------------------------------------------------------------

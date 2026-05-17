@@ -34,7 +34,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -60,6 +60,13 @@ generate_env() {
   # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
   # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
   service_token_display=$(openssl rand -hex 32)
+  # WARP-337: ops-console support-client bearer. Used by Warp Lab
+  # support to authenticate against the on-device /ops/* API when
+  # troubleshooting a deployed Droplet. The service binds loopback-only
+  # (127.0.0.1:8089) and is reached via a reverse SSH/WireGuard tunnel —
+  # the bearer is the second layer of defense. Rotates independently of
+  # all other secrets so support can hand it off / revoke per-engagement.
+  ops_token=$(openssl rand -hex 32)
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -121,6 +128,12 @@ SERVICE_TOKEN_VOICE=$service_token_voice
 # value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
 SERVICE_TOKEN_DISPLAY=$service_token_display
 
+# --- ops-console support-client bearer (WARP-337) ---
+# Used by Warp Lab support to authenticate to the on-device /ops/*
+# API. Loopback-only bind + reverse tunnel is the first line of defense;
+# this bearer is the second. Rotate per support engagement if needed.
+OPS_TOKEN=$ops_token
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -165,6 +178,7 @@ EOF
   log_info "  ROUTING_TOKEN     : ${routing_service_token:0:8}****"
   log_info "  VOICE_TOKEN       : ${service_token_voice:0:8}****"
   log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
+  log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -236,6 +250,12 @@ migrate_env() {
   # display bearer; without this key the orchestrator → oled-display path
   # falls back to the empty-string bearer and 401s on every health probe.
   _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
+  # WARP-337 backfill: ops-console support client bearer. Without this
+  # key the service falls through to an ephemeral token that regenerates
+  # on every container restart, so support's saved credential invalidates
+  # silently. The token is operator-only (loopback bind + reverse tunnel
+  # is the actual exposure surface — see docs/operator-surfaces.md).
+  _migrate_ensure_key OPS_TOKEN "$(openssl rand -hex 32)"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — Jetson production hits 'real', everything else hits

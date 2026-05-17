@@ -1,5 +1,5 @@
 # ops-console runtime deps. Test deps in requirements-dev.txt (matches
-# the file-indexer / voice-orchestrator split convention).
+# the file-indexer / voice-io split convention).
 fastapi==0.115.0          # HTTP layer
 uvicorn[standard]==0.30.6 # ASGI server
 pydantic==2.9.2           # request/response schemas
