@@ -79,6 +79,17 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
   const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  // The `@zxing` decoder loop closes over the `onResult` callback at the
+  // moment we hand it in. If the parent ever re-renders with a fresh
+  // function identity (e.g. `useCallback` deps shift) the looping closure
+  // still holds the stale reference. Today the parent uses a stable
+  // callback so this isn't triggered, but the failure mode is silent —
+  // a stale `onResult` would simply call into a stopped-state setter.
+  // Mirror the prop through a ref + read inside the decode callback so
+  // the latest version is always used.
+  const onResultRef = useRef(onResult);
+  onResultRef.current = onResult;
+
   const [status, setStatus] = useState<ScanStatus>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState("");
@@ -136,7 +147,9 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
           }
           setStatus("decoded");
           stopCamera();
-          onResult(payload);
+          // Use the ref so a parent re-render after the loop started
+          // can't strand us on a stale callback.
+          onResultRef.current(payload);
           return;
         }
         if (err && !(err instanceof NotFoundException)) {
@@ -163,7 +176,12 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
         setErrorMsg(e?.message ?? "Failed to start camera.");
       }
     }
-  }, [disabled, onResult, stopCamera]);
+    // Note: `onResult` is read via `onResultRef.current` inside the
+    // decode callback, so we deliberately don't list it here. Adding
+    // it would force `startCamera` to re-create whenever the parent
+    // passes a fresh function identity — which would tear down the
+    // active camera stream mid-scan.
+  }, [disabled, stopCamera]);
 
   // Stop camera on unmount — important on mobile, where leaving the
   // stream open keeps the camera LED on and drains battery.

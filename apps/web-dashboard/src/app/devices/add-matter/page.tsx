@@ -21,10 +21,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Lightbulb, Loader2 } from "lucide-react";
 import { commissionMatterDevice } from "@/lib/api";
-import { MatterQrScanner } from "@/components/smart-home/MatterQrScanner";
+
+// WARP-102: lazy-load the QR scanner. `@zxing/browser` + `@zxing/library`
+// are ~200 KB minified each and not tree-shakeable (the decoder pulls a
+// wasm binary). A static import would bake them into every dashboard
+// page's bundle since the import graph reaches them transitively.
+// `ssr: false` because the scanner needs `navigator.mediaDevices` which
+// is undefined during server prerendering.
+const MatterQrScanner = dynamic(
+  () =>
+    import("@/components/smart-home/MatterQrScanner").then(
+      (m) => m.MatterQrScanner,
+    ),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="dp-card flex items-center justify-center min-h-[280px] type-footnote text-label-secondary">
+        Loading scanner…
+      </div>
+    ),
+  },
+);
 
 type FlowState =
   | { phase: "scan"; error: string | null }
