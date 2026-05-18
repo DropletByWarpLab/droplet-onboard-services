@@ -101,6 +101,14 @@ const chatRequestSchema = z.object({
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
+  // Per-turn override for the agent loop's tool advertisement. "none"
+  // sends ZERO tools to the model so it can't wander into a speculative
+  // tool call — voice-io's intent gate sets this for greetings,
+  // time-of-day, and who-are-you utterances that the system prompt
+  // already answers. "auto" matches the default behaviour. When the
+  // field is absent the loop applies "auto" so existing callers (chat,
+  // legacy clients) keep working unchanged.
+  tool_choice: z.enum(["auto", "none"]).optional(),
   conversationId: z.string().uuid().optional(),
   turnId: z.string().min(1).max(128).optional(),
 });
@@ -451,6 +459,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             temperature: chatReq.temperature,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
+            tool_choice: chatReq.tool_choice,
             toolCallContext,
           });
         } catch (err) {
@@ -474,6 +483,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           temperature: chatReq.temperature,
           max_iter: chatReq.max_iter,
           allowed_tools: allowedForUser,
+          tool_choice: chatReq.tool_choice,
           toolCallContext,
         });
         liveAssistantContent = result.message.content;

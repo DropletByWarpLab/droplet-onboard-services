@@ -59,6 +59,7 @@ time to play.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -66,7 +67,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from voice.llm import LLMClient, LLMUnavailable
+from voice.llm import LLMClient, LLMUnavailable, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.wake import (
@@ -77,6 +78,111 @@ from voice.wake import (
 )
 
 logger = logging.getLogger("voice.pipeline")
+
+
+# ────────────────────────────────────────────────────────────────────
+# Intent gate — suppress speculative tool calls
+# ────────────────────────────────────────────────────────────────────
+#
+# llama3.1:8b speculatively dispatches tools (`get_router_system_info`,
+# `get_system_health`, …) for utterances where the answer is already
+# in the system prompt context — greetings, "what time is it?",
+# "who are you?", "can you hear me?". The outcome is non-deterministic
+# (same prompt sometimes works, sometimes routes to a tool that has
+# no idea about the question and produces a confused fallback).
+#
+# Approach: classify the transcript with a small regex pass BEFORE we
+# hit the LLM. If it matches one of the patterns below, ask the
+# orchestrator for `tool_choice="none"` — the agent loop then sends
+# ZERO tools to the model, so the answer can only come from the
+# system prompt + the model's own knowledge. Deterministic by
+# construction.
+#
+# Match rules:
+#   * Whole-utterance only (`^…$`) so "hey, turn off the lights"
+#     still goes to the agent loop (greeting prefix doesn't take it
+#     out of the tool-driven path).
+#   * Case-insensitive; tolerates trailing punctuation produced by
+#     Whisper ("hey jarvis." vs "hey jarvis").
+#   * Patterns deliberately tight: false-positives are recoverable
+#     (model just says "I can't answer that without checking" instead
+#     of calling the right tool); false-negatives are the status quo.
+#
+# Updates here MUST be paired with a unit test in
+# `tests/test_pipeline.py::TestIntentClassifier` so regressions are
+# caught before the next deploy.
+
+_INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Greetings and check-ins — whole utterance only. The optional
+    # wake-word prefix ("hey jarvis", "hey droplet") matches the way
+    # users naturally re-trigger after the wake fires.
+    re.compile(
+        r"^\s*(hi|hello|hey|hey there|hi there|yo|sup|"
+        r"hey\s+(jarvis|droplet|assistant)|"
+        r"hello\s+(jarvis|droplet|assistant))"
+        r"[\s!.,?]*$",
+        re.IGNORECASE,
+    ),
+    # "good morning/evening/afternoon/night", optionally addressed.
+    re.compile(
+        r"^\s*good\s+(morning|evening|afternoon|night)"
+        r"(\s*,?\s*(jarvis|droplet|assistant))?"
+        r"[\s!.,?]*$",
+        re.IGNORECASE,
+    ),
+    # Liveness check-ins: "can you hear me?" / "are you there?" with
+    # optional wake-word prefix.
+    re.compile(
+        r"^\s*(hey\s+(jarvis|droplet|assistant)[,\s]+)?"
+        r"(can you hear me|are you there|you there|are you listening|"
+        r"do you hear me|hello\?\s*are you there)"
+        r"[\s!.,?]*$",
+        re.IGNORECASE,
+    ),
+    # Time-of-day queries. Match the natural variants without
+    # accidentally swallowing "what time should I leave?".
+    re.compile(
+        r"^\s*(what(?:'s|s| is)?\s+(the\s+)?time(\s+(is\s+it|now))?|"
+        r"what time is it(\s+now)?|"
+        r"what's the current time|current time|time now|"
+        r"tell me the time|do you (know|have) the time|"
+        r"got the time)"
+        r"[\s!.,?]*$",
+        re.IGNORECASE,
+    ),
+    # Date / day-of-week queries.
+    re.compile(
+        r"^\s*(what(?:'s|s| is)?\s+(the\s+|today'?s\s+)?date|"
+        r"what day (of the week )?is it(\s+today)?|"
+        r"what'?s today|what day is today|"
+        r"what'?s the day)"
+        r"[\s!.,?]*$",
+        re.IGNORECASE,
+    ),
+    # Who-are-you / capability queries that the persona prompt already
+    # answers.
+    re.compile(
+        r"^\s*(who are you|what(?:'s|s| is)? your name|"
+        r"what are you|what can you do|"
+        r"are you (jarvis|droplet|an assistant|there))"
+        r"[\s!.,?]*$",
+        re.IGNORECASE,
+    ),
+)
+
+
+def classify_tool_choice(transcript: str) -> Optional[ToolChoice]:
+    """Return ``"none"`` for utterances that should answer from system-
+    prompt context only; ``None`` to let the orchestrator pick (auto).
+
+    Pure function — no I/O, no state. Safe to call from any thread.
+    """
+    if not transcript:
+        return None
+    for pat in _INTENT_NO_TOOLS_PATTERNS:
+        if pat.match(transcript):
+            return "none"
+    return None
 
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
@@ -790,8 +896,18 @@ class WakePipeline:
                 transcript,
             )
             return
+        # Intent gate: short-circuit speculative tool calls on greetings,
+        # time-of-day, and who-are-you utterances. The orchestrator's
+        # agent loop honors tool_choice="none" by advertising zero
+        # tools — the model can only answer from the system prompt
+        # context, which already carries the live time + location.
+        tool_choice = classify_tool_choice(transcript)
+        if tool_choice == "none":
+            logger.info(
+                "intent gate matched (no tools): transcript=%r", transcript,
+            )
         try:
-            reply = self._llm.reply(transcript)
+            reply = self._llm.reply(transcript, tool_choice=tool_choice)
         except LLMUnavailable as exc:
             self._set_error(f"LLM call failed: {exc}")
             logger.warning("LLM call failed for transcript %r: %s", transcript, exc)
