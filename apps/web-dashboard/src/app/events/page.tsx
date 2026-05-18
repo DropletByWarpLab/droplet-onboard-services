@@ -11,6 +11,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useEvents } from "@/lib/hooks/useEvents";
 import { useReviews } from "@/lib/hooks/useReviews";
@@ -157,31 +158,44 @@ export default function EventsPage() {
     return reviewsHook.refresh();
   };
 
-  return (
-    <div className="p-6">
-      <div className="flex items-start justify-between mb-4">
-        <div>
-          <h1 className="type-large-title text-label-primary">Events</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {headerLoading
-              ? "Loading…"
-              : headerCount === 0
-                ? "Nothing to triage right now"
-                : `${headerCount} ${tab === "events" ? "event" : "item"}${
-                    headerCount === 1 ? "" : "s"
-                  }${headerHasMore ? " (more available)" : ""}`}
-          </p>
-        </div>
-        <button
-          onClick={() => refreshActive()}
-          disabled={headerLoading}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} className={headerLoading ? "animate-spin" : ""} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const eventsStatus = headerLoading
+    ? { tone: "neutral" as const, label: "Loading…" }
+    : headerCount === 0
+      ? { tone: "ok" as const, label: "Nothing to triage" }
+      : {
+          tone: "warn" as const,
+          label: `${headerCount} ${tab === "events" ? "event" : "item"}${
+            headerCount === 1 ? "" : "s"
+          }${headerHasMore ? " (more)" : ""}`,
+        };
 
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Operations" },
+          { label: "Events" },
+        ]}
+        status={eventsStatus}
+        actions={
+          <button
+            onClick={() => refreshActive()}
+            disabled={headerLoading}
+            className="
+              inline-flex items-center justify-center h-9 w-9 rounded-md
+              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+              transition-colors
+            "
+            aria-label="Refresh events"
+            title="Refresh"
+          >
+            <RefreshCw size={16} className={headerLoading ? "animate-spin" : ""} />
+          </button>
+        }
+      />
+
+      <div className="p-6">
       {/* Tab strip — Frigate splits the timeline by review severity, so
           the dashboard does too. Each tab carries its own filter. */}
       <div className="flex items-center gap-1 mb-4 border-b border-separator">
@@ -316,6 +330,7 @@ export default function EventsPage() {
           onMarkViewed={(rv) => reviewsHook.markViewed(rv.id)}
         />
       )}
+      </div>
     </div>
   );
 }
