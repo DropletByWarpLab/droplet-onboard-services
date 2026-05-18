@@ -35,6 +35,7 @@ import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
+import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
@@ -235,6 +236,13 @@ export function createApp(prisma: PrismaClient) {
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
   // Per-user Redis cache with 30s TTL.
   app.use("/api", createHomeRouter(prisma));
+
+  // ADR-003 + ADR-005: workspace-type (Home vs Business) singleton.
+  // GET available to any authenticated user (drives chrome pill);
+  // POST is owner-only (flip the workspace type). Sits alongside the
+  // broader WARP-457 createSettingsRouter — flagged in the PR body
+  // for potential consolidation in a follow-up.
+  app.use("/api", createSettingsWorkspaceRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
