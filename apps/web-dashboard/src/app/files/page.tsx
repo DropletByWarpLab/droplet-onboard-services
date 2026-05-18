@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
@@ -412,33 +413,44 @@ export default function FilesPage() {
     return moveDialog.paths.map((p) => p.split("/").pop() || p);
   }, [moveDialog]);
 
-  return (
-    <div className="p-6 lg:p-8 max-w-7xl">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4 gap-4">
-        <h1 className="type-large-title text-label-primary flex-shrink-0">Files</h1>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <button
-            onClick={() => setShowNewFolder(true)}
-            className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
-          >
-            <FolderPlus size={14} />
-            <span className="hidden sm:inline">New Folder</span>
-          </button>
-          <UploadButton onClick={() => fileInputRef.current?.click()} />
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files) handleUpload(e.target.files);
-              e.target.value = "";
-            }}
-          />
-        </div>
-      </div>
+  // Topbar action slot: New Folder + Upload. File-system breadcrumbs
+  // (the existing BreadcrumbNav) stay BELOW the Topbar — they're
+  // intra-page navigation (path within Files), distinct from the
+  // page-level breadcrumb (Workspace > Files).
+  const filesActions = (
+    <>
+      <button
+        onClick={() => setShowNewFolder(true)}
+        className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
+      >
+        <FolderPlus size={14} />
+        <span className="hidden sm:inline">New Folder</span>
+      </button>
+      <UploadButton onClick={() => fileInputRef.current?.click()} />
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) handleUpload(e.target.files);
+          e.target.value = "";
+        }}
+      />
+    </>
+  );
 
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Files" },
+        ]}
+        actions={filesActions}
+      />
+
+      <div className="p-6 lg:p-8 max-w-7xl">
       {/* Search bar */}
       <div className="mb-4">
         <SearchBar
@@ -714,6 +726,7 @@ export default function FilesPage() {
         confirmLabel="Move to Trash"
         variant="destructive"
       />
+      </div>
     </div>
   );
 }
