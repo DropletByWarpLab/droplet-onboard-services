@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Plus, RefreshCw } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useCalendarEvents, type CalendarEvent } from "@/lib/hooks/useCalendar";
 import { AgendaView } from "@/components/calendar/AgendaView";
 import { EventForm } from "@/components/calendar/EventForm";
@@ -32,36 +33,47 @@ export default function CalendarPage() {
     setShowForm(true);
   }
 
-  return (
-    <div className="p-6">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Calendar</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {events.length > 0
-              ? `${events.length} event${events.length !== 1 ? "s" : ""} in the next 30 days`
-              : "Your agenda is clear"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => refresh()}
-            disabled={isLoading}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
-            <span className="type-subheadline">Refresh</span>
-          </button>
-          <button
-            onClick={newEvent}
-            className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <Plus size={16} />
-            <span className="type-subheadline">New event</span>
-          </button>
-        </div>
-      </div>
+  const status = events.length === 0
+    ? { tone: "neutral" as const, label: "Agenda clear" }
+    : { tone: "ok" as const, label: `${events.length} event${events.length === 1 ? "" : "s"} next 30 days` };
 
+  const actions = (
+    <>
+      <button
+        onClick={() => refresh()}
+        disabled={isLoading}
+        className="
+          inline-flex items-center justify-center h-9 w-9 rounded-md
+          text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+          transition-colors
+        "
+        aria-label="Refresh calendar"
+        title="Refresh"
+      >
+        <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
+      </button>
+      <button
+        onClick={newEvent}
+        className="dp-btn-primary flex items-center gap-1.5 px-3 h-9 rounded-md"
+      >
+        <Plus size={15} />
+        <span className="type-subheadline">New event</span>
+      </button>
+    </>
+  );
+
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Calendar" },
+        ]}
+        status={status}
+        actions={actions}
+      />
+
+      <div className="p-6">
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6">
         <div>
           {isLoading && events.length === 0 ? (
@@ -87,6 +99,7 @@ export default function CalendarPage() {
         onClose={() => setShowForm(false)}
         onSaved={() => refresh()}
       />
+      </div>
     </div>
   );
 }
