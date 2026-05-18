@@ -389,8 +389,26 @@ export function createPublicAuthRouter(
         },
       });
 
+      // ADR-004 §3 + action item #2: native mobile clients can't read
+      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
+      // them; Android's OkHttp can but it's ugly). When the caller
+      // opts in with `?return=body=1`, return the JWTs in the JSON
+      // body too. The cookies are STILL set so browsers behave
+      // unchanged. No behavior change for any existing caller — the
+      // body field is only added when the query param is present.
+      const wantBody = req.query.return === "body" || req.query.return === "body=1";
       res.json({
         user: { id: userId, username, displayName, role },
+        ...(wantBody
+          ? {
+              accessToken,
+              refreshToken,
+              accessTokenExpiresAt:
+                Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+              refreshTokenExpiresAt:
+                Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+            }
+          : {}),
       });
     } catch (err) {
       next(err);
@@ -497,20 +515,29 @@ export function createPublicAuthRouter(
   // ── Refresh: exchange refresh token for new access token ──
   router.post("/auth/refresh", async (req, res, next) => {
     try {
-      const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME];
-      if (!refreshTokenCookie) {
+      // ADR-004: native clients (iOS / Android / Tauri Win) POST the
+      // refresh token in the JSON body since they can't read httpOnly
+      // cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
+      // set by /auth/login. Body takes precedence if both are present
+      // so a mobile client deliberately rotating doesn't get blocked by
+      // a stale cookie.
+      const refreshTokenBody =
+        typeof req.body?.refreshToken === "string" ? req.body.refreshToken : null;
+      const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME] ?? null;
+      const refreshTokenInput = refreshTokenBody ?? refreshTokenCookie;
+      if (!refreshTokenInput) {
         res.status(401).json({ error: "No refresh token available" });
         return;
       }
 
       // --- Try JWT refresh first ---
-      const refreshResult = await verifyRefreshToken(refreshTokenCookie);
+      const refreshResult = await verifyRefreshToken(refreshTokenInput);
       if (refreshResult) {
         // Claim exclusive rotation rights before issuing new tokens. If
         // another concurrent /auth/refresh call (e.g. a browser double-submit
         // on flaky networks) already claimed this token, reject to prevent
         // two valid token pairs from being issued for the same refresh token.
-        const claimed = await claimRefreshRotation(refreshTokenCookie);
+        const claimed = await claimRefreshRotation(refreshTokenInput);
         if (!claimed) {
           res.status(401).json({ error: "Refresh token is already being rotated" });
           return;
@@ -567,7 +594,7 @@ export function createPublicAuthRouter(
 
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
-        await denyRefreshToken(refreshTokenCookie);
+        await denyRefreshToken(refreshTokenInput);
         const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role });
         const newAccessToken = signAccessToken({ id: sub, username, displayName, role });
 
@@ -592,14 +619,27 @@ export function createPublicAuthRouter(
           maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
         });
 
-        res.json({ status: "ok", expiresIn: ACCESS_TOKEN_TTL_SECONDS });
+        // Native clients want the new tokens in body since they can't
+        // read Set-Cookie. Always include them — browsers ignore the
+        // body's accessToken (they use the cookie that was just set
+        // above), so this is non-breaking.
+        res.json({
+          status: "ok",
+          expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
+          accessTokenExpiresAt:
+            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+          refreshTokenExpiresAt:
+            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+        });
         return;
       }
 
       // --- Fallback: OAuth2 refresh (legacy Nextcloud tokens) ---
       if (config.AUTH_MODE === "oauth2" && config.OAUTH2_CLIENT_ID) {
         const tokens = await ncOAuth2RefreshToken(
-          refreshTokenCookie,
+          refreshTokenInput,
           config.OAUTH2_CLIENT_ID,
           config.OAUTH2_CLIENT_SECRET
         );
