@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Trash2, Users, X } from "lucide-react";
+import { Check, Plus, Trash2, Users, X } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useAccent } from "@/lib/accent";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
 import {
@@ -130,6 +131,7 @@ export default function SettingsPage() {
             <span className="type-body text-label-primary">Theme</span>
             <ThemeToggle />
           </div>
+          <AccentRow />
         </div>
       </section>
 
@@ -336,7 +338,67 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="dp-row">
       <span className="type-body text-label-secondary">{label}</span>
-      <span className="type-body text-label-primary font-mono text-sm">{value}</span>
+      <span className="type-body text-label-primary tabular-nums text-sm">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * Accent picker row. 8 preset swatches; clicking one writes the
+ * preference to localStorage via useAccent + the change propagates
+ * everywhere instantly (sidebar active state, buttons, focus rings,
+ * AI hero glow, etc.) because every consumer reads CSS variables
+ * that the AccentProvider re-injects.
+ */
+function AccentRow() {
+  const { accentId, setAccentId, presets } = useAccent();
+  return (
+    <div className="dp-row !items-start py-4">
+      <div className="flex flex-col gap-1">
+        <span className="type-body text-label-primary">Accent color</span>
+        <span className="type-caption-1 text-label-tertiary">
+          Personalizes buttons, active nav, focus rings, and the AI hero glow.
+        </span>
+      </div>
+      <div role="radiogroup" aria-label="Accent color" className="flex flex-wrap items-center gap-2 max-w-[60%] justify-end">
+        {presets.map((p) => {
+          const active = p.id === accentId;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              aria-label={p.label}
+              title={p.label}
+              onClick={() => setAccentId(p.id)}
+              className={`
+                relative w-8 h-8 rounded-full transition-all
+                ${active
+                  ? "ring-2 ring-offset-2 ring-offset-surface-tertiary"
+                  : "hover:scale-110"}
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-tertiary
+              `}
+              style={{
+                background: p.accent,
+                // Inline ring color so the ring matches the swatch
+                // (Tailwind's ring-* requires a class lookup; this
+                // is one preset deep so a style attr is cleanest).
+                ["--tw-ring-color" as string]: p.accent,
+              }}
+            >
+              {active && (
+                <Check
+                  size={14}
+                  strokeWidth={3}
+                  className="text-white absolute inset-0 m-auto"
+                  aria-hidden
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

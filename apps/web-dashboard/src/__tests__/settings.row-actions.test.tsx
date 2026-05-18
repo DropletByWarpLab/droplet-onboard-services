@@ -59,6 +59,29 @@ vi.mock("@/components/ThemeToggle", () => ({
   ThemeToggle: () => null,
 }));
 
+// 2026-05-18: Settings page Appearance section now renders an
+// <AccentRow> which calls useAccent(). The hook throws if no
+// AccentProvider is mounted, so the test mocks the lib directly
+// with a violet default (matches the live default).
+vi.mock("@/lib/accent", () => ({
+  useAccent: () => ({
+    accentId: "violet",
+    accent: {
+      id: "violet",
+      label: "Violet",
+      accent: "#6d28d9",
+      accentHover: "#5b21b6",
+      accentSubtle: "rgba(109,40,217,0.10)",
+      shadowHero: "0 30px 80px -40px rgba(109,40,217,0.35)",
+    },
+    setAccentId: vi.fn(),
+    presets: [
+      { id: "violet", label: "Violet", accent: "#6d28d9", accentHover: "#5b21b6", accentSubtle: "", shadowHero: "" },
+      { id: "blue", label: "Blue", accent: "#2563eb", accentHover: "#1d4ed8", accentSubtle: "", shadowHero: "" },
+    ],
+  }),
+}));
+
 import SettingsPage from "@/app/settings/page";
 
 beforeEach(() => {
