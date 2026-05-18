@@ -94,11 +94,49 @@ export function getHomeVariant(
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // Lazy-init from localStorage so first paint matches stored preference.
+  // This is the SSR-safe + offline-friendly baseline; the orchestrator
+  // GET below is the source of truth once it answers.
   const [workspaceType, setWorkspaceTypeState] = useState<WorkspaceType>(
     readStoredWorkspace,
   );
 
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
+
+  // Hydrate from the orchestrator once auth is settled. Per ADR-005
+  // §workspace, GET /api/settings/workspace returns the singleton
+  // Workspace row's type, or the HOME default if the wizard hasn't
+  // run yet. 404 (Phase 4a not deployed) is a no-op — we keep the
+  // localStorage value. Any error other than 404/network is silently
+  // tolerated; the dashboard already painted with the localStorage
+  // best guess.
+  useEffect(() => {
+    if (authLoading || !user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/workspace", {
+          credentials: "same-origin",
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as { workspaceType?: string };
+        const next = body.workspaceType === "business" ? "business" : "home";
+        if (!cancelled && next !== workspaceType) {
+          setWorkspaceTypeState(next);
+          try {
+            window.localStorage.setItem(STORAGE_KEY, next);
+          } catch {
+            /* private mode — fine */
+          }
+        }
+      } catch {
+        // Network down, orchestrator slow, etc — keep cached value.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user?.id]);
 
   // Sync across tabs — if a setup wizard in another tab flips the type,
   // every open dashboard tab re-renders.
@@ -118,6 +156,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       window.localStorage.setItem(STORAGE_KEY, next);
     } catch {
       // Private mode / quota — state still updates for this session.
+    }
+    // Best-effort push to the orchestrator so the new value is durable
+    // + visible to other clients. POST is owner-only on the server side;
+    // 403 is fine — the local state still updated for this session.
+    if (typeof window !== "undefined") {
+      fetch("/api/settings/workspace", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceType: next }),
+      }).catch(() => {
+        /* offline / orchestrator down — localStorage is the fallback */
+      });
     }
   }, []);
 
