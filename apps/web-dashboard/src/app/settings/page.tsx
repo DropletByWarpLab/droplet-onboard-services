@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2, Users, X } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -100,10 +101,25 @@ export default function SettingsPage() {
     }
   };
 
-  return (
-    <div className="p-6 lg:p-8 max-w-4xl">
-      <h1 className="type-large-title text-label-primary mb-8">Settings</h1>
+  // Status chip — surfaces the device's overall health so the operator
+  // always knows what posture they're configuring. Falls back to neutral
+  // before /api/orchestrator/health has resolved.
+  const settingsStatus = health
+    ? { tone: "ok" as const, label: `${health.version ?? "v0.1.0"} · ${device?.hostname ?? "droplet"}` }
+    : { tone: "neutral" as const, label: "Loading device info…" };
 
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Admin" },
+          { label: "Settings" },
+        ]}
+        status={settingsStatus}
+      />
+
+      <div className="p-6 lg:p-8 max-w-4xl">
       {/* Appearance */}
       <section className="mb-10">
         <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
@@ -311,6 +327,7 @@ export default function SettingsPage() {
         confirmLabel="Delete"
         variant="destructive"
       />
+      </div>
     </div>
   );
 }
