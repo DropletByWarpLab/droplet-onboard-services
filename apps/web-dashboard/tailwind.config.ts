@@ -6,18 +6,20 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Brand colors
+        // Brand ramp — violet (re-pointed from indigo on 2026-05-18).
+        // Anchor accent is droplet-700 #6d28d9; tinted backgrounds use
+        // droplet-50/100/200, hover states use droplet-800, ink uses 900.
         droplet: {
-          50: "#eef2ff",
-          100: "#e0e7ff",
-          200: "#c7d2fe",
-          300: "#a5b4fc",
-          400: "#818cf8",
-          500: "#6366f1",
-          600: "#4f46e5",
-          700: "#4338ca",
-          800: "#3730a3",
-          900: "#312e81",
+          50: "#f5f3ff",
+          100: "#ede9fe",
+          200: "#ddd6fe",
+          300: "#c4b5fd",
+          400: "#a78bfa",
+          500: "#8b5cf6",
+          600: "#7c3aed",
+          700: "#6d28d9",
+          800: "#5b21b6",
+          900: "#4c1d95",
         },
         // Semantic surface colors (CSS custom properties)
         surface: {
@@ -25,6 +27,7 @@ const config: Config = {
           secondary: "var(--color-surface-secondary)",
           tertiary: "var(--color-surface-tertiary)",
           elevated: "var(--color-surface-elevated)",
+          raised: "var(--color-surface-raised)",
         },
         label: {
           primary: "var(--color-label-primary)",
@@ -44,6 +47,16 @@ const config: Config = {
           yellow: "var(--color-system-yellow)",
           green: "var(--color-system-green)",
           blue: "var(--color-system-blue)",
+        },
+        // Role colors — used by Business workspace role pills + matrix.
+        // Home workspace does not render these (everyone is owner-level).
+        role: {
+          owner:   "var(--role-owner)",
+          admin:   "var(--role-admin)",
+          manager: "var(--role-manager)",
+          member:  "var(--role-member)",
+          viewer:  "var(--role-viewer)",
+          guest:   "var(--role-guest)",
         },
       },
       borderRadius: {

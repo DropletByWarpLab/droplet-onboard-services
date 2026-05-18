@@ -128,6 +128,16 @@ function makePrismaMock() {
     $transaction: async (
       fn: (tx: { chatSession: typeof chatSession; chatMessage: typeof chatMessage }) => Promise<void>,
     ) => fn({ chatSession, chatMessage }),
+    $executeRaw: vi.fn(
+      async (_strings: TemplateStringsArray, ...values: unknown[]) => {
+        // Mock only the rename UPDATE shape: (title, id, userId).
+        const [title, id, userId] = values as [string, string, string];
+        const row = sessions.find((s) => s.id === id && s.userId === userId);
+        if (!row) return 0;
+        row.title = title;
+        return 1;
+      },
+    ),
   };
 
   return { prisma, sessions, messages };
@@ -270,6 +280,71 @@ describe("ChatPersistenceService (WARP-304)", () => {
     const svc = new ChatPersistenceService(prisma as never);
     const detail = await svc.getConversationForUser("s-bob", "alice");
     expect(detail).toBeNull();
+  });
+
+  it("getConversationForUser returns the status of each message", async () => {
+    const { prisma } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+
+    await prisma.chatSession.create({
+      data: { userId: "alice", title: "T", model: "llama3", provider: "ollama" },
+    });
+    // Seed one message of each status so the mapping covers the enum.
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "user",
+        content: "hi",
+        turnId: "t1",
+        status: "completed",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "hello",
+        turnId: "t1",
+        status: "completed",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "",
+        turnId: "t2",
+        status: "failed",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "partial",
+        turnId: "t3",
+        status: "aborted",
+      },
+    });
+    await prisma.chatMessage.create({
+      data: {
+        sessionId: "sess-1",
+        role: "assistant",
+        content: "mid",
+        turnId: "t4",
+        status: "streaming",
+      },
+    });
+
+    const detail = await svc.getConversationForUser("sess-1", "alice");
+    expect(detail).not.toBeNull();
+    expect(detail!.messages.map((m) => m.status)).toEqual([
+      "completed",
+      "completed",
+      "failed",
+      "aborted",
+      "streaming",
+    ]);
   });
 
   it("deleteConversationForUser refuses cross-user deletes", async () => {
@@ -509,5 +584,94 @@ describe("ChatPersistenceService (WARP-304)", () => {
     expect(row?.content).toBe("Hello");
     expect(row?.status).toBe("streaming");
     expect(row?.completedAt).toBeNull();
+  });
+
+  // ── WARP-331: rename conversation ──
+
+  it("renameConversationForUser updates a row owned by the user and returns the trimmed title", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "Old",
+      model: null,
+      provider: null,
+      createdAt: new Date(2026, 0, 1),
+      updatedAt: new Date(2026, 0, 1),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    const result = await svc.renameConversationForUser("s1", "alice", "  Frigate ports  ");
+    expect(result).toBe("Frigate ports");
+    expect(sessions[0].title).toBe("Frigate ports");
+    // updatedAt MUST NOT be bumped on rename.
+    expect(sessions[0].updatedAt.getTime()).toBe(new Date(2026, 0, 1).getTime());
+  });
+
+  it("renameConversationForUser clamps to 64 chars", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: null,
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    const long = "x".repeat(200);
+    const result = await svc.renameConversationForUser("s1", "alice", long);
+    expect(result?.length).toBe(64);
+    expect(sessions[0].title?.length).toBe(64);
+  });
+
+  it("renameConversationForUser rejects empty / whitespace-only titles", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "Old",
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    await expect(svc.renameConversationForUser("s1", "alice", "   ")).rejects.toThrow(/title_required/);
+    expect(sessions[0].title).toBe("Old"); // unchanged
+  });
+
+  it("renameConversationForUser returns null when row belongs to another user", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s-bob",
+      userId: "bob",
+      title: "Bob's chat",
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    const result = await svc.renameConversationForUser("s-bob", "alice", "Hijack");
+    expect(result).toBeNull();
+    expect(sessions[0].title).toBe("Bob's chat");
+  });
+
+  it("renameConversationForUser never calls chatSession.update (avoids @updatedAt bump)", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "Old",
+      model: null,
+      provider: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const svc = new ChatPersistenceService(prisma as never);
+    await svc.renameConversationForUser("s1", "alice", "New");
+    expect(prisma.chatSession.update).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).toHaveBeenCalled();
   });
 });

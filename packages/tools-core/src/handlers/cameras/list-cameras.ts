@@ -3,7 +3,19 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 const inputSchema = { type: "object", properties: {}, additionalProperties: false } as const;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const res = await ctx.http.cameras.get("/cameras", { headers: { Accept: "application/json" } });
+  // Route through the orchestrator's /api/cameras instead of the
+  // camera-discovery service directly. Three reasons:
+  //   1. camera-discovery runs network_mode: host and exposes a
+  //      different URL shape (/cameras/known returns a raw array, no
+  //      `cameras:` key the redaction below expects).
+  //   2. The orchestrator's route aggregates camera-discovery state +
+  //      Frigate recording status into the canonical {cameras:[…]}
+  //      response the dashboard also consumes, so voice + chat + UI
+  //      all see the same shape.
+  //   3. mcp-server's createHttpClient auto-injects the service-principal
+  //      JWT for the orchestrator target (closes the auth gap that
+  //      previously surfaced as HTTP 401 here for service callers).
+  const res = await ctx.http.orchestrator.get("/api/cameras", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {
       ok: false,

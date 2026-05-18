@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { RefreshCw, Smartphone, Wifi } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
@@ -41,41 +42,49 @@ export default function DevicesPage() {
       ]
     : [];
 
-  return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Devices</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {totalDevices > 0
-              ? `${totalDevices} device${totalDevices !== 1 ? "s" : ""} connected`
-              : "No devices found"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => router.push("/devices/clients")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Paired phones + laptops"
-          >
-            <Smartphone size={16} />
-            <span className="type-subheadline">Paired apps</span>
-          </button>
-          <button
-            onClick={refresh}
-            disabled={isRefreshing}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <RefreshCw
-              size={16}
-              className={isRefreshing ? "animate-spin" : ""}
-            />
-            <span className="type-subheadline">Refresh</span>
-          </button>
-        </div>
-      </div>
+  const status = totalDevices === 0
+    ? { tone: "neutral" as const, label: "No devices paired yet" }
+    : { tone: "ok" as const, label: `${totalDevices} device${totalDevices === 1 ? "" : "s"} connected` };
 
+  const actions = (
+    <>
+      <button
+        onClick={() => router.push("/devices/clients")}
+        className="dp-btn-secondary flex items-center gap-1.5 px-3 h-9 rounded-md"
+        title="Paired phones + laptops"
+      >
+        <Smartphone size={15} />
+        <span className="type-subheadline hidden sm:inline">Paired apps</span>
+      </button>
+      <button
+        onClick={refresh}
+        disabled={isRefreshing}
+        className="
+          inline-flex items-center justify-center h-9 w-9 rounded-md
+          text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+          transition-colors
+        "
+        aria-label="Refresh devices"
+        title="Refresh"
+      >
+        <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
+
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Operations" },
+          { label: "Devices" },
+        ]}
+        status={status}
+        actions={actions}
+      />
+
+      <div className="p-6">
       {/* Content with refresh fade */}
       <div
         className={`transition-opacity duration-300 ${isRefreshing ? "opacity-60" : "opacity-100"}`}
@@ -145,6 +154,7 @@ export default function DevicesPage() {
           onClose={() => setSelectedDevice(null)}
         />
       )}
+      </div>
     </div>
   );
 }

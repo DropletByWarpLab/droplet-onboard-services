@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { sendChat, uploadBrainFile, fetchConversation } from "../api";
 import type {
   ChatAttachment,
@@ -129,9 +129,9 @@ function extractCitations(toolName: string, data: unknown): ChatCitation[] {
  *   - `tool_result`   → fill in the chip with `ok`/`data`/`status`/`message`
  *   - `done`          → end of stream
  *
- * The session-based UX (server-side history, sidebar of past chats)
- * went away with WARP-104. If reintroduced it would need an
- * orchestrator-side persistence layer; see the WARP-104 PR body.
+ * Conversation history is rendered by ChatHistoryPanel (WARP-331),
+ * which receives optimistic inserts + turn-completed refetches via
+ * the `historyHandleRef` option on this hook.
  */
 
 let messageCounter = 0;
@@ -227,6 +227,44 @@ function createAttachmentId(): string {
   return `att-${Date.now()}-${++attachmentCounter}`;
 }
 
+import type { ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
+
+const TITLE_MAX_LEN = 64;
+
+/** WARP-331 — derive the optimistic title from the first user message. */
+function deriveOptimisticTitle(firstUserContent: string): string {
+  const trimmed = firstUserContent.trim().replace(/\s+/g, " ");
+  if (trimmed.length <= TITLE_MAX_LEN) return trimmed;
+  // Reserve 1 char for the ellipsis so the final string is ≤ TITLE_MAX_LEN.
+  const slice = trimmed.slice(0, TITLE_MAX_LEN - 1);
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > TITLE_MAX_LEN / 2 ? slice.slice(0, lastSpace) : slice) + "…";
+}
+
+export function notifyHistoryOfNewConversation(
+  handle: ChatHistoryPanelHandle | null,
+  args: { id: string; firstUserContent: string },
+): void {
+  if (!handle) return;
+  const now = new Date().toISOString();
+  handle.optimisticInsert({
+    id: args.id,
+    title: deriveOptimisticTitle(args.firstUserContent),
+    model: null,
+    provider: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+export async function notifyHistoryOfTurnCompleted(
+  handle: ChatHistoryPanelHandle | null,
+  conversationId: string,
+): Promise<void> {
+  if (!handle) return;
+  await handle.applyTurnCompleted(conversationId);
+}
+
 export interface UseChatOptions {
   /**
    * The originating chat id sent up with each brain-memory upload so a
@@ -235,12 +273,61 @@ export interface UseChatOptions {
    * component owns it.
    */
   chatId?: string;
+  /**
+   * WARP-331: optional ref to the ChatHistoryPanel imperative handle.
+   * When set, useChat will call `optimisticInsert` on the first turn of a
+   * new conversation, and `applyTurnCompleted` when turn-completed fires.
+   */
+  historyHandleRef?: MutableRefObject<ChatHistoryPanelHandle | null>;
 }
+
+/**
+ * WARP-331: key for the per-conversation attachment cache while a chat is
+ * still a draft (no server-assigned conversationId yet). On the first
+ * turn's `X-Conversation-Id` header we rename this bucket to the real id
+ * so the chips don't visibly flicker.
+ */
+const DRAFT_CONV_KEY = "__draft__";
 
 export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isStreaming, setIsStreaming] = useState(false);
+  /**
+   * WARP-331: the conversationId of the currently-in-flight assistant
+   * stream, or `null` when nothing is streaming. The exposed `isStreaming`
+   * is derived as `streamActive && streamingConversationId === conversationId`
+   * — i.e. the UI lock follows the user's active chat, not the underlying
+   * fetch. Switching chats mid-stream therefore unlocks the new chat's
+   * input immediately; the prior chat's stream keeps running (the
+   * orchestrator persists the assistant turn server-side via WARP-329).
+   * Returning to the streaming chat re-locks the input until the stream
+   * completes.
+   */
+  const [streamActive, setStreamActive] = useState(false);
+  const [streamingConversationId, setStreamingConversationId] = useState<
+    string | null
+  >(null);
+  const streamingConversationIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    streamingConversationIdRef.current = streamingConversationId;
+  }, [streamingConversationId]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  /**
+   * WARP-331: per-conversation attachment cache. Keyed by conversationId
+   * or `DRAFT_CONV_KEY` for a pre-first-turn pending state. Switching
+   * conversations swaps the visible attachments via the effect below,
+   * so chips uploaded in chat A don't bleed into chat B's composer.
+   */
+  const attachmentsByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
+  /**
+   * WARP-331: track conversation ids whose stream JUST finished locally.
+   * The MQTT turn-completed handler uses this to skip an auto-refresh
+   * when the local stream already wrote the final content — the reload
+   * would otherwise remount the message bubbles with server ids and
+   * cause a visible flash. 5-second grace covers the network hop between
+   * the orchestrator's finalize and the client's MQTT delivery.
+   */
+  const recentlyLocallyCompletedRef = useRef<Map<string, number>>(new Map());
+  const LOCAL_COMPLETE_GRACE_MS = 5000;
   /**
    * WARP-304: server-assigned conversation id. Null until the first turn
    * returns the `X-Conversation-Id` header. The chat page reflects this
@@ -302,21 +389,28 @@ export function useChat(options: UseChatOptions = {}) {
           | { itemId?: string; status?: string; reason?: string }
           | undefined;
         if (!payload?.itemId || typeof payload.status !== "string") return;
-        setAttachments((prev) =>
-          prev.map((a) =>
-            a.itemId === payload.itemId
-              ? {
-                  ...a,
-                  status:
-                    payload.status === "ready"
-                      ? "ready"
-                      : ("failed" as ChatAttachment["status"]),
-                  error:
-                    payload.status === "failed" ? payload.reason : undefined,
-                }
-              : a,
-          ),
-        );
+        const itemId = payload.itemId;
+        const rawStatus = payload.status;
+        const reason = payload.reason;
+        const flip = (a: ChatAttachment): ChatAttachment =>
+          a.itemId === itemId
+            ? {
+                ...a,
+                status:
+                  rawStatus === "ready"
+                    ? "ready"
+                    : ("failed" as ChatAttachment["status"]),
+                error: rawStatus === "failed" ? reason : undefined,
+              }
+            : a;
+        // WARP-331: a status flip can arrive for an itemId that lives
+        // in another conversation's bucket while the user is viewing a
+        // different chat. Apply the updater across every bucket so the
+        // chip is up to date the moment the user navigates back.
+        for (const [key, list] of attachmentsByConvRef.current) {
+          attachmentsByConvRef.current.set(key, list.map(flip));
+        }
+        setAttachments((prev) => prev.map(flip));
         return;
       }
 
@@ -336,6 +430,32 @@ export function useChat(options: UseChatOptions = {}) {
             }
           | undefined;
         if (!payload?.conversationId || !payload.messageId) return;
+        // WARP-331: always notify the history panel (tab visibility is
+        // irrelevant for sidebar refreshes).
+        const historyId = payload.conversationId;
+        void notifyHistoryOfTurnCompleted(
+          options.historyHandleRef?.current ?? null,
+          historyId,
+        );
+        // WARP-331: if the user is currently viewing this conversation
+        // AND we didn't just stream it locally, refetch the persisted
+        // state so the freshly-finalized assistant turn appears without
+        // a manual page reload. Covers the "I switched away mid-stream
+        // and came back" case where the local stream was abandoned but
+        // the orchestrator continued to persist server-side.
+        if (payload.conversationId === conversationIdRef.current) {
+          const recentlyAt = recentlyLocallyCompletedRef.current.get(
+            payload.conversationId,
+          );
+          const isStillStreamingLocally =
+            streamingConversationIdRef.current === payload.conversationId;
+          const justLocallyCompleted =
+            recentlyAt !== undefined &&
+            Date.now() - recentlyAt < LOCAL_COMPLETE_GRACE_MS;
+          if (!isStillStreamingLocally && !justLocallyCompleted) {
+            void loadConversation(payload.conversationId);
+          }
+        }
         // Only surface a notification when the tab is hidden. If the
         // user is staring at the chat surface, the streaming UI already
         // told them everything they need to know.
@@ -467,7 +587,16 @@ export function useChat(options: UseChatOptions = {}) {
         return [...prev, userMessage, assistantMessage];
       });
 
-      setIsStreaming(true);
+      // WARP-331: tag the in-flight stream with the conversationId it
+      // belongs to. `null` here means "this is a draft chat that hasn't
+      // received its X-Conversation-Id header yet"; we update it as soon
+      // as the header arrives below. The exposed `isStreaming` is derived
+      // from whether this id matches the user's active conversationId,
+      // so switching chats mid-stream unlocks the new chat's input
+      // immediately (the orchestrator persists the assistant turn
+      // server-side via WARP-329 even if the client navigates away).
+      setStreamActive(true);
+      setStreamingConversationId(conversationIdRef.current);
       // Mint a fresh AbortController for this turn. Any previous one
       // is stale — sendMessage isn't called while a stream is in flight
       // because the input is disabled, but we still defensively abort
@@ -500,8 +629,25 @@ export function useChat(options: UseChatOptions = {}) {
         // URL) immediately — no waiting for the stream to end.
         const headerId = response.headers.get(CONVERSATION_ID_HEADER);
         if (headerId && conversationIdRef.current !== headerId) {
+          const wasNew = conversationIdRef.current === null;
           conversationIdRef.current = headerId;
           setConversationId(headerId);
+          // WARP-331: re-tag the in-flight stream with the real server id
+          // so isStreaming derives correctly while the stream is still
+          // running. Also migrate any draft-bucket attachments to the
+          // new id so the chip row doesn't visibly reset.
+          setStreamingConversationId(headerId);
+          if (wasNew) {
+            const drafted = attachmentsByConvRef.current.get(DRAFT_CONV_KEY);
+            if (drafted && drafted.length > 0) {
+              attachmentsByConvRef.current.set(headerId, drafted);
+            }
+            attachmentsByConvRef.current.delete(DRAFT_CONV_KEY);
+            notifyHistoryOfNewConversation(
+              options.historyHandleRef?.current ?? null,
+              { id: headerId, firstUserContent: content },
+            );
+          }
         }
         // WARP-329: the server's assistant ChatMessage.id, captured from
         // the same response. Not surfaced to the page today — kept on the
@@ -557,7 +703,7 @@ export function useChat(options: UseChatOptions = {}) {
         // error condition from the UX's perspective — we preserve any
         // partial content the model already streamed and mark the
         // bubble with `stopped: true` so the ChatMessage layer can
-        // render the "Stopped by you" tag.
+        // render the aborted FailureChip.
         const isAbort =
           isStoppingRef.current ||
           controller.signal.aborted ||
@@ -590,7 +736,21 @@ export function useChat(options: UseChatOptions = {}) {
           });
         }
       } finally {
-        setIsStreaming(false);
+        // WARP-331: stamp the just-finished conversation so the MQTT
+        // turn-completed handler can skip its auto-refresh — the local
+        // stream already wrote the final content, refetching would just
+        // remount the bubbles. We stamp the streaming id rather than the
+        // current conversationId because the user may have already
+        // navigated away (background completion is the whole point).
+        const justFinished = streamingConversationIdRef.current;
+        if (justFinished) {
+          recentlyLocallyCompletedRef.current.set(justFinished, Date.now());
+        }
+        // Clear both stream-state shards. The exposed `isStreaming` flips
+        // false on the next render — for any chat the user is currently
+        // viewing.
+        setStreamActive(false);
+        setStreamingConversationId(null);
         isStoppingRef.current = false;
         if (abortRef.current === controller) {
           abortRef.current = null;
@@ -624,21 +784,29 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const retryMessage = useCallback(
     async (messageId: string, model: string, systemPrompt?: string) => {
-      // Read the failed message from the ref-mirror — the updater
-      // pattern doesn't work here because in this test/runtime
-      // environment React batches the updater AFTER the surrounding
-      // async code reads back closure-captured state.
-      const target = messagesRef.current.find((m) => m.id === messageId);
-      if (!target?.error) return;
-      const retryPrompt = target.error.retryPrompt;
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      const target = snapshot[idx];
+      // Derive the prompt to re-send. Live failures carry retryPrompt on
+      // the error field; history-loaded failures (failureKind) don't, so
+      // fall back to the preceding user message's content.
+      let retryPrompt: string | null = null;
+      if (target.error) {
+        retryPrompt = target.error.retryPrompt;
+      } else if (target.failureKind) {
+        const prev = idx > 0 ? snapshot[idx - 1] : null;
+        if (prev && prev.role === "user") retryPrompt = prev.content;
+      }
+      if (retryPrompt == null) return;
 
       // Drop the failed assistant + the user turn immediately before it
       // so the new turn replays a clean thread.
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.id === messageId);
-        if (idx === -1) return prev;
-        const userIdx = idx > 0 && prev[idx - 1].role === "user" ? idx - 1 : idx;
-        return prev.filter((_, i) => i !== idx && i !== userIdx);
+        const i = prev.findIndex((m) => m.id === messageId);
+        if (i === -1) return prev;
+        const userIdx = i > 0 && prev[i - 1].role === "user" ? i - 1 : i;
+        return prev.filter((_, k) => k !== i && k !== userIdx);
       });
 
       await sendMessage(retryPrompt, model, systemPrompt);
@@ -686,12 +854,22 @@ export function useChat(options: UseChatOptions = {}) {
     [sendMessage],
   );
 
+  /**
+   * WARP-331: increments every time the messages array is replaced
+   * wholesale (loadConversation, clearMessages) rather than appended/
+   * mutated by a streaming chunk. The chat page watches this to force a
+   * scroll-to-bottom on discrete refresh events without yanking the
+   * user mid-stream-citation-read.
+   */
+  const [messagesEpoch, setMessagesEpoch] = useState(0);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     // WARP-304: starting a new chat must detach from the prior persisted
     // conversation — subsequent sends will mint a fresh one server-side.
     setConversationId(null);
     conversationIdRef.current = null;
+    setMessagesEpoch((e) => e + 1);
   }, []);
 
   /**
@@ -711,6 +889,16 @@ export function useChat(options: UseChatOptions = {}) {
       const rebuilt: ChatMessage[] = [];
       for (const m of persisted.messages) {
         if (m.role !== "user" && m.role !== "assistant") continue;
+        const failureKind: ChatMessage["failureKind"] =
+          m.role === "assistant"
+            ? m.status === "failed"
+              ? "failed"
+              : m.status === "aborted"
+                ? "aborted"
+                : m.status === "streaming"
+                  ? "interrupted"
+                  : undefined
+            : undefined;
         rebuilt.push({
           id: m.id,
           role: m.role as "user" | "assistant",
@@ -728,12 +916,47 @@ export function useChat(options: UseChatOptions = {}) {
                 })),
               }
             : {}),
+          ...(failureKind ? { failureKind } : {}),
+        });
+      }
+      // Tail-orphan: a user message at the END of the persisted list with no
+      // assistant follow-up — usually a server crash after the user row was
+      // committed but before the assistant row was created. Synthesize a
+      // placeholder so the UI can offer Try-again rather than ending the chat
+      // abruptly. Mid-conversation orphans are skipped on purpose (would
+      // inject a duplicate turn mid-thread on retry).
+      const tail = rebuilt[rebuilt.length - 1];
+      if (tail && tail.role === "user") {
+        rebuilt.push({
+          id: `missing-after-${tail.id}`,
+          role: "assistant",
+          content: "",
+          failureKind: "missing",
         });
       }
       setMessages(rebuilt);
       setConversationId(persisted.id);
       conversationIdRef.current = persisted.id;
+      setMessagesEpoch((e) => e + 1);
       return true;
+    },
+    [],
+  );
+
+  /**
+   * WARP-331: every attachment mutation routes through this helper so
+   * the per-conversation cache stays in sync with the visible state.
+   * The cache is keyed by `conversationId` (or `DRAFT_CONV_KEY` before
+   * the first turn returns its server-assigned id).
+   */
+  const mutateAttachments = useCallback(
+    (updater: (prev: ChatAttachment[]) => ChatAttachment[]) => {
+      const key = conversationIdRef.current ?? DRAFT_CONV_KEY;
+      setAttachments((prev) => {
+        const next = updater(prev);
+        attachmentsByConvRef.current.set(key, next);
+        return next;
+      });
     },
     [],
   );
@@ -747,46 +970,73 @@ export function useChat(options: UseChatOptions = {}) {
    *
    * Returns the `localId` of the chip so callers can track / remove it.
    */
-  const attach = useCallback(async (file: File): Promise<string> => {
-    const localId = createAttachmentId();
-    const pending: ChatAttachment = {
-      localId,
-      filename: file.name,
-      bytes: file.size,
-      status: "uploading",
-    };
-    setAttachments((prev) => [...prev, pending]);
+  const attach = useCallback(
+    async (file: File): Promise<string> => {
+      const localId = createAttachmentId();
+      const pending: ChatAttachment = {
+        localId,
+        filename: file.name,
+        bytes: file.size,
+        status: "uploading",
+      };
+      mutateAttachments((prev) => [...prev, pending]);
 
-    try {
-      const res = await uploadBrainFile(file, chatIdRef.current);
-      setAttachments((prev) =>
-        prev.map((a) =>
-          a.localId === localId
-            ? { ...a, itemId: res.itemId, status: "indexing" }
-            : a,
-        ),
-      );
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Upload failed";
-      setAttachments((prev) =>
-        prev.map((a) =>
-          a.localId === localId
-            ? { ...a, status: "failed", error: message }
-            : a,
-        ),
-      );
-    }
-    return localId;
-  }, []);
+      try {
+        const res = await uploadBrainFile(file, chatIdRef.current);
+        mutateAttachments((prev) =>
+          prev.map((a) =>
+            a.localId === localId
+              ? { ...a, itemId: res.itemId, status: "indexing" }
+              : a,
+          ),
+        );
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Upload failed";
+        mutateAttachments((prev) =>
+          prev.map((a) =>
+            a.localId === localId
+              ? { ...a, status: "failed", error: message }
+              : a,
+          ),
+        );
+      }
+      return localId;
+    },
+    [mutateAttachments],
+  );
 
-  const removeAttachment = useCallback((localId: string) => {
-    setAttachments((prev) => prev.filter((a) => a.localId !== localId));
-  }, []);
+  const removeAttachment = useCallback(
+    (localId: string) => {
+      mutateAttachments((prev) => prev.filter((a) => a.localId !== localId));
+    },
+    [mutateAttachments],
+  );
 
   const clearAttachments = useCallback(() => {
+    const key = conversationIdRef.current ?? DRAFT_CONV_KEY;
+    attachmentsByConvRef.current.delete(key);
     setAttachments([]);
   }, []);
+
+  // WARP-331: when the active conversationId changes, swap the visible
+  // attachments to the bucket the user is now looking at. The MQTT-driven
+  // "indexed" updates from chat A continue to mutate chat A's cache slot
+  // even while the user is viewing chat B (via mutateAttachments), so
+  // switching back doesn't lose a status flip that landed in the
+  // meantime.
+  useEffect(() => {
+    const key = conversationId ?? DRAFT_CONV_KEY;
+    const stored = attachmentsByConvRef.current.get(key) ?? [];
+    setAttachments(stored);
+  }, [conversationId]);
+
+  // WARP-331: derive the visible streaming lock. The in-flight stream
+  // keeps running on the conversation it started for, regardless of
+  // where the user navigates; the composer only locks when the user
+  // is actually viewing that conversation.
+  const isStreaming =
+    streamActive && streamingConversationId === conversationId;
 
   return {
     messages,
@@ -804,6 +1054,11 @@ export function useChat(options: UseChatOptions = {}) {
     // WARP-304
     conversationId,
     loadConversation,
+    // WARP-331 — increments on every wholesale message-array replacement
+    // (load, clear). The chat page watches this to force a scroll-to-
+    // bottom on discrete refresh events without yanking the user
+    // mid-stream-citation-read.
+    messagesEpoch,
   };
 }
 

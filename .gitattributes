@@ -1,6 +1,16 @@
-# Keep shell scripts and other Linux-runtime artifacts as LF in the working
-# tree so they don't break when checked out on Windows with core.autocrlf=true
-# and then SFTP'd to a Linux box.
+# Force LF line endings on Linux-runtime artifacts so Windows clones
+# with core.autocrlf=true don't break scripts deployed to the POC box
+# OR shipped inside Docker images.
+#
+# Union of both branches' rules:
+#  - POC (feat/poc-single-box) added the extensionless attach script
+#    that the photo-studio box's systemd unit invokes
+#  - feat/dashboard-redesign broadened coverage to Python services,
+#    Dockerfiles, and YAML compose files
 *.sh text eol=lf
 *.service text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
 openwrt/poc-single-box/droplet-openwrt-attach text eol=lf

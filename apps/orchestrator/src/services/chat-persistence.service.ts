@@ -63,6 +63,7 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
     toolCalls: PersistedToolCall[] | null;
     toolCallId: string | null;
     turnId: string | null;
+    status: "pending" | "streaming" | "completed" | "failed" | "aborted";
     createdAt: string;
   }>;
 }
@@ -110,6 +111,7 @@ export class ChatPersistenceService {
         toolCalls: (m.toolCalls as unknown as PersistedToolCall[] | null) ?? null,
         toolCallId: m.toolCallId,
         turnId: m.turnId,
+        status: m.status as "pending" | "streaming" | "completed" | "failed" | "aborted",
         createdAt: m.createdAt.toISOString(),
       })),
     };
@@ -149,6 +151,38 @@ export class ChatPersistenceService {
       where: { id: conversationId, userId },
     });
     return result.count > 0;
+  }
+
+  /**
+   * Rename a conversation owned by the user. Trims and clamps to
+   * `TITLE_MAX_LEN` to match the auto-derived title cap. Returns the
+   * final stored title, or `null` if no row matched the (id, userId)
+   * pair (other user, or doesn't exist — callers map both to 404).
+   *
+   * Uses raw SQL deliberately: `ChatSession.updatedAt` carries Prisma's
+   * `@updatedAt` decorator, which would auto-bump the column on any
+   * `chatSession.update()` call. Rename is a metadata edit — we don't
+   * want the renamed chat jumping to the top of the sidebar. New-
+   * activity recency comes from sends, not from typing in the title.
+   * The single UPDATE is also atomic, closing the read-modify race
+   * the prior findFirst → update pattern had.
+   */
+  async renameConversationForUser(
+    conversationId: string,
+    userId: string,
+    rawTitle: string,
+  ): Promise<string | null> {
+    const trimmed = rawTitle.trim();
+    if (trimmed.length === 0) {
+      throw new Error("title_required");
+    }
+    const next = trimmed.slice(0, TITLE_MAX_LEN);
+    const rowsAffected = await this.prisma.$executeRaw`
+      UPDATE "ChatSession"
+      SET title = ${next}
+      WHERE id = ${conversationId} AND "userId" = ${userId}
+    `;
+    return rowsAffected > 0 ? next : null;
   }
 
   /**

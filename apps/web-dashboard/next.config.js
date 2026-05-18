@@ -2,16 +2,24 @@
 const nextConfig = {
   output: "standalone",
   async rewrites() {
-    // In dev mode (outside Docker), proxy API calls to local services
+    // In dev mode (outside Docker), proxy API calls to local services.
+    // Docker dev (docker/docker-compose.dev.yml) sets the *_INTERNAL_URL
+    // envs so the Next.js server-side rewrite resolves to the orchestrator
+    // container by service name instead of localhost (which would point at
+    // the dashboard container itself).
     if (process.env.NODE_ENV === "development") {
+      const orchestratorUrl =
+        process.env.ORCHESTRATOR_INTERNAL_URL || "http://localhost:3000";
+      const aiGatewayUrl =
+        process.env.AI_GATEWAY_INTERNAL_URL || "http://localhost:8000";
       return [
         {
           source: "/api/:path*",
-          destination: "http://localhost:3000/api/:path*",
+          destination: `${orchestratorUrl}/api/:path*`,
         },
         {
           source: "/ai/:path*",
-          destination: "http://localhost:8000/ai/:path*",
+          destination: `${aiGatewayUrl}/ai/:path*`,
         },
       ];
     }

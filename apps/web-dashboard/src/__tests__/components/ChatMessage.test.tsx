@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 
 // CitationChip wraps next/link — the global mock in setup.ts returns a
 // raw string template rather than a real element, which makes the chip
@@ -572,20 +572,22 @@ describe("ChatMessage", () => {
   });
 
   describe("stopped marker (WARP-295)", () => {
-    it("renders a 'Stopped by you' tag on an assistant message with stopped=true", () => {
+    it("renders the aborted FailureChip when message.stopped is set (live abort)", () => {
       render(
         <ChatMessage
           message={{
-            id: "asst-stop",
+            id: "m1",
             role: "assistant",
-            content: "Partial answer",
+            content: "partial",
             stopped: true,
           }}
+          onRetry={() => undefined}
         />,
       );
-      expect(screen.getByText(/stopped by you/i)).toBeInTheDocument();
-      // The partial content is preserved.
-      expect(screen.getByText(/partial answer/i)).toBeInTheDocument();
+      expect(screen.getByText("Stopped")).toBeInTheDocument();
+      expect(screen.queryByText(/Stopped by you/)).not.toBeInTheDocument();
+      // The bubble keeps the partial content.
+      expect(screen.getByText("partial")).toBeInTheDocument();
     });
 
     it("no stopped tag when the flag is unset", () => {
@@ -638,5 +640,71 @@ describe("ChatMessage", () => {
       const status = container.querySelector('[role="status"]');
       expect(status).toBeNull();
     });
+  });
+});
+
+describe("FailureChip", () => {
+  const baseMsg = {
+    id: "m1",
+    role: "assistant" as const,
+    content: "",
+  };
+
+  it.each([
+    ["failed", "Something went wrong on this turn."],
+    ["aborted", "Stopped"],
+    ["interrupted", "Interrupted — the reply didn't finish."],
+    ["missing", "No reply was saved for this turn."],
+  ] as const)("renders the %s variant with the right copy", (kind, copy) => {
+    render(
+      <ChatMessage
+        message={{ ...baseMsg, failureKind: kind }}
+        onRetry={() => undefined}
+      />,
+    );
+    expect(screen.getByText(copy)).toBeInTheDocument();
+    // The chip's root div carries data-failure-kind for testing.
+    expect(document.querySelector(`[data-failure-kind="${kind}"]`)).toBeInTheDocument();
+  });
+
+  it("Try-again invokes onRetry with the message id", () => {
+    const onRetry = vi.fn();
+    render(
+      <ChatMessage
+        message={{ ...baseMsg, failureKind: "failed" }}
+        onRetry={onRetry}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /try sending this message again/i }),
+    );
+    expect(onRetry).toHaveBeenCalledWith("m1");
+  });
+
+  it("preserves partial content when failureKind is interrupted", () => {
+    render(
+      <ChatMessage
+        message={{ ...baseMsg, content: "halfway through", failureKind: "interrupted" }}
+        onRetry={() => undefined}
+      />,
+    );
+    expect(screen.getByText("halfway through")).toBeInTheDocument();
+    expect(document.querySelector('[data-failure-kind="interrupted"]')).toBeInTheDocument();
+  });
+
+  it("falls back to message.error.message for live-error copy", () => {
+    render(
+      <ChatMessage
+        message={{
+          ...baseMsg,
+          error: { message: "Custom live error", retryPrompt: "x" },
+        }}
+        onRetry={() => undefined}
+      />,
+    );
+    // failureKind is undefined; derivation should yield "failed" from
+    // the error field, and the chip should use the custom copy.
+    expect(screen.getByText("Custom live error")).toBeInTheDocument();
+    expect(document.querySelector('[data-failure-kind="failed"]')).toBeInTheDocument();
   });
 });

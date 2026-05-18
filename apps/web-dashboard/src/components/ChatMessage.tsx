@@ -13,6 +13,8 @@ import {
   Copy as CopyIcon,
   Quote as QuoteIcon,
   RotateCcw,
+  StopCircle,
+  Ghost,
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CitationChip } from "@/components/CitationChip";
@@ -51,8 +53,15 @@ export const ChatMessage = memo(function ChatMessage({
   const isUser = message.role === "user";
   const toolCalls = message.toolCalls;
   const hasToolCalls = !isUser && toolCalls && toolCalls.length > 0;
-  const hasError = !isUser && Boolean(message.error);
-  const isStopped = !isUser && Boolean(message.stopped);
+  // failureKind unifies live and loaded failure states. Live errors map
+  // to "failed"; live stops map to "aborted". For loaded messages the
+  // hook sets failureKind directly.
+  const failureKind: ChatMessageType["failureKind"] | undefined = !isUser
+    ? message.failureKind
+      ?? (message.error ? "failed" : undefined)
+      ?? (message.stopped ? "aborted" : undefined)
+    : undefined;
+  const hasFailure = Boolean(failureKind);
   const citations = !isUser ? message.citations : undefined;
   const hasCitations = Boolean(citations && citations.length > 0);
   const showToolbar =
@@ -147,29 +156,22 @@ export const ChatMessage = memo(function ChatMessage({
                 {message.content}
               </ReactMarkdown>
             )}
-            {hasError && (
-              <div
-                className="flex items-start gap-2 p-2 rounded-lg bg-system-red/10 text-system-red type-caption-1"
-                role="alert"
+            {message.content && (failureKind === "aborted" || failureKind === "interrupted") && (
+              <span
+                className="text-label-tertiary"
+                aria-hidden="true"
+                data-testid="partial-ellipsis"
               >
-                <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p>{message.error!.message}</p>
-                  {onRetry && (
-                    <button
-                      type="button"
-                      onClick={() => onRetry(message.id)}
-                      className="mt-1.5 inline-flex items-center gap-1 type-caption-1 font-medium
-                        text-system-red hover:underline focus:outline-none focus:ring-2
-                        focus:ring-system-red/40 rounded-sm"
-                      aria-label="Try sending this message again"
-                    >
-                      <RefreshCcw size={12} />
-                      Try again
-                    </button>
-                  )}
-                </div>
-              </div>
+                …
+              </span>
+            )}
+            {hasFailure && (
+              <FailureChip
+                kind={failureKind!}
+                liveErrorMessage={message.error?.message}
+                canRetry={Boolean(onRetry)}
+                onRetry={() => onRetry?.(message.id)}
+              />
             )}
             {isStreaming && (
               <>
@@ -216,13 +218,6 @@ export const ChatMessage = memo(function ChatMessage({
             />
           ))}
         </div>
-      ) : null}
-      {/* WARP-295: "Stopped by you" marker — preserves the partial
-          content while making clear it didn't run to completion. */}
-      {isStopped ? (
-        <p className="type-caption-1 text-label-tertiary italic">
-          Stopped by you
-        </p>
       ) : null}
       {/* WARP-295: message-actions toolbar. focus-within keeps the
           toolbar reachable by keyboard — Tab into the bubble's button
@@ -300,6 +295,90 @@ export const ChatMessage = memo(function ChatMessage({
     </div>
   );
 });
+
+/**
+ * Failure-state chip for an assistant turn. Four variants:
+ *
+ *   - failed       — server-side error (live or loaded)
+ *   - aborted      — user-cancelled (live or loaded). The bubble keeps
+ *                    its partial content; this chip sits below it.
+ *   - interrupted  — server died mid-stream. Loaded-only. Partial
+ *                    content kept.
+ *   - missing      — synthetic placeholder for an orphan user turn.
+ *                    No bubble; just the chip.
+ *
+ * The Try-again link is rendered when `canRetry` is true and routes to
+ * the parent's `onRetry`. The page wires that to useChat.retryMessage.
+ */
+function FailureChip({
+  kind,
+  liveErrorMessage,
+  canRetry,
+  onRetry,
+}: {
+  kind: NonNullable<ChatMessageType["failureKind"]>;
+  liveErrorMessage?: string;
+  canRetry: boolean;
+  onRetry: () => void;
+}) {
+  const variant = ({
+    failed: {
+      Icon: AlertTriangle,
+      copy: liveErrorMessage ?? "Something went wrong on this turn.",
+      tone: "bg-system-red/10 text-system-red",
+      role: "alert" as const,
+    },
+    aborted: {
+      Icon: StopCircle,
+      copy: "Stopped",
+      tone: "bg-surface-tertiary text-label-secondary",
+      role: "status" as const,
+    },
+    interrupted: {
+      Icon: RotateCcw,
+      copy: "Interrupted — the reply didn't finish.",
+      tone: "bg-system-orange/15 text-system-orange",
+      role: "alert" as const,
+    },
+    missing: {
+      Icon: Ghost,
+      copy: "No reply was saved for this turn.",
+      tone: "bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
+      role: "status" as const,
+    },
+  } satisfies Record<NonNullable<ChatMessageType["failureKind"]>, {
+    Icon: typeof AlertTriangle;
+    copy: string;
+    tone: string;
+    role: "alert" | "status";
+  }>)[kind];
+
+  return (
+    <div
+      className={`flex items-start gap-2 p-2 rounded-lg type-caption-1 ${variant.tone}`}
+      role={variant.role}
+      data-failure-kind={kind}
+    >
+      <variant.Icon size={14} className="flex-shrink-0 mt-0.5" aria-hidden="true" />
+      <div className="flex-1 min-w-0">
+        <p>{variant.copy}</p>
+        {canRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-1.5 inline-flex items-center gap-1 type-caption-1 font-medium
+              hover:underline focus:outline-none focus:ring-2
+              focus:ring-current/40 rounded-sm"
+            aria-label="Try sending this message again"
+          >
+            <RefreshCcw size={12} aria-hidden="true" />
+            Try again
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Inline chip surfaced on the assistant message for each MCP tool the

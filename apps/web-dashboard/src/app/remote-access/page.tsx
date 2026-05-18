@@ -15,6 +15,7 @@ import {
   Loader2,
   ShieldOff,
 } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useAuth } from "@/lib/auth";
 import {
   fetchVpnStatus,
@@ -93,25 +94,38 @@ export default function RemoteAccessPage() {
   const activePeers = peers.filter((p) => p.status === "active");
   const endpointMissing = status && !status.endpointConfigured;
 
+  // Per ADR-005, VPN is the mandatory transport for off-LAN clients.
+  // Status chip reflects whether WG endpoint is configured.
+  const remoteStatus = endpointMissing
+    ? { tone: "warn" as const, label: "Endpoint not configured" }
+    : { tone: "ok" as const, label: "Ready for remote connections" };
+
   return (
-    <div className="p-6 lg:p-8 max-w-4xl">
-      <div className="flex items-start justify-between gap-4 mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Remote Access</h1>
-          <p className="type-subheadline text-label-tertiary mt-1 max-w-xl">
-            Connect your phone or laptop to your home network from anywhere.
-            Add a device, scan the QR code in the WireGuard app, and you&rsquo;re in.
-          </p>
-        </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          disabled={endpointMissing === true}
-          className="dp-btn-primary type-subheadline !py-2 !px-4 !min-h-[36px] flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Plus size={14} />
-          Add a device
-        </button>
-      </div>
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Operations" },
+          { label: "Remote Access" },
+        ]}
+        status={remoteStatus}
+        actions={
+          <button
+            onClick={() => setShowAdd(true)}
+            disabled={endpointMissing === true}
+            className="dp-btn-primary flex items-center gap-1.5 px-3 h-9 rounded-md disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Plus size={15} />
+            <span className="type-subheadline">Add device</span>
+          </button>
+        }
+      />
+
+      <div className="p-6 lg:p-8 max-w-4xl">
+      <p className="type-subheadline text-label-tertiary mb-6 max-w-xl">
+        Connect your phone or laptop to your home network from anywhere.
+        Add a device, scan the QR code in the WireGuard app, and you&rsquo;re in.
+      </p>
 
       {error && (
         <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
@@ -193,6 +207,7 @@ export default function RemoteAccessPage() {
         confirmLabel="Revoke"
         variant="destructive"
       />
+      </div>
     </div>
   );
 }

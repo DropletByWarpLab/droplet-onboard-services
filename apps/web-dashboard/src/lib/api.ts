@@ -1357,6 +1357,13 @@ export interface PersistedConversation {
       | null;
     toolCallId: string | null;
     turnId: string | null;
+    /**
+     * Lifecycle status of the persisted row. The client uses
+     * it to drive failureKind on reloaded messages. Optional because
+     * older orchestrator builds didn't return it; treat missing as
+     * `completed` defensively.
+     */
+    status?: "pending" | "streaming" | "completed" | "failed" | "aborted";
     createdAt: string;
   }>;
 }
@@ -1372,6 +1379,72 @@ export async function fetchConversation(
     throw new Error(`Failed to fetch conversation: ${res.status}`);
   }
   return res.json() as Promise<PersistedConversation>;
+}
+
+/**
+ * WARP-331 — list a user's conversations newest-first. Paginated.
+ * Powers the chat history sidebar on /chat.
+ */
+export interface ConversationSummary {
+  id: string;
+  title: string | null;
+  model: string | null;
+  provider: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listConversations(args: {
+  limit: number;
+  offset: number;
+}): Promise<ConversationSummary[]> {
+  const qs = new URLSearchParams({
+    limit: String(args.limit),
+    offset: String(args.offset),
+  });
+  const res = await authFetch(`${BASE}/api/llm/conversations?${qs}`);
+  if (!res.ok) throw new Error(`Failed to list conversations: ${res.status}`);
+  const body = (await res.json()) as { conversations: ConversationSummary[] };
+  return body.conversations;
+}
+
+/** WARP-331 — rename a conversation. Server trims + clamps to 64 chars.
+ *  Returns the canonical stored title. No `updatedAt` is returned because
+ *  the service intentionally does not bump the DB column on rename (rename
+ *  is metadata; see chat-persistence.service.ts). */
+export async function renameConversation(
+  conversationId: string,
+  title: string,
+): Promise<{ id: string; title: string }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+  if (!res.ok) {
+    let body: { error?: string } = {};
+    try {
+      body = await res.json();
+    } catch {
+      // ignore
+    }
+    throw new Error(body.error || `Failed to rename conversation: ${res.status}`);
+  }
+  return res.json() as Promise<{ id: string; title: string }>;
+}
+
+/** WARP-331 — delete a conversation. Returns true on 200, false on 404. */
+export async function deleteConversation(conversationId: string): Promise<boolean> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    { method: "DELETE" },
+  );
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`Failed to delete conversation: ${res.status}`);
+  return true;
 }
 
 // --- Brain memory (chat attachments) ---

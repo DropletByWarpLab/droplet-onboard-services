@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import useSWR from "swr";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useRouter, usePathname } from "next/navigation";
 import {
   RefreshCw,
   Video,
@@ -13,7 +14,9 @@ import {
   Bell,
   User,
   Car,
+  type LucideIcon,
 } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
@@ -143,17 +146,31 @@ export default function CamerasPage() {
     }
   };
 
+  // Shared chrome for the loading + error states so the Topbar stays
+  // in place while the body swaps — avoids a layout-jump on first paint.
+  const chromeOnly = (
+    <>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Operations" },
+          { label: "Cameras" },
+        ]}
+        status={{ tone: "neutral", label: isLoading ? "Loading…" : "Service offline" }}
+      />
+    </>
+  );
+
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-48 bg-surface-secondary rounded animate-pulse" />
-          <div className="h-4 w-32 bg-surface-secondary rounded animate-pulse" />
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card aspect-video animate-pulse bg-surface-secondary" />
-          ))}
+      <div>
+        {chromeOnly}
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="dp-card aspect-video animate-pulse bg-surface-secondary" />
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -161,125 +178,106 @@ export default function CamerasPage() {
 
   if (error) {
     return (
-      <div className="p-6">
-        <div className="dp-card text-center py-12">
-          <Video size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            Camera service is offline
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
-            Make sure this Droplet is powered on and the camera service is
-            running. Try again in a moment, or contact support if this
-            persists.
-          </p>
-          <button
-            onClick={refresh}
-            disabled={isRefreshing}
-            className="dp-btn-secondary inline-flex items-center gap-2 px-4 py-2 rounded-lg"
-          >
-            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
-            <span className="type-subheadline">Retry</span>
-          </button>
+      <div>
+        {chromeOnly}
+        <div className="p-6">
+          <div className="dp-card text-center py-12">
+            <Video size={32} className="mx-auto text-label-quaternary mb-3" />
+            <h2 className="type-title-3 text-label-primary mb-1">
+              Camera service is offline
+            </h2>
+            <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
+              Make sure this Droplet is powered on and the camera service is
+              running. Try again in a moment, or contact support if this
+              persists.
+            </p>
+            <button
+              onClick={refresh}
+              disabled={isRefreshing}
+              className="dp-btn-secondary inline-flex items-center gap-2 px-4 py-2 rounded-lg"
+            >
+              <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+              <span className="type-subheadline">Retry</span>
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
+  // Status chip on the Topbar — tells the operator at a glance how the
+  // fleet's doing. Tone neutral for the empty state so it doesn't read
+  // as "warning" before any cameras are added.
+  const statusChip = totalCameras === 0
+    ? { tone: "neutral" as const, label: "No cameras connected" }
+    : { tone: "ok" as const, label: `${totalCameras} camera${totalCameras === 1 ? "" : "s"} connected` };
+
+  // Topbar primary actions — kept to the two operator-frequent ones
+  // (Add + Refresh). The other 5 nav targets (Birdseye / People /
+  // Plates / Notifications / System / Scan) live in the secondary
+  // sub-nav strip below the Topbar — they're navigation, not actions.
+  const topbarActions = (
+    <>
+      <button
+        onClick={() => setShowAddModal(true)}
+        className="dp-btn-primary flex items-center gap-1.5 px-3 h-9 rounded-md"
+      >
+        <Plus size={15} />
+        <span className="type-subheadline">Add camera</span>
+      </button>
+      <button
+        onClick={refresh}
+        disabled={isRefreshing}
+        className="
+          inline-flex items-center justify-center h-9 w-9 rounded-md
+          text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
+          transition-colors
+        "
+        aria-label="Refresh cameras"
+        title="Refresh"
+      >
+        <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
+
   return (
-    <div className="p-6">
-      {/* Notifications */}
+    <div>
+      {/* Notifications — fixed-positioned toaster, renders outside flow */}
       <CameraNotificationToast
         notifications={notifications}
         onDismiss={dismissNotification}
       />
 
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Cameras</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {totalCameras > 0
-              ? `${totalCameras} camera${totalCameras !== 1 ? "s" : ""} connected`
-              : "No cameras found"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <Plus size={16} />
-            <span className="type-subheadline">Add Camera</span>
-          </button>
-          <button
-            onClick={async () => {
-              setScanning(true);
-              try {
-                await triggerCameraScan();
-                refresh();
-              } catch { /* scan service may not be running */ }
-              setScanning(false);
-            }}
-            disabled={scanning}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <Radar size={16} className={scanning ? "animate-pulse" : ""} />
-            <span className="type-subheadline">Scan</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/birdseye")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Auto-composited multi-camera view"
-          >
-            <LayoutGrid size={16} />
-            <span className="type-subheadline">Birdseye</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/people")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Known faces (face recognition)"
-          >
-            <User size={16} />
-            <span className="type-subheadline hidden lg:inline">People</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/plates")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Detected license plates"
-          >
-            <Car size={16} />
-            <span className="type-subheadline hidden lg:inline">Plates</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/notifications")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Per-camera notification preferences"
-          >
-            <Bell size={16} />
-            <span className="type-subheadline hidden lg:inline">Notifications</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/system")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Recognition engine health"
-          >
-            <Server size={16} />
-            <span className="type-subheadline">System</span>
-          </button>
-          <button
-            onClick={refresh}
-            disabled={isRefreshing}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <RefreshCw
-              size={16}
-              className={isRefreshing ? "animate-spin" : ""}
-            />
-            <span className="type-subheadline">Refresh</span>
-          </button>
-        </div>
-      </div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Operations" },
+          { label: "Cameras" },
+        ]}
+        status={statusChip}
+        actions={topbarActions}
+      />
 
+      {/* Secondary sub-nav for the camera-related sub-routes. Plays the
+          same role the dashboard's sidebar Files sub-nav plays for
+          /files — sub-pages of /cameras grouped here so the Topbar
+          isn't drowning in 7 nav buttons. The Scan button lives here
+          too because it's a "go look for new cameras" action, adjacent
+          to the discovery surfaces. */}
+      <CamerasSubNav
+        scanning={scanning}
+        onScan={async () => {
+          setScanning(true);
+          try {
+            await triggerCameraScan();
+            refresh();
+          } catch { /* scan service may not be running */ }
+          setScanning(false);
+        }}
+      />
+
+      <div className="p-6">
       {/* Network isolation */}
       <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />
 
@@ -459,6 +457,87 @@ export default function CamerasPage() {
         confirmLabel="Delete group"
         variant="destructive"
       />
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Secondary sub-nav strip for /cameras/*. Renders a horizontal row of
+// pill links + a "Scan" action button. Visually mirrors the redesign's
+// chip-tab pattern: outlined pills with the active route filled-violet.
+// ─────────────────────────────────────────────────────────────────
+
+interface CamerasSubNavProps {
+  scanning: boolean;
+  onScan: () => void;
+}
+
+function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
+  const pathname = usePathname();
+
+  const items: Array<{ href: string; label: string; icon: LucideIcon; titleAttr: string }> = [
+    { href: "/cameras/birdseye",      label: "Birdseye",      icon: LayoutGrid, titleAttr: "Auto-composited multi-camera view" },
+    { href: "/cameras/people",        label: "People",        icon: User,       titleAttr: "Known faces (face recognition)" },
+    { href: "/cameras/plates",        label: "Plates",        icon: Car,        titleAttr: "Detected license plates" },
+    { href: "/cameras/notifications", label: "Notifications", icon: Bell,       titleAttr: "Per-camera notification preferences" },
+    { href: "/cameras/system",        label: "System",        icon: Server,     titleAttr: "Recognition engine health" },
+  ];
+
+  const isActive = (href: string) => pathname === href;
+
+  return (
+    <div
+      className="
+        sticky top-14 z-20
+        bg-[var(--color-toolbar-bg)] dp-material
+        border-b border-separator
+      "
+    >
+      <div className="px-4 lg:px-8 h-12 flex items-center gap-2 overflow-x-auto">
+        {items.map((item) => {
+          const Icon = item.icon;
+          const active = isActive(item.href);
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              title={item.titleAttr}
+              aria-current={active ? "page" : undefined}
+              className={`
+                inline-flex items-center gap-1.5 h-8 px-3 rounded-full
+                type-footnote transition-colors flex-shrink-0
+                ${
+                  active
+                    ? "bg-accent text-white"
+                    : "border border-separator text-label-secondary hover:border-accent/40 hover:text-accent bg-surface-tertiary"
+                }
+              `}
+            >
+              <Icon size={13} strokeWidth={active ? 2 : 1.5} />
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
+
+        {/* The Scan action lives in the sub-nav because the camera-discovery
+            surfaces are right next to it conceptually. Bumped to the right
+            with ml-auto so it doesn't crowd the navigation pills. */}
+        <button
+          onClick={onScan}
+          disabled={scanning}
+          className="
+            ml-auto inline-flex items-center gap-1.5 h-8 px-3 rounded-full
+            border border-separator type-footnote text-label-secondary
+            hover:border-accent/40 hover:text-accent bg-surface-tertiary
+            transition-colors flex-shrink-0 disabled:opacity-60
+          "
+          title="Scan the LAN for ONVIF cameras"
+        >
+          <Radar size={13} className={scanning ? "animate-pulse" : ""} />
+          <span>{scanning ? "Scanning…" : "Scan network"}</span>
+        </button>
+      </div>
     </div>
   );
 }
