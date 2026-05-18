@@ -765,6 +765,18 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       await cacheSet(cacheKey, items, RECENTS_TTL);
       res.json({ items });
     } catch (err) {
+      // Graceful degrade: Nextcloud's WebDAV occasionally 401s when the
+      // stored app password is stale, has been revoked, or the
+      // freshly-installed Nextcloud (dev compose / first-boot prod)
+      // hasn't fully wired up the user's session yet. Return an empty
+      // recents list rather than 500 — the home-page widget renders
+      // "no recent files" and the user isn't blocked on a transient
+      // upstream auth hiccup. The 500 path used to trigger SWR's retry
+      // backoff which cycled until the user closed the tab.
+      if (err instanceof Error && /401/.test(err.message)) {
+        res.json({ items: [] });
+        return;
+      }
       handleFileError(err, res, next);
     }
   });

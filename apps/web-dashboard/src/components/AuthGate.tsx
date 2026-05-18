@@ -36,8 +36,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    // If authenticated and on login/setup page, redirect to dashboard
-    if (user && isPublicPage) {
+    // If authenticated and on login/setup page, redirect to dashboard.
+    // BUT NOT if setup is still required — without the guard, this
+    // rule fights the `setupRequired && pathname !== "/setup"` rule
+    // above and the user ping-pongs between / and /setup forever
+    // (setup rule sends them to /setup → this rule sends them back to
+    // / → setup rule fires again → loop). The setup wizard itself is
+    // responsible for marking setupRequired=false via completeSetup()
+    // when it finishes; until then a logged-in user stays on /setup.
+    if (user && isPublicPage && !setupRequired) {
       router.replace("/");
       return;
     }
