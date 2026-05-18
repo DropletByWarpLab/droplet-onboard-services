@@ -51,6 +51,23 @@ vi.mock("@/lib/theme", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
+// 2026-05-18 — Sidebar consults useWorkspace() to decide which Phase 3
+// (Roles/Groups/Sessions/Billing) entries to surface and to render the
+// "Home"/"Business" pill in the header. Mock with the Home defaults so
+// the existing mobile-drawer expectations (which only know about Phase 1
+// routes) still hold. Phase 3 will add a parallel test file for the
+// Business-mode drawer surface.
+vi.mock("@/lib/workspace", () => ({
+  useWorkspace: () => ({
+    workspaceType: "home" as const,
+    setWorkspaceType: vi.fn(),
+    isHome: true,
+    isBusiness: false,
+    homeVariant: "B" as const,
+  }),
+  getHomeVariant: () => "B" as const,
+}));
+
 // Pathname for active-tab assertions. Tests can override per-case via
 // the `usePathname` mock setter below.
 const pathnameRef = { current: "/" as string };
