@@ -144,9 +144,11 @@ services:
       PORT: 3000
       # ── Database / cache / broker ──
       DATABASE_URL: postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-dropletdev}@db:5432/droplet
-      REDIS_HOST: cache
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ""
+      # The orchestrator's config.ts reads REDIS_URL (not REDIS_HOST +
+      # REDIS_PORT) — kept in lockstep with apps/orchestrator/src/config.ts.
+      # The redis:7-alpine container runs with no password in dev, so a
+      # plain redis://cache:6379 (no auth segment) is correct.
+      REDIS_URL: redis://cache:6379
       MQTT_BROKER: mqtt://broker:1883
       # ── Auth ──
       JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-do-not-ship}

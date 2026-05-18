@@ -126,12 +126,17 @@ async function seedCameras() {
   for (const camName of ["front-door", "reception", "loading-bay"]) {
     const cam = await prisma.camera.findUnique({ where: { name: camName } });
     if (!cam) continue;
+    // Prisma's compound-unique argument follows the order in the
+    // @@unique declaration. CameraGroupMember declares
+    // @@unique([groupId, cameraId]) so the key is groupId_cameraId
+    // (groupId FIRST). There's also no `cameraName` column — it
+    // lived on an older schema revision; the relation handles joins.
     await prisma.cameraGroupMember.upsert({
       where: {
-        cameraId_groupId: { cameraId: cam.id, groupId: entries.id },
+        groupId_cameraId: { groupId: entries.id, cameraId: cam.id },
       },
       update: {},
-      create: { cameraId: cam.id, groupId: entries.id, cameraName: cam.name },
+      create: { groupId: entries.id, cameraId: cam.id },
     });
   }
 

@@ -50,3 +50,7 @@ docker/secrets/
 # device-bridge runtime env (live credentials). Only .example is tracked.
 services/oled-display/device-bridge.env
 /etc/droplet/device-bridge.env
+# Dev-only runtime data (BRAIN_MEMORY_ROOT / MATTER_STORAGE_PATH /
+# NEXTCLOUD_DATA_ROOT in docker/docker-compose.dev.yml all point here).
+# Wiped by `docker compose down -v`; bind-mount artefact.
+.dev-data/
