@@ -80,7 +80,7 @@ logger = logging.getLogger("voice.pipeline")
 
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
-DEFAULT_THRESHOLD = 0.5
+DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
 DEFAULT_STT_MAX_RECORD_S = 5.0  # captured audio per wake (no VAD yet — fixed window)
