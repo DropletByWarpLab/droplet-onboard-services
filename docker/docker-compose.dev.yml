@@ -156,6 +156,16 @@ services:
       # ── Companion services. URLs intentionally point at non-existent
       #    hosts; the orchestrator should gracefully degrade. ──
       NEXTCLOUD_URL: http://nextcloud:80
+      # The orchestrator acts as admin against Nextcloud's OCS API to
+      # create users (setup wizard), mint per-device app passwords
+      # (pair flow), reset passwords, etc. These MUST match what the
+      # nextcloud container booted with (NEXTCLOUD_ADMIN_USER /
+      # _PASSWORD passed to it in the same .env). Without these the
+      # orchestrator falls back to "admin:admin" and every OCS call
+      # 401s. Setup-wizard symptom is "Cannot reach Nextcloud OCS
+      # API: 401" on the Create Account step.
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-dropletdev}
       AI_GATEWAY_URL: http://ai-gateway-disabled:8000
       AI_GATEWAY_GRPC_URL: ai-gateway-disabled:50051
       ROUTING_SERVICE_URL: http://routing-disabled:8080
