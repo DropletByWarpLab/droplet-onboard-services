@@ -220,6 +220,57 @@ WGLOOP
   start-stop-daemon -S -b -m -p /var/run/wg-sync.pid -x /usr/local/sbin/wg-sync-loop
   # ---------------------------------------------------------------------
 
+  # --- eth0 watchdog -----------------------------------------------------
+  # OpenWrts procd / netifd brings eth0 DOWN seconds after this attach
+  # script ends, because we removed the eth0 port from br-lans UCI device
+  # entry (so docker-proxy can keep L3 ownership of 172.18.0.10/16). With
+  # no UCI interface referencing eth0, netifd treats it as orphaned and
+  # admin-downs it on every reconcile pass — which kills the routing
+  # services next outbound RPC call before its docker healthcheck even
+  # fires.
+  #
+  # Symmetry with the wg-sync poll loop above: a 2-second watchdog
+  # idempotently re-asserts UP + the docker-assigned IP + default route
+  # whenever it notices eth0 is missing them. Cheap (one ip-link-show
+  # + a couple of grep checks per cycle) and the recovery is sub-second.
+  # Storage target: /tmp, NOT /usr/local/sbin. The overlay upperdir
+  # housing /usr/local/sbin is briefly read-only right after `docker
+  # restart` while procd boots, so the first attach after every
+  # container restart silently fails to write to /usr/local/sbin/...
+  # (see the cluster of `Read-only file system` lines in the journal
+  # from earlier attach runs). /tmp is a tmpfs mounted before procd
+  # even starts, so writes always succeed there. The trade-off — the
+  # watchdog file is wiped on container restart — is fine because the
+  # attach script runs after every restart and rewrites it.
+  cat > /tmp/eth0-keepalive <<"ETHWD"
+#!/bin/sh
+# eth0 watchdog. Bring eth0 back up + restore the docker IP/default
+# route if procd/netifd has admin-downed it again.
+IP_ADDR="${1:-172.18.0.10/16}"
+GW="${2:-172.18.0.1}"
+while true; do
+  STATE=$(ip -o link show eth0 2>/dev/null | head -1)
+  case "$STATE" in
+    *"state UP"*) : ;;
+    *)
+      ip link set eth0 up 2>/dev/null
+      ;;
+  esac
+  ip addr show eth0 2>/dev/null | grep -q "${IP_ADDR%/*}" || \
+    ip addr add "$IP_ADDR" dev eth0 2>/dev/null
+  ip route 2>/dev/null | grep -q "^default" || \
+    ip route add default via "$GW" 2>/dev/null
+  sleep 2
+done
+ETHWD
+  chmod +x /tmp/eth0-keepalive
+
+  start-stop-daemon -K -q -p /var/run/eth0-keepalive.pid 2>/dev/null
+  rm -f /var/run/eth0-keepalive.pid
+  start-stop-daemon -S -b -m -p /var/run/eth0-keepalive.pid \
+    -x /tmp/eth0-keepalive -- "${CONT_IP}/16" "$CONT_GW"
+  # ---------------------------------------------------------------------
+
   # --- ip nat table: masq egress + DNAT ingress for AP clients ----------
   nft list table ip nat >/dev/null 2>&1 || nft add table ip nat
 
