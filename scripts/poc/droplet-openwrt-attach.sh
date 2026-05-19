@@ -334,6 +334,19 @@ DNSMASQ
     sleep 1
   fi
   pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
+
+  # Final pass — re-run bootstrap_net AFTER everything else in this docker
+  # exec block has run. Procd / hostapd / dnsmasq init can race against
+  # the early `unbridge_eth0 + bootstrap_net` calls at the top of this
+  # block — netifd in particular brings eth0 DOWN again on a clean
+  # container restart because eth0 has no UCI interface (we removed it
+  # from br-lan + left it un-managed by design, so docker-proxy keeps L3
+  # ownership). With no UCI to bring it back up, netifd happily leaves
+  # eth0 down → host:8081 can't reach uhttpd → routing service times out
+  # → orchestrator router:false. Idempotent re-run here is the simplest
+  # fix: by this point procd/netifd are quiesced and we get the last word.
+  unbridge_eth0
+  bootstrap_net
 '
 
 echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"
