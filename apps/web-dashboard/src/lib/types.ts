@@ -352,6 +352,13 @@ export interface DriveInfo {
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /**
+   * WARP-174: per-drive customer-chosen name from the Drive Prisma table
+   * (migration 20260514000000_warp_174_drive_displayname). Optional
+   * because freshly-discovered drives won't have a row yet — the
+   * Storage step in the setup wizard upserts on first labelling.
+   */
+  displayName?: string;
 }
 
 export interface DrivesResponse {

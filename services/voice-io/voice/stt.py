@@ -256,15 +256,6 @@ class WyomingSTT(StreamingSTT):
             raise STTUnavailable(
                 f"connect to wyoming STT {self._host}:{self._port} failed: {exc}"
             ) from exc
-        # socket.create_connection's timeout only governs the connect.
-        # The socket reverts to blocking afterwards, so a stalled wyoming
-        # peer (TCP send buffer full, container OOM-pause, etc.) would
-        # hang every `sendall` in _send_event / send_chunk forever and
-        # wedge the pipeline worker thread. Pin send-side timeout to the
-        # same connect-timeout budget; _read_transcript already does the
-        # same on the read side via settimeout(transcript_timeout_s) at
-        # send-stop. See PR #227 review.
-        sock.settimeout(self._connect_timeout_s)
         return _WyomingSession(
             sock, language=self._language,
             transcript_timeout_s=self._transcript_timeout_s,

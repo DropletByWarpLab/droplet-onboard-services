@@ -36,6 +36,7 @@ import type {
   NetworkCommandResult,
   NetworkOverview,
   StorageStats,
+  DriveInfo,
   DrivesResponse,
   WirelessScanResult,
   AuthUser,
@@ -324,6 +325,34 @@ export async function fetchStorage(): Promise<StorageStats> {
 export async function fetchDrives(): Promise<DrivesResponse> {
   const res = await authFetch(`${BASE}/api/storage/drives`);
   if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-174: update a drive's user-chosen label. Hits PATCH on
+ * /api/storage/drives/:uuid with `{ displayName }`. The orchestrator
+ * upserts into the Drive Prisma table (migration
+ * 20260514000000_warp_174_drive_displayname). Called by the setup
+ * wizard's StorageStep.
+ *
+ * Signature matches the box's StorageStep.tsx call site:
+ *   updateDriveLabel(uuid, { displayName: "..." })
+ */
+export async function updateDriveLabel(
+  uuid: string,
+  patch: { displayName: string },
+): Promise<DriveInfo> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to label drive ${uuid}: ${res.status}`);
+  }
   return res.json();
 }
 

@@ -43,12 +43,22 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
 logger = logging.getLogger("voice.llm")
+
+
+# Per-turn override for the orchestrator's agent loop. "none" forces
+# the model to answer from the system prompt context without calling
+# any tool — the intent gate in `voice.pipeline.classify_tool_choice`
+# uses this to short-circuit speculative tool calls on greetings,
+# time-of-day, and who-are-you utterances. Matches the
+# `tool_choice?: "auto" | "none"` field on `AgentDeps.aiGateway.chat`
+# in `apps/orchestrator/src/services/llm-agent.service.ts`.
+ToolChoice = Literal["auto", "none"]
 
 # Reasonable defaults; overridable via env in main.py.
 #
@@ -72,16 +82,24 @@ DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # slower models.
 DEFAULT_LLM_TIMEOUT_S = 120.0
 # Cap the agent loop. The orchestrator hard-caps at 10; we ask for a
-# lower number so voice replies stay snappy. Most useful voice prompts
-# resolve in 1-3 iterations.
-DEFAULT_LLM_MAX_ITER = 5
+# much lower number so voice replies stay snappy. A voice turn should
+# resolve in at most one tool-call iteration ("list_cameras" → result
+# → final answer). Letting the model take 3-5 iterations on noisy or
+# ambiguous transcripts is the main reason voice replies feel slow —
+# each iteration is a full ai-gateway round-trip (~2-4 s on the POC's
+# 8 B model). 2 is the smallest value that still preserves the "one
+# tool call, then answer" pattern. Override via the request body's
+# max_iter for callers that explicitly need a multi-step plan.
+DEFAULT_LLM_MAX_ITER = 2
 DEFAULT_LLM_SYSTEM_PROMPT = (
-    "You are the voice assistant inside a Droplet, a private on-device "
-    "appliance running in the user's home. Reply in ONE short sentence "
-    "suitable for spoken playback. No markdown, no formatting, no lists. "
-    "If you don't know something, say so plainly. You may call read-only "
-    "tools (list_cameras, list_devices, etc.) when the user asks about "
-    "the appliance's state; you have no permission to make changes."
+    "You're the friendly voice assistant living inside this family's "
+    "Droplet at home — think helpful housemate, not corporate bot. Talk "
+    "warmly and casually, like a real person you'd hand a coffee to: use "
+    "contractions, keep it natural, one short spoken sentence per reply. "
+    "No markdown, no lists, no emojis — every reply gets read aloud. If "
+    "you don't know, just say so plainly without apologizing twice. You "
+    "can check the home's cameras, network, files, smart devices, "
+    "calendar, and reminders (read-only); you can't change anything."
 )
 
 # Fallback timezone when neither `TZ` nor a system zoneinfo is usable.
@@ -159,13 +177,19 @@ class LLMClient(ABC):
     """One-shot: transcript in → reply text out."""
 
     @abstractmethod
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
         """Return the assistant's reply text for the given user turn.
 
         Stateless from the voice-io perspective — the orchestrator owns
         conversation history. Each call uses an anonymous conversation
         (future: switch to a sticky voice conversation id once the
         dashboard surfaces it).
+
+        `tool_choice="none"` is set by the pipeline's intent gate for
+        utterances that should answer from system-prompt context only
+        (greetings, time-of-day). The orchestrator forwards this to
+        ai-gateway so the model can't speculatively call a tool. Pass
+        `None` (the default) to let the orchestrator's auto-pick apply.
         """
 
     @property
@@ -240,7 +264,7 @@ class OrchestratorLLM(LLMClient):
             )
             return False
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
         if not user_text or not user_text.strip():
             return ""
         # Build a fresh system prompt on every call so the embedded
@@ -267,6 +291,13 @@ class OrchestratorLLM(LLMClient):
             "stream": False,
             "max_iter": self._max_iter,
         }
+        # Forward an explicit per-turn tool_choice when the caller passed
+        # one. The intent gate sets "none" for utterances that don't need
+        # a tool (greetings, time-of-day) so the model can't wander; for
+        # everything else we leave the field unset and the orchestrator's
+        # default ("auto") applies.
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
         try:
             resp = httpx.post(
                 f"{self._base_url}{self._chat_path}",
@@ -389,8 +420,12 @@ class MockLLM(LLMClient):
     def available(self) -> bool:
         return self._available
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
+        # Accept tool_choice for signature parity with OrchestratorLLM —
+        # the mock doesn't dispatch tools so the value is recorded for
+        # tests to assert on, not acted on.
         self.requests.append(user_text)
+        self.last_tool_choice = tool_choice
         if self._scripts:
             return self._scripts.pop(0)
         if self._echo:
