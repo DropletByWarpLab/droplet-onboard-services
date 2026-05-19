@@ -22,8 +22,16 @@ interface MockMessage {
   sessionId: string;
   role: string;
   content: string;
-  toolCalls: unknown;
-  toolCallId: string | null;
+  // Optional to match the Prisma schema (`toolCalls Json?`, `toolCallId String?`).
+  // Most test fixtures don't carry tool-call payloads, and prior to this
+  // they were required-fields, which made the assistant-status tests
+  // (lines ~285–348) fail the orchestrator's `tsc` step under the
+  // workspace `include: ["src/**/*"]` (no test exclude). The mock's
+  // `create()` already coalesces both fields to null when absent, so
+  // there's no runtime behavior change — just a type that finally
+  // matches the schema. See the chatMessage.create mock below.
+  toolCalls?: unknown;
+  toolCallId?: string | null;
   turnId: string | null;
   status: string;
   completedAt: Date | null;
