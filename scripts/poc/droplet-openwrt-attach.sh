@@ -337,14 +337,22 @@ DNSMASQ
 
   # Final pass — re-run bootstrap_net AFTER everything else in this docker
   # exec block has run. Procd / hostapd / dnsmasq init can race against
-  # the early `unbridge_eth0 + bootstrap_net` calls at the top of this
+  # the early unbridge_eth0 + bootstrap_net calls at the top of this
   # block — netifd in particular brings eth0 DOWN again on a clean
   # container restart because eth0 has no UCI interface (we removed it
   # from br-lan + left it un-managed by design, so docker-proxy keeps L3
   # ownership). With no UCI to bring it back up, netifd happily leaves
-  # eth0 down → host:8081 can't reach uhttpd → routing service times out
-  # → orchestrator router:false. Idempotent re-run here is the simplest
-  # fix: by this point procd/netifd are quiesced and we get the last word.
+  # eth0 down, host:8081 cannot reach uhttpd, routing service times out,
+  # orchestrator reports router:false. Idempotent re-run here is the
+  # simplest fix: procd and netifd are quiesced by this point and we get
+  # the last word.
+  #
+  # NB: NO APOSTROPHES allowed in this comment block — the whole docker
+  # exec body is wrapped in single quotes by the outer script, so a stray
+  # `cant` or `dont` would close the heredoc early and the trailing
+  # function calls would run in the OUTER bash where they are undefined.
+  # (Found the hard way: a `cannot` rendered as cant prematurely closed
+  # the heredoc, two systemctl restarts ago.)
   unbridge_eth0
   bootstrap_net
 '
