@@ -87,7 +87,7 @@ USB mic in after the box has already booted.
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Where to POST chat turns. |
 | `ORCHESTRATOR_TOKEN` | *(empty)* | Bearer token for orchestrator. Set in compose from the same secret the rest of the stack uses. |
 | `WAKE_WORD` | `hey_jarvis` | Wake-word model name. openWakeWord ships several bundled models — `hey_jarvis`, `alexa`, `hey_mycroft`. To use a custom-trained model, drop `<name>.onnx` into `/app/models/` and set `WAKE_WORD=<name>`. The custom "Hey Droplet" model ships once Stefan's training data lands; until then the default is `hey_jarvis` for dev. Set to `__mock__` for a dev box with no real wake model. |
-| `WAKE_THRESHOLD` | `0.5` | Detector confidence threshold (0 – 1). Raise to reduce false-positives. |
+| `WAKE_THRESHOLD` | `0.3` | Detector confidence threshold (0 – 1). Tuned low for the bundled `hey_jarvis` fallback model, which under-fires at 0.5 on speech at typical room distance. Raise back toward 0.5 once a custom-trained `hey_droplet.onnx` lands. |
 | `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
 | `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
 | `STT_LANGUAGE` | `en` | Language code for transcription. |
