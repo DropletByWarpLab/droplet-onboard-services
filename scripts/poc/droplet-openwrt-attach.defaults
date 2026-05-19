@@ -1,0 +1,35 @@
+# /etc/default/droplet-openwrt-attach — env for droplet-openwrt-attach.service
+#
+# Sourced by systemd via the EnvironmentFile= directive in
+# droplet-openwrt-attach.service. Override any of these to customise the
+# POC AP without touching the script body.
+#
+# DROPLET_AP_SSID         — SSID broadcast inside the openwrt container.
+# DROPLET_AP_PSK          — WPA2-PSK passphrase.
+# DROPLET_AP_PHY          — phy index to move into the container netns.
+#                           Default "phy1" suits iwlwifi/AX210. Set to
+#                           "phy0" on the photo-studio Ryzen box (MT7922
+#                           is phy0 and supports Wi-Fi 6 at 22 dBm in AP
+#                           mode; the AX210 is firmware-capped at 3 dBm).
+# DROPLET_AP_IFACE        — interface name the moved phy surfaces with.
+#                           Must match the kernel name for $DROPLET_AP_PHY.
+#                           MT7922 -> wlp14s0; AX210 -> wlp7s0.
+# DROPLET_AP_DOMAIN       — DNS suffix dnsmasq-ap answers locally.
+# DROPLET_AP_HOSTNAME     — bare hostname mapped to 192.168.20.1.
+# DROPLET_GATEWAY_CONTAINER — name of the nginx gateway container the
+#                           AP-side DNAT for :80/:443 should point at.
+# OPENWRT_PASSWORD_FILE   — the docker secret file the routing container
+#                           reads too; both sides stay in lockstep.
+#
+# The attach script regenerates /etc/hostapd.conf and /etc/dnsmasq-ap.conf
+# inside the container from these on every run, so changing values here +
+# `systemctl restart droplet-openwrt-attach.service` is enough to apply.
+
+DROPLET_AP_SSID=Droplet
+DROPLET_AP_PSK=Droplet123!
+
+# Photo-studio Ryzen box specifics: the MT7922 (mt7921e driver) is phy0
+# and surfaces as wlp14s0 inside the openwrt container. Pinning here
+# makes the choice deterministic regardless of probe order.
+DROPLET_AP_PHY=phy0
+DROPLET_AP_IFACE=wlp14s0

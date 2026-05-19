@@ -1,0 +1,355 @@
+#!/bin/bash
+# Bring up the OpenWrt container's AP after a (re)start. Idempotent.
+#
+# Phase K: AP clients reach the dashboard via DNAT — phone hits
+# https://droplet.local/ (DNS served by openwrt's dnsmasq) which resolves
+# to 192.168.20.1, openwrt DNATs :443/:80 to the docker gateway container.
+# No cross-subnet TCP needed from the phone's perspective.
+set +e
+
+# --- Customer-facing knobs (override via env) -----------------------------
+AP_SSID="${DROPLET_AP_SSID:-Droplet-POC}"
+AP_PSK="${DROPLET_AP_PSK:-droplet-poc-password}"
+AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
+AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
+# Which wireless phy to move into the container netns, and what interface
+# name it surfaces with. On the photo-studio Ryzen box the MT7922 is phy0
+# (named wlp14s0) and supports Wi-Fi 6 at full 22 dBm on 2.4 GHz; the AX210
+# (phy1, wlp7s0) is firmware-capped at 3 dBm in AP mode. Defaults below keep
+# the original AX210 path; the env file overrides for this customer.
+AP_PHY="${DROPLET_AP_PHY:-phy1}"
+AP_IFACE="${DROPLET_AP_IFACE:-wlp7s0}"
+GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-pi-platform-gateway-1}"
+# Phase L: root password for OpenWrt rpcd. Read from the docker secret
+# the routing service also reads, so both sides stay in lockstep.
+OPENWRT_PASSWORD_FILE="${OPENWRT_PASSWORD_FILE:-/home/droplet/edge-platform/docker/secrets/openwrt_password}"
+# --------------------------------------------------------------------------
+
+for i in $(seq 1 60); do
+  state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)
+  [ "$state" = "true" ] && break
+  sleep 1
+done
+[ "$state" = "true" ] || { echo "droplet-openwrt not running"; exit 1; }
+
+PID=$(docker inspect -f '{{.State.Pid}}' droplet-openwrt)
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt)
+GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' droplet-openwrt)
+
+# Resolve dashboard gateway IP at attach time — it's stable in practice but
+# we read it fresh so a docker-compose recreate that shuffles IPs is handled.
+GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null)
+[ -z "$GATEWAY_IP" ] && { echo "$GATEWAY_CONTAINER not found — cannot wire DNAT"; exit 1; }
+
+# Phase L: read OpenWrt root password from the docker secret so we can
+# (re)set it inside the container on every attach. Empty -> skip the set,
+# but log so the operator notices.
+OPENWRT_ROOT_PW=""
+if [ -r "$OPENWRT_PASSWORD_FILE" ]; then
+  OPENWRT_ROOT_PW=$(tr -d '\n' < "$OPENWRT_PASSWORD_FILE")
+fi
+if [ -z "$OPENWRT_ROOT_PW" ]; then
+  echo "warn: OpenWrt password secret at $OPENWRT_PASSWORD_FILE is empty or unreadable"
+  echo "       routing service will not be able to auth to ubus until this is set"
+fi
+
+# Move the AP phy into the container netns (no-op if it's already there
+# from a prior attach run). Phy choice driven by $AP_PHY so the operator
+# picks which radio carries the customer AP — e.g. mt7921e/phy0 for full
+# 22 dBm and Wi-Fi 6, vs iwlwifi/phy1 capped at 3 dBm in AP mode.
+[ -e "/sys/class/ieee80211/$AP_PHY" ] && iw phy "$AP_PHY" set netns "$PID"
+
+docker exec -i \
+  -e CONT_IP="$IP" -e CONT_GW="$GW" \
+  -e GATEWAY_IP="$GATEWAY_IP" \
+  -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
+  -e AP_IFACE="$AP_IFACE" \
+  -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
+  -e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW" \
+  droplet-openwrt sh -c '
+  # Container network bootstrap (CONT_IP/CONT_GW/GATEWAY_IP/AP_* from env).
+  # NB: do this FIRST and again AFTER any /etc/init.d/network restart, since
+  # netifd restart wipes Dockers pre-assigned eth0 IP and breaks docker-proxy.
+  #
+  # 2026-05-18 fix: the stock OpenWrt 24.10.2 rootfs ships a config that
+  # bridges eth0 into br-lan with IP 192.168.1.1/24. Inside a docker
+  # container that means kernel routes L3 through br-lan, not through
+  # eth0 — Dockers 172.18.0.10 IP on eth0 is a phantom address that
+  # never carries traffic. Symptom cascade: cant ping 8.8.8.8 →
+  # opkg install silently fails → hostapd never installs → no AP.
+  # And host->container:8081 RPC times out because the SYN-ACK gets
+  # routed back through br-lan instead of eth0.
+  #
+  # Fix is two-layered: (a) UCI delete eth0 from br-lans port list so
+  # /etc/init.d/network restart wont re-bridge it, (b) `ip link set
+  # eth0 nomaster` here so the running kernel state is corrected even
+  # before network restart fires. Both are idempotent — no-op if eth0
+  # is already standalone or the UCI entry is already gone.
+  unbridge_eth0() {
+    # Runtime: detach eth0 from whatever bridge it might be in.
+    ip link set eth0 nomaster 2>/dev/null
+    # Persist: remove eth0 from the br-lan UCI device port list so the
+    # next /etc/init.d/network restart doesnt re-attach it.
+    if uci -q show network | grep -q "ports=.*eth0"; then
+      uci -q del_list network.@device[0].ports=eth0 2>/dev/null
+      uci -q commit network
+    fi
+  }
+  unbridge_eth0
+  bootstrap_net() {
+    # eth0 must be UP — network restart can leave it DOWN.
+    ip link set eth0 up 2>/dev/null
+    ip addr show eth0 | grep -q "$CONT_IP" || ip addr add "${CONT_IP}/16" dev eth0
+    ip route | grep -q "^default" || ip route add default via "$CONT_GW"
+  }
+  bootstrap_net
+  grep -q 8.8.8.8 /etc/resolv.conf 2>/dev/null || {
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+  }
+  echo 1 > /proc/sys/net/ipv4/ip_forward
+
+  # Install packages if missing (wiped by --force-recreate; will move to a
+  # custom Dockerfile baked into compose build context for production).
+  # Phase L: added wireguard-tools, kmod-wireguard, luci-proto-wireguard
+  # so the routing service can mint VPN peers against this container.
+  NEED_INSTALL=0
+  command -v hostapd >/dev/null || NEED_INSTALL=1
+  command -v wg >/dev/null      || NEED_INSTALL=1
+  [ -f /lib/netifd/proto/wireguard.sh ] || NEED_INSTALL=1
+  if [ "$NEED_INSTALL" = 1 ]; then
+    opkg update >/dev/null 2>&1
+    opkg install \
+      hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
+      uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
+      wireguard-tools kmod-wireguard luci-proto-wireguard \
+      >/dev/null 2>&1
+    # netifd was started before luci-proto-wireguard arrived, so it didnt
+    # load the wireguard protocol handler. Restart it so ifup wg0 works
+    # for any subsequent peer-add via the routing service.
+    /etc/init.d/network restart >/dev/null 2>&1
+    sleep 2
+    # network restart wiped eth0s docker IP + default route AND may have
+    # re-bridged eth0 into br-lan if the UCI delete above didnt take —
+    # re-run unbridge before bootstrap so the new IP lands on the actual
+    # L3 interface, not on a bridge port that the kernel ignores.
+    unbridge_eth0
+    bootstrap_net
+    # uhttpd binds to eth0 too; nudge it so docker-proxy can talk to ubus.
+    /etc/init.d/uhttpd restart >/dev/null 2>&1
+  fi
+
+  # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
+  # rpcd login works. Idempotent: only re-set if the current password fails.
+  if [ -n "$OPENWRT_ROOT_PW" ]; then
+    if ! ubus call session login "{\"username\":\"root\",\"password\":\"$OPENWRT_ROOT_PW\"}" >/dev/null 2>&1; then
+      printf "%s\n%s\n" "$OPENWRT_ROOT_PW" "$OPENWRT_ROOT_PW" | passwd root >/dev/null 2>&1
+      # rpcd caches sometimes; nudge it to re-read shadow
+      /etc/init.d/rpcd restart >/dev/null 2>&1
+    fi
+  fi
+
+  # --- Phase L: wg-sync helper -----------------------------------------
+  # netifds wireguard.sh proto handler doesnt cleanly re-apply UCI peer
+  # changes to a running wg0 in this container (ubus call network reload
+  # times out). Workaround: when the routing service writes a peer via
+  # uci.apply, /etc/config/network is rewritten — we poll-watch UCI peer
+  # hash and call `wg syncconf wg0 <runtime-conf>` to push to the kernel.
+  # ~2s propagation, no interface bounce.
+  mkdir -p /usr/local/sbin
+  cat > /usr/local/sbin/wg-sync <<"WGSYNC"
+#!/bin/sh
+# Apply UCI WireGuard peer state to the running wg0 interface via wg syncconf.
+# Idempotent; safe to call on every network commit.
+IFACE="${1:-wg0}"
+ip link show "$IFACE" >/dev/null 2>&1 || exit 0
+SRV_PK=$(uci -q get network.$IFACE.private_key) || exit 0
+SRV_PORT=$(uci -q get network.$IFACE.listen_port)
+CONF=$(mktemp -t wg-runtime.XXXXXX)
+{
+  echo "[Interface]"
+  echo "PrivateKey = $SRV_PK"
+  [ -n "$SRV_PORT" ] && echo "ListenPort = $SRV_PORT"
+  i=0
+  while uci -q get network.@wireguard_${IFACE}[$i].public_key >/dev/null 2>&1; do
+    PK=$(uci -q get network.@wireguard_${IFACE}[$i].public_key)
+    AIP=$(uci -q get network.@wireguard_${IFACE}[$i].allowed_ips)
+    KA=$(uci -q get network.@wireguard_${IFACE}[$i].persistent_keepalive)
+    EP=$(uci -q get network.@wireguard_${IFACE}[$i].endpoint_host)
+    EPP=$(uci -q get network.@wireguard_${IFACE}[$i].endpoint_port)
+    echo ""
+    echo "[Peer]"
+    echo "PublicKey = $PK"
+    [ -n "$AIP" ] && echo "AllowedIPs = $AIP"
+    [ -n "$KA" ]  && echo "PersistentKeepalive = $KA"
+    if [ -n "$EP" ]; then
+      [ -n "$EPP" ] && echo "Endpoint = $EP:$EPP" || echo "Endpoint = $EP"
+    fi
+    i=$((i+1))
+  done
+} > "$CONF"
+wg syncconf "$IFACE" "$CONF" 2>&1
+rc=$?
+rm -f "$CONF"
+exit $rc
+WGSYNC
+  chmod +x /usr/local/sbin/wg-sync
+
+  # 2-second poll loop — busybox in this image lacks inotifyd, so we just
+  # re-run wg-sync periodically. wg syncconf is idempotent, so the no-change
+  # case is a cheap noop. Wraps the call in a hash check so the log only
+  # records actual changes.
+  cat > /usr/local/sbin/wg-sync-loop <<"WGLOOP"
+#!/bin/sh
+LAST=""
+while true; do
+  HASH=$(uci show network 2>/dev/null | grep -E "^network\.(wg0\.|@wireguard_wg0\[)" | md5sum | cut -d" " -f1)
+  if [ "$HASH" != "$LAST" ]; then
+    /usr/local/sbin/wg-sync wg0 >>/tmp/wg-sync.log 2>&1
+    LAST="$HASH"
+  fi
+  sleep 2
+done
+WGLOOP
+  chmod +x /usr/local/sbin/wg-sync-loop
+
+  # Spawn the poll loop via start-stop-daemon (busybox applet) so it daemonizes
+  # cleanly under PID 1 = /sbin/init, surviving docker exec returns.
+  start-stop-daemon -K -q -p /var/run/wg-sync.pid 2>/dev/null
+  rm -f /var/run/wg-sync.pid
+  start-stop-daemon -S -b -m -p /var/run/wg-sync.pid -x /usr/local/sbin/wg-sync-loop
+  # ---------------------------------------------------------------------
+
+  # --- ip nat table: masq egress + DNAT ingress for AP clients ----------
+  nft list table ip nat >/dev/null 2>&1 || nft add table ip nat
+
+  # postrouting: masq 192.168.20.0/24 going out eth0
+  nft list chain ip nat postrouting >/dev/null 2>&1 || \
+    nft add chain ip nat postrouting "{ type nat hook postrouting priority 100 ; }"
+  nft list chain ip nat postrouting | grep -q "192.168.20.0/24" || \
+    nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
+
+  # prerouting: DNAT $AP_IFACE:80/:443 -> gateway container so phones can hit
+  # https://droplet.local/ (which resolves to 192.168.20.1) and land on nginx
+  nft list chain ip nat prerouting >/dev/null 2>&1 || \
+    nft add chain ip nat prerouting "{ type nat hook prerouting priority -100 ; }"
+  # Flush prior DNAT rules so a gateway-IP change doesnt leave a stale target
+  for h in $(nft -a list chain ip nat prerouting 2>/dev/null | grep "dnat to" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
+    nft delete rule ip nat prerouting handle $h
+  done
+  # Critical: scope DNAT to traffic destined for 192.168.20.1 (the openwrt
+  # AP IP) ONLY. Without the `ip daddr` predicate, every :80/:443 packet
+  # leaving the AP gets hijacked to the dashboard gateway — so a client
+  # browsing https://google.com ends up on the Droplet login page with a
+  # cert mismatch (looks like a captive portal). With the daddr filter,
+  # the rule only fires for clients explicitly hitting the router IP
+  # (droplet.local resolves to 192.168.20.1 -> rule kicks in -> dashboard),
+  # while everything else passes through to the real internet.
+  nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # ----------------------------------------------------------------------
+
+  # Stop procd dnsmasq so our manual one can bind 192.168.20.1
+  /etc/init.d/dnsmasq stop 2>/dev/null
+  /etc/init.d/dnsmasq disable 2>/dev/null
+
+  # hostapd config — regenerate every run so SSID/PSK env changes propagate.
+  # Wi-Fi 6 (HE) + HT enabled on 2.4 GHz ch 6; hostapd auto-falls back to
+  # HT20 if 40 MHz neighbours preclude it (CCA scan during HT_SCAN state).
+  # AC is intentionally absent — 802.11ac is 5 GHz only and would just emit
+  # warnings here.
+  cat > /etc/hostapd.conf.new <<HOSTAPD
+interface=$AP_IFACE
+driver=nl80211
+ssid=$AP_SSID
+hw_mode=g
+channel=6
+country_code=US
+ieee80211d=1
+ieee80211n=1
+ieee80211ax=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40][DSSS_CCK-40]
+he_oper_chwidth=0
+he_oper_centr_freq_seg0_idx=8
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_passphrase=$AP_PSK
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+ieee80211w=1
+HOSTAPD
+
+  HOSTAPD_CHANGED=0
+  if [ ! -f /etc/hostapd.conf ] || ! cmp -s /etc/hostapd.conf /etc/hostapd.conf.new; then
+    mv /etc/hostapd.conf.new /etc/hostapd.conf
+    HOSTAPD_CHANGED=1
+  else
+    rm -f /etc/hostapd.conf.new
+  fi
+
+  # dnsmasq-ap config — regenerate every run so name mappings propagate.
+  # NOTE dhcp-option=6 points phones at openwrt itself for DNS, NOT 8.8.8.8,
+  # so phones can resolve AP_DOMAIN / AP_HOSTNAME locally.
+  cat > /etc/dnsmasq-ap.conf.new <<DNSMASQ
+interface=$AP_IFACE
+bind-interfaces
+# dnsmasq defaults to /var/lib/misc/dnsmasq.leases, which doesnt exist in
+# the openwrt minimal rootfs after a fresh container. Pin to /tmp/ where
+# it always exists and gets reset on container restart (which is what we
+# want — clients re-DHCP fresh after a reboot anyway).
+dhcp-leasefile=/tmp/dhcp.leases
+dhcp-range=192.168.20.10,192.168.20.100,255.255.255.0,12h
+dhcp-option=3,192.168.20.1
+dhcp-option=6,192.168.20.1
+server=8.8.8.8
+server=1.1.1.1
+no-resolv
+# Customer-facing hostnames -> openwrt IP (DNATs to dashboard)
+address=/$AP_HOSTNAME/192.168.20.1
+address=/$AP_DOMAIN/192.168.20.1
+DNSMASQ
+
+  DNSMASQ_CHANGED=0
+  if [ ! -f /etc/dnsmasq-ap.conf ] || ! cmp -s /etc/dnsmasq-ap.conf /etc/dnsmasq-ap.conf.new; then
+    mv /etc/dnsmasq-ap.conf.new /etc/dnsmasq-ap.conf
+    DNSMASQ_CHANGED=1
+  else
+    rm -f /etc/dnsmasq-ap.conf.new
+  fi
+
+  # Bring up $AP_IFACE + (re)start daemons only if config changed or not running
+  ip link set "$AP_IFACE" up 2>/dev/null
+  ip addr show "$AP_IFACE" | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev "$AP_IFACE"
+
+  if [ "$HOSTAPD_CHANGED" = 1 ]; then
+    pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
+    sleep 1
+  fi
+  pgrep -f "hostapd -B" >/dev/null || hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
+
+  if [ "$DNSMASQ_CHANGED" = 1 ]; then
+    pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
+    sleep 1
+  fi
+  pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
+'
+
+echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"
+
+# Routing service caches its OpenWrt session at startup and does not
+# reconnect on RPC failure (the python-uci SDK holds the session token
+# across calls). After a docker restart of droplet-openwrt — whether
+# from this attach run, a manual restart, or a host reboot — the routing
+# service is left holding a stale session and answers /health with
+# {"connected":false,"error":"Access denied"}. Probe routing's /health
+# (it's on host network, bound to 127.0.0.1:8080) and only kick the
+# container when the probe says it's still detached. Idempotent + cheap:
+# a healthy routing service is left untouched.
+if command -v curl >/dev/null 2>&1 && command -v docker >/dev/null 2>&1; then
+  if curl -sf -m 3 http://127.0.0.1:8080/health 2>/dev/null | grep -q '"connected":false'; then
+    echo "droplet-openwrt-attach: routing reports connected=false, restarting it to clear stale session"
+    docker restart droplet-pi-platform-routing-1 >/dev/null 2>&1 || true
+  fi
+fi
