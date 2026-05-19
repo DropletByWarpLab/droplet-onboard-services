@@ -1,0 +1,7 @@
+# Reference screenshots for the PR / docs are committed below; everything
+# else dropped here by tools/preview_render.py or tools/verify_qr.py is
+# regeneratable scratch.
+*.png
+!idle.png
+!stats.png
+!qr.png

@@ -2,187 +2,105 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Droplet PyPortal — New Swipe Dashboard (Preview)</title>
+<title>Droplet PyPortal — Modernized (C / C / A)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
-    --bg: #050507;
-    --panel: #0d0d12;
-    --card: #141420;
-    --card-2: #1d1d2e;
-    --sep: #2a2a38;
-    --sep-2: #3a3a4a;
-    --label: #ffffff;
-    --label-2: #c8c8d4;
-    --label-3: #8b8b9c;
-    --label-4: #545466;
-    --accent: #8b93ff;
-    --accent-primary: #7c7fff;
-    --accent-light: #b4baff;
-    --accent-subtle: rgba(124,127,255,0.18);
-    --accent-glow: rgba(124,127,255,0.38);
-    --gauge-track: #24243a;
-    --green: #3dff9f;
-    --green-soft: rgba(61,255,159,0.20);
-    --orange: #ffb347;
-    --orange-soft: rgba(255,179,71,0.22);
-    --red: #ff5c7a;
-    --red-soft: rgba(255,92,122,0.24);
-    --blue: #0a84ff;
+    --bg: #050507; --panel: #0d0d12; --card: #141420; --card-2: #1d1d2e;
+    --sep: #2a2a38; --sep-2: #3a3a4a;
+    --label: #ffffff; --label-2: #c8c8d4; --label-3: #8b8b9c; --label-4: #545466;
+    --accent: #818cf8; --accent-light: #b4baff; --accent-subtle: rgba(129,140,248,0.18);
+    --green: #30d158; --orange: #ff9f0a; --red: #ff453a;
   }
   html, body {
     background:
-      radial-gradient(1200px 600px at 50% -10%, rgba(99,102,241,0.12), transparent 60%),
-      radial-gradient(800px 400px at 85% 90%, rgba(10,132,255,0.08), transparent 60%),
+      radial-gradient(1200px 600px at 50% -10%, rgba(99,102,241,0.10), transparent 60%),
       var(--bg);
     color: var(--label);
-    font-family: -apple-system, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+    font-family: 'Inter', -apple-system, system-ui, sans-serif;
     min-height: 100vh;
   }
   body { padding: 36px 24px 96px; }
-  header {
-    max-width: 1280px;
-    margin: 0 auto 28px;
-    text-align: center;
-  }
-  header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+  header { max-width: 1280px; margin: 0 auto 28px; text-align: center; }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
   header .tag { margin-top: 6px; color: var(--label-3); font-size: 12px; }
   header .badge {
-    display: inline-block;
-    margin-left: 8px;
-    padding: 2px 8px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.4px;
-    color: var(--accent);
-    background: var(--accent-subtle);
-    border: 1px solid rgba(129,140,248,0.3);
-    border-radius: 999px;
-    vertical-align: middle;
+    display: inline-block; margin-left: 8px; padding: 2px 10px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1.4px;
+    color: var(--accent); background: var(--accent-subtle);
+    border: 1px solid rgba(129,140,248,0.3); border-radius: 999px; vertical-align: middle;
   }
   .layout {
-    max-width: 1280px;
-    margin: 0 auto;
-    display: grid;
-    grid-template-columns: minmax(600px, 1fr) 320px;
-    gap: 32px;
-    align-items: start;
+    max-width: 1280px; margin: 0 auto;
+    display: grid; grid-template-columns: minmax(600px, 1fr) 320px;
+    gap: 32px; align-items: start;
   }
-  .stage {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 20px;
-  }
+  .stage { display: flex; flex-direction: column; align-items: center; gap: 20px; }
   .bezel {
-    position: relative;
-    background: #060608;
-    border: 1px solid #2a2a31;
-    border-radius: 22px;
-    padding: 18px;
-    box-shadow:
-      0 30px 80px -20px rgba(99,102,241,0.35),
-      0 0 0 1px rgba(255,255,255,0.025) inset;
+    position: relative; background: #060608; border: 1px solid #1f1f23;
+    border-radius: 22px; padding: 18px;
+    box-shadow: 0 30px 80px -28px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.025) inset;
   }
   .bezel::before {
-    content: '';
-    position: absolute;
-    top: 8px; left: 50%;
-    transform: translateX(-50%);
-    width: 6px; height: 6px;
-    background: #2a2a31;
-    border-radius: 50%;
+    content: ''; position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    width: 6px; height: 6px; background: #1f1f23; border-radius: 50%;
   }
   canvas {
-    display: block;
-    width: 800px;
-    height: 533px;
-    image-rendering: crisp-edges;
-    cursor: grab;
-    border-radius: 6px;
-    background: #000;
-    touch-action: none;
+    display: block; width: 800px; height: 533px;
+    image-rendering: crisp-edges; cursor: grab; border-radius: 6px;
+    background: #000; touch-action: none;
   }
   canvas.dragging { cursor: grabbing; }
-  .controls {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: center;
-    max-width: 800px;
-  }
-  .controls button, .controls select {
-    background: var(--card);
-    color: var(--label);
-    border: 1px solid var(--sep);
-    border-radius: 10px;
-    padding: 8px 14px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-    font-family: inherit;
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 800px; }
+  .controls button {
+    background: var(--card); color: var(--label);
+    border: 1px solid var(--sep); border-radius: 10px;
+    padding: 8px 14px; font-size: 12px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s; font-family: inherit;
   }
   .controls button:hover { border-color: var(--accent); color: var(--accent); }
   .controls button.active {
-    background: var(--accent-subtle);
-    border-color: var(--accent);
-    color: var(--accent);
+    background: var(--accent-subtle); border-color: var(--accent); color: var(--accent);
   }
   .controls button.danger:hover { border-color: var(--red); color: var(--red); }
   .hint {
-    color: var(--label-3);
-    font-size: 12px;
-    text-align: center;
-    line-height: 1.6;
-    max-width: 720px;
+    color: var(--label-3); font-size: 12px; text-align: center;
+    line-height: 1.6; max-width: 720px;
   }
   .hint code {
-    background: var(--card);
-    border: 1px solid var(--sep);
-    border-radius: 4px;
-    padding: 1px 6px;
-    font-size: 11px;
-    color: var(--accent-light);
+    background: var(--card); border: 1px solid var(--sep); border-radius: 4px;
+    padding: 1px 6px; font-size: 11px; color: var(--accent-light);
   }
-
   .side {
-    background: var(--card);
-    border: 1px solid var(--sep);
-    border-radius: 14px;
+    background: var(--card); border: 1px solid var(--sep); border-radius: 14px;
     padding: 20px;
   }
   .side h2 {
-    font-size: 13px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--label-2);
-    margin-bottom: 12px;
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.2px; color: var(--label-2); margin-bottom: 12px;
   }
-  .side p {
-    color: var(--label-3);
-    font-size: 12px;
-    line-height: 1.55;
-    margin-bottom: 14px;
-  }
-  .side .row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
-    margin-bottom: 6px;
-  }
+  .side p { color: var(--label-3); font-size: 12px; line-height: 1.55; margin-bottom: 14px; }
+  .side .row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
   .side .row .k { color: var(--label-3); }
-  .side .row .v { color: var(--label); font-family: 'SF Mono', 'Menlo', monospace; }
+  .side .row .v { color: var(--label); font-family: 'JetBrains Mono', ui-monospace, monospace; }
   .side hr { border: none; border-top: 1px solid var(--sep); margin: 14px 0; }
-  .side ul { list-style: none; padding: 0; margin: 0; font-size: 12px; color: var(--label-2); line-height: 1.8; }
+  .side ul { list-style: none; padding: 0; margin: 0; font-size: 12px; color: var(--label-2); line-height: 1.7; }
+  .side ul li { padding: 3px 0; }
   .side ul li::before { content: '›'; color: var(--accent); margin-right: 6px; font-weight: 700; }
+  .side .combo {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    background: var(--accent-subtle); color: var(--accent);
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>Droplet PyPortal — New Swipe Dashboard <span class="badge">PREVIEW</span></h1>
-  <p class="tag">Idle logo ⇠ (swipe left) Stats — Logo — QR (swipe right) ⇢ · Tap logo or red bubble · 480×320 canvas</p>
+  <h1>Droplet PyPortal — Modernized <span class="badge">C · C · A</span></h1>
+  <p class="tag">Idle <code style="background:transparent;color:inherit;padding:0">Editorial numeric</code> ⇠ swipe ⇢ Stats <code style="background:transparent;color:inherit;padding:0">Sparkline hero</code> · QR <code style="background:transparent;color:inherit;padding:0">QR-right + password chip</code> · 480×320</p>
 </header>
 
 <div class="layout">
@@ -191,71 +109,61 @@
       <canvas id="panel" width="480" height="320"></canvas>
     </div>
     <div class="controls">
-      <button data-screen="idle" class="active">Idle (logo)</button>
+      <button data-screen="idle" class="active">Idle</button>
       <button data-screen="stats">Stats</button>
-      <button data-screen="qr">QR / Join Wi-Fi</button>
-      <button id="btnAlert" class="danger">+ Fire camera alert</button>
+      <button data-screen="qr">Pair Wi-Fi</button>
+      <button id="btnAlert" class="danger">+ Fire alert</button>
       <button id="btnClearAlerts">Clear alerts</button>
-      <button id="btnRotate">Rotate Wi-Fi key</button>
+      <button id="btnRotate">Rotate key</button>
     </div>
     <p class="hint">
-      Drag left/right on the screen to swipe · arrow keys <code>←</code> <code>→</code> also swipe · tap the logo to wake · tap the red <code>!</code> on Stats for alerts ·
-      after <code id="idleLabel">30s</code> of no input Stats/QR fade back to the dimmed idle logo.
+      Drag left/right on the screen to swipe · arrow keys <code>←</code> <code>→</code> also swipe · tap the screen on idle to wake · tap the red <code>!</code> on Stats for alerts · after 30 s of no input → idle.
     </p>
   </div>
 
   <aside class="side">
-    <h2>What's new</h2>
+    <h2>Selected combo</h2>
+    <p>
+      Idle <span class="combo">C</span> editorial numeric clock<br>
+      Stats <span class="combo">C</span> sparkline hero + tabular row<br>
+      Pair <span class="combo">A</span> QR right + password chip
+    </p>
+
+    <hr/>
+    <h2>What's modern</h2>
     <ul>
-      <li>Logo = screensaver, not a nav tile</li>
-      <li>Swipe carousel: Stats ⇠ Logo ⇢ QR</li>
-      <li>Ubiquiti-style stats: radial dials + sparklines + rolled-up cards for network / drives / cams / wifi</li>
-      <li>Red <code>!</code> bubble top-right for Frigate parameter hits &amp; system errors — tap to see &amp; clear</li>
-      <li>QR pulls from router + rotates key on a TTL (lives in device-bridge)</li>
+      <li>One hero metric per screen, not four</li>
+      <li>Numbers grow, chrome shrinks</li>
+      <li>Status as a single pill, not four dots</li>
+      <li>Password visible on the pairing screen for typed entry</li>
+      <li>All shapes flat — ports cleanly to firmware</li>
     </ul>
 
     <hr/>
-    <h2>Current</h2>
+    <h2>Live</h2>
     <div class="row"><span class="k">Screen</span><span class="v" id="metaScreen">idle</span></div>
-    <div class="row"><span class="k">Brightness</span><span class="v" id="metaBri">255</span></div>
     <div class="row"><span class="k">Idle timer</span><span class="v" id="metaIdle">--</span></div>
     <div class="row"><span class="k">Alerts</span><span class="v" id="metaAlerts">0</span></div>
     <div class="row"><span class="k">Key rotates</span><span class="v" id="metaRot">--</span></div>
 
     <hr/>
-    <h2>Sign-off checklist</h2>
-    <p>When you're happy with this preview, I'll port the design to <code>pyportal/code.py</code> (renderers + a swipe detector in the touch loop), then add <code>POST /openwrt/wifi/rotate</code> to <code>device-bridge.py</code> with a nightly cron. Nothing ships until you say go.</p>
+    <h2>Hand-off</h2>
+    <p>This file replaces <code style="font-family:monospace">preview.html</code> 1:1. Port path: update <code style="font-family:monospace">code.py</code> renderers to match, then mirror into <code style="font-family:monospace">display.py</code> for the sim backend.</p>
   </aside>
 </div>
 
 <script>
 // ============================================================
-// Design tokens — mirror apps/web-dashboard dark mode
+// Tokens — DS dark mode, tightened for OLED-style TFT
 // ============================================================
-const C = {
-  bg: '#050507',
-  panel: '#0d0d12',
-  card: '#141420',
-  card2: '#1d1d2e',
-  sep: '#2a2a38',
-  sep2: '#3a3a4a',
-  text: '#ffffff',
-  label2: '#c8c8d4',
-  label3: '#8b8b9c',
-  label4: '#545466',
-  accent: '#8b93ff',
-  accentPrimary: '#7c7fff',
-  accentLight: '#b4baff',
-  accentSubtle: 'rgba(124,127,255,0.18)',
-  accentGlow: 'rgba(124,127,255,0.38)',
-  gaugeTrack: '#24243a',
-  green: '#3dff9f',
-  greenSoft: 'rgba(61,255,159,0.20)',
-  orange: '#ffb347',
-  orangeSoft: 'rgba(255,179,71,0.22)',
-  red: '#ff5c7a',
-  redSoft: 'rgba(255,92,122,0.24)',
-  blue: '#0a84ff',
+const T = {
+  bg:'#050507', panel:'#0d0d12', surface:'#141420', surface2:'#1d1d2e',
+  sep:'#2a2a38', sep2:'#3a3a4a',
+  text:'#ffffff', label2:'#c8c8d4', label3:'#8b8b9c', label4:'#545466',
+  accent:'#818cf8', accentDim:'#5b62c7', accentInk:'#b4baff',
+  track:'#1f1f30',
+  green:'#30d158', orange:'#ff9f0a', red:'#ff453a',
+  white:'#ffffff',
 };
 
 const W = 480, H = 320;
@@ -263,139 +171,111 @@ const canvas = document.getElementById('panel');
 const ctx = canvas.getContext('2d');
 
 // ============================================================
-// Live fake data (in real firmware this comes from the bridge)
+// Live fake data — same shape as code.py's serial payload
 // ============================================================
 const data = {
   hostname: 'droplet-lab',
   ip: '192.168.50.41',
-  uptime: '4d 12h 38m',
+  uptime: '4d 12h',
   cpu: 24, mem: 47, disk: 62, temp: 54,
   sparks: { cpu: [], mem: [], disk: [], temp: [] },
   wan: { up: true, latency: 12 },
   lan: { clients: 7 },
   wifi: {
-    ssid: 'Droplet-AI',
-    clients: 3,
-    channel: 36,
-    band: '5GHz',
-    keyRotatesInSec: 24 * 60,  // 24 minutes to next rotation
+    ssid: 'Droplet-AI', clients: 3, channel: 36, band: '5GHz',
+    keyRotatesInSec: 24 * 60, password: 'hello-droplet-25',
   },
-  drives: {
-    count: 2,
-    usedBytes: 412 * 1e9,
-    totalBytes: 1024 * 1e9,
-  },
+  drives: { count: 2, usedBytes: 412 * 1e9, totalBytes: 1024 * 1e9 },
   cams: {
     online: 3, total: 4,
     lastEvent: { camera: 'driveway', label: 'person', score: 0.91, ago: '2m' },
   },
-  files: { count: 1287, sizeBytes: 48 * 1e9 },
 };
 for (const k of ['cpu','mem','disk','temp']) {
-  for (let i = 0; i < 40; i++) data.sparks[k].push(data[k] + (Math.random()*12-6));
+  for (let i = 0; i < 48; i++) data.sparks[k].push(data[k] + (Math.random()*12-6));
 }
 
-// Alerts — Frigate parameter hits + system errors. Seed with a couple so
-// the bubble is visible by default.
 let alerts = [
-  { type: 'cam',  title: 'driveway: person',     detail: 'confidence 91%', time: '2m ago',  cleared: false },
-  { type: 'sys',  title: 'orchestrator restart', detail: 'auto-recovered', time: '14m ago', cleared: false },
+  { type:'cam', title:'driveway: person',     detail:'confidence 91%', time:'2m ago',  cleared:false },
+  { type:'sys', title:'orchestrator restart', detail:'auto-recovered', time:'14m ago', cleared:false },
 ];
 
-// ============================================================
-// Screen state
-// ============================================================
-let screen = 'idle';        // 'idle' | 'stats' | 'qr'
-let eventsOpen = false;      // overlay on top of 'stats'
-let brightness = 255;        // 255 = full; dims to 96 when idle
-let idleTimer = null;
-let idleAt = 0;              // monotonic time left until auto-idle
+let screen = 'idle';
+let eventsOpen = false;
+let idleTimer = null, idleAt = 0;
 const IDLE_MS = 30000;
-let rotTimer = null;         // rotation countdown
 
-// Carousel X-position for swipe animation (-W..W during drag, snaps back)
-let dragX = 0;
-let dragging = false;
-let dragStart = null;
-let dragAnim = null;
+let dragX = 0, dragging = false, dragStart = null, dragAnim = null;
+let regions = [];
 
-// Simulated metric drift so sparklines breathe
 setInterval(() => {
   for (const k of ['cpu','mem']) {
     const v = Math.max(3, Math.min(92, data[k] + (Math.random()*10-5)));
-    data[k] = v;
-    data.sparks[k].push(v);
-    if (data.sparks[k].length > 40) data.sparks[k].shift();
+    data[k] = v; data.sparks[k].push(v);
+    if (data.sparks[k].length > 48) data.sparks[k].shift();
   }
   data.temp = Math.max(38, Math.min(78, data.temp + (Math.random()*2-1)));
-  data.sparks.temp.push(data.temp);
-  if (data.sparks.temp.length > 40) data.sparks.temp.shift();
+  data.sparks.temp.push(data.temp); if (data.sparks.temp.length > 48) data.sparks.temp.shift();
   render();
 }, 1200);
 
-// Wi-Fi key rotation countdown (demo: decrements every second)
 setInterval(() => {
   if (data.wifi.keyRotatesInSec > 0) data.wifi.keyRotatesInSec--;
   if (data.wifi.keyRotatesInSec === 0) {
-    data.wifi.keyRotatesInSec = 60 * 60;  // 1h cadence
-    alerts.unshift({
-      type: 'sys', title: 'Wi-Fi key rotated', detail: 'Droplet AI · new QR available',
-      time: 'just now', cleared: false
-    });
+    data.wifi.keyRotatesInSec = 60 * 60;
+    alerts.unshift({ type:'sys', title:'Wi-Fi key rotated', detail:'Droplet-AI · new QR available', time:'just now', cleared:false });
   }
   render();
 }, 1000);
 
 // ============================================================
-// Helpers
+// Primitives — flat shapes only (firmware-portable)
 // ============================================================
-function rrect(x, y, w, h, r, fill, stroke, sw=1) {
+function rrect(x, y, w, h, r, fill, stroke, sw) {
   r = Math.min(r, w/2, h/2);
   ctx.beginPath();
-  ctx.moveTo(x+r,y);
-  ctx.arcTo(x+w,y,x+w,y+h,r);
-  ctx.arcTo(x+w,y+h,x,y+h,r);
-  ctx.arcTo(x,y+h,x,y,r);
-  ctx.arcTo(x,y,x+w,y,r);
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
   ctx.closePath();
   if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = sw; ctx.stroke(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = sw || 1; ctx.stroke(); }
 }
-function text(s, x, y, {size=13, weight=400, color=C.text, align='left', baseline='top', letter=0}={}) {
-  ctx.font = `${weight} ${size}px -apple-system,'SF Pro Text','Segoe UI',system-ui,sans-serif`;
-  ctx.fillStyle = color;
-  ctx.textAlign = align;
-  ctx.textBaseline = baseline;
-  if (letter) {
+function text(s, x, y, o) {
+  o = o || {};
+  const size = o.size || 13, weight = o.weight || 400;
+  ctx.font = weight + ' ' + size + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = o.color || T.text;
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = o.baseline || 'top';
+  if (o.letter) {
     const chars = s.split('');
+    const total = chars.reduce((a,ch) => a + ctx.measureText(ch).width + o.letter, -o.letter);
     let cx = x;
-    const origAlign = ctx.textAlign;
+    const orig = ctx.textAlign;
     ctx.textAlign = 'left';
-    const total = chars.reduce((a,ch) => a + ctx.measureText(ch).width + letter, -letter);
-    if (origAlign === 'center') cx = x - total/2;
-    else if (origAlign === 'right') cx = x - total;
-    chars.forEach(ch => {
-      ctx.fillText(ch, cx, y);
-      cx += ctx.measureText(ch).width + letter;
-    });
-    ctx.textAlign = origAlign;
+    if (orig === 'center') cx = x - total/2;
+    else if (orig === 'right') cx = x - total;
+    chars.forEach(ch => { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + o.letter; });
+    ctx.textAlign = orig;
   } else {
     ctx.fillText(s, x, y);
   }
 }
+function dot(x, y, color, r) {
+  r = r || 3;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+}
 
-// Droplet mark — geometry matches apps/web-dashboard/src/components/DropletMark.tsx
+// Droplet mark — geometry matches DropletMark.tsx
 const MARK_LEFT  = [[26,0],[44,28],[36,48],[16,48],[8,28]];
 const MARK_RIGHT = [[26,0],[44,28],[26,36]];
-function drawMark(x, y, size, primary=C.accentPrimary, highlight=C.accentLight, glow=false) {
-  const vw = 52, vh = 60;
-  const s = size/vh;
-  const xOff = x + (size - vw*s)/2;
-  if (glow) {
-    ctx.save();
-    ctx.shadowColor = C.accentGlow;
-    ctx.shadowBlur = 30;
-  }
+function drawMark(x, y, size, primary, highlight) {
+  primary = primary || T.accent; highlight = highlight || T.accentInk;
+  const vw = 52, vh = 60, s = size/vh, xOff = x + (size - vw*s)/2;
   const poly = (pts, fill) => {
     ctx.beginPath();
     pts.forEach(([px,py],i) => {
@@ -403,473 +283,246 @@ function drawMark(x, y, size, primary=C.accentPrimary, highlight=C.accentLight, 
       if (i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
     });
     ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
+    ctx.fillStyle = fill; ctx.fill();
   };
   poly(MARK_LEFT, primary);
   poly(MARK_RIGHT, highlight);
-  if (glow) ctx.restore();
 }
-
 function fmtBytes(n) {
-  const units = ['B','KB','MB','GB','TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length-1) { n /= 1024; i++; }
-  return n.toFixed(i < 2 ? 0 : 1) + ' ' + units[i];
+  const u=['B','KB','MB','GB','TB']; let i=0;
+  while (n>=1024 && i<u.length-1) { n/=1024; i++; }
+  return n.toFixed(i<2?0:1) + ' ' + u[i];
 }
-
-function fmtDuration(s) {
-  const m = Math.floor(s/60), sec = s%60;
-  return m + ':' + String(sec).padStart(2,'0');
-}
-
-function colorFor(pct, warn=80, crit=95) {
-  if (pct >= crit) return C.red;
-  if (pct >= warn) return C.orange;
-  return C.accent;
+function fmtDuration(s) { const m=Math.floor(s/60), sec=s%60; return m+':'+String(sec).padStart(2,'0'); }
+function colorFor(pct, warn, crit) {
+  warn = warn||75; crit = crit||92;
+  if (pct >= crit) return T.red;
+  if (pct >= warn) return T.orange;
+  return T.accent;
 }
 
 // ============================================================
-// Reusable widgets
+// SCREEN — IDLE (Direction C · editorial numeric)
+//   Hero clock at 140px, brand-bug top-left, ssid bottom-right
 // ============================================================
-// Half-donut gauge: 180° arc with rounded caps, value inside, label under.
-// Mirrors _half_donut in code.py so the preview matches the device.
-function radialGauge(cx, cy, r, pct, label, valueStr, sparks) {
-  const color = colorFor(pct);
-  const startA = Math.PI;       // left
-  const endA   = 0;             // right
-  const p = Math.max(0, Math.min(100, pct)) / 100;
-  const thickness = Math.max(8, Math.round(r / 3));
-
-  // Subtle outer glow on the fill color for the "vibrant on dark" feel.
-  ctx.save();
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 10;
-
-  // Track
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = C.gaugeTrack;
-  ctx.lineWidth = thickness;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, startA, endA, true);
-  ctx.stroke();
-
-  // Fill — counter-clockwise from left to (1-p)*π
-  if (p > 0) {
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 12;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = thickness;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, startA, startA - Math.PI * p, true);
-    ctx.stroke();
-  }
-  ctx.restore();
-  ctx.lineCap = 'butt';
-
-  // Value text — sits inside the arc (above the flat edge)
-  text(valueStr, cx, cy - Math.round(r * 0.35),
-       {size:18, weight:700, align:'center', baseline:'middle'});
-  // Label under the flat edge
-  text(label, cx, cy + 14,
-       {size:10, weight:700, color:C.label3, align:'center', baseline:'middle', letter:0.8});
-
-  // Mini sparkline — keep it under the label, unchanged vibe
-  if (sparks && sparks.length > 1) {
-    const sx = cx - r, sy = cy + 22, sw = r*2, sh = 8;
-    const lo = Math.min(...sparks), hi = Math.max(...sparks);
-    const span = Math.max(1, hi - lo);
-    ctx.strokeStyle = color + 'cc';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    sparks.forEach((v,i) => {
-      const px = sx + (i/(sparks.length-1)) * sw;
-      const py = sy + sh - ((v-lo)/span) * sh;
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    });
-    ctx.stroke();
-  }
-}
-
-function statusDot(x, y, color, r=3) {
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI*2);
-  ctx.fill();
-  ctx.fillStyle = color + '44';
-  ctx.beginPath();
-  ctx.arc(x, y, r+2, 0, Math.PI*2);
-  ctx.fill();
-}
-
-function card(x, y, w, h) {
-  rrect(x, y, w, h, 10, C.card);
-  rrect(x, y, w, h, 10, null, C.sep, 1);
-}
-
-// ============================================================
-// SCREENS
-// ============================================================
-
-// ---------- Idle (logo screensaver) ----------
-function drawIdle(offsetX=0) {
+function drawIdle(offsetX) {
+  offsetX = offsetX || 0;
   ctx.save();
   ctx.translate(offsetX, 0);
+  ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
 
-  ctx.fillStyle = C.bg;
-  ctx.fillRect(0, 0, W, H);
+  drawMark(20, 18, 20, T.accent, T.accentInk);
+  text('DROPLET', 50, 24, { size:9, weight:700, color:T.label3, letter:2 });
+  text('on-prem AI', W-20, 24, { size:9, weight:500, color:T.label4, align:'right', letter:1 });
 
-  // Soft indigo radial glow behind the clock — sells the "vibrant on dark"
-  // look the user asked for without washing out the contrast.
-  const grd = ctx.createRadialGradient(W/2, H/2 + 10, 40, W/2, H/2 + 10, 280);
-  grd.addColorStop(0, 'rgba(124,127,255,0.18)');
-  grd.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = grd;
-  ctx.fillRect(0, 0, W, H);
-
-  // Small droplet mark up top — no "Droplet" wordmark. The clock is
-  // the hero now.
-  const markSize = 60;
-  const mx = (W - markSize*52/60) / 2;
-  const my = 24;
-  drawMark(mx, my, markSize, C.accentPrimary, C.accentLight, true);
-
-  // Live clock — HH:MM with a soft-blinking colon. seconds tick locally
-  // off Date.now() so the preview mirrors the on-device local-RTC tick.
   const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  const colonOn = (now.getSeconds() % 2) === 0;
-  const clockY = my + markSize + 82;
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  const colon = (now.getSeconds() % 2) === 0 ? ':' : ' ';
+  text(hh+colon+mm, W/2, 168, { size:140, weight:800, align:'center', baseline:'middle', letter:-6 });
 
-  // Subtle drop-shadow glow so the clock reads as the focal point
-  ctx.save();
-  ctx.shadowColor = 'rgba(124,127,255,0.35)';
-  ctx.shadowBlur = 18;
-  text(hh, W/2 - 48, clockY, {size:68, weight:800, align:'center', baseline:'middle', letter:-1.5});
-  text(mm, W/2 + 48, clockY, {size:68, weight:800, align:'center', baseline:'middle', letter:-1.5});
-  ctx.restore();
-  // Colon separately so we can blink it
-  text(colonOn ? ':' : ' ', W/2, clockY - 4,
-    {size:64, weight:800, color:C.accentLight, align:'center', baseline:'middle'});
-
-  // Date line under the clock
-  const dateStr = now.toLocaleDateString(undefined, {
-    weekday: 'short', month: 'short', day: 'numeric'
-  });
-  text(dateStr, W/2, clockY + 46,
-    {size:14, weight:600, color:C.label3, align:'center', baseline:'middle', letter:0.6});
-
-  // Bottom info chips — IP on the left, Wi-Fi SSID on the right.
-  drawChip(16, H - 34, data.ip || '—', C.label2);
-  drawChip(W - 16, H - 34, (data.wifi && data.wifi.ssid) || 'Droplet-AI',
-           C.accent, {anchorRight: true});
+  const dateStr = now.toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' }).toUpperCase();
+  text(dateStr, 20, H-28, { size:11, weight:700, color:T.label3, letter:1.6 });
+  text(data.wifi.ssid, W-20, H-28, { size:11, weight:700, color:T.accent, align:'right' });
 
   ctx.restore();
 }
 
-function drawChip(x, y, str, color, {anchorRight = false} = {}) {
-  // Approximate width from character count — matches the firmware's
-  // terminalio sizing approach.
-  const padX = 10;
-  const th = 22;
-  ctx.save();
-  ctx.font = '600 11px -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif';
-  const tw = Math.ceil(ctx.measureText(str).width) + padX * 2;
-  const cx = anchorRight ? x - tw : x;
-  // pill
-  rrect(cx, y, tw, th, th/2, C.card);
-  rrect(cx, y, tw, th, th/2, null, C.sep, 1);
-  ctx.restore();
-  text(str, cx + tw/2, y + th/2,
-    {size:11, weight:600, color, align:'center', baseline:'middle'});
-}
-
-// ---------- Stats (Ubiquiti-style) ----------
-function drawStats(offsetX=0) {
+// ============================================================
+// SCREEN — STATS (Direction C · sparkline hero + tabular row)
+//   CPU hero, full-width sparkline, 4 tabular columns below
+// ============================================================
+function drawStats(offsetX) {
+  offsetX = offsetX || 0;
   ctx.save();
   ctx.translate(offsetX, 0);
+  ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
 
-  ctx.fillStyle = C.bg;
-  ctx.fillRect(0, 0, W, H);
+  // Hero metric — CPU
+  text('CPU LOAD', 20, 18, { size:10, weight:700, color:T.label3, letter:1.6 });
+  text(data.cpu.toFixed(0)+'%', 20, 32, { size:64, weight:800, letter:-3 });
 
-  // Header (42px)
-  rrect(0, 0, W, 42, 0, C.panel);
-  rrect(0, 41, W, 1, 0, C.sep);
-
-  drawMark(12, 8, 26, C.accent, C.accentLight);
-  text(data.hostname, 44, 12, {size:14, weight:700});
-  text(data.ip + ' · up ' + data.uptime, 44, 28, {size:10, color:C.label3});
-
-  // Clock + alert bubble top-right
-  const clock = new Date().toTimeString().slice(0,5);
+  // Time + alert bubble on the right
+  const now = new Date();
   const openCount = alerts.filter(a => !a.cleared).length;
   if (openCount > 0) {
-    // Red bubble with count
-    const bx = W - 30, by = 10, br = 11;
-    ctx.save();
-    ctx.shadowColor = C.red;
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = C.red;
-    ctx.beginPath();
-    ctx.arc(bx, by+br, br, 0, Math.PI*2);
-    ctx.fill();
-    ctx.restore();
-    text('!', bx, by+br+0.5, {size:14, weight:900, color:'#fff', align:'center', baseline:'middle'});
+    const bx = W-28, by = 24, br = 13;
+    rrect(bx-br, by-br, br*2, br*2, br, T.red);
+    text('!', bx, by, { size:16, weight:900, color:'#fff', align:'center', baseline:'middle' });
     if (openCount > 1) {
-      // Small count chip on top-right of bubble
-      const cw = 14, ch = 12;
-      rrect(bx + 5, by - 3, cw, ch, ch/2, '#fff');
-      text(String(openCount), bx + 5 + cw/2, by + 3, {size:9, weight:700, color:C.red, align:'center', baseline:'middle'});
+      const cw = 16, ch = 13;
+      rrect(bx+br-6, by-br-4, cw, ch, ch/2, '#fff');
+      text(String(openCount), bx+br-6+cw/2, by-br-4+ch/2, { size:9, weight:700, color:T.red, align:'center', baseline:'middle' });
     }
-    // Tap region
-    regions.push({x: bx-br-4, y: by-4, w: br*2+8, h: br*2+8, on: () => { eventsOpen = true; bumpIdle(); render(); }});
+    regions.push({ x:bx-br-6, y:by-br-6, w:br*2+12, h:br*2+12, on:()=>{ eventsOpen=true; bumpIdle(); render(); }});
   } else {
-    // Soft status ring (all clear)
-    statusDot(W - 28, 21, C.green, 3);
-    text('OK', W - 18, 22, {size:10, weight:700, color:C.green, baseline:'middle'});
+    dot(W-26, 28, T.green, 4);
+    text('OK', W-36, 28, { size:11, weight:700, color:T.green, align:'right', baseline:'middle' });
   }
-  // Clock next to bubble
-  text(clock, W - 50, 22, {size:12, weight:600, color:C.label2, align:'right', baseline:'middle'});
+  text(now.toTimeString().slice(0,5), W-20, 50, { size:12, weight:600, color:T.label2, align:'right' });
 
-  // --- Row 1: 4 radial dials ---
-  const dials = [
-    ['CPU',  data.cpu,  data.cpu.toFixed(0) + '%', data.sparks.cpu],
-    ['MEM',  data.mem,  data.mem.toFixed(0) + '%', data.sparks.mem],
-    ['DISK', data.disk, data.disk.toFixed(0) + '%', data.sparks.disk],
-    ['TEMP', data.temp, data.temp.toFixed(0) + '°', data.sparks.temp],
+  // Hero sparkline
+  const sp = data.sparks.cpu;
+  const lo = Math.min(...sp), hi = Math.max(...sp);
+  const span = Math.max(1, hi - lo);
+  const sx = 20, sy = 100, sw = W-40, sh = 32;
+  rrect(sx, sy+sh-1, sw, 1, 0, T.sep);
+  ctx.strokeStyle = T.accent;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  sp.forEach((v, i) => {
+    const px = sx + (i/(sp.length-1)) * sw;
+    const py = sy + sh - ((v-lo)/span) * sh;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+  // fill below — single flat-color polygon, no gradient (firmware-friendly)
+  ctx.beginPath();
+  sp.forEach((v, i) => {
+    const px = sx + (i/(sp.length-1)) * sw;
+    const py = sy + sh - ((v-lo)/span) * sh;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.lineTo(sx+sw, sy+sh); ctx.lineTo(sx, sy+sh); ctx.closePath();
+  ctx.fillStyle = '#818cf822';
+  ctx.fill();
+
+  rrect(20, 152, W-40, 1, 0, T.sep);
+
+  // 4 tabular columns
+  const cols = [
+    { lbl:'MEM',     val:data.mem.toFixed(0)+'%',  c:T.label2 },
+    { lbl:'DISK',    val:data.disk.toFixed(0)+'%', c:T.label2 },
+    { lbl:'TEMP',    val:data.temp.toFixed(0)+'°', c:T.label2 },
+    { lbl:'CAMERAS', val:data.cams.online+'/'+data.cams.total, c:T.green },
   ];
-  // Half-donuts hang off their flat edge, so cy is the baseline. Nudge
-  // down a few px so the arc sits cleanly in the dial row.
-  const gRowY = 90;
-  const gGap = W / 4;
-  dials.forEach(([lbl, pct, val, sp], i) => {
-    radialGauge(gGap * (i + 0.5), gRowY, 30, pct, lbl, val, sp);
+  const colW = (W-40) / 4;
+  cols.forEach((c, i) => {
+    const x = 20 + i*colW;
+    text(c.lbl, x, 170, { size:9, weight:700, color:T.label3, letter:1.4 });
+    text(c.val, x, 188, { size:28, weight:800, color:c.c });
   });
 
-  // --- Row 2: Network + Storage (2 cards) ---
-  const pad = 10;
-  const r2y = 138;
-  const cw = (W - 3*pad) / 2;
-  const ch = 72;
-  drawNetworkCard(pad, r2y, cw, ch);
-  drawStorageCard(pad*2 + cw, r2y, cw, ch);
-
-  // --- Row 3: Cameras + Wi-Fi (2 cards) ---
-  const r3y = r2y + ch + pad;
-  drawCamerasCard(pad, r3y, cw, ch);
-  drawWifiCard(pad*2 + cw, r3y, cw, ch);
+  // Bottom strip
+  text(data.hostname + ' · ' + data.ip, 20, H-26, { size:11, weight:600, color:T.label3 });
+  const allClear = openCount === 0;
+  dot(W-96, H-21, allClear ? T.green : T.red, 3);
+  text(allClear ? 'All good' : (openCount + ' alert' + (openCount>1?'s':'')),
+       W-20, H-26, { size:11, weight:700, color: allClear ? T.green : T.red, align:'right' });
 
   ctx.restore();
 }
 
-function drawNetworkCard(x, y, w, h) {
-  card(x, y, w, h);
-  text('NETWORK', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
-  statusDot(x + w - 14, y + 13, data.wan.up ? C.green : C.red);
-  text(data.wan.up ? 'UP' : 'DOWN', x + w - 22, y + 13, {
-    size:9, weight:700, color:data.wan.up?C.green:C.red, align:'right', baseline:'middle'
-  });
-  text(data.ip, x+10, y+24, {size:14, weight:700});
-  // Two metrics under: clients, latency
-  text(data.lan.clients + ' clients', x+10, y+46, {size:11, color:C.label2});
-  text(data.wan.latency + 'ms', x+10, y+60, {size:11, color:C.label3});
-  // Mini LAN icon-ish bar on right
-  const bx = x + w - 60, by = y + 44, bw = 50;
-  rrect(bx, by, bw, 3, 1.5, C.sep);
-  rrect(bx, by, Math.min(bw, data.lan.clients * 6), 3, 1.5, C.accent);
-  text('LAN', x + w - 14, y + 58, {size:9, weight:700, color:C.label3, align:'right'});
-}
-
-function drawStorageCard(x, y, w, h) {
-  card(x, y, w, h);
-  text('STORAGE', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
-  const pct = (data.drives.usedBytes / data.drives.totalBytes) * 100;
-  const col = colorFor(pct, 80, 95);
-  statusDot(x + w - 14, y + 13, col);
-  text(data.drives.count + ' drive' + (data.drives.count === 1 ? '' : 's'),
-    x + w - 22, y + 13, {size:9, weight:700, color:col, align:'right', baseline:'middle'});
-
-  text(fmtBytes(data.drives.usedBytes), x+10, y+24, {size:14, weight:700});
-  text('of ' + fmtBytes(data.drives.totalBytes), x+10, y+46, {size:10, color:C.label3});
-
-  // Fill bar
-  const bx = x+10, by = y + h - 16, bw = w - 20;
-  rrect(bx, by, bw, 6, 3, C.sep);
-  const fw = Math.floor(bw * Math.max(0, Math.min(100, pct)) / 100);
-  if (fw > 0) rrect(bx, by, fw, 6, 3, col);
-  text(pct.toFixed(0)+'%', x + w - 10, by - 2, {size:9, weight:700, color:col, align:'right', baseline:'bottom'});
-}
-
-function drawCamerasCard(x, y, w, h) {
-  card(x, y, w, h);
-  text('CAMERAS', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
-  const ok = data.cams.online === data.cams.total;
-  const col = ok ? C.green : (data.cams.online === 0 ? C.red : C.orange);
-  statusDot(x + w - 14, y + 13, col);
-  text(data.cams.online + '/' + data.cams.total + ' online',
-    x + w - 22, y + 13, {size:9, weight:700, color:col, align:'right', baseline:'middle'});
-
-  const ev = data.cams.lastEvent;
-  if (ev) {
-    text(ev.camera, x+10, y+24, {size:13, weight:700});
-    text(ev.label + ' · ' + (ev.score*100).toFixed(0) + '%',
-      x+10, y+44, {size:11, color:C.accent});
-    text(ev.ago + ' ago', x+10, y+58, {size:10, color:C.label3});
-  } else {
-    text('No events', x+10, y+28, {size:12, color:C.label3});
-  }
-}
-
-function drawWifiCard(x, y, w, h) {
-  card(x, y, w, h);
-  text('WI-FI', x+10, y+8, {size:9, weight:700, color:C.label3, letter:0.6});
-  statusDot(x + w - 14, y + 13, C.accent);
-  text('ch ' + data.wifi.channel + ' · ' + data.wifi.band,
-    x + w - 22, y + 13, {size:9, weight:700, color:C.accent, align:'right', baseline:'middle'});
-
-  text(data.wifi.ssid, x+10, y+24, {size:13, weight:700});
-  text(data.wifi.clients + ' client' + (data.wifi.clients === 1 ? '' : 's'),
-    x+10, y+44, {size:11, color:C.label2});
-  // Countdown to next key rotation
-  text('rotates in ' + fmtDuration(data.wifi.keyRotatesInSec),
-    x+10, y+58, {size:10, color:C.label3});
-}
-
-// ---------- QR / Join Wi-Fi ----------
-function drawQR(offsetX=0) {
+// ============================================================
+// SCREEN — PAIR (Direction A · QR right + password chip)
+//   Eyebrow/title left, QR with mark inset right, password visible
+// ============================================================
+function drawQR(offsetX) {
+  offsetX = offsetX || 0;
   ctx.save();
   ctx.translate(offsetX, 0);
+  ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
 
-  ctx.fillStyle = C.bg;
-  ctx.fillRect(0, 0, W, H);
+  text('PAIR', 20, 22, { size:9, weight:700, color:T.accent, letter:2 });
+  text('Join Wi-Fi', 20, 38, { size:22, weight:700 });
 
-  // Header
-  rrect(0, 0, W, 42, 0, C.panel);
-  rrect(0, 41, W, 1, 0, C.sep);
-  drawMark(12, 8, 26, C.accent, C.accentLight);
-  text('Join Wi-Fi', 44, 12, {size:14, weight:700});
-  text('Scan with your phone camera', 44, 28, {size:10, color:C.label3});
+  // QR card right
+  const qrSize = 200, qx = W - qrSize - 30, qy = 60;
+  rrect(qx-10, qy-10, qrSize+20, qrSize+20, 14, T.white);
+  drawFakeQR(qx, qy, qrSize, 1);
+  // Mark inset center
+  const mc = 30;
+  rrect(qx + qrSize/2 - mc/2 - 3, qy + qrSize/2 - mc/2 - 3, mc+6, mc+6, 6, T.white);
+  drawMark(qx + qrSize/2 - mc/2, qy + qrSize/2 - mc/2, mc, T.accent, T.accentInk);
 
-  // Rotation TTL chip
+  // Left column
+  text('NETWORK', 20, 92, { size:9, weight:700, color:T.label3, letter:1.4 });
+  text(data.wifi.ssid, 20, 108, { size:17, weight:700 });
+
+  text('PASSWORD', 20, 142, { size:9, weight:700, color:T.label3, letter:1.4 });
+  text(data.wifi.password, 20, 158, { size:14, weight:600, color:T.accentInk });
+
+  // TTL chip — only when rotation is enabled (mirrors current behavior)
   const secs = data.wifi.keyRotatesInSec;
   const ttlStr = 'KEY ' + fmtDuration(secs);
-  const ttlW = 72;
-  rrect(W - ttlW - 10, 10, ttlW, 22, 11, secs < 60 ? C.orangeSoft : C.accentSubtle);
-  text(ttlStr, W - ttlW/2 - 10, 21,
-    {size:10, weight:700, color:secs < 60 ? C.orange : C.accent, align:'center', baseline:'middle', letter:0.6});
+  ctx.font = '700 10px Inter, system-ui, sans-serif';
+  const ttlW = Math.ceil(ctx.measureText(ttlStr).width) + 20;
+  rrect(20, 184, ttlW, 20, 10, secs < 60 ? 'rgba(255,159,10,0.18)' : T.surface);
+  rrect(20, 184, ttlW, 20, 10, null, secs < 60 ? T.orange : T.sep, 1);
+  text(ttlStr, 20 + ttlW/2, 194, { size:10, weight:700,
+    color: secs < 60 ? T.orange : T.label2, align:'center', baseline:'middle', letter:0.6 });
 
-  // QR block — simulated, not a real encoder (preview only).
-  // We draw a 25x25 pseudo-random-but-stable matrix so it *feels* like a QR.
-  const qrSize = 220;
-  const qx = 32, qy = 60;
-  rrect(qx - 10, qy - 10, qrSize + 20, qrSize + 20, 12, '#fff');
-  drawFakeQR(qx, qy, qrSize);
-
-  // Right side panel
-  const rx = qx + qrSize + 24;
-  const rw = W - rx - 16;
-  text('SSID', rx, 62, {size:9, weight:700, color:C.label3, letter:0.6});
-  text(data.wifi.ssid, rx, 78, {size:16, weight:700});
-
-  text('SECURITY', rx, 108, {size:9, weight:700, color:C.label3, letter:0.6});
-  text('WPA2', rx, 124, {size:14, weight:700, color:C.accent});
-
-  text('BAND', rx, 150, {size:9, weight:700, color:C.label3, letter:0.6});
-  text(data.wifi.band + ' · ch ' + data.wifi.channel, rx, 166, {size:12, weight:600, color:C.label2});
-
-  // Rotate button
-  const btnY = 230;
-  rrect(rx, btnY, rw, 32, 16, C.accentSubtle);
-  rrect(rx, btnY, rw, 32, 16, null, C.accent, 1);
-  text('⟳ Rotate now', rx + rw/2, btnY + 16,
-    {size:12, weight:700, color:C.accent, align:'center', baseline:'middle'});
-  regions.push({x: rx, y: btnY, w: rw, h: 32, on: rotateNow});
-
-  // Footer hint
-  text('‹ back to logo', 12, H - 14, {size:10, color:C.label3});
+  // Rotate pill — 44px tap target
+  const btnY = 224, btnW = 200, btnH = 44;
+  rrect(20, btnY, btnW, btnH, 12, T.surface);
+  rrect(20, btnY, btnW, btnH, 12, null, T.sep2, 1);
+  text('⟳  Rotate password', 20 + btnW/2, btnY + btnH/2,
+    { size:13, weight:600, color:T.label2, align:'center', baseline:'middle' });
+  regions.push({ x:20, y:btnY, w:btnW, h:btnH, on: rotateNow });
 
   ctx.restore();
 }
 
-// Deterministic pseudo-random matrix keyed off a seed that flips each rotation.
+// Pseudo-QR matrix (preview only; firmware uses real encoder output)
 let qrSeed = 1;
-function drawFakeQR(x, y, size) {
-  const N = 25;
-  const cell = size / N;
+function drawFakeQR(x, y, size, seed) {
+  const N = 25, cell = size/N;
   const rand = (i, j) => {
-    // Tiny LCG seeded with coordinates + qrSeed
-    let s = (i * 73856093) ^ (j * 19349663) ^ (qrSeed * 83492791);
-    s = (s ^ (s >>> 13)) * 1274126177;
-    return ((s ^ (s >>> 16)) & 0xff) / 255;
+    let s = (i*73856093) ^ (j*19349663) ^ ((seed||qrSeed) * 83492791);
+    s = (s ^ (s>>>13)) * 1274126177;
+    return ((s ^ (s>>>16)) & 0xff) / 255;
   };
   ctx.fillStyle = '#000';
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
-      // Finder patterns in 3 corners
-      const inFinder = (i < 7 && j < 7) || (i < 7 && j >= N-7) || (i >= N-7 && j < 7);
+      const inFinder = (i<7 && j<7) || (i<7 && j>=N-7) || (i>=N-7 && j<7);
       if (inFinder) {
-        const li = i >= N-7 ? i - (N-7) : i;
-        const lj = j >= N-7 ? j - (N-7) : j;
-        const onBorder = li === 0 || li === 6 || lj === 0 || lj === 6;
-        const onInner = li >= 2 && li <= 4 && lj >= 2 && lj <= 4;
-        if (onBorder || onInner) {
-          ctx.fillRect(x + j*cell, y + i*cell, cell+0.5, cell+0.5);
-        }
+        const li = i>=N-7 ? i-(N-7) : i;
+        const lj = j>=N-7 ? j-(N-7) : j;
+        const onBorder = li===0 || li===6 || lj===0 || lj===6;
+        const onInner  = li>=2 && li<=4 && lj>=2 && lj<=4;
+        if (onBorder || onInner) ctx.fillRect(x+j*cell, y+i*cell, cell+0.6, cell+0.6);
         continue;
       }
-      if (rand(i, j) > 0.52) {
-        ctx.fillRect(x + j*cell, y + i*cell, cell+0.5, cell+0.5);
-      }
+      if (rand(i, j) > 0.52) ctx.fillRect(x+j*cell, y+i*cell, cell+0.6, cell+0.6);
     }
   }
 }
 
-// ---------- Alerts drawer (over stats) ----------
+// ============================================================
+// Alerts drawer (overlay on Stats)
+// ============================================================
 function drawAlertsDrawer() {
-  // Dim the stats behind
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(0, 0, W, H);
+  const dw = 300, dx = W - dw;
+  rrect(dx, 0, dw, H, 0, T.panel);
+  rrect(dx, 0, 1, H, 0, T.sep);
 
-  const dw = 300, dx = W - dw, dy = 0, dh = H;
-  rrect(dx, dy, dw, dh, 0, C.panel);
-  rrect(dx, dy, 1, dh, 0, C.sep);
-
-  // Header
-  text('ALERTS', dx + 14, 14, {size:11, weight:700, color:C.label2, letter:0.8});
+  text('ALERTS', dx + 14, 16, { size:11, weight:700, color:T.label2, letter:1.4 });
   const open = alerts.filter(a => !a.cleared).length;
-  text(open + ' open', dx + dw - 58, 14, {size:10, color:C.label3});
+  text(open + ' open', dx + dw - 50, 16, { size:10, color:T.label3 });
+  text('✕', dx + dw - 16, 16, { size:18, weight:400, color:T.label2, align:'right' });
+  regions.push({ x:dx+dw-32, y:6, w:28, h:28, on:()=>{ eventsOpen=false; bumpIdle(); render(); }});
 
-  // Close X
-  text('✕', dx + dw - 14, 14, {size:16, weight:400, color:C.label2, align:'right'});
-  regions.push({x: dx + dw - 30, y: 4, w: 26, h: 26, on: () => { eventsOpen = false; bumpIdle(); render(); }});
-
-  // List
-  const listY = 40;
+  let y = 44;
   const rowH = 58;
-  let y = listY;
   const visible = alerts.slice(0, 4);
   if (visible.length === 0) {
-    text('No alerts.', dx + dw/2, H/2, {size:14, color:C.label3, align:'center', baseline:'middle'});
+    text('No alerts.', dx + dw/2, H/2, { size:14, color:T.label3, align:'center', baseline:'middle' });
   } else {
     visible.forEach((a, i) => {
-      rrect(dx + 10, y, dw - 20, rowH - 6, 8, a.cleared ? C.card : C.card2);
-      rrect(dx + 10, y, dw - 20, rowH - 6, 8, null, C.sep, 1);
-      // type icon
-      const ic = a.type === 'cam' ? '◉' : '⚠';
-      const iconCol = a.cleared ? C.label3 : (a.type === 'cam' ? C.red : C.orange);
-      text(ic, dx + 22, y + 16, {size:16, weight:700, color:iconCol, baseline:'middle'});
-      text(a.title, dx + 38, y + 10, {size:12, weight:700, color:a.cleared?C.label3:C.text});
-      text(a.detail, dx + 38, y + 26, {size:10, color:C.label3});
-      text(a.time, dx + 38, y + 40, {size:9, color:C.label4});
-      // Clear "x" per row
+      rrect(dx + 10, y, dw - 20, rowH - 6, 8, a.cleared ? T.surface : T.surface2);
+      rrect(dx + 10, y, dw - 20, rowH - 6, 8, null, T.sep, 1);
+      const iconCol = a.cleared ? T.label3 : (a.type==='cam' ? T.red : T.orange);
+      dot(dx + 24, y + 24, iconCol, 5);
+      text(a.title, dx + 40, y + 10, { size:12, weight:700, color: a.cleared ? T.label3 : T.text });
+      text(a.detail, dx + 40, y + 26, { size:10, color:T.label3 });
+      text(a.time, dx + 40, y + 40, { size:9, color:T.label4 });
       if (!a.cleared) {
-        const cx2 = dx + dw - 30, cy2 = y + rowH/2 - 3;
-        text('×', cx2, cy2, {size:18, weight:400, color:C.label3, align:'center', baseline:'middle'});
+        text('×', dx + dw - 22, y + 26, { size:18, weight:400, color:T.label3, align:'center', baseline:'middle' });
         regions.push({
-          x: cx2 - 14, y: y + 4, w: 28, h: rowH - 14,
+          x: dx + dw - 36, y: y + 4, w: 30, h: rowH - 12,
           on: () => { alerts[i].cleared = true; bumpIdle(); render(); }
         });
       }
@@ -877,152 +530,99 @@ function drawAlertsDrawer() {
     });
   }
 
-  // Clear all
-  const cbtnY = H - 44;
-  rrect(dx + 14, cbtnY, dw - 28, 32, 16, C.card2);
-  rrect(dx + 14, cbtnY, dw - 28, 32, 16, null, C.sep2, 1);
-  text('Clear all', dx + dw/2, cbtnY + 16,
-    {size:12, weight:700, color:C.label2, align:'center', baseline:'middle'});
+  const cbtnY = H - 52;
+  rrect(dx + 14, cbtnY, dw - 28, 40, 12, T.surface2);
+  rrect(dx + 14, cbtnY, dw - 28, 40, 12, null, T.sep2, 1);
+  text('Clear all', dx + dw/2, cbtnY + 20,
+    { size:13, weight:600, color:T.label2, align:'center', baseline:'middle' });
   regions.push({
-    x: dx + 14, y: cbtnY, w: dw - 28, h: 32,
+    x: dx + 14, y: cbtnY, w: dw - 28, h: 40,
     on: () => { alerts.forEach(a => a.cleared = true); alerts = []; bumpIdle(); render(); }
   });
 }
 
 // ============================================================
-// Render + carousel animation
+// Carousel + render
 // ============================================================
-let regions = [];  // click/tap targets for the current frame
-
-// Carousel = only the active screens. Idle (logo) is the screensaver, not
-// part of the swipe order — tapping/swiping from idle jumps to the first
-// active screen (stats).
 const ORDER = ['stats', 'qr'];
-const NAV_LABELS = { stats: 'System', qr: 'Join Wi-Fi' };
+const NAV_LABELS = { stats: 'System', qr: 'Pair' };
 function screenIndex(s) { return ORDER.indexOf(s); }
 
 function render() {
   regions = [];
 
-  // 178 = 70% of 255 — same on idle and active so the logo screensaver
-  // stays readable in a normally-lit room.
-  const targetBrightness = 178;
-  brightness += (targetBrightness - brightness) * 0.18;
-
-  // Paint the current screen, plus siblings during a swipe. Idle is
-  // outside the carousel so we only draw neighbors when on an active
-  // screen.
   if (screen !== 'idle' && (dragging || Math.abs(dragX) > 0.5)) {
     const idx = screenIndex(screen);
-    drawScreenByName(screen, dragX);
-    if (idx > 0 && dragX > 0) drawScreenByName(ORDER[idx-1], dragX - W);
-    if (idx < ORDER.length-1 && dragX < 0) drawScreenByName(ORDER[idx+1], dragX + W);
+    drawByName(screen, dragX);
+    if (idx > 0 && dragX > 0) drawByName(ORDER[idx-1], dragX - W);
+    if (idx < ORDER.length-1 && dragX < 0) drawByName(ORDER[idx+1], dragX + W);
   } else {
-    drawScreenByName(screen, 0);
+    drawByName(screen, 0);
   }
 
-  // No idle veil — brightness stays at 70% across idle + active.
-
-  // Bottom nav on active screens
   if (screen !== 'idle' && !dragging && Math.abs(dragX) < 1) drawNavBar();
-
-  // Alerts drawer on top of stats
   if (screen === 'stats' && eventsOpen) drawAlertsDrawer();
 
-  // Meta in sidebar
   document.getElementById('metaScreen').textContent = screen + (eventsOpen ? ' + alerts' : '');
-  document.getElementById('metaBri').textContent = Math.round(brightness);
   document.getElementById('metaAlerts').textContent = alerts.filter(a => !a.cleared).length;
   document.getElementById('metaRot').textContent = fmtDuration(data.wifi.keyRotatesInSec);
   const idleLeft = Math.max(0, Math.ceil((idleAt - Date.now())/1000));
-  document.getElementById('metaIdle').textContent =
-    (screen === 'idle') ? 'asleep' : (idleLeft + 's');
+  document.getElementById('metaIdle').textContent = (screen === 'idle') ? 'asleep' : (idleLeft + 's');
 
   document.querySelectorAll('.controls button[data-screen]').forEach(b => {
     b.classList.toggle('active', b.dataset.screen === screen);
   });
 }
 
-function drawScreenByName(name, dx) {
+function drawByName(name, dx) {
   if (name === 'idle')  return drawIdle(dx);
   if (name === 'stats') return drawStats(dx);
   if (name === 'qr')    return drawQR(dx);
 }
 
 function drawNavBar() {
-  const h = 28, y = H - h;
-  rrect(0, y, W, h, 0, C.panel);
-  rrect(0, y, W, 1, 0, C.sep);
-  const pads = 10, gap = 8;
-  const pw = (W - 2*pads - gap*(ORDER.length-1)) / ORDER.length;
-  const ph = h - 10;
-  ORDER.forEach((name, i) => {
-    const px = pads + i*(pw+gap);
-    const py = y + (h - ph)/2;
-    const isCur = name === screen;
-    rrect(px, py, pw, ph, ph/2, isCur ? C.accentSubtle : C.card,
-          isCur ? C.accent : C.sep, 1);
-    text(NAV_LABELS[name] || name, px + pw/2, py + ph/2,
-      {size:11, weight:700, color: isCur ? C.accent : C.label2,
-       align:'center', baseline:'middle'});
-    regions.push({
-      x: px, y: py, w: pw, h: ph,
-      on: () => { goTo(name); }
-    });
-  });
+  const h = 0; // nav bar is now part of the bottom strip on stats/qr — keep clean
+  // (Direction C/A both have their own meta strip — skip the extra nav pill)
 }
 
 // ============================================================
-// Idle timer, navigation, input
+// Idle, swipe, input
 // ============================================================
 function bumpIdle() {
   idleAt = Date.now() + IDLE_MS;
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    if (screen !== 'idle') {
-      eventsOpen = false;
-      goTo('idle');
-    }
+    if (screen !== 'idle') { eventsOpen = false; goTo('idle'); }
   }, IDLE_MS);
-  if (screen === 'idle') {
-    // Tap while idle -> wake to stats
-    goTo('stats');
-  }
 }
 
-function goTo(name, animate=true) {
-  if (!ORDER.includes(name)) return;
-  if (screen === name) { render(); return; }
+function goTo(name, animate) {
   screen = name;
   eventsOpen = false;
   if (screen !== 'idle') bumpIdle();
+  else { clearTimeout(idleTimer); }
   render();
 }
 
-// Swipe — advance/rewind along the ORDER
 function swipe(dir) {
+  if (screen === 'idle') { goTo('stats'); return; }
   const idx = screenIndex(screen);
   const next = idx + dir;
   if (next < 0 || next >= ORDER.length) return;
-  animateCarousel(dir, () => { screen = ORDER[next]; if (screen !== 'idle') bumpIdle(); render(); });
+  animateCarousel(dir, () => { screen = ORDER[next]; bumpIdle(); render(); });
 }
 
 function animateCarousel(dir, onDone) {
   cancelAnimationFrame(dragAnim);
-  const from = dragX;
-  const to = dir > 0 ? -W : W;  // dir=1 = swipe left (to next, canvas moves left)
+  const from = dragX, to = dir > 0 ? -W : W;
   const t0 = performance.now();
   function step(t) {
     const p = Math.min(1, (t - t0) / 220);
     const ease = 1 - Math.pow(1 - p, 3);
     dragX = from + (to - from) * ease;
     render();
-    if (p < 1) {
-      dragAnim = requestAnimationFrame(step);
-    } else {
-      dragX = 0;
-      onDone();
-    }
+    if (p < 1) dragAnim = requestAnimationFrame(step);
+    else { dragX = 0; onDone(); }
   }
   dragAnim = requestAnimationFrame(step);
 }
@@ -1041,7 +641,6 @@ function snapBack() {
   dragAnim = requestAnimationFrame(step);
 }
 
-// ----- Pointer / touch -----
 function canvasXY(e) {
   const rect = canvas.getBoundingClientRect();
   const sx = W / rect.width, sy = H / rect.height;
@@ -1057,10 +656,10 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 canvas.addEventListener('pointermove', (e) => {
   if (!dragging || !dragStart) return;
-  const [x, y] = canvasXY(e);
+  const [x] = canvasXY(e);
   dragX = x - dragStart.x;
-  // Resist at edges
   const idx = screenIndex(screen);
+  if (screen === 'idle') dragX *= 0.3;
   if (idx === 0 && dragX > 0) dragX *= 0.3;
   if (idx === ORDER.length - 1 && dragX < 0) dragX *= 0.3;
   render();
@@ -1070,76 +669,57 @@ canvas.addEventListener('pointerup', (e) => {
   dragging = false;
   if (!dragStart) return;
   const [x, y] = canvasXY(e);
-  const dx = x - dragStart.x;
-  const dy = y - dragStart.y;
-  const dt = Date.now() - dragStart.t;
+  const dx = x - dragStart.x, dy = y - dragStart.y, dt = Date.now() - dragStart.t;
   dragStart = null;
 
-  // Quick horizontal movement → swipe
   if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.3) {
-    // dx > 0 = swipe right (to previous), dx < 0 = swipe left (to next)
     swipe(dx < 0 ? 1 : -1);
     return;
   }
 
-  // Otherwise treat as a tap if it was quick + didn't move much
   if (dt < 400 && Math.abs(dx) < 12 && Math.abs(dy) < 12) {
-    // Drawer hit-test first
     const hit = regions.find(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
     if (hit) { hit.on(); snapBack(); return; }
-
-    // Idle: any tap wakes to stats
     if (screen === 'idle') { goTo('stats'); snapBack(); return; }
   }
 
   snapBack();
 });
 canvas.addEventListener('pointercancel', () => {
-  dragging = false;
-  dragStart = null;
+  dragging = false; dragStart = null;
   canvas.classList.remove('dragging');
   snapBack();
 });
 
-// ----- Keyboard -----
 document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft')  swipe(-1);
   if (e.key === 'ArrowRight') swipe(1);
   if (e.key === 'Escape')     { eventsOpen = false; render(); }
 });
 
-// ----- Controls -----
 document.querySelectorAll('.controls button[data-screen]').forEach(b => {
   b.addEventListener('click', () => goTo(b.dataset.screen));
 });
 document.getElementById('btnAlert').addEventListener('click', () => {
   const types = [
-    { type: 'cam', title: 'side-gate: person',  detail: 'confidence 88%', time: 'just now', cleared: false },
-    { type: 'cam', title: 'driveway: vehicle',  detail: 'confidence 94%', time: 'just now', cleared: false },
-    { type: 'sys', title: 'disk > 85% on /mnt/cloud-storage', detail: 'auto-prune queued', time: 'just now', cleared: false },
+    { type:'cam', title:'side-gate: person',  detail:'confidence 88%', time:'just now', cleared:false },
+    { type:'cam', title:'driveway: vehicle',  detail:'confidence 94%', time:'just now', cleared:false },
+    { type:'sys', title:'disk > 85% on /mnt', detail:'auto-prune queued', time:'just now', cleared:false },
   ];
   alerts.unshift(types[Math.floor(Math.random()*types.length)]);
   render();
 });
-document.getElementById('btnClearAlerts').addEventListener('click', () => {
-  alerts = [];
-  render();
-});
+document.getElementById('btnClearAlerts').addEventListener('click', () => { alerts = []; render(); });
 document.getElementById('btnRotate').addEventListener('click', rotateNow);
 
 function rotateNow() {
   data.wifi.keyRotatesInSec = 60 * 60;
   qrSeed = (qrSeed * 1103515245 + 12345) & 0x7fffffff;
-  alerts.unshift({
-    type: 'sys', title: 'Wi-Fi key rotated',
-    detail: 'Droplet-AI · scan new QR', time: 'just now', cleared: false,
-  });
+  alerts.unshift({ type:'sys', title:'Wi-Fi key rotated', detail:'Droplet-AI · scan new QR', time:'just now', cleared:false });
   goTo('qr');
 }
 
-// Init
-bumpIdle();
-goTo('idle', false);
+goTo('idle');
 render();
 </script>
 </body>
