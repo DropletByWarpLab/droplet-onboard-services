@@ -378,11 +378,17 @@ def _wifi_payload(ssid, key, encryption):
 
 def _qr_encode(text):
     """Generate a QR code bit-matrix for `text` using the `qrcode` lib
-    (apt: python3-qrcode). Returns (matrix, version)."""
+    (apt: python3-qrcode). Returns (matrix, version).
+
+    Error-correction H (~30 % recovery) so the redesigned PyPortal pair
+    screen can paint the Droplet mark in the center of the QR without
+    breaking scannability. Lower ECC levels (L/M/Q) cannot survive the
+    central cutout reliably.
+    """
     import qrcode
-    from qrcode.constants import ERROR_CORRECT_L
+    from qrcode.constants import ERROR_CORRECT_H
     q = qrcode.QRCode(
-        error_correction=ERROR_CORRECT_L,
+        error_correction=ERROR_CORRECT_H,
         border=0,       # we pad on the display side
         box_size=1,
     )

@@ -16,11 +16,12 @@ pivot to PyPortal (Tegra's GPIO/SPI driver stack is incompatible with the
 Pi-shield TFTs we originally targeted; see WARP-127). gpio_shim,
 Jetson.GPIO, RPi.GPIO, luma, spidev, and the XPT2046 touch code are gone.
 
-The visual system mirrors the web dashboard (`apps/web-dashboard/`) so the
-on-device screen looks like a compact version of the admin UI: same Droplet
-brand mark (faceted indigo drop, geometry from `DropletMark.tsx` /
-`public/logo.svg`), same color tokens (dark mode surface + `#818cf8` accent),
-same tile / status-chip layout.
+Visual system: redesigned 2026-05-18 to match `preview.html` (Direction
+C / C / A — editorial-numeric idle, sparkline-hero stats, QR-right pair).
+Three customer-facing screens: IDLE (clock screensaver), STATS (live
+health overview), QR (Wi-Fi pairing). MESSAGE is an ephemeral overlay
+pushed by the LLM. Tokens here mirror the `T` object at the top of
+`preview.html`'s script block.
 """
 
 import os
@@ -31,9 +32,10 @@ import logging
 import threading
 import urllib.request
 import urllib.error
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Any, Callable, Tuple
+from typing import Optional, List, Any, Callable, Tuple, Deque
 
 try:
     from zoneinfo import ZoneInfo
@@ -69,10 +71,6 @@ PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
 PYPORTAL_BAUD = int(os.environ.get("PYPORTAL_BAUD", "115200"))
 
 # Host-side device-bridge URL (see services/oled-display/device-bridge.py).
-# The bridge runs on the Jetson host and exposes /wifi, /files, /cameras,
-# /drives, /openwrt/qr so the container gets live data without mounting
-# NetworkManager/DBus/etc. inside. Default 127.0.0.1 because the bridge
-# binds to loopback by default (see BRIDGE_BIND in device-bridge.py).
 WIFI_HELPER_URL = os.environ.get(
     "WIFI_HELPER_URL", "http://127.0.0.1:9090")
 WIFI_REFRESH_SECONDS = int(os.environ.get("WIFI_REFRESH_SECONDS", "20"))
@@ -80,38 +78,48 @@ FILES_REFRESH_SECONDS = int(os.environ.get("FILES_REFRESH_SECONDS", "30"))
 CAMERAS_REFRESH_SECONDS = int(os.environ.get("CAMERAS_REFRESH_SECONDS", "15"))
 
 # ---------------------------------------------------------------------------
-# Design tokens — mirror apps/web-dashboard/src/app/globals.css (dark mode).
-# On-device we use dark mode exclusively: the panel is OLED-adjacent and
-# dark surfaces read well in both ambient light and the LAN-closet
-# deployments the device is built for.
+# Design tokens — mirror the `T` object in preview.html (Direction C/C/A
+# redesign, 2026-05-18). The firmware renders flat shapes only, so any
+# alpha-looking tones below are pre-blended on the bg surface. Existing
+# constant names are preserved so call-sites elsewhere keep compiling.
 # ---------------------------------------------------------------------------
 # Surfaces
-BG_COLOR         = (18, 18, 20)      # surface-primary (near-black)
-SURFACE_SECONDARY = (28, 28, 30)     # #1c1c1e
-SURFACE_RAISED   = (24, 24, 27)      # #18181b, slight warmth
-SEPARATOR        = (70, 70, 76)
+BG_COLOR          = (0x05, 0x05, 0x07)   # T.bg     #050507
+PANEL_COLOR       = (0x0D, 0x0D, 0x12)   # T.panel  #0d0d12
+SURFACE_SECONDARY = (0x14, 0x14, 0x20)   # T.surface  #141420
+SURFACE_RAISED    = (0x14, 0x14, 0x20)   # alias of surface for legacy callers
+SURFACE_ACTIVE    = (0x1D, 0x1D, 0x2E)   # T.surface2 #1d1d2e
+SEPARATOR         = (0x2A, 0x2A, 0x38)   # T.sep      #2a2a38
+SEPARATOR_2       = (0x3A, 0x3A, 0x4A)   # T.sep2     #3a3a4a
+TRACK_COLOR       = (0x1F, 0x1F, 0x30)   # T.track    #1f1f30
 
 # Labels
-TEXT_COLOR       = (255, 255, 255)
-LABEL_SECONDARY  = (190, 190, 200)
-LABEL_TERTIARY   = (145, 145, 160)
-LABEL_QUATERNARY = (100, 100, 115)
+TEXT_COLOR        = (0xFF, 0xFF, 0xFF)
+LABEL_SECONDARY   = (0xC8, 0xC8, 0xD4)   # T.label2  #c8c8d4
+LABEL_TERTIARY    = (0x8B, 0x8B, 0x9C)   # T.label3  #8b8b9c
+LABEL_QUATERNARY  = (0x54, 0x54, 0x66)   # T.label4  #545466
 
 # Accent (indigo)
-ACCENT_COLOR     = (129, 140, 248)   # #818cf8 dashboard dark-mode accent
-ACCENT_PRIMARY   = (99, 102, 241)    # #6366f1 brand logo primary
-ACCENT_LIGHT     = (165, 180, 252)   # #a5b4fc
-ACCENT_SUBTLE    = (45, 47, 85)      # rendered opacity-15 of accent on dark
+ACCENT_COLOR      = (0x81, 0x8C, 0xF8)   # T.accent     #818cf8
+ACCENT_PRIMARY    = (0x81, 0x8C, 0xF8)   # mark primary fill = accent
+ACCENT_LIGHT      = (0xB4, 0xBA, 0xFF)   # T.accentInk  #b4baff
+ACCENT_DIM        = (0x5B, 0x62, 0xC7)   # T.accentDim  #5b62c7
+# Sparkline fill: pre-blended #818cf822 (~13% alpha) over #050507 -> ~#15172a.
+ACCENT_FILL_SOFT  = (0x15, 0x17, 0x2A)
+# Pre-blended orange chip background: rgba(255,159,10,0.18) over bg.
+ORANGE_CHIP_BG    = (0x33, 0x25, 0x0E)
+# Pre-blended accent-subtle for legacy callers: rgba(129,140,248,0.18) over bg.
+ACCENT_SUBTLE     = (0x2A, 0x2D, 0x3D)
 
 # System status
-STATUS_RED       = (255, 69, 58)     # system-red
-STATUS_ORANGE    = (255, 159, 10)    # system-orange
-STATUS_GREEN     = (48, 209, 88)     # system-green
+STATUS_RED        = (0xFF, 0x45, 0x3A)   # T.red    #ff453a
+STATUS_ORANGE     = (0xFF, 0x9F, 0x0A)   # T.orange #ff9f0a
+STATUS_GREEN      = (0x30, 0xD1, 0x58)   # T.green  #30d158
 
-# Semantic aliases used across screens
-CARD_COLOR       = SURFACE_RAISED
-TEMP_WARN        = STATUS_ORANGE
-TEMP_CRIT        = STATUS_RED
+# Legacy aliases retained so any peripheral code still imports cleanly.
+CARD_COLOR        = SURFACE_SECONDARY
+TEMP_WARN         = STATUS_ORANGE
+TEMP_CRIT         = STATUS_RED
 
 # ---------------------------------------------------------------------------
 # Assets + cycle timing
@@ -121,25 +129,156 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 
 # Auto-cycle disabled by default on the touch build: a touch display is
 # for interaction, not a billboard. Setting AUTO_CYCLE=1 restores the
-# old logo -> stats carousel for headless demos.
+# old idle <-> stats carousel for headless demos.
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
-LOGO_DURATION = 5
+LOGO_DURATION = 5       # idle screen tick in auto-cycle mode
 STATS_DURATION = 10
 MESSAGE_HOLD = 30
-# How long an LLM message pins the screen. After that we return to home.
 MESSAGE_RETURN_HOME_AFTER = MESSAGE_HOLD
+
+# Sparkline depth (matches preview.html's 48-point buffer).
+SPARK_LEN = 48
+
+
+# ---------------------------------------------------------------------------
+# Font loader — try Inter first, fall back to DejaVu.
+# ---------------------------------------------------------------------------
+_FONT_CACHE: dict = {}
+
+# Search order for TrueType faces. Inter is preferred (matches preview.html);
+# DejaVu is the universal Debian fallback that the existing container ships.
+_INTER_REGULAR_NAMES = ("Inter-Regular.ttf", "Inter.ttf", "Inter-Medium.ttf")
+_INTER_BOLD_NAMES = ("Inter-Bold.ttf", "Inter-SemiBold.ttf", "Inter-ExtraBold.ttf")
+_DEJAVU_REGULAR_NAMES = ("DejaVuSans.ttf",)
+_DEJAVU_BOLD_NAMES = ("DejaVuSans-Bold.ttf",)
+# Windows fallback — Segoe UI ships on every modern Windows install, so the
+# host-side preview renders correctly when devs run this locally (e.g. the
+# Stefan dev box on Windows 11 without DejaVu installed). Production
+# containers still have DejaVu and pick that up first.
+_SYSTEM_REGULAR_NAMES = ("segoeui.ttf", "arial.ttf", "calibri.ttf")
+_SYSTEM_BOLD_NAMES = ("segoeuib.ttf", "arialbd.ttf", "calibrib.ttf")
+
+_FONT_SEARCH_PATHS = (
+    str(ASSETS_DIR / "fonts"),
+    str(ASSETS_DIR),
+    "/usr/share/fonts/truetype/inter",
+    "/usr/share/fonts/opentype/inter",
+    "/usr/share/fonts/truetype/dejavu",
+    "/usr/share/fonts",
+    # Windows
+    "C:/Windows/Fonts",
+    os.path.expandvars("%LOCALAPPDATA%/Microsoft/Windows/Fonts"),
+)
+
+
+def _find_font_file(names: Tuple[str, ...]) -> Optional[str]:
+    for search in _FONT_SEARCH_PATHS:
+        try:
+            base = Path(search)
+            if not base.exists():
+                continue
+            for n in names:
+                p = base / n
+                if p.exists():
+                    return str(p)
+        except Exception:
+            continue
+    return None
+
+
+def _format_idle_date(dt: datetime) -> str:
+    """ALL-CAPS date string for the firmware idle screen ("MONDAY, MAY 18").
+
+    The PyPortal has no locale + no `%-d` strftime directive, so we
+    compute the format on the host and push it as a plain string. The
+    `%-d` POSIX directive isn't available on Windows either, so we
+    build the day without zero-padding manually.
+    """
+    return f"{dt.strftime('%A')}, {dt.strftime('%b')} {dt.day}".upper()
 
 
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    key = (size, bold)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+    candidates = (
+        _INTER_BOLD_NAMES if bold else _INTER_REGULAR_NAMES,
+        _DEJAVU_BOLD_NAMES if bold else _DEJAVU_REGULAR_NAMES,
+        _SYSTEM_BOLD_NAMES if bold else _SYSTEM_REGULAR_NAMES,
+    )
+    for names in candidates:
+        path = _find_font_file(names)
+        if path:
+            try:
+                f = ImageFont.truetype(path, size)
+                _FONT_CACHE[key] = f
+                return f
+            except Exception:
+                continue
+    f = ImageFont.load_default()
+    _FONT_CACHE[key] = f
+    return f
+
+
+def _measure(draw: ImageDraw.ImageDraw, s: str, font) -> Tuple[int, int]:
     try:
-        variant = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-        for search in ["/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/"]:
-            path = Path(search) / variant
-            if path.exists():
-                return ImageFont.truetype(str(path), size)
+        bbox = draw.textbbox((0, 0), s, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
     except Exception:
-        pass
-    return ImageFont.load_default()
+        # Bitmap-default fallback
+        return font.getsize(s) if hasattr(font, "getsize") else (len(s) * 6, 11)
+
+
+def _draw_text(draw: ImageDraw.ImageDraw, s: str, x: int, y: int, *,
+               font, color, align: str = "left", baseline: str = "top",
+               letter: float = 0.0):
+    """Drop-in mirror of preview.html's `text()` helper.
+
+    Supports align (left/center/right) + baseline (top/middle/bottom) and
+    optional letter spacing (rendered char-by-char when non-zero).
+    """
+    if letter and len(s) > 1:
+        # Per-char layout so we can space the glyphs explicitly. Mirrors
+        # the canvas branch with the same name in preview.html.
+        widths = []
+        total = 0
+        for ch in s:
+            w, _ = _measure(draw, ch, font)
+            widths.append(w)
+            total += w
+        total += int(letter * (len(s) - 1))
+        if align == "center":
+            cx = x - total // 2
+        elif align == "right":
+            cx = x - total
+        else:
+            cx = x
+        # Baseline adjust — same as the simple branch below.
+        _, th = _measure(draw, s, font)
+        if baseline == "middle":
+            ty = y - th // 2
+        elif baseline == "bottom":
+            ty = y - th
+        else:
+            ty = y
+        for ch, w in zip(s, widths):
+            draw.text((cx, ty), ch, fill=color, font=font)
+            cx += w + int(letter)
+        return
+    tw, th = _measure(draw, s, font)
+    if align == "center":
+        tx = x - tw // 2
+    elif align == "right":
+        tx = x - tw
+    else:
+        tx = x
+    if baseline == "middle":
+        ty = y - th // 2
+    elif baseline == "bottom":
+        ty = y - th
+    else:
+        ty = y
+    draw.text((tx, ty), s, fill=color, font=font)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +295,7 @@ _MARK_RIGHT = [(26, 0), (44, 28), (26, 36)]
 def draw_droplet_mark(
     draw: ImageDraw.ImageDraw,
     x: int, y: int, size: int,
-    primary: Tuple[int, int, int] = ACCENT_PRIMARY,
+    primary: Tuple[int, int, int] = ACCENT_COLOR,
     highlight: Tuple[int, int, int] = ACCENT_LIGHT,
 ):
     """Draw the Droplet brand mark at (x, y) sized to `size` pixels tall.
@@ -165,8 +304,7 @@ def draw_droplet_mark(
     proportionally so the full 52x60 geometry fits inside `size x size`.
     """
     vw, vh = _MARK_VIEWBOX
-    scale = size / vh  # scale by height so the mark looks like its web twin
-    # Horizontal centering offset inside the size-box
+    scale = size / vh
     x_off = x + (size - int(vw * scale)) // 2
     y_off = y
 
@@ -175,6 +313,73 @@ def draw_droplet_mark(
 
     draw.polygon([proj(p) for p in _MARK_LEFT], fill=primary)
     draw.polygon([proj(p) for p in _MARK_RIGHT], fill=highlight)
+
+
+# ---------------------------------------------------------------------------
+# Pseudo-QR (used when the bridge hasn't returned a real matrix yet, so the
+# preview still shows the right *shape* of UI). Mirrors preview.html's
+# drawFakeQR — three finder squares + deterministic noise.
+# ---------------------------------------------------------------------------
+def _draw_fake_qr(draw: ImageDraw.ImageDraw, x: int, y: int, size: int,
+                  seed: int = 1, n_cells: int = 25,
+                  bg: Tuple[int, int, int] = (255, 255, 255),
+                  fg: Tuple[int, int, int] = (0, 0, 0)):
+    cell = size / n_cells
+    draw.rectangle([(x, y), (x + size, y + size)], fill=bg)
+    for i in range(n_cells):
+        for j in range(n_cells):
+            in_finder = ((i < 7 and j < 7) or
+                         (i < 7 and j >= n_cells - 7) or
+                         (i >= n_cells - 7 and j < 7))
+            if in_finder:
+                li = i - (n_cells - 7) if i >= n_cells - 7 else i
+                lj = j - (n_cells - 7) if j >= n_cells - 7 else j
+                on_border = li == 0 or li == 6 or lj == 0 or lj == 6
+                on_inner = 2 <= li <= 4 and 2 <= lj <= 4
+                if on_border or on_inner:
+                    draw.rectangle(
+                        [(int(x + j * cell), int(y + i * cell)),
+                         (int(x + (j + 1) * cell), int(y + (i + 1) * cell))],
+                        fill=fg,
+                    )
+                continue
+            s = (i * 73856093) ^ (j * 19349663) ^ (seed * 83492791)
+            s = (s ^ (s >> 13)) * 1274126177
+            v = ((s ^ (s >> 16)) & 0xff) / 255.0
+            if v > 0.52:
+                draw.rectangle(
+                    [(int(x + j * cell), int(y + i * cell)),
+                     (int(x + (j + 1) * cell), int(y + (i + 1) * cell))],
+                    fill=fg,
+                )
+
+
+def _draw_qr_matrix(draw: ImageDraw.ImageDraw, x: int, y: int, size: int,
+                    matrix: List[List[int]],
+                    bg: Tuple[int, int, int] = (255, 255, 255),
+                    fg: Tuple[int, int, int] = (0, 0, 0)):
+    """Render a real binary QR matrix from the bridge."""
+    n = len(matrix)
+    if n == 0:
+        return
+    cell = size / n
+    draw.rectangle([(x, y), (x + size, y + size)], fill=bg)
+    for i in range(n):
+        row = matrix[i]
+        for j in range(min(n, len(row))):
+            if row[j]:
+                draw.rectangle(
+                    [(int(x + j * cell), int(y + i * cell)),
+                     (int(x + (j + 1) * cell + 0.5),
+                      int(y + (i + 1) * cell + 0.5))],
+                    fill=fg,
+                )
+
+
+def _fmt_duration(secs: int) -> str:
+    secs = max(0, int(secs))
+    m, s = divmod(secs, 60)
+    return f"{m}:{s:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -202,40 +407,26 @@ class TouchRegion:
 class TFTDisplay:
     """PyPortal-backed 480x320 TFT controller with touch-driven screens."""
 
-    # Screen ids — mirror the dashboard's top-level routes where it makes
-    # sense: home tile grid, chat-prep, stats/health, device summary,
-    # settings. `logo` and `message` are ephemeral overlays.
-    HOME = "home"
+    # Screen ids — the redesign collapses the carousel to two interactive
+    # screens (STATS + QR) plus an IDLE screensaver and a MESSAGE overlay.
+    # HOME/LOGO are kept as aliases so legacy callers (orchestrator,
+    # FastAPI routes, the auto-cycle loop) keep resolving.
+    IDLE = "idle"
     STATS = "stats"
-    CHAT = "chat"
-    DEVICES = "devices"
-    SETTINGS = "settings"
-    LOGO = "logo"
+    QR = "qr"
     MESSAGE = "message"
+    # Aliases for backward compatibility — `show_home` -> stats,
+    # `show_logo` -> idle.
+    HOME = STATS
+    LOGO = IDLE
 
     def __init__(self):
         self._pyportal = None
         self._pyportal_lock = threading.Lock()
-        # Path of the ttyACM the live fd was opened on. Tracked so the cycle
-        # loop can detect a USB re-enumeration: when the kernel renumbers the
-        # CDC interfaces (firmware reset, replug, host-side hub reset) the
-        # original device node disappears but our open fd silently no-ops —
-        # writes succeed without doing anything and reads return zero bytes,
-        # so the existing reconnect-on-IOError path in `_pyportal_send` never
-        # fires. A periodic `os.path.exists(self._pyportal_path)` check is
-        # the cheapest reliable way to spot a dead fd.
         self._pyportal_path: Optional[str] = None
-        # Set by `_probe_pyportal` on every successful probe; cleared by the
-        # cycle loop after it runs `_push_full_state`. Probe always discards
-        # the firmware's pre-probe READY/REQUEST_STATE handshake (the probe
-        # calls `reset_input_buffer()` before pinging, and only reads enough
-        # bytes to confirm an OK), so we can't rely on the in-loop READY
-        # handler to fire on a fresh probe. Without this flag, the firmware
-        # would sit with empty state until the slowest periodic push tick
-        # (files = 30s) — i.e. "the screen doesn't auto-fill on reboot".
         self._needs_resync = False
         self._backend = "sim"
-        self._current_mode = self.HOME
+        self._current_mode = self.IDLE
         self._current_image: Optional[Image.Image] = None
         self._custom_title: Optional[str] = None
         self._custom_lines: Optional[List[str]] = None
@@ -252,10 +443,18 @@ class TFTDisplay:
         # Live touch feedback: momentary highlight after a tap
         self._last_tap_region: Optional[str] = None
         self._last_tap_at: float = 0.0
+        # Rolling sparkline buffer for the stats hero (CPU history).
+        self._cpu_spark: Deque[float] = deque(maxlen=SPARK_LEN)
+        # Cached QR snapshot (populated by the cycle loop / fetch_qr).
+        self._qr_snapshot: Optional[dict] = None
+        # Optional alert list — empty by default. Anything that wants to
+        # surface alerts on the panel can push entries via show_message
+        # or by mutating this list before render_stats runs.
+        self._alerts: List[dict] = []
 
         self._init_device()
         self._load_logo()
-        # First frame — render home so the screen isn't blank on boot.
+        # First frame — render idle so the screen isn't blank on boot.
         self._render_current()
 
     # ----- Backend init -------------------------------------------------
@@ -263,8 +462,6 @@ class TFTDisplay:
     def _init_device(self):
         # PyPortal takes several seconds to finish USB enumeration after a
         # Jetson reboot, so retry a few times before falling through to sim.
-        # Otherwise a cold boot leaves the user with a blank screen until
-        # the container is restarted.
         if BACKEND in ("auto", "pyportal"):
             attempts = 6 if BACKEND == "auto" else 1
             for attempt in range(attempts):
@@ -277,12 +474,9 @@ class TFTDisplay:
 
     def _try_pyportal(self) -> bool:
         try:
-            import serial
+            import serial  # noqa: F401
         except ImportError:
             return False
-        # PyPortal can re-enumerate as ttyACM0/1/2 depending on which
-        # USB interface ends up as "data" vs "console" at boot. Try each
-        # candidate and pick the first that responds.
         candidates = []
         if Path(PYPORTAL_TTY).exists():
             candidates.append(PYPORTAL_TTY)
@@ -304,15 +498,10 @@ class TFTDisplay:
             return False
         try:
             s = serial.Serial(path, PYPORTAL_BAUD, timeout=2)
-            # Give the USB-serial endpoint a moment to stabilise after
-            # open() — CircuitPython sometimes needs a few ms before it
-            # is ready to read/write reliably.
             time.sleep(0.3)
             s.reset_input_buffer()
             s.write(b'{"mode":"ping"}\n')
             s.flush()
-            # Expect an OK or READY within 800ms; otherwise treat as a
-            # different serial device (e.g. PyPortal's REPL console).
             deadline = time.time() + 0.8
             saw_ok = False
             while time.time() < deadline:
@@ -328,12 +517,6 @@ class TFTDisplay:
             self._pyportal = s
             self._pyportal_path = path
             self._backend = "pyportal"
-            # Ask the cycle loop to push a full state burst on its next
-            # tick. Necessary because the probe above ran
-            # `reset_input_buffer()` before pinging, which discards the
-            # firmware's READY/REQUEST_STATE handshake — without an
-            # explicit resync, the firmware would render empty fields
-            # until the slowest periodic push tick (30s).
             self._needs_resync = True
             logger.info("TFT initialised via PyPortal on %s @ %d baud",
                         path, PYPORTAL_BAUD)
@@ -353,11 +536,8 @@ class TFTDisplay:
                 self._pyportal.write(json.dumps(payload).encode("utf-8") + b"\n")
                 self._pyportal.flush()
         except Exception as e:
-            # I/O error usually means the PyPortal re-enumerated on USB
-            # (e.g. firmware reloaded) and our file handle is stale.
-            # Drop the handle, try to re-probe; subsequent calls will
-            # either reconnect or stay quiet until the PyPortal is back.
-            logger.warning("PyPortal write failed (mode=%s): %s — reconnecting", mode, e)
+            logger.warning("PyPortal write failed (mode=%s): %s — reconnecting",
+                           mode, e)
             try:
                 with self._pyportal_lock:
                     try:
@@ -365,11 +545,10 @@ class TFTDisplay:
                     except Exception:
                         pass
                     self._pyportal = None
-                    self._backend = "sim"  # temporary until re-probe succeeds
+                    self._backend = "sim"
             except Exception:
                 pass
             if self._try_pyportal():
-                # Re-probe worked — re-send the payload once.
                 try:
                     with self._pyportal_lock:
                         self._pyportal.write(
@@ -381,11 +560,12 @@ class TFTDisplay:
     # ----- Assets -------------------------------------------------------
 
     def _load_logo(self):
-        """Prefer the canonical vector logo, but allow override via PNG.
+        """Allow a marketing PNG override for the idle splash.
 
-        If a PNG exists in `assets/logo_480.png` or `assets/logo_128.png`
-        it's used as-is (lets product swap in a rendered marketing asset
-        later). Otherwise we draw the DropletMark-derived vector ourselves.
+        The redesign's idle screen is procedural (clock + brand mark +
+        date + SSID), but we keep a PNG hook so product can drop in a
+        full-bleed splash later by saving `assets/logo_480.png`. If
+        present, that PNG is shown as-is whenever IDLE is the active mode.
         """
         for candidate in (ASSETS_DIR / "logo_480.png", ASSETS_DIR / "logo_128.png"):
             if candidate.exists():
@@ -396,43 +576,8 @@ class TFTDisplay:
                     return
                 except Exception as e:
                     logger.warning("Failed to load %s: %s", candidate, e)
-        self._logo_image = self._render_logo_fallback()
-
-    def _render_logo_fallback(self) -> Image.Image:
-        """Full-screen splash using the canonical brand mark + wordmark.
-
-        Matches apps/web-dashboard/public/logo.svg composition: mark on
-        top, "Droplet" wordmark below, subtle tagline.
-        """
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
-        draw = ImageDraw.Draw(img)
-
-        mark_size = 140
-        mark_x = (WIDTH - mark_size) // 2
-        mark_y = HEIGHT // 2 - mark_size // 2 - 30
-        draw.rounded_rectangle(
-            [(mark_x - 28, mark_y - 22),
-             (mark_x + mark_size + 28, mark_y + mark_size + 22)],
-            radius=28, fill=SURFACE_RAISED,
-        )
-        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
-                          primary=ACCENT_PRIMARY, highlight=ACCENT_LIGHT)
-
-        font_word = _get_font(44, bold=True)
-        text = "Droplet"
-        bbox = draw.textbbox((0, 0), text, font=font_word)
-        tw = bbox[2] - bbox[0]
-        draw.text(((WIDTH - tw) // 2, mark_y + mark_size + 36),
-                  text, fill=TEXT_COLOR, font=font_word)
-
-        tag_font = _get_font(14)
-        tag = "Edge AI Appliance"
-        bbox = draw.textbbox((0, 0), tag, font=tag_font)
-        tw = bbox[2] - bbox[0]
-        draw.text(((WIDTH - tw) // 2, mark_y + mark_size + 86),
-                  tag, fill=LABEL_TERTIARY, font=tag_font)
-
-        return img
+        # No override — leave as None so render_idle() draws the procedural one.
+        self._logo_image = None
 
     # ----- Push to display ---------------------------------------------
 
@@ -447,623 +592,474 @@ class TFTDisplay:
         except Exception as e:
             logger.debug("preview save failed: %s", e)
 
-    # ----- Shared chrome -----------------------------------------------
+    # ----- Page indicator (replaces the old bottom nav pills) ----------
 
-    def _draw_header(self, img: Image.Image, draw: ImageDraw.ImageDraw,
-                     *, show_back: bool = False, show_home: bool = False,
-                     title: Optional[str] = None,
-                     status: Optional[str] = None):
-        """Dashboard-style header strip: brand mark + wordmark on the left,
-        optional back/home button, status chip and clock on the right.
-
-        Returns the y-coordinate where the header ends (content starts).
+    def _draw_page_indicator(self, draw: ImageDraw.ImageDraw, active: str):
+        """Two small dots at the bottom centre — accent for active, sep2
+        for inactive. Replaces the carousel's pill tab bar which is gone
+        in the redesign.
         """
-        bar_h = 52
-        draw.rectangle([(0, 0), (WIDTH, bar_h)], fill=SURFACE_SECONDARY)
-        draw.line([(0, bar_h), (WIDTH, bar_h)], fill=SEPARATOR, width=1)
-
-        font_title = _get_font(17, bold=True)
-        font_small = _get_font(12, bold=True)
-        font_clock = _get_font(20, bold=True)
-
-        x_cursor = 12
-        if show_back:
-            self._draw_button(
-                draw, x_cursor, 10, 70, 32,
-                "< Back", font_small,
-                region=TouchRegion("nav_back", x_cursor, 10, 70, 32,
-                                   self._go_home),
-            )
-            x_cursor += 80
-        elif show_home:
-            self._draw_button(
-                draw, x_cursor, 10, 70, 32,
-                "Home", font_small,
-                region=TouchRegion("nav_home", x_cursor, 10, 70, 32,
-                                   self._go_home),
-            )
-            x_cursor += 80
-
-        # Brand
-        draw_droplet_mark(draw, x_cursor, 10, 32,
-                          primary=ACCENT_COLOR, highlight=ACCENT_LIGHT)
-        x_cursor += 36
-        wordmark = title or "Droplet"
-        draw.text((x_cursor, 14), wordmark, fill=TEXT_COLOR, font=font_title)
-
-        # Clock
-        clock = time.strftime("%H:%M")
-        bbox = draw.textbbox((0, 0), clock, font=font_clock)
-        clock_w = bbox[2] - bbox[0]
-        draw.text((WIDTH - clock_w - 14, 14), clock,
-                  fill=TEXT_COLOR, font=font_clock)
-
-        # Status chip between clock and brand
-        if status is not None:
-            chip_font = _get_font(11, bold=True)
-            chip_bbox = draw.textbbox((0, 0), status, font=chip_font)
-            chip_w = (chip_bbox[2] - chip_bbox[0]) + 22
-            chip_h = 20
-            chip_x = WIDTH - clock_w - 14 - chip_w - 10
-            chip_y = (bar_h - chip_h) // 2
-            draw.rounded_rectangle(
-                [(chip_x, chip_y), (chip_x + chip_w, chip_y + chip_h)],
-                radius=10, fill=SURFACE_RAISED,
-            )
-            draw.ellipse(
-                [(chip_x + 7, chip_y + 6), (chip_x + 13, chip_y + 12)],
-                fill=STATUS_GREEN,
-            )
-            draw.text((chip_x + 16, chip_y + 3), status,
-                      fill=LABEL_SECONDARY, font=chip_font)
-
-        return bar_h + 6
-
-    def _draw_button(self, draw: ImageDraw.ImageDraw,
-                     x: int, y: int, w: int, h: int,
-                     label: str, font,
-                     *, region: Optional[TouchRegion] = None,
-                     fill=SURFACE_RAISED, text_color=TEXT_COLOR,
-                     border=True):
-        """Pill button with optional touch binding + tap flash."""
-        active = (region and self._last_tap_region == region.name and
-                  time.time() - self._last_tap_at < 0.25)
-        bg = ACCENT_SUBTLE if active else fill
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=h // 2, fill=bg)
-        if border:
-            draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                                   radius=h // 2, outline=SEPARATOR, width=1)
-        bbox = draw.textbbox((0, 0), label, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        draw.text((x + (w - tw) // 2, y + (h - th) // 2 - 1),
-                  label, fill=text_color if not active else ACCENT_COLOR,
-                  font=font)
-        if region is not None:
-            self._touch_regions.append(region)
+        cy = HEIGHT - 10
+        r = 2  # 4 px diameter
+        # Centre two dots 10 px apart around WIDTH/2.
+        positions = [
+            ("stats", WIDTH // 2 - 5),
+            ("qr", WIDTH // 2 + 5),
+        ]
+        for name, cx in positions:
+            color = ACCENT_COLOR if name == active else SEPARATOR_2
+            draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=color)
 
     # ----- Screen renderers --------------------------------------------
 
-    def render_logo(self) -> Image.Image:
-        if self._logo_image is None:
-            return self._render_logo_fallback()
-        return self._logo_image.copy()
+    def render_idle(self) -> Image.Image:
+        """Direction C — editorial-numeric idle (clock screensaver).
 
-    def render_home(self) -> Image.Image:
-        """Dashboard-style tile grid. This is the root interactive screen."""
+        Small Droplet mark + "DROPLET" eyebrow + "on-prem AI" tagline
+        top, massive 140 px HH:MM clock centred, ALL-CAPS date bottom-
+        left, SSID bottom-right in accent. Colon blinks every second.
+        """
+        # Marketing override beats the procedural idle if provided.
+        if self._logo_image is not None:
+            return self._logo_image.copy()
+
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        content_y = self._draw_header(
-            img, draw, show_home=False,
-            status="Online",
-        )
+        # Brand bug + eyebrow
+        draw_droplet_mark(draw, 20, 18, 20, ACCENT_COLOR, ACCENT_LIGHT)
+        _draw_text(draw, "DROPLET", 50, 24,
+                   font=_get_font(9, bold=True), color=LABEL_TERTIARY, letter=2)
+        _draw_text(draw, "on-prem AI", WIDTH - 20, 24,
+                   font=_get_font(9), color=LABEL_QUATERNARY,
+                   align="right", letter=1)
 
-        # Tile grid: 2 columns x 2 rows of primary destinations + a
-        # compact system status ribbon at the foot.
-        pad = 10
-        tile_gap = 10
-        grid_w = WIDTH - 2 * pad
-        grid_h = HEIGHT - content_y - 66  # leave space for footer
-        tile_w = (grid_w - tile_gap) // 2
-        tile_h = (grid_h - tile_gap) // 2
+        # Hero clock — 140 px tabular numbers, colon blinks each second.
+        now = datetime.now(_TZ) if _TZ else datetime.now()
+        hh = f"{now.hour:02d}"
+        mm = f"{now.minute:02d}"
+        colon = ":" if (now.second % 2) == 0 else " "
+        clock_str = hh + colon + mm
+        # 140 px Inter @ ExtraBold — fall back to whatever big TTF we have.
+        clock_font = _get_font(140, bold=True)
+        _draw_text(draw, clock_str, WIDTH // 2, 168,
+                   font=clock_font, color=TEXT_COLOR,
+                   align="center", baseline="middle", letter=-6)
 
-        font_label = _get_font(12, bold=True)
-        font_title = _get_font(19, bold=True)
-        font_meta = _get_font(12)
-
-        tiles = [
-            ("CHAT", "Ask AI", "Tap to chat",     self.CHAT,     self._go_chat),
-            ("SYS",  "Status", "Health & metrics", self.STATS,    self._go_stats),
-            ("NET",  "Network", self._get_ip(),   self.DEVICES,  self._go_devices),
-            ("CFG",  "Settings", "Brightness & more", self.SETTINGS, self._go_settings),
-        ]
-        for idx, (tag, title, sub, _mode, action) in enumerate(tiles):
-            col = idx % 2
-            row = idx // 2
-            tx = pad + col * (tile_w + tile_gap)
-            ty = content_y + row * (tile_h + tile_gap)
-            self._draw_tile(draw, tx, ty, tile_w, tile_h,
-                            tag, title, sub,
-                            font_label, font_title, font_meta,
-                            region=TouchRegion(f"tile_{tag.lower()}",
-                                               tx, ty, tile_w, tile_h, action))
-
-        # Status ribbon (mirrors dashboard's StatusSegment row)
-        ribbon_y = HEIGHT - 56
-        self._draw_status_ribbon(draw, pad, ribbon_y, WIDTH - 2 * pad, 44)
+        # Date bottom-left, SSID bottom-right.
+        date_str = now.strftime("%A, %b %-d").upper() if os.name != "nt" \
+            else now.strftime("%A, %b %d").upper()
+        _draw_text(draw, date_str, 20, HEIGHT - 28,
+                   font=_get_font(11, bold=True), color=LABEL_TERTIARY,
+                   letter=1.6)
+        ssid = self._current_ssid()
+        _draw_text(draw, ssid, WIDTH - 20, HEIGHT - 28,
+                   font=_get_font(11, bold=True), color=ACCENT_COLOR,
+                   align="right")
 
         return img
 
-    def _draw_tile(self, draw, x, y, w, h,
-                   tag, title, sub,
-                   font_label, font_title, font_meta,
-                   region: Optional[TouchRegion] = None):
-        active = (region and self._last_tap_region == region.name and
-                  time.time() - self._last_tap_at < 0.3)
-        bg = SURFACE_SECONDARY if active else SURFACE_RAISED
-        border = ACCENT_COLOR if active else SEPARATOR
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=14, fill=bg)
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=14, outline=border, width=1)
-
-        # Accent tag pill in the corner
-        pad = 12
-        pill_w = 42
-        pill_h = 20
-        draw.rounded_rectangle(
-            [(x + pad, y + pad), (x + pad + pill_w, y + pad + pill_h)],
-            radius=10, fill=ACCENT_SUBTLE,
-        )
-        bbox = draw.textbbox((0, 0), tag, font=font_label)
-        tw = bbox[2] - bbox[0]
-        draw.text((x + pad + (pill_w - tw) // 2, y + pad + 4),
-                  tag, fill=ACCENT_COLOR, font=font_label)
-
-        # Title
-        draw.text((x + pad, y + pad + pill_h + 14),
-                  title, fill=TEXT_COLOR, font=font_title)
-        # Subtitle
-        draw.text((x + pad, y + pad + pill_h + 44),
-                  sub[:28], fill=LABEL_TERTIARY, font=font_meta)
-
-        # Corner chevron (arrow hint)
-        ax = x + w - 26
-        ay = y + h - 24
-        draw.polygon([
-            (ax, ay), (ax + 10, ay + 6), (ax, ay + 12),
-        ], fill=LABEL_TERTIARY)
-
-        if region is not None:
-            self._touch_regions.append(region)
-
-    def _draw_status_ribbon(self, draw, x, y, w, h):
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=12, fill=SURFACE_RAISED)
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=12, outline=SEPARATOR, width=1)
-
-        font_val = _get_font(15, bold=True)
-        font_cap = _get_font(10, bold=True)
-
-        cpu_pct = psutil.cpu_percent(interval=0.0)
-        try:
-            mem_pct = psutil.virtual_memory().percent
-        except Exception:
-            mem_pct = 0
-        try:
-            disk_pct = psutil.disk_usage("/").percent
-        except Exception:
-            disk_pct = 0
-        temp = self._get_cpu_temp()
-        try:
-            up = time.time() - psutil.boot_time()
-            hrs = int(up // 3600)
-            mins = int((up % 3600) // 60)
-            uptime = f"{hrs}h {mins}m" if hrs < 48 else f"{int(up // 86400)}d"
-        except Exception:
-            uptime = "—"
-
-        segments = [
-            (f"{cpu_pct:.0f}%", "CPU"),
-            (f"{mem_pct:.0f}%", "RAM"),
-            (f"{disk_pct:.0f}%", "DISK"),
-            (f"{temp:.0f}°C", "TEMP"),
-            (uptime, "UP"),
-        ]
-        seg_w = w / len(segments)
-        for i, (primary, caption) in enumerate(segments):
-            cx = x + i * seg_w
-            draw.text((cx + 12, y + 6), primary,
-                      fill=TEXT_COLOR, font=font_val)
-            draw.text((cx + 12, y + 26), caption,
-                      fill=LABEL_TERTIARY, font=font_cap)
-            if i > 0:
-                draw.line([(cx, y + 8), (cx, y + h - 8)],
-                          fill=SEPARATOR, width=1)
+    # Back-compat alias — callers still ask for render_logo().
+    def render_logo(self) -> Image.Image:
+        return self.render_idle()
 
     def render_stats(self) -> Image.Image:
-        """Detailed health screen — 2x2 metric cards, back button."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
-        draw = ImageDraw.Draw(img)
-        with self._touch_regions_lock:
-            self._touch_regions = []
+        """Direction C — sparkline-hero stats overview.
 
-        content_y = self._draw_header(img, draw,
-                                      show_back=True, title="Health")
-
-        font_label = _get_font(11, bold=True)
-        font_value = _get_font(26, bold=True)
-        font_sm = _get_font(12)
-
-        cpu_pct = psutil.cpu_percent(interval=0.05)
-        try:
-            mem = psutil.virtual_memory()
-        except Exception:
-            mem = None
-        try:
-            disk = psutil.disk_usage("/")
-        except Exception:
-            disk = None
-        temp = self._get_cpu_temp()
-
-        pad = 10
-        gap = 10
-        card_w = (WIDTH - 2 * pad - gap) // 2
-        card_h = (HEIGHT - content_y - 56 - gap) // 2
-
-        self._draw_metric_card(
-            draw, pad, content_y, card_w, card_h,
-            "CPU", f"{cpu_pct:.0f}%", cpu_pct,
-            font_label, font_value, font_sm,
-            danger_thresh=(80, 95),
-        )
-        mem_val = f"{mem.used / (1024**3):.1f}/{mem.total / (1024**3):.0f} GB" if mem else "n/a"
-        mem_pct = mem.percent if mem else 0
-        self._draw_metric_card(
-            draw, pad + card_w + gap, content_y, card_w, card_h,
-            "MEMORY", mem_val, mem_pct,
-            font_label, font_value, font_sm,
-            danger_thresh=(80, 95),
-        )
-        disk_val = (f"{(disk.used / (1024**3)):.0f}/{(disk.total / (1024**3)):.0f} GB"
-                    if disk else "n/a")
-        disk_pct = disk.percent if disk else 0
-        self._draw_metric_card(
-            draw, pad, content_y + card_h + gap, card_w, card_h,
-            "DISK", disk_val, disk_pct,
-            font_label, font_value, font_sm,
-            danger_thresh=(85, 95),
-        )
-        self._draw_temp_card(
-            draw, pad + card_w + gap, content_y + card_h + gap,
-            card_w, card_h,
-            temp, font_label, font_value, font_sm,
-        )
-
-        # Footer: IP + hostname (mirrors dashboard status ribbon)
-        foot_y = HEIGHT - 42
-        draw.text((pad, foot_y), "IP",
-                  fill=LABEL_TERTIARY, font=_get_font(10, bold=True))
-        draw.text((pad + 24, foot_y - 2),
-                  self._get_ip(), fill=TEXT_COLOR, font=_get_font(14))
-
-        up = time.time() - psutil.boot_time()
-        days = int(up // 86400)
-        hours = int((up % 86400) // 3600)
-        mins = int((up % 3600) // 60)
-        up_str = f"{days}d {hours}h" if days else f"{hours}h {mins}m"
-        bbox = draw.textbbox((0, 0), up_str, font=_get_font(14))
-        draw.text((WIDTH - (bbox[2] - bbox[0]) - pad, foot_y - 2),
-                  up_str, fill=TEXT_COLOR, font=_get_font(14))
-        draw.text((WIDTH - (bbox[2] - bbox[0]) - pad - 28, foot_y),
-                  "UP", fill=LABEL_TERTIARY, font=_get_font(10, bold=True))
-
-        return img
-
-    def render_chat(self) -> Image.Image:
-        """Chat-prep screen — mirrors the dashboard's hero prompt capsule.
-
-        The device itself can't run a REPL here (no keyboard), so this
-        screen shows a reminder that the user should speak (or use the
-        web UI) and displays the latest LLM-pushed message when present.
+        CPU hero top-left (eyebrow + 64 px number), time + alert bubble
+        top-right, full-width 32 px sparkline at y=100, 4-column
+        tabular row (MEM/DISK/TEMP/CAMERAS) at y=170, hostname·IP +
+        alert summary footer.
         """
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        content_y = self._draw_header(img, draw,
-                                      show_back=True, title="Ask AI")
+        stats = self._gather_stats()
+        # Update the rolling spark before the render so the line matches
+        # the current hero number.
+        cpu_val = stats.get("cpu")
+        if isinstance(cpu_val, (int, float)):
+            self._cpu_spark.append(float(cpu_val))
 
-        # Hero question (mirrors dashboard h1)
-        font_hero = _get_font(30, bold=True)
-        draw.text((16, content_y + 6), "What can I",
-                  fill=TEXT_COLOR, font=font_hero)
-        draw.text((16, content_y + 40), "help you with?",
-                  fill=ACCENT_COLOR, font=font_hero)
+        # Hero metric — CPU
+        cpu_pct = stats.get("cpu") if stats.get("cpu") is not None else 0
+        _draw_text(draw, "CPU LOAD", 20, 18,
+                   font=_get_font(10, bold=True), color=LABEL_TERTIARY,
+                   letter=1.6)
+        _draw_text(draw, f"{int(cpu_pct)}%", 20, 32,
+                   font=_get_font(64, bold=True), color=TEXT_COLOR,
+                   letter=-3)
 
-        # Capsule (faux prompt input — touch target routes to web UI)
-        cap_x = 16
-        cap_y = content_y + 92
-        cap_w = WIDTH - 32
-        cap_h = 48
-        draw.rounded_rectangle(
-            [(cap_x, cap_y), (cap_x + cap_w, cap_y + cap_h)],
-            radius=cap_h // 2, fill=SURFACE_RAISED,
-        )
-        draw.rounded_rectangle(
-            [(cap_x, cap_y), (cap_x + cap_w, cap_y + cap_h)],
-            radius=cap_h // 2, outline=ACCENT_COLOR, width=1,
-        )
-        sparkle = "*"
-        font_body = _get_font(15)
-        draw.text((cap_x + 18, cap_y + 14),
-                  f"{sparkle}  Open chat on dashboard to ask…",
-                  fill=LABEL_SECONDARY, font=font_body)
-        # Send-button stub
-        btn_w = 60
-        btn_x = cap_x + cap_w - btn_w - 6
-        btn_y = cap_y + 6
-        btn_h = cap_h - 12
-        draw.rounded_rectangle(
-            [(btn_x, btn_y), (btn_x + btn_w, btn_y + btn_h)],
-            radius=btn_h // 2, fill=ACCENT_COLOR,
-        )
-        font_btn = _get_font(13, bold=True)
-        bbox = draw.textbbox((0, 0), "Ask", font=font_btn)
-        draw.text((btn_x + (btn_w - (bbox[2] - bbox[0])) // 2,
-                   btn_y + (btn_h - (bbox[3] - bbox[1])) // 2 - 1),
-                  "Ask", fill=(255, 255, 255), font=font_btn)
-
-        # Last message panel (if any)
-        msg_y = cap_y + cap_h + 16
-        msg_h = HEIGHT - msg_y - 16
-        draw.rounded_rectangle(
-            [(16, msg_y), (WIDTH - 16, msg_y + msg_h)],
-            radius=12, fill=SURFACE_RAISED,
-        )
-        font_label = _get_font(10, bold=True)
-        draw.text((28, msg_y + 10), "LATEST",
-                  fill=LABEL_TERTIARY, font=font_label)
-        if self._custom_title or self._custom_lines:
-            font_title = _get_font(16, bold=True)
-            draw.text((28, msg_y + 28),
-                      (self._custom_title or "Message")[:40],
-                      fill=TEXT_COLOR, font=font_title)
-            y = msg_y + 54
-            for line in (self._custom_lines or [])[:3]:
-                draw.text((28, y), line[:54],
-                          fill=LABEL_SECONDARY, font=_get_font(13))
-                y += 20
+        # Time + alert bubble on the right
+        now = datetime.now(_TZ) if _TZ else datetime.now()
+        open_alerts = [a for a in self._alerts if not a.get("cleared")]
+        open_count = len(open_alerts)
+        if open_count > 0:
+            bx, by, br = WIDTH - 28, 24, 13
+            draw.ellipse([(bx - br, by - br), (bx + br, by + br)],
+                         fill=STATUS_RED)
+            _draw_text(draw, "!", bx, by,
+                       font=_get_font(16, bold=True), color=TEXT_COLOR,
+                       align="center", baseline="middle")
+            if open_count > 1:
+                cw, ch = 16, 13
+                draw.rounded_rectangle(
+                    [(bx + br - 6, by - br - 4),
+                     (bx + br - 6 + cw, by - br - 4 + ch)],
+                    radius=ch // 2, fill=TEXT_COLOR)
+                _draw_text(draw, str(open_count),
+                           bx + br - 6 + cw // 2,
+                           by - br - 4 + ch // 2,
+                           font=_get_font(9, bold=True), color=STATUS_RED,
+                           align="center", baseline="middle")
+            # Bubble is the tap target to open the (preview-only) drawer.
+            self._touch_regions.append(TouchRegion(
+                "alerts_open", bx - br - 6, by - br - 6,
+                br * 2 + 12, br * 2 + 12, self._toggle_alerts))
         else:
-            draw.text((28, msg_y + 28),
-                      "Assistant is idle.",
-                      fill=LABEL_SECONDARY, font=_get_font(14))
-            draw.text((28, msg_y + 50),
-                      "Tool calls and replies appear here.",
-                      fill=LABEL_TERTIARY, font=_get_font(12))
+            # OK dot + label
+            draw.ellipse([(WIDTH - 30, 24), (WIDTH - 22, 32)],
+                         fill=STATUS_GREEN)
+            _draw_text(draw, "OK", WIDTH - 36, 28,
+                       font=_get_font(11, bold=True), color=STATUS_GREEN,
+                       align="right", baseline="middle")
+
+        _draw_text(draw, now.strftime("%H:%M"), WIDTH - 20, 50,
+                   font=_get_font(12, bold=True), color=LABEL_SECONDARY,
+                   align="right")
+
+        # Hero sparkline
+        self._draw_sparkline(draw, 20, 100, WIDTH - 40, 32, list(self._cpu_spark))
+
+        # Hairline separator between the spark and the tabular row.
+        draw.rectangle([(20, 152), (WIDTH - 20, 153)], fill=SEPARATOR)
+
+        # 4 tabular columns
+        cams = self._current_cameras()
+        mem = stats.get("mem")
+        disk = stats.get("disk")
+        temp = stats.get("temp")
+        cols = [
+            ("MEM",     f"{int(mem)}%" if mem is not None else "—",
+                LABEL_SECONDARY),
+            ("DISK",    f"{int(disk)}%" if disk is not None else "—",
+                LABEL_SECONDARY),
+            ("TEMP",    f"{int(temp)}°" if temp is not None else "—",
+                LABEL_SECONDARY),
+            ("CAMERAS", f"{cams[0]}/{cams[1]}" if cams else "—/—",
+                STATUS_GREEN),
+        ]
+        col_w = (WIDTH - 40) / 4
+        for i, (lbl, val, color) in enumerate(cols):
+            x = int(20 + i * col_w)
+            _draw_text(draw, lbl, x, 170,
+                       font=_get_font(9, bold=True), color=LABEL_TERTIARY,
+                       letter=1.4)
+            _draw_text(draw, val, x, 188,
+                       font=_get_font(28, bold=True), color=color)
+
+        # Bottom strip — hostname · ip on the left, alert summary on right.
+        hostname = stats.get("hostname") or socket.gethostname()
+        ip = stats.get("ip") or self._get_ip()
+        _draw_text(draw, f"{hostname} · {ip}", 20, HEIGHT - 26,
+                   font=_get_font(11, bold=True), color=LABEL_TERTIARY)
+        all_clear = open_count == 0
+        draw.ellipse([(WIDTH - 99, HEIGHT - 24), (WIDTH - 93, HEIGHT - 18)],
+                     fill=STATUS_GREEN if all_clear else STATUS_RED)
+        msg = "All good" if all_clear else \
+            f"{open_count} alert" + ("s" if open_count > 1 else "")
+        _draw_text(draw, msg, WIDTH - 20, HEIGHT - 26,
+                   font=_get_font(11, bold=True),
+                   color=STATUS_GREEN if all_clear else STATUS_RED,
+                   align="right")
+
+        # Two-dot page indicator
+        self._draw_page_indicator(draw, "stats")
 
         return img
 
-    def render_devices(self) -> Image.Image:
-        """Network / devices summary screen — derived from dashboard's
-        devices tile + status-ribbon row."""
+    def render_qr(self) -> Image.Image:
+        """Direction A — QR right + password chip.
+
+        Eyebrow "PAIR" + "Join Wi-Fi" h1 top-left, NETWORK + SSID,
+        PASSWORD + plaintext password (so a guest can type it instead
+        of scanning), optional TTL chip, "⟳ Rotate password" pill, and
+        a 200×200 QR card with the brand mark inset at the centre.
+        """
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        content_y = self._draw_header(img, draw,
-                                      show_back=True, title="Network")
+        snap = self._qr_snapshot or {}
+        ssid = (snap.get("ssid") or snap.get("network")
+                or self._current_ssid())
+        password = (snap.get("key") or snap.get("password")
+                    or snap.get("psk") or "")
+        ttl_secs = snap.get("ttl_seconds")
+        if ttl_secs is None:
+            ttl_secs = snap.get("expires_in")
+        matrix = snap.get("matrix")
 
-        pad = 16
-        font_label = _get_font(10, bold=True)
-        font_title = _get_font(17, bold=True)
-        font_val = _get_font(16)
-        font_meta = _get_font(12)
+        # Eyebrow + headline (left column)
+        _draw_text(draw, "PAIR", 20, 22,
+                   font=_get_font(9, bold=True), color=ACCENT_COLOR, letter=2)
+        _draw_text(draw, "Join Wi-Fi", 20, 38,
+                   font=_get_font(22, bold=True), color=TEXT_COLOR)
 
-        # Primary card: this device
-        card_h = 96
+        # QR card (right) — 200×200 with a 10 px white card frame.
+        qr_size = 200
+        qx = WIDTH - qr_size - 30
+        qy = 60
         draw.rounded_rectangle(
-            [(pad, content_y + 4),
-             (WIDTH - pad, content_y + 4 + card_h)],
-            radius=14, fill=SURFACE_RAISED,
-        )
-        draw_droplet_mark(draw, pad + 16, content_y + 18, 52,
-                          primary=ACCENT_COLOR, highlight=ACCENT_LIGHT)
-        draw.text((pad + 86, content_y + 18),
-                  socket.gethostname()[:24],
-                  fill=TEXT_COLOR, font=font_title)
-        draw.text((pad + 86, content_y + 44),
-                  self._get_ip(), fill=ACCENT_COLOR, font=font_val)
-        draw.text((pad + 86, content_y + 66),
-                  "This device", fill=LABEL_TERTIARY, font=font_meta)
-
-        # Two secondary cards
-        sub_y = content_y + 4 + card_h + 12
-        sub_h = HEIGHT - sub_y - 16
-        col_w = (WIDTH - 2 * pad - 12) // 2
-        for idx, (label, primary, secondary) in enumerate([
-            ("LAN", self._get_ip(), "Via gateway"),
-            ("UPLINK", "Online", "DNS reachable"),
-        ]):
-            sx = pad + idx * (col_w + 12)
-            draw.rounded_rectangle(
-                [(sx, sub_y), (sx + col_w, sub_y + sub_h)],
-                radius=14, fill=SURFACE_RAISED,
-            )
-            draw.text((sx + 14, sub_y + 12),
-                      label, fill=LABEL_TERTIARY, font=font_label)
-            draw.text((sx + 14, sub_y + 30),
-                      primary, fill=TEXT_COLOR, font=font_title)
-            draw.text((sx + 14, sub_y + sub_h - 26),
-                      secondary, fill=LABEL_SECONDARY, font=font_meta)
-        return img
-
-    def render_settings(self) -> Image.Image:
-        """Settings screen — brightness slider + quick actions."""
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
-        draw = ImageDraw.Draw(img)
-        with self._touch_regions_lock:
-            self._touch_regions = []
-
-        content_y = self._draw_header(img, draw,
-                                      show_back=True, title="Settings")
-
-        pad = 16
-        font_label = _get_font(11, bold=True)
-        font_title = _get_font(17, bold=True)
-
-        # Brightness card
-        card_y = content_y + 4
-        card_h = 130
+            [(qx - 10, qy - 10), (qx + qr_size + 10, qy + qr_size + 10)],
+            radius=14, fill=(255, 255, 255))
+        if isinstance(matrix, list) and matrix and isinstance(matrix[0], list):
+            _draw_qr_matrix(draw, qx, qy, qr_size, matrix)
+        else:
+            # Deterministic seed off the SSID so the preview looks stable.
+            seed = (sum(ord(c) for c in ssid) or 1) & 0x7fffffff
+            _draw_fake_qr(draw, qx, qy, qr_size, seed=seed)
+        # Brand-mark inset at the centre, with a thin white pad so the
+        # mark stays legible against any QR module density.
+        mc = 30
+        inset_x = qx + qr_size // 2 - mc // 2
+        inset_y = qy + qr_size // 2 - mc // 2
         draw.rounded_rectangle(
-            [(pad, card_y), (WIDTH - pad, card_y + card_h)],
-            radius=14, fill=SURFACE_RAISED,
-        )
-        draw.text((pad + 16, card_y + 14),
-                  "BRIGHTNESS", fill=LABEL_TERTIARY, font=font_label)
-        draw.text((pad + 16, card_y + 32),
-                  f"{self._brightness}/255",
-                  fill=TEXT_COLOR, font=_get_font(24, bold=True))
+            [(inset_x - 3, inset_y - 3),
+             (inset_x + mc + 3, inset_y + mc + 3)],
+            radius=6, fill=(255, 255, 255))
+        draw_droplet_mark(draw, inset_x, inset_y, mc,
+                          ACCENT_COLOR, ACCENT_LIGHT)
 
-        # Stepper buttons
-        btn_font = _get_font(20, bold=True)
-        minus_x = WIDTH - pad - 120
-        plus_x = WIDTH - pad - 60
-        btn_y = card_y + 18
-        self._draw_button(
-            draw, minus_x, btn_y, 50, 44, "-", btn_font,
-            region=TouchRegion("bri_minus", minus_x, btn_y, 50, 44,
-                               lambda: self.set_brightness(
-                                   max(0, self._brightness - 25))),
-        )
-        self._draw_button(
-            draw, plus_x, btn_y, 50, 44, "+", btn_font,
-            region=TouchRegion("bri_plus", plus_x, btn_y, 50, 44,
-                               lambda: self.set_brightness(
-                                   min(255, self._brightness + 25))),
-        )
+        # NETWORK + SSID
+        _draw_text(draw, "NETWORK", 20, 92,
+                   font=_get_font(9, bold=True), color=LABEL_TERTIARY,
+                   letter=1.4)
+        _draw_text(draw, ssid, 20, 108,
+                   font=_get_font(17, bold=True), color=TEXT_COLOR)
 
-        # Brightness bar
-        bar_x = pad + 16
-        bar_y = card_y + card_h - 22
-        bar_w = WIDTH - 2 * pad - 32
-        draw.rounded_rectangle(
-            [(bar_x, bar_y), (bar_x + bar_w, bar_y + 8)],
-            radius=4, fill=SURFACE_SECONDARY,
-        )
-        fill_w = int(bar_w * self._brightness / 255)
-        if fill_w > 0:
-            draw.rounded_rectangle(
-                [(bar_x, bar_y), (bar_x + fill_w, bar_y + 8)],
-                radius=4, fill=ACCENT_COLOR,
-            )
+        # PASSWORD + plaintext value
+        _draw_text(draw, "PASSWORD", 20, 142,
+                   font=_get_font(9, bold=True), color=LABEL_TERTIARY,
+                   letter=1.4)
+        _draw_text(draw, password or "—", 20, 158,
+                   font=_get_font(14, bold=True), color=ACCENT_LIGHT)
 
-        # Quick actions row
-        act_y = card_y + card_h + 14
-        act_h = HEIGHT - act_y - 16
-        col_w = (WIDTH - 2 * pad - 12) // 2
+        # TTL chip — only when rotation is enabled.
+        if isinstance(ttl_secs, (int, float)) and ttl_secs > 0:
+            ttl_str = "KEY " + _fmt_duration(int(ttl_secs))
+            chip_font = _get_font(10, bold=True)
+            ttl_w_text, _ = _measure(draw, ttl_str, chip_font)
+            ttl_w = ttl_w_text + 20
+            urgent = ttl_secs < 60
+            fill = ORANGE_CHIP_BG if urgent else SURFACE_SECONDARY
+            stroke = STATUS_ORANGE if urgent else SEPARATOR
+            color = STATUS_ORANGE if urgent else LABEL_SECONDARY
+            draw.rounded_rectangle([(20, 184), (20 + ttl_w, 204)],
+                                   radius=10, fill=fill)
+            draw.rounded_rectangle([(20, 184), (20 + ttl_w, 204)],
+                                   radius=10, outline=stroke, width=1)
+            _draw_text(draw, ttl_str, 20 + ttl_w // 2, 194,
+                       font=chip_font, color=color,
+                       align="center", baseline="middle", letter=0.6)
 
-        # Show logo
-        draw.rounded_rectangle(
-            [(pad, act_y), (pad + col_w, act_y + act_h)],
-            radius=14, fill=SURFACE_RAISED,
-        )
-        draw.text((pad + 14, act_y + 14),
-                  "SHOW LOGO", fill=LABEL_TERTIARY, font=font_label)
-        draw.text((pad + 14, act_y + 34),
-                  "Splash screen", fill=TEXT_COLOR, font=font_title)
+        # Rotate pill — 44 px tap target.
+        btn_y, btn_w, btn_h = 224, 200, 44
+        draw.rounded_rectangle([(20, btn_y), (20 + btn_w, btn_y + btn_h)],
+                               radius=12, fill=SURFACE_SECONDARY)
+        draw.rounded_rectangle([(20, btn_y), (20 + btn_w, btn_y + btn_h)],
+                               radius=12, outline=SEPARATOR_2, width=1)
+        _draw_text(draw, "↻  Rotate password",
+                   20 + btn_w // 2, btn_y + btn_h // 2,
+                   font=_get_font(13, bold=True), color=LABEL_SECONDARY,
+                   align="center", baseline="middle")
         self._touch_regions.append(TouchRegion(
-            "act_logo", pad, act_y, col_w, act_h,
-            lambda: self._set_mode(self.LOGO),
-        ))
+            "qr_rotate", 20, btn_y, btn_w, btn_h, self._rotate_now))
 
-        # Reboot-cycle / home
-        rx = pad + col_w + 12
-        draw.rounded_rectangle(
-            [(rx, act_y), (rx + col_w, act_y + act_h)],
-            radius=14, fill=SURFACE_RAISED,
-        )
-        draw.text((rx + 14, act_y + 14),
-                  "CYCLE", fill=LABEL_TERTIARY, font=font_label)
-        label = "Auto-cycle off" if not self._cycle_running or self._cycle_paused_until > time.time() else "Auto-cycle on"
-        draw.text((rx + 14, act_y + 34),
-                  label, fill=TEXT_COLOR, font=font_title)
-        self._touch_regions.append(TouchRegion(
-            "act_cycle", rx, act_y, col_w, act_h,
-            self._toggle_cycle,
-        ))
+        # Two-dot page indicator
+        self._draw_page_indicator(draw, "qr")
 
         return img
 
     def render_message(self, title: str, lines: List[str]) -> Image.Image:
+        """LLM-pushed ephemeral message. Restyled to the new dark palette.
+
+        Eyebrow "MESSAGE", title in the hero slot, the lines in a soft
+        surface card below. Auto-dismisses to STATS after MESSAGE_HOLD.
+        """
         img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        content_y = self._draw_header(img, draw,
-                                      show_home=True, title=title[:24])
+        # Header strip — eyebrow + clock
+        _draw_text(draw, "MESSAGE", 20, 22,
+                   font=_get_font(9, bold=True), color=ACCENT_COLOR, letter=2)
+        now = datetime.now(_TZ) if _TZ else datetime.now()
+        _draw_text(draw, now.strftime("%H:%M"), WIDTH - 20, 22,
+                   font=_get_font(11, bold=True), color=LABEL_TERTIARY,
+                   align="right")
 
-        font_body = _get_font(17)
-        y = content_y + 18
-        draw.rounded_rectangle(
-            [(16, content_y + 6), (WIDTH - 16, HEIGHT - 16)],
-            radius=14, fill=SURFACE_RAISED,
-        )
-        for line in lines[:10]:
-            draw.text((28, y), line[:52],
-                      fill=TEXT_COLOR, font=font_body)
-            y += 24
+        # Title
+        _draw_text(draw, (title or "Message")[:40], 20, 38,
+                   font=_get_font(22, bold=True), color=TEXT_COLOR)
+
+        # Body card
+        card_top = 80
+        card_bottom = HEIGHT - 24
+        draw.rounded_rectangle([(20, card_top), (WIDTH - 20, card_bottom)],
+                               radius=14, fill=SURFACE_SECONDARY)
+        draw.rounded_rectangle([(20, card_top), (WIDTH - 20, card_bottom)],
+                               radius=14, outline=SEPARATOR, width=1)
+
+        font_body = _get_font(15)
+        y = card_top + 18
+        max_lines = max(1, (card_bottom - card_top - 36) // 22)
+        for line in (lines or [])[:max_lines]:
+            _draw_text(draw, line[:54], 36, y,
+                       font=font_body, color=TEXT_COLOR)
+            y += 22
+
         return img
 
-    @staticmethod
-    def _draw_metric_card(draw, x, y, w, h, label, value, pct,
-                          font_label, font_value, font_sm, danger_thresh=(80, 95)):
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=14, fill=CARD_COLOR)
-        draw.text((x + 14, y + 12), label, fill=LABEL_TERTIARY, font=font_label)
-        draw.text((x + 14, y + 30), value, fill=TEXT_COLOR, font=font_value)
-        bar_x = x + 14
-        bar_y = y + h - 22
-        bar_w = w - 28
-        draw.rounded_rectangle([(bar_x, bar_y), (bar_x + bar_w, bar_y + 8)],
-                               radius=4, fill=SURFACE_SECONDARY)
-        fill_w = int(bar_w * min(max(pct, 0), 100) / 100)
-        if fill_w > 0:
-            warn, crit = danger_thresh
-            color = (ACCENT_COLOR if pct < warn
-                     else STATUS_ORANGE if pct < crit
-                     else STATUS_RED)
-            draw.rounded_rectangle([(bar_x, bar_y), (bar_x + fill_w, bar_y + 8)],
-                                   radius=4, fill=color)
+    def render_alerts_drawer(self,
+                             base: Optional[Image.Image] = None,
+                             ) -> Image.Image:
+        """Right-side drawer overlay on top of the current frame.
 
-    @staticmethod
-    def _draw_temp_card(draw, x, y, w, h, temp,
-                        font_label, font_value, font_sm):
-        draw.rounded_rectangle([(x, y), (x + w, y + h)],
-                               radius=14, fill=CARD_COLOR)
-        draw.text((x + 14, y + 12), "TEMP",
-                  fill=LABEL_TERTIARY, font=font_label)
-        color = (TEXT_COLOR if temp < 70
-                 else STATUS_ORANGE if temp < 85
-                 else STATUS_RED)
-        draw.text((x + 14, y + 30), f"{temp:.0f}\u00b0C",
-                  fill=color, font=font_value)
-        status_text = ("nominal" if temp < 70
-                       else "warm" if temp < 85
-                       else "hot")
-        status_color = (STATUS_GREEN if temp < 70
-                        else STATUS_ORANGE if temp < 85
-                        else STATUS_RED)
-        draw.text((x + 14, y + h - 24), status_text,
-                  fill=status_color, font=font_sm)
+        Per the design brief the "55% black scrim" is pre-blended to a
+        flat dim rather than carrying alpha through to the firmware.
+        """
+        if base is None:
+            base = self.render_stats()
+        img = base.copy()
+        draw = ImageDraw.Draw(img)
+
+        # Scrim: 55% black over the existing pixels. PIL can do this with
+        # an alpha-composite, which is fine for the host-side preview
+        # (the firmware draws solid panel chrome instead — see brief).
+        scrim = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 140))
+        img_rgba = img.convert("RGBA")
+        img_rgba.alpha_composite(scrim)
+        img = img_rgba.convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        dw = 300
+        dx = WIDTH - dw
+        draw.rectangle([(dx, 0), (dx + dw, HEIGHT)], fill=PANEL_COLOR)
+        draw.line([(dx, 0), (dx, HEIGHT)], fill=SEPARATOR, width=1)
+
+        _draw_text(draw, "ALERTS", dx + 14, 16,
+                   font=_get_font(11, bold=True), color=LABEL_SECONDARY,
+                   letter=1.4)
+        open_count = sum(1 for a in self._alerts if not a.get("cleared"))
+        _draw_text(draw, f"{open_count} open", dx + dw - 50, 16,
+                   font=_get_font(10), color=LABEL_TERTIARY)
+        _draw_text(draw, "✕", dx + dw - 16, 16,
+                   font=_get_font(18), color=LABEL_SECONDARY,
+                   align="right")
+        self._touch_regions.append(TouchRegion(
+            "alerts_close", dx + dw - 32, 6, 28, 28, self._toggle_alerts))
+
+        y = 44
+        row_h = 58
+        visible = self._alerts[:4]
+        if not visible:
+            _draw_text(draw, "No alerts.", dx + dw // 2, HEIGHT // 2,
+                       font=_get_font(14), color=LABEL_TERTIARY,
+                       align="center", baseline="middle")
+        else:
+            for i, a in enumerate(visible):
+                cleared = bool(a.get("cleared"))
+                bg = SURFACE_SECONDARY if cleared else SURFACE_ACTIVE
+                draw.rounded_rectangle(
+                    [(dx + 10, y), (dx + dw - 10, y + row_h - 6)],
+                    radius=8, fill=bg)
+                draw.rounded_rectangle(
+                    [(dx + 10, y), (dx + dw - 10, y + row_h - 6)],
+                    radius=8, outline=SEPARATOR, width=1)
+                if cleared:
+                    icon_col = LABEL_TERTIARY
+                elif a.get("type") == "cam":
+                    icon_col = STATUS_RED
+                else:
+                    icon_col = STATUS_ORANGE
+                draw.ellipse([(dx + 19, y + 19), (dx + 29, y + 29)],
+                             fill=icon_col)
+                title = str(a.get("title", ""))
+                detail = str(a.get("detail", ""))
+                when = str(a.get("time", ""))
+                _draw_text(draw, title, dx + 40, y + 10,
+                           font=_get_font(12, bold=True),
+                           color=LABEL_TERTIARY if cleared else TEXT_COLOR)
+                _draw_text(draw, detail, dx + 40, y + 26,
+                           font=_get_font(10), color=LABEL_TERTIARY)
+                _draw_text(draw, when, dx + 40, y + 40,
+                           font=_get_font(9), color=LABEL_QUATERNARY)
+                if not cleared:
+                    _draw_text(draw, "×", dx + dw - 22, y + 26,
+                               font=_get_font(18), color=LABEL_TERTIARY,
+                               align="center", baseline="middle")
+                    self._touch_regions.append(TouchRegion(
+                        f"alerts_clear_{i}", dx + dw - 36, y + 4,
+                        30, row_h - 12,
+                        lambda idx=i: self._clear_alert(idx)))
+                y += row_h
+
+        cbtn_y = HEIGHT - 52
+        draw.rounded_rectangle(
+            [(dx + 14, cbtn_y), (dx + dw - 14, cbtn_y + 40)],
+            radius=12, fill=SURFACE_ACTIVE)
+        draw.rounded_rectangle(
+            [(dx + 14, cbtn_y), (dx + dw - 14, cbtn_y + 40)],
+            radius=12, outline=SEPARATOR_2, width=1)
+        _draw_text(draw, "Clear all", dx + dw // 2, cbtn_y + 20,
+                   font=_get_font(13, bold=True), color=LABEL_SECONDARY,
+                   align="center", baseline="middle")
+        self._touch_regions.append(TouchRegion(
+            "alerts_clear_all", dx + 14, cbtn_y, dw - 28, 40,
+            self._clear_all_alerts))
+
+        return img
+
+    # ----- Sparkline helper --------------------------------------------
+
+    def _draw_sparkline(self, draw: ImageDraw.ImageDraw,
+                        sx: int, sy: int, sw: int, sh: int,
+                        series: List[float]):
+        """Solid-fill sparkline below a 1 px stroke, exactly as in
+        preview.html. Both fill and stroke are flat colors (no alpha)
+        so the polyline ports cleanly to firmware.
+        """
+        # Baseline hairline
+        draw.rectangle([(sx, sy + sh - 1), (sx + sw, sy + sh)], fill=SEPARATOR)
+
+        if not series:
+            return
+        if len(series) == 1:
+            series = [series[0], series[0]]
+
+        lo = min(series)
+        hi = max(series)
+        span = max(1.0, hi - lo)
+        points = []
+        for i, v in enumerate(series):
+            px = sx + (i / (len(series) - 1)) * sw
+            py = sy + sh - ((v - lo) / span) * sh
+            points.append((px, py))
+
+        # Filled polygon below the line (flat #15172a, pre-blended)
+        fill_poly = points + [(sx + sw, sy + sh), (sx, sy + sh)]
+        draw.polygon([(int(x), int(y)) for x, y in fill_poly],
+                     fill=ACCENT_FILL_SOFT)
+        # Stroke line on top — 2 px so it reads at arm's length.
+        draw.line([(int(x), int(y)) for x, y in points],
+                  fill=ACCENT_COLOR, width=2)
 
     # ----- Sensor helpers ----------------------------------------------
 
@@ -1081,7 +1077,6 @@ class TFTDisplay:
                 try:
                     with open(f"/sys/class/thermal/{zone}/type") as f:
                         zone_type = f.read().strip().lower()
-                    # Skip obviously-not-CPU zones
                     if any(bad in zone_type for bad in ("gpu", "pll", "aux")):
                         continue
                     with open(f"/sys/class/thermal/{zone}/temp") as f:
@@ -1106,6 +1101,46 @@ class TFTDisplay:
         except Exception:
             return "unknown"
 
+    def _current_ssid(self) -> str:
+        """Best-effort SSID readout for the idle/QR screens.
+
+        Falls back to a friendly default so the preview never shows
+        empty when the bridge is briefly unreachable.
+        """
+        if self._qr_snapshot:
+            v = (self._qr_snapshot.get("ssid")
+                 or self._qr_snapshot.get("network"))
+            if v:
+                return str(v)
+        try:
+            w = self.fetch_wifi(timeout=1.0)
+            if isinstance(w, dict):
+                cur = w.get("current") or w.get("connected") or {}
+                if isinstance(cur, dict) and cur.get("ssid"):
+                    return str(cur["ssid"])
+                if w.get("ssid"):
+                    return str(w["ssid"])
+        except Exception:
+            pass
+        return "Droplet-AI"
+
+    def _current_cameras(self) -> Optional[Tuple[int, int]]:
+        try:
+            c = self.fetch_cameras(timeout=1.0)
+            if not isinstance(c, dict):
+                return None
+            online = c.get("online")
+            total = c.get("total")
+            if online is None and isinstance(c.get("cameras"), list):
+                cams = c["cameras"]
+                total = len(cams)
+                online = sum(1 for x in cams if x.get("online"))
+            if online is not None and total is not None:
+                return int(online), int(total)
+        except Exception:
+            pass
+        return None
+
     # ----- Display control ---------------------------------------------
 
     def _set_mode(self, mode: str, *, pause_cycle: bool = True):
@@ -1116,10 +1151,16 @@ class TFTDisplay:
             self._render_current_locked()
 
     def show_logo(self):
-        self._set_mode(self.LOGO)
+        """Show the idle/screensaver screen. (Alias retained for callers
+        that still use the old name — `logo` == `idle` in the redesign.)
+        """
+        self._set_mode(self.IDLE)
 
     def show_home(self):
-        self._set_mode(self.HOME, pause_cycle=False)
+        """Show the stats overview. Kept as the canonical 'home' for the
+        orchestrator and FastAPI routes that hand-off to this display.
+        """
+        self._set_mode(self.STATS, pause_cycle=False)
 
     def show_stats(self):
         # Kept for backwards-compat with the orchestrator client + cycle loop.
@@ -1163,28 +1204,50 @@ class TFTDisplay:
                         self._pyportal.flush()
             except Exception as e:
                 logger.warning("PyPortal brightness write failed: %s", e)
-        # Re-render settings page if that's where we are so the number
-        # and bar update instantly.
         with self._lock:
-            if self._current_mode == self.SETTINGS:
-                self._render_current_locked()
+            self._render_current_locked()
 
-    # ----- Navigation helpers (bound to touch regions) ------------------
+    # ----- Internal action handlers (bound to touch regions) ------------
 
-    def _go_home(self):
-        self._set_mode(self.HOME, pause_cycle=False)
+    def _go_idle(self):
+        self._set_mode(self.IDLE, pause_cycle=False)
 
     def _go_stats(self):
         self._set_mode(self.STATS)
 
-    def _go_chat(self):
-        self._set_mode(self.CHAT)
+    def _go_qr(self):
+        self._set_mode(self.QR)
 
-    def _go_devices(self):
-        self._set_mode(self.DEVICES)
+    def _toggle_alerts(self):
+        # Preview-only drawer toggle. The firmware owns its own drawer
+        # state; on the host side we just flip a flag and re-render.
+        self._alerts_open = not getattr(self, "_alerts_open", False)
+        with self._lock:
+            self._render_current_locked()
 
-    def _go_settings(self):
-        self._set_mode(self.SETTINGS)
+    def _clear_alert(self, idx: int):
+        if 0 <= idx < len(self._alerts):
+            self._alerts[idx]["cleared"] = True
+        with self._lock:
+            self._render_current_locked()
+
+    def _clear_all_alerts(self):
+        self._alerts = []
+        self._alerts_open = False
+        with self._lock:
+            self._render_current_locked()
+
+    def _rotate_now(self):
+        """Tap handler for the QR-screen rotate pill. Best-effort; the
+        bridge is the source of truth, so we kick it and let the next
+        QR fetch refresh the snapshot."""
+        try:
+            self.rotate_wifi_key()
+            self._qr_snapshot = self.fetch_qr() or self._qr_snapshot
+        except Exception as e:                                       # noqa: BLE001
+            logger.warning("rotate_wifi_key failed: %s", e)
+        with self._lock:
+            self._render_current_locked()
 
     def _toggle_cycle(self):
         if self._cycle_running and self._cycle_paused_until < time.time():
@@ -1204,21 +1267,19 @@ class TFTDisplay:
     def _render_current_locked(self):
         """Render whatever the current screen is. Assumes _lock held."""
         mode = self._current_mode
-        if mode == self.LOGO:
-            img = self.render_logo()
+        if mode == self.IDLE:
+            img = self.render_idle()
         elif mode == self.STATS:
             img = self.render_stats()
-        elif mode == self.CHAT:
-            img = self.render_chat()
-        elif mode == self.DEVICES:
-            img = self.render_devices()
-        elif mode == self.SETTINGS:
-            img = self.render_settings()
+            if getattr(self, "_alerts_open", False):
+                img = self.render_alerts_drawer(img)
+        elif mode == self.QR:
+            img = self.render_qr()
         elif mode == self.MESSAGE:
             img = self.render_message(self._custom_title or "Message",
                                       self._custom_lines or [])
-        else:  # HOME and fallback
-            img = self.render_home()
+        else:  # fallback
+            img = self.render_stats()
         self._push(img)
 
     # ----- Structured-data helpers (used by PyPortal backend) ----------
@@ -1258,16 +1319,19 @@ class TFTDisplay:
             # local time on every stats update. Container runs UTC so
             # we compute the zoned time explicitly.
             "now": (datetime.now(_TZ) if _TZ else datetime.now()).strftime("%H:%M"),
+            # ALL-CAPS date string for the redesigned idle screen
+            # ("MONDAY, MAY 18"). Pushed alongside `now` so the
+            # firmware doesn't need a locale or strftime '-d' (those
+            # don't exist in CircuitPython).
+            "date": _format_idle_date(datetime.now(_TZ) if _TZ else datetime.now()),
         }
 
     def _push_full_state(self) -> None:
         """Send a complete state snapshot to the firmware: stats + wifi +
         drives + cameras + files. Idempotent; bridge fetch failures are
         logged and skipped (the periodic loop will catch up on the next
-        tick). Used by the firmware-driven READY/REQUEST_STATE handler
-        and by the host-driven probe-success path — both want the same
-        burst, and both want it to no-op cleanly when an upstream is
-        briefly unreachable."""
+        tick).
+        """
         try:
             self._pyportal_send("stats", self._gather_stats())
         except Exception as e:                              # noqa: BLE001
@@ -1306,7 +1370,10 @@ class TFTDisplay:
         return self._bridge_get("/cameras", timeout)
 
     def fetch_qr(self, timeout: float = 12.0) -> Optional[dict]:
-        return self._bridge_get("/openwrt/qr", timeout)
+        snap = self._bridge_get("/openwrt/qr", timeout)
+        if snap is not None:
+            self._qr_snapshot = snap
+        return snap
 
     def rotate_wifi_key(self, timeout: float = 30.0) -> Optional[dict]:
         """Ask device-bridge to roll the Droplet-AI WPA key. Used by the
@@ -1434,11 +1501,12 @@ class TFTDisplay:
 
         Runs constantly while the service is up. Every tick it:
           1. Checks for a new touch press->release and dispatches it.
-          2. Re-renders live screens (stats/home/settings) so metrics
-             and tap highlights stay fresh.
-          3. Pushes stats + wifi scan snapshots to the PyPortal so its
-             screens stay current.
-          4. Optionally auto-advances if AUTO_CYCLE=1 and we're idle.
+          2. Re-renders live screens (idle/stats) so metrics and tap
+             highlights stay fresh.
+          3. Pushes stats + wifi + cameras + drives + files snapshots
+             to the PyPortal so its screens stay current.
+          4. Optionally auto-advances between IDLE and STATS if
+             AUTO_CYCLE=1 (legacy demo mode).
         """
         last_press = 0
         last_release = 0
@@ -1479,27 +1547,14 @@ class TFTDisplay:
                             self._backend = "sim"
                     except Exception:
                         pass
-                    # Force the next iteration's promotion block to retry
-                    # immediately rather than waiting out a fresh 5s window.
                     last_backend_retry = 0.0
 
-            # If we started on sim because USB enumeration hadn't finished
-            # yet, keep probing every 5s and promote to pyportal once it
-            # appears. Covers the cold-boot race where the Jetson starts
-            # the container before /dev/ttyACM* is ready.
             if self._backend != "pyportal":
                 if time.time() - last_backend_retry > 5.0:
                     last_backend_retry = time.time()
                     if BACKEND in ("auto", "pyportal") and self._try_pyportal():
                         logger.info("Promoted backend: sim -> pyportal")
 
-            # Probe-driven full-state resync. `_probe_pyportal` sets
-            # `_needs_resync` on every successful probe (initial cold
-            # boot, cycle-loop promotion, `_pyportal_send` reconnect).
-            # Without this burst the firmware's stats / time / wifi /
-            # drives / cameras stay on their initial empty values until
-            # each individual periodic-push timer fires below — up to
-            # 30s for files, which reads as "the screen never auto-fills".
             if self._backend == "pyportal" and self._needs_resync:
                 self._needs_resync = False
                 logger.info("post-probe resync — pushing full state")
@@ -1513,7 +1568,6 @@ class TFTDisplay:
             touch = getattr(self, "_touch_source", None)
             if touch is not None:
                 state = touch.get_state()
-                # Press->release edge => tap
                 if (state.get("release_count", 0) > last_release
                         and state.get("press_count", 0) >= last_press
                         and state.get("x") is not None
@@ -1532,10 +1586,11 @@ class TFTDisplay:
                     self._message_clear_at and
                     now >= self._message_clear_at):
                 self._message_clear_at = 0
-                self._go_home()
+                self._go_stats()
 
-            # Live re-render of time-sensitive screens
-            live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS))
+            # Live re-render of time-sensitive screens (idle blinks colon
+            # at 1 Hz; stats sparkline ticks with each gather).
+            live = (self._current_mode in (self.IDLE, self.STATS))
             if live and (now - last_full_render) > 1.0:
                 with self._lock:
                     self._render_current_locked()
@@ -1544,8 +1599,6 @@ class TFTDisplay:
             # Keep the PyPortal's local data snapshot fresh. The PyPortal
             # renders locally; we push data every few seconds so every
             # screen has live numbers when the user navigates to it.
-            # A longer cadence (8s) keeps perceived flicker low — the
-            # firmware re-renders the active screen on each push.
             if self._backend == "pyportal" and (now - last_stats_push) > 8.0:
                 self._pyportal_send("stats", self._gather_stats())
                 last_stats_push = now
@@ -1564,7 +1617,6 @@ class TFTDisplay:
                 if cams is not None:
                     self._pyportal_send("cameras", cams)
                 last_cams_push = now
-            # Drives poll — separate, shorter cadence so hot-plug is snappy.
             if self._backend == "pyportal":
                 if not hasattr(self, "_last_drives_push"):
                     self._last_drives_push = 0.0
@@ -1599,20 +1651,8 @@ class TFTDisplay:
                     line, _, serial_buf = serial_buf.partition(b"\n")
                     txt = line.decode("utf-8", errors="ignore").strip()
                     if txt in ("READY", "REQUEST_STATE"):
-                        # Full-snapshot resync: fired when the firmware boots
-                        # (READY) or explicitly asks for state (REQUEST_STATE,
-                        # which our firmware sends right after READY). Without
-                        # this, a code.py auto-reload would leave the PyPortal
-                        # rendering empty screens until each periodic push
-                        # cycle ticks over (up to 30s worst-case). The
-                        # post-probe resync block above also calls
-                        # `_push_full_state` for the host-side path (fresh
-                        # probe / re-probe after USB re-enumeration); both
-                        # paths converge on the same helper.
                         logger.info("pyportal: %s — resyncing full state", txt)
                         self._push_full_state()
-                        # Reset periodic-push anchors so we don't double-send
-                        # in the next loop iteration.
                         last_stats_push = now
                         last_wifi_push = now
                         last_files_push = now
@@ -1623,9 +1663,6 @@ class TFTDisplay:
                         if qr is not None:
                             self._pyportal_send("qr", qr)
                     elif txt == "ROTATE_KEY":
-                        # PyPortal asked us to roll the Wi-Fi key. Ask the
-                        # bridge to do the UCI change on OpenWrt, then push
-                        # the fresh QR so the user can scan it right away.
                         resp = self.rotate_wifi_key()
                         logger.info("pyportal: rotate -> %s", resp)
                         qr = self.fetch_qr()
@@ -1636,11 +1673,6 @@ class TFTDisplay:
                         if snap is not None:
                             self._pyportal_send("wifi", snap)
                     elif txt.startswith("NAV:"):
-                        # When the user lands on the QR screen, push a
-                        # fresh matrix. Firmware also sends REQUEST_QR on
-                        # nav, but this is a belt-and-braces catch-all so
-                        # older firmware that doesn't auto-request still
-                        # works after an upgrade.
                         logger.info("pyportal: %s", txt)
                         if txt == "NAV:qr":
                             qr = self.fetch_qr()
@@ -1652,13 +1684,11 @@ class TFTDisplay:
                     elif txt:
                         logger.info("pyportal: %s", txt)
 
-            # Optional carousel for demo mode
+            # Optional carousel for demo mode — alternate idle <-> stats.
             if AUTO_CYCLE and now >= self._cycle_paused_until:
-                # Alternate logo <-> stats every LOGO_DURATION seconds
                 t = int(now // LOGO_DURATION) % 2
-                desired = self.LOGO if t == 0 else self.STATS
+                desired = self.IDLE if t == 0 else self.STATS
                 if self._current_mode != desired:
                     self._set_mode(desired, pause_cycle=False)
 
             time.sleep(0.08)
-
