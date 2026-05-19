@@ -212,5 +212,9 @@ function formatBytes(bytes: number): string {
   const tb = bytes / 1_000_000_000_000;
   if (tb >= 1) return `${tb.toFixed(tb >= 10 ? 0 : 1)} TB`;
   const gb = bytes / 1_000_000_000;
-  return `${gb.toFixed(gb >= 100 ? 0 : 0)} GB`;
+  // 1 decimal for sub-10 GB (small USB sticks read "7.3 GB" instead
+  // of "7 GB"), 0 decimals at 10 GB and up. Mirrors the TB branch
+  // above. Prior version had `gb >= 100 ? 0 : 0` — both branches
+  // returned 0, so a 1.5 GB drive rendered as "1 GB" (truncated).
+  return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`;
 }

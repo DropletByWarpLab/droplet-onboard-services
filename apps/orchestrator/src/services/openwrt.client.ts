@@ -522,17 +522,21 @@ export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
 
 export async function setDuckDnsConfig(opts: {
   subdomain: string;
-  token: string;
+  // Optional: when undefined the routing service preserves the existing
+  // /etc/config/ddns password value. Used by the wizard's "keep stored
+  // token" path so returning customers don't have to re-type the token.
+  token?: string;
   enabled?: boolean;
 }): Promise<DuckDnsStatus & { status: "ok" }> {
+  const body: { subdomain: string; token?: string; enabled: boolean } = {
+    subdomain: opts.subdomain,
+    enabled: opts.enabled ?? true,
+  };
+  if (opts.token !== undefined) body.token = opts.token;
   const res = await routingFetch("/ddns/duckdns", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      subdomain: opts.subdomain,
-      token: opts.token,
-      enabled: opts.enabled ?? true,
-    }),
+    body: JSON.stringify(body),
     label: "DuckDNS set",
   });
   return res.json() as Promise<DuckDnsStatus & { status: "ok" }>;

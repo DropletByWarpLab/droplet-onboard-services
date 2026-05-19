@@ -37,6 +37,26 @@ const fetchDevicesMock = vi.fn(async () => ({
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // Storage step auto-skips on empty drive list — let it pass straight
+  // through so the polling-bounds tests land on discovery as they
+  // expect.
+  fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
+  updateDriveLabel: vi.fn(),
+  // Cameras step is downstream of discovery — never reached by these
+  // tests but mocked so the import resolves.
+  fetchDiscoveredCameras: vi.fn(async () => []),
+  acceptDiscoveredCamera: vi.fn(),
+  // VPN step is downstream of discovery; never reached in these tests
+  // but mocked for the import side-effect.
+  fetchVpnStatus: vi.fn(async () => ({
+    configured: false,
+    endpointConfigured: false,
+  })),
+  createVpnPeer: vi.fn(),
+  fetchModels: vi.fn(async () => ({ models: [] })),
+  sendChat: vi.fn(),
   fetchMatterDevices: () => fetchDevicesMock(),
 }));
 
@@ -63,6 +83,15 @@ async function advanceToDiscovery() {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
+  });
+  // Account → Internet. The Internet step (WARP-174) sits between account
+  // and discovery — skip it so the polling-bounds tests can land on the
+  // discovery surface they exercise. Flush once for InternetStep's
+  // fetchDuckDnsStatus effect, then click the always-rendered skip link.
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
 }
 

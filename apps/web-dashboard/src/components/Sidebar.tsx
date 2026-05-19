@@ -11,6 +11,7 @@ import {
   Film,
   FolderOpen,
   Globe,
+  HelpCircle,
   Laptop,
   LayoutDashboard,
   LogOut,
@@ -104,6 +105,10 @@ const NAV_GROUPS: NavGroup[] = [
       // with workspace:"business" set.
       { href: "/users", label: "Users", icon: Users },
       { href: "/settings", label: "Settings", icon: Settings },
+      // WARP-174: customer-facing manual + "How Droplet works" replay
+      // modal. Sits next to Settings in the same "support / reference"
+      // mental zone.
+      { href: "/help", label: "Help", icon: HelpCircle },
       // WARP-279: admin-only Activity log entry. Visibility gated below.
       {
         href: "/admin/claude-activity",

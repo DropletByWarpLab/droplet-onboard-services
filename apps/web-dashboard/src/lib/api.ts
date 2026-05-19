@@ -38,6 +38,7 @@ import type {
   StorageStats,
   DriveInfo,
   DrivesResponse,
+  DriveLabel,
   WirelessScanResult,
   AuthUser,
   InviteCreateRequest,
@@ -329,19 +330,21 @@ export async function fetchDrives(): Promise<DrivesResponse> {
 }
 
 /**
- * WARP-174: update a drive's user-chosen label. Hits PATCH on
- * /api/storage/drives/:uuid with `{ displayName }`. The orchestrator
- * upserts into the Drive Prisma table (migration
- * 20260514000000_warp_174_drive_displayname). Called by the setup
- * wizard's StorageStep.
+ * WARP-174: upsert the customer's friendly name (+ optional icon + notes)
+ * for a drive. Used by the setup wizard's Storage step and the
+ * post-setup `/storage` page.
  *
- * Signature matches the box's StorageStep.tsx call site:
- *   updateDriveLabel(uuid, { displayName: "..." })
+ * First call for a given UUID requires `displayName`; later calls can
+ * be partial. Server returns the full Drive row.
  */
 export async function updateDriveLabel(
   uuid: string,
-  patch: { displayName: string },
-): Promise<DriveInfo> {
+  patch: {
+    displayName?: string;
+    icon?: string | null;
+    notes?: string | null;
+  },
+): Promise<DriveLabel> {
   const res = await authFetch(
     `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
     {
@@ -351,7 +354,8 @@ export async function updateDriveLabel(
     },
   );
   if (!res.ok) {
-    throw new Error(`Failed to label drive ${uuid}: ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update drive: ${res.status}`);
   }
   return res.json();
 }
@@ -2129,7 +2133,10 @@ export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
 
 export async function setDuckDnsConfig(opts: {
   subdomain: string;
-  token: string;
+  // Optional: omit entirely when the customer is keeping a previously
+  // stored token. The orchestrator + routing service preserve the
+  // existing password value in that case rather than rewriting cleartext.
+  token?: string;
   enabled?: boolean;
 }): Promise<DuckDnsStatus> {
   const res = await authFetch(`${BASE}/api/ddns/duckdns`, {

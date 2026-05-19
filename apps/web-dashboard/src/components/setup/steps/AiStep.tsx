@@ -118,6 +118,13 @@ export function AiStep({
         messages: [{ role: "user", content: promptToSend }],
         stream: false,
         max_tokens: 400,
+        // WARP-174: the wizard's sample prompt is a throwaway "does
+        // local AI work on this box" check. Without this flag every
+        // first-run customer ends up with the wizard's probe at the
+        // top of their /chat history sidebar — confusing first-run
+        // UX. The orchestrator's /api/llm/chat skips
+        // ensureConversation + createTurnRows when ephemeral=true.
+        ephemeral: true,
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

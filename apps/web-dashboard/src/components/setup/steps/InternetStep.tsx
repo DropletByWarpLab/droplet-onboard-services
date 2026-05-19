@@ -33,7 +33,11 @@ export function InternetStep({
   onComplete,
   onSkip,
 }: {
-  onComplete: (subdomain: string) => void;
+  // VpnStep re-fetches the live endpoint via `fetchVpnStatus()` on
+  // mount, so the parent doesn't need to thread the subdomain through.
+  // (The wizard used to pipe it as an early-paint placeholder; cleaner
+  // to let the server be the single source of truth.)
+  onComplete: () => void;
   onSkip: () => void;
 }) {
   const [subdomain, setSubdomain] = useState("");
@@ -100,15 +104,22 @@ export function InternetStep({
     setError(null);
     setSaving(true);
     try {
-      const result = await setDuckDnsConfig({
+      // "Keep stored" path: omit `token` from the request entirely.
+      // The orchestrator's Zod schema + the routing service's Pydantic
+      // schema both treat `token` as optional, and the routing handler
+      // preserves the existing password value when it's missing. The
+      // earlier `token: "stored"` sentinel tripped the min(10) check
+      // and returned 400 — `Invalid request` — when a returning
+      // customer re-entered this step without re-typing their token.
+      const keepStored = !token.trim() && existing?.configured === true;
+      const payload: { subdomain: string; token?: string; enabled?: boolean } = {
         subdomain: subdomain.trim(),
-        // Empty token means "keep the stored one" — orchestrator handles this
-        // path for re-saves when only the toggle changed.
-        token: token.trim() || (existing?.configured ? "stored" : ""),
         enabled,
-      });
+      };
+      if (!keepStored) payload.token = token.trim();
+      const result = await setDuckDnsConfig(payload);
       setExisting(result);
-      onComplete(subdomain.trim());
+      onComplete();
     } catch (e) {
       const msg =
         e instanceof Error ? e.message : "Could not save. Try again in a moment.";
