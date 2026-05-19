@@ -5,6 +5,27 @@
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 COMPOSE_ENV_FILE="$REPO_ROOT/.env"
 
+# POC override layered on top of the base compose. Provides the POC-box
+# bits the base file deliberately doesn't carry: stock-OpenSSL FIPS
+# opt-out for the Node services (DROPLET_FIPS_REQUIRED=false), the
+# Ollama (ROCm) + OpenWrt (router-in-container) services, the mock-TPM
+# backend for device-identity-svc, the Frigate render-node remap to the
+# iGPU, the Nextcloud data-dir bind to /mnt/droplet, and the routing
+# service's OPENWRT_HOST/PORT pointing at the in-container openwrt.
+#
+# Compose auto-merges docker-compose.override.yml ONLY when no `-f` is
+# passed; once we pass `-f docker/docker-compose.yml` explicitly the
+# auto-discovery is bypassed. Compose-up'ing without the override
+# silently drops Ollama + OpenWrt and leaves mcp-server crash-looping
+# on the FIPS self-test under NODE_ENV=production. Add the override
+# only when the file exists, so the base flow stays portable to envs
+# that don't ship it.
+COMPOSE_OVERRIDE_FILE="$REPO_ROOT/docker/docker-compose.override.yml"
+COMPOSE_FILE_ARGS=(-f "$COMPOSE_FILE")
+if [ -f "$COMPOSE_OVERRIDE_FILE" ]; then
+  COMPOSE_FILE_ARGS+=(-f "$COMPOSE_OVERRIDE_FILE")
+fi
+
 # =============================================================================
 # Env validation — single source of truth for required secrets
 # =============================================================================
@@ -61,7 +82,7 @@ prepare_and_build() {
   # Stop any running containers so builds don't conflict with stale state.
   # Compose file has no :? patterns, so this always works even with partial .env.
   log_info "Stopping any existing containers..."
-  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+  run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" \
     down --remove-orphans 2>/dev/null || true
 
   # --- Ensure init scripts are executable ---
@@ -144,7 +165,7 @@ prepare_and_build() {
   )
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix
@@ -178,13 +199,13 @@ start_stack() {
 
   # --- Start infrastructure first ---
   run_with_spinner "Starting database, cache, and broker" \
-    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" up -d db cache broker
+    run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" up -d db cache broker
 
   # --- Wait for Postgres to be healthy ---
   log_info "Waiting for PostgreSQL to be ready..."
   local retries=30
   while [ $retries -gt 0 ]; do
-    if run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T db pg_isready -U "${POSTGRES_USER:-droplet}" >/dev/null 2>&1; then
+    if run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" exec -T db pg_isready -U "${POSTGRES_USER:-droplet}" >/dev/null 2>&1; then
       log_success "PostgreSQL is ready"
       break
     fi
@@ -199,11 +220,11 @@ start_stack() {
 
   # --- Ensure Nextcloud database exists (init script only runs on fresh volumes) ---
   log_info "Ensuring Nextcloud database exists..."
-  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+  run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" \
     exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
     psql -U "${POSTGRES_USER:-droplet}" -w -tc \
     "SELECT 1 FROM pg_database WHERE datname = 'nextcloud'" 2>/dev/null | grep -q 1 || \
-  run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+  run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" \
     exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
     psql -U "${POSTGRES_USER:-droplet}" -w -c \
     "CREATE DATABASE nextcloud OWNER ${POSTGRES_USER:-droplet}" 2>/dev/null
@@ -211,14 +232,14 @@ start_stack() {
 
   # --- Start all remaining services (Nextcloud needs to be up for install check) ---
   run_with_spinner "Starting all services" \
-    run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" up -d
+    run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" up -d
 
   # --- Wait for services to stabilize ---
   log_info "Waiting for services to start..."
   local wait_retries=60
   while [ $wait_retries -gt 0 ]; do
     local running
-    running=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" ps --status running --format json 2>/dev/null | wc -l || echo 0)
+    running=$(run_docker_compose "${COMPOSE_FILE_ARGS[@]}" --env-file "$COMPOSE_ENV_FILE" ps --status running --format json 2>/dev/null | wc -l || echo 0)
     # Expect at least 7 services: db, cache, broker, gateway, orchestrator, web-dashboard, ai-gateway
     if [ "$running" -ge 7 ] 2>/dev/null; then
       break
