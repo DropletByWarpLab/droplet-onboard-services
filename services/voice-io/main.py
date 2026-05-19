@@ -33,6 +33,7 @@ from voice.devices import (
 )
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_POST_SPEAK_COOLDOWN_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
     WakePipeline,
@@ -55,6 +56,9 @@ WAKE_DEBOUNCE_S = float(
 )
 STT_MAX_RECORD_S = float(
     os.environ.get("STT_MAX_RECORD_S", str(DEFAULT_STT_MAX_RECORD_S))
+)
+POST_SPEAK_COOLDOWN_S = float(
+    os.environ.get("POST_SPEAK_COOLDOWN_S", str(DEFAULT_POST_SPEAK_COOLDOWN_S))
 )
 
 app = FastAPI(title="voice-io", version="0.1.0")
@@ -144,6 +148,7 @@ async def startup() -> None:
             threshold=WAKE_THRESHOLD,
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
+            post_speak_cooldown_s=POST_SPEAK_COOLDOWN_S,
         )
         await asyncio.to_thread(_pipeline.start)
     except Exception as exc:

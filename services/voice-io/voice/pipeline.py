@@ -85,6 +85,16 @@ DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
 DEFAULT_STT_MAX_RECORD_S = 5.0  # captured audio per wake (no VAD yet — fixed window)
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
+# Window after TTS playback ends during which wake detection is suppressed.
+# The reSpeaker XVF3800 is both speaker and mic on the same USB endpoint;
+# even with hardware AEC, the tail of a synthesized reply can bleed back
+# into the capture stream and trip the wake detector. The cooldown also
+# absorbs the user's natural "follow-up" talk that arrives right after
+# the device finishes speaking ("ok thanks", "got it") — those shouldn't
+# re-arm a new turn. Tuned to 2 s: long enough to swallow Piper's tail +
+# room reverb, short enough that a deliberate second "hey jarvis" still
+# wakes promptly.
+DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
@@ -168,6 +178,7 @@ class WakePipeline:
         output_device_index: Optional[int] = None,
         llm: Optional[LLMClient] = None,
         upstream_probe_interval_s: float = DEFAULT_UPSTREAM_PROBE_INTERVAL_S,
+        post_speak_cooldown_s: float = DEFAULT_POST_SPEAK_COOLDOWN_S,
         sd_module: Any = None,
     ):
         self._detector = detector
@@ -193,6 +204,10 @@ class WakePipeline:
         # forever — the user sees /voice/status.stt_loaded=false and
         # the closed loop never fires even though everything works.
         self._upstream_probe_interval_s = upstream_probe_interval_s
+        # Cooldown window after a speak() finishes; suppresses wake fires
+        # to absorb TTS bleed-back + user "ok thanks" follow-up talk.
+        self._post_speak_cooldown_s = post_speak_cooldown_s
+        self._speak_ended_at: Optional[float] = None
         self._sd_module = sd_module  # dependency injection for tests
 
         self._thread: Optional[threading.Thread] = None
@@ -429,6 +444,10 @@ class WakePipeline:
         prev_state will be transcript_ready and we'll fall back into
         that until visual-decay. For a manual POST /voice/say, prev_state
         is usually 'listening' and we go straight back.
+
+        Also marks `_speak_ended_at` so the post-speak cooldown takes
+        effect immediately — the next few hundred ms of mic audio is
+        the worst window for TTS bleed-back into the capture stream.
         """
         with self._lock:
             # If something else flipped us to error during playback,
@@ -438,6 +457,7 @@ class WakePipeline:
                     prev_state if prev_state in ("listening", "transcript_ready")
                     else "listening"
                 )
+            self._speak_ended_at = time.time()
 
     # ──────────────────────────────────────────────────────────────
     # Status — atomic snapshot
@@ -602,6 +622,19 @@ class WakePipeline:
 
     def _run_wake_detect(self, frame: np.ndarray) -> None:
         """Wake-word path: predict, threshold-check, debounce, fire."""
+        # Post-speak cooldown: drop frames during the brief window after
+        # TTS playback ends. The reSpeaker XVF3800 is both mic and speaker
+        # on the same USB endpoint, so even with hardware AEC the tail
+        # of a Piper reply can score above threshold and re-trigger a
+        # turn the user didn't ask for. Cheap fast-path that runs before
+        # the detector predict() to skip the inference cost entirely.
+        now = time.time()
+        if (
+            self._speak_ended_at is not None
+            and now - self._speak_ended_at < self._post_speak_cooldown_s
+        ):
+            return
+
         try:
             scores = self._detector.predict(frame)
         except Exception as exc:
@@ -616,7 +649,6 @@ class WakePipeline:
             return
 
         # Debounce.
-        now = time.time()
         if now - self._last_fire_at < self._debounce_s:
             return
         self._last_fire_at = now
