@@ -38,7 +38,15 @@ function parseTransport(argv: string[]): "stdio" | "http" {
   return "stdio";
 }
 
-type HttpTarget = "routing" | "cameras" | "switchSvc" | "fileIndexer" | "nextcloud";
+// Widened to include "orchestrator" because `httpFactory: createHttpClient`
+// is consumed downstream with an expected union that includes
+// "orchestrator" (the bearer-injection branch at line ~91 already gates
+// on `target !== "orchestrator"`). Surfaced as a TS2367 / TS2322 pair
+// when the box's mcp-server `npm run build` ran against this branch on
+// 2026-05-18 — never caught before because the orchestrator's tsc step
+// covers apps/orchestrator only; the workspace build is what compiles
+// services/mcp-server.
+type HttpTarget = "routing" | "cameras" | "switchSvc" | "fileIndexer" | "nextcloud" | "orchestrator";
 
 function baseUrlFor(target: HttpTarget): string {
   switch (target) {
@@ -58,6 +66,12 @@ function baseUrlFor(target: HttpTarget): string {
       return process.env.FILE_INDEXER_URL ?? "http://file-indexer:8000";
     case "nextcloud":
       return process.env.NEXTCLOUD_URL ?? "http://nextcloud";
+    case "orchestrator":
+      // mcp-server runs as a sibling container in the same compose
+      // network; reach the orchestrator on its service DNS name. The
+      // injectAuth() helper mints a JWT_SECRET-signed service-principal
+      // token for every request to this target (see ~line 91).
+      return process.env.ORCHESTRATOR_URL ?? "http://orchestrator:3000";
   }
 }
 
