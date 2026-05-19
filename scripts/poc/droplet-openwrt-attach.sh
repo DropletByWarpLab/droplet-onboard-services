@@ -340,16 +340,23 @@ echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$
 
 # Routing service caches its OpenWrt session at startup and does not
 # reconnect on RPC failure (the python-uci SDK holds the session token
-# across calls). After a docker restart of droplet-openwrt — whether
-# from this attach run, a manual restart, or a host reboot — the routing
-# service is left holding a stale session and answers /health with
-# {"connected":false,"error":"Access denied"}. Probe routing's /health
-# (it's on host network, bound to 127.0.0.1:8080) and only kick the
-# container when the probe says it's still detached. Idempotent + cheap:
-# a healthy routing service is left untouched.
-if command -v curl >/dev/null 2>&1 && command -v docker >/dev/null 2>&1; then
-  if curl -sf -m 3 http://127.0.0.1:8080/health 2>/dev/null | grep -q '"connected":false'; then
-    echo "droplet-openwrt-attach: routing reports connected=false, restarting it to clear stale session"
+# across calls). After ANY docker restart of droplet-openwrt — whether
+# triggered by this attach run, a manual `docker restart`, or a host
+# reboot — the routing service is left holding a stale session and the
+# dashboard's next call lands on {"connected":false,"error":"Access
+# denied"}.
+#
+# Earlier this block tried to probe routing's /health and conditionally
+# restart, but the probe ran ~1s after openwrt came up — routing was
+# still answering with its in-memory cache before its next outbound
+# call failed, so the condition never fired. Since this script is a
+# oneshot systemd unit (not a per-second poll), the unconditional
+# restart is cheap (~15s on the POC box) and removes the race entirely.
+# `docker restart` against an absent container is a hard error, so
+# guard on `docker ps`.
+if command -v docker >/dev/null 2>&1; then
+  if docker ps --format '{{.Names}}' | grep -qx droplet-pi-platform-routing-1; then
+    echo "droplet-openwrt-attach: restarting routing to drop any stale OpenWrt session"
     docker restart droplet-pi-platform-routing-1 >/dev/null 2>&1 || true
   fi
 fi
