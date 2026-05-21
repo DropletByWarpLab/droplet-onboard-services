@@ -68,10 +68,10 @@ The classifier is a stateful loop, not a one-shot. It owns the port→VLAN mappi
 | VLAN | Subnet | Purpose | Notes |
 |------|--------|---------|-------|
 | 1 (default) | 192.168.20.0/24 | LAN — computers, phones, default landing zone | dnsmasq on host's `br-lan` |
-| 50 | 192.168.30.0/24 | CAMS — cameras, NVRs, intercoms | dnsmasq on `br-lan.50`; isolated from VLAN 1 by default |
+| 10 | 192.168.30.0/24 | CAMS — cameras, NVRs, intercoms | dnsmasq on `br-lan.10`; isolated from VLAN 1 by default |
 
-**Why VLAN 50 and not VLAN 100** (which `docs/camera-system.md` mentions)?
-The 100 in the existing doc refers to a future production network where the Lantronix is a customer-facing 24/48-port managed switch with multiple VLANs already in use. On the POC's 8-port Lantronix where we control everything, low VLAN IDs (1, 50) keep the per-port tables short and are easier to read at the CLI. Production deployments can renumber via `.env` overrides; the daemon doesn't care about the specific ID.
+**Why VLAN 10 and not VLAN 100** (which `docs/camera-system.md` originally specified)?
+Live recon of the photo-studio POC's Lantronix turned up an **already-deployed VLAN map** from the previous build: VLAN 1 = LAN (ports 2, 3, 10), **VLAN 10 = cameras (ports 1, 4, 7, 8, 9)**, VLAN 100 = a third zone (port 6), and port 5 was a trunk to an upstream router. The daemon adopts the existing VLAN 10 instead of inventing a new "VLAN 50" — saves a re-config pass on every existing customer switch and matches what the operator already sees in the web UI. Production deployments still get `.env` overrides if their own switch uses a different ID.
 
 **Why 192.168.20.0/24 / 192.168.30.0/24?** Stays inside RFC1918 ranges already used by the appliance (`.10.x` = mgmt, `.20.x` = LAN today). The CAMS jump to `.30.x` keeps the per-subnet maps easy to recognize without colliding with any home-router default range.
 
@@ -140,7 +140,9 @@ Everything below is the floor the daemon will sit on. Today the system is **sing
 - ✅ Persistent `/32` route to the Lantronix mgmt IP so the orchestrator's `switch` service can reach `192.168.1.77` without re-IPing either side.
 - ✅ `.env` wired with `SWITCH_HOST` / `SWITCH_USERNAME` / `SWITCH_PASSWORD` / `SWITCH_DRIVER=lantronix` and `CAMERA_SUBNET=192.168.20.0/24`.
 - ✅ `switch` + `camera-discovery` services enabled via the `full` Compose profile.
-- ✅ Camera plugged into Lantronix port 7 (PoE class 3, ~7.8 W) gets a DHCP lease and is auto-adopted into Frigate.
+- ✅ `docker/frigate/config.yml`: dropped the stale static `front_door` entry pointing at a long-gone IP — it was pinning Frigate to a ffmpeg connection-timeout loop that interfered with auto-adoption. File is now `cameras: {}` with a worked example in the comment header.
+- ✅ Port 7 (camera) moved from the legacy VLAN 10 back to VLAN 1 (running config only — `/config/conf_save` returns 500 on JSON bodies, persistence across switch reboot is Phase 2 follow-up).
+- ✅ Camera plugged into Lantronix port 7 (PoE class 3, ~7.8 W) gets a DHCP lease and is auto-adopted into Frigate. The cam (Hanwha XNV-C8083R, OUI `E4:30:22`) lands at `192.168.20.176`.
 
 Bring-up procedure:
 
@@ -152,6 +154,10 @@ sudo bash scripts/poc/install-poc-host-net.sh
 #   SWITCH_USERNAME=admin
 #   SWITCH_PASSWORD=<the same password as docker/secrets/openwrt_password>
 #   CAMERA_SUBNET=192.168.20.0/24
+#   CAMERA_DEFAULT_USERNAME=admin
+#   CAMERA_DEFAULT_PASSWORD=<your camera bootstrap password>
+#   CAMERA_AUTO_INITIALIZE=1
+#   ONVIF_WS_DISCOVERY_ENABLED=1
 docker compose --profile full -f docker/docker-compose.yml -p droplet-pi-platform up -d switch camera-discovery
 ```
 
@@ -182,6 +188,29 @@ Each phase is independently shippable — the daemon is useful in passive (Phase
    Two options: in-repo JSON (versioned with the code) or operator-editable on the appliance. Probably both, with the in-repo file as the default + an override path on disk.
 4. **PoE classes 0–2 (low-power devices: APs, sensors).**
    Currently the decision tree skips them. If a Class-0 ONVIF camera shows up (rare but possible) we'd miss it. Worth a follow-up.
+
+## Lantronix SM8TAT2SA REST endpoint map (firmware v1.04.0079)
+
+Capture from live recon — `services/switch/drivers/lantronix.py` doesn't fully match. Use these names directly until the driver is updated in Phase 2.
+
+| Working endpoint | Method | Body envelope |
+|---|---|---|
+| `/config/login` | GET → POST | `{"users_login_auth": {"agent": 4, "username": ..., "password": ..., "userip": ...}}` (userip pulled from the GET response). Client-side cookies `cid`/`seid`/`sesslid` must be pre-set; switch never sends `Set-Cookie`. |
+| `/stat/sysinfo` | GET | — |
+| `/stat/ip_status` | GET | — |
+| `/stat/port_status` | GET | — |
+| `/stat/poe_status` | GET | — |
+| `/stat/lldp_neighbor` | GET | — |
+| `/stat/dynamic_mac_table` | GET (use `--compressed`) | — (gzipped response) |
+| `/stat/diagcable?port=N` | GET | TDR cable diagnostic |
+| `/stat/voice_oui_vlan_table` | GET | Pre-existing OUI→VLAN auto-classify feature; usable as the Phase 5 hand-off path. |
+| `/config/vlan` | GET, POST | POST envelope: `{"vlan_config_set": {"conf": [...per-port...], "allow_vlans": "1,10,...", "cust_tpid": 34984}}` — per-port shape: `{port, mode, pvid, portype, infilter, inaccept, etagging, allowedvlan}`. |
+| `/config/poe_config` | GET, POST | POST envelope: `{"poe_config_set": {"poe_mgmt_mode": ..., "capacitor": ..., "poe_config": [{Port, Mode, Pri, MaxPwr, pid}, ...]}}` — `Mode: 0`=disabled, `Mode: 2`=auto. |
+| `/config/ports` | GET, POST | POST envelope: `{...port_state_set wrapper TBD...}` — only the GET shape is confirmed; saving config returned 500. |
+| `/config/diagnostic` | POST | `{"port": N}` to trigger cable diagnostic. |
+| `/config/conf_save` | POST | **500 on every JSON body shape attempted** — running-config changes don't persist across switch reboot today. Phase 2 follow-up to figure out the right form-data shape. |
+
+Wrong endpoint names in the current driver: `/stat/port`, `/stat/vlan`, `/stat/vlan_membership`, `/stat/mac_table`, `/config/poe`, `/config/ports` (the per-port shape) — these either 404 or return empty stubs.
 
 ---
 
