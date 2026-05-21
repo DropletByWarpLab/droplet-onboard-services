@@ -41,6 +41,9 @@ import listDiscoveredCameras from "./handlers/cameras/list-discovered-cameras.js
 import listCameraEvents from "./handlers/cameras/list-camera-events.js";
 import scanForCameras from "./handlers/cameras/scan-for-cameras.js";
 import acceptDiscoveredCamera from "./handlers/cameras/accept-discovered-camera.js";
+import getCameraInitStatus from "./handlers/cameras/get-camera-init-status.js";
+import initializeCamera from "./handlers/cameras/initialize-camera.js";
+import addCameraToFrigate from "./handlers/cameras/add-camera-to-frigate.js";
 import getCameraSnapshot from "./handlers/cameras/get-camera-snapshot.js";
 import listClips from "./handlers/cameras/list-clips.js";
 import exportClip from "./handlers/cameras/export-clip.js";
@@ -114,6 +117,9 @@ const allTools: Tool[] = [
   listCameraEvents,
   scanForCameras,
   acceptDiscoveredCamera,
+  getCameraInitStatus,
+  initializeCamera,
+  addCameraToFrigate,
   getCameraSnapshot,
   listClips,
   exportClip,
