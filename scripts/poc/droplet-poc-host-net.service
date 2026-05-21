@@ -1,0 +1,22 @@
+[Unit]
+# Host-side networking for the POC:
+#   - persistent /32 route to the Lantronix switch (192.168.1.77 via br-lan)
+#   - dedicated dnsmasq instance serving DHCP on br-lan (192.168.20.0/24)
+#
+# Without this, devices plugged into the Lantronix never get an IP —
+# the OpenWrt container's dnsmasq is scoped to the AP-side LAN, not the
+# host's br-lan. See scripts/poc/droplet-poc-host-net.sh for details.
+Description=Droplet POC host networking (br-lan DHCP + Lantronix switch route)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/droplet-poc-host-net
+ExecStart=/usr/local/sbin/droplet-poc-host-net
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
