@@ -429,13 +429,20 @@ services:
       context: ..
       dockerfile: services/switch/Dockerfile
     network_mode: host
+    # env_file feeds SWITCH_PASSWORD (+ DEVICE_SECRET_KEY etc.) from the
+    # repo-root .env. The `environment:` block below intentionally OMITS
+    # SWITCH_PASSWORD: a `${SWITCH_PASSWORD:-}` interpolation here would
+    # override the env_file value with "" whenever compose's own env
+    # doesn't see the var (compose runs from docker/ — root .env not
+    # auto-discovered). Same logic for SERVICE_SECRET / DEVICE_SECRET_KEY.
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
       - SWITCH_PORT=${SWITCH_PORT:-443}
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
-      - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
       - PORT=8081
     profiles: ["full"]
     restart: always
