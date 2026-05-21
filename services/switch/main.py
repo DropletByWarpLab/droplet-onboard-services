@@ -84,10 +84,21 @@ SWITCH_HOST = os.environ.get("SWITCH_HOST", "192.168.1.77")
 SWITCH_PORT = int(os.environ.get("SWITCH_PORT", "443"))
 SWITCH_DRIVER = os.environ.get("SWITCH_DRIVER", "lantronix")
 
+# Smart-port watcher: opt-in via env so the existing single-VLAN POC keeps
+# booting cleanly even without an MQTT broker in scope. The watcher itself
+# also tolerates broker-down (logs once, does not crash the switch service).
+SMART_PORT_WATCHER_ENABLED = (
+    os.environ.get("SMART_PORT_WATCHER_ENABLED", "0") == "1"
+)
+MQTT_BROKER = os.environ.get("MQTT_BROKER_LOCAL") or os.environ.get(
+    "MQTT_BROKER", "mqtt://mosquitto:1883"
+)
+
 # ---------------------------------------------------------------------------
 # Driver singleton
 # ---------------------------------------------------------------------------
 driver_instance: Optional[SwitchDriver] = None
+watcher_instance: Optional["SmartPortWatcher"] = None  # noqa: F821 — forward ref
 
 
 def get_driver() -> SwitchDriver:
@@ -119,7 +130,7 @@ def handle_switch_error(exc: SwitchError):
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global driver_instance
+    global driver_instance, watcher_instance
     try:
         driver_instance = create_driver()
         await driver_instance.connect()
@@ -128,8 +139,22 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to switch at %s: %s", SWITCH_HOST, exc)
         driver_instance = None
 
+    if SMART_PORT_WATCHER_ENABLED and driver_instance is not None:
+        # Import lazily so a broken paho-mqtt install can't crash the whole
+        # service — we'd rather lose the watcher than the REST surface.
+        try:
+            from watcher import SmartPortWatcher
+
+            watcher_instance = SmartPortWatcher(driver_instance, MQTT_BROKER)
+            await watcher_instance.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Smart-port watcher failed to start: %s", exc)
+            watcher_instance = None
+
     yield
 
+    if watcher_instance is not None:
+        await watcher_instance.stop()
     if driver_instance:
         await driver_instance.disconnect()
         logger.info("Switch service stopped")

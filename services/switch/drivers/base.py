@@ -183,6 +183,24 @@ class SwitchDriver(ABC):
     # --- PoE Control ---
 
     @abstractmethod
+    async def get_mac_table(self) -> list[dict]:
+        """Read the switch's dynamic MAC-address forwarding table.
+
+        Returns the set of MACs the switch has learned, with the port
+        and VLAN they were learned on. Used by the smart-port watcher
+        to detect a new device appearing on an access port.
+
+        Returns list of:
+            {
+                "port": 7,
+                "mac": "E4:30:22:50:2A:FD",
+                "vlan": 1,
+                "type": "dynamic" | "static",
+            }
+        """
+        ...
+
+    @abstractmethod
     async def get_poe_status(self) -> list[dict]:
         """Get PoE status for all PoE-capable ports.
 

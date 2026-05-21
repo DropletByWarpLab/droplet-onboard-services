@@ -619,6 +619,55 @@ class LantronixDriver(SwitchDriver):
         )
         logger.info("Port %d PoE %s", port, "enabled" if enabled else "disabled")
 
+    # --- MAC table ---
+
+    async def get_mac_table(self) -> list[dict]:
+        # SM8TAT2SA returns one of two shapes for the dynamic FDB depending
+        # on firmware: top-level list under `data`, or a `macTable` named
+        # array. The keys also vary case (`MAC` / `mac`, `Port` / `port`).
+        # Normalise both, drop multicast/broadcast pollution that some
+        # firmware emits, and uppercase the MAC for stable hashing
+        # downstream (the watcher dedups on {port, mac}).
+        data = await self._request("GET", "/stat/dynamic_mac_table")
+        raw = data.get("data", data.get("macTable", data.get("entries", [])))
+        if not isinstance(raw, list):
+            return []
+
+        out: list[dict] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            mac_raw = (
+                entry.get("mac")
+                or entry.get("MAC")
+                or entry.get("macAddress")
+                or entry.get("MAC Address")
+                or ""
+            )
+            mac = mac_raw.upper().strip()
+            if not mac or mac.startswith("01:00:5E") or mac == "FF:FF:FF:FF:FF:FF":
+                continue
+            port_raw = entry.get("port", entry.get("Port", 0))
+            try:
+                port_num = int(port_raw)
+            except (TypeError, ValueError):
+                continue
+            if port_num < PORT_MIN or port_num > PORT_MAX:
+                continue
+            vlan_raw = entry.get("vlan", entry.get("VLAN", entry.get("vid", 1)))
+            try:
+                vlan_num = int(vlan_raw)
+            except (TypeError, ValueError):
+                vlan_num = 1
+            type_raw = (entry.get("type") or entry.get("Type") or "dynamic").lower()
+            out.append({
+                "port": port_num,
+                "mac": mac,
+                "vlan": vlan_num,
+                "type": "static" if "static" in type_raw else "dynamic",
+            })
+        return out
+
     # --- Higher-Level Operations ---
 
     async def detect_wan_port(self) -> dict:
