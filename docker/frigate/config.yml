@@ -63,22 +63,22 @@ objects:
 # PUT /api/config/set. The config.yml mount is writable so Frigate's
 # in-place migrator and auto-adoption round-trip work.
 #
-# No static `cameras:` block by default — entries plus a stale example IP
-# pinned Frigate to a connection-timeout loop that, in turn, kept Frigate
-# busy enough to drop later API-added entries.
-#
-# To pin a manual camera here, mirror the auto-add shape:
+# Auto-adoption today uses a generic `rtsp://<ip>:554/stream1` URL with
+# no credentials, which fails on Hanwha (real path is `/profile2/media.smp`
+# + Digest auth). Until services/camera-discovery learns ONVIF
+# GetStreamUri + creds-in-URL (smart-port Phase 2), operators can pin a
+# manual entry here. Example:
 #
 #   cameras:
-#     front_door:
+#     hanwha_dome:
 #       ffmpeg:
 #         inputs:
-#           - path: "rtsp://admin:{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}@<ip>:554/profile2/media.smp"
+#           - path: "rtsp://admin:{FRIGATE_CAMERA_HANWHA_PASSWORD}@<ip>:554/profile2/media.smp"
 #             roles:
 #               - detect
 #               - record
 #
-# `{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}` substitutes verbatim from .env via
+# `{FRIGATE_CAMERA_HANWHA_PASSWORD}` substitutes verbatim from .env via
 # Frigate's str.format (no URL-encoding). Store the raw password — e.g.
 # `Droplet123!`, not `Droplet123%21` — because the bundled jetson ffmpeg
 # does not URL-decode userinfo and the camera returns 401 + locks the
