@@ -60,25 +60,27 @@ objects:
     - cat
 
 # Cameras are added dynamically by the camera-discovery service via
-# PUT /api/config/set. Manual entries below are preserved across restarts
-# (the config.yml mount is writable so Frigate's in-place migrator and
-# auto-adoption round-trip work).
-cameras:
-  # Hanwha XNV-C8083R dome (8 MP) on switch port 6 / VLAN 100.
-  # profile2 = H.264 3328x1872 @ 30fps (Frigate downsamples to 1280x720 for
-  # detection per the top-level detect block).
-  #
-  # The password comes from FRIGATE_CAMERA_FRONT_DOOR_PASSWORD via Frigate's
-  # str.format substitution (frigate/config/env.py): the env value is dropped
-  # into the URL VERBATIM, with NO URL-encoding. Store the **raw** password
-  # in .env — e.g. `FRIGATE_CAMERA_FRONT_DOOR_PASSWORD=Droplet123!`, not
-  # `Droplet123%21`. The bundled jetson ffmpeg does not URL-decode userinfo
-  # before authenticating, so percent-escapes go on the wire literally and
-  # the camera returns 401, then locks the account after ~5 retries.
-  front_door:
-    ffmpeg:
-      inputs:
-        - path: "rtsp://admin:{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}@192.168.100.219:554/profile2/media.smp"
-          roles:
-            - detect
-            - record
+# PUT /api/config/set. The config.yml mount is writable so Frigate's
+# in-place migrator and auto-adoption round-trip work.
+#
+# No static `cameras:` block by default — entries plus a stale example IP
+# pinned Frigate to a connection-timeout loop that, in turn, kept Frigate
+# busy enough to drop later API-added entries.
+#
+# To pin a manual camera here, mirror the auto-add shape:
+#
+#   cameras:
+#     front_door:
+#       ffmpeg:
+#         inputs:
+#           - path: "rtsp://admin:{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}@<ip>:554/profile2/media.smp"
+#             roles:
+#               - detect
+#               - record
+#
+# `{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}` substitutes verbatim from .env via
+# Frigate's str.format (no URL-encoding). Store the raw password — e.g.
+# `Droplet123!`, not `Droplet123%21` — because the bundled jetson ffmpeg
+# does not URL-decode userinfo and the camera returns 401 + locks the
+# account after ~5 retries on percent-escapes.
+cameras: {}
