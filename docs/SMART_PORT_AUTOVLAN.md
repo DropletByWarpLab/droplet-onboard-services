@@ -143,6 +143,8 @@ Everything below is the floor the daemon will sit on. Today the system is **sing
 - ✅ `docker/frigate/config.yml`: dropped the stale static `front_door` entry pointing at a long-gone IP — it was pinning Frigate to a ffmpeg connection-timeout loop that interfered with auto-adoption. File is now `cameras: {}` with a worked example in the comment header.
 - ✅ Port 7 (camera) moved from the legacy VLAN 10 back to VLAN 1 (running config only — `/config/conf_save` returns 500 on JSON bodies, persistence across switch reboot is Phase 2 follow-up).
 - ✅ Camera plugged into Lantronix port 7 (PoE class 3, ~7.8 W) gets a DHCP lease and is auto-adopted into Frigate. The cam (Hanwha XNV-C8083R, OUI `E4:30:22`) lands at `192.168.20.176`.
+- ✅ Hanwha first-run init flow (`/init-cgi/pw_init.cgi?msubmenu=statuscheck&action=view` -> RSA-encrypt -> `setinitpassword`) wired and verified live — runs automatically through `vendor_init.py` when the camera reports `Initialized=False` and `CAMERA_AUTO_INITIALIZE=1`.
+- ✅ Frigate is **live** on `hanwha_dome`, ~5 fps capture / 8 fps detect, 1280x720 JPEGs in `/api/hanwha_dome/latest.jpg`. The disk config in `docker/frigate/config.yml` carries the explicit RTSP URL with creds (manual entry, since the camera-discovery auto-add still defaults to `rtsp://<ip>:554/stream1` with no creds — see "Carryover" below).
 
 Bring-up procedure:
 
@@ -168,7 +170,7 @@ docker compose --profile full -f docker/docker-compose.yml -p droplet-pi-platfor
 | Phase | Ticket (proposed) | Scope |
 |-------|-------------------|-------|
 | 1 — Foundation (this PR) | — | DHCP on br-lan, switch reachable, single-VLAN camera path working |
-| 2 — VLAN segmentation | WARP-NEW-A | VLAN 50 on switch + `br-lan.50` on host + per-VLAN dnsmasq + nftables policy. Cameras moved by hand. |
+| 2 — VLAN segmentation + switch mgmt re-IP | WARP-NEW-A | VLAN 10 (CAMS) reactivated on switch + `br-lan.10` on host + per-VLAN dnsmasq + nftables policy. Re-IP Lantronix mgmt 192.168.1.77 -> 192.168.20.77 so the switch survives when the home router (and its `192.168.1.0/24` subnet) goes away. Cameras moved by hand. Fix `services/camera-discovery/frigate_client.py` so the auto-add RTSP URL includes Digest creds + the real ONVIF-probed stream URI (Hanwha = `/profile2/media.smp`, not `/stream1`). |
 | 3 — Classifier daemon (passive) | WARP-NEW-B | Daemon reads PoE/MAC/leases/ONVIF, **logs** classifications, dashboard surfaces them. No PVID moves yet — operator-confirm only. |
 | 4 — Classifier daemon (active) | WARP-NEW-C | Daemon writes PVID moves after the confidence-counter threshold. Demotion path (cam unplugged → port returns to LAN). Audit log. |
 | 5 — Voice-VLAN-OUI hand-off | WARP-NEW-D | Push the OUI watchlist into the switch's native voice-VLAN-OUI table so VLAN moves happen at the switch with no host loop. Daemon stays as the audit + demotion path. |
@@ -177,6 +179,17 @@ docker compose --profile full -f docker/docker-compose.yml -p droplet-pi-platfor
 Each phase is independently shippable — the daemon is useful in passive (Phase 3) mode before any port moves happen, and operators get visibility without trusting automation yet.
 
 ---
+
+## Droplet-replaces-home-router future direction
+
+The end state Stefan flagged on 2026-05-21: the Droplet eventually **replaces the home router entirely**. The home `192.168.1.0/24` segment goes away; the Droplet's WAN side terminates the ISP handoff directly, and everything downstream is the Droplet's own LAN. That changes what counts as "stable" for this design:
+
+- **Switch mgmt IP `192.168.1.77` must move.** Today it's reachable via the `/32` host-route hack because `br-mgmt` shares that `/24` with the home router. When the home router goes away, that subnet goes too — the Lantronix would be orphaned at an address with no upstream gateway and no host route. Phase 2 needs a one-shot migration that re-IPs the switch to something inside the Droplet's own LAN range (e.g. `192.168.20.77/24` on `br-lan` natively) or a dedicated mgmt VLAN. Once the switch is on a Droplet-owned subnet, the `/32` route in `droplet-poc-host-net.sh` becomes a no-op and gets deleted.
+- **No camera or service config may reference `192.168.1.x`.** Cameras live on `192.168.30.0/24` (VLAN 10 in Phase 2). Frigate, MQTT, the orchestrator, ops-console — all stay inside `192.168.10.x` / `192.168.20.x` / `192.168.30.x`. Anything that pins to `192.168.1.x` is a regression to fix before the home-router switchover.
+- **DHCP / DNS / WireGuard upstream all migrate to the Droplet.** OpenWrt's container already runs DHCP for the Wi-Fi AP segment; the host's `droplet-poc-host-net.service` runs DHCP for `br-lan`. When the home router goes, the Droplet's WAN side needs PPPoE / DHCP-client (whatever the ISP hands it), and `ethmgmt` becomes the WAN interface (not the LAN-to-home uplink it is today). The smart-port classifier doesn't care which side faces the ISP — it only manages the downstream switch ports — but the operations runbook has to.
+- **No customer-visible disruption during cutover.** Existing LAN/CAMS clients keep their leases as long as the dnsmasq pool stays the same. The cutover is just "swap which port is WAN" + reboot.
+
+This doc treats the home router as a temporary upstream that's allowed to disappear. Any code in this PR or its successors that bakes in `192.168.1.x` is a bug.
 
 ## Open questions
 
