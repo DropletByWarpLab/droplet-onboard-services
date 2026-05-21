@@ -27,17 +27,17 @@ Auto-VLAN closes that gap. The default state is "trust LAN"; new devices are cla
 │  Port 1-8: PoE copper        ← devices plug in here                │
 │  Port 9-10: SFP fiber        ← uplink to host enp12s0 (port 10)    │
 │                                                                    │
-│  PVID per port flips between VLAN 1 (LAN) and VLAN 50 (CAMS)       │
-│  based on classification.                                          │
+│  PVID per port flips between VLAN 1 (LAN) and VLAN 10 (CAMS)       │
+│  based on LLM classification.                                      │
 │                                                                    │
-│  Uplink (port 10) is a TRUNK: tagged VLAN 1 + VLAN 50.             │
+│  Uplink (port 10) is a TRUNK: tagged VLAN 1 + VLAN 10.             │
 └────────────────────────────────────────────────────────────────────┘
                                 ↓
 ┌────────────────────────────────────────────────────────────────────┐
 │ Host (Droplet POC box)                                             │
 │                                                                    │
 │  br-lan       (untagged VLAN 1, 192.168.20.0/24)  ← LAN devices    │
-│  br-lan.50    (tagged   VLAN 50, 192.168.30.0/24) ← cameras        │
+│  br-lan.10    (tagged   VLAN 10, 192.168.30.0/24) ← cameras        │
 │                                                                    │
 │  Both served by dnsmasq instances bound to those bridges.          │
 │  Inter-VLAN routing handled by an nftables ruleset (LAN→CAMS       │
@@ -45,21 +45,49 @@ Auto-VLAN closes that gap. The default state is "trust LAN"; new devices are cla
 └────────────────────────────────────────────────────────────────────┘
                                 ↑
 ┌────────────────────────────────────────────────────────────────────┐
-│ Smart-port classifier daemon (services/switch/classifier.py)       │
+│ Event source (services/switch/watcher.py — Phase 3)                │
 │                                                                    │
-│  Inputs:                                                           │
-│    - Lantronix PoE status     (per-port Pdclass, PwrUsed)          │
-│    - Lantronix MAC table      (per-port MACs learned)              │
-│    - dnsmasq lease file       (DHCP fingerprints + hostnames)      │
-│    - ONVIF probe              (only on candidates)                 │
-│    - OUI list                 (camera-vendor MACs)                 │
+│  Lightweight loop that watches three signals and publishes MQTT    │
+│  events when ANY of them changes:                                  │
+│    - new MAC in switch's dynamic_mac_table                         │
+│    - PoE class transition (no PD → class N, or N → no PD)          │
+│    - new lease in droplet-poc-lan.leases                           │
 │                                                                    │
-│  Output: port_state[port].class ∈ {unknown, lan, camera, isolated} │
-│  Side-effect: switch.set_port_pvid(port, vlan) when class changes  │
+│  Topic: smart-port/event   Payload: { port, mac, oui, poe_class,   │
+│                                       ip, hostname, source }       │
+│                                                                    │
+│  NO classification logic of its own — only the "something just     │
+│  happened" signal. Classification + action are the LLM's job.      │
+└────────────────────────────────────────────────────────────────────┘
+                                ↓ MQTT event
+┌────────────────────────────────────────────────────────────────────┐
+│ Local LLM (orchestrator agent loop, via tools-core)                │
+│                                                                    │
+│  The classifier IS the LLM. Triggered by the MQTT event OR by an   │
+│  operator prompt ("a new camera was plugged in, can you add it?"). │
+│  Runs the ReAct loop using MCP tools to decide what kind of device │
+│  appeared and what to do about it.                                 │
+│                                                                    │
+│  Why LLM and not a hardcoded classifier:                           │
+│    - Vendor-specific init flows differ wildly (Hanwha RSA, Axis    │
+│      mDNS setup, Reolink first-boot wizard) — easier to lean on    │
+│      the LLM's pretrained knowledge than maintain a per-vendor     │
+│      decision tree in the daemon.                                  │
+│    - Operators can intervene mid-flow ("no, that's actually a      │
+│      laptop, keep it in LAN") without code changes.                │
+│    - Falls back gracefully on novel hardware: if classification is │
+│      ambiguous the LLM asks the operator instead of guessing.      │
+│                                                                    │
+│  Tools the LLM uses (most already exist — see "Tool catalog"       │
+│  below):                                                           │
+│    get_switch_ports, get_switch_poe, set_port_vlan,                │
+│    list_discovered_cameras, scan_for_cameras,                      │
+│    get_camera_init_status (NEW), initialize_camera (NEW),          │
+│    accept_discovered_camera                                        │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-The classifier is a stateful loop, not a one-shot. It owns the port→VLAN mapping; the orchestrator's existing `/api/switch/setup/cameras` becomes a manual override.
+The smart-port system is **LLM-driven, not deterministic-daemon-driven**. The Phase 3 watcher is just an event source; the Phase 4+ adoption logic is the orchestrator's agent loop talking to MCP tools.
 
 ---
 
@@ -77,39 +105,46 @@ Live recon of the photo-studio POC's Lantronix turned up an **already-deployed V
 
 ---
 
-## Device classification
+## LLM classification flow
 
-The daemon classifies a port whenever any of these change:
+The MQTT event lands at the orchestrator. The agent loop runs a prompt roughly like:
 
-- A new MAC appears in the switch's MAC table for that port.
-- The PoE class changes (e.g. a new powered device just came up).
-- A DHCP lease appears (or expires) on either bridge for a MAC observed on that port.
+> Switch port `<N>` just learned a new device: MAC `<mac>` (OUI `<oui>`), PoE class `<class>`, current IP `<ip>` if any. Decide whether this is a camera, a computer, or something else, and act on it. Available tools: get_switch_ports, get_switch_poe, list_discovered_cameras, get_camera_init_status, initialize_camera, scan_for_cameras, accept_discovered_camera, set_port_vlan.
 
-### Decision tree
+Heuristics the LLM has from training + can verify with tools:
 
-```
-1. PoE class on this port?
-   ├── No → not a camera (skip ONVIF probe)
-   └── Class 3/4 (~7.5W+) → candidate, continue
-2. MAC OUI in CAMERA_VENDOR_OUIS?  (Hikvision, Dahua, Reolink, Axis, Hanwha, Amcrest, …)
-   ├── Yes → CAMERA (move PVID to 50)
-   └── No → continue
-3. ONVIF probe at the device's current IP?
-   ├── 200 from /onvif/device_service → CAMERA
-   ├── No reply twice in 30s         → UNKNOWN (stay in LAN)
-   └── Reply but not ONVIF-shaped    → UNKNOWN
-4. DHCP vendor-class-id starts with "AXIS"/"HIKVISION"/etc?  (fallback for cameras without ONVIF)
-```
+- **OUI lookup** (camera vendors: Hanwha `E4:30:22`, Axis `00:40:8C`, Hikvision `BC:AD:28`/`C0:51:7E`, Dahua `4C:11:BF`, Reolink `EC:71:DB`, Amcrest `9C:8E:CD`, etc.). The LLM compares the observed OUI against its training data; we don't ship a watchlist.
+- **PoE class 3+** + **port 554 (RTSP)** + **port 80/443 with non-browser headers** → almost certainly a camera.
+- **ONVIF probe** at `http://<ip>/onvif/device_service` (anonymous GetDeviceInformation) — if it speaks ONVIF, it's a camera.
+- **DHCP hostname** containing model strings (`XNV-`, `AXIS-`, `HIK-`, `IPC-`, etc.) — strong signal.
+- **DHCP vendor-class-id** — fallback for cameras without ONVIF.
 
-Each rung that fires CAMERA bumps a confidence counter. The PVID move only happens at confidence ≥ 2 to avoid mis-classifying e.g. a PoE-powered Raspberry Pi.
+The LLM doesn't need a deterministic decision tree — it weighs the evidence the same way it would for any classification task and either acts confidently (run `set_port_vlan` + `initialize_camera` + `accept_discovered_camera`) or asks the operator for confirmation through the existing Tier-2 prompt path.
 
-### Why not lean on Voice-VLAN-OUI?
+### Why LLM and not a hardcoded classifier daemon
 
-The Lantronix has a built-in `voice_vlan_oui` feature designed for IP phones — exactly the same mechanism we'd want for cameras (OUI match → port joins a specific VLAN). It's tempting to repurpose it, and Phase 3 below explores doing exactly that. **The reason the daemon is the source of truth and Voice-VLAN-OUI is just an optimization path:**
+Previous version of this doc proposed a Python classifier with a decision tree. Stefan flagged on 2026-05-21 that this should be the **local LLM's job**, not a daemon's. The reasons hold up:
 
-1. ONVIF probes catch cameras whose OUIs aren't on any vendor list (off-brand IPCs).
-2. The daemon can demote a port too — a camera unplugged and replaced with a laptop needs the port to flip back to VLAN 1. The switch's Voice-VLAN logic only does the LAN→VOICE direction.
-3. PoE class is observable per-port; OUI alone misses non-PoE cameras and false-positives PoE laptops with camera-vendor NICs.
+1. Vendor-specific init flows are not stable enough to encode once. Hanwha cameras went through three different init-cgi shapes between 2018–2022; Reolink rolled out a wholesale rewrite in 2024. The LLM pulls the right flow from training; the daemon would need a rolling update for every camera model the field deploys.
+2. ONVIF probes catch off-brand cameras whose OUI isn't on any vendor list — but the LLM still needs to *interpret* the probe's response (which profiles to pull, which stream URI to feed Frigate). A daemon can do the probe; only the LLM can read the response intelligently.
+3. The Lantronix has a built-in `voice_vlan_oui` feature that auto-moves OUI-matched MACs to a target VLAN. We push the OUI watchlist into that table as an *optimization* (Phase 5) so the switch handles routine cases without bothering the LLM, and the LLM stays involved for edge cases + demotion (cam unplugged → port back to LAN).
+4. Operators trust an LLM that asks "this looks like an Amcrest cam, OK to add?" more than they trust a daemon that silently moves ports.
+
+### Tool catalog (state of `packages/tools-core/src/handlers/` on this branch)
+
+| Tool | Status | Notes |
+|---|---|---|
+| `get_switch_ports` / `get_switch_poe` / `get_switch_vlans` | ✅ exists | Reads via the orchestrator's switch service client. |
+| `set_port_vlan` / `set_port_poe` / `setup_camera_ports` | ✅ exists | Writes; Tier 2 (operator confirm). |
+| `detect_wan_port` | ✅ exists | Used by setup wizard. |
+| `list_cameras` / `list_discovered_cameras` / `scan_for_cameras` | ✅ exists | Camera-discovery surface. |
+| `accept_discovered_camera` | ✅ exists | Adds to Frigate via the discovery service. |
+| `get_camera_snapshot` / `get_camera_live_url` / `list_camera_events` | ✅ exists | Operator consumption. |
+| `get_camera_init_status(ip)` | ⬜ **MISSING** | Wraps `GET /cameras/{ip}/init-status` on camera-discovery. Returns `{vendor, initialized, needs_initialization}`. Tier 1 (read-only). |
+| `initialize_camera(ip, username?, password?)` | ⬜ **MISSING** | Wraps `POST /cameras/{ip}/initialize`. Tier 2 — writes to the camera. |
+| `add_camera_to_frigate(name, rtsp_url)` | ⬜ **MISSING** | Manual override path for when `accept_discovered_camera` writes a wrong URL (Hanwha case). Tier 2. Removable once `services/camera-discovery/frigate_client.py` learns ONVIF GetStreamUri. |
+
+Three new tool handlers + one bug fix in camera-discovery are what stand between today's manual flow and an LLM-driven flow. All three of the missing tools are thin proxies over endpoints camera-discovery already exposes.
 
 ---
 
@@ -169,14 +204,14 @@ docker compose --profile full -f docker/docker-compose.yml -p droplet-pi-platfor
 
 | Phase | Ticket (proposed) | Scope |
 |-------|-------------------|-------|
-| 1 — Foundation (this PR) | — | DHCP on br-lan, switch reachable, single-VLAN camera path working |
-| 2 — VLAN segmentation + switch mgmt re-IP | WARP-NEW-A | VLAN 10 (CAMS) reactivated on switch + `br-lan.10` on host + per-VLAN dnsmasq + nftables policy. Re-IP Lantronix mgmt 192.168.1.77 -> 192.168.20.77 so the switch survives when the home router (and its `192.168.1.0/24` subnet) goes away. Cameras moved by hand. Fix `services/camera-discovery/frigate_client.py` so the auto-add RTSP URL includes Digest creds + the real ONVIF-probed stream URI (Hanwha = `/profile2/media.smp`, not `/stream1`). |
-| 3 — Classifier daemon (passive) | WARP-NEW-B | Daemon reads PoE/MAC/leases/ONVIF, **logs** classifications, dashboard surfaces them. No PVID moves yet — operator-confirm only. |
-| 4 — Classifier daemon (active) | WARP-NEW-C | Daemon writes PVID moves after the confidence-counter threshold. Demotion path (cam unplugged → port returns to LAN). Audit log. |
-| 5 — Voice-VLAN-OUI hand-off | WARP-NEW-D | Push the OUI watchlist into the switch's native voice-VLAN-OUI table so VLAN moves happen at the switch with no host loop. Daemon stays as the audit + demotion path. |
-| 6 — Dashboard surface | WARP-NEW-E | `/cameras` page gets a "Network" tab with per-port live status (class, MAC, PoE, PVID) + manual override. |
+| 1 — Foundation (this PR) | — | DHCP on br-lan, switch reachable, single-VLAN camera path working, Hanwha cam live in Frigate via manual override. |
+| 2 — VLAN segmentation + switch mgmt re-IP + camera-discovery URL fix | WARP-NEW-A | VLAN 10 (CAMS) reactivated on switch + `br-lan.10` on host + per-VLAN dnsmasq + nftables policy. Re-IP Lantronix mgmt 192.168.1.77 → 192.168.20.77 so the switch survives when the home router (and its `192.168.1.0/24` subnet) goes away. Fix `services/camera-discovery/frigate_client.py` so `accept_discovered_camera` writes a real ONVIF-probed RTSP URL with Digest creds (Hanwha = `/profile2/media.smp`, not `/stream1`). Removes the need for `add_camera_to_frigate`. |
+| 3 — Event source + missing LLM tools | WARP-NEW-B | `services/switch/watcher.py` (lightweight loop, publishes `smart-port/event` over MQTT). Three new tool handlers in `packages/tools-core/src/handlers/cameras/`: `get_camera_init_status`, `initialize_camera`, `add_camera_to_frigate`. Wire them through the orchestrator's MCP server + register in `registry.ts`. Tier-2 confirm UX in the dashboard. |
+| 4 — LLM adoption agent | WARP-NEW-C | Orchestrator subscribes to `smart-port/event` MQTT topic, kicks off an agent loop with a `new-device-on-switch` system prompt. Loop uses the tools from Phase 3 to classify + adopt or surface to operator. Audit log entry per port flip. Demotion path (cam unplugged → port back to LAN) is the same agent reacting to a `device-disappeared` event. |
+| 5 — Voice-VLAN-OUI hand-off | WARP-NEW-D | Push known camera OUIs into the switch's native `voice_oui_vlan_table` so routine cases move at the switch without bothering the LLM. The agent stays involved for novel OUIs, demotion, and audit. |
+| 6 — Dashboard surface | WARP-NEW-E | `/cameras` page gets a "Network" tab with per-port live status (class, MAC, PoE, PVID), manual override, and a feed of the LLM's recent adoption decisions. |
 
-Each phase is independently shippable — the daemon is useful in passive (Phase 3) mode before any port moves happen, and operators get visibility without trusting automation yet.
+Each phase is independently shippable — Phase 3's tools let the LLM run the adoption flow on-demand (operator prompt) before Phase 4 makes it event-driven.
 
 ---
 
