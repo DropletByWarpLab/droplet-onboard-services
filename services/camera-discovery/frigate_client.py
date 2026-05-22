@@ -8,10 +8,61 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import quote
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+# WARP-400 §5 — per-vendor RTSP URL templates.
+#
+# Pre-fix, `accept_camera` blindly handed Frigate whatever URL the
+# rtsp_prober had stashed. For a Hanwha that hadn't yet initialised
+# (or for the placeholder fallback at rtsp_prober.py:318) that URL is
+# wrong (Hikvision-shape `/Streaming/Channels/101` instead of
+# Hanwha's `/profile2/media.smp`), so Frigate keeps the camera in
+# "loading" forever. With the vendor known (the
+# `initialize_camera` flow yields `InitResult.vendor`) we can build
+# the right URL from a small table that covers every vendor whose
+# `init-cgi`/setup endpoint we know about.
+#
+# `{user}` and `{pw}` are url-encoded by `build_rtsp_url`. Don't pre-
+# encode them in the templates — the format-string substitution would
+# double-encode.
+VENDOR_RTSP_TEMPLATES: dict[str, str] = {
+    "hanwha":    "rtsp://{user}:{pw}@{ip}:554/profile2/media.smp",
+    "hikvision": "rtsp://{user}:{pw}@{ip}:554/Streaming/Channels/101",
+    "axis":      "rtsp://{user}:{pw}@{ip}:554/axis-media/media.amp",
+    "dahua":     "rtsp://{user}:{pw}@{ip}:554/cam/realmonitor?channel=1&subtype=0",
+    "reolink":   "rtsp://{user}:{pw}@{ip}:554/h264Preview_01_main",
+    "amcrest":   "rtsp://{user}:{pw}@{ip}:554/cam/realmonitor?channel=1&subtype=0",
+}
+
+
+class UnsupportedVendor(ValueError):
+    """Raised when we don't have an RTSP template for the given vendor."""
+
+
+def build_rtsp_url(vendor: str, ip: str, user: str, pw: str) -> str:
+    """Build a credentialed RTSP URL for a known camera vendor.
+
+    Once Phase 2's accept_camera plumbing lands, this replaces the
+    placeholder URL from rtsp_prober.py:318 for any vendor we know.
+    For vendors we don't have a template for, callers should fall back
+    to the discovered URL from the probe.
+    """
+    if not ip:
+        raise ValueError("ip is required")
+    vendor_key = (vendor or "").strip().lower()
+    template = VENDOR_RTSP_TEMPLATES.get(vendor_key)
+    if not template:
+        raise UnsupportedVendor(f"no RTSP template for vendor={vendor!r}")
+    return template.format(
+        user=quote(user or "", safe=""),
+        pw=quote(pw or "", safe=""),
+        ip=ip,
+    )
 
 
 class FrigateClient:
