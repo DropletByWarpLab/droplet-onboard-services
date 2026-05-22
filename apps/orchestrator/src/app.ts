@@ -31,6 +31,7 @@ import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
+import { createAutonomousProposalsRouter } from "./routes/autonomous-proposals.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
@@ -105,6 +106,8 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
+  // WARP-399: autonomous-agent Tier-2 deferral inbox (admin only).
+  app.use("/api", createAutonomousProposalsRouter(prisma));
   // ADR-003 + ADR-005: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type).

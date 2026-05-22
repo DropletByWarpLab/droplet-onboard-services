@@ -27,6 +27,32 @@ import type {
 import type { ChatMessage, ChatResponse, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 
+/**
+ * WARP-399 — Tier-2 deferral hook for autonomous mode.
+ *
+ * In `interactive` mode the agent loop dispatches every tool call.
+ * In `autonomous` mode (e.g. the smart-port subscriber kicks off a run
+ * with no operator in the chat) the loop calls `deferTier2ToolCall`
+ * BEFORE dispatching. If the hook returns a `ToolDeferral`, dispatch
+ * is skipped: a synthetic tool result is fed back to the model and
+ * the loop continues. The hook owner (smart-port-agent.service) is
+ * responsible for persisting the `AutonomousProposal` row.
+ *
+ * Returning `null` means "go ahead, dispatch normally" — the hook
+ * uses this for Tier-1 tools and as the fallback when an autonomous
+ * agent legitimately calls a tool that doesn't require confirmation.
+ */
+export interface ToolDeferral {
+  proposal_id: string;
+  reason: string;
+}
+
+export type ToolDeferralHook = (input: {
+  toolName: string;
+  toolArgs: Record<string, unknown>;
+  agentRunId?: string;
+}) => Promise<ToolDeferral | null>;
+
 export interface AgentDeps {
   mcp: McpClientService;
   aiGateway: {
@@ -43,6 +69,13 @@ export interface AgentDeps {
     }) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
   };
   onEvent?: (e: SSEEvent) => void;
+  /**
+   * Optional Tier-2 deferral hook. Wired by the orchestrator boot when
+   * the autonomous-agent runtime is enabled. Left `undefined` for the
+   * default interactive path (dashboard chat) — equivalent to "no
+   * deferral, dispatch every call".
+   */
+  deferTier2ToolCall?: ToolDeferralHook;
 }
 
 export interface AgentRequest {
@@ -60,6 +93,22 @@ export interface AgentRequest {
    * in-process trusted, so it's safe to plumb session tokens this way.
    */
   toolCallContext?: McpCallContext;
+  /**
+   * WARP-399 — run mode.
+   *
+   * `interactive` (default): an operator is on the other end of the
+   * conversation. Tier-2 tools require dashboard confirm and the
+   * existing camera-discovery / switch-service flow handles it.
+   *
+   * `autonomous`: no operator in chat. Tier-2 dispatches are routed
+   * through `deferTier2ToolCall` and staged as proposals for later
+   * operator approval. Set together with `agentRunId` (the
+   * CommandAuditLog row id) so each deferred proposal can be joined
+   * back to the run that produced it.
+   */
+  mode?: "interactive" | "autonomous";
+  /** Audit row id for the in-flight agent run. Required when mode=autonomous. */
+  agentRunId?: string;
 }
 
 export interface AgentTraceEntry {
@@ -150,17 +199,51 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     for (const call of asst.tool_calls) {
       const args = safeParseArgs(call);
       emit({ type: "tool_call", id: call.id, name: call.function.name, args });
-      const result = await deps.mcp.callTool(
-        call.function.name,
-        args,
-        req.toolCallContext,
-      );
-      const text = result.content[0]?.text ?? "{}";
+
+      // WARP-399 — Tier-2 deferral in autonomous mode. The hook is the
+      // arbiter; this code path doesn't know which tools require
+      // confirmation (that lives in the `tools-core` registry, not on
+      // the MCP descriptor). When the hook returns a `ToolDeferral`,
+      // we synthesise a `confirmation_required` tool result and skip
+      // the real dispatch — the model can keep classifying (Tier-1
+      // reads) or stop, either is fine.
+      const deferral =
+        req.mode === "autonomous" && deps.deferTier2ToolCall
+          ? await deps.deferTier2ToolCall({
+              toolName: call.function.name,
+              toolArgs: args,
+              agentRunId: req.agentRunId,
+            })
+          : null;
+      let text: string;
       let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = { raw: text };
+      let isErrorResult: boolean;
+      if (deferral) {
+        const synthetic = {
+          ok: false,
+          status: "confirmation_required",
+          error: {
+            code: "TIER2_DEFERRED",
+            message: deferral.reason,
+            details: { proposal_id: deferral.proposal_id, deferred: true },
+          },
+        };
+        text = JSON.stringify(synthetic);
+        parsed = synthetic;
+        isErrorResult = false; // proposals aren't errors — surface as a chip
+      } else {
+        const result = await deps.mcp.callTool(
+          call.function.name,
+          args,
+          req.toolCallContext,
+        );
+        text = result.content[0]?.text ?? "{}";
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = { raw: text };
+        }
+        isErrorResult = result.isError;
       }
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
 
@@ -176,7 +259,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const evt: Extract<SSEEvent, { type: "tool_result" }> = {
         type: "tool_result",
         id: call.id,
-        ok: isConfirmation ? true : !result.isError,
+        ok: isConfirmation ? true : !isErrorResult,
       };
       if (isConfirmation) {
         evt.status = "confirmation_required";

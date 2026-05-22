@@ -198,6 +198,36 @@ model CommandAuditLog {
   @@index([domain, createdAt])
 }
 
+// WARP-399 — autonomous-agent Tier-2 deferral inbox.
+//
+// When the smart-port (or any future) agent runs in `mode: "autonomous"`
+// and the LLM picks a Tier-2 tool, the agent loop intercepts the dispatch
+// and stages it here instead. The ops-console inbox lists `status=pending`
+// rows; operator click-to-approve flips them to `approved` and re-runs
+// the original tool through the normal interactive path. The `cron-runtime`
+// sweep marks anything past `expiresAt` as `expired`.
+//
+// `agentRunId` points back to the CommandAuditLog row that captured the
+// autonomous run's full trace, so the drawer can render the agent's
+// reasoning alongside the proposed action.
+model AutonomousProposal {
+  id               String    @id @default(cuid())
+  domain           String
+  entityId         String
+  toolName         String
+  toolArgs         Json
+  tier             Int
+  status           String    @default("pending")
+  resolvedByUserId String?
+  resolvedAt       DateTime?
+  expiresAt        DateTime
+  agentRunId       String
+  createdAt        DateTime  @default(now())
+
+  @@index([status, expiresAt])
+  @@index([domain, entityId, createdAt])
+}
+
 model NetworkConfigSnapshot {
   id        String   @id @default(cuid())
   userId    String?
