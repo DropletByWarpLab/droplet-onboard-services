@@ -30,7 +30,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from ops import auth, docker_client, services as svc_probe, system as sys_probe
+from ops import (
+    auth,
+    autonomous_proposals as ap,
+    docker_client,
+    services as svc_probe,
+    system as sys_probe,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -178,6 +184,64 @@ async def ops_services() -> dict[str, Any]:
         "summary": svc_probe.summarise(results),
         "results": [asdict(r) for r in results],
     }
+
+
+# ---------------------------------------------------------------------------
+# WARP-399 — autonomous-agent Tier-2 proposals inbox
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/ops/autonomous-proposals",
+    dependencies=[Depends(auth.require_token)],
+)
+async def ops_list_proposals(
+    proposal_status: str = Query(default="pending", alias="status"),
+    domain: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """List pending (default) / approved / rejected / expired proposals.
+
+    Proxies orchestrator's `GET /api/autonomous-proposals` using the
+    OPS_ORCHESTRATOR_TOKEN service principal. 503 if the env isn't set.
+    """
+    try:
+        return await ap.list_proposals(
+            status=proposal_status, domain=domain, limit=limit,
+        )
+    except ap.OrchestratorUnauthenticated as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
+        )
+
+
+@app.post(
+    "/ops/autonomous-proposals/{proposal_id}/approve",
+    dependencies=[Depends(auth.require_token)],
+)
+async def ops_approve_proposal(proposal_id: str) -> dict[str, Any]:
+    """Approve a pending proposal. Does NOT re-dispatch the tool in v1
+    (per WARP-399 §6) — the operator runs the action interactively from
+    the dashboard. This endpoint just flips status + records the operator."""
+    try:
+        return await ap.approve_proposal(proposal_id)
+    except ap.OrchestratorUnauthenticated as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
+        )
+
+
+@app.post(
+    "/ops/autonomous-proposals/{proposal_id}/reject",
+    dependencies=[Depends(auth.require_token)],
+)
+async def ops_reject_proposal(proposal_id: str) -> dict[str, Any]:
+    """Reject a pending proposal."""
+    try:
+        return await ap.reject_proposal(proposal_id)
+    except ap.OrchestratorUnauthenticated as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
+        )
 
 
 # ---------------------------------------------------------------------------

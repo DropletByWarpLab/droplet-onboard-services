@@ -321,6 +321,37 @@
     <pre class="logs" id="log-pre">Click a container's "logs" button above.</pre>
   </section>
 
+  <!-- WARP-399 autonomous-agent proposals inbox -->
+  <section class="panel full">
+    <div class="panel-h">
+      <span>Autonomous proposals</span>
+      <span class="badge" id="ap-count">—</span>
+      <select id="ap-status" style="margin-left:auto;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;">
+        <option value="pending" selected>pending</option>
+        <option value="approved">approved</option>
+        <option value="rejected">rejected</option>
+        <option value="expired">expired</option>
+      </select>
+      <button id="ap-refresh-btn">Reload</button>
+    </div>
+    <div class="panel-body" id="ap-body">
+      <p class="hint">Tier-2 actions an autonomous agent (today: smart-port adoption) staged for operator approval. Approve = mark approved; the agent will NOT auto-dispatch the tool in v1 — re-run the action interactively from the dashboard to execute.</p>
+      <table id="ap-table">
+        <thead>
+          <tr>
+            <th style="width:14ch">Created</th>
+            <th>Domain / entity</th>
+            <th>Tool + args</th>
+            <th style="width:8ch">Tier</th>
+            <th style="width:14ch">Expires</th>
+            <th style="width:24ch"></th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="6" class="hint">—</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
 </main>
 
 <script>
@@ -579,6 +610,90 @@ async function refreshAll() {
   if (state.selectedContainer && state.autoRefresh) {
     showLogs(state.selectedContainer);
   }
+  // WARP-399 — also refresh the proposals panel. Quiet 503 if the
+  // bridge token isn't configured; loud on other errors.
+  refreshProposals().catch(() => {});
+}
+
+// ---- WARP-399: Autonomous proposals inbox ----
+async function refreshProposals() {
+  if (!state.token) return;
+  const sel = $('ap-status');
+  const status = sel ? sel.value : 'pending';
+  let data;
+  try {
+    data = await api('/ops/autonomous-proposals?status=' + encodeURIComponent(status));
+  } catch (e) {
+    renderProposalsError(e.message);
+    return;
+  }
+  renderProposals(data, status);
+}
+
+function renderProposals(data, statusFilter) {
+  const tbody = document.querySelector('#ap-table tbody');
+  const count = $('ap-count');
+  const rows = (data && data.proposals) || [];
+  if (count) count.textContent = rows.length + ' ' + statusFilter;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="hint">No ' + escapeHtml(statusFilter) + ' proposals.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(p => {
+    const created = new Date(p.createdAt).toLocaleString();
+    const expires = new Date(p.expiresAt).toLocaleString();
+    const args = JSON.stringify(p.toolArgs);
+    const actions = statusFilter === 'pending'
+      ? `<button data-ap-id="${escapeHtml(p.id)}" data-ap-action="approve">Approve</button>
+         <button data-ap-id="${escapeHtml(p.id)}" data-ap-action="reject">Reject</button>`
+      : '<span class="hint">' + escapeHtml(p.status) + (p.resolvedByUserId ? ' by ' + escapeHtml(p.resolvedByUserId) : '') + '</span>';
+    return `<tr>
+      <td class="mono" style="font-size:12px">${escapeHtml(created)}</td>
+      <td><strong>${escapeHtml(p.domain)}</strong><br><span class="hint">${escapeHtml(p.entityId)}</span></td>
+      <td><strong>${escapeHtml(p.toolName)}</strong><br><code style="font-size:11px;color:var(--muted)">${escapeHtml(args)}</code></td>
+      <td>${p.tier}</td>
+      <td class="mono" style="font-size:12px">${escapeHtml(expires)}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderProposalsError(msg) {
+  const tbody = document.querySelector('#ap-table tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="6" class="err" style="padding:8px 0;color:var(--bad)">' + escapeHtml(msg) + '</td></tr>';
+  const count = $('ap-count');
+  if (count) count.textContent = 'error';
+}
+
+async function approveProposal(id) {
+  if (!confirm('Approve this proposal? (The agent will NOT auto-dispatch the tool — you still need to run it interactively from the dashboard.)')) return;
+  try {
+    await api('/ops/autonomous-proposals/' + encodeURIComponent(id) + '/approve', { method: 'POST' });
+    await refreshProposals();
+  } catch (e) {
+    alert('approve failed: ' + e.message);
+  }
+}
+
+async function rejectProposal(id) {
+  if (!confirm('Reject this proposal?')) return;
+  try {
+    await api('/ops/autonomous-proposals/' + encodeURIComponent(id) + '/reject', { method: 'POST' });
+    await refreshProposals();
+  } catch (e) {
+    alert('reject failed: ' + e.message);
+  }
+}
+
+// Minimal escapeHtml — same shape as similar inline escapes elsewhere in the file.
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function showError(msg) {
@@ -624,6 +739,26 @@ $('connect-btn').addEventListener('click', async () => {
     state.token = '';
     showError(e.message);
   }
+});
+
+// WARP-399 proposals panel controls.
+const apRefreshBtn = $('ap-refresh-btn');
+if (apRefreshBtn) {
+  apRefreshBtn.addEventListener('click', () => { refreshProposals().catch(() => {}); });
+}
+const apStatusSel = $('ap-status');
+if (apStatusSel) {
+  apStatusSel.addEventListener('change', () => { refreshProposals().catch(() => {}); });
+}
+// Approve/reject buttons are rendered inline — delegate clicks from the table body.
+document.addEventListener('click', (ev) => {
+  const target = ev.target;
+  if (!(target instanceof HTMLElement)) return;
+  const id = target.getAttribute('data-ap-id');
+  const action = target.getAttribute('data-ap-action');
+  if (!id || !action) return;
+  if (action === 'approve') approveProposal(id);
+  else if (action === 'reject') rejectProposal(id);
 });
 
 $('refresh-btn').addEventListener('click', refreshAll);
