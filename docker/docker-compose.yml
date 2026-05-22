@@ -219,6 +219,19 @@ services:
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - NEXTCLOUD_URL=http://nextcloud:80
+      # WARP-401 — match the orchestrator's FIPS posture. The bookworm-slim
+      # base image we ship doesn't actually ship the NIST-validated FIPS
+      # provider (`fips.so`); the Dockerfile activates `OPENSSL_CONF=
+      # /etc/ssl/openssl-fips.cnf` so the apparatus is in place, but
+      # without a real provider the boot self-test fails and the
+      # container restart-loops. Until a provider is provisioned (Ubuntu
+      # Pro FIPS / UBI 9 / source-build per the Dockerfile's "IMPORTANT —
+      # provisioning the FIPS module" note), match the orchestrator's
+      # documented dev/POC posture: skip the boot self-test AND fall back
+      # to the system OpenSSL config so Prisma's libpq TLS handshake to
+      # Postgres works (same P1011 trap orchestrator hit).
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:
