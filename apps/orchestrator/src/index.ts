@@ -38,6 +38,12 @@ import {
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
+import {
+  initSmartPortAgent,
+  type SmartPortAgent,
+} from "./services/smart-port-agent.service.js";
+import * as aiGateway from "./services/ai-gateway.client.js";
+import { mcpClient } from "./services/mcp-client.singleton.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -97,6 +103,25 @@ async function main() {
     await connectMqtt();
   } catch (err) {
     logger.warn("MQTT broker unavailable");
+  }
+
+  // WARP-399: optional autonomous smart-port adoption loop. Gated by
+  // SMART_PORT_AUTONOMOUS_ENABLED=1; off by default so the existing
+  // operator-prompted path (Phase 3) keeps working unchanged. When
+  // on, the subscriber dispatches Tier-1 reads autonomously and
+  // defers every Tier-2 call to the proposals inbox.
+  let smartPortAgent: SmartPortAgent | null = null;
+  try {
+    smartPortAgent = await initSmartPortAgent({
+      prisma,
+      mcp: mcpClient,
+      aiGateway: { chat: aiGateway.chat },
+    });
+  } catch (err) {
+    logger.warn(
+      "smart-port autonomous agent failed to start: %s",
+      (err as Error).message,
+    );
   }
 
   // WARP-225: subscribe to file-indexer's
@@ -229,6 +254,11 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info("Shutting down...");
+    if (smartPortAgent) {
+      await smartPortAgent.stop().catch((err) => {
+        logger.warn("smart-port agent stop failed: %s", (err as Error).message);
+      });
+    }
     cronRuntime.stop();
     stopHealthMonitor();
     shutdownDeviceRegistration();
