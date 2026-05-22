@@ -40,7 +40,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from driver_checker import full_driver_report, auto_fix_drivers
-from frigate_client import FrigateClient
+from frigate_client import FrigateClient, UnsupportedVendor, build_rtsp_url
 from onvif_scanner import discover_cameras, probe_onvif_device
 from rtsp_prober import probe_camera
 from vendor_init import check_status as vendor_status_check
@@ -84,6 +84,16 @@ AUTO_INIT_PASSWORD = os.getenv("CAMERA_DEFAULT_PASSWORD", "")
 # Track IPs we've already successfully or unsuccessfully initialized so the
 # scan loop doesn't re-hit the same camera every 30s.
 _auto_init_attempted: set[str] = set()
+
+# WARP-400 §5 — vendor + credentials known for a camera after a successful
+# `vendor_initialize`. accept_camera reads this to build the correct RTSP
+# URL via `frigate_client.build_rtsp_url(vendor, ip, user, pw)` instead of
+# handing Frigate the placeholder URL the prober stashed (which for the
+# placeholder case at rtsp_prober.py:318 is plain `rtsp://<ip>:<port>/stream1`
+# — wrong for every vendor we support). Process-local cache: rebuilt by
+# rerunning `initialize_camera` after a service restart. Wiped on rejection
+# from the discovered list so a re-add starts from scratch.
+_initialized_creds: dict[str, dict[str, str]] = {}
 
 # --- Security helpers ---
 
@@ -352,6 +362,11 @@ async def _maybe_auto_initialize(ip: str) -> bool:
     result = await vendor_initialize(ip, AUTO_INIT_USERNAME, AUTO_INIT_PASSWORD)
     if result.success:
         logger.info("Auto-init succeeded on %s (vendor=%s)", ip, result.vendor)
+        _initialized_creds[ip] = {
+            "vendor": (result.vendor or "").lower(),
+            "username": AUTO_INIT_USERNAME,
+            "password": AUTO_INIT_PASSWORD,
+        }
         publish_discovery({
             "event": "camera_initialized",
             "ip": ip,
@@ -673,6 +688,37 @@ async def accept_camera(mac: str):
         raise HTTPException(status_code=404, detail="Camera not found in pending list")
 
     rtsp_url = camera.get("rtsp_url")
+    # WARP-400 §5 — prefer the vendor-aware URL over the probe's guess if
+    # we successfully ran `initialize_camera` for this IP earlier. The probe
+    # frequently lands a placeholder (`/stream1`) or a Hikvision-shape URL
+    # that's wrong for every other vendor; the per-vendor template + the
+    # credentials the operator gave us during init produce the URL Frigate
+    # actually needs. Fall back to the probe URL if we don't have a template
+    # for the vendor or if init never ran.
+    ip = camera.get("ip", "")
+    creds = _initialized_creds.get(ip)
+    if creds and creds.get("vendor"):
+        try:
+            templated_url = build_rtsp_url(
+                creds["vendor"],
+                ip,
+                creds.get("username") or "admin",
+                creds.get("password") or "",
+            )
+            rtsp_url = templated_url
+            camera["rtsp_url"] = templated_url
+            camera["vendor"] = creds["vendor"]
+            logger.info(
+                "accept_camera: using vendor-aware RTSP URL for %s (vendor=%s)",
+                ip, creds["vendor"],
+            )
+        except UnsupportedVendor:
+            # Known-vendor but no template — leave the probe URL alone.
+            logger.info(
+                "accept_camera: no RTSP template for vendor=%s, falling back to probe URL for %s",
+                creds.get("vendor"), ip,
+            )
+
     if not rtsp_url:
         pending_cameras[mac] = camera  # Put back
         raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
@@ -698,6 +744,10 @@ async def reject_camera(mac: str):
         raise HTTPException(status_code=404, detail="Camera not found")
     if len(rejected_macs) < MAX_REJECTED_MACS:
         rejected_macs.add(mac)
+    # WARP-400 §5 — drop any cached init credentials so a re-add (after
+    # the operator clears the rejection) doesn't auto-populate the URL
+    # with stale credentials.
+    _initialized_creds.pop(camera.get("ip", ""), None)
     return {"status": "rejected", "mac": mac}
 
 
@@ -772,6 +822,13 @@ async def camera_initialize(ip: str, request: Request):
 
     result = await vendor_initialize(ip, username, password)
     _auto_init_attempted.add(ip)
+    if result.success:
+        # WARP-400 §5 — accept_camera reads this to build the right RTSP URL.
+        _initialized_creds[ip] = {
+            "vendor": (result.vendor or "").lower(),
+            "username": username,
+            "password": password,
+        }
     payload = {
         "ip": ip,
         "vendor": result.vendor,
