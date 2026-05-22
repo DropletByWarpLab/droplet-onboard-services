@@ -247,6 +247,22 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  // WARP-399 — ops-console approval surface. Distinct from voice in that
+  // ops needs ADMIN role to POST /api/autonomous-proposals/:id/approve|reject
+  // (which gates on owner/admin). The trust boundary here is the
+  // Warp Lab operator behind ops-console, NOT the customer-facing
+  // dashboard surface — different audit semantics (ops surfaces this
+  // as `_service:ops`, not as a real user) but same effective rights
+  // on the autonomous-proposals routes.
+  {
+    token: config.SERVICE_TOKEN_OPS,
+    principal: {
+      id: "_service:ops",
+      username: "_service:ops",
+      displayName: "Ops Console",
+      role: "admin",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {

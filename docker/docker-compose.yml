@@ -99,6 +99,11 @@ services:
       # MUST equal voice-io's ORCHESTRATOR_TOKEN env value or the handshake
       # 401s. authMiddleware does a constant-time compare against this.
       - SERVICE_TOKEN_VOICE=${SERVICE_TOKEN_VOICE:-}
+      # WARP-399 — service-principal bearer that ops-console presents on
+      # /api/autonomous-proposals*. Distinct from VOICE because ops gets
+      # admin role (approve/reject), voice only gets service role.
+      # MUST equal ops-console's OPS_ORCHESTRATOR_TOKEN env value.
+      - SERVICE_TOKEN_OPS=${SERVICE_TOKEN_OPS:-}
       # WARP-44: `real` (default) / `mock` / `disabled`. When disabled the
       # orchestrator short-circuits router calls and the dashboard surfaces a
       # "Router supervision disabled" banner. `mock` is handled on the routing
@@ -793,6 +798,12 @@ services:
       - OPS_PROBE_ROUTING=${OPS_PROBE_ROUTING:-}
       - OPS_PROBE_SWITCH=${OPS_PROBE_SWITCH:-}
       - OPS_PROBE_NEXTCLOUD=${OPS_PROBE_NEXTCLOUD:-}
+      # WARP-399 — bridge to orchestrator's autonomous-proposals API.
+      # OPS_ORCHESTRATOR_TOKEN MUST equal SERVICE_TOKEN_OPS on the
+      # orchestrator stanza or the proxy 503s. Operator sets both in
+      # .env in lockstep (same pattern as SERVICE_TOKEN_VOICE).
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
+      - OPS_ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_OPS:-}
     ports:
       # Bind to 127.0.0.1 only — the operator reaches it through an SSH
       # tunnel or (future) the WireGuard reverse tunnel. Never expose

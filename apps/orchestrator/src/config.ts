@@ -141,6 +141,17 @@ const envSchema = z.object({
   // lockstep. Both must agree or voice → orchestrator handshake fails.
   SERVICE_TOKEN_VOICE: z.string().default(""),
 
+  // SERVICE_TOKEN_OPS — recognised by authMiddleware for the ops-console
+  // service (WARP-399 autonomous-proposals approval surface). Unlike
+  // SERVICE_TOKEN_VOICE (role=service, read-only), ops-console runs the
+  // operator's approval flow for Tier-2 proposals and so needs admin role
+  // to call POST /api/autonomous-proposals/:id/approve|reject. Set in
+  // lockstep with ops-console's OPS_ORCHESTRATOR_TOKEN env in
+  // docker-compose.yml. Empty default means "no token configured" —
+  // ops-console will surface "orchestrator unauthenticated" in the UI
+  // until an operator sets it.
+  SERVICE_TOKEN_OPS: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if
