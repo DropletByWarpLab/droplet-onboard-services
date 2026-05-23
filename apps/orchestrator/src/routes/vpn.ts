@@ -35,6 +35,7 @@ import {
   VpnConfigError,
   VpnIpExhaustedError,
 } from "../services/vpn.service.js";
+import { notePeerCreated } from "../services/screen-qr.service.js";
 
 const logger = pino({ name: "vpn-route" });
 
@@ -196,6 +197,12 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         lanCidr: config.WIREGUARD_LAN_CIDR,
         vpnSubnet: config.WIREGUARD_VPN_SUBNET,
       });
+
+      // PyPortal screen QR — surface this peer for ~60 s so a phone
+      // next to the box can scan it directly without the dashboard
+      // browser. Best-effort: notePeerCreated() never throws (catches
+      // any push failure internally), so the API response stays clean.
+      notePeerCreated(conf, saved.deviceLabel ?? undefined);
 
       res.status(201).json({
         peer: {

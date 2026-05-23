@@ -24,6 +24,7 @@ import {
   stopHealthMonitor,
 } from "./services/health-monitor.service.js";
 import { ensureMcpStarted, stopMcp } from "./services/mcp-client.singleton.js";
+import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
@@ -231,6 +232,11 @@ async function main() {
     logger.info("Shutting down...");
     cronRuntime.stop();
     stopHealthMonitor();
+    // WARP-165: stop the screen-QR poller's setInterval so integration
+    // test suites that drive `createApp()` end-to-end don't leak the
+    // timer (the handle is unref'd so it doesn't block process exit in
+    // production, but explicit stop keeps shutdown ordering predictable).
+    stopScreenQRPoller();
     shutdownDeviceRegistration();
     await shutdownMatterService();
     await shutdownCameraService();
