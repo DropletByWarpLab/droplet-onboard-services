@@ -26,6 +26,7 @@ import {
   vpnStatus,
   createVpnPeer,
   deleteVpnPeer,
+  fetchDuckDnsStatus,
   RouterError,
 } from "../services/openwrt.client.js";
 import {
@@ -42,6 +43,69 @@ const logger = pino({ name: "vpn-route" });
 const createPeerSchema = z.object({
   deviceLabel: z.string().trim().min(1).max(64),
 });
+
+/**
+ * Resolve the WireGuard endpoint host for peer configs.
+ *
+ * Closes the "set WIREGUARD_ENDPOINT_HOST automatically when DuckDNS is
+ * configured" follow-up called out in M2.6 §"Open follow-ups" (WARP-174,
+ * setup wizard scope). Priority:
+ *
+ *   1. If `config.WIREGUARD_ENDPOINT_HOST` env is set, use it verbatim —
+ *      operator override always wins.
+ *   2. Else, ask the routing service for the current DuckDNS state. If
+ *      it's configured AND enabled (the customer flipped the auto-update
+ *      toggle on in the Internet step), derive `<subdomain>.duckdns.org`
+ *      (or use `fullDomain` if the routing service returned it).
+ *   3. Else, return empty string — caller surfaces "Internet not
+ *      configured" to the dashboard.
+ *
+ * Routing-service failures are non-fatal: we treat "couldn't check" as
+ * "no endpoint", which downgrades the wizard's VPN step to its "set up
+ * internet first" view rather than crashing the orchestrator. The env
+ * override path is unaffected — if you set the env var you keep working
+ * even if the routing service is down.
+ */
+// In-process TTL cache for the DuckDNS lookup. The fallback fires
+// inside both `GET /vpn/status` (polled by the dashboard's
+// remote-access page) and `POST /vpn/peers` (one-shot per peer
+// creation). DuckDNS subdomains don't change minute-to-minute, and
+// hitting the routing service on every GET would amplify dashboard
+// polling onto a Python sidecar that already has plenty to do. 30s
+// strikes the balance between "operator just turned DuckDNS on and
+// expects to see the endpoint immediately" and "don't hammer the
+// routing service on the hot path".
+const ENDPOINT_CACHE_TTL_MS = 30_000;
+let _endpointCache: { value: string; expiresAt: number } | null = null;
+
+async function resolveEndpointHost(): Promise<string> {
+  const envHost = config.WIREGUARD_ENDPOINT_HOST.trim();
+  if (envHost) return envHost;
+  const now = Date.now();
+  if (_endpointCache && _endpointCache.expiresAt > now) {
+    return _endpointCache.value;
+  }
+  let value = "";
+  try {
+    const ddns = await fetchDuckDnsStatus();
+    if (ddns.configured && ddns.enabled) {
+      value = ddns.fullDomain || `${ddns.subdomain}.duckdns.org`;
+    }
+  } catch (err) {
+    logger.debug(
+      { err },
+      "vpn: could not check DuckDNS for endpoint fallback — treating as unconfigured",
+    );
+  }
+  _endpointCache = { value, expiresAt: now + ENDPOINT_CACHE_TTL_MS };
+  return value;
+}
+
+// Test-only: drop the in-process cache so unit tests can simulate a
+// DuckDNS config change without waiting out the TTL.
+export function _resetEndpointCacheForTests(): void {
+  _endpointCache = null;
+}
 
 function getUser(req: Request): { username: string; role: string } {
   return {
@@ -63,10 +127,25 @@ export function createVpnRouter(prisma: PrismaClient): Router {
   // count, and whether the endpoint host is configured. No private data
   // returned. Available to any authenticated user — they need to know
   // whether Remote Access is on before they hit "Add device".
-  router.get("/vpn/status", async (_req: Request, res: Response, next: NextFunction) => {
+  //
+  // The full `endpointHost` (i.e. the DuckDNS subdomain that resolves
+  // to the device's public IP) is admin-only: pre-WARP-174 this field
+  // came from the operator-set WIREGUARD_ENDPOINT_HOST env var and was
+  // never visible to family users. Now that resolveEndpointHost() falls
+  // back to DuckDNS, exposing it broadly would leak the device's public
+  // reachability to every authenticated account — same gate the
+  // PUT /api/ddns/duckdns route already enforces. Family users still
+  // get `endpointConfigured: boolean` so the "Add device" button can
+  // light up at the right time without leaking the hostname itself.
+  router.get("/vpn/status", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const status = await vpnStatus();
-      const endpointConfigured = config.WIREGUARD_ENDPOINT_HOST.trim() !== "";
+      // WARP-174: derive from DuckDNS as a fallback when the env override
+      // isn't set. Same helper used in POST /vpn/peers so the dashboard's
+      // "Add device" button enables the moment DuckDNS lands.
+      const endpointHost = await resolveEndpointHost();
+      const endpointConfigured = endpointHost !== "";
+      const exposeEndpointHost = isAdmin(req);
       if (!status) {
         return res.json({
           configured: false,
@@ -77,7 +156,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       res.json({
         configured: true,
         endpointConfigured,
-        endpointHost: config.WIREGUARD_ENDPOINT_HOST || null,
+        endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
         addresses: status.addresses,
@@ -122,8 +201,17 @@ export function createVpnRouter(prisma: PrismaClient): Router {
   // dashboard renders the .conf as a QR. The private key is in the .conf
   // text and is NEVER returned again — if the user loses it they revoke
   // and re-mint.
+  //
+  // Admin-gated: minting a VPN peer punches a route into the LAN with
+  // full network-layer access. Self-service enrolment isn't the intended
+  // policy — family users should ask an admin to add their device. Same
+  // posture as the rest of `/ddns/duckdns` (network-wide config is
+  // admin-only). The wizard's VPN step now also surfaces this in copy.
   router.post("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
     try {
+      if (!isAdmin(req)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
       const parsed = createPeerSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({
@@ -132,11 +220,12 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         });
       }
       const user = getUser(req);
-      const endpointHost = config.WIREGUARD_ENDPOINT_HOST.trim();
+      // WARP-174: env-or-DuckDNS resolution. See resolveEndpointHost above.
+      const endpointHost = await resolveEndpointHost();
       if (!endpointHost) {
         return res.status(503).json({
           error:
-            "Set WIREGUARD_ENDPOINT_HOST in .env (DuckDNS subdomain or your router's public IP) before issuing peer configs.",
+            "Configure a DuckDNS subdomain in the wizard's Internet step (or set WIREGUARD_ENDPOINT_HOST in .env) before issuing peer configs.",
         });
       }
 

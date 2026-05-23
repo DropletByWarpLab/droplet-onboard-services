@@ -20,6 +20,27 @@ model Device {
   updatedAt   DateTime @updatedAt
 }
 
+/// WARP-174: per-drive customer-chosen names + icons + notes.
+///
+/// The device-bridge inventories mounted drives by filesystem UUID; this
+/// model attaches a friendly `displayName` ("Wedding Photos") so the
+/// dashboard's Storage surface and the setup wizard's Storage step can
+/// show the human name instead of the FS-provided label or the mount
+/// path. Naming mirrors `NetworkDevice.displayName` from the ADR-002
+/// Phase 1 device-intelligence pattern — same shape, different domain.
+///
+/// The setup wizard upserts here via PATCH /api/storage/drives/:uuid.
+/// Survives reboots because the UUID is the filesystem UUID, stable as
+/// long as the drive itself is.
+model Drive {
+  uuid        String   @id
+  displayName String
+  icon        String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 /// WARP-304: per-user persistent chat sessions for the /chat page.
 /// `userId` is the Nextcloud username from the auth middleware. The dashboard
 /// only ever lists / reads sessions for the requesting user — owner/admin do

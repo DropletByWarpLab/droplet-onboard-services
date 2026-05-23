@@ -22,6 +22,12 @@ function isAdmin(req: Request): boolean {
 
 // Subdomain/token grammars match the routing service Pydantic schemas so
 // invalid input is rejected here instead of round-tripping through HTTP.
+//
+// `token` is optional: when omitted the routing service preserves the
+// existing /etc/config/ddns password value, supporting the wizard's
+// "keep stored token" path for returning customers (re-entering the
+// Internet step via VPN Back or a wizard re-run). When present it must
+// still meet the min(10)/max(128) DuckDNS shape.
 const setSchema = z.object({
   subdomain: z
     .string()
@@ -31,7 +37,7 @@ const setSchema = z.object({
       message:
         "Subdomain must be lowercase letters, digits, or hyphens (no leading/trailing hyphen, no dots).",
     }),
-  token: z.string().min(10).max(128),
+  token: z.string().min(10).max(128).optional(),
   enabled: z.boolean().optional(),
 });
 

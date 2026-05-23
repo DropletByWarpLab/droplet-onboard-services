@@ -103,6 +103,13 @@ const chatRequestSchema = z.object({
   allowed_tools: z.array(z.string()).optional(),
   conversationId: z.string().uuid().optional(),
   turnId: z.string().min(1).max(128).optional(),
+  // WARP-174: setup wizard's "Ask the AI" sample prompt and similar
+  // throwaway flows (system pings, health probes) set this to true
+  // so the call skips ensureConversation + createTurnRows. Without
+  // the flag every wizard tap creates a real ChatSession that
+  // shows up in the customer's /chat history sidebar — confusing
+  // first-run UX (their oldest conversation is the wizard's probe).
+  ephemeral: z.boolean().optional().default(false),
 });
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
@@ -286,7 +293,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       let conversationId: string | null = null;
       let assistantMessageId: string | null = null;
 
-      if (userId && persistedUserContent) {
+      // WARP-174: ephemeral chats (setup wizard sample prompt, health
+      // probes) skip the entire persistence path so they don't clutter
+      // the user's /chat history sidebar. The reply still goes back to
+      // the caller — we just don't write any rows.
+      if (chatReq.ephemeral) {
+        // Intentionally leave conversationId/assistantMessageId null;
+        // downstream just won't set the X-Conversation-Id header.
+      } else if (userId && persistedUserContent) {
         // ensureConversation: find-or-create the ChatSession row.
         const convo = await persistence
           .ensureConversation({

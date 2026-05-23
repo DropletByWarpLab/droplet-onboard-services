@@ -215,9 +215,13 @@ class DuckDnsConfigRequest(BaseModel):
         ..., min_length=1, max_length=63, pattern=_DUCKDNS_SUBDOMAIN_PATTERN,
         description="DuckDNS subdomain, e.g. 'stefan-droplet' (no '.duckdns.org' suffix).",
     )
-    token: str = Field(
-        ..., min_length=10, max_length=128,
-        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read.",
+    # Optional: when omitted, the handler preserves the existing
+    # /etc/config/ddns password. The dashboard's wizard uses this for
+    # the "keep stored token" path so a returning customer doesn't have
+    # to re-paste the token every time they re-visit the Internet step.
+    token: Optional[str] = Field(
+        default=None, min_length=10, max_length=128,
+        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read. Omit to keep the currently-stored value.",
     )
     enabled: bool = Field(
         default=True,

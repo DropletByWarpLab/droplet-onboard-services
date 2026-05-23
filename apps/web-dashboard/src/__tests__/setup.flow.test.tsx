@@ -24,10 +24,32 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 // API stubs. setupAdmin + loginUser must resolve so the page advances to
-// `discovery`; fetchMatterDevices keeps the discovery polling loop quiet.
+// `internet`; fetchDuckDnsStatus returns "unconfigured" so the wizard's
+// Internet step renders its form (and its "Skip for now" button) without
+// reaching the network; fetchMatterDevices keeps the discovery polling
+// loop quiet.
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // Storage step auto-skips when zero drives — keep the bridge "empty"
+  // so the flow test doesn't have to click anything on that step.
+  fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
+  updateDriveLabel: vi.fn(),
+  // Cameras step auto-skips when zero discovered cameras — same idea.
+  fetchDiscoveredCameras: vi.fn(async () => []),
+  acceptDiscoveredCamera: vi.fn(),
+  // VPN step: endpoint not configured → preCheck phase, "Skip for now"
+  // is always present.
+  fetchVpnStatus: vi.fn(async () => ({
+    configured: false,
+    endpointConfigured: false,
+  })),
+  createVpnPeer: vi.fn(),
+  // AI step: no models yet → "Skip for now" is always present.
+  fetchModels: vi.fn(async () => ({ models: [] })),
+  sendChat: vi.fn(),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -81,8 +103,35 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
     });
 
-    // We should now be on `discovery`. Skip straight to done.
+    // We're now on `internet`. Skip to `discovery`. Need to flush again so
+    // the InternetStep's fetchDuckDnsStatus effect resolves before the
+    // "Skip for now" button is queried — the button is present regardless,
+    // but the form's loading-disabled state can briefly mask the primary
+    // CTA; the skip link is always rendered.
     await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // We're now on `discovery`. Skip again. Cameras auto-skips on 0,
+    // VPN lands on preCheck (endpointConfigured: false), one more skip
+    // gets us to `done`.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    // VPN step preCheck → skip → AI.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    // AI step → skip → Done. fetchModels mocked empty so the picker
+    // just shows "No models available yet"; the Skip link is always
+    // rendered.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 

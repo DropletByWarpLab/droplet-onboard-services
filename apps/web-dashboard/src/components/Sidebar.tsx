@@ -11,6 +11,7 @@ import {
   Film,
   FolderOpen,
   Globe,
+  HelpCircle,
   Home,
   Laptop,
   LayoutDashboard,
@@ -66,6 +67,10 @@ const secondaryNav: NavItem[] = [
   { href: "/remote-access", label: "Remote Access", icon: Globe },
   { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
+  // WARP-174: customer-facing manual + "How Droplet works" replay
+  // modal. Placed at the bottom of the secondary nav so it sits next
+  // to Settings — the same "support / reference" mental zone.
+  { href: "/help", label: "Help", icon: HelpCircle },
 ];
 
 // WARP-279: admin-only entries appended to the secondary nav at render
