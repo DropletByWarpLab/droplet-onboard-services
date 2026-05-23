@@ -203,7 +203,7 @@ class RealBackend:
         """
         return (
             b"-----BEGIN CERTIFICATE-----\n"
-            b"# WARP-230 synth EK cert placeholder — replace via tpm2-pytss\n"
+            b"# WARP-230 synth EK cert placeholder - replace via tpm2-pytss\n"
             b"-----END CERTIFICATE-----\n"
         )
 
@@ -309,6 +309,6 @@ class RealBackend:
         _ = now + dt.timedelta(days=DEVICE_CERT_VALIDITY_DAYS)
         return (
             b"-----BEGIN CERTIFICATE-----\n"
-            b"# WARP-230 real-backend cert placeholder — TPM-signed body fills in\n"
+            b"# WARP-230 real-backend cert placeholder - TPM-signed body fills in\n"
             b"-----END CERTIFICATE-----\n"
         )
