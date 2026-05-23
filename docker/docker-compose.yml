@@ -751,6 +751,79 @@ services:
     profiles: ["display"]
     restart: always
 
+  # ---------------------------------------------------------------------------
+  # ops-console — operator-side monitoring + control surface.
+  #
+  # Profile-gated to "ops" so the customer's normal `docker compose up`
+  # (default + "full") does not start it. Operator turns it on with:
+  #   docker compose --profile ops up -d ops-console
+  # which is wired up by the operator's reverse-tunnel script (future).
+  #
+  # Mounts /var/run/docker.sock — that's the privilege boundary. Anyone
+  # inside this container is effectively root on the host. The bearer
+  # token in services/ops-console/ops/auth.py is what stops uninvited
+  # /ops/* requests; the reverse tunnel + tailscale ACL is the outer
+  # layer (covered in services/ops-console/README.md).
+  # ---------------------------------------------------------------------------
+  ops-console:
+    build:
+      context: ..
+      dockerfile: services/ops-console/Dockerfile
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Operator pastes this token into the UI. setup.sh writes a 32-byte
+      # hex string to .env; if missing the container generates an
+      # ephemeral one and logs it loudly (NOT for production).
+      - OPS_TOKEN=${OPS_TOKEN:-}
+      # Per-service probe URLs. Defaults verified live on POC 2026-05-15.
+      # Empty default = container exists but exposes no HTTP /health
+      # endpoint; surfaces as `unknown` (relies on /ops/containers for
+      # liveness). Override any with a real URL via .env to enable.
+      - OPS_PROBE_ORCHESTRATOR=${OPS_PROBE_ORCHESTRATOR:-http://orchestrator:3000/api/orchestrator/health}
+      - OPS_PROBE_AI_GATEWAY=${OPS_PROBE_AI_GATEWAY:-http://ai-gateway:8000/ai/health}
+      - OPS_PROBE_VOICE=${OPS_PROBE_VOICE:-http://voice-io:8086/health}
+      - OPS_PROBE_FRIGATE=${OPS_PROBE_FRIGATE:-http://frigate:5000/healthz}
+      # Workers / no-HTTP-by-design — leave defaults empty:
+      - OPS_PROBE_WEB_DASHBOARD=${OPS_PROBE_WEB_DASHBOARD:-}
+      - OPS_PROBE_FILE_INDEXER=${OPS_PROBE_FILE_INDEXER:-}
+      - OPS_PROBE_CAMERA_DISCOVERY=${OPS_PROBE_CAMERA_DISCOVERY:-}
+      - OPS_PROBE_DEVICE_IDENTITY=${OPS_PROBE_DEVICE_IDENTITY:-}
+      - OPS_PROBE_MCP=${OPS_PROBE_MCP:-}
+      - OPS_PROBE_ROUTING=${OPS_PROBE_ROUTING:-}
+      - OPS_PROBE_SWITCH=${OPS_PROBE_SWITCH:-}
+      - OPS_PROBE_NEXTCLOUD=${OPS_PROBE_NEXTCLOUD:-}
+    ports:
+      # Bind to 127.0.0.1 only — the operator reaches it through an SSH
+      # tunnel or (future) the WireGuard reverse tunnel. Never expose
+      # this on the customer-facing IP, even with the bearer token,
+      # because docker.sock = host root.
+      #
+      # Host port 8089 (not 8087) to stay outside the 808x service
+      # cluster (gateway/routing/switch/mcp/voice all live there) and
+      # avoid any chance of colliding with oled-display which runs in
+      # host network mode. Container still listens on 8087 internally.
+      - "127.0.0.1:8089:8087"
+    volumes:
+      # The whole point of this container — read container state +
+      # restart sick ones. Mount as :ro is NOT possible because the
+      # daemon needs write to act on POSTs. The bearer-token gate +
+      # the compose-project label scoping in ops/docker_client.py
+      # restrict what callers can ask for.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # WARP-337: persistent audit log. Every /ops/* request lands
+      # here as a JSONL line (timestamp, identity, method, path,
+      # status, latency, optional detail). Mount the named volume
+      # rather than a bind so the audit trail survives ops-console
+      # container restarts during a support engagement.
+      - ops-audit:/var/log/ops-console
+    # No-new-privileges defence-in-depth — even with docker.sock the
+    # container itself can't gain extra caps. Helpful if a future
+    # ops-console exec path lands and we forget to harden it.
+    security_opt:
+      - no-new-privileges:true
+    profiles: ["ops"]
+    restart: unless-stopped
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
@@ -763,6 +836,10 @@ volumes:
   frigate-config:
   aikeys:
   nextcloud-data:
+  # WARP-337: ops-console JSONL audit trail. Named volume rather than a
+  # bind mount so the trail survives container restarts during support
+  # engagements and doesn't require operators to pre-create a host dir.
+  ops-audit:
   matter-data:
   brain-memory-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
