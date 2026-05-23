@@ -246,7 +246,7 @@ export default function SettingsPage() {
             label="Services"
             value={
               health
-                ? `DB: ${health.services.db ? "OK" : "Down"} | Cache: ${health.services.redis ? "OK" : "Down"} | AI: ${health.services.aiGateway ? "OK" : "Down"}`
+                ? `DB: ${health.services.db ? "OK" : "Down"} | Cache: ${health.services.redis ? "OK" : "Down"} | AI: ${health.services.aiGateway ? "OK" : "Down"} | Screen: ${health.services.display ? "OK" : "Down"}`
                 : "Loading..."
             }
           />

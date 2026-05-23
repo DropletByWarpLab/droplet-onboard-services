@@ -78,14 +78,22 @@ STATE_FILE = os.environ.get(
 if not os.access(os.path.dirname(STATE_FILE) or "/", os.W_OK):
     STATE_FILE = "/tmp/droplet-bridge-state.json"
 
-# Shared-secret auth for mutating endpoints. Falls back to DEVICE_SECRET_KEY
-# (the same token the orchestrator uses) so the Droplet stack has one
-# credential rather than three. Even with the bridge bound to loopback,
-# any unprivileged process on the Jetson could currently POST to
-# /openwrt/wifi/rotate or /wifi/connect — requiring the token moves that
-# capability from "anyone with a shell" to "anyone with the secret".
+# Shared-secret auth for mutating endpoints. Primary source is
+# BRIDGE_AUTH_TOKEN, populated by install-device-bridge.sh from
+# SERVICE_TOKEN_DISPLAY in the repo .env (WARP-165). Older installs may
+# still have DEVICE_SECRET_KEY / SERVICE_SECRET as the bridge token —
+# we keep those as fallbacks so a bridge that hasn't been re-installed
+# yet still authenticates correctly against an orchestrator that's also
+# still on the old token. The next `sudo ./scripts/install-device-bridge.sh`
+# run rotates the bridge env to SERVICE_TOKEN_DISPLAY.
+#
+# Even with the bridge bound to loopback, any unprivileged process on
+# the Jetson could currently POST to /openwrt/wifi/rotate or
+# /wifi/connect — requiring the token moves that capability from
+# "anyone with a shell" to "anyone with the secret".
 BRIDGE_AUTH_TOKEN = (
     os.environ.get("BRIDGE_AUTH_TOKEN")
+    or os.environ.get("SERVICE_TOKEN_DISPLAY")
     or os.environ.get("DEVICE_SECRET_KEY")
     or os.environ.get("SERVICE_SECRET")
     or ""
@@ -995,9 +1003,11 @@ def _boot_banner():
         # are mutation paths that reach OpenWrt and nmcli respectively; even
         # loopback exposure to an unprivileged process is not acceptable.
         raise RuntimeError(
-            "BRIDGE_AUTH_TOKEN (or DEVICE_SECRET_KEY / SERVICE_SECRET) is "
-            "required — refusing to start device-bridge without an auth "
-            "secret. scripts/setup.sh provisions this automatically.")
+            "BRIDGE_AUTH_TOKEN (or SERVICE_TOKEN_DISPLAY / "
+            "DEVICE_SECRET_KEY / SERVICE_SECRET) is required — refusing "
+            "to start device-bridge without an auth secret. "
+            "sudo ./scripts/install-device-bridge.sh provisions this "
+            "automatically from the repo .env (WARP-165).")
 
 
 if __name__ == "__main__":
