@@ -34,7 +34,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -67,6 +67,13 @@ generate_env() {
   # the bearer is the second layer of defense. Rotates independently of
   # all other secrets so support can hand it off / revoke per-engagement.
   ops_token=$(openssl rand -hex 32)
+  # WARP-339: shared bearer the mcp-server presents on outbound calls
+  # back to the orchestrator's REST surface (matter, audit-log, etc.).
+  # Same authMiddleware path as voice — distinct token so the two
+  # service principals can rotate independently and request logs
+  # attribute correctly (`_service:mcp` vs `_service:voice`). Compose
+  # wires mcp-server's ORCHESTRATOR_TOKEN to ${SERVICE_TOKEN_MCP}.
+  service_token_mcp=$(openssl rand -hex 32)
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -134,6 +141,15 @@ SERVICE_TOKEN_DISPLAY=$service_token_display
 # this bearer is the second. Rotate per support engagement if needed.
 OPS_TOKEN=$ops_token
 
+# --- MCP service bearer (mcp-server → orchestrator REST) ---
+# WARP-339. Same shape as SERVICE_TOKEN_VOICE: the mcp-server presents
+# this Bearer on outbound calls to the orchestrator's /api/matter/*,
+# /api/audit-log/*, /api/safety-tier/* routes. authMiddleware matches
+# via timingSafeEqual and sets req.user = _service:mcp. Distinct token
+# so the two service consumers rotate independently. Compose wires
+# mcp-server's ORCHESTRATOR_TOKEN to \${SERVICE_TOKEN_MCP}.
+SERVICE_TOKEN_MCP=$service_token_mcp
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -179,6 +195,7 @@ EOF
   log_info "  VOICE_TOKEN       : ${service_token_voice:0:8}****"
   log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
+  log_info "  MCP_TOKEN         : ${service_token_mcp:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -256,6 +273,10 @@ migrate_env() {
   # silently. The token is operator-only (loopback bind + reverse tunnel
   # is the actual exposure surface — see docs/operator-surfaces.md).
   _migrate_ensure_key OPS_TOKEN "$(openssl rand -hex 32)"
+  # WARP-339 backfill: existing installs predate the mcp service-token
+  # path; without this key mcp-server's outbound calls to orchestrator
+  # /api/matter/* will 401 when AUTH_ENABLED=true.
+  _migrate_ensure_key SERVICE_TOKEN_MCP "$(openssl rand -hex 32)"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — Jetson production hits 'real', everything else hits

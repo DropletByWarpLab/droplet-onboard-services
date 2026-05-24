@@ -99,6 +99,11 @@ services:
       # MUST equal voice-io's ORCHESTRATOR_TOKEN env value or the handshake
       # 401s. authMiddleware does a constant-time compare against this.
       - SERVICE_TOKEN_VOICE=${SERVICE_TOKEN_VOICE:-}
+      # WARP-339: same shape for mcp-server's outbound calls to
+      # /api/matter/*, /api/audit-log/*, etc. matchServiceToken
+      # binds matches to the `_service:mcp` AuthUser. Rotate
+      # independently of SERVICE_TOKEN_VOICE.
+      - SERVICE_TOKEN_MCP=${SERVICE_TOKEN_MCP:-}
       # WARP-44: `real` (default) / `mock` / `disabled`. When disabled the
       # orchestrator short-circuits router calls and the dashboard surfaces a
       # "Router supervision disabled" banner. `mock` is handled on the routing
@@ -223,6 +228,19 @@ services:
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - NEXTCLOUD_URL=http://nextcloud:80
+      # WARP-102: Matter tool calls + audit-log proxy through here back
+      # to the orchestrator's /api/matter/*, /api/audit-log/*. Explicit
+      # wiring (rather than relying on baseUrlFor's compose-DNS default)
+      # matches the pattern every other service-to-service URL uses.
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
+      # WARP-339: service-principal bearer for the outbound orchestrator
+      # calls above. MUST equal the orchestrator's SERVICE_TOKEN_MCP env
+      # value or authMiddleware rejects with 401. Mirrors the
+      # voice-io ORCHESTRATOR_TOKEN pattern (line ~588). The
+      # ${SERVICE_TOKEN_MCP:-${ORCHESTRATOR_TOKEN:-}} fallback lets a
+      # dev install override the whole pair with a single env var
+      # without needing both names in their local .env.
+      - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_MCP:-${ORCHESTRATOR_TOKEN:-}}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:
