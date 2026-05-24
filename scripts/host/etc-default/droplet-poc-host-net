@@ -1,0 +1,24 @@
+# /etc/default/droplet-poc-host-net — env for droplet-poc-host-net.service
+#
+# Sourced by systemd via the EnvironmentFile= directive. Override any
+# of these to retarget the script without editing the body.
+#
+# SWITCH_IP            — mgmt IP of the Lantronix switch. Defaults to
+#                        the factory-set 192.168.1.77; only override
+#                        once the smart-port rework re-IPs the switch
+#                        into the LAN subnet.
+# HOST_SWITCH_SIDE_IP  — /32 alias on br-lan that gives the host a
+#                        source address in the switch's subnet. Pick
+#                        something outside the upstream router's
+#                        DHCP pool on br-mgmt (which is also .1.x).
+# LAN_BRIDGE           — the host bridge the script binds dnsmasq to
+#                        and adds the switch route via. enp12s0 must
+#                        be a member.
+# DNSMASQ_CONF         — full path to the dnsmasq config installed by
+#                        install-poc-host-net.sh. Override if you
+#                        copy the file somewhere else.
+
+SWITCH_IP=192.168.1.77
+HOST_SWITCH_SIDE_IP=192.168.1.250
+LAN_BRIDGE=br-lan
+DNSMASQ_CONF=/etc/droplet-poc-host-net/lan-dhcp.conf

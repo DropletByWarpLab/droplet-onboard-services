@@ -1,0 +1,22 @@
+[Unit]
+Description=Droplet Edge Platform
+Documentation=https://github.com/Nahast/droplet
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/droplet/edge-platform/docker
+EnvironmentFile=/home/droplet/edge-platform/.env
+ExecStart=/usr/bin/docker compose -f /home/droplet/edge-platform/docker/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose -f /home/droplet/edge-platform/docker/docker-compose.yml down
+ExecReload=/usr/bin/docker compose -f /home/droplet/edge-platform/docker/docker-compose.yml restart
+User=droplet
+Group=docker
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
