@@ -4,18 +4,18 @@
 
 ## TL;DR for future agents and developers
 
-- **`droplet-pi-platform`** (this repo) — runs **intelligence**. The orchestrator's ReAct agent loop, the MCP server with the tool registry, the AI gateway that proxies model requests to Ollama.
+- **`droplet-onboard-services`** (this repo) — runs **intelligence**. The orchestrator's ReAct agent loop, the MCP server with the tool registry, the AI gateway that proxies model requests to Ollama.
 - **`droplet-jetson-ai`** (sibling repo) — runs **inference**. Ollama + a small Python sidecar that does manifest pulls and exposes `/models/eligible`. **No agent runtime there.**
 - The two repos are deployed side-by-side on the same Jetson (single device).
 
-If you're looking for "where is Ollama" or "how do I add a new model" — **the answer is the other repo, not this one**. There is intentionally zero inference-server code in `droplet-pi-platform`.
+If you're looking for "where is Ollama" or "how do I add a new model" — **the answer is the other repo, not this one**. There is intentionally zero inference-server code in `droplet-onboard-services`.
 
 ## Architecture
 
 ```
               ┌─────────────── single Jetson Orin Nano 8 GB ───────────────┐
               │                                                            │
-              │   droplet-pi-platform (orchestrator)                       │
+              │   droplet-onboard-services (orchestrator)                       │
               │   ─ apps/orchestrator/      ReAct agent loop, owns chat    │
               │   ─ services/mcp-server/    stdio child, ~50 tools         │
               │   ─ services/ai-gateway/    pure model proxy: routing      │
@@ -64,12 +64,12 @@ bump both sides in lockstep when the contract changes.
 
 | Concern | Location |
 |---|---|
-| Agent loop (read → tool-call → act → re-prompt) | `droplet-pi-platform/apps/orchestrator/src/services/llm-agent.service.ts` |
-| Tool definitions (~50 tools) | `droplet-pi-platform/packages/tools-core/` |
-| MCP server (stdio child of orchestrator) | `droplet-pi-platform/services/mcp-server/` |
-| Model routing (`llama*` → local, `claude*` → Anthropic, `gpt*` → OpenAI) | `droplet-pi-platform/services/ai-gateway/router.py` |
-| HTTP API exposed to the world (`/ai/chat`, `/ai/sessions/*`, `/ai/keys/*`) | `droplet-pi-platform/services/ai-gateway/main.py` |
-| BYOK API key storage (Fernet-encrypted) | `droplet-pi-platform/services/ai-gateway/` |
+| Agent loop (read → tool-call → act → re-prompt) | `droplet-onboard-services/apps/orchestrator/src/services/llm-agent.service.ts` |
+| Tool definitions (~50 tools) | `droplet-onboard-services/packages/tools-core/` |
+| MCP server (stdio child of orchestrator) | `droplet-onboard-services/services/mcp-server/` |
+| Model routing (`llama*` → local, `claude*` → Anthropic, `gpt*` → OpenAI) | `droplet-onboard-services/services/ai-gateway/router.py` |
+| HTTP API exposed to the world (`/ai/chat`, `/ai/sessions/*`, `/ai/keys/*`) | `droplet-onboard-services/services/ai-gateway/main.py` |
+| BYOK API key storage (Fernet-encrypted) | `droplet-onboard-services/services/ai-gateway/` |
 | Model serving (Ollama process) | `droplet-jetson-ai/docker/docker-compose.yml` (ollama service) |
 | Model lifecycle (pull/sync/list) | `droplet-jetson-ai/services/ollama-manager/` |
 | Per-device VRAM detection | `droplet-jetson-ai/services/ollama-manager/vram.py` |
@@ -89,13 +89,13 @@ The Jetson side (this repo) is involved only in step 3-4. We see one HTTP call p
 
 ## Adding a new agent capability
 
-**Add a new tool the agent can call:** edit `droplet-pi-platform/packages/tools-core/src/index.ts`. The tool registry is shared between the orchestrator's agent loop and the MCP server, so adding it once exposes it both ways.
+**Add a new tool the agent can call:** edit `droplet-onboard-services/packages/tools-core/src/index.ts`. The tool registry is shared between the orchestrator's agent loop and the MCP server, so adding it once exposes it both ways.
 
 **Add a new model the appliance can serve:** edit `droplet-jetson-ai/models/model-manifest.json` to add an entry, then run `POST /models/sync` on the appliance. The manifest entry needs a `min_vram_gb` so the appliance knows whether to actually pull it. No code changes in either repo.
 
-**Change the agent's system prompt:** edit the orchestrator-side prompt in `droplet-pi-platform/apps/orchestrator/src/services/llm-agent.service.ts`. There is no system prompt on the Jetson side; the appliance is stateless w.r.t. agent identity.
+**Change the agent's system prompt:** edit the orchestrator-side prompt in `droplet-onboard-services/apps/orchestrator/src/services/llm-agent.service.ts`. There is no system prompt on the Jetson side; the appliance is stateless w.r.t. agent identity.
 
-**Change which provider a model name routes to:** edit `droplet-pi-platform/services/ai-gateway/router.py`. The Jetson is unaware of which model the orchestrator chose; it just receives a `model` field in the API request and serves it.
+**Change which provider a model name routes to:** edit `droplet-onboard-services/services/ai-gateway/router.py`. The Jetson is unaware of which model the orchestrator chose; it just receives a `model` field in the API request and serves it.
 
 ## What is NOT in this repo
 
@@ -123,7 +123,7 @@ When making changes that touch both repos:
 
 1. Branch and PR each repo separately, but link the PRs in their descriptions.
 2. Land the inference contract change in `droplet-jetson-ai` first (it's the dependency).
-3. Then land the orchestrator change in `droplet-pi-platform`.
+3. Then land the orchestrator change in `droplet-onboard-services`.
 4. Bump `models/model-manifest.json` and `JETSON_OLLAMA_URL` only when both PRs are merged.
 
 If you're making a change that touches **only this repo** (e.g. adding a new model, changing the lifecycle API), the orchestrator side needs no PR.

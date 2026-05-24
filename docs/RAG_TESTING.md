@@ -286,7 +286,7 @@ manual verification before a major RAG change.
 
 **Run locally** with `./scripts/test-rag.sh` for the inner loop, or
 **kick the workflow off manually** from
-https://github.com/DropletByWarpLab/droplet-pi-platform/actions/workflows/rag-tests.yml
+https://github.com/DropletByWarpLab/droplet-onboard-services/actions/workflows/rag-tests.yml
 → "Run workflow" → pick a branch → "Run workflow".
 
 **Job timeout:** 35 min. Above that we'd start dropping legit slow runs

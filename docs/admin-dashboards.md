@@ -77,7 +77,7 @@ The file lives at the repo root, is gitignored (only `.claude/session-state.exam
 |---|---|---|
 | `GITHUB_TOKEN` | empty | Optional fine-grained PAT scoped to this repo with `metadata: read`, `actions: read`, `pull-requests: read`, `contents: read`. Without one, calls go unauthenticated (60 req/h ceiling — fine for sandbox/dev). |
 | `GITHUB_REPO_OWNER` | `DropletByWarpLab` | Override for forks. |
-| `GITHUB_REPO_NAME` | `droplet-pi-platform` | Override for forks. |
+| `GITHUB_REPO_NAME` | `droplet-onboard-services` | Override for forks. |
 | `JIRA_HOST` | `warp-lab.atlassian.net` | Bare cloud subdomain (no scheme). |
 | `JIRA_EMAIL` | empty | Atlassian account email. |
 | `JIRA_API_TOKEN` | empty | Generate at id.atlassian.com → Security → API tokens. |
