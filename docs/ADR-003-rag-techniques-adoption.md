@@ -4,6 +4,8 @@
 **Date:** 2026-05-24
 **Deciders:** Engineering team
 **Source:** Inventory of `NirDiamant/RAG_Techniques` (37 notebooks + 4 eval notebooks, May 2026); audit of `services/file-indexer/`, `services/ai-gateway/`, `apps/orchestrator/src/services/file-search.service.ts`, `services/mcp-server/src/file-search.service.ts`, `docs/RAG_RETRIEVAL.md`, `docs/RAG_TESTING.md`, `docs/ROADMAP.md` M3.3
+**Tracking:** WARP-RAG epic + WARP-RAG.1..5 phase tickets (see "Tickets" section below)
+**Branch:** `feat/rag-techniques-adoption`
 
 ## Context
 
@@ -46,7 +48,7 @@ Justification:
 | Dimension | Assessment |
 |---|---|
 | Complexity | Medium, spread over 4 phases |
-| Cost | ~6 sprints if all phases land |
+| Cost | ~6 weeks if all phases land (calendar, 1 dev focused) |
 | Team familiarity | High — every change is local to one file/service |
 
 **Pros:** Preserves WARP-286 abstractions, RBAC layer, and state machine. Every technique is independently gated on eval. No new framework lock-in. RAGAS as a scoped eval-only dep.
@@ -72,127 +74,186 @@ Justification:
 **Pros:** Zero risk. Current stack passes NDCG@10 ≥ 1.1× threshold.
 **Cons:** Leaves measurable wins on the table (HyDE, contextual headers, small-to-big are each likely worth several NDCG points individually based on published benchmarks). Blocks M3.3 (multimodal). Doesn't establish the RAGAS-style metrics needed to safely add CRAG-style validation loops later.
 
+---
+
+## Conventions for the step tables below
+
+Each step row carries:
+
+- **#** — stable step ID, also used as the Jira sub-task identifier when applicable
+- **Step** — what to do, in imperative form
+- **Files / surfaces** — exact paths or globs the work touches
+- **Depends on** — step IDs that must complete first; `—` means no in-phase dependency
+- **Batch** — a letter `A`, `B`, `C`... All steps with the same letter in the same phase have no shared state and can be dispatched as one parallel agent group. The harness contract: batch `A` runs first; once every step in `A` is complete, batch `B` runs; etc.
+
+**Parallelization read:** "Phase 1 batch A has 6 independent steps" means the executing agent should dispatch all 6 simultaneously (one Agent tool call with 6 sub-prompts, or 6 parallel subagents) rather than serially. Where two steps touch the same file or share schema, they're put in different batches even if they're logically siblings.
+
+---
+
 ## Adoption plan
 
-Each phase has: a goal, the techniques drawn from the reference catalog, the files that change, the eval gate, and a dependency note. Phases are sequenced so each one strengthens the eval surface that the next one is gated by.
+### Phase 1 — Ingest enrichment (sentence-aware chunking + contextual headers)
 
-### Phase 1 — Ingest-side enrichment (low-risk, high-ROI)
+**Goal:** Improve embedding quality without touching the query path or the agent loop. Every chunk that lands in `FileContentChunk.text` is now sentence-respecting and prefixed with its document/section path, so the embedder sees text that already carries hierarchical context.
 
-**Goal:** Improve embedding quality without touching the query path or the agent loop. Each technique is a ~50–150 LOC change to `services/file-indexer/`. None require a schema migration; they all rewrite the *content* of `FileContentChunk.text` before it's embedded.
+**Framework picks (researched 2026-05-24):**
 
-**Techniques from catalog:**
+- **Text splitter: `semantic-text-splitter` v0.30.x** (Rust-backed Python crate, ~8 MB wheel). Sentence-aware via Unicode segmentation, tokenizer-aware via native HuggingFace tokenizers, zero LangChain coupling. Beats `langchain-text-splitters` on footprint (which transitively pulls NLTK or spaCy models, both 100+ MB) and `unstructured` on scope (we already own MIME-specific extractors).
+- **PDF heading hierarchy: `pypdf.PdfReader.outline`** (already a transitive dep via existing extractors). Returns the bookmark tree as nested `Destination` objects with `/Title` + page references. No new dep.
+- **DOCX heading hierarchy: `python-docx` `paragraph.style.name`** (already a dep). `if name.startswith("Heading"): level = int(name.split()[-1])`. No new dep.
+- **PPTX section detection: `python-pptx` slide layout name + `slide.shapes.title.text`** (already a dep). No new dep.
 
-| Catalog ref | Adoption form |
-|---|---|
-| Contextual Chunk Headers (`contextual_chunk_headers.ipynb`) | Prepend `"Document: <filename> / Section: <heading-or-page>\n\n"` to every chunk before embedding. Heading derived from PDF outline (already extracted by `pypdf`), DOCX heading style, or filename for plain text. |
-| Semantic Chunking (`semantic_chunking.ipynb`) | Replace `chunker.py`'s word-split with `RecursiveCharacterTextSplitter`-style sentence-aware split (separators: paragraph → sentence → word, target 512 tokens). For code/tables, preserve atomic blocks via fenced-region detection. |
-| Anthropic-style "Contextual Retrieval" (related to `contextual_chunk_headers` but with LLM) | Defer to Phase 4. Heavy ingest LLM cost; gate on Phase 2 eval showing a measurable lift from the cheaper headers. |
+**Step-by-step:**
 
-**Files changed:**
-- `services/file-indexer/chunker.py` — sentence-aware splitter (~150 LOC).
-- `services/file-indexer/extractors/pdf.py`, `docx.py`, `pptx.py` — extract heading hierarchy alongside body text. Most already do (`pageNumber` is already on `FileContentChunk`). Add `sectionPath: string[]` to the per-chunk metadata.
-- `services/file-indexer/embedder.py` — accept an optional `prefix` per text in the batch.
-- `apps/orchestrator/prisma/schema.prisma` — no migration needed; reuse `metadata jsonb`.
-- `tests/retrieval-eval/queries.yaml` — extend with 10 queries where heading context disambiguates the answer (e.g. two PDFs with the same body sentence in different sections).
+| # | Step | Files / surfaces | Depends on | Batch |
+|---|---|---|---|---|
+| 1.1 | Add `semantic-text-splitter` to file-indexer `requirements.txt`; rewrite `chunker.py` to wrap `TextSplitter.from_huggingface_tokenizer(...)` with `CHUNK_SIZE_TOKENS=512`, `chunk_overlap_ratio=0.2`. Keep the existing public signature (`chunk_text(text: str) -> List[Chunk]`) for caller compatibility. | `services/file-indexer/chunker.py`, `services/file-indexer/requirements.txt` | — | A |
+| 1.2 | Extract PDF outline tree in `extractors/pdf.py`; map each extracted text span to its nearest preceding outline entry; emit `sectionPath: list[str]` per chunk-candidate. | `services/file-indexer/extractors/pdf.py` | — | A |
+| 1.3 | Extract DOCX heading hierarchy in `extractors/docx.py` using `paragraph.style.name`; emit `sectionPath` walking back from each body paragraph. | `services/file-indexer/extractors/docx.py` | — | A |
+| 1.4 | Extract PPTX slide-section structure in `extractors/pptx.py` using slide layout + title shape; `sectionPath = [section_name, slide_title]`. | `services/file-indexer/extractors/pptx.py` | — | A |
+| 1.5 | For TXT/MD/EML/MSG, emit `sectionPath = [filename]` (no in-file structure available). | `services/file-indexer/extractors/text.py`, `extractors/email.py` | — | A |
+| 1.6 | Extend `tests/retrieval-eval/queries.yaml` with 10 disambiguation queries (e.g. two PDFs with the same body sentence in different sections; question must hinge on section path to retrieve the right one). | `tests/retrieval-eval/queries.yaml` | — | A |
+| 1.7 | Plumb `sectionPath` through `db.py` upsert; prepend `f"Document: {filename} / Section: {' > '.join(sectionPath)}\n\n"` before embedding. | `services/file-indexer/db.py`, `services/file-indexer/embedder.py` | 1.1, 1.2, 1.3, 1.4, 1.5 | B |
+| 1.8 | Trigger a full re-index of fixtures; verify status enum transitions (`queued → indexing → ready`) hold; check WARP-218 retry counters stay at zero. | `services/file-indexer/` runtime | 1.7 | C |
+| 1.9 | Run `tests/retrieval-eval/run.integration.test.ts`; assert `ndcg@10(hybrid + headers) ≥ ndcg@10(hybrid) × 1.05` on the extended corpus. | `tests/retrieval-eval/` | 1.8 | C |
+| 1.10 | Update `docs/RAG_RETRIEVAL.md` with the new chunking section + `sectionPath` documentation; record measured NDCG delta. | `docs/RAG_RETRIEVAL.md` | 1.9 | D |
 
-**Eval gate:** `ndcg@10(hybrid + headers) ≥ ndcg@10(hybrid) × 1.05` on the extended corpus. If we don't see a 5% lift, drop the technique and document why in `RAG_RETRIEVAL.md`.
+**Batches at a glance:** A (6 parallel) → B (1) → C (2 sequential) → D (1).
+**Files changed:** ~7 files, ~400 LOC, 0 schema migrations (`sectionPath` rides on existing `metadata jsonb`).
+**Eval gate:** `ndcg@10(hybrid + headers) ≥ ndcg@10(hybrid) × 1.05` on the extended corpus.
+**Calendar:** 5–8 working days, 1 dev focused.
+**Risk:** None of these steps touch the query path. Worst case: re-index produces no measurable delta and we revert step 1.7 to disable header prefixing while keeping sentence-aware chunking. Sentence-aware chunking is foundational enough that we keep it regardless of header-prefix outcome.
 
-**Cost:** ~1 sprint. No production LLM cost. Re-index is required (one-time, runs on the existing file-indexer pipeline).
+---
 
-### Phase 2 — Evaluation surface (unblocks every later phase)
+### Phase 2 — RAGAS evaluation harness
 
-**Goal:** Add faithfulness, context-relevance, and answer-correctness metrics to the existing NDCG@10 harness. This is the prerequisite for safely landing query-side and agentic techniques later — without these metrics we can't detect when CRAG-style loops are improving precision but hurting recall, or when query rewriting is drifting from user intent.
+**Goal:** Add faithfulness, context-relevance, and answer-correctness metrics to the existing NDCG@10 harness. Establish baselines so Phases 3 and 4 can be gated on them. No production runtime change — this is offline only.
 
-**Techniques from catalog:**
+**Framework picks (researched 2026-05-24):**
 
-| Catalog ref | Adoption form |
-|---|---|
-| DeepEval / End-to-End RAG Evaluation / Open-RAG-Eval / GroUSE (`evaluation/*.ipynb`) | Adopt **RAGAS** specifically (not in the catalog, but the de-facto standard the catalog's eval notebooks orbit around). Faithfulness, context_relevance, answer_correctness, context_precision, context_recall. |
+- **`ragas==0.4.x`** (current as of 2026-01). Native local-Ollama support via `ragas.llms.llm_factory("mistral", provider="openai", client=OpenAI(base_url="http://localhost:11434/v1"))`. Does NOT drag in LangChain agent runtime — only `langchain-core` types come along. Stable metrics: `Faithfulness`, `LLMContextRecall`, `LLMContextPrecision`, `AnswerRelevancy`, `FactualCorrectness`. Single `evaluate(dataset=..., metrics=[...], llm=...)` entry point.
+- **Considered + rejected: DeepEval.** Bigger surface (full eval framework + Confident AI dashboards), unnecessary for nightly CI metrics on an appliance.
+- **Considered + rejected: TruLens.** Production-tracing focus; we want offline batch eval.
 
-**Why RAGAS over the catalog's specific notebooks:** RAGAS has the smallest dependency footprint (no LangChain agent runtime required), a stable metric API, and explicit support for local Ollama as the judge LLM. The catalog's notebooks are pedagogical wrappers — they don't ship a stable CLI we want in CI.
+**Step-by-step:**
 
-**Files changed:**
-- `tests/retrieval-eval/ragas/` — new directory. `ragas_runner.py`, `goldens.yaml` (extends `queries.yaml` with expected answers), `requirements.txt` pinning `ragas`.
-- `tests/retrieval-eval/run.integration.test.ts` — add a `RAGAS_ENABLED=1` mode that shells out to the Python runner and asserts thresholds.
-- `scripts/test-rag.sh` — new flag `--with-ragas`. Default off in PR CI (judge LLM cost is non-trivial); on for nightly + release gates.
-- `docs/RAG_TESTING.md` — new "RAGAS metrics" section documenting thresholds and judge-LLM policy.
+| # | Step | Files / surfaces | Depends on | Batch |
+|---|---|---|---|---|
+| 2.1 | Create `tests/retrieval-eval/ragas/` directory with `requirements.txt` pinning `ragas==0.4.3`, `openai>=1.0`, `datasets`, and `pandas`. Add `pyproject.toml` or `setup.cfg` markers so the dep is isolated from production. | `tests/retrieval-eval/ragas/requirements.txt`, `tests/retrieval-eval/ragas/pyproject.toml` | — | A |
+| 2.2 | Author `goldens.yaml` extending `queries.yaml` with `expected_answer` and `expected_contexts` (chunk-id list) per query. Cover the existing 20-query corpus first. | `tests/retrieval-eval/ragas/goldens.yaml` | — | A |
+| 2.3 | Implement `ragas_runner.py`: load goldens, call orchestrator's `/api/admin/retrieval-eval/search` for each query, build a `Dataset`, run `evaluate(..., metrics=[Faithfulness, LLMContextRecall, LLMContextPrecision, AnswerRelevancy, FactualCorrectness], llm=local_llm)`. Emit JSON + Markdown summary. | `tests/retrieval-eval/ragas/ragas_runner.py` | 2.1, 2.2 | B |
+| 2.4 | Add `RAGAS_ENABLED=1` mode to `tests/retrieval-eval/run.integration.test.ts` that shells out to `ragas_runner.py` and asserts threshold envelopes (set in 2.7). | `tests/retrieval-eval/run.integration.test.ts` | 2.3 | C |
+| 2.5 | Add `--with-ragas` flag + `RAGAS_JUDGE={local\|cloud}` env handling to `scripts/test-rag.sh`. Default judge: local Ollama. Cloud judge requires explicit env var. | `scripts/test-rag.sh` | 2.3 | C |
+| 2.6 | Add nightly GitHub Actions job that runs `RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas` on the appliance test runner. PR CI stays NDCG-only (RAGAS too slow per-PR). | `.github/workflows/rag-eval-nightly.yml` (new) | 2.5 | C |
+| 2.7 | Run baselines 5×, record p50/p95 per metric, set thresholds at `baseline_p50 - 1.5 × IQR` as the regression envelope. Commit baselines to `tests/retrieval-eval/ragas/baselines.json`. | `tests/retrieval-eval/ragas/baselines.json` | 2.4 | D |
+| 2.8 | Document RAGAS metrics + judge-LLM policy + threshold rationale in a new `## RAGAS metrics` section of `docs/RAG_TESTING.md`. | `docs/RAG_TESTING.md` | 2.7 | E |
 
-**Judge-LLM policy:**
-- Default judge: the local model (`mistral:7b-instruct` or whatever the appliance ships with). Cheap, deterministic enough for regression detection.
-- Golden judge: a cloud model (Claude Sonnet or GPT-4o) gated behind an explicit `RAGAS_JUDGE=cloud` env var. Run on release-candidate builds only, not on every PR.
+**Batches at a glance:** A (2 parallel) → B (1) → C (3 parallel) → D (1) → E (1).
+**Files changed:** ~6 files, ~300 LOC Python + harness wiring, no schema migrations.
+**Eval gate:** Baselines established; thresholds set for Phases 3+.
+**Calendar:** 4–6 working days, 1 dev focused.
+**Risk:** RAGAS metric variance on a small corpus (20 queries) — that's why we average 5 runs and set envelopes from IQR rather than single-shot thresholds. If variance is still too high, extend corpus to ≥50 queries before fixing thresholds.
 
-**Eval gate:** Establish baselines this phase. Thresholds are set in Phase 3 once we have one stable run of numbers.
+**Independence from Phase 1:** Phase 2 touches only `tests/retrieval-eval/ragas/` and harness scripts; it does NOT depend on Phase 1's chunker changes. **Phases 1 and 2 can run fully in parallel as two independent work streams.** This is the highest-value parallelization in the whole plan.
 
-**Cost:** ~1 sprint. No production runtime impact (offline harness only).
+---
 
-### Phase 3 — Query-side enhancement
+### Phase 3 — Query enhancement (HyDE + multi-query + adaptive routing)
 
 **Goal:** Improve retrieval recall on under-specified or short queries via lightweight LLM-driven query expansion. Each technique adds at most one LLM call per user query, gated by a heuristic so the cost only applies when it's likely to help.
 
-**Techniques from catalog:**
+**Framework picks (researched 2026-05-24):**
 
-| Catalog ref | Adoption form |
-|---|---|
-| HyDE (`HyDe_*.ipynb`) | One LLM call to generate a hypothetical answer to the query; embed that instead of the raw query. **Gated:** only fired when `query.length < 80 chars` (the under-specified case where HyDE helps most). |
-| Query Transformations / multi-query (`query_transformations.ipynb`) | Generate 3 query rewrites via one LLM call. Embed each in parallel (batched in the gRPC `EmbedText` call — already supports up to 256 per batch). Run vector search per query, RRF-fuse the results, then continue the existing pipeline. |
-| Adaptive Retrieval (`adaptive_retrieval.ipynb`) | One classifier LLM call: `{factual | analytical | conversational | navigational}`. Each class maps to a `searchHybrid` parameter preset (e.g. factual → `rerank.candidates=100`, conversational → `minSimilarity=0.5` to reduce noise, navigational → metadata filter on filename match). |
+- **HyDE / multi-query: hand-rolled prompt module.** No canonical small library exists (`MultiQueryRetriever`, `HypotheticalDocumentEmbedder` are framework-coupled; `texttron/hyde` is two Jupyter notebooks). These are 30-line prompt patterns; vendoring is correct. HyDE prompt: open-domain QA variant from Gao et al. 2022 (`Please write a passage to answer the question. Question: {query} Passage:`). Generate 1 hypothetical doc (not the paper's 8 — LLM call is the bottleneck on Orin).
+- **Adaptive classification: `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`** (~110 MB int8). Zero-shot NLI classifier, English. ~50 ms per query on CPU. Categories: `{factual, analytical, conversational, navigational}`. Beats a 7B LLM classifier call by ~100× on cost.
+- **Considered + rejected: full LLM-based classifier.** Costs a chat-model round-trip per query for what's a one-vector NLI score with deberta.
 
-**Files changed:**
-- `apps/orchestrator/src/services/query-enhancement.service.ts` — new file. Three exported functions: `hydeRewrite`, `multiQueryExpand`, `classifyQuery`. Each is a thin wrapper around the ai-gateway's chat endpoint.
-- `apps/orchestrator/src/services/file-search.service.ts` — `searchHybrid` accepts an optional `queryEnhancement: { hyde?, multiQuery?, adaptive? }` block. When omitted, behavior is unchanged. WARP-202 mirror update required.
-- `services/mcp-server/src/file-search.service.ts` — same signature change for the mirror.
-- `packages/tools-core/src/handlers/files/search-content.ts` — pass enhancement flags through from the LLM agent loop.
-- `tests/retrieval-eval/queries.yaml` — extend with 15 queries known to be under-specified (1–3 words), 10 multi-faceted analytical queries, 10 conversational queries.
+**Step-by-step:**
 
-**Eval gate (per technique, evaluated independently):**
-- HyDE: `ndcg@10(hyde) ≥ ndcg@10(baseline) × 1.05` on the under-specified subset, no regression (>2%) on the full corpus.
-- Multi-query: `context_recall(multi-query) ≥ context_recall(baseline) × 1.10` (RAGAS metric from Phase 2). Latency p99 budget: +400 ms.
-- Adaptive: `ndcg@10` lift on each class is independently positive; if conversational class shows regression, default it off and document.
+| # | Step | Files / surfaces | Depends on | Batch |
+|---|---|---|---|---|
+| 3.1 | Add `ClassifyQuery` RPC to ai-gateway gRPC server; load `MoritzLaurer/deberta-v3-base-zeroshot-v2.0` lazily on first call (mirror the BGE-reranker singleton pattern in `reranker.py`). Cache classification result keyed on query SHA-256. | `services/ai-gateway/grpc_server.py`, `services/ai-gateway/query_classifier.py` (new), `services/ai-gateway/protos/*.proto` | — | A |
+| 3.2 | Create `apps/orchestrator/src/services/query-enhancement.service.ts`. Export `hydeRewrite(query): Promise<string>` (one LLM call via ai-gateway chat) and `multiQueryExpand(query, n=3): Promise<string[]>` (one LLM call returning 3 rewrites). | `apps/orchestrator/src/services/query-enhancement.service.ts` (new) | — | A |
+| 3.3 | Extend `tests/retrieval-eval/queries.yaml` with three labeled subsets: 15 under-specified (1–3 word) queries for HyDE; 10 multi-faceted analytical queries for multi-query; 10 conversational queries for adaptive. Each row gets a `class` field. | `tests/retrieval-eval/queries.yaml` | — | A |
+| 3.4 | Add `classifyQuery(query): Promise<QueryClass>` wrapper in `query-enhancement.service.ts` calling the new gRPC method. | `apps/orchestrator/src/services/query-enhancement.service.ts` | 3.1, 3.2 | B |
+| 3.5 | Extend `searchHybrid` signature in orchestrator copy: add `queryEnhancement?: { hyde?, multiQuery?, adaptive? }` block. Behavior unchanged when omitted. When `multiQuery: true`, embed each rewrite in one batched `EmbedText` call (already supports 256/batch), run parallel vector searches, RRF-fuse across queries before existing RRF stage. | `apps/orchestrator/src/services/file-search.service.ts` | 3.4 | C |
+| 3.6 | Mirror the `searchHybrid` signature change to the mcp-server copy. **WARP-202 mirror contract: this MUST land in the same PR as 3.5 or CI will flag drift.** | `services/mcp-server/src/file-search.service.ts` | 3.5 | C |
+| 3.7 | Update `packages/tools-core/src/handlers/files/search-content.ts` to pass enhancement flags through from the LLM agent loop. Default off; orchestrator's agent loop opts in based on adaptive classification. | `packages/tools-core/src/handlers/files/search-content.ts` | 3.5, 3.6 | D |
+| 3.8 | Wire adaptive routing in orchestrator's `llm-agent.service.ts`: classify query → map class to enhancement preset (`factual → rerank.candidates=100`; `conversational → minSimilarity=0.5`; `analytical → multiQuery=true`; `navigational → metadata filter on filename`). | `apps/orchestrator/src/services/llm-agent.service.ts` | 3.7 | D |
+| 3.9 | Run eval gate per technique. HyDE: `ndcg@10(hyde) ≥ baseline × 1.05` on under-specified subset, no full-corpus regression >2%. Multi-query: `context_recall(multi-query) ≥ baseline × 1.10`. Adaptive: per-class NDCG positive; if conversational regresses, default it off. | `tests/retrieval-eval/`, RAGAS harness from Phase 2 | 3.8 | E |
+| 3.10 | Update `docs/RAG_RETRIEVAL.md` with query-enhancement section + per-class adaptive presets table + measured deltas. | `docs/RAG_RETRIEVAL.md` | 3.9 | F |
 
-**Cost:** ~2 sprints. Adds 1 LLM call per query (worst case 2: classification + HyDE), all on the existing local model. Latency budget: +200ms cold, negligible warm.
+**Batches at a glance:** A (3 parallel) → B (1) → C (2 — mirror constraint, see 3.6) → D (2 parallel) → E (1) → F (1).
+**Files changed:** ~8 files, ~500 LOC across orchestrator + mirror + ai-gateway, 1 new proto definition.
+**Eval gate:** Per-technique thresholds above.
+**Calendar:** 8–12 working days, 1 dev focused.
+**Risk:** WARP-202 mirror drift — explicitly called out in 3.6. The two `file-search.service.ts` copies are deliberately mirrored and CI catches drift; the agent executing this phase must update both in lockstep.
 
-### Phase 4 — Reflection & correction
+---
 
-**Goal:** Catch low-confidence retrievals before they become bad answers. Add a lightweight grader between retrieval and generation, with a fallback path that re-queries.
+### Phase 4 — CRAG-lite (retrieval grading without web fallback)
 
-**Techniques from catalog:**
+**Goal:** Catch low-confidence retrievals before they become bad answers. A lightweight grader between retrieval and generation, with a fallback that re-queries via Phase 3's multi-query expansion (no web search — out of scope).
 
-| Catalog ref | Adoption form |
-|---|---|
-| CRAG (`crag.ipynb`) | One grader LLM call on the top-K retrieved chunks: `{relevant | partial | irrelevant}`. On `irrelevant`, fall back to query expansion (Phase 3 multi-query) and re-retrieve once. On `partial`, mark the context with a hedge instruction in the prompt. Do **not** call out to web search (the reference notebook's fallback); we don't have a sanctioned local web search path and adding one belongs to a separate ADR. |
-| Reliable RAG (`reliable_rag.ipynb`) | Subsumed into CRAG above — the relevance check is the same call. |
-| Self-RAG (`self_rag.ipynb`) | **Anti-recommended for production** per the catalog summary — 3–5 LLM calls per query is too expensive on Jetson Orin. Skip. |
+**Framework picks (researched 2026-05-24):**
 
-**Files changed:**
-- `apps/orchestrator/src/services/retrieval-grader.service.ts` — new file. Single `gradeRetrieval({ query, chunks })` function returning the verdict.
-- Orchestrator's agent loop (where `search_content` results are stitched into the prompt) — call the grader, branch on verdict.
-- `packages/tools-core/src/handlers/files/search-content.ts` — extend `ToolResult.data` with a `grading?` field so the LLM sees the verdict and can self-hedge.
-- `tests/retrieval-eval/ragas/` — gate this phase on the `faithfulness` and `answer_correctness` metrics from Phase 2.
+- **Grader: `cross-encoder/ms-marco-MiniLM-L-6-v2`** (~80 MB, ~22M params). Produces a per-(query, doc) relevance score in ~50 ms CPU. Trichotomized via two thresholds (above upper → relevant, below lower → irrelevant, between → partial) — same signal shape as Yan et al. 2024's T5-Large CRAG grader at 1/30th the size.
+- **Considered + rejected: T5-Large fine-tuned grader (the paper's choice).** 770M params (~1.5 GB fp16, ~770 MB int8) competes with the chat LLM for VRAM. The cross-encoder produces the same per-(q, doc) score at 1/10th the memory and is what most production CRAG-lite implementations actually ship.
+- **No web-search fallback.** The reference notebook falls back to web search on "irrelevant" verdicts; we don't have a sanctioned local web-search path. Adding one belongs in a separate ADR. Our fallback is to re-run retrieval with Phase 3's `multiQueryExpand`.
 
-**Eval gate:** `faithfulness(crag) ≥ faithfulness(baseline) + 0.05` AND `answer_correctness(crag) ≥ answer_correctness(baseline) + 0.03`, on the full corpus. Latency p99 budget: +500 ms in the worst case (grader + re-retrieve).
+**Step-by-step:**
 
-**Cost:** ~2 sprints. The grader runs only after the existing pipeline completes; on `relevant` (expected majority) no extra cost beyond one LLM call.
+| # | Step | Files / surfaces | Depends on | Batch |
+|---|---|---|---|---|
+| 4.1 | Add `GradeRetrieval` RPC to ai-gateway: load `cross-encoder/ms-marco-MiniLM-L-6-v2` lazily (same singleton pattern as BGE-reranker and deberta classifier). Input: `(query, docs[])`. Output: `scores[]` (one per doc). | `services/ai-gateway/grpc_server.py`, `services/ai-gateway/grader.py` (new), `services/ai-gateway/protos/*.proto` | — | A |
+| 4.2 | Create `apps/orchestrator/src/services/retrieval-grader.service.ts`. Export `gradeRetrieval({ query, chunks }): Promise<{ verdict: 'relevant'\|'partial'\|'irrelevant', scores: number[] }>`. Thresholds named: `GRADE_UPPER = 0.7`, `GRADE_LOWER = 0.3`, tunable via env. | `apps/orchestrator/src/services/retrieval-grader.service.ts` (new) | — | A |
+| 4.3 | Extend `tests/retrieval-eval/queries.yaml` with 10 known-low-confidence queries (intentionally ambiguous / out-of-corpus) for grader calibration. | `tests/retrieval-eval/queries.yaml` | — | A |
+| 4.4 | Wire grader into orchestrator's `llm-agent.service.ts` between `search_content` tool result and prompt stitching. On `relevant` → use top-K as-is. On `partial` → use top-K with hedge instruction in prompt. On `irrelevant` → invoke Phase 3 `multiQueryExpand` once and retry. | `apps/orchestrator/src/services/llm-agent.service.ts` | 4.1, 4.2 | B |
+| 4.5 | Extend `packages/tools-core/src/handlers/files/search-content.ts` `ToolResult.data` with optional `grading: { verdict, scores }` field so the LLM sees the verdict and can self-hedge. | `packages/tools-core/src/handlers/files/search-content.ts` | 4.2 | B |
+| 4.6 | Run RAGAS gate from Phase 2: `faithfulness(crag) ≥ faithfulness(baseline) + 0.05` AND `answer_correctness(crag) ≥ answer_correctness(baseline) + 0.03`. Worst-case latency budget p99: +500 ms (grader + re-retrieve). | `tests/retrieval-eval/ragas/` | 4.4 | C |
+| 4.7 | Update `docs/RAG_RETRIEVAL.md` with grader pipeline section + threshold rationale + measured deltas. | `docs/RAG_RETRIEVAL.md` | 4.6 | D |
 
-### Phase 5 — Multimodal (unblocks M3.3)
+**Batches at a glance:** A (3 parallel) → B (2 parallel) → C (1) → D (1).
+**Files changed:** ~6 files, ~300 LOC, no schema migrations.
+**Eval gate:** Above.
+**Calendar:** 6–10 working days, 1 dev focused.
+**Hard blockers:** Phase 2 (RAGAS metrics required to gate this), Phase 3 (multi-query is the fallback). Do not start Phase 4 until both have landed.
 
-**Goal:** Land CLIP image embeddings, joining text and image chunks in the same retrieval surface. Already in the ROADMAP as M3.3; this ADR scopes the technique choice and the eval addition.
+---
 
-**Techniques from catalog:**
+### Phase 5 — Multimodal (VLM-caption-first, unblocks ROADMAP M3.3)
 
-| Catalog ref | Adoption form |
-|---|---|
-| Multi-modal RAG with Captioning (`multi_model_rag_with_captioning.ipynb`) | **First.** VLM captions each image at ingest; caption is stored as `FileContentChunk.text` and embedded with the existing text embedder. Zero query-time changes. Acceptable while CLIP capacity is uncertain. |
-| Multi-modal RAG with ColPali (`multi_model_rag_with_colpali.ipynb`) | **Anti-recommended for Orin Nano at this scale.** Late-interaction on rendered page images is too memory-heavy. Skip unless the ingest VLM path measurably underperforms. |
+**Goal:** Land image embeddings into the same retrieval surface as text via a captioning-first strategy. Image arrives → VLM produces caption → caption embedded with existing text embedder → joins the unified `FileContentChunk` index. Zero query-time changes.
 
-**Files changed:**
-- `services/file-indexer/extractors/image.py` — currently stub; add VLM-caption path. VLM model selection (LLaVA quantized, MiniCPM-V) is the M3.3 blocker — depends on inference-engine capacity.
-- `apps/orchestrator/prisma/schema.prisma` — add `modality: enum('text' | 'image_caption')` to `FileContentChunk`. Migration required.
-- `services/ai-gateway/grpc_server.py` — new `CaptionImage` RPC alongside `EmbedText` and `Rerank`.
-- `tests/retrieval-eval/queries.yaml` — extend with 10 image-grounded queries (PDF with figures, image-only chat attachments).
+**Framework picks (researched 2026-05-24):**
 
-**Eval gate:** No regression on text-only queries; `ndcg@10(image queries)` strictly above zero (baseline is zero — images aren't searchable today).
+- **VLM: `moondream2`** (2B params, ~1.5 GB Q4, Ollama-native as `moondream`). The only Ollama-native VLM that (a) ships a first-class `caption(image, length)` API purpose-built for our use case, (b) leaves >5 GB headroom for mistral-7b chat on the standard 8GB Orin Nano, (c) has 7 quantization variants for memory tuning.
+- **Considered + rejected: LLaVA-1.6 7B / MiniCPM-V 2.6 / Llama 3.2 Vision 11B.** All ≥7B, can't coexist with mistral-7b on 8 GB.
+- **Considered + rejected: Qwen2.5-VL 3B.** Fits but needs prompt engineering for captioning (no dedicated API). Reserved as fallback if moondream2 caption quality is insufficient.
+- **Considered + rejected: ColPali / Florence-2.** ColPali needs more VRAM than Orin Nano comfortably handles; Florence-2 has no Ollama path.
 
-**Cost:** ~2 sprints once inference-engine capacity is confirmed. Cross-repo dependency on `droplet-jetson-ai` for the VLM model.
+**Step-by-step:**
+
+| # | Step | Files / surfaces | Depends on | Batch |
+|---|---|---|---|---|
+| 5.1 | Add `moondream` to the Ollama pre-pulled-models list in the device-jetson-ai sibling repo. Coordinate with that repo's setup (`scripts/setup-jetson-ai.sh` or equivalent). **Cross-repo dependency: needs a PR there first.** | `droplet-jetson-ai/scripts/setup-jetson-ai.sh` (sibling repo) | — | A |
+| 5.2 | Author Prisma migration adding `modality: enum('text', 'image_caption')` to `FileContentChunk`. Default `text` for backfill. Add index `(userId, modality, indexedAt)` for filtered queries. | `apps/orchestrator/prisma/schema.prisma`, `apps/orchestrator/prisma/migrations/<ts>_add_modality/` | — | A |
+| 5.3 | Extend `tests/retrieval-eval/queries.yaml` with 10 image-grounded queries (PDF with figures, image-only chat attachments). Add fixture images to `tests/fixtures/`. | `tests/retrieval-eval/queries.yaml`, `tests/fixtures/` | — | A |
+| 5.4 | Add `CaptionImage` RPC to ai-gateway gRPC server. Input: `(image_bytes, length='normal')`. Output: caption string. Calls Ollama's `moondream` model via OpenAI-compat vision API. Lazy-loaded singleton like reranker/classifier/grader. | `services/ai-gateway/grpc_server.py`, `services/ai-gateway/captioner.py` (new), `services/ai-gateway/protos/*.proto` | 5.1 | B |
+| 5.5 | Rewrite `services/file-indexer/extractors/image.py`: replace the current `image_only` warning path with a call to `CaptionImage`; store caption as `text` with `modality='image_caption'` and the original image bytes path in `metadata`. | `services/file-indexer/extractors/image.py` | 5.2, 5.4 | C |
+| 5.6 | Update `services/file-indexer/brain_ingest.py` to route image MIME types into the new captioning path instead of marking `image_only` and skipping. | `services/file-indexer/brain_ingest.py` | 5.5 | D |
+| 5.7 | Backfill: re-run extraction for existing `BrainMemoryItem` rows where `warnings` contains `image_only`. WARP-218 retry counters apply; this is the same pipeline. | `services/file-indexer/` runtime (manual op) | 5.6 | E |
+| 5.8 | Run eval gate: no regression on text-only queries; `ndcg@10(image queries) > 0` (baseline is zero — images aren't searchable today). | `tests/retrieval-eval/` | 5.6 | F |
+| 5.9 | Flip ROADMAP M3.3 from `[~] Partial` to `[x]` Done with file references; update `docs/RAG_RETRIEVAL.md` modality section + measured deltas. | `docs/ROADMAP.md`, `docs/RAG_RETRIEVAL.md` | 5.8 | G |
+
+**Batches at a glance:** A (3 parallel) → B (1) → C (1) → D (1) → E (1) → F (1) → G (1).
+**Files changed:** ~7 files in this repo + 1 in the sibling repo, ~400 LOC, 1 Prisma migration.
+**Eval gate:** Above.
+**Calendar:** 8–12 working days *after* the sibling repo's Ollama pre-pull lands (Step 5.1).
+**Hard blockers:** Step 5.1 needs inference-engine / droplet-jetson-ai capacity confirmation. The actual model fits the budget; the question is whether ops wants to ship a second model on the device. Coordinate before starting.
+
+---
 
 ### Phase 6 — Hold for evidence
 
@@ -203,6 +264,47 @@ Each phase has: a goal, the techniques drawn from the reference catalog, the fil
 - **Microsoft GraphRAG / RAPTOR / Hierarchical Indices.** Large ingest cost and complex index footprint. Gate: a user-visible failure mode (multi-hop question, cross-document synthesis) emerges that hybrid+rerank can't address.
 - **Sophisticated Controllable RAG Agent / Agentic RAG (Contextual AI).** Vendor lock-in or LangGraph commitment. Out of scope for this ADR.
 - **MemoRAG.** GPU-heavy memory model; doesn't quantize gracefully on Orin Nano.
+- **CRAG web-search fallback.** Out of scope for this ADR; needs a separate "local web search" ADR.
+
+---
+
+## Cross-phase parallelization summary (for the harness)
+
+| Run mode | What can execute in parallel |
+|---|---|
+| **Maximum parallelism** | Phase 1 batch A (6 steps) + Phase 2 batch A (2 steps) = **8 steps in flight simultaneously**, zero shared files. Compress weeks 1–2 to days. |
+| **After Phase 1 batch A** | Phase 1 batch B (1 step). Phase 2 continues independently. |
+| **After Phase 1 + Phase 2 complete** | Phase 3 batch A (3 steps in parallel). |
+| **After Phase 3 complete** | Phase 4 batch A (3 steps in parallel). Phase 5 batch A (3 steps in parallel) — *but* Phase 5 batch A step 5.1 requires sibling-repo coordination, so don't start 5.x until that PR is open. |
+| **Phase 4 and Phase 5** | Independent of each other — different services, different files. Can run as parallel work streams once Phase 3 lands. |
+
+**Harness contract:** Within a batch, dispatch all steps as a single Agent tool call with multiple sub-prompts (per `superpowers:dispatching-parallel-agents`). Between batches, wait for full batch completion before starting the next. Cross-phase parallelism is the property of the dependency table, not the batch letter — a step in Phase 3 batch A still cannot run until Phase 2 has completed.
+
+---
+
+## Tickets
+
+JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.net`. The branch `feat/rag-techniques-adoption` is the work-tracking root.
+
+| Phase | Ticket | Status |
+|---|---|---|
+| Epic | [WARP-434](https://warp-lab.atlassian.net/browse/WARP-434) | To Do |
+| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | To Do |
+| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | To Do (parallel with WARP-435) |
+| Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | To Do (blocked by WARP-436) |
+| Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do (blocked by WARP-436, WARP-437) |
+| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-jetson-ai capacity) |
+
+All assigned to Romain. Labels: `origin-ai`, `size-{m\|l}`, `rag`, plus a per-phase topical tag (`ingest`, `eval`, `query`, `grading`, `multimodal`).
+
+Blocking relations wired in Jira:
+- WARP-436 blocks WARP-437
+- WARP-436 blocks WARP-438
+- WARP-437 blocks WARP-438
+
+WARP-439's blocker is cross-repo (droplet-jetson-ai sibling) and isn't represented as a Jira link.
+
+---
 
 ## Roadmap entries (proposed additions to `docs/ROADMAP.md`)
 
@@ -211,33 +313,44 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 ```markdown
 ### M-RAG.1 Ingest enrichment (Phase 1 of ADR-003)
 - **Scope:** Sentence-aware chunking + contextual chunk headers.
+- **Framework:** semantic-text-splitter v0.30.x + pypdf.outline + python-docx style.name.
 - **Files:** services/file-indexer/chunker.py, services/file-indexer/extractors/*.py
 - **Status:** [ ] Not started
 - **Eval gate:** ndcg@10 ≥ 1.05× current baseline.
+- **Ticket:** WARP-RAG.1
 
 ### M-RAG.2 RAGAS eval harness (Phase 2 of ADR-003)
 - **Scope:** Faithfulness / context-relevance / answer-correctness metrics.
-- **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh
+- **Framework:** ragas==0.4.x with native Ollama via OpenAI-compat.
+- **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh, .github/workflows/rag-eval-nightly.yml
 - **Status:** [ ] Not started
-- **Eval gate:** Baselines established; thresholds set in M-RAG.3+.
+- **Eval gate:** Baselines established; thresholds set for M-RAG.3+.
+- **Ticket:** WARP-RAG.2
+- **Parallel with:** M-RAG.1 (no shared files).
 
 ### M-RAG.3 Query enhancement (Phase 3 of ADR-003)
 - **Scope:** HyDE (gated), multi-query, adaptive retrieval.
-- **Files:** apps/orchestrator/src/services/query-enhancement.service.ts, file-search.service.ts (+mirror)
+- **Framework:** Hand-rolled prompts + MoritzLaurer/deberta-v3-base-zeroshot-v2.0 for classification.
+- **Files:** apps/orchestrator/src/services/query-enhancement.service.ts, file-search.service.ts (+mirror), services/ai-gateway/query_classifier.py
 - **Status:** [ ] Not started
 - **Blockers:** M-RAG.2 (need RAGAS metrics to gate adaptive).
+- **Ticket:** WARP-RAG.3
 
 ### M-RAG.4 Retrieval grading / CRAG-lite (Phase 4 of ADR-003)
 - **Scope:** Grader-then-rewrite loop; no web-search fallback.
-- **Files:** apps/orchestrator/src/services/retrieval-grader.service.ts, orchestrator agent loop
+- **Framework:** cross-encoder/ms-marco-MiniLM-L-6-v2 (80 MB) instead of the paper's T5-Large.
+- **Files:** apps/orchestrator/src/services/retrieval-grader.service.ts, services/ai-gateway/grader.py, orchestrator agent loop
 - **Status:** [ ] Not started
 - **Blockers:** M-RAG.2 (faithfulness metric required), M-RAG.3 (multi-query is the fallback).
+- **Ticket:** WARP-RAG.4
 
 ### M-RAG.5 Multimodal indexing (extends M3.3)
-- **Scope:** VLM-caption-first multimodal indexing. ColPali deferred.
-- **Files:** services/file-indexer/extractors/image.py, services/ai-gateway/grpc_server.py (new CaptionImage RPC), prisma schema (add modality enum)
+- **Scope:** VLM-caption-first multimodal indexing.
+- **Framework:** moondream2 (~1.5 GB) via Ollama as `moondream`. Reserves Qwen2.5-VL 3B as fallback.
+- **Files:** services/file-indexer/extractors/image.py, services/ai-gateway/captioner.py (new CaptionImage RPC), prisma schema (add modality enum)
 - **Status:** [ ] Not started
-- **Blockers:** inference-engine VLM capacity (cross-repo).
+- **Blockers:** droplet-jetson-ai Ollama pre-pull PR (cross-repo).
+- **Ticket:** WARP-RAG.5
 ```
 
 ## Consequences
@@ -247,6 +360,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - Each phase is independently mergeable, independently revertible, independently eval-gated.
 - The eval surface is the gate, not the technique. If Phase 1 doesn't lift NDCG, we don't compound it with Phase 3.
 - No production runtime depends on a cloud LLM. Cloud judge is opt-in for goldens only.
+- Phases 1 + 2 can run as fully parallel work streams, compressing the critical path.
 
 **Negative:**
 - No framework convenience. Every new technique is hand-written and tested. Discipline cost is real, especially on the WARP-202 mirror (every `searchHybrid` signature change is two files).
@@ -265,3 +379,9 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - `services/file-indexer/chunker.py` — current word-split chunker.
 - `https://github.com/NirDiamant/RAG_Techniques` — reference catalog.
 - `https://docs.ragas.io/` — RAGAS metrics documentation.
+- `https://github.com/benbrandt/text-splitter` — `semantic-text-splitter` upstream.
+- `https://ollama.com/library/moondream` — moondream2 VLM via Ollama.
+- `https://huggingface.co/MoritzLaurer/deberta-v3-base-zeroshot-v2.0` — query classifier.
+- `https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2` — CRAG-lite grader.
+- Gao et al. 2022, "Precise Zero-Shot Dense Retrieval without Relevance Labels" (HyDE).
+- Yan et al. 2024, "Corrective Retrieval Augmented Generation" — arxiv 2401.15884.
