@@ -155,7 +155,11 @@ def make_chat_llm(judge: str):
         return ChatOpenAI(
             model=DEFAULT_LOCAL_JUDGE_MODEL,
             base_url=DEFAULT_OLLAMA_URL,
-            api_key="sk-noop-ollama",
+            # Sentinel only — Ollama's OpenAI-compat endpoint ignores
+            # api_key entirely, but the SDK requires a non-empty value.
+            # Deliberately NOT shaped like a real key (`sk-…`) so secret
+            # scanners don't false-positive.
+            api_key="ollama-local-no-auth",
             temperature=0,
         )
     if judge == "cloud":
@@ -230,6 +234,12 @@ def run(
     chat_llm = make_chat_llm(judge)
 
     rows: list[dict[str, Any]] = []
+    # Error counters surface as `error_counts` in the JSON summary so
+    # silent degradation (search 5xx, synthesis timeouts, judge LLM
+    # blips) is visible during triage instead of just dragging metrics
+    # down with no breadcrumb.
+    n_search_errors = 0
+    n_synthesis_errors = 0
     for i, row in enumerate(merged, 1):
         print(
             f"   [{i:>2}/{len(merged)}] {row['id']}: {row['user_input'][:60]}"
@@ -239,6 +249,7 @@ def run(
         except RuntimeError as e:
             print(f"      ! {e}", file=sys.stderr)
             hits = []
+            n_search_errors += 1
         # RAGAS context fields: retrieved_contexts (what the retriever
         # actually returned). When snippets are empty (older orchestrator
         # build, or chunk text was filtered), fall back to a path tag so
@@ -248,6 +259,8 @@ def run(
             for h in hits
         ]
         response = synthesize_answer(chat_llm, row["user_input"], ctxs)
+        if response.startswith("[synthesis_error:"):
+            n_synthesis_errors += 1
         rows.append(
             {
                 "user_input": row["user_input"],
@@ -261,7 +274,11 @@ def run(
     ds = Dataset.from_pandas(pd.DataFrame(rows))
     print(f"   dataset   = {len(ds)} rows")
 
-    # Import RAGAS lazily so `--help` works without it installed.
+    # Import RAGAS lazily because it's the heaviest dep — surfaces import
+    # errors after argument parsing rather than during module load.
+    # NOTE: `--help` itself still requires pandas + datasets + pyyaml at
+    # the top of the module; only ragas is deferred. Truly-fast `--help`
+    # would need those moved inside `run()` too.
     from ragas import evaluate
     from ragas.metrics import (
         AnswerRelevancy,
@@ -304,6 +321,10 @@ def run(
         "limit": limit,
         "judge": judge,
         "n_queries": len(ds),
+        "error_counts": {
+            "search": n_search_errors,
+            "synthesis": n_synthesis_errors,
+        },
         "metrics": {
             col: {
                 "p50": float(df[col].quantile(0.5)),

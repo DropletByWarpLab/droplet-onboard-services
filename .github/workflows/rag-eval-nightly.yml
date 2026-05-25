@@ -207,9 +207,14 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         working-directory: tests
+        # tee runner stdout/stderr so the JSON+MD artifacts always have a
+        # paired log even when the test process is SIGKILL'd (e.g. timeout
+        # mid-judge). Without this, a runner crash leaves nothing to triage.
         run: |
+          set -o pipefail
           npx vitest run --no-file-parallelism \
-            retrieval-eval/run.integration.test.ts
+            retrieval-eval/run.integration.test.ts \
+            2>&1 | tee /tmp/ragas-runner.log
 
       - name: Upload RAGAS results
         if: always()
@@ -219,6 +224,7 @@ jobs:
           path: |
             tests/retrieval-eval/ragas/results.json
             tests/retrieval-eval/ragas/results.md
+            /tmp/ragas-runner.log
           retention-days: 30
 
       - name: Capture container logs (on failure)
