@@ -40,7 +40,7 @@ vi.mock("../services/openwrt.client.js", async () => {
   };
 });
 
-import { createVpnRouter } from "../routes/vpn.js";
+import { createVpnRouter, _resetEndpointCacheForTests } from "../routes/vpn.js";
 import * as openwrt from "../services/openwrt.client.js";
 
 // In-memory Prisma stand-in for the VpnPeer table.
@@ -129,6 +129,12 @@ function buildApp(prismaMock: any, user = { username: "alice", role: "owner" }) 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // WARP-174: the resolveEndpointHost() in-process cache (30s TTL) is
+  // shared across tests because it lives on a module-level let. Tests
+  // that flip WIREGUARD_ENDPOINT_HOST or fetchDuckDnsStatus expectations
+  // must drop the cache so the new state takes effect immediately;
+  // otherwise the second-of-two tests sees the first test's cached "".
+  _resetEndpointCacheForTests();
 });
 
 describe("GET /api/vpn/status", () => {
