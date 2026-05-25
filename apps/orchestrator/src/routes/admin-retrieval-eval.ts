@@ -23,6 +23,15 @@ interface SearchResultWire {
   path: string;
   chunkIdx: number;
   score: number;
+  /**
+   * WARP-436: chunk snippet text. Required by the RAGAS eval harness
+   * (`tests/retrieval-eval/ragas/ragas_runner.py`) so the LLM judge can
+   * score faithfulness / context-relevance against the actual retrieved
+   * text, not just metadata. Kept on the same admin-only endpoint
+   * because exposing chunk text via a public surface would bypass the
+   * per-user RBAC story; this endpoint is already 404 in production.
+   */
+  snippet: string;
 }
 
 export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
@@ -72,12 +81,11 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      let hits: Array<{
-        source: "nextcloud" | "brain";
-        path: string;
-        chunkIdx: number;
-        score: number;
-      }>;
+      // Reuse the canonical SearchHit type from file-search.service so
+      // we always see whatever fields the underlying retriever exposes
+      // (snippet, metadata, pageNumber, …). WARP-436: snippet is what
+      // the RAGAS runner consumes.
+      let hits: Awaited<ReturnType<typeof search.searchByVector>>;
 
       if (variant === "vector") {
         // minSimilarity=0 so we don't pre-filter the baseline — let the
@@ -127,6 +135,7 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
         path: h.path,
         chunkIdx: h.chunkIdx,
         score: h.score,
+        snippet: h.snippet,
       }));
       res.json({ results: wire });
     } catch (err) {

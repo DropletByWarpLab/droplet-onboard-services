@@ -11,15 +11,11 @@ This directory is being built out across the WARP-436 batches:
 
 | Batch | Lands | Status |
 |---|---|---|
-| A | `requirements.txt`, `README.md`, `goldens.yaml` | ✅ (this PR) |
-| B | `ragas_runner.py` | pending |
-| C | `RAGAS_ENABLED=1` mode in `run.integration.test.ts`, `--with-ragas` flag in `scripts/test-rag.sh`, nightly GH Actions workflow | pending |
-| D | `baselines.json` (recorded p50/p95 from 5 runs) | pending |
-| E | `docs/RAG_TESTING.md` "RAGAS metrics" section | pending |
-
-Until batch B lands, `ragas_runner.py` does not exist — `requirements.txt`
-and `goldens.yaml` here are scaffolding only. Installing them does not
-make the harness runnable yet.
+| A | `requirements.txt`, `README.md`, `goldens.yaml` | ✅ |
+| B | `ragas_runner.py` + admin-retrieval-eval `snippet` extension | ✅ |
+| C | `RAGAS_ENABLED=1` mode in `run.integration.test.ts`, `--with-ragas` flag in `scripts/test-rag.sh`, nightly GH Actions workflow | ✅ |
+| D | `baselines.json` (recorded p50/p95 from 5 runs) | scaffold only — needs a real Linux/CI run to populate |
+| E | `docs/RAG_TESTING.md` "RAGAS metrics" section | ✅ |
 
 ## Isolation contract
 
@@ -45,11 +41,38 @@ a separate ADR — it's not what this harness is for.
 
 - `requirements.txt` — pinned RAGAS + OpenAI-compat + parsing deps.
 - `goldens.yaml` — extends `../queries.yaml` with `expected_answer` and
-  `reference_contexts` per query. Match by `id`.
-- `ragas_runner.py` *(batch B)* — load goldens, query the orchestrator,
-  build a `Dataset`, run `ragas.evaluate(...)`.
-- `baselines.json` *(batch D)* — recorded p50/p95 per metric across 5
-  runs; thresholds derived from `p50 − 1.5 × IQR`.
+  `reference_contexts` per query. Match by `id`. All 20 goldens
+  categorized (10 `[WARP-TESTING]` verified, 10 `[INFERRED]` /
+  `[INFERRED-CONFIRMED]` from fixture documentation).
+- `ragas_runner.py` — load goldens, query the orchestrator's
+  `/api/admin/retrieval-eval/search`, synthesize answers via the judge
+  LLM, run `ragas.evaluate(...)`. Writes `results.json` + `results.md`.
+- `baselines.json` — recorded p50/p95 per metric across 5 runs;
+  thresholds derived from `p50 − 1.5 × IQR`. **Currently a scaffold
+  with placeholder zeros.** Run the nightly job (or `RAGAS_ENABLED=1
+  ./scripts/test-rag.sh --with-ragas`) once on Linux/CI to populate
+  it with real numbers before merging Phase 3 / Phase 4.
+
+## How to run
+
+```bash
+# 1. Install the deps (one-time, isolated to this dir's venv)
+python -m venv .venv && source .venv/bin/activate
+pip install -r tests/retrieval-eval/ragas/requirements.txt
+
+# 2. Bring the Compose stack up (orchestrator + ai-gateway + db + file-indexer)
+./scripts/test-rag.sh --no-down --only end-to-end
+# (the --only argument boots + seeds fixtures, then exits without teardown)
+
+# 3. Run the harness
+python tests/retrieval-eval/ragas/ragas_runner.py \
+    --variant hybrid --limit 10 --judge local \
+    --out tests/retrieval-eval/ragas/results.json \
+    --out-md tests/retrieval-eval/ragas/results.md
+
+# Or via the integration-test wrapper:
+RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas
+```
 
 ## See also
 

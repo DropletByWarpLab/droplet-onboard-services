@@ -1,0 +1,17 @@
+{
+  "_comment": "WARP-436 — RAGAS metric baselines, schema-only scaffold.",
+  "_status": "PLACEHOLDER. Populate via the rag-eval-nightly workflow's first successful run on a Linux runner (the macOS dev path can't bring up the full Compose stack — see docs/RAG_TESTING.md 'macOS dev-machine note'). The integration test in tests/retrieval-eval/run.integration.test.ts treats the all-zero floors as 'recording mode' and skips assertions when zero.",
+  "recorded_at": null,
+  "judge": "local",
+  "n_queries": 20,
+  "n_runs": 0,
+  "runs": [],
+  "envelopes": {
+    "faithfulness":          { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
+    "llm_context_precision": { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
+    "llm_context_recall":    { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
+    "answer_relevancy":      { "floor": 0.0, "p50": null, "p95": null, "iqr": null },
+    "factual_correctness":   { "floor": 0.0, "p50": null, "p95": null, "iqr": null }
+  },
+  "_threshold_formula": "floor = p50 − 1.5 × IQR, computed over 5 runs"
+}

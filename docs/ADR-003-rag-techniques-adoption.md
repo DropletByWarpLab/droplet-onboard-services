@@ -288,9 +288,9 @@ JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.ne
 
 | Phase | Ticket | Status |
 |---|---|---|
-| Epic | [WARP-434](https://warp-lab.atlassian.net/browse/WARP-434) | To Do |
-| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | To Do |
-| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | To Do (parallel with WARP-435) |
+| Epic | [WARP-434](https://warp-lab.atlassian.net/browse/WARP-434) | In Progress |
+| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | In Progress (branch `feat/warp-435-ingest-enrichment`, parallel work stream) |
+| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | In Progress — batches A/B/C/E landed; batch D scaffolded (needs first Linux/CI run to populate baselines.json) |
 | Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | To Do (blocked by WARP-436) |
 | Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do (blocked by WARP-436, WARP-437) |
 | Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-jetson-ai capacity) |

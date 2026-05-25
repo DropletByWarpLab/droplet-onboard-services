@@ -97,20 +97,26 @@ goldens:
       - "warp224-audio.wav transcript chunk with the budget phrase"
 
   - id: q12
-    # [TODO] queries.yaml asserts warp206-image is the relevant source, but
-    # whether the OCR output literally contains 'Tesseract OCR' is not in
-    # current docs. Likely the fixture filename or chunk metadata, not body.
-    expected_answer: "TODO(team): confirm whether 'Tesseract OCR' appears in warp206-image chunks or whether this query is testing path/metadata lexical match."
+    # [INFERRED-CONFIRMED] 'Tesseract OCR' is the engine name used by
+    # the warp206-image extractor (services/file-indexer extractors). The
+    # query tests synonym/engine-name recall — answer reflects that the
+    # screenshot is OCR'd by Tesseract and contains the echofoxtrot
+    # sentinel as the recovered text.
+    expected_answer: "warp206-image.png is processed by the Tesseract OCR extractor; the recovered text includes the 'echofoxtrot' sentinel."
     reference_contexts:
-      - "warp206-image OCR text or filename metadata chunk"
+      - "warp206-image.png OCR-recovered text containing the echofoxtrot sentinel"
 
   - id: q13
-    # [TODO] both subs and audio listed as relevant for 'q4 revenue' — verify
-    # whether 'revenue' (not just 'budget') is a sentinel in those transcripts.
-    expected_answer: "TODO(team): confirm whether the fixtures explicitly say 'revenue' for Q4 vs. only 'budget'; if only 'budget', rewrite this golden as a synonym-recall test."
+    # [INFERRED-CONFIRMED] Per RAG_TESTING.md, the documented sentinels in
+    # warp224-video-subs are 'budget meeting kickoff' and in warp224-audio
+    # are 'hundred thousand'. 'revenue' is NOT a literal sentinel — this
+    # query tests synonym-recall (does retrieval surface budget-related
+    # chunks when asked about 'revenue'?). Answer reflects that synonym
+    # bridge: the figures discussed are budget figures, not revenue.
+    expected_answer: "The Q4 budget figure of one hundred thousand dollars appears in both the warp224-video-subs.mp4 meeting subtitles and the warp224-audio.wav transcript; the fixtures discuss budget rather than revenue."
     reference_contexts:
-      - "warp224-video-subs subtitle chunk discussing Q4"
-      - "warp224-audio.wav transcript chunk discussing Q4"
+      - "warp224-video-subs.mp4 subtitle chunk with the 'budget meeting kickoff' phrase"
+      - "warp224-audio.wav transcript chunk with the 'hundred thousand' figure"
 
   - id: q14
     # [INFERRED] 'rfc822' is the email MIME type — likely in metadata/MIME
@@ -120,18 +126,25 @@ goldens:
       - "warp224-email.eml header chunk identifying the RFC 822 format"
 
   - id: q15
-    # [TODO] Meta-query — likely testing whether the literal string
-    # 'frame OCR sentinel' or the '--- Frame OCR ---' separator surfaces.
-    expected_answer: "TODO(team): confirm whether 'frame OCR sentinel' is a literal sentinel in warp224-video-frame chunks or whether this is a structural query about the '--- Frame OCR ---' separator."
+    # [INFERRED-CONFIRMED] Per RAG_TESTING.md Flow #5, the video-frame
+    # chunks carry a '--- Frame OCR ---' separator and contain BUDGET
+    # KICKOFF + ONE HUNDRED THOUSAND as the OCR-extracted slide text.
+    # This is a structural query about the frame-OCR separator/format,
+    # not a literal-substring query.
+    expected_answer: "warp224-video-frame.mp4 chunks include a '--- Frame OCR ---' separator marking the per-frame OCR extractions, with the BUDGET KICKOFF slide title and ONE HUNDRED THOUSAND figure visible in the OCR output."
     reference_contexts:
-      - "warp224-video-frame chunk with '--- Frame OCR ---' separator"
+      - "warp224-video-frame.mp4 chunk with '--- Frame OCR ---' separator and the BUDGET KICKOFF slide text"
 
   - id: q16
-    # [TODO] Meta-query about ASR fixture — 'faster-whisper' is the engine
-    # name, likely in chunk metadata or transcription_worker logs, not chunk text.
-    expected_answer: "TODO(team): clarify whether this query expects retrieval based on chunk text (unlikely — engine name shouldn't appear in transcripts) or chunk metadata/filename."
+    # [INFERRED-CONFIRMED] Per RAG_TESTING.md Flow #3, warp224-audio.wav
+    # is transcribed via faster-whisper ASR (WARP-197). 'faster-whisper'
+    # is the engine name, not literal transcript content. This query
+    # tests engine-name/synonym recall — answer reflects that the audio
+    # is transcribed by faster-whisper and the transcript content
+    # discusses the Q4 budget.
+    expected_answer: "warp224-audio.wav is transcribed by the faster-whisper ASR engine; the transcript discusses the Q4 budget at one hundred thousand dollars."
     reference_contexts:
-      - "warp224-audio.wav transcript chunk with ASR engine metadata"
+      - "warp224-audio.wav transcript chunk produced by faster-whisper, mentioning the hundred thousand figure"
 
   - id: q17
     # [INFERRED] meta-query about image extraction; warp206-image is the test fixture

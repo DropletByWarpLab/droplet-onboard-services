@@ -5,13 +5,11 @@ triaging a failed `rag-tests` CI run or about to ship a change to
 `services/file-indexer/`, `apps/orchestrator/src/routes/files-*`, or
 the embedding plumbing, start here.
 
-> **WARP-436 in flight:** an offline RAGAS metrics harness (faithfulness,
-> context-precision/recall, answer-correctness) is being layered on top
-> of the NDCG@10 eval. Scaffolded in `tests/retrieval-eval/ragas/` — see
-> that directory's `README.md` for the per-batch landing schedule. The
-> full "RAGAS metrics" operator section lands at batch E (step 2.8 of
-> ADR-003 Phase 2). Until then, see [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md)
-> for the design.
+> **RAGAS metrics layered on top of NDCG@10:** see the [RAGAS metrics](#ragas-metrics-warp-436)
+> section below for faithfulness / context-precision / context-recall /
+> answer-relevancy / factual-correctness. Runs nightly on Linux CI via
+> `.github/workflows/rag-eval-nightly.yml`; can be run locally on Linux
+> with `RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas`.
 
 ## What gets tested
 
@@ -304,6 +302,121 @@ of the budget.
 **Failure artifacts:** `rag-tests-logs-<run_id>`. Retention 7 days.
 Contains one file per service plus a `ps.txt` snapshot. Download and
 grep for `ERROR` / `WARN` first.
+
+## RAGAS metrics (WARP-436)
+
+NDCG@10 measures whether retrieval returns relevant chunks. It does
+**not** measure whether the LLM's answer is faithful to those chunks,
+whether the answer is actually relevant to the question, or whether
+the answer is factually correct against a gold reference. The RAGAS
+harness adds those four metrics on top, judged by an LLM.
+
+ADR: [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md) — Phase 2.
+
+### Metrics
+
+| Metric | What it measures | RAGAS class |
+|---|---|---|
+| Faithfulness | Does every claim in the answer have support in the retrieved contexts? | `Faithfulness` |
+| LLMContextPrecision | Of the chunks retrieved, how many were actually relevant to the gold answer? | `LLMContextPrecision` |
+| LLMContextRecall | Of the chunks needed for the gold answer, how many did retrieval surface? | `LLMContextRecall` |
+| AnswerRelevancy | Is the answer on-topic for the question (independent of correctness)? | `AnswerRelevancy` |
+| FactualCorrectness | How well does the answer match the gold reference answer? | `FactualCorrectness` |
+
+All five are LLM-judged. There is no per-PR ground truth for
+"faithfulness", so every metric is a noisy estimate — that's why the
+acceptance gate uses an envelope (`p50 − 1.5 × IQR` floor over 5
+runs) rather than a single-shot threshold.
+
+### Judge-LLM policy
+
+| Judge | When | Cost | How to invoke |
+|---|---|---|---|
+| `local` (default) | nightly + PR-of-Phase-3-or-4 | free (local Ollama, ~50 min runner time on cold) | `RAGAS_JUDGE=local` (default) |
+| `cloud` | release-candidate builds, goldens-recalibration | OpenAI tokens, see budget tracker | `RAGAS_JUDGE=cloud` + `OPENAI_API_KEY` |
+
+PR CI **never** spends cloud judge tokens. The nightly workflow
+defaults to local. The cloud judge is reserved for release-candidate
+verification where the noise floor of the local judge would mask a
+real regression.
+
+### How to run
+
+```bash
+# Local (Linux only; macOS dev path can't bring up the full stack
+# — see "macOS dev-machine note" above):
+RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas
+
+# Or by-hand against an already-running stack:
+python tests/retrieval-eval/ragas/ragas_runner.py \
+    --variant hybrid --limit 10 --judge local \
+    --out tests/retrieval-eval/ragas/results.json
+
+# Via CI:
+gh workflow run rag-eval-nightly --ref <branch>
+```
+
+Outputs land in `tests/retrieval-eval/ragas/results.{json,md}`. The
+nightly workflow uploads both as artifacts (`ragas-results-<run_id>`,
+30-day retention).
+
+### Goldens
+
+Each of the 20 NDCG queries in `tests/retrieval-eval/queries.yaml` has
+a paired entry in `tests/retrieval-eval/ragas/goldens.yaml`, matched
+by `id`. The goldens add two fields the NDCG harness doesn't need:
+
+- `expected_answer` — the ground-truth answer string, used by
+  `FactualCorrectness` and `AnswerRelevancy`.
+- `reference_contexts` — short prose descriptions of the chunks that
+  should appear in the retrieved context, used by `LLMContextRecall`
+  and `LLMContextPrecision`.
+
+Each entry carries a sourcing tag in its comment:
+
+- `[WARP-TESTING]` — verified against the "Flows under test" sentinel
+  table in this doc.
+- `[INFERRED]` / `[INFERRED-CONFIRMED]` — derived from documented
+  fixture conventions; correct in spirit, may need a wording tweak.
+
+When adding a new query to `queries.yaml`, add the matching golden in
+the same PR. The runner skips queries without a golden and prints a
+warning to stderr.
+
+### Baselines + thresholds
+
+`tests/retrieval-eval/ragas/baselines.json` records p50 / p95 / IQR per
+metric over 5 runs, plus the derived floor (`p50 − 1.5 × IQR`). The
+WARP-436 integration test asserts every metric's mean is ≥ floor.
+
+**Today** that file is a placeholder (all-zero floors). The first
+nightly run on Linux CI populates it. To rebaseline after a change to
+goldens or to the judge model:
+
+1. Run the nightly workflow 5 times: `gh workflow run rag-eval-nightly` × 5.
+2. Pull the `results.json` artifacts from each.
+3. Compute p50 / p95 / IQR per metric, write to `baselines.json`.
+4. Commit `baselines.json` in a PR titled `chore(rag-eval): rebaseline
+   RAGAS — <reason>` so the rebaseline event is auditable.
+
+### Triaging a RAGAS failure
+
+| Symptom | First service to check | Likely cause |
+|---|---|---|
+| Every metric is zero | judge LLM | `RAGAS_JUDGE=local` but Ollama not running / model not pulled. Check `ollama list`. |
+| Faithfulness drops sharply, others stable | orchestrator agent loop or LLM | answer synthesis changed; check whether the chat model defaulted to a different family. |
+| Context precision drops sharply, recall stable | retrieval — chunker or embedder | chunks are bigger / noisier than baseline. Re-check Phase 1's chunker.py contract. |
+| Context recall drops, precision stable | retrieval — query side | embedding or query rewriting regressed; check ai-gateway gRPC EmbedText. |
+| All metrics drift down ~5% over a week | judge LLM | local Ollama model version bump. Re-pin the model tag and rebaseline. |
+| Metric variance > 0.15 IQR within a single nightly | corpus | 20 queries is too few for stable variance; extend goldens.yaml to ≥50 and rebaseline. |
+
+### See also
+
+- `tests/retrieval-eval/ragas/README.md` — per-batch landing status,
+  isolation contract, file inventory.
+- `tests/retrieval-eval/ragas/ragas_runner.py` — the runner itself.
+- `.github/workflows/rag-eval-nightly.yml` — nightly CI workflow.
+- [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md) — full Phase 2 design.
 
 ## LLM determinism caveat (e2e test)
 

@@ -17,7 +17,8 @@
  * constant — not a sprinkle of `* 1.1` literals across the file.
  */
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -32,6 +33,15 @@ import {
   pollNcChunkCount,
   COMPOSE,
 } from "../helpers/rag-retrieval";
+
+/**
+ * WARP-436: when RAGAS_ENABLED=1 is set in the environment, the eval
+ * suite also runs ragas_runner.py against the same stack and asserts
+ * threshold envelopes derived from tests/retrieval-eval/ragas/baselines.json.
+ * Default OFF — RAGAS is offline-judge-driven and too slow for per-PR CI.
+ */
+const RAGAS_ENABLED = process.env.RAGAS_ENABLED === "1";
+const RAGAS_JUDGE = process.env.RAGAS_JUDGE ?? "local";
 
 /**
  * Acceptance criterion per WARP-286 spec: hybrid must beat vector-only
@@ -64,6 +74,11 @@ interface SearchResult {
   path: string;
   chunkIdx: number;
   score: number;
+  // WARP-436: snippet is added by the admin-retrieval-eval endpoint
+  // extension for the RAGAS runner. The NDCG@10 harness doesn't use it,
+  // but typing it here keeps the wire shape in sync between TS + Python
+  // consumers of the same endpoint.
+  snippet?: string;
 }
 
 function matchesRelevant(result: SearchResult, r: RelevantMatch): boolean {
@@ -209,4 +224,74 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
       vecMean * NDCG_IMPROVEMENT_THRESHOLD,
     );
   }, 600_000);
+
+  // WARP-436 — RAGAS metrics layered on top of NDCG@10. Gated by env so
+  // we don't pay the judge-LLM cost on every PR's vitest run.
+  it.skipIf(!RAGAS_ENABLED)(
+    "RAGAS metrics stay above baseline thresholds (WARP-436)",
+    async () => {
+      const ragasDir = resolve(REPO_ROOT, "tests/retrieval-eval/ragas");
+      const runner = resolve(ragasDir, "ragas_runner.py");
+      const resultsJson = resolve(ragasDir, "results.json");
+      const baselinesJson = resolve(ragasDir, "baselines.json");
+
+      // Spawn the runner against the still-running Compose stack. The
+      // venv is created/refreshed by scripts/test-rag.sh --with-ragas;
+      // when running through `npx vitest` directly the caller is
+      // expected to have provisioned it. We don't auto-create a venv
+      // here to keep this test's responsibility tight.
+      const pythonBin = process.env.RAGAS_PYTHON
+        ?? resolve(ragasDir, ".ragas-venv/bin/python");
+      const args = [
+        runner,
+        "--variant", "hybrid",
+        "--limit", "10",
+        "--judge", RAGAS_JUDGE,
+        "--api-url", API_URL,
+        "--out", resultsJson,
+        "--out-md", resolve(ragasDir, "results.md"),
+      ];
+
+      // eslint-disable-next-line no-console
+      console.log(`\n[RAGAS] ${pythonBin} ${args.join(" ")}`);
+      execSync(`${pythonBin} ${args.map((a) => JSON.stringify(a)).join(" ")}`,
+        { stdio: "inherit" });
+
+      expect(existsSync(resultsJson)).toBe(true);
+      const results = JSON.parse(readFileSync(resultsJson, "utf8")) as {
+        metrics: Record<string, { mean: number; p50: number; p95: number }>;
+      };
+
+      // If baselines.json exists, assert every metric's mean is within the
+      // p50 - 1.5*IQR envelope. If it doesn't (first-ever run on a new
+      // appliance), record-mode: print numbers, don't fail.
+      if (!existsSync(baselinesJson)) {
+        // eslint-disable-next-line no-console
+        console.log(
+          "\n[RAGAS] baselines.json not found — recording mode. " +
+          "Inspect tests/retrieval-eval/ragas/results.json and commit " +
+          "baselines.json with the 5-run aggregates per docs/RAG_TESTING.md.",
+        );
+        return;
+      }
+
+      const baselines = JSON.parse(
+        readFileSync(baselinesJson, "utf8"),
+      ) as {
+        envelopes: Record<string, { floor: number }>;
+      };
+
+      for (const [metric, stats] of Object.entries(results.metrics)) {
+        const floor = baselines.envelopes?.[metric]?.floor;
+        if (typeof floor !== "number") continue;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[RAGAS] ${metric}: mean=${stats.mean.toFixed(3)} floor=${floor.toFixed(3)}`,
+        );
+        expect(stats.mean).toBeGreaterThanOrEqual(floor);
+      }
+    },
+    // Judge LLM call per metric per query → can be slow on local mistral.
+    1_800_000,
+  );
 });
