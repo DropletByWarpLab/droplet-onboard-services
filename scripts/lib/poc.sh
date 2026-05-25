@@ -52,12 +52,21 @@ detect_poc_mode() {
   fi
 
   # Signal 2: separate Jetson reachable?
+  # We need a REACHABLE Ollama, not just a resolvable hostname. The PoC
+  # box has avahi advertising itself, and stale /etc/hosts entries can
+  # have `inference-engine.local` pointing at something dead — both make
+  # getent succeed without there being a real Jetson on the LAN. The
+  # curl below is the authoritative check: an Ollama instance answering
+  # /api/version means we're multi-box, anything else means we're not.
   local jetson_reachable=0
-  if getent hosts inference-engine.local >/dev/null 2>&1; then
-    jetson_reachable=1
-  elif command -v curl >/dev/null 2>&1 && curl -fsS -m 2 \
-      http://192.168.50.197:11434/api/version >/dev/null 2>&1; then
-    jetson_reachable=1
+  if command -v curl >/dev/null 2>&1; then
+    # Try the documented static IP first, then the mDNS name. Both
+    # need a real /api/version response; a name that resolves to a
+    # dead IP fails the curl and correctly stays at jetson_reachable=0.
+    if curl -fsS -m 2 http://192.168.50.197:11434/api/version >/dev/null 2>&1 \
+       || curl -fsS -m 2 http://inference-engine.local:11434/api/version >/dev/null 2>&1; then
+      jetson_reachable=1
+    fi
   fi
 
   # Signal 3: dGPU silicon present?
