@@ -26,6 +26,7 @@ import {
   confirmCommand,
   getAuditLog,
 } from "../services/safety-tier.service.js";
+import { requireRole } from "../middleware/auth.js";
 
 const logger = pino({ name: "matter-routes" });
 
@@ -154,7 +155,9 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   });
 
   // --- Commission a new device ---
-  router.post("/matter/commission", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family — household-tier
+  // operation; service principals (voice-io, mcp) excluded.
+  router.post("/matter/commission", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {
         return res.status(503).json({ error: "Matter controller not started" });
@@ -191,7 +194,12 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   });
 
   // --- Send command (with safety tier evaluation) ---
-  router.post("/matter/devices/:nodeId/command", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family — same posture
+  // as /matter/commission.
+  router.post(
+    "/matter/devices/:nodeId/command",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {
         return res.status(503).json({ error: "Matter controller not started" });
@@ -264,10 +272,16 @@ export function createMatterRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
-  });
+    },
+  );
 
   // --- Confirm a Tier 2 command ---
-  router.post("/matter/devices/:nodeId/confirm", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family — confirming a
+  // staged command is the same trust tier as issuing one.
+  router.post(
+    "/matter/devices/:nodeId/confirm",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {
         return res.status(503).json({ error: "Matter controller not started" });
@@ -319,10 +333,15 @@ export function createMatterRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
-  });
+    },
+  );
 
   // --- Decommission a device ---
-  router.delete("/matter/devices/:nodeId", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family.
+  router.delete(
+    "/matter/devices/:nodeId",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {
         return res.status(503).json({ error: "Matter controller not started" });
@@ -335,7 +354,8 @@ export function createMatterRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
-  });
+    },
+  );
 
   // --- Audit log ---
   router.get("/matter/audit", async (req, res, next) => {

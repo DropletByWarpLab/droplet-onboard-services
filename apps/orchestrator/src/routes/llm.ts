@@ -15,6 +15,7 @@ import {
   type PersistedToolCall,
 } from "../services/chat-persistence.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { requireRole } from "../middleware/auth.js";
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
@@ -229,7 +230,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // identically). Subsequent turns send the id back. `turnId` is a
   // client-supplied idempotency key — re-submits skip the duplicate
   // persist.
-  router.post("/llm/chat", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family + guest +
+  // service — any human-tier role can drive their own chat session,
+  // AND voice-io's service principal MUST also be able to drive the
+  // agent loop (it POSTs here with SERVICE_TOKEN_VOICE; see
+  // `services/voice-io/voice/llm.py`). This is a deviation from
+  // ADR-004 §3 which states "service principals are read-only" — the
+  // existing voice flow is the read-only-tool-surface side of that
+  // contract, but the route itself must remain reachable for
+  // service. Tool-level RBAC (WRITE_TOOLS narrowing in `narrowAllowedToolsForRole`)
+  // is what keeps voice from issuing destructive operations.
+  router.post(
+    "/llm/chat",
+    requireRole("owner", "admin", "family", "guest", "service"),
+    async (req, res, next) => {
     try {
       const parsed = chatRequestSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -509,7 +523,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
-  });
+    },
+  );
 
   // ── WARP-304: per-user conversation history ──
   // The dashboard reads `/api/llm/conversations/:id` on mount when a
@@ -560,7 +575,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/llm/conversations/:id", async (req, res, next) => {
+  // WARP-171: per-route guard. Conversation rows are owned by the
+  // requesting user; service principals should never delete on behalf
+  // of a user. Human-tier roles only.
+  router.delete("/llm/conversations/:id", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
     try {
       const userId = (req as AuthedRequest).user?.username;
       if (!userId) {
@@ -584,7 +602,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // WARP-331: rename. Mirrors the GET/DELETE handlers above — scoped by
   // req.user.username, service maps "no such row owned by this user"
   // to a null return, and we surface that as 404.
-  router.patch("/llm/conversations/:id", async (req, res, next) => {
+  // WARP-171: per-route guard. Same posture as the delete above.
+  router.patch("/llm/conversations/:id", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
     try {
       const userId = (req as AuthedRequest).user?.username;
       if (!userId) {
@@ -659,7 +678,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   });
 
   // Key management (proxy to ai-gateway)
-  router.post("/llm/keys/:provider", async (req, res, next) => {
+  // WARP-171: per-route guard. Provider API keys are household-tier
+  // credentials (per-user OpenAI key etc.) — owner/admin/family scope.
+  // No `guest` (read-only family-tier) and no `service`.
+  router.post("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { provider } = req.params;
       const { api_key } = req.body;
@@ -683,7 +705,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/llm/keys/:provider", async (req, res, next) => {
+  // WARP-171: same posture as POST /llm/keys/:provider.
+  router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       await aiGateway.deleteKey(req.params.provider);
       res.json({ status: "deleted" });

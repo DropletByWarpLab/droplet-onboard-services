@@ -38,6 +38,7 @@ import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
+import { requireRole } from "../middleware/auth.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -190,7 +191,10 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Upload file(s) ──
-  router.post("/files/upload", handleUpload, async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family — household
+  // file writes. service principals never upload (the file-indexer
+  // talks to Nextcloud's WebDAV directly, not through this API).
+  router.post("/files/upload", requireRole("owner", "admin", "family"), handleUpload, async (req, res, next) => {
     try {
       const targetPath = (req.query.path as string) || "/";
 
@@ -230,7 +234,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Delete a file or directory ──
-  router.delete("/files", async (req, res, next) => {
+  router.delete("/files", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const filePath = req.query.path as string;
       if (!filePath) {
@@ -252,7 +256,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Create a directory ──
-  router.post("/files/mkdir", async (req, res, next) => {
+  router.post("/files/mkdir", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ path: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -280,7 +284,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
   // expireDate / password / note / shareWith). Callers that pass only `path`
   // get a public read-only link from the defaults.
-  router.post("/files/share", async (req, res, next) => {
+  router.post("/files/share", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -375,7 +379,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   }
 
   // ── Rename (POST /api/files/rename) ──
-  router.post("/files/rename", async (req, res, next) => {
+  router.post("/files/rename", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -409,7 +413,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Move (POST /api/files/move) ──
-  router.post("/files/move", async (req, res, next) => {
+  router.post("/files/move", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
@@ -435,7 +439,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Copy (POST /api/files/copy) ──
-  router.post("/files/copy", async (req, res, next) => {
+  router.post("/files/copy", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
@@ -461,7 +465,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Bulk delete (POST /api/files/bulk-delete) ──
-  router.post("/files/bulk-delete", async (req, res, next) => {
+  router.post("/files/bulk-delete", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ paths: z.array(z.string().min(1)).min(1).max(200) });
       const parsed = schema.safeParse(req.body);
@@ -497,7 +501,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Bulk move (POST /api/files/bulk-move) ──
-  router.post("/files/bulk-move", async (req, res, next) => {
+  router.post("/files/bulk-move", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         paths: z.array(z.string().min(1)).min(1).max(200),
@@ -541,7 +545,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Bulk copy (POST /api/files/bulk-copy) ──
-  router.post("/files/bulk-copy", async (req, res, next) => {
+  router.post("/files/bulk-copy", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         paths: z.array(z.string().min(1)).min(1).max(200),
@@ -595,7 +599,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Trash: restore (POST /api/files/trash/restore) ──
-  router.post("/files/trash/restore", async (req, res, next) => {
+  router.post("/files/trash/restore", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ name: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -613,7 +617,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Trash: delete single item permanently (DELETE /api/files/trash/item) ──
-  router.delete("/files/trash/item", async (req, res, next) => {
+  router.delete("/files/trash/item", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const name = req.query.name as string;
       if (!name) {
@@ -630,7 +634,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Trash: empty (DELETE /api/files/trash) ──
-  router.delete("/files/trash", async (_req, res, next) => {
+  router.delete("/files/trash", requireRole("owner", "admin", "family"), async (_req, res, next) => {
     try {
       const user = getUser(_req);
       await ncEmptyTrash(await getToken(_req), user);
@@ -664,7 +668,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Versions: restore (POST /api/files/versions/restore) ──
-  router.post("/files/versions/restore", async (req, res, next) => {
+  router.post("/files/versions/restore", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -707,7 +711,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   const SEARCH_TTL = 5;
 
   // ── Favorite toggle (POST /api/files/favorite) ──
-  router.post("/files/favorite", async (req, res, next) => {
+  router.post("/files/favorite", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -843,7 +847,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Update existing share (PUT /api/files/share/:id) ──
-  router.put("/files/share/:id", async (req, res, next) => {
+  router.put("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -895,7 +899,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Revoke a share (DELETE /api/files/share/:id) ──
-  router.delete("/files/share/:id", async (req, res, next) => {
+  router.delete("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {

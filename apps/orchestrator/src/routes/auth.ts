@@ -37,7 +37,11 @@ import {
   REFRESH_TOKEN_TTL_SECONDS,
   type Role,
 } from "../services/jwt.service.js";
-import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
+import {
+  SESSION_COOKIE_NAME,
+  REFRESH_COOKIE_NAME,
+  requireRole,
+} from "../middleware/auth.js";
 import {
   storeNcToken,
   getNcToken,
@@ -107,11 +111,10 @@ const acceptInviteSchema = z.object({
   password: z.string().min(8).max(128),
 });
 
-/** True if the caller is allowed to manage invites (issue / list / revoke). */
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
+// WARP-171: the legacy `isAdmin(req)` helper was inlined-and-removed
+// when every invite-management route was switched to
+// `requireRole("owner", "admin")`. The two-value contract is now
+// expressed at route registration where reviewers can see it.
 
 /** Best-effort source IP for the audit trail. Honours `trust proxy`. */
 function getRequestIp(req: Request): string | null {
@@ -771,7 +774,8 @@ export function createProtectedAuthRouter(
   });
 
   // ── Create user (admin only) ──
-  router.post("/auth/users", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.post("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -805,7 +809,8 @@ export function createProtectedAuthRouter(
   // Accepts any combination of displayName / email / quota / password and
   // applies them one OCS PUT at a time. Each field is independent so a
   // partial failure leaves the previously-applied fields in place.
-  router.put("/auth/users/:username", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
@@ -845,41 +850,51 @@ export function createProtectedAuthRouter(
   });
 
   // ── Disable / enable user (admin only) ──
-  router.post("/auth/users/:username/disable", async (req, res, next) => {
-    try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.post(
+    "/auth/users/:username/disable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const token = await resolveNcToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        await ncSetUserEnabled(token, req.params.username, false);
+        res.json({ status: "disabled", username: req.params.username });
+      } catch (err: any) {
+        if (err.message?.includes("403") || err.message?.includes("997")) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+        next(err);
       }
-      await ncSetUserEnabled(token, req.params.username, false);
-      res.json({ status: "disabled", username: req.params.username });
-    } catch (err: any) {
-      if (err.message?.includes("403") || err.message?.includes("997")) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
-      next(err);
-    }
-  });
+    },
+  );
 
-  router.post("/auth/users/:username/enable", async (req, res, next) => {
-    try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.post(
+    "/auth/users/:username/enable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const token = await resolveNcToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        await ncSetUserEnabled(token, req.params.username, true);
+        res.json({ status: "enabled", username: req.params.username });
+      } catch (err: any) {
+        if (err.message?.includes("403") || err.message?.includes("997")) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+        next(err);
       }
-      await ncSetUserEnabled(token, req.params.username, true);
-      res.json({ status: "enabled", username: req.params.username });
-    } catch (err: any) {
-      if (err.message?.includes("403") || err.message?.includes("997")) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
-      next(err);
-    }
-  });
+    },
+  );
 
   // ── Delete user (admin only) ──
   // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
@@ -890,7 +905,8 @@ export function createProtectedAuthRouter(
   // best-effort: if it throws we still return success, but log loud
   // — orphaned local rows are recoverable later via a janitor job;
   // returning 500 here would also fail to undo the upstream delete.
-  router.delete("/auth/users/:username", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
@@ -947,12 +963,12 @@ export function createProtectedAuthRouter(
   // the existing ddns/vpn convention so the dashboard's "you're logged in,
   // just not allowed" path is consistent across pages.
   // ────────────────────────────────────────────────────────────
-  router.post("/auth/invites", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only. Replaces the
+  // pre-WARP-171 inline `isAdmin(req)` check; the guard runs as
+  // middleware ahead of the handler so the 403 short-circuits before
+  // any handler-local validation.
+  router.post("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
         return;
@@ -999,12 +1015,12 @@ export function createProtectedAuthRouter(
     }
   });
 
-  router.get("/auth/invites", async (req, res, next) => {
+  // WARP-171: GET listing of invites is also admin-only — exposing
+  // pending tokens to a family-tier user would be a credential leak
+  // even though the token's just-an-identifier. Same guard as the
+  // POST/DELETE invite endpoints.
+  router.get("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
         return;
@@ -1030,33 +1046,34 @@ export function createProtectedAuthRouter(
     }
   });
 
-  router.delete("/auth/invites/:token", async (req, res, next) => {
-    try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.delete(
+    "/auth/invites/:token",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        if (!prisma) {
+          res.status(500).json({ error: "Invite store unavailable" });
+          return;
+        }
+        const invite = await findInviteByToken(prisma, req.params.token);
+        if (!invite) {
+          res.status(404).json({ error: "Invite not found" });
+          return;
+        }
+        // Idempotent: revoking an already-revoked invite is a no-op success.
+        if (!invite.revokedAt) {
+          await prisma.userInvite.update({
+            where: { id: invite.id },
+            data: { revokedAt: new Date() },
+          });
+        }
+        res.json({ revoked: true });
+      } catch (err) {
+        next(err);
       }
-      if (!prisma) {
-        res.status(500).json({ error: "Invite store unavailable" });
-        return;
-      }
-      const invite = await findInviteByToken(prisma, req.params.token);
-      if (!invite) {
-        res.status(404).json({ error: "Invite not found" });
-        return;
-      }
-      // Idempotent: revoking an already-revoked invite is a no-op success.
-      if (!invite.revokedAt) {
-        await prisma.userInvite.update({
-          where: { id: invite.id },
-          data: { revokedAt: new Date() },
-        });
-      }
-      res.json({ revoked: true });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   return router;
 }
