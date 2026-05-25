@@ -22,7 +22,12 @@ from watchdog.observers.polling import PollingObserver
 
 from config import NEXTCLOUD_DATA_ROOT
 from extractors.registry import dispatch
-from chunker import chunk_text
+from chunker import (
+    chunk_text,
+    chunk_text_with_offsets,
+    format_chunk_with_header,
+    section_path_for_offset,
+)
 from embedder import embed_texts
 from db import upsert_chunk, delete_chunks_for_file, prune_excess_chunks
 from mqtt_client import publish
@@ -204,23 +209,34 @@ class IndexHandler(FileSystemEventHandler):
             logger.debug("No fileId for %s/%s — skipping", user, relpath)
             return
 
-        # Chunk
-        chunks = chunk_text(text)
-        if not chunks:
+        # Chunk + section-aware header prefix (WARP-435 / ADR-003 Phase 1).
+        chunk_pairs = chunk_text_with_offsets(text)
+        if not chunk_pairs:
             return
 
-        # Embed
-        vectors = embed_texts(chunks)
-        if len(vectors) != len(chunks):
-            logger.warning("Embedding count mismatch for %s/%s", user, relpath)
-            return
-
-        # Upsert
         # WARP-214: forward ExtractedDoc.metadata (chain[], subtitle_source) to
         # the chunk row so the dashboard can render breadcrumbs + source-channel
         # badges from /api/files/knowledge/{recent,search}.
         doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
-        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        section_paths_meta = (
+            doc_metadata.get("section_paths") if doc_metadata else None
+        )
+        display_filename = os.path.basename(relpath) or relpath
+        prefixed_chunks: list[str] = []
+        for offset, chunk_str in chunk_pairs:
+            sp = section_path_for_offset(offset, section_paths_meta)
+            prefixed_chunks.append(
+                format_chunk_with_header(chunk_str, display_filename, sp)
+            )
+
+        # Embed (prefixed text — the exact string also persisted on
+        # FileContentChunk.text so search hits show the section context).
+        vectors = embed_texts(prefixed_chunks)
+        if len(vectors) != len(prefixed_chunks):
+            logger.warning("Embedding count mismatch for %s/%s", user, relpath)
+            return
+
+        for idx, (chunk, vec) in enumerate(zip(prefixed_chunks, vectors)):
             upsert_chunk(
                 user,
                 file_id,
@@ -232,14 +248,14 @@ class IndexHandler(FileSystemEventHandler):
             )
 
         # Prune excess chunks if the file shrunk
-        prune_excess_chunks(file_id, len(chunks) - 1)
+        prune_excess_chunks(file_id, len(prefixed_chunks) - 1)
 
         publish(f"droplet/index/{user}/indexed", {
             "path": relpath,
             "ncFileId": file_id,
-            "chunks": len(chunks),
+            "chunks": len(prefixed_chunks),
         })
-        logger.info("Indexed %s/%s -> %d chunks", user, relpath, len(chunks))
+        logger.info("Indexed %s/%s -> %d chunks", user, relpath, len(prefixed_chunks))
 
 
 def start_watcher() -> Observer:

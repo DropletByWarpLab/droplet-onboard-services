@@ -137,6 +137,101 @@ def chunk_text(
     return [c.strip() for c in chunks if c and c.strip()]
 
 
+def chunk_text_with_offsets(
+    text: str,
+    chunk_size: int = CHUNK_SIZE_TOKENS,
+    overlap_ratio: float = CHUNK_OVERLAP_RATIO,
+) -> list[tuple[int, str]]:
+    """Sentence-aware chunker that also returns each chunk's start offset.
+
+    Returns ``(start_char_offset, chunk_text)`` tuples. The offset is
+    the byte index into the original ``text`` where the chunk begins —
+    needed by the WARP-435 contextual-header plumbing to look up the
+    enclosing section path from the extractor's ``section_paths``
+    metadata.
+
+    Uses ``TextSplitter.chunk_indices`` (returns ``(offset, chunk)``
+    pairs) when the splitter is available; otherwise falls back to the
+    word-split chunker and reconstructs offsets by scanning.
+    """
+    if not text or not text.strip():
+        return []
+
+    overlap_tokens = max(0, int(chunk_size * overlap_ratio))
+
+    try:
+        splitter = _get_splitter(chunk_size, overlap_tokens)
+        # ``chunk_indices`` returns (byte_offset, chunk_str) pairs.
+        pairs = list(splitter.chunk_indices(text))
+    except Exception as e:  # pragma: no cover - degradation path
+        logger.warning(
+            "chunker: chunk_indices unavailable (%s); falling back to "
+            "scan-reconstruction. Quality may regress.",
+            e,
+        )
+        chunks = _fallback_word_split(text, chunk_size, overlap_ratio)
+        # Reconstruct offsets by sequential scan — accurate when chunks
+        # are contiguous (legacy chunker emits non-overlapping windows
+        # in word terms but our reconstruction is character-based).
+        out: list[tuple[int, str]] = []
+        cursor = 0
+        for chunk in chunks:
+            idx = text.find(chunk[:80], cursor)
+            if idx < 0:
+                idx = cursor
+            out.append((idx, chunk))
+            cursor = max(cursor, idx + 1)
+        return out
+
+    return [(int(off), c.strip()) for off, c in pairs if c and c.strip()]
+
+
+def section_path_for_offset(
+    offset: int, section_paths: list[tuple[int, list[str]]] | None
+) -> list[str]:
+    """Look up the section path covering ``offset`` via binary search.
+
+    ``section_paths`` is the ``(char_offset, path)`` tuple list emitted
+    by the extractors. Returns the path of the most recent entry whose
+    offset is <= the chunk's offset. Empty list when no entry applies
+    (caller falls back to ``[filename]``).
+    """
+    if not section_paths:
+        return []
+    # Linear scan is fine — N is typically <100 (headings per document).
+    # Binary search is a micro-opt; not worth the readability tax.
+    current: list[str] = []
+    for entry_offset, entry_path in section_paths:
+        if entry_offset <= offset:
+            current = entry_path
+        else:
+            break
+    return current
+
+
+def format_chunk_with_header(
+    chunk: str, filename: str, section_path: list[str]
+) -> str:
+    """Prepend the WARP-435 contextual header to a chunk.
+
+    Header format (ADR-003 Phase 1):
+        Document: {filename} / Section: {a > b > c}
+
+        {chunk_text}
+
+    When ``section_path`` is empty we still emit the document header so
+    every chunk carries at least the filename — that alone is a useful
+    signal for the embedder when the same body sentence appears in
+    multiple documents (cross-doc disambiguation).
+    """
+    if section_path:
+        section_str = " > ".join(s for s in section_path if s)
+        header = f"Document: {filename} / Section: {section_str}"
+    else:
+        header = f"Document: {filename}"
+    return f"{header}\n\n{chunk}"
+
+
 def _fallback_word_split(
     text: str, chunk_size: int, overlap_ratio: float
 ) -> list[str]:
