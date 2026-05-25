@@ -40,6 +40,8 @@ import {
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
+import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
+import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -80,6 +82,21 @@ async function main() {
   await prisma.$connect();
   logger.info("Connected to PostgreSQL");
 
+  // WARP-456: initialize the signed activity recorder. Boot-fatal —
+  // an orchestrator that can't sign audit rows must NOT start.
+  initActivityRecorder(prisma);
+  // Genesis-or-restart event so the first row of every container's
+  // lifetime is always a `system` start-up. Makes the chain easier to
+  // segment in the dashboard's activity feed.
+  await recordActivity({
+    kind: "system",
+    severity: "info",
+    sourceIcon: "power",
+    what: "Orchestrator started",
+    sub: `pid ${process.pid}`,
+  });
+  logger.info("Activity recorder initialized");
+
   // Initialize services
   initDeviceService(prisma);
 
@@ -106,6 +123,12 @@ async function main() {
   // caches drop within the next round-trip on a write. Best-effort —
   // if MQTT is down we still bound staleness via the cache TTL.
   startContextStatsInvalidator();
+
+  // WARP-456: bridge file-indexer MQTT events into ActivityRow so the
+  // sealed audit log captures filesystem activity. Subscribes to
+  // `droplet/index/+/indexed` and `droplet/index/+/deleted`. Best-
+  // effort like the bridge above — if MQTT is down we miss the rows.
+  attachFileIndexerActivityBridge();
 
   // Initialize Matter controller (non-fatal if unavailable)
   try {

@@ -19,7 +19,8 @@
  * The signer is injected so tests can use a fixed key and production
  * pulls from `/data/secrets/audit.key` via `getDefaultSigner()`.
  */
-import type { PrismaClient, Prisma } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import pino from "pino";
 import {
   hashSignature,
@@ -236,9 +237,7 @@ export async function recordSafely(
   }
 }
 
-// Prisma needs a stub at module load when the global mock returns
-// undefined for `Prisma`. The route handlers also import `Prisma` for
-// `DbNull`, so we re-export the namespace; tests that mock
-// `@prisma/client` should include `Prisma.DbNull` in their stub.
-import { Prisma } from "@prisma/client";
+// Prisma's namespace is imported at the top of the file (alongside the
+// type-only PrismaClient) for runtime use of `Prisma.DbNull`. Tests that
+// mock `@prisma/client` need to expose `Prisma.DbNull` in their stub.
 export type { Prisma };
