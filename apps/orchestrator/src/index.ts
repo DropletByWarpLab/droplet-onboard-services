@@ -43,6 +43,7 @@ import {
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
+import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -168,6 +169,20 @@ async function main() {
     logger.info("MCP stdio child started");
   } catch (err) {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
+  }
+
+  // First-boot model readiness: if LLM_MODEL is set and Ollama doesn't
+  // have it yet, fire a background pull so the user lands on a working
+  // dashboard ~20 min after first boot without any manual `ollama pull`.
+  // Non-blocking — the orchestrator is fully serving requests while the
+  // model downloads in the background. See model-readiness.service.ts.
+  try {
+    await ensureDefaultModelPulled();
+  } catch (err) {
+    logger.warn(
+      "Model readiness check failed: %s (orchestrator continues serving requests)",
+      (err as Error).message,
+    );
   }
 
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
