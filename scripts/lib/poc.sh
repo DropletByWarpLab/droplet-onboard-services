@@ -148,8 +148,10 @@ install_poc_host_integration() {
   # the PSK redacted; we materialize the real one from the .env value
   # (DROPLET_AP_PSK if set, else fall back to a setup-wizard placeholder
   # that the setup wizard will rotate on first run).
+  # `|| true` on the grep is mandatory under `set -o pipefail`: a no-match
+  # grep exits 1 and propagates through the pipe, killing setup.sh entirely.
   local ap_psk
-  ap_psk="$(grep -E '^DROPLET_AP_PSK=' "$REPO_ROOT/.env" 2>/dev/null | cut -d= -f2-)"
+  ap_psk="$( { grep -E '^DROPLET_AP_PSK=' "$REPO_ROOT/.env" 2>/dev/null || true; } | cut -d= -f2-)"
   if [ -z "$ap_psk" ]; then
     ap_psk="CHANGE_ME_VIA_SETUP_WIZARD"
     log_warn "DROPLET_AP_PSK not set in .env — installing placeholder; setup wizard will rotate"
