@@ -557,6 +557,129 @@ export async function fetchOperation(opId: string): Promise<{
   });
 }
 
+// ---------------------------------------------------------------------------
+// AP onboarding (WARP-446)
+// ---------------------------------------------------------------------------
+//
+// Thin pass-through to the routing service's `/aps/*` endpoints. The
+// orchestrator's `ap-onboard.service.ts` owns the state machine (ApDevice
+// rows, status transitions, audit columns); this client just shuttles
+// JSON bodies + Operation-Id into and out of the routing layer. RouterError
+// classification (UNREACHABLE / TIMEOUT / AUTH / etc.) flows through the
+// shared retry helper, same as every other call here.
+
+export type DiscoveredApInfo = {
+  mac: string;
+  model?: string;
+  serial?: string;
+  version?: string;
+  last_ip?: string;
+  hostname?: string;
+  first_seen?: string;
+  last_seen?: string;
+};
+
+export type ApStatusResponse = {
+  mac: string;
+  state: "discovered" | "online" | "decommissioned" | "unknown";
+  model?: string;
+  serial?: string;
+  version?: string;
+  last_ip?: string;
+  hostname?: string;
+  wireless?: {
+    iface_section: string;
+    radio: string;
+    ssid: string;
+    encryption: string;
+    network: string;
+    key_set: boolean;
+  };
+};
+
+export type ApApproveResponse = {
+  status: "ok";
+  mac: string;
+  iface_section: string;
+  ssid: string;
+  operation_id?: string;
+};
+
+export type ApDecommissionResponse = {
+  status: "ok";
+  mac: string;
+  operation_id?: string;
+};
+
+export async function listDiscoveredAps(): Promise<DiscoveredApInfo[]> {
+  const data = await routingFetchJson<{ discovered: DiscoveredApInfo[] }>(
+    "/aps/discovered",
+    { label: "AP discovery list" },
+  );
+  return data.discovered;
+}
+
+export async function getApStatus(opts: { mac: string }): Promise<ApStatusResponse | null> {
+  try {
+    return await routingFetchJson<ApStatusResponse>(
+      `/aps/${encodeURIComponent(opts.mac)}`,
+      { label: "AP status" },
+    );
+  } catch (err) {
+    // 404 = unknown / never-discovered MAC. Caller decides what to do.
+    if (err instanceof RouterError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function approveAp(opts: {
+  mac: string;
+  ssid: string;
+  encryptionKey: string;
+  radio?: string;
+  encryption?: string;
+  network?: string;
+}): Promise<ApApproveResponse> {
+  const body: Record<string, unknown> = {
+    ssid: opts.ssid,
+    encryption_key: opts.encryptionKey,
+  };
+  if (opts.radio) body.radio = opts.radio;
+  if (opts.encryption) body.encryption = opts.encryption;
+  if (opts.network) body.network = opts.network;
+  const res = await postJson(
+    `/aps/${encodeURIComponent(opts.mac)}/approve`,
+    body,
+    "AP approve",
+  );
+  return res.json() as Promise<ApApproveResponse>;
+}
+
+export async function decommissionAp(opts: { mac: string }): Promise<ApDecommissionResponse> {
+  const res = await routingFetch(`/aps/${encodeURIComponent(opts.mac)}`, {
+    method: "DELETE",
+    label: "AP decommission",
+  });
+  return res.json() as Promise<ApDecommissionResponse>;
+}
+
+/** Test-only seam — only available when routing is in ROUTING_MODE=mock. */
+export async function seedDiscoveredAp(opts: {
+  mac: string;
+  model?: string;
+  serial?: string;
+  version?: string;
+  last_ip?: string;
+  hostname?: string;
+}): Promise<{ status: "ok"; mac: string }> {
+  const body: Record<string, unknown> = { mac: opts.mac };
+  for (const k of ["model", "serial", "version", "last_ip", "hostname"] as const) {
+    if (opts[k] !== undefined) body[k] = opts[k];
+  }
+  const res = await postJson("/aps/_test_seed", body, "AP test seed");
+  return res.json() as Promise<{ status: "ok"; mac: string }>;
+}
+
 // --- Health ---
 
 export async function healthCheck(): Promise<boolean> {

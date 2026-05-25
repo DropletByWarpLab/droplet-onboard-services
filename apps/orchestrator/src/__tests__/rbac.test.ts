@@ -86,6 +86,11 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/vpn/peers", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/vpn/peers/abc", allowed: ["owner", "admin"] },
   { method: "put", path: "/api/ddns/duckdns", allowed: ["owner", "admin"] },
+  // WARP-446: extender AP onboarding writes — same posture as VPN peers
+  // and DuckDNS, since approving an AP changes the household's
+  // wireless surface (ADR-005 §RBAC).
+  { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/approve", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/decommission", allowed: ["owner", "admin"] },
 
   // ── service restart ── (owner only — destructive, may interrupt the box) ──
   { method: "post", path: "/api/network/system/reboot", allowed: ["owner"] },

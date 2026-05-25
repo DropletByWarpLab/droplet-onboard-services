@@ -24,6 +24,7 @@ import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calen
 import { createRemindersRouter } from "./routes/reminders.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createVpnRouter } from "./routes/vpn.js";
+import { createApsRouter } from "./routes/aps.js";
 import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
@@ -90,6 +91,8 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createRemindersRouter(prisma));
   app.use("/api", createNotificationsRouter(prisma));
   app.use("/api", createVpnRouter(prisma));
+  // WARP-446: coverage extender AP onboarding (ADR-005).
+  app.use("/api", createApsRouter(prisma));
   app.use("/api", createDdnsRouter());
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
