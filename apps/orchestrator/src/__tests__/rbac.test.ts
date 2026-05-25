@@ -106,11 +106,16 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/files/rename", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/files/move", allowed: ["owner", "admin", "family"] },
 
-  // ── llm sessions (own) ── (owner + admin + family + guest) ──
-  // The user is acting on their OWN session — the guard is just "is
-  // there a session-bearing role at all". Service principals are
-  // excluded so voice-io / mcp-server can't drive arbitrary chat.
-  { method: "post", path: "/api/llm/chat", allowed: ["owner", "admin", "family", "guest"] },
+  // ── llm sessions (own) ── ──
+  // POST /llm/chat: includes `service` because voice-io's principal
+  //   posts here (see `services/voice-io/voice/llm.py` — the comment
+  //   on the route in `routes/llm.ts` explains the deviation from
+  //   ADR-004 §3 "service is read-only"). Tool-level RBAC keeps voice
+  //   from issuing destructive operations through the agent loop.
+  // DELETE/PATCH /llm/conversations/:id: pure user-data ownership —
+  //   service principals never delete on behalf of a user. Human-tier
+  //   roles only.
+  { method: "post", path: "/api/llm/chat", allowed: ["owner", "admin", "family", "guest", "service"] },
   { method: "delete", path: "/api/llm/conversations/abc", allowed: ["owner", "admin", "family", "guest"] },
   { method: "patch", path: "/api/llm/conversations/abc", allowed: ["owner", "admin", "family", "guest"] },
 ];
@@ -245,6 +250,18 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
         res.status(200).json({ ok: true });
       },
     );
+    // POST /llm/chat — voice-io is a service principal AND must reach
+    // this route (the entire voice loop runs through it). This is the
+    // documented deviation from "service is read-only" in ADR-004 §3;
+    // the matrix in this file includes `service` on /llm/chat for the
+    // same reason.
+    router.post(
+      "/llm/chat",
+      requireRole("owner", "admin", "family", "guest", "service"),
+      (_req, res) => {
+        res.status(200).json({ ok: true });
+      },
+    );
     app.use("/api", router);
     return app;
   }
@@ -284,5 +301,19 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
       .set("Authorization", "Bearer test-mcp-token-32chars-padding-1234a")
       .send({});
     expect(res.status).toBe(403);
+  });
+
+  it("service token (voice) is accepted on POST /api/llm/chat (AC #6 — voice loop must work)", async () => {
+    // The hard-line regression test for AC #6: voice-io's whole
+    // purpose is to drive /api/llm/chat. If a future change to the
+    // matrix removes `service` from the allowed list for this route,
+    // the voice flow would break silently in production. This test
+    // is the canary.
+    const app = buildAppWithRealAuth();
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .set("Authorization", "Bearer test-voice-token-32chars-padding-xyz")
+      .send({});
+    expect(res.status).toBe(200);
   });
 });
