@@ -257,6 +257,15 @@ DROPLET_FIPS_REQUIRED=false
 # No TPM 2.0 on consumer Ryzen — fall back to the mock backend.
 DROPLET_TPM_BACKEND=mock
 
+# The one model — voice-io, dashboard, orchestrator's model-readiness
+# service all read this. Per the architecture-guard one-model-rule, this
+# is THE model across all surfaces. gpt-oss:20b is the PoC default per
+# droplet-local-LLM manifest (PR #19); the orchestrator's
+# model-readiness service auto-pulls it on first boot if Ollama doesn't
+# have it yet, so a clean rebuild produces a working dashboard ~20 min
+# after `setup.sh` finishes with no manual `ollama pull`.
+LLM_MODEL=gpt-oss:20b
+
 # Routing service talks to the bundled openwrt container at host
 # loopback :8181 (openwrt's published port-forward). OPENWRT_USERNAME
 # is root because that's the only authenticated rpcd user we provision
