@@ -209,6 +209,53 @@ def section_path_for_offset(
     return current
 
 
+# Per-token caps for the contextual-header sanitizer. The filename gets a
+# generous 256-char budget (real filenames rarely approach this; the cap is
+# a defence-in-depth bound, not a fit-to-screen rule). Section-path entries
+# get the tighter 80-char cap because path entries stack ``a > b > c`` and
+# we don't want a single 1 KB bookmark name to dominate the embedder's
+# context window.
+_HEADER_FILENAME_MAX = 256
+_HEADER_SECTION_MAX = 80
+
+
+def _sanitize_header_token(s: str, max_len: int = _HEADER_FILENAME_MAX) -> str:
+    """Normalise one header token (filename or section-path entry).
+
+    Strips ASCII control characters (everything ``< 0x20``, including
+    newlines, carriage returns, and tabs), removes the literal ``Document:``
+    / ``Section:`` substrings (so a bookmark named exactly ``Document: foo``
+    can't impersonate the genuine header prefix), collapses runs of
+    whitespace to a single space, and truncates to ``max_len`` characters.
+    Returns the literal ``(empty)`` when the cleaned result is empty so the
+    header still carries structure.
+
+    WARP-435 reviewer finding 1: PDF outlines (and other extractor
+    metadata) are attacker-controlled text. Interpolating raw into the
+    header gives a prompt-injection vector at the retrieval surface — the
+    sanitized chunk text is what later gets persisted to
+    ``FileContentChunk.text`` and stitched into LLM prompts.
+    """
+    if not s:
+        return "(empty)"
+    # Replace ASCII control chars (< 0x20) with a single space so adjacent
+    # words don't fuse together (``foo\tbar`` → ``foo bar``, not ``foobar``).
+    # Keep everything else, including high-bit Unicode — bookmark names
+    # legitimately contain accented characters, CJK, emoji, etc. The
+    # whitespace-collapse step below then folds those spaces with any
+    # neighbouring ASCII spaces back down to a single separator.
+    cleaned = "".join(ch if ord(ch) >= 0x20 else " " for ch in s)
+    # Drop literal header-prefix tokens to defeat impersonation.
+    cleaned = cleaned.replace("Document:", "").replace("Section:", "")
+    # Collapse internal whitespace runs to a single space.
+    cleaned = " ".join(cleaned.split())
+    # Truncate to the cap; we don't add an ellipsis (keeps the cap exact).
+    cleaned = cleaned[:max_len]
+    if not cleaned:
+        return "(empty)"
+    return cleaned
+
+
 def format_chunk_with_header(
     chunk: str, filename: str, section_path: list[str]
 ) -> str:
@@ -219,16 +266,25 @@ def format_chunk_with_header(
 
         {chunk_text}
 
+    Both the filename and each section-path entry are run through
+    ``_sanitize_header_token`` first — extractor metadata (especially PDF
+    bookmarks) is attacker-controlled and would otherwise allow header
+    impersonation / control-char injection into the persisted chunk text.
+
     When ``section_path`` is empty we still emit the document header so
     every chunk carries at least the filename — that alone is a useful
     signal for the embedder when the same body sentence appears in
     multiple documents (cross-doc disambiguation).
     """
+    safe_filename = _sanitize_header_token(filename, _HEADER_FILENAME_MAX)
     if section_path:
-        section_str = " > ".join(s for s in section_path if s)
-        header = f"Document: {filename} / Section: {section_str}"
+        safe_entries = [
+            _sanitize_header_token(s, _HEADER_SECTION_MAX) for s in section_path
+        ]
+        section_str = " > ".join(safe_entries)
+        header = f"Document: {safe_filename} / Section: {section_str}"
     else:
-        header = f"Document: {filename}"
+        header = f"Document: {safe_filename}"
     return f"{header}\n\n{chunk}"
 
 
