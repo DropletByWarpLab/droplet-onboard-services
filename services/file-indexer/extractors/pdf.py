@@ -33,8 +33,24 @@ from extractors.types import ExtractedDoc
 logger = logging.getLogger(__name__)
 
 
+# Default depth cap for outline traversal. The PDF spec doesn't strictly
+# bound outline nesting, but 32 is comfortably more than any real document
+# (the W3C-recommended XML element nesting limit is 256, so 32 leaves
+# generous headroom for outlines). WARP-435 reviewer finding 2: prevents
+# a malformed PDF with a pathologically deep outline from hitting Python's
+# recursion limit unpredictably.
+_OUTLINE_MAX_DEPTH = 32
+
+
 def _flatten_outline(
-    reader: PdfReader, outline: Any, stack: list[str], out: list[tuple[int, list[str]]]
+    reader: PdfReader,
+    outline: Any,
+    stack: list[str],
+    out: list[tuple[int, list[str]]],
+    *,
+    max_depth: int = _OUTLINE_MAX_DEPTH,
+    _depth: int = 0,
+    _visited: set[int] | None = None,
 ) -> None:
     """Walk pypdf's nested outline list, emitting (page_index, path) tuples.
 
@@ -49,15 +65,47 @@ def _flatten_outline(
     is the canonical way to turn that into a 0-based page index; we
     fall back to scanning ``reader.pages`` for older pypdf shapes.
 
+    Bounded traversal (WARP-435 reviewer finding 2):
+      * ``max_depth`` caps recursion depth (default 32). When hit we log
+        a warning and stop descending — already-emitted entries are kept.
+      * ``_visited`` tracks ``id()`` of every nested list we descend into.
+        A malformed PDF with a self-referential or mutually-referential
+        outline list would otherwise loop forever; on reentry we log a
+        warning and skip.
+
     Failures (corrupt outline, missing page ref, unhashable Destination)
     are swallowed — bookmarks are nice-to-have, not load-bearing for
     extraction.
     """
     if outline is None:
         return
+    if _visited is None:
+        _visited = set()
+
+    if _depth >= max_depth:
+        logger.warning(
+            "pdf: outline depth cap (%d) reached; stopping descent. "
+            "Truncated PDF outline branch — earlier entries are kept.",
+            max_depth,
+        )
+        return
+
     # outline may be a single Destination or a list. Normalise.
     if not isinstance(outline, list):
         outline = [outline]
+
+    # Cycle guard: if we've already walked this exact list object, skip.
+    # id() is stable for the object's lifetime and unhashable Destination
+    # objects don't reach this branch (lists are always hashable by id).
+    list_id = id(outline)
+    if list_id in _visited:
+        logger.warning(
+            "pdf: outline cycle detected (already-visited list id=%d); "
+            "skipping reentry.",
+            list_id,
+        )
+        return
+    _visited.add(list_id)
 
     i = 0
     while i < len(outline):
@@ -65,7 +113,15 @@ def _flatten_outline(
         if isinstance(entry, list):
             # A bare nested list with no preceding parent — descend with
             # the current stack unchanged. Defensive against weird PDFs.
-            _flatten_outline(reader, entry, stack, out)
+            _flatten_outline(
+                reader,
+                entry,
+                stack,
+                out,
+                max_depth=max_depth,
+                _depth=_depth + 1,
+                _visited=_visited,
+            )
             i += 1
             continue
 
@@ -87,7 +143,15 @@ def _flatten_outline(
 
         # Look ahead — if the next element is a list, it's our children.
         if i + 1 < len(outline) and isinstance(outline[i + 1], list):
-            _flatten_outline(reader, outline[i + 1], new_stack, out)
+            _flatten_outline(
+                reader,
+                outline[i + 1],
+                new_stack,
+                out,
+                max_depth=max_depth,
+                _depth=_depth + 1,
+                _visited=_visited,
+            )
             i += 2
         else:
             i += 1
