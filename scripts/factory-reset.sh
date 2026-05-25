@@ -167,9 +167,9 @@ VOLUMES=(
   "nvrdata"
   "matter-data"
   "frigate-config"
-  # POC profile volumes (only present when COMPOSE_PROFILES=poc has been
-  # active at some point on this box). Listed unconditionally so a reset
-  # works whether the profile is on or off — `docker volume rm` of a
+  # single-box profile volumes (only present when COMPOSE_PROFILES=single-box
+  # has been active at some point on this host). Listed unconditionally so a
+  # reset works whether the profile is on or off — `docker volume rm` of a
   # nonexistent volume is a soft fail and the loop below handles it.
   "ollama-data"
   "openwrt-config"

@@ -382,10 +382,11 @@ services:
     # JETSON_OLLAMA_URL is `http://host.docker.internal:11434` (host-installed
     # Ollama for local Docker Desktop dev). Without this mapping, ai-gateway
     # cannot resolve the name and chat throws "Temporary failure in name
-    # resolution". On the single-box PoC (COMPOSE_PROFILES=poc) the
-    # bundled `ollama` service below resolves via compose DNS and this
-    # mapping is unused — but it's harmless and keeps the local-dev story
-    # intact. See .env.example "AI Gateway" block for the deployment matrix.
+    # resolution". On the single-box deployment shape
+    # (COMPOSE_PROFILES=single-box) the bundled `ollama` service below
+    # resolves via compose DNS and this mapping is unused — but it's
+    # harmless and keeps the local-dev story intact. See .env.example
+    # "AI Gateway" block for the deployment matrix.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -525,9 +526,10 @@ services:
       # GPU render node. Default `/dev/dri/renderD128` matches every host
       # with a single render node (Jetson Orin's nvgpu, x86 single-GPU
       # boxes). Override via `FRIGATE_RENDER_NODE` in .env when the dGPU
-      # is reserved for another container — on the single-box PoC the
-      # AMD dGPU (renderD128) hosts Ollama, so Frigate detects on the
-      # iGPU at renderD129. Setup wizard / `setup.sh --poc` writes this.
+      # is reserved for another container — on the single-box deployment
+      # shape the AMD dGPU (renderD128) hosts Ollama, so Frigate detects
+      # on the iGPU at renderD129. Setup wizard / `setup.sh --single-box`
+      # writes this.
       - ${FRIGATE_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128  # GPU render node
     volumes:
       - frigate-config:/config
@@ -878,21 +880,22 @@ services:
     restart: unless-stopped
 
   # ==========================================================================
-  # POC profile (`COMPOSE_PROFILES=poc`) — single-box appliance services.
+  # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
+  # deployment shape services.
   # ==========================================================================
-  # The production multi-box deployment runs Ollama on a separate Jetson
-  # (the dGPU host) and a real OpenWrt router (the Pi 5). The single-box
-  # PoC collapses both into containers on the same x86 host. Services
-  # below ONLY start when the `poc` profile is active; on every other
-  # deployment they're invisible.
+  # The multi-box deployment runs Ollama on a separate Jetson (the dGPU
+  # host) and a real OpenWrt router (the Pi 5). The single-box shape
+  # collapses both into containers on the same x86 host. Services below
+  # ONLY start when the `single-box` profile is active; on every other
+  # deployment shape they're invisible.
   #
-  # Activation: `COMPOSE_PROFILES=poc` in .env (setup.sh writes this when
-  # it detects single-box mode: dGPU present + no separate Jetson on LAN).
-  # Operators can also force it with `COMPOSE_PROFILES=poc,linux docker
-  # compose up -d` for one-off testing.
+  # Activation: `COMPOSE_PROFILES=single-box` in .env (setup.sh writes this
+  # when it detects single-box hardware: dGPU + iGPU + no separate Jetson
+  # on LAN). Operators can also force it with
+  # `COMPOSE_PROFILES=single-box,linux docker compose up -d` for testing.
   #
   # Captured 2026-05-24 from /home/droplet/edge-platform/docker/docker-compose.override.yml
-  # on the live PoC at 192.168.1.87 — Phase 1 of the "box = repo" cleanup.
+  # on the box at 192.168.1.87 — Phase 1 of the "box = repo" cleanup.
   # See scripts/host/_box-snapshot-2026-05-24.md for the full inventory.
 
   # --- Ollama (ROCm) ---------------------------------------------------------
@@ -907,7 +910,7 @@ services:
   ollama:
     image: ollama/ollama:rocm
     container_name: droplet-ollama
-    profiles: ["poc"]
+    profiles: ["single-box"]
     restart: unless-stopped
     expose:
       - "11434"
@@ -949,7 +952,7 @@ services:
     image: openwrt/rootfs:x86_64-24.10.2
     container_name: droplet-openwrt
     hostname: openwrt
-    profiles: ["poc"]
+    profiles: ["single-box"]
     command: /sbin/init
     privileged: true
     restart: unless-stopped
@@ -992,7 +995,7 @@ volumes:
   whisper-models:
   # WARP-154 — Piper voice cache (~70 MB per voice).
   piper-voices:
-  # POC profile (`COMPOSE_PROFILES=poc`) — only used when the bundled
+  # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
   # ollama + openwrt services are active. Declared unconditionally so
   # `docker volume ls` shows the names whether the profile is on or off;
   # the volumes themselves are only materialized when the services start.
