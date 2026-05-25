@@ -346,15 +346,19 @@ export function createVpnRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const user = getUser(req);
       const id = req.params.id;
       const peer = await prisma.vpnPeer.findUnique({ where: { id } });
       if (!peer) {
         return res.status(404).json({ error: "Peer not found" });
       }
-      if (peer.userId !== user.username && !isAdmin(req)) {
-        return res.status(403).json({ error: "Not your peer" });
-      }
+      // WARP-171: per-resource ownership check used to live here
+      // (`peer.userId !== user.username && !isAdmin(req)` returning 403).
+      // After requireRole("owner", "admin") was added at the route guard
+      // above, the branch became unreachable: family-tier callers never
+      // pass the guard, and owner/admin always do. Removing the dead code
+      // so future readers don't think family users can still hit this
+      // handler. Behavior is unchanged — see the comment above the route
+      // for the WARP-171 family-tier deletion semantics.
       if (peer.status === "revoked") {
         // Already gone in our world; treat as idempotent success.
         return res.json({ status: "revoked", id });
