@@ -200,3 +200,124 @@ documented rationale.
 | Rerank top-50 (cache hit) | 5 ms | 10 ms |
 | Total cold | 445 ms | 980 ms |
 | Total warm | 50 ms | 190 ms |
+
+## Ingest enrichment (WARP-435 / ADR-003 Phase 1)
+
+Two changes land at ingest time, before chunks reach pgvector. Both
+are query-path-invariant — `searchHybrid` is untouched. The win is
+purely on the embedding side: the embedder now sees text that already
+carries hierarchical context, so semantically-equivalent chunks from
+different sections separate more cleanly in vector space.
+
+### Sentence-aware chunking
+
+The legacy chunker (`services/file-indexer/chunker.py` pre-WARP-435)
+split text on whitespace word boundaries with a hardcoded
+`0.75 * words ≈ tokens` heuristic. That cut mid-sentence routinely
+and produced chunks anywhere from 60% to 110% of the intended
+`CHUNK_SIZE_TOKENS` budget.
+
+The new chunker uses
+[`semantic-text-splitter`](https://github.com/benbrandt/text-splitter)
+(Rust-backed Python wheel, ~8 MB) driven by the embedder's actual
+HuggingFace tokenizer
+(`sentence-transformers/all-MiniLM-L6-v2`):
+
+```python
+from semantic_text_splitter import TextSplitter
+from tokenizers import Tokenizer
+
+tok = Tokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+splitter = TextSplitter.from_huggingface_tokenizer(
+    tok,
+    capacity=CHUNK_SIZE_TOKENS,                   # 512 real tokens
+    overlap=int(CHUNK_SIZE_TOKENS * 0.2),         # 102-token overlap
+)
+chunks = splitter.chunks(text)
+```
+
+The splitter walks the text with three levels of granularity in order:
+Unicode-aware sentence segmentation, then word boundaries, then
+character boundaries. Mid-sentence cuts only happen when a single
+sentence overruns `capacity`. Real-token accounting means a chunk that
+fits at index time is guaranteed to fit at query time — no more
+"ai-gateway returned a 512-token-truncated embedding" warnings.
+
+Public signature `chunk_text(text: str) -> list[str]` is preserved so
+callers in `watcher.py`, `brain_ingest.py`, and `transcription_worker.py`
+keep working without per-caller changes.
+
+Degradation path: if the HF tokenizer can't be fetched (offline dev,
+network failure), the chunker falls back to the legacy word-split path
+with a one-shot warning — better than failing the row. The next
+successful run upgrades it.
+
+### Contextual chunk headers (`sectionPath`)
+
+Every chunk is prefixed with a hierarchical header before embedding:
+
+```
+Document: ADR-003.pdf / Section: Phase 1 — Ingest enrichment > Step 1.7
+
+When the embedder grades the chunk's similarity to a query, it gets
+the document + section anchor for free instead of having to infer it
+from the body text.
+```
+
+The header lives in `FileContentChunk.text` — i.e. **the same string
+the embedder saw is the string we persist** so the lexical arm and
+the LLM's citation surface both reflect the section context. No
+divergence between embedding input and stored representation.
+
+#### Where `sectionPath` comes from
+
+Each extractor emits a per-document `metadata.section_paths` list of
+`(char_offset, [section, ...])` tuples. The chunker maps each chunk's
+start offset to the most recent preceding entry's path:
+
+| Extractor | Source of hierarchy |
+|---|---|
+| `extractors/pdf.py` | Walks `PdfReader.outline` (PDF bookmarks tree). Pages without an outline entry get `[]` — chunk falls back to `[filename]` |
+| `extractors/docx.py` | Tracks paragraph-style heading depth (`Heading 1..9`); snapshots the live stack at every body paragraph |
+| `extractors/pptx.py` | `[section_name, slide_title]` per slide via python-pptx layout/title APIs; new extractor in WARP-435 |
+| `extractors/text.py` | `[filename]` (flat formats have no in-body hierarchy) |
+| `extractors/email.py` | `[filename]` (the recursive `chain[]` breadcrumb carries attachment lineage separately) |
+| `extractors/audio.py`, `video.py` | Pass-through — inherit `[filename]` since transcripts are flat streams |
+
+#### Where `sectionPath` lands
+
+The new helpers live in `services/file-indexer/chunker.py`:
+
+- `chunk_text_with_offsets(text)` — sentence-aware chunker that also
+  returns each chunk's byte offset.
+- `section_path_for_offset(offset, section_paths)` — sweep lookup over
+  the extractor's `(offset, path)` tuples.
+- `format_chunk_with_header(chunk, filename, section_path)` — formats
+  the `Document: ... / Section: ...\n\n...` prefix.
+
+The chunk-emitting paths (`brain_ingest.py`, `watcher.py`,
+`transcription_worker.py`) all call these helpers in the same shape.
+Chunks without a matching section entry still get the document-level
+header (`Document: foo.pdf`) so cross-document disambiguation works
+even on outline-less files.
+
+`sectionPath` rides on the existing `metadata jsonb` column on
+`FileContentChunk`. No schema migration.
+
+### Eval gate
+
+Per ADR-003 Phase 1: `ndcg@10(hybrid + headers) ≥ ndcg@10(hybrid) × 1.05`
+on the extended `tests/retrieval-eval/queries.yaml` corpus
+(q01..q30). The extension (q21..q30) adds two query families:
+
+- **Sentence-spanning queries** (q21..q26) — phrasings whose terms
+  span a sentence boundary the legacy word-split chunker would have
+  cut mid-sentence, breaking recall.
+- **Section-path disambiguation** (q27..q30) — queries hinging on
+  document/section context to pick the correctly-scoped chunk over a
+  same-body twin.
+
+Measured NDCG delta: *to be filled in by the live eval run* — Phase 1
+batch C (steps 1.8 + 1.9) requires the full integration stack
+(`./scripts/test-rag.sh`). The delta is recorded here once the
+parent-shell run completes and the harness reports per-pipeline NDCG@10.
