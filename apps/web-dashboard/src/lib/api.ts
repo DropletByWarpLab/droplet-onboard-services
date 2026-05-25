@@ -2083,6 +2083,59 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
 
 // --- Remote Access (WireGuard VPN) ---
 
+// ── WARP-446: Coverage extender APs ──
+
+export async function fetchApDevices(): Promise<{ aps: import("./types").ApDeviceInfo[] }> {
+  const res = await authFetch(`${BASE}/api/aps`);
+  if (!res.ok) throw new Error(`Failed to fetch extender APs: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDiscoveredApDevices(): Promise<{
+  discovered: import("./types").ApDeviceInfo[];
+}> {
+  const res = await authFetch(`${BASE}/api/aps/discovered`);
+  if (!res.ok) throw new Error(`Failed to fetch discovered extenders: ${res.status}`);
+  return res.json();
+}
+
+export async function approveApDevice(
+  mac: string,
+  body: {
+    ssid: string;
+    encryptionKey: string;
+    radio?: string;
+    encryption?: string;
+    network?: string;
+    displayName?: string;
+  },
+): Promise<{ ap: import("./types").ApDeviceInfo }> {
+  // Colons in MAC are allowed unencoded in path segments per RFC 3986 §3.3.
+  const res = await authFetch(`${BASE}/api/aps/${mac}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to approve extender: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function decommissionApDevice(
+  mac: string,
+): Promise<{ ap: import("./types").ApDeviceInfo }> {
+  const res = await authFetch(`${BASE}/api/aps/${mac}/decommission`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to decommission extender: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   const res = await authFetch(`${BASE}/api/vpn/status`);
   if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);
