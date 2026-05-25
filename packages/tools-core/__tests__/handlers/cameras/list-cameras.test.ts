@@ -5,7 +5,14 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      cameras: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+      // WARP-339: list_cameras now calls `ctx.http.orchestrator.get`
+      // (auto-injects the service-principal JWT), not the per-service
+      // `ctx.http.cameras.get`. Mock the right one — the previous test
+      // mocked `cameras.get` and crashed with "Cannot read properties
+      // of undefined (reading 'get')" because `orchestrator` was a
+      // bare object cast.
+      orchestrator: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+      cameras: {} as ToolContext["http"]["cameras"],
       routing: {} as ToolContext["http"]["routing"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
