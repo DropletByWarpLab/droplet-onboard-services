@@ -956,6 +956,132 @@ class VPNApi:
 
 
 # ---------------------------------------------------------------------------
+# High-level API: AP onboarding (WARP-446)
+# ---------------------------------------------------------------------------
+class ApApi:
+    """Coverage-extender AP wireless config management.
+
+    Each approved extender gets one `wifi-iface` UCI section keyed on
+    its MAC. The section is the standard hostapd-compatible shape with
+    802.11k/v/r flags baked in so band-steering (dawn) works without
+    per-AP tuning. See `docs/ADR-005-ap-auto-onboarding.md` for the
+    decision record.
+
+    Following the WireGuard / camera-subnet pattern: callers wrap these
+    helpers in `safe_apply` so a bad push that partitions connectivity
+    is auto-rolled back. The helpers themselves don't commit — they
+    stage uci changes and the caller's `safe_apply` does the
+    commit + reload atomically.
+    """
+
+    # Standard 802.11r FT flags. Same shape used by OpenWrt's wiki
+    # examples for cross-AP fast handoff over WPA2-PSK. ft_over_ds=0
+    # means the handoff goes through the AIR (over-the-air) rather
+    # than over the wired backhaul — the latter requires a working
+    # IP routing between APs that we don't reliably have at install
+    # time (a fresh extender may not have a static lease yet).
+    _FT_FLAGS = {
+        "ieee80211r": "1",
+        "ft_over_ds": "0",
+        "ft_psk_generate_local": "1",
+    }
+
+    # 802.11k (neighbor reports) + 802.11v (BSS Transition Management).
+    # Dawn needs these set on every AP to negotiate roaming — without
+    # them dawn falls back to deauth-based steering which is what
+    # caused the usteer/Apple problems documented in ADR-005.
+    _KV_FLAGS = {
+        "ieee80211k": "1",
+        "bss_transition": "1",
+    }
+
+    def __init__(self, router: "DropletRouter"):
+        self._r = router
+
+    @staticmethod
+    def iface_section_for_mac(mac: str) -> str:
+        """Deterministic uci section name from a MAC.
+
+        `B8:27:EB:12:34:56` → `ap_extender_b827eb123456`. Lowercase,
+        no separators — matches the OpenWrt section-name grammar
+        (`^[a-z][a-z0-9_]*$`). Idempotent re-push relies on this
+        being stable across input variants ("AA:BB", "aa-bb", "AABB").
+
+        Raises ValueError when the input doesn't look like a MAC.
+        """
+        if not isinstance(mac, str):
+            raise ValueError(f"mac must be a string, got {type(mac).__name__}")
+        cleaned = mac.replace(":", "").replace("-", "").replace(".", "").strip().lower()
+        if len(cleaned) != 12 or not all(c in "0123456789abcdef" for c in cleaned):
+            raise ValueError(
+                f"invalid MAC: {mac!r} (expected 6 hex bytes separated by : or -)"
+            )
+        return f"ap_extender_{cleaned}"
+
+    def push_wireless_config(
+        self,
+        iface_section: str,
+        radio: str,
+        ssid: str,
+        encryption: str,
+        key: str,
+        network: str = "lan",
+    ) -> None:
+        """Stage a `wifi-iface` section for the extender's wireless config.
+
+        DOES NOT commit. Caller wraps this in `safe_apply` so commit +
+        reload happen as a single ucitrack pass — same convention
+        `create_interface` / `add_peer` in VPNApi use. Pre-committing
+        here would leave nothing pending for `apply`, which then
+        returns NO_DATA.
+
+        802.11k/v/r flags are baked in unconditionally (see ADR-005);
+        the dashboard does NOT expose toggles for them because the
+        whole point of automatic onboarding is consistent steering
+        across every AP.
+        """
+        values = {
+            "device": radio,
+            "mode": "ap",
+            "network": network,
+            "ssid": ssid,
+            "encryption": encryption,
+            "key": key,
+            **self._FT_FLAGS,
+            **self._KV_FLAGS,
+        }
+        # uci.set requires the section to exist; uci.add(name=...) is
+        # the create-or-set idiom. We always use `add` because re-runs
+        # need to be safe — if the section already exists, uci.add
+        # with the same name will fail on real OpenWrt; the caller's
+        # idempotency layer (remove + push) handles that.
+        try:
+            self._r.uci.set("wireless", iface_section, values)
+        except UbusError as exc:
+            # NOT_FOUND / NO_DATA — section doesn't exist yet; create.
+            if exc.code in (4, 5):
+                self._r.uci.add("wireless", "wifi-iface", values=values, name=iface_section)
+            else:
+                raise
+
+    def remove_wireless_config(self, iface_section: str) -> None:
+        """Stage deletion of the wifi-iface section.
+
+        DOES NOT commit. Caller wraps this in `safe_apply`. No-op when
+        the section doesn't exist — matches the orchestrator's
+        decommission contract (idempotent).
+        """
+        try:
+            self._r.uci.delete("wireless", iface_section)
+        except UbusError as exc:
+            if exc.code in (4, 5):
+                # Already gone — caller's decommission flow treats this
+                # as success-equivalent.
+                return
+            raise
+
+
+# ---------------------------------------------------------------------------
 # High-level API: File operations
 # ---------------------------------------------------------------------------
 class FileApi:
@@ -1016,6 +1142,7 @@ class DropletRouter:
         self.firewall = FirewallApi(self)
         self.system = SystemApi(self)
         self.vpn = VPNApi(self)
+        self.ap = ApApi(self)  # WARP-446: coverage extender onboarding
         self.file = FileApi(self)
 
         if auto_login:
