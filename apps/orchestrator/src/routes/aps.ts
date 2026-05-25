@@ -109,6 +109,15 @@ export function createApsRouter(prisma: PrismaClient): Router {
   // WARP-171 / ADR-004 §3: owner + admin only. Approving a new
   // extender changes the household's wireless surface and is the
   // same posture as the existing SSID/PSK writes.
+  //
+  // Response shape (WARP-446 blocker #2): `{ ap, operationId }`.
+  // The operationId is the routing-service's safe_apply op id; the
+  // dashboard polls `/api/network/operations/:id` against it so the
+  // optimistic-update banner clears the moment apply/rollback lands
+  // rather than waiting for the 10s SWR refresh window. operationId
+  // is null when the routing layer didn't surface one (mocks, older
+  // routing builds, GET fallback) — dashboard treats that as "no op
+  // tracking, just refresh".
   router.post(
     "/aps/:mac/approve",
     requireRole("owner", "admin"),
@@ -125,8 +134,8 @@ export function createApsRouter(prisma: PrismaClient): Router {
         const actor = {
           username: req.user?.username ?? "dev",
         };
-        const row = await approveAp(prisma, mac, parsed.data, actor);
-        res.json({ ap: row });
+        const { ap, operationId } = await approveAp(prisma, mac, parsed.data, actor);
+        res.json({ ap, operationId });
       } catch (err) {
         if (err instanceof ApOnboardError) {
           return res.status(err.status).json({ error: err.message, code: err.code });
@@ -138,15 +147,19 @@ export function createApsRouter(prisma: PrismaClient): Router {
 
   // ── POST /api/aps/:mac/decommission ──────────────────────────
   // Same RBAC posture — removing an extender mid-flight could drop
-  // every connected device on that AP, so it stays admin-only.
+  // every connected device on that AP, so it stays admin-only. Same
+  // `{ ap, operationId }` response shape as approve so the dashboard
+  // can poll the apply/rollback state. operationId is null for the
+  // idempotent already-DECOMMISSIONED short-circuit (no in-flight
+  // routing call to track).
   router.post(
     "/aps/:mac/decommission",
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const mac = macFromParam(req);
-        const row = await decommissionAp(prisma, mac);
-        res.json({ ap: row });
+        const { ap, operationId } = await decommissionAp(prisma, mac);
+        res.json({ ap, operationId });
       } catch (err) {
         if (err instanceof ApOnboardError) {
           return res.status(err.status).json({ error: err.message, code: err.code });

@@ -261,6 +261,59 @@ describe("POST /api/aps/:mac/approve", () => {
     expect(row.failureReason).toBeNull();
   });
 
+  it("returns { ap, operationId } so the dashboard can poll /api/network/operations/:id (AC #6 — blocker #2)", async () => {
+    // setupHappyPath sets operation_id = "op-abc-123" on the
+    // routing-service response. The orchestrator MUST pass it through
+    // in the response body so the dashboard's optimistic-update flow
+    // can poll the operation tracker until applied/rolled_back without
+    // waiting for the 10s SWR refresh window.
+    setupHappyPath();
+    const prisma = createPrismaMock();
+    prisma.rows.set("B8:27:EB:00:00:01", {
+      mac: "B8:27:EB:00:00:01",
+      status: "AWAITING_APPROVAL",
+      lastSeen: new Date(),
+    });
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/aps/B8:27:EB:00:00:01/approve")
+      .send({ ssid: "Droplet", encryptionKey: "longenoughpw" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ap: expect.objectContaining({
+        mac: "B8:27:EB:00:00:01",
+        status: "ONLINE",
+      }),
+      operationId: "op-abc-123",
+    });
+  });
+
+  it("operationId is null when the routing layer didn't surface one (no header, old build)", async () => {
+    // Real-mode routing service should always emit operation_id, but
+    // the orchestrator must NOT crash when it doesn't (mock providers,
+    // older routing builds, GET fallbacks). Dashboard treats null as
+    // "no op tracking; just refresh /api/aps".
+    (openwrt.approveAp as any).mockResolvedValue({
+      status: "ok",
+      mac: "B8:27:EB:00:00:01",
+      iface_section: "ap_extender_b827eb000001",
+      ssid: "Droplet",
+      // operation_id intentionally omitted
+    });
+    const prisma = createPrismaMock();
+    prisma.rows.set("B8:27:EB:00:00:01", {
+      mac: "B8:27:EB:00:00:01",
+      status: "AWAITING_APPROVAL",
+      lastSeen: new Date(),
+    });
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/aps/B8:27:EB:00:00:01/approve")
+      .send({ ssid: "Droplet", encryptionKey: "longenoughpw" });
+    expect(res.status).toBe(200);
+    expect(res.body.operationId).toBeNull();
+  });
+
   it("transitions to FAILED with failureReason when the router push errors out (AC #5 — explicit state, no IS NULL derivation)", async () => {
     (openwrt.approveAp as any).mockRejectedValue(
       Object.assign(new Error("Router unreachable"), { code: "UNREACHABLE" }),
@@ -337,6 +390,48 @@ describe("POST /api/aps/:mac/decommission", () => {
     expect(row.status).toBe("DECOMMISSIONED");
     expect(row.decommissionedAt).toBeInstanceOf(Date);
     expect(row.lastOperationId).toBe("op-decom-1");
+  });
+
+  it("returns { ap, operationId } so the dashboard can poll on remove (AC #6 — blocker #2)", async () => {
+    (openwrt.decommissionAp as any).mockResolvedValue({
+      status: "ok",
+      mac: "B8:27:EB:00:00:01",
+      operation_id: "op-decom-2",
+    });
+    const prisma = createPrismaMock();
+    prisma.rows.set("B8:27:EB:00:00:01", {
+      mac: "B8:27:EB:00:00:01",
+      status: "ONLINE",
+      lastSeen: new Date(),
+    });
+    const app = buildApp(prisma);
+    const res = await request(app).post("/api/aps/B8:27:EB:00:00:01/decommission");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ap: expect.objectContaining({
+        mac: "B8:27:EB:00:00:01",
+        status: "DECOMMISSIONED",
+      }),
+      operationId: "op-decom-2",
+    });
+  });
+
+  it("returns operationId: null for the idempotent already-decommissioned short-circuit", async () => {
+    // No routing call fires — the orchestrator short-circuits — so the
+    // operation tracker has nothing to poll. Dashboard treats null as
+    // "no in-flight write; just refresh".
+    const prisma = createPrismaMock();
+    prisma.rows.set("B8:27:EB:00:00:01", {
+      mac: "B8:27:EB:00:00:01",
+      status: "DECOMMISSIONED",
+      decommissionedAt: new Date(100),
+      lastSeen: new Date(),
+    });
+    const app = buildApp(prisma);
+    const res = await request(app).post("/api/aps/B8:27:EB:00:00:01/decommission");
+    expect(res.status).toBe(200);
+    expect(res.body.operationId).toBeNull();
+    expect(openwrt.decommissionAp).not.toHaveBeenCalled();
   });
 
   it("is idempotent on already-decommissioned APs (operator double-click safe)", async () => {

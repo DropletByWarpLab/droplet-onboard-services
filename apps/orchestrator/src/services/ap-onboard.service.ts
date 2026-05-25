@@ -31,11 +31,36 @@ import {
 
 const logger = pino({ name: "ap-onboard" });
 
+/**
+ * Typed error codes for AP-onboard failures. Surfaces in
+ * `ApOnboardError.code` and the JSON error body so the dashboard's
+ * `AP_ONBOARD_ERROR_COPY` table can key on it instead of regex-matching
+ * the raw `failureReason` string (blocker #7).
+ *
+ * - `AP_NOT_FOUND`            — orchestrator never saw this MAC announce.
+ * - `AP_INVALID`              — schema / boundary validation failure.
+ * - `PROVISIONING_TIMEOUT`    — the routing-service safe_apply timed out.
+ * - `ROUTER_UNREACHABLE`      — the routing service itself is down /
+ *                               the main OpenWrt box won't accept the
+ *                               ubus session.
+ * - `WIRELESS_CONFIG_REJECTED`— OpenWrt accepted the call but rejected
+ *                               the uci change (e.g. invalid PSK shape
+ *                               on the router side).
+ * - `UNKNOWN`                 — anything that escaped classification.
+ */
+export type ApOnboardErrorCode =
+  | "AP_NOT_FOUND"
+  | "AP_INVALID"
+  | "PROVISIONING_TIMEOUT"
+  | "ROUTER_UNREACHABLE"
+  | "WIRELESS_CONFIG_REJECTED"
+  | "UNKNOWN";
+
 export class ApOnboardError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code: string,
+    public readonly code: ApOnboardErrorCode,
   ) {
     super(message);
     this.name = "ApOnboardError";
@@ -49,6 +74,11 @@ export class ApOnboardError extends Error {
     return new ApOnboardError(message, 400, "AP_INVALID");
   }
 
+  /**
+   * Translate a RouterError into the AP-onboard taxonomy. Keeps the
+   * dashboard's `AP_ONBOARD_ERROR_COPY` table the single source of
+   * truth for user-facing copy.
+   */
   static routerError(err: RouterError): ApOnboardError {
     // RouterError statuses already encode the right HTTP semantics
     // (502 = bad-gateway-ish for routing-service failures, 503 for
@@ -56,8 +86,39 @@ export class ApOnboardError extends Error {
     // since the routing service is the gateway. status is optional on
     // RouterError (network-error path doesn't set one).
     const status = err.status && err.status >= 400 ? err.status : 502;
-    return new ApOnboardError(err.message, status, "ROUTER_ERROR");
+    let code: ApOnboardErrorCode;
+    switch (err.code) {
+      case "TIMEOUT":
+        code = "PROVISIONING_TIMEOUT";
+        break;
+      case "UNREACHABLE":
+      case "AUTH":
+      case "DISABLED":
+        code = "ROUTER_UNREACHABLE";
+        break;
+      case "ROLLED_BACK":
+        // The router refused to apply the wireless change (safe_apply
+        // rolled back) — surface that as a config-rejection.
+        code = "WIRELESS_CONFIG_REJECTED";
+        break;
+      default:
+        code = "UNKNOWN";
+    }
+    return new ApOnboardError(err.message, status, code);
   }
+}
+
+/**
+ * Public shape returned by `approveAp` + `decommissionAp` so route
+ * handlers can echo both the updated row AND the routing-service
+ * operation_id (the dashboard's optimistic-update flow polls
+ * `/api/network/operations/:id` against this value). `operationId` is
+ * null when the underlying routing call didn't surface one (older
+ * routing build, idempotent short-circuit, GET fallback).
+ */
+export interface ApMutationResult {
+  ap: unknown;
+  operationId: string | null;
 }
 
 export interface DiscoveredApObservation {
@@ -157,14 +218,17 @@ export interface ApproveOptions {
  *   3. On success, audit columns (`approvedAt`, `approvedBy`,
  *      `approvedSsid`, `lastOperationId`) are written.
  *
- * Returns the freshly-updated row so the caller can echo it back.
+ * Returns `{ ap, operationId }` so the route layer can echo BOTH back
+ * to the dashboard (which polls `/api/network/operations/:id` against
+ * the operationId). `operationId` is null when the routing layer
+ * didn't surface one (older builds, GET fallback).
  */
 export async function approveAp(
   prisma: PrismaClient,
   rawMac: string,
   opts: ApproveOptions,
   actor: { username: string },
-): Promise<unknown> {
+): Promise<ApMutationResult> {
   const mac = normalizeMac(rawMac);
 
   const existing = await prisma.apDevice.findUnique({ where: { mac } });
@@ -191,6 +255,7 @@ export async function approveAp(
       encryption: opts.encryption,
       network: opts.network,
     });
+    const operationId = result.operation_id ?? null;
     const updated = await prisma.apDevice.update({
       where: { mac },
       data: {
@@ -198,12 +263,12 @@ export async function approveAp(
         approvedAt: new Date(),
         approvedBy: actor.username,
         approvedSsid: opts.ssid,
-        lastOperationId: result.operation_id ?? null,
+        lastOperationId: operationId,
         displayName: opts.displayName ?? existing.displayName ?? defaultDisplayName(mac, existing.model ?? null),
         failureReason: null,
       },
     });
-    return updated;
+    return { ap: updated, operationId };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.warn(
@@ -222,18 +287,22 @@ export async function approveAp(
     }
     // Generic error from the openwrt.client mock or elsewhere — bubble
     // a 502 because the routing-service hop is the gateway.
-    throw new ApOnboardError(message, 502, "ROUTER_ERROR");
+    throw new ApOnboardError(message, 502, "UNKNOWN");
   }
 }
 
 /**
  * Decommission an AP. Idempotent on already-DECOMMISSIONED rows (the
  * common operator-double-click case).
+ *
+ * Returns `{ ap, operationId }`. `operationId` is null for the
+ * already-DECOMMISSIONED short-circuit (no in-flight routing call to
+ * poll) and when the routing layer didn't surface one.
  */
 export async function decommissionAp(
   prisma: PrismaClient,
   rawMac: string,
-): Promise<unknown> {
+): Promise<ApMutationResult> {
   const mac = normalizeMac(rawMac);
 
   const existing = await prisma.apDevice.findUnique({ where: { mac } });
@@ -243,27 +312,28 @@ export async function decommissionAp(
   if (existing.status === "DECOMMISSIONED") {
     // Idempotent — the operator already pulled the trigger. Return
     // the row unchanged rather than re-firing the routing call.
-    return existing;
+    return { ap: existing, operationId: null };
   }
 
   try {
     const result = await routingDecommissionAp({ mac });
+    const operationId = result.operation_id ?? null;
     const updated = await prisma.apDevice.update({
       where: { mac },
       data: {
         status: "DECOMMISSIONED",
         decommissionedAt: new Date(),
-        lastOperationId: result.operation_id ?? null,
+        lastOperationId: operationId,
         failureReason: null,
       },
     });
-    return updated;
+    return { ap: updated, operationId };
   } catch (err) {
     if (err instanceof RouterError) {
       throw ApOnboardError.routerError(err);
     }
     const message = err instanceof Error ? err.message : String(err);
-    throw new ApOnboardError(message, 502, "ROUTER_ERROR");
+    throw new ApOnboardError(message, 502, "UNKNOWN");
   }
 }
 
