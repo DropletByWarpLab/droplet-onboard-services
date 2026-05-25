@@ -50,7 +50,6 @@ edge-platform/
     setup.sh, factory-reset.sh, verify.sh, test-security.sh
     build-image.sh, camera-drivers.sh, generate-grpc.sh
   tests/                    Vitest integration tests (+ bash smoke tests)
-  clients/                  android/, desktop/, ios/ — legacy client scaffolds
   turbo.json                Turbo monorepo pipeline
   package.json              npm 10.9 workspaces
 ```
@@ -125,11 +124,8 @@ GTM §5.3 claims "the codebase has no test suite." This is out of date for this 
 
 Coverage gaps remain (streaming E2E, browser E2E), but the "no tests" framing in the GTM doc is no longer accurate.
 
-### 8. `clients/` directory (android/desktop/ios) is likely legacy
-The repo has a top-level `clients/` directory with `android/`, `desktop/`, `ios/` subdirectories. Native mobile in the 2026 plan lives in the standalone `mobile-app` repo (React Native + Expo). The `clients/` tree here should be confirmed as legacy/abandoned and either removed or explicitly marked as deprecated in a future pass. **Flagged for a follow-up pass — not in this docs PR's scope.**
-
-### 9. HTTPS is partial, not pending
+### 8. HTTPS is partial, not pending
 GTM M1.4 lists HTTPS as P0 future work. The `gateway` service already binds `:443` and mounts `docker/certs/`; the missing piece is confirming a self-signed cert is auto-generated on first boot by `scripts/setup.sh`. M1.4 should be `[~]` Partial, not `[ ]` Not started.
 
-### 10. Model name and hardware assumption
+### 9. Model name and hardware assumption
 The GTM doc's §5.1 latency risk mentions **phi3:mini** on Pi hardware. Per cross-repo notes, the `inference-engine` repo runs **llama3.2:3b** on **Jetson**, not phi3:mini on Pi. Mapping impact: the "10–30s per response" risk quantity is calibrated for the wrong model+hardware pair and should be re-measured; the qualitative risk (latency hurts UX → streaming is the mitigation) still applies. Tracked authoritatively in `inference-engine/docs/gtm-mapping.md`.
