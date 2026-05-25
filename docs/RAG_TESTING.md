@@ -5,6 +5,14 @@ triaging a failed `rag-tests` CI run or about to ship a change to
 `services/file-indexer/`, `apps/orchestrator/src/routes/files-*`, or
 the embedding plumbing, start here.
 
+> **WARP-436 in flight:** an offline RAGAS metrics harness (faithfulness,
+> context-precision/recall, answer-correctness) is being layered on top
+> of the NDCG@10 eval. Scaffolded in `tests/retrieval-eval/ragas/` — see
+> that directory's `README.md` for the per-batch landing schedule. The
+> full "RAGAS metrics" operator section lands at batch E (step 2.8 of
+> ADR-003 Phase 2). Until then, see [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md)
+> for the design.
+
 ## What gets tested
 
 Six vitest files live in `tests/`. They share one Compose stack so the
