@@ -1,8 +1,10 @@
 # Setup wizard walkthrough — design doc
 
 > Branch: `feat/setup-wizard-walkthrough` off `main` (target). Will merge to
-> `main` after Stefan validates the photo-studio handoff. POC-only changes
-> stay on `poc/single-box` and never merge here.
+> `main` after Stefan validates the photo-studio handoff. Deployment-shape-
+> specific overrides (single-box vs multi-box vs v2-6) ride the
+> `COMPOSE_PROFILES` mechanism in `docker/docker-compose.yml`; this wizard
+> itself is shape-agnostic.
 
 ## What we're adding (Stefan's brief)
 
@@ -185,8 +187,8 @@ Subtitle:  Give your Droplet a name people can find from anywhere.
 ### Step: Storage
 
 **Purpose**: Customer sees the drives the box detected (1.4 TB SATA, 400 GB
-SATA in the POC; could be different in production) and gives them
-human-meaningful names instead of `/mnt/droplet/data`.
+SATA on the single-box deployment shape; could be different on multi-box
+or v2-6) and gives them human-meaningful names instead of `/mnt/droplet/data`.
 
 **Backend calls**:
 - `GET /api/storage/drives` on mount → `{ drives: [{ device, mount, label, uuid, size_bytes, used_bytes, free_bytes, mounted }] }`.

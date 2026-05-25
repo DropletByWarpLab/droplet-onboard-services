@@ -1,8 +1,8 @@
 # Voice assistant (WARP-154) — design + commit plan
 
 > Branch: `feat/voice-assistant` off `main`. Target: merge to `main`
-> after the wizard branch lands and end-to-end voice works on the POC
-> box with a USB mic + speaker.
+> after the wizard branch lands and end-to-end voice works on the
+> single-box deployment shape with a USB mic + speaker.
 
 ## Goals (from Stefan)
 
@@ -10,8 +10,8 @@
 - Works with the LLM (already shipped — `/api/llm/chat` agent loop +
   50 tools in `packages/tools-core`).
 - Mic and speaker live IN the device — the hardware abstraction must
-  handle the current POC box (x86 + onboard Realtek ALC662, no USB
-  audio yet) AND the production v2.6 (Jetson + I/O-Brick I²S codec)
+  handle the single-box shape (x86 + onboard Realtek ALC662, no USB
+  audio yet) AND the v2-6 hardware (Jetson + I/O-Brick I²S codec)
   AND any USB headset a dev plugs in.
 - "Basically all functionality" — the voice loop talks to the existing
   agent runtime, so anything the LLM can do via text it can do via
@@ -43,15 +43,16 @@ compatibility".
 Real configurations the abstraction explicitly handles (with unit
 tests under `tests/test_devices.py::TestRealHardwareScenarios`):
 
-1. **POC box (x86 Ryzen)** — `aplay -l` shows 3 onboard PCI cards (HDMI
-   dGPU, ALC662 codec, secondary AMD HDA). No USB mic plugged in yet.
-   Resolution: picks ALC662 input + onboard analog output. Service runs
-   in "no-mic mode" if the customer never plugs anything in (graceful
-   failure, `/health` reports `inputAvailable: false`).
-2. **POC + ReSpeaker 4-Mic USB array** — same box plus the USB array
-   Stefan's ordered. Resolution: USB array wins for input on score,
-   onboard codec wins for output (or USB speaker if also plugged in).
-3. **Production v2.6 (Jetson + I/O Brick)** — I²S codec on platform bus.
+1. **Single-box (x86 Ryzen)** — `aplay -l` shows 3 onboard PCI cards
+   (HDMI dGPU, ALC662 codec, secondary AMD HDA). No USB mic plugged
+   in yet. Resolution: picks ALC662 input + onboard analog output.
+   Service runs in "no-mic mode" if the customer never plugs anything
+   in (graceful failure, `/health` reports `inputAvailable: false`).
+2. **Single-box + ReSpeaker 4-Mic USB array** — same hardware plus the
+   USB array Stefan's ordered. Resolution: USB array wins for input on
+   score, onboard codec wins for output (or USB speaker if also plugged
+   in).
+3. **v2-6 (Jetson + I/O Brick)** — I²S codec on platform bus.
    Resolution: platform-bus codec wins both ways. Same code path, no
    special case.
 4. **Generic dev box** — laptop with onboard audio + USB headset.
@@ -110,7 +111,7 @@ POST /audio/test-record[?duration_s=2.0]
 
 ## On-device verification (post-commit)
 
-The POC box (`droplet-sys`, x86 Ryzen, no USB mic plugged in yet):
+The single-box host (`droplet-sys`, x86 Ryzen, no USB mic plugged in yet):
 
 1. SFTP `services/voice-io/` to the host.
 2. `docker compose --profile linux build voice-io`.
@@ -119,7 +120,7 @@ The POC box (`droplet-sys`, x86 Ryzen, no USB mic plugged in yet):
    `{"ok": true, "inputAvailable": true, "outputAvailable": true, ...}` if
    the onboard ALC662 is unmuted and connected, or
    `inputAvailable: false` if not.
-5. `curl http://127.0.0.1:8086/audio/devices` → expect the three POC
+5. `curl http://127.0.0.1:8086/audio/devices` → expect the three onboard
    cards listed with scores, plus the resolution.
 6. After ReSpeaker arrives: plug in, `curl /audio/devices?refresh=1`
    should show it with the highest input score.

@@ -613,8 +613,9 @@ services:
   # §"Hardware compatibility" for the supported configurations.
   #
   # Profile-gated to "linux" because /dev/snd doesn't exist on Docker
-  # Desktop for macOS; dev installs there skip it. POC + production both
-  # run Linux so the profile is on by default via setup.sh.
+  # Desktop for macOS; dev installs there skip it. Single-box and
+  # multi-box deployments both run Linux so the profile is on by
+  # default via setup.sh.
   voice-io:
     build:
       context: ..
@@ -624,7 +625,7 @@ services:
     # specific devices — sounddevice picks them up via PortAudio.
     devices:
       - "/dev/snd:/dev/snd"
-    # The host's audio group GID. On Ubuntu/Debian (POC + Jetson) it's 29;
+    # The host's audio group GID. On Ubuntu/Debian (single-box + Jetson) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
     # match for /dev/snd's owner.
