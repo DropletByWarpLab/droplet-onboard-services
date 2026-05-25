@@ -80,13 +80,25 @@ const createUserSchema = z.object({
 });
 
 // ── WARP-217 invite schemas ──
-const inviteRoleField = z.enum(["user", "admin"]);
+// WARP-171: widened from the legacy ["user", "admin"] union to the full
+// Role enum so the DB column (now typed as `Role`) and the request body
+// share a vocabulary. Legacy "user" sent by older dashboard builds is
+// coerced to "family" via the preprocessor so existing clients keep
+// working through one rolling deploy window — the dashboard should be
+// updated to send the canonical names in a follow-up.
+//
+// `service` is excluded because a service principal is never minted by
+// an invite — those are env-var-only (SERVICE_TOKEN_*).
+const inviteRoleField = z.preprocess(
+  (v) => (v === "user" ? "family" : v),
+  z.enum(["owner", "admin", "family", "guest"]),
+);
 
 const createInviteSchema = z.object({
   username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
   email: z.string().email().max(200).optional(),
-  role: inviteRoleField.default("user"),
+  role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
 });
@@ -545,11 +557,22 @@ export function createPublicAuthRouter(
         return;
       }
 
-      // Build the Nextcloud groups list from the invite's role. Admin
-      // invites land users in the "admin" group so `roleFromGroups` will
-      // map them to "owner" on first login. Non-admin invites pass an
-      // empty groups array — Nextcloud's default group assignment applies.
-      const groups: string[] = invite.role === "admin" ? ["admin"] : [];
+      // Build the Nextcloud groups list from the invite's role.
+      // WARP-171: the invite role is now the canonical Role enum (was
+      // a free-form String). The mapping below preserves the
+      // pre-WARP-171 wire contract — "admin" invitee still lands in
+      // the Nextcloud "admin" group, which roleFromGroups() turns
+      // back into the "owner" session role on first login. The new
+      // enum values get explicit mappings so future invites can ask
+      // for them without ambiguity. `family` (formerly "user") is
+      // the empty-groups default so a regular household member lands
+      // in Nextcloud's default group set.
+      const groups: string[] =
+        invite.role === "owner" || invite.role === "admin"
+          ? ["admin"]
+          : invite.role === "guest"
+            ? ["guest"]
+            : [];
 
       try {
         await ncCreateUser(
@@ -592,7 +615,16 @@ export function createPublicAuthRouter(
       });
 
       // Auto-login the invitee — same shape as /api/auth/login.
-      const role: Role = invite.role === "admin" ? "owner" : "family";
+      // WARP-171: preserve the pre-WARP-171 wire contract — "admin"
+      // invitee gets an "owner" session role (the original two-value
+      // semantics) — and add direct passthrough for the three new
+      // enum values an invite can now request explicitly.
+      const role: Role =
+        invite.role === "owner" || invite.role === "admin"
+          ? "owner"
+          : invite.role === "guest"
+            ? "guest"
+            : "family";
       const userId = invite.username;
       const accessToken = signAccessToken({
         id: userId,
