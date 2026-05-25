@@ -30,6 +30,7 @@ import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
+import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -199,6 +200,17 @@ async function main() {
     { lockKey: "droplet:device-reconcile-poller" },
   );
   logger.info({ reconcileMs }, "device reconcile poller started");
+
+  // WARP-446 (AC #1): mDNS coverage-extender discovery. Every
+  // DROPLET_AP_DISCOVERY_INTERVAL seconds (default 10 s) the poller
+  // queries the routing service's /aps/discovered endpoint and
+  // upserts each observed MAC into ApDevice via reconcileDiscovered.
+  // New extenders surface as AWAITING_APPROVAL within one tick — well
+  // inside the 30 s AC #1 budget. Same advisory-lock pattern as the
+  // schedule ticker / reconcile poller above so multi-instance
+  // deploys don't double-fire.
+  const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
+  startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
