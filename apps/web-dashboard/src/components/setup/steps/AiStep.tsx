@@ -326,7 +326,7 @@ export function AiStep({
 // Model selection helpers — exported only for tests.
 // ──────────────────────────────────────────────────────────────────
 
-/** Models the orchestrator routes to the Jetson Ollama proxy stay
+/** Models the orchestrator routes to the local Ollama instance stay
  *  on-device; everything else is a BYOK cloud route. We treat the
  *  Ollama provider OR a recognised local family prefix as local. */
 export function isLocalModel(m: ModelInfo): boolean {

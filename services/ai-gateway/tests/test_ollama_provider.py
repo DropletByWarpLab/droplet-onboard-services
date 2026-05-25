@@ -37,12 +37,12 @@ def test_prettify_ollama_name(raw: str, expected: str) -> None:
 # Test fixtures and constants
 # ---------------------------------------------------------------------------
 
-# Use a base_url that is NOT the conftest's JETSON_OLLAMA_URL — the provider
+# Use a base_url that is NOT the conftest's OLLAMA_URL — the provider
 # under test takes an explicit override, and we want a /proxy suffix here so
 # the health_url derivation is exercised.
-TEST_BASE_URL = "http://test-jetson:8002/proxy"
-TEST_HEALTH_URL = "http://test-jetson:8002/health"
-TEST_CHAT_URL = "http://test-jetson:8002/proxy/v1/chat/completions"
+TEST_BASE_URL = "http://test-ollama:8002/proxy"
+TEST_HEALTH_URL = "http://test-ollama:8002/health"
+TEST_CHAT_URL = "http://test-ollama:8002/proxy/v1/chat/completions"
 
 
 def _limits_payload(
@@ -89,13 +89,13 @@ class TestLimitsCache:
     """Unit tests for the appliance-limits cache."""
 
     def test_health_url_strips_proxy_suffix(self):
-        cache = _LimitsCache("http://jetson:8002/proxy")
-        assert cache.health_url == "http://jetson:8002/health"
+        cache = _LimitsCache("http://ollama:8002/proxy")
+        assert cache.health_url == "http://ollama:8002/health"
 
     def test_health_url_no_proxy_suffix_left_alone(self):
         # removesuffix is a no-op when the suffix isn't present.
-        cache = _LimitsCache("http://jetson:8002")
-        assert cache.health_url == "http://jetson:8002/health"
+        cache = _LimitsCache("http://ollama:8002")
+        assert cache.health_url == "http://ollama:8002/health"
 
     def test_initial_defaults(self):
         cache = _LimitsCache(TEST_BASE_URL)

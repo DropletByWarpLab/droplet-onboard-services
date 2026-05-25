@@ -266,7 +266,7 @@ FRIGATE_RENDER_NODE=/dev/dri/renderD129
 # ai-gateway → compose-internal `ollama` service (bypasses the legacy
 # inference-engine.local mDNS path; works on single-box because the
 # ollama service runs alongside ai-gateway on the same compose network).
-JETSON_OLLAMA_URL=http://ollama:11434
+OLLAMA_URL=http://ollama:11434
 
 # FIPS off: consumer x86 hosts don't ship a FIPS-validated OpenSSL build,
 # and the FIPS profile rejects Postgres TLS handshake ciphers (P1011).
@@ -295,5 +295,5 @@ OPENWRT_USERNAME=root
 ROUTING_MODE=real
 EOF
 
-  log_success "Wrote single-box knobs to .env (COMPOSE_PROFILES=linux,single-box, FRIGATE_RENDER_NODE, JETSON_OLLAMA_URL, FIPS off, TPM=mock, OpenWrt at 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b)"
+  log_success "Wrote single-box knobs to .env (COMPOSE_PROFILES=linux,single-box, FRIGATE_RENDER_NODE, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt at 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b)"
 }

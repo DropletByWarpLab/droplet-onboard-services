@@ -270,8 +270,8 @@ const SECTIONS: Section[] = [
           <strong>Local models:</strong> the Chat page lists everything
           the Droplet has installed under &ldquo;On your Droplet
           (private)&rdquo;. Llama, Mistral, Qwen, Gemma, Phi — whichever
-          ones the operator pulled. They run on the Jetson GPU inside the
-          box.
+          ones the operator pulled. They run on the GPU inside the box;
+          nothing leaves your network.
         </p>
         <p>
           <strong>Cloud models (optional):</strong> if you&rsquo;ve added

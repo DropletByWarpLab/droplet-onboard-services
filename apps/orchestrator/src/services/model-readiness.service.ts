@@ -13,7 +13,7 @@
  * `docker exec droplet-ollama ollama pull gpt-oss:20b` before the
  * dashboard model list would surface anything. With `setup.sh --poc`
  * writing `LLM_MODEL=gpt-oss:20b` to .env (Phase 2) and the manifest
- * declaring it as the default (droplet-jetson-ai Phase 3a), this
+ * declaring it as the default (droplet-local-LLM Phase 3a), this
  * service notices the gap on first orchestrator boot and closes it
  * by hitting Ollama's HTTP API directly. The user vision: plug the
  * WAN cable in, walk away, come back to a working dashboard with
@@ -29,7 +29,7 @@
  * Why not via ollama-manager
  * --------------------------
  * The canonical path for model lifecycle is the `ollama-manager`
- * sidecar (port 8002) in `droplet-jetson-ai`, which exposes
+ * sidecar (port 8002) in `droplet-local-LLM`, which exposes
  * `/models/sync`, `/models/eligible`, `/models/pull` with VRAM gating
  * and manifest awareness. On the PoC today the manager isn't deployed
  * (Phase 3c — separate cross-repo work). When it lands, this service
@@ -43,9 +43,27 @@ import pino from "pino";
 
 const logger = pino({ name: "model-readiness" });
 
+// Backward compatibility: the legacy `JETSON_OLLAMA_URL` env var is still
+// read as a fallback for .env files that pre-date the rename to the
+// hardware-agnostic `OLLAMA_URL`. setup.sh's migrate_env copies the old
+// name to the new on next run; this fallback keeps the orchestrator
+// functional during the transition window.
 const OLLAMA_URL =
-  process.env.JETSON_OLLAMA_URL ?? "http://host.docker.internal:11434";
+  process.env.OLLAMA_URL ??
+  process.env.JETSON_OLLAMA_URL ??
+  "http://host.docker.internal:11434";
 const LLM_MODEL = process.env.LLM_MODEL ?? "";
+
+if (process.env.JETSON_OLLAMA_URL && !process.env.OLLAMA_URL) {
+  // Use console.warn here (not the pino logger) because this runs at
+  // module load, before the orchestrator's logger is set up.
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[model-readiness] JETSON_OLLAMA_URL is deprecated — rename to OLLAMA_URL " +
+      "(legacy hardware-specific naming; the variable is hardware-agnostic). " +
+      "setup.sh migrate_env will rename it on next run.",
+  );
+}
 
 interface OllamaTagsResponse {
   models?: Array<{ name: string; size?: number; modified_at?: string }>;

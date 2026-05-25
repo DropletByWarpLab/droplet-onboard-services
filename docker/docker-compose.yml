@@ -379,7 +379,7 @@ services:
       - path: ../.env
         required: false
     # Mirrors orchestrator + mcp-server: the chat path's default
-    # JETSON_OLLAMA_URL is `http://host.docker.internal:11434` (host-installed
+    # OLLAMA_URL is `http://host.docker.internal:11434` (host-installed
     # Ollama for local Docker Desktop dev). Without this mapping, ai-gateway
     # cannot resolve the name and chat throws "Temporary failure in name
     # resolution". On the single-box deployment shape

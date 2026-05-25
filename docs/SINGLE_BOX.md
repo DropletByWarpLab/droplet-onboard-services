@@ -30,7 +30,7 @@ separate Jetson on the LAN, enables single-box mode automatically, and:
 
 - generates per-device secrets in `.env` via `secrets.sh`
 - appends the single-box knobs to `.env` (`COMPOSE_PROFILES=linux,single-box`,
-  `FRIGATE_RENDER_NODE=/dev/dri/renderD129`, `JETSON_OLLAMA_URL=http://ollama:11434`,
+  `FRIGATE_RENDER_NODE=/dev/dri/renderD129`, `OLLAMA_URL=http://ollama:11434`,
   `DROPLET_TPM_BACKEND=mock`, `OPENSSL_CONF=`, `DROPLET_FIPS_REQUIRED=false`,
   `LLM_MODEL=gpt-oss:20b`, `OPENWRT_HOST=127.0.0.1`, etc.)
 - installs the captured host scripts (`/usr/local/sbin/droplet-openwrt-attach`,

@@ -79,7 +79,7 @@ bump both sides in lockstep when the contract changes.
 
 1. **Web dashboard or API client** → `POST /ai/chat` on the orchestrator (port 3000) or directly on ai-gateway (port 8000).
 2. **Orchestrator's agent loop** (`llm-agent.service.ts`) starts: get tools from MCP, send first turn to ai-gateway.
-3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `JETSON_OLLAMA_URL` (`http://host.docker.internal:8002/proxy`). The request enters `ollama-manager`'s chat proxy, which pre-flights model-loading + circuit-open state and forwards to Ollama.
+3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `OLLAMA_URL` (`http://host.docker.internal:8002/proxy`). The request enters `ollama-manager`'s chat proxy, which pre-flights model-loading + circuit-open state and forwards to Ollama.
 4. **Jetson Ollama** (this repo's `ollama` container) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
 6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).
@@ -124,7 +124,7 @@ When making changes that touch both repos:
 1. Branch and PR each repo separately, but link the PRs in their descriptions.
 2. Land the inference contract change in `droplet-jetson-ai` first (it's the dependency).
 3. Then land the orchestrator change in `droplet-onboard-services`.
-4. Bump `models/model-manifest.json` and `JETSON_OLLAMA_URL` only when both PRs are merged.
+4. Bump `models/model-manifest.json` and `OLLAMA_URL` only when both PRs are merged.
 
 If you're making a change that touches **only this repo** (e.g. adding a new model, changing the lifecycle API), the orchestrator side needs no PR.
 

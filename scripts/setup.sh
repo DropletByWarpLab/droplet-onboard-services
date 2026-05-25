@@ -224,7 +224,7 @@ if [ "$DRY_RUN" = "true" ]; then
   log_info "                  mosquitto.conf, TLS cert, docker/secrets/openwrt_password"
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     log_info "  single-box: would append COMPOSE_PROFILES=linux,single-box + knobs to .env"
-    log_info "                  (FRIGATE_RENDER_NODE, JETSON_OLLAMA_URL, OPENSSL_CONF=,"
+    log_info "                  (FRIGATE_RENDER_NODE, OLLAMA_URL, OPENSSL_CONF=,"
     log_info "                  DROPLET_FIPS_REQUIRED=false, DROPLET_TPM_BACKEND=mock,"
     log_info "                  LLM_MODEL=gpt-oss:20b, OPENWRT_HOST/PORT/USERNAME)"
     log_info "  single-box: would install /usr/local/sbin/droplet-openwrt-attach +"
