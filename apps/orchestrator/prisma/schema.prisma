@@ -1138,3 +1138,81 @@ enum ActivitySeverity {
   err
   info
 }
+
+// ── WARP-457: workspace settings registry ──
+//
+// Persistent CRUD layer for the dashboard's Settings surface. Replaces
+// the .env-only knobs in apps/orchestrator/src/config.ts for surfaces
+// the household is expected to tune from the UI (workspace name,
+// memory/privacy defaults, off-LAN posture, hardware feature flags,
+// appearance theme). `.env` continues to own infra-level knobs
+// (DATABASE_URL, JWT_SECRET, OLLAMA_URL etc) — settings here are
+// additive, not a replacement.
+//
+// Per the no-guessing rule (CLAUDE.md):
+//   - `section` is the explicit `SettingSection` enum — never derived
+//     from a key prefix or path-style string.
+//   - `type` is the explicit `SettingType` enum — the route layer
+//     validates `valueJson` against this enum before write (string
+//     length, number range, enum membership, duration parsing, etc).
+//
+// `valueJson` is Json so the same column carries every type-erased
+// value; adding a new `SettingType` doesn't need a column migration.
+// The seeder in workspace-settings.service.ts populates rows from
+// existing .env-derived defaults on first run (insert-or-skip; never
+// overwrite user values).
+//
+// `@@index([section])` keeps GET /api/settings's grouped query plan
+// stable as the row count grows.
+model WorkspaceSetting {
+  id        String         @id @default(uuid())
+  key       String         @unique
+  section   SettingSection
+  type      SettingType
+  valueJson Json
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([section])
+}
+
+/// WARP-457: top-level grouping for the dashboard's Settings surface.
+/// Adding a new value here is a schema change — keep the set stable.
+/// The route layer (GET /api/settings/:section) trusts this enum for
+/// path-param validation.
+///   - `workspace`       — display name, locale, default scope, etc.
+///   - `memory_privacy`  — brain memory defaults, retention, scope.
+///   - `off_lan`         — VPN / remote-access posture (DDNS, peers).
+///   - `hardware`        — feature flags for cameras, switch, display.
+///   - `appearance`      — theme, density, dashboard layout.
+enum SettingSection {
+  workspace
+  memory_privacy
+  off_lan
+  hardware
+  appearance
+}
+
+/// WARP-457: type tag for `WorkspaceSetting.valueJson`. The route
+/// layer's PATCH handler dispatches per-type validation off this
+/// enum (string length, number range, enum membership, duration
+/// parsing, json validity). Adding a new type requires extending the
+/// validator switch in routes/settings.ts.
+///   - `string`            — UTF-8 text, length-bounded by the route.
+///   - `number`            — JSON number (integer or float).
+///   - `bool`              — true/false.
+///   - `duration_seconds`  — non-negative integer seconds.
+///   - `enum`              — value must be one of an allowed set; the
+///                           allowed set lives in the route definition,
+///                           not in the schema (so per-key allowed
+///                           values don't need a schema migration).
+///   - `json`              — opaque JSON blob; validated for parse-
+///                           ability and a depth cap, not shape.
+enum SettingType {
+  string
+  number
+  bool
+  duration_seconds
+  enum
+  json
+}
