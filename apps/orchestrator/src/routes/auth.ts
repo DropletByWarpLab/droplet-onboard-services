@@ -518,6 +518,53 @@ export function createPublicAuthRouter(
 
         const { sub, username, displayName, role } = refreshResult;
 
+        // WARP-485 round 2 — re-validate that the local User row backing
+        // this refresh token still exists before rotating. Three things
+        // this catches:
+        //   1. Owner removed the user via /api/people mid-session — the
+        //      stale cookie must not silently mint fresh credentials.
+        //   2. Legacy refresh tokens issued pre-WARP-485 carry the NC
+        //      username in `sub` (not a UUID); `findUnique({ id: sub })`
+        //      returns null on those, invalidating them so the holder
+        //      re-logs in and gets a properly-shaped token pair. This is
+        //      the deliberate cache-bump for the JWT layer.
+        //   3. Defense in depth against forged tokens that somehow
+        //      verify but reference no real user.
+        // Fail-closed with the same error code as the OCS path so the
+        // dashboard's auth-error handler can branch consistently.
+        if (!prisma) {
+          logger.warn(
+            { sub },
+            "JWT refresh: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+          );
+          await denyRefreshToken(refreshTokenCookie);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "User not provisioned. Please log in again.",
+            code: "USER_NOT_PROVISIONED",
+          });
+          return;
+        }
+        const localUser = await prisma.user.findUnique({ where: { id: sub } });
+        if (!localUser) {
+          logger.warn(
+            { sub },
+            "JWT refresh: no local User row for refresh-token subject; refusing rotation (WARP-485 round 2)",
+          );
+          // Burn the old refresh token so a retry can't re-enter this
+          // branch repeatedly — denylist entry auto-expires with the
+          // token's own TTL.
+          await denyRefreshToken(refreshTokenCookie);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "User not provisioned. Please log in again.",
+            code: "USER_NOT_PROVISIONED",
+          });
+          return;
+        }
+
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
         await denyRefreshToken(refreshTokenCookie);
