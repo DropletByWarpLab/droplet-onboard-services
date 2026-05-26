@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  classifyQuery,
+  CLASSIFIER_CACHE_TTL_SEC,
   hydeRewrite,
   multiQueryExpand,
   MULTI_QUERY_DEFAULT_N,
@@ -51,3 +53,54 @@ describe("multiQueryExpand", () => {
     expect(out).toHaveLength(MULTI_QUERY_DEFAULT_N);
   });
 });
+
+describe("classifyQuery", () => {
+  it("returns the class + confidence from the gRPC client", async () => {
+    const rpc = vi.fn().mockResolvedValue({ class: "factual", confidence: 0.91 });
+    const out = await classifyQuery({ query: "what is x", rpc, cache: makeMemoryCache() });
+    expect(out).toEqual({ cls: "factual", confidence: 0.91 });
+  });
+
+  it("caches by query SHA-256 with TTL", async () => {
+    const rpc = vi.fn().mockResolvedValue({ class: "factual", confidence: 0.9 });
+    const cache = makeMemoryCache();
+    await classifyQuery({ query: "x", rpc, cache });
+    await classifyQuery({ query: "x", rpc, cache });
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to 'unknown' on RPC failure", async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error("boom"));
+    const out = await classifyQuery({ query: "x", rpc, cache: makeMemoryCache() });
+    expect(out.cls).toBe("unknown");
+  });
+
+  it("falls back to 'unknown' when RPC returns an unrecognized class", async () => {
+    const rpc = vi.fn().mockResolvedValue({ class: "unexpected_class", confidence: 0.42 });
+    const out = await classifyQuery({ query: "x", rpc, cache: makeMemoryCache() });
+    expect(out.cls).toBe("unknown");
+    expect(out.confidence).toBe(0.42);
+  });
+
+  it("exports a 24h TTL constant", () => {
+    expect(CLASSIFIER_CACHE_TTL_SEC).toBe(24 * 60 * 60);
+  });
+});
+
+function makeMemoryCache() {
+  const store = new Map<string, { v: string; exp: number }>();
+  return {
+    async get(k: string) {
+      const e = store.get(k);
+      if (!e) return null;
+      if (e.exp < Date.now()) {
+        store.delete(k);
+        return null;
+      }
+      return e.v;
+    },
+    async setex(k: string, ttl: number, v: string) {
+      store.set(k, { v, exp: Date.now() + ttl * 1000 });
+    },
+  };
+}

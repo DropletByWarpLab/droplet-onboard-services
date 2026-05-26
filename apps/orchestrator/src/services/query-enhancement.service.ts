@@ -10,6 +10,13 @@
  * orchestrator and the mcp-server (WARP-202 mirror).
  */
 
+import { createHash } from "node:crypto";
+
+import type { QueryClass } from "../types/query-enhancement.js";
+
+// Re-export for type-narrowing call sites.
+export type { QueryClass } from "../types/query-enhancement.js";
+
 export const MULTI_QUERY_DEFAULT_N = 3;
 const HYDE_MAX_TOKENS = 200;
 const MULTI_QUERY_MAX_TOKENS = 300;
@@ -97,6 +104,67 @@ export async function multiQueryExpand({
     .filter((s) => s.length > 0)
     .slice(0, n);
   return cleaned.length > 0 ? cleaned : [query];
+}
+
+/** Classifier results are deterministic for a given query; 24 h TTL is safe. */
+export const CLASSIFIER_CACHE_TTL_SEC = 24 * 60 * 60;
+
+const CLASSIFIER_CACHE_PREFIX = "warp437:cls:";
+
+export interface ClassifyQueryRpc {
+  (args: { query: string }): Promise<{ class: string; confidence: number }>;
+}
+
+export interface ClassifyQueryCache {
+  get(key: string): Promise<string | null>;
+  setex(key: string, ttl: number, value: string): Promise<unknown>;
+}
+
+export interface ClassifyQueryParams {
+  query: string;
+  rpc: ClassifyQueryRpc;
+  cache: ClassifyQueryCache;
+}
+
+export interface ClassifyResult {
+  cls: QueryClass;
+  confidence: number;
+}
+
+const KNOWN_CLASSES: ReadonlySet<QueryClass> = new Set<QueryClass>([
+  "factual",
+  "analytical",
+  "conversational",
+  "navigational",
+  "unknown",
+]);
+
+export async function classifyQuery({
+  query,
+  rpc,
+  cache,
+}: ClassifyQueryParams): Promise<ClassifyResult> {
+  const key = CLASSIFIER_CACHE_PREFIX + createHash("sha256").update(query).digest("hex");
+  const cached = await cache.get(key);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached) as ClassifyResult;
+      if (KNOWN_CLASSES.has(parsed.cls)) return parsed;
+    } catch {
+      // fallthrough to fresh RPC
+    }
+  }
+  try {
+    const r = await rpc({ query });
+    const cls: QueryClass = KNOWN_CLASSES.has(r.class as QueryClass)
+      ? (r.class as QueryClass)
+      : "unknown";
+    const result: ClassifyResult = { cls, confidence: r.confidence };
+    await cache.setex(key, CLASSIFIER_CACHE_TTL_SEC, JSON.stringify(result));
+    return result;
+  } catch {
+    return { cls: "unknown", confidence: 0 };
+  }
 }
 
 function tryParseJsonArray(text: string): string[] | null {
