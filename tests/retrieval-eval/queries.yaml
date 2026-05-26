@@ -510,13 +510,19 @@ queries:
     notes: "WARP-437 — analytical, multi-query candidate (3 fixtures)"
 
   - id: q-analytical-003
-    query: "list the documents that mention alphahotel or its variants"
+    query: "what does the kickoff meeting discuss across the audio, video, and PDF channels"
     class: analytical
     relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
       - source: nextcloud
         path_contains: "sample.pdf"
         chunk_idx_any: true
-    notes: "WARP-437 — analytical, multi-query candidate (enumeration)"
+    notes: "WARP-437 — multi-fixture synthesis across audio/video/PDF kickoff content"
 
   - id: q-analytical-004
     query: "which channels carry budget-related content"
