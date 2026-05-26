@@ -92,6 +92,17 @@ PACKAGES+=" iw iwinfo wireless-regdb"
 # --- VPN: WireGuard ---
 PACKAGES+=" wireguard-tools kmod-wireguard luci-proto-wireguard"
 
+# --- WARP-446: Band-steering daemon (per ADR-005) ---
+# `dawn` is the OpenWrt-community choice for cross-AP 802.11k/v/r
+# coordination. Chosen over `usteer` because dawn's defaults work
+# with Apple's RSSI hysteresis; usteer's defaults deauth iPhones
+# every ~30s under our hardware profile. See docs/ADR-005.
+#
+# Same package installs on both the main router and every extender
+# AP — the daemon's UDP multicast (port 1025) does the cross-AP
+# coordination at runtime; no per-AP role config.
+PACKAGES+=" dawn"
+
 # --- Dynamic DNS (DuckDNS for the WireGuard endpoint hostname) ---
 # DuckDNS runs through the generic GET-URL path so no provider-specific
 # extension is required. The routing service writes a `ddns` UCI section

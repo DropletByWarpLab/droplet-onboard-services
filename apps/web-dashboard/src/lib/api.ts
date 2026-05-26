@@ -2083,6 +2083,83 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
 
 // --- Remote Access (WireGuard VPN) ---
 
+// ── WARP-446: Coverage extender APs ──
+
+export async function fetchApDevices(): Promise<{
+  aps: import("./types").ApDeviceInfo[];
+  // ADR-005 LRU cap on the discovered-list. Surfaces in the panel so
+  // the operator knows when an mDNS flood is filling the queue.
+  discoveredCap: number;
+  discoveredCapReached: boolean;
+}> {
+  const res = await authFetch(`${BASE}/api/aps`);
+  if (!res.ok) throw new Error(`Failed to fetch extender APs: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDiscoveredApDevices(): Promise<{
+  discovered: import("./types").ApDeviceInfo[];
+  cap: number;
+  capReached: boolean;
+}> {
+  const res = await authFetch(`${BASE}/api/aps/discovered`);
+  if (!res.ok) throw new Error(`Failed to fetch discovered extenders: ${res.status}`);
+  return res.json();
+}
+
+export async function approveApDevice(
+  mac: string,
+  body: {
+    ssid: string;
+    encryptionKey: string;
+    radio?: string;
+    encryption?: string;
+    network?: string;
+    displayName?: string;
+  },
+): Promise<{
+  ap: import("./types").ApDeviceInfo;
+  operationId: string | null;
+}> {
+  // Colons in MAC are allowed unencoded in path segments per RFC 3986 §3.3.
+  const res = await authFetch(`${BASE}/api/aps/${mac}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    // WARP-446 (blocker #7): the orchestrator surfaces a typed
+    // `code` on every ApOnboardError (PROVISIONING_TIMEOUT,
+    // ROUTER_UNREACHABLE, WIRELESS_CONFIG_REJECTED, UNKNOWN). Attach
+    // it to the thrown Error so the panel's AP_ONBOARD_ERROR_COPY
+    // table can key on the code rather than regex-matching the raw
+    // message.
+    const e = new Error(err.error || `Failed to approve extender: ${res.status}`);
+    if (err.code) (e as Error & { code?: string }).code = err.code;
+    throw e;
+  }
+  return res.json();
+}
+
+export async function decommissionApDevice(
+  mac: string,
+): Promise<{
+  ap: import("./types").ApDeviceInfo;
+  operationId: string | null;
+}> {
+  const res = await authFetch(`${BASE}/api/aps/${mac}/decommission`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const e = new Error(err.error || `Failed to decommission extender: ${res.status}`);
+    if (err.code) (e as Error & { code?: string }).code = err.code;
+    throw e;
+  }
+  return res.json();
+}
+
 export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   const res = await authFetch(`${BASE}/api/vpn/status`);
   if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);

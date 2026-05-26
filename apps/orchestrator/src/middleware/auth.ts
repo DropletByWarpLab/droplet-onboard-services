@@ -271,3 +271,51 @@ function matchServiceToken(token: string): AuthUser | null {
   }
   return null;
 }
+
+/**
+ * WARP-171: per-route RBAC guard. Mounts after `authMiddleware`; assumes
+ * `req.user.role` is populated by the upstream middleware (either from
+ * a verified JWT, a matched service principal, or the Nextcloud OCS
+ * fallback). Returns 403 — NOT 401 — when:
+ *
+ *   - `req.user` is absent (defense in depth; the upstream middleware
+ *     should have already issued 401, but a misordered router would
+ *     otherwise allow the request through silently),
+ *   - `req.user.role` is missing or not a string,
+ *   - the role is not in the `allowed` list (including the empty-list
+ *     programmer-error case — no implicit allow-all).
+ *
+ * The 401-vs-403 distinction matters: 401 means "tell me who you are";
+ * 403 means "I know who you are, just not allowed". Conflating them
+ * leaks the auth-vs-authz ordering to clients and breaks the
+ * dashboard's two-stage error rendering (toast vs redirect-to-login).
+ *
+ * Usage:
+ *   router.post("/auth/users", requireRole("owner", "admin"), handler);
+ *
+ * See `docs/ADR-004-rbac-per-route-guards.md` §3 for the per-route
+ * allowlist matrix. Each guarded route file derives its allowed roles
+ * from that matrix; the matrix is mirrored in tests
+ * (`src/__tests__/rbac.test.ts`) so additions stay in sync.
+ */
+export function requireRole(
+  ...allowed: Role[]
+): (req: Request, res: Response, next: NextFunction) => void {
+  // Cache the allowed set so the per-request hot path is just one
+  // string lookup. The middleware is constructed once per route and
+  // invoked thousands of times; the Set avoids a linear scan when
+  // a route allows multiple roles.
+  const allowedSet = new Set<string>(allowed);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const role = req.user?.role;
+    if (typeof role !== "string" || role.length === 0) {
+      res.status(403).json({ error: "Forbidden: no role on session" });
+      return;
+    }
+    if (!allowedSet.has(role)) {
+      res.status(403).json({ error: "Forbidden: role not permitted" });
+      return;
+    }
+    next();
+  };
+}

@@ -10,6 +10,7 @@
 import type { Router } from "express";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
+import { requireRole } from "../middleware/auth.js";
 
 export interface DeviceDeps {
   networkDeviceService: ReturnType<typeof createNetworkDeviceService>;
@@ -29,7 +30,11 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.patch("/network/devices/:mac", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin — naming devices,
+  // assigning group membership, and unblocking are household-admin
+  // operations. The dashboard's "Devices" page is admin-gated; this
+  // guard mirrors the page's expectation.
+  router.patch("/network/devices/:mac", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { displayName, icon, notes } = req.body ?? {};
       const patch: { displayName?: string; icon?: string; notes?: string } = {};
@@ -58,7 +63,7 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.post("/network/devices/:mac/groups", async (req, res, next) => {
+  router.post("/network/devices/:mac/groups", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { groupIds } = req.body ?? {};
       if (!Array.isArray(groupIds) || !groupIds.every((x) => typeof x === "string")) {
@@ -76,7 +81,7 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.delete("/network/devices/:mac", async (req, res, next) => {
+  router.delete("/network/devices/:mac", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       await networkDeviceService.forgetDevice(req.params.mac);
       res.status(204).end();
@@ -96,7 +101,7 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.post("/network/groups", async (req, res, next) => {
+  router.post("/network/groups", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { name, color, icon } = req.body ?? {};
       if (typeof name !== "string" || name.trim().length === 0) {
@@ -115,7 +120,7 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.patch("/network/groups/:id", async (req, res, next) => {
+  router.patch("/network/groups/:id", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { name, color, icon } = req.body ?? {};
       const patch: { name?: string; color?: string; icon?: string } = {};
@@ -144,7 +149,7 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
     }
   });
 
-  router.delete("/network/groups/:id", async (req, res, next) => {
+  router.delete("/network/groups/:id", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       await networkDeviceService.deleteGroup(req.params.id);
       res.status(204).end();

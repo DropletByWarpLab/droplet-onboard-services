@@ -13,6 +13,10 @@ import blockNetworkDevice from "./handlers/network/block-network-device.js";
 import unblockNetworkDevice from "./handlers/network/unblock-network-device.js";
 import addPortForward from "./handlers/network/add-port-forward.js";
 import getRouterSystemInfo from "./handlers/network/get-router-system-info.js";
+// WARP-446 — coverage extender AP onboarding
+import listApDevices from "./handlers/network/list-ap-devices.js";
+import approveAp from "./handlers/network/approve-ap.js";
+import decommissionAp from "./handlers/network/decommission-ap.js";
 
 // files
 import listFiles from "./handlers/files/list-files.js";
@@ -89,6 +93,10 @@ const allTools: Tool[] = [
   unblockNetworkDevice,
   addPortForward,
   getRouterSystemInfo,
+  // WARP-446: coverage extender AP onboarding
+  listApDevices,
+  approveAp,
+  decommissionAp,
   // files
   listFiles,
   readFile,

@@ -21,11 +21,16 @@ logger = logging.getLogger(__name__)
 # (pull/delete/manifest) and exposes an OPT-IN /proxy that adds tool-call
 # observability + JSON repair, but its 120s read timeout (TIMEOUT_PROXY
 # in droplet-jetson-ai/services/ollama-manager/timeouts.py) is too tight
-# for the orchestrator's agent loop on CPU. Production .env already
-# points at `inference-engine.local:11434` (direct); this default makes
-# the macOS / fresh-install / unit-test paths agree with production.
-# Override via JETSON_OLLAMA_URL to opt back into the /proxy (e.g. when
-# you want the tool-call repair + circuit-breaker for a specific deploy).
+# for the orchestrator's agent loop on CPU. The compose default below
+# (`host.docker.internal:11434`) targets a host-installed Ollama for
+# local Docker Desktop dev — note ai-gateway does not currently have the
+# `extra_hosts: host.docker.internal:host-gateway` mapping, so this only
+# resolves on Docker Desktop, not stock Linux. On the single-box PoC the
+# orchestrator runs with JETSON_OLLAMA_URL=http://droplet-ollama:11434
+# (the bundled Ollama container on the compose default network); on a
+# multi-box deployment with a separate Jetson, point at its static IP.
+# Override via JETSON_OLLAMA_URL to opt into the /proxy if you want the
+# tool-call repair + circuit-breaker for a specific deploy.
 # See ADR-004 in the droplet-jetson-ai repo for the original rationale.
 JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://host.docker.internal:11434")
 

@@ -14,11 +14,11 @@ import {
   fetchDuckDnsStatus,
   setDuckDnsConfig,
 } from "../services/openwrt.client.js";
+import { requireRole } from "../middleware/auth.js";
 
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
+// WARP-171: legacy `isAdmin(req)` inlined-and-removed; both endpoints
+// below use `requireRole("owner", "admin")` mounted as middleware so
+// the 403 short-circuits before any handler-local validation.
 
 // Subdomain/token grammars match the routing service Pydantic schemas so
 // invalid input is rejected here instead of round-tripping through HTTP.
@@ -44,36 +44,38 @@ const setSchema = z.object({
 export function createDdnsRouter(): Router {
   const router = Router();
 
-  router.get("/ddns/duckdns", async (req: Request, res: Response, next: NextFunction) => {
-    if (!isAdmin(req)) {
-      return res.status(403).json({ error: "Admin access required" });
-    }
-    try {
-      const status = await fetchDuckDnsStatus();
-      res.json(status);
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.get(
+    "/ddns/duckdns",
+    requireRole("owner", "admin"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const status = await fetchDuckDnsStatus();
+        res.json(status);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
-  router.put("/ddns/duckdns", async (req: Request, res: Response, next: NextFunction) => {
-    if (!isAdmin(req)) {
-      return res.status(403).json({ error: "Admin access required" });
-    }
-    const parsed = setSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({
-        error: "Invalid request",
-        details: parsed.error.flatten(),
-      });
-    }
-    try {
-      const result = await setDuckDnsConfig(parsed.data);
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.put(
+    "/ddns/duckdns",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      const parsed = setSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "Invalid request",
+          details: parsed.error.flatten(),
+        });
+      }
+      try {
+        const result = await setDuckDnsConfig(parsed.data);
+        res.json(result);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   return router;
 }

@@ -24,16 +24,22 @@ import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calen
 import { createRemindersRouter } from "./routes/reminders.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createVpnRouter } from "./routes/vpn.js";
+import { createApsRouter } from "./routes/aps.js";
 import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createFipsRouter } from "./routes/fips.js";
+import { createActivityRouter } from "./routes/activity.js";
+import { createPeopleRouter } from "./routes/people.js";
+import { createSettingsRouter } from "./routes/settings.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
+import { seedWorkspaceSettings } from "./services/workspace-settings.service.js";
+import pino from "pino";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -90,6 +96,8 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createRemindersRouter(prisma));
   app.use("/api", createNotificationsRouter(prisma));
   app.use("/api", createVpnRouter(prisma));
+  // WARP-446: coverage extender AP onboarding (ADR-005).
+  app.use("/api", createApsRouter(prisma));
   app.use("/api", createDdnsRouter());
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
@@ -105,6 +113,17 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
+  // WARP-456: signed append-only activity feed + export bundle.
+  app.use("/api", createActivityRouter(prisma));
+  // WARP-455: A1 local user directory + role/scope mutations. Mutations
+  // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
+  // system kind for permission edits).
+  app.use("/api", createPeopleRouter(prisma));
+  // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
+  // PATCH section with per-type validation). Mutations emit ActivityRow
+  // rows via recordActivity (kind: system, severity: info — one row per
+  // changed key). Reads open to owner+admin+family; writes owner+admin.
+  app.use("/api", createSettingsRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
@@ -119,6 +138,20 @@ export function createApp(prisma: PrismaClient) {
   // Web Push — initialise VAPID + log keys at startup. Idempotent;
   // safe to call before any subscribe/push attempt.
   initPushDispatch();
+
+  // WARP-457: workspace settings first-boot seeder. Idempotent
+  // (insert-or-skip via createMany({skipDuplicates: true})); operator-
+  // edited values survive every subsequent boot. Fire-and-forget here —
+  // if the DB is wedged the orchestrator's later /api/settings calls
+  // will surface the failure; we don't want to block app construction
+  // on a non-critical bootstrap.
+  const seedLogger = pino({ name: "app:workspace-settings" });
+  seedWorkspaceSettings(prisma).catch((err) => {
+    seedLogger.warn(
+      { err },
+      "workspace settings seeder failed (settings table may be unbootstrapped)",
+    );
+  });
 
   // Error handling
   app.use(errorHandler);

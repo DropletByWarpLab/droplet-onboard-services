@@ -37,7 +37,11 @@ import {
   REFRESH_TOKEN_TTL_SECONDS,
   type Role,
 } from "../services/jwt.service.js";
-import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
+import {
+  SESSION_COOKIE_NAME,
+  REFRESH_COOKIE_NAME,
+  requireRole,
+} from "../middleware/auth.js";
 import {
   storeNcToken,
   getNcToken,
@@ -47,6 +51,17 @@ import {
 } from "../services/nextcloud-session.service.js";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+/** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
+ *  (set by the nginx gateway in production), falls back to req.ip. */
+function callerIpFromReq(req: Request): string | undefined {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    return xff.split(",")[0]!.trim();
+  }
+  return req.ip;
+}
 
 const logger = pino({ name: "auth-route" });
 
@@ -80,13 +95,25 @@ const createUserSchema = z.object({
 });
 
 // ── WARP-217 invite schemas ──
-const inviteRoleField = z.enum(["user", "admin"]);
+// WARP-171: widened from the legacy ["user", "admin"] union to the full
+// Role enum so the DB column (now typed as `Role`) and the request body
+// share a vocabulary. Legacy "user" sent by older dashboard builds is
+// coerced to "family" via the preprocessor so existing clients keep
+// working through one rolling deploy window — the dashboard should be
+// updated to send the canonical names in a follow-up.
+//
+// `service` is excluded because a service principal is never minted by
+// an invite — those are env-var-only (SERVICE_TOKEN_*).
+const inviteRoleField = z.preprocess(
+  (v) => (v === "user" ? "family" : v),
+  z.enum(["owner", "admin", "family", "guest"]),
+);
 
 const createInviteSchema = z.object({
   username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
   email: z.string().email().max(200).optional(),
-  role: inviteRoleField.default("user"),
+  role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
 });
@@ -95,11 +122,10 @@ const acceptInviteSchema = z.object({
   password: z.string().min(8).max(128),
 });
 
-/** True if the caller is allowed to manage invites (issue / list / revoke). */
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
+// WARP-171: the legacy `isAdmin(req)` helper was inlined-and-removed
+// when every invite-management route was switched to
+// `requireRole("owner", "admin")`. The two-value contract is now
+// expressed at route registration where reviewers can see it.
 
 /** Best-effort source IP for the audit trail. Honours `trust proxy`. */
 function getRequestIp(req: Request): string | null {
@@ -205,6 +231,21 @@ export function createPublicAuthRouter(
 
       const result = await ncLoginWithCredentials(parsed.data.username, parsed.data.password);
       if (!result) {
+        // WARP-456: failed login audit row. We intentionally include
+        // the attempted username so an audit reviewer can spot
+        // patterns; the password never reaches the recorder.
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Sign-in failed",
+          sub: `${parsed.data.username} • ${callerIpFromReq(req) ?? "unknown"}`,
+          refs: {
+            outcome: "invalid_credentials",
+            username: parsed.data.username,
+            ip: callerIpFromReq(req) ?? null,
+          },
+        });
         res.status(401).json({ error: "Invalid credentials" });
         return;
       }
@@ -252,6 +293,22 @@ export function createPublicAuthRouter(
         sameSite: "lax",
         path: "/api/auth",
         maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+      });
+
+      // WARP-456: successful sign-in audit row.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-in",
+        what: `${displayName} signed in`,
+        sub: `${role} • ${callerIpFromReq(req) ?? "unknown"}`,
+        refs: {
+          outcome: "success",
+          userId,
+          username,
+          role,
+          ip: callerIpFromReq(req) ?? null,
+        },
       });
 
       res.json({
@@ -545,11 +602,22 @@ export function createPublicAuthRouter(
         return;
       }
 
-      // Build the Nextcloud groups list from the invite's role. Admin
-      // invites land users in the "admin" group so `roleFromGroups` will
-      // map them to "owner" on first login. Non-admin invites pass an
-      // empty groups array — Nextcloud's default group assignment applies.
-      const groups: string[] = invite.role === "admin" ? ["admin"] : [];
+      // Build the Nextcloud groups list from the invite's role.
+      // WARP-171: the invite role is now the canonical Role enum (was
+      // a free-form String). The mapping below preserves the
+      // pre-WARP-171 wire contract — "admin" invitee still lands in
+      // the Nextcloud "admin" group, which roleFromGroups() turns
+      // back into the "owner" session role on first login. The new
+      // enum values get explicit mappings so future invites can ask
+      // for them without ambiguity. `family` (formerly "user") is
+      // the empty-groups default so a regular household member lands
+      // in Nextcloud's default group set.
+      const groups: string[] =
+        invite.role === "owner" || invite.role === "admin"
+          ? ["admin"]
+          : invite.role === "guest"
+            ? ["guest"]
+            : [];
 
       try {
         await ncCreateUser(
@@ -592,7 +660,16 @@ export function createPublicAuthRouter(
       });
 
       // Auto-login the invitee — same shape as /api/auth/login.
-      const role: Role = invite.role === "admin" ? "owner" : "family";
+      // WARP-171: preserve the pre-WARP-171 wire contract — "admin"
+      // invitee gets an "owner" session role (the original two-value
+      // semantics) — and add direct passthrough for the three new
+      // enum values an invite can now request explicitly.
+      const role: Role =
+        invite.role === "owner" || invite.role === "admin"
+          ? "owner"
+          : invite.role === "guest"
+            ? "guest"
+            : "family";
       const userId = invite.username;
       const accessToken = signAccessToken({
         id: userId,
@@ -708,6 +785,22 @@ export function createProtectedAuthRouter(
       res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
       res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
 
+      // WARP-456: audit row for the logout. `req.user` is set by the
+      // authMiddleware before this handler runs.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-out",
+        what: req.user?.displayName
+          ? `${req.user.displayName} signed out`
+          : "Sign-out",
+        sub: callerIpFromReq(req) ?? null,
+        refs: {
+          userId: req.user?.id ?? null,
+          ip: callerIpFromReq(req) ?? null,
+        },
+      });
+
       res.json({ status: "ok" });
     } catch (err) {
       next(err);
@@ -739,7 +832,8 @@ export function createProtectedAuthRouter(
   });
 
   // ── Create user (admin only) ──
-  router.post("/auth/users", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.post("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -773,7 +867,8 @@ export function createProtectedAuthRouter(
   // Accepts any combination of displayName / email / quota / password and
   // applies them one OCS PUT at a time. Each field is independent so a
   // partial failure leaves the previously-applied fields in place.
-  router.put("/auth/users/:username", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
@@ -813,41 +908,51 @@ export function createProtectedAuthRouter(
   });
 
   // ── Disable / enable user (admin only) ──
-  router.post("/auth/users/:username/disable", async (req, res, next) => {
-    try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.post(
+    "/auth/users/:username/disable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const token = await resolveNcToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        await ncSetUserEnabled(token, req.params.username, false);
+        res.json({ status: "disabled", username: req.params.username });
+      } catch (err: any) {
+        if (err.message?.includes("403") || err.message?.includes("997")) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+        next(err);
       }
-      await ncSetUserEnabled(token, req.params.username, false);
-      res.json({ status: "disabled", username: req.params.username });
-    } catch (err: any) {
-      if (err.message?.includes("403") || err.message?.includes("997")) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
-      next(err);
-    }
-  });
+    },
+  );
 
-  router.post("/auth/users/:username/enable", async (req, res, next) => {
-    try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.post(
+    "/auth/users/:username/enable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const token = await resolveNcToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        await ncSetUserEnabled(token, req.params.username, true);
+        res.json({ status: "enabled", username: req.params.username });
+      } catch (err: any) {
+        if (err.message?.includes("403") || err.message?.includes("997")) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+        next(err);
       }
-      await ncSetUserEnabled(token, req.params.username, true);
-      res.json({ status: "enabled", username: req.params.username });
-    } catch (err: any) {
-      if (err.message?.includes("403") || err.message?.includes("997")) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
-      next(err);
-    }
-  });
+    },
+  );
 
   // ── Delete user (admin only) ──
   // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
@@ -858,7 +963,8 @@ export function createProtectedAuthRouter(
   // best-effort: if it throws we still return success, but log loud
   // — orphaned local rows are recoverable later via a janitor job;
   // returning 500 here would also fail to undo the upstream delete.
-  router.delete("/auth/users/:username", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
@@ -915,12 +1021,12 @@ export function createProtectedAuthRouter(
   // the existing ddns/vpn convention so the dashboard's "you're logged in,
   // just not allowed" path is consistent across pages.
   // ────────────────────────────────────────────────────────────
-  router.post("/auth/invites", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only. Replaces the
+  // pre-WARP-171 inline `isAdmin(req)` check; the guard runs as
+  // middleware ahead of the handler so the 403 short-circuits before
+  // any handler-local validation.
+  router.post("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
         return;
@@ -967,12 +1073,12 @@ export function createProtectedAuthRouter(
     }
   });
 
-  router.get("/auth/invites", async (req, res, next) => {
+  // WARP-171: GET listing of invites is also admin-only — exposing
+  // pending tokens to a family-tier user would be a credential leak
+  // even though the token's just-an-identifier. Same guard as the
+  // POST/DELETE invite endpoints.
+  router.get("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
         return;
@@ -998,33 +1104,34 @@ export function createProtectedAuthRouter(
     }
   });
 
-  router.delete("/auth/invites/:token", async (req, res, next) => {
-    try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.delete(
+    "/auth/invites/:token",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        if (!prisma) {
+          res.status(500).json({ error: "Invite store unavailable" });
+          return;
+        }
+        const invite = await findInviteByToken(prisma, req.params.token);
+        if (!invite) {
+          res.status(404).json({ error: "Invite not found" });
+          return;
+        }
+        // Idempotent: revoking an already-revoked invite is a no-op success.
+        if (!invite.revokedAt) {
+          await prisma.userInvite.update({
+            where: { id: invite.id },
+            data: { revokedAt: new Date() },
+          });
+        }
+        res.json({ revoked: true });
+      } catch (err) {
+        next(err);
       }
-      if (!prisma) {
-        res.status(500).json({ error: "Invite store unavailable" });
-        return;
-      }
-      const invite = await findInviteByToken(prisma, req.params.token);
-      if (!invite) {
-        res.status(404).json({ error: "Invite not found" });
-        return;
-      }
-      // Idempotent: revoking an already-revoked invite is a no-op success.
-      if (!invite.revokedAt) {
-        await prisma.userInvite.update({
-          where: { id: invite.id },
-          data: { revokedAt: new Date() },
-        });
-      }
-      res.json({ revoked: true });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   return router;
 }

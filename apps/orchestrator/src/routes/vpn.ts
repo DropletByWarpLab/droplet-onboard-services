@@ -37,6 +37,7 @@ import {
   VpnIpExhaustedError,
 } from "../services/vpn.service.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
+import { requireRole } from "../middleware/auth.js";
 
 const logger = pino({ name: "vpn-route" });
 
@@ -207,11 +208,15 @@ export function createVpnRouter(prisma: PrismaClient): Router {
   // policy — family users should ask an admin to add their device. Same
   // posture as the rest of `/ddns/duckdns` (network-wide config is
   // admin-only). The wizard's VPN step now also surfaces this in copy.
-  router.post("/vpn/peers", async (req: Request, res: Response, next: NextFunction) => {
+  // WARP-171: per-route guard. owner + admin only — replaces the
+  // pre-WARP-171 inline `isAdmin(req)` check. The intent is unchanged
+  // (see comment above) — the guard is just hoisted to middleware so
+  // a reviewer can see the policy at route registration.
+  router.post(
+    "/vpn/peers",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
     try {
-      if (!isAdmin(req)) {
-        return res.status(403).json({ error: "Admin access required" });
-      }
       const parsed = createPeerSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({
@@ -321,23 +326,39 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       }
       next(err);
     }
-  });
+    },
+  );
 
   // ── DELETE /api/vpn/peers/:id ──
   // Removes the peer from the router AND marks the DB row revoked. We keep
   // the row (status="revoked", revokedAt set) so the dashboard can show a
   // brief "removed just now" state and so we have an audit trail.
-  router.delete("/vpn/peers/:id", async (req: Request, res: Response, next: NextFunction) => {
+  //
+  // WARP-171: per-route guard. owner + admin only — matches the
+  // matrix in ADR-004 §3. This is a behavior change from
+  // pre-WARP-171: previously a family-tier user could delete their
+  // OWN peer (peer.userId === user.username escape hatch). Now they
+  // must ask an admin. The intent is consistency with POST: if a
+  // family user can't mint a peer self-service, they shouldn't be
+  // able to revoke one self-service either.
+  router.delete(
+    "/vpn/peers/:id",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const user = getUser(req);
       const id = req.params.id;
       const peer = await prisma.vpnPeer.findUnique({ where: { id } });
       if (!peer) {
         return res.status(404).json({ error: "Peer not found" });
       }
-      if (peer.userId !== user.username && !isAdmin(req)) {
-        return res.status(403).json({ error: "Not your peer" });
-      }
+      // WARP-171: per-resource ownership check used to live here
+      // (`peer.userId !== user.username && !isAdmin(req)` returning 403).
+      // After requireRole("owner", "admin") was added at the route guard
+      // above, the branch became unreachable: family-tier callers never
+      // pass the guard, and owner/admin always do. Removing the dead code
+      // so future readers don't think family users can still hit this
+      // handler. Behavior is unchanged — see the comment above the route
+      // for the WARP-171 family-tier deletion semantics.
       if (peer.status === "revoked") {
         // Already gone in our world; treat as idempotent success.
         return res.json({ status: "revoked", id });
@@ -367,7 +388,8 @@ export function createVpnRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
-  });
+    },
+  );
 
   return router;
 }

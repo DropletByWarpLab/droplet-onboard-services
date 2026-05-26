@@ -145,7 +145,10 @@ describe("runAllProbes (WARP-43)", () => {
     const results = await runAllProbes(prisma);
 
     const names = results.map((r) => r.name).sort();
-    expect(names).toEqual(["ai-gateway", "nextcloud", "postgres", "redis", "routing"]);
+    // WARP-165 added `display` to the probe set (PyPortal sidecar);
+    // it's degraded-class only (auto-falls back to a sim backend when
+    // /dev/ttyACM* is absent) and never trips the aggregate to down.
+    expect(names).toEqual(["ai-gateway", "display", "nextcloud", "postgres", "redis", "routing"]);
     expect(results.every((r) => r.status === "ok")).toBe(true);
   });
 

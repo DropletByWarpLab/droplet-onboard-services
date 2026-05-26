@@ -43,12 +43,24 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
 logger = logging.getLogger("voice.llm")
+
+
+# Per-turn override for the orchestrator's agent loop. "none" forces
+# the model to answer from the system prompt context without calling
+# any tool — the intent gate in `voice.pipeline.classify_tool_choice`
+# uses this to short-circuit speculative tool calls on greetings,
+# time-of-day, and who-are-you utterances. Matches the
+# `tool_choice?: "auto" | "none"` field on `AgentDeps.aiGateway.chat`
+# in `apps/orchestrator/src/services/llm-agent.service.ts` AND the
+# new `tool_choice` field on `chatRequestSchema`
+# (`apps/orchestrator/src/routes/llm.ts`).
+ToolChoice = Literal["auto", "none"]
 
 # Reasonable defaults; overridable via env in main.py.
 #
@@ -167,13 +179,19 @@ class LLMClient(ABC):
     """One-shot: transcript in → reply text out."""
 
     @abstractmethod
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
         """Return the assistant's reply text for the given user turn.
 
         Stateless from the voice-io perspective — the orchestrator owns
         conversation history. Each call uses an anonymous conversation
         (future: switch to a sticky voice conversation id once the
         dashboard surfaces it).
+
+        `tool_choice="none"` is set by the pipeline's intent gate for
+        utterances that should answer from system-prompt context only
+        (greetings, time-of-day). The orchestrator forwards it to
+        ai-gateway so the model can't speculatively call a tool. Pass
+        `None` (the default) to let the orchestrator's auto-pick apply.
         """
 
     @property
@@ -248,7 +266,7 @@ class OrchestratorLLM(LLMClient):
             )
             return False
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
         if not user_text or not user_text.strip():
             return ""
         # Build a fresh system prompt on every call so the embedded
@@ -275,6 +293,14 @@ class OrchestratorLLM(LLMClient):
             "stream": False,
             "max_iter": self._max_iter,
         }
+        # Forward the per-turn override when the caller passed one.
+        # The intent gate sets "none" for utterances that don't need a
+        # tool (greetings, time-of-day) so the model can't wander; for
+        # everything else we leave the field unset and the orchestrator's
+        # default ("auto") applies. The new chatRequestSchema field
+        # (apps/orchestrator/src/routes/llm.ts) accepts this verbatim.
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
         try:
             resp = httpx.post(
                 f"{self._base_url}{self._chat_path}",
@@ -397,8 +423,12 @@ class MockLLM(LLMClient):
     def available(self) -> bool:
         return self._available
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice: Optional[ToolChoice] = None) -> str:
+        # Accept tool_choice for signature parity with OrchestratorLLM —
+        # the mock doesn't dispatch tools so the value is recorded for
+        # tests to assert on, not acted on.
         self.requests.append(user_text)
+        self.last_tool_choice = tool_choice
         if self._scripts:
             return self._scripts.pop(0)
         if self._echo:

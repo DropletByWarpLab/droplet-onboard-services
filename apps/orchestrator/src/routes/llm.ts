@@ -15,6 +15,29 @@ import {
   type PersistedToolCall,
 } from "../services/chat-persistence.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { requireRole } from "../middleware/auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+/** WARP-456: severity bucket the dashboard renders for the activity feed. */
+function activitySeverityForTurnStatus(
+  status: "completed" | "failed" | "aborted",
+): "ok" | "err" | "warn" {
+  if (status === "completed") return "ok";
+  if (status === "failed") return "err";
+  return "warn"; // aborted — neutral-bad
+}
+
+/** WARP-456: drop `undefined` keys so the signed `refs` JSON is dense
+ *  (matches the canonical-JSON shape the signer hashes). */
+function stripUndefined(
+  o: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
@@ -101,6 +124,14 @@ const chatRequestSchema = z.object({
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
+  // Per-turn override for the agent loop's tool advertisement. "none"
+  // sends ZERO tools to the model so it can't wander into a speculative
+  // tool call — voice-io's intent gate sets this for greetings,
+  // time-of-day, and who-are-you utterances that the system prompt
+  // already answers. "auto" matches the default behaviour. When the
+  // field is absent the loop applies "auto" so existing callers (chat,
+  // legacy clients) keep working unchanged.
+  tool_choice: z.enum(["auto", "none"]).optional(),
   conversationId: z.string().uuid().optional(),
   turnId: z.string().min(1).max(128).optional(),
   // WARP-174: setup wizard's "Ask the AI" sample prompt and similar
@@ -229,7 +260,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // identically). Subsequent turns send the id back. `turnId` is a
   // client-supplied idempotency key — re-submits skip the duplicate
   // persist.
-  router.post("/llm/chat", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family + guest +
+  // service — any human-tier role can drive their own chat session,
+  // AND voice-io's service principal MUST also be able to drive the
+  // agent loop (it POSTs here with SERVICE_TOKEN_VOICE; see
+  // `services/voice-io/voice/llm.py`). This is a deviation from
+  // ADR-004 §3 which states "service principals are read-only" — the
+  // existing voice flow is the read-only-tool-surface side of that
+  // contract, but the route itself must remain reachable for
+  // service. Tool-level RBAC (WRITE_TOOLS narrowing in `narrowAllowedToolsForRole`)
+  // is what keeps voice from issuing destructive operations.
+  router.post(
+    "/llm/chat",
+    requireRole("owner", "admin", "family", "guest", "service"),
+    async (req, res, next) => {
     try {
       const parsed = chatRequestSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -399,8 +443,37 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         status: "completed" | "failed" | "aborted",
       ): Promise<void> => {
         if (flushTimer) clearInterval(flushTimer);
-        if (!conversationId || !assistantMessageId) return;
         const completedAt = new Date();
+
+        // WARP-456: emit a signed audit row for the chat turn. Runs
+        // even when there's no persisted conversation (service-token
+        // callers, ephemeral wizard prompts) so the activity feed has
+        // a complete record of inference activity. `refs` only carries
+        // identifiers we actually have.
+        await recordActivity({
+          kind: "chat",
+          severity: activitySeverityForTurnStatus(status),
+          sourceIcon: "message-square",
+          what:
+            status === "completed"
+              ? "Chat turn completed"
+              : status === "failed"
+                ? "Chat turn failed"
+                : "Chat turn aborted",
+          sub: userId
+            ? `${userId} • ${chatReq.model}`
+            : `service • ${chatReq.model}`,
+          refs: stripUndefined({
+            userId,
+            model: chatReq.model,
+            conversationId: conversationId ?? undefined,
+            messageId: assistantMessageId ?? undefined,
+            iterations: liveToolCalls.length,
+            status,
+          }),
+        });
+
+        if (!conversationId || !assistantMessageId) return;
         try {
           await persistence.finalizeAssistantMessage({
             conversationId,
@@ -465,6 +538,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             temperature: chatReq.temperature,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
+            tool_choice: chatReq.tool_choice,
             toolCallContext,
           });
         } catch (err) {
@@ -488,6 +562,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           temperature: chatReq.temperature,
           max_iter: chatReq.max_iter,
           allowed_tools: allowedForUser,
+          tool_choice: chatReq.tool_choice,
           toolCallContext,
         });
         liveAssistantContent = result.message.content;
@@ -509,7 +584,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
-  });
+    },
+  );
 
   // ── WARP-304: per-user conversation history ──
   // The dashboard reads `/api/llm/conversations/:id` on mount when a
@@ -560,7 +636,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/llm/conversations/:id", async (req, res, next) => {
+  // WARP-171: per-route guard. Conversation rows are owned by the
+  // requesting user; service principals should never delete on behalf
+  // of a user. Human-tier roles only.
+  router.delete("/llm/conversations/:id", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
     try {
       const userId = (req as AuthedRequest).user?.username;
       if (!userId) {
@@ -584,7 +663,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // WARP-331: rename. Mirrors the GET/DELETE handlers above — scoped by
   // req.user.username, service maps "no such row owned by this user"
   // to a null return, and we surface that as 404.
-  router.patch("/llm/conversations/:id", async (req, res, next) => {
+  // WARP-171: per-route guard. Same posture as the delete above.
+  router.patch("/llm/conversations/:id", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
     try {
       const userId = (req as AuthedRequest).user?.username;
       if (!userId) {
@@ -659,7 +739,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   });
 
   // Key management (proxy to ai-gateway)
-  router.post("/llm/keys/:provider", async (req, res, next) => {
+  // WARP-171: per-route guard. Provider API keys are household-tier
+  // credentials (per-user OpenAI key etc.) — owner/admin/family scope.
+  // No `guest` (read-only family-tier) and no `service`.
+  router.post("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { provider } = req.params;
       const { api_key } = req.body;
@@ -683,7 +766,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/llm/keys/:provider", async (req, res, next) => {
+  // WARP-171: same posture as POST /llm/keys/:provider.
+  router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       await aiGateway.deleteKey(req.params.provider);
       res.json({ status: "deleted" });

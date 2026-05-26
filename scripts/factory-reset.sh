@@ -220,7 +220,11 @@ if [ $remaining -gt 0 ]; then
       osascript -e 'quit app "Docker"' 2>/dev/null || true
       sleep 5
       open -a Docker
-      local docker_retries=30
+      # Top-level scope here (this block is at file scope, NOT inside a
+      # function), so `local` would be a no-op and SC2168 fires at the
+      # static-analysis layer. Plain assignment keeps the var visible to
+      # the loop below — which is the only thing that reads it.
+      docker_retries=30
       while [ $docker_retries -gt 0 ]; do
         docker info >/dev/null 2>&1 && break
         docker_retries=$((docker_retries - 1))
@@ -277,6 +281,19 @@ fi
 if [ -d "$REPO_ROOT/docker/secrets" ]; then
   rm -rf "$REPO_ROOT/docker/secrets"
   log_success "Removed docker/secrets/ (Docker secret mounts)"
+fi
+
+# Audit signing key (WARP-456)
+# WARP-456 audit chain treats factory-reset as an era boundary — new key,
+# new genesis row. Preserving the old key against an empty ActivityRow
+# table would silently fork the chain: two distinct genesis rows signed
+# by the same key, with no verifier capable of distinguishing the two
+# eras. The orchestrator's sync_audit_signing_key (scripts/lib/secrets.sh)
+# re-generates the file on next setup.sh run; the empty ActivityRow table
+# then writes its first row as the new chain's genesis.
+if [ -d "$REPO_ROOT/data/secrets" ]; then
+  rm -rf "$REPO_ROOT/data/secrets"
+  log_success "Removed data/secrets/ (audit signing key — era boundary)"
 fi
 
 # MQTT password file

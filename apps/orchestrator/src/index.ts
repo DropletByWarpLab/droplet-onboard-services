@@ -30,6 +30,8 @@ import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
+import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
+import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -39,6 +41,8 @@ import {
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
+import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
+import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -79,6 +83,21 @@ async function main() {
   await prisma.$connect();
   logger.info("Connected to PostgreSQL");
 
+  // WARP-456: initialize the signed activity recorder. Boot-fatal —
+  // an orchestrator that can't sign audit rows must NOT start.
+  initActivityRecorder(prisma);
+  // Genesis-or-restart event so the first row of every container's
+  // lifetime is always a `system` start-up. Makes the chain easier to
+  // segment in the dashboard's activity feed.
+  await recordActivity({
+    kind: "system",
+    severity: "info",
+    sourceIcon: "power",
+    what: "Orchestrator started",
+    sub: `pid ${process.pid}`,
+  });
+  logger.info("Activity recorder initialized");
+
   // Initialize services
   initDeviceService(prisma);
 
@@ -105,6 +124,12 @@ async function main() {
   // caches drop within the next round-trip on a write. Best-effort —
   // if MQTT is down we still bound staleness via the cache TTL.
   startContextStatsInvalidator();
+
+  // WARP-456: bridge file-indexer MQTT events into ActivityRow so the
+  // sealed audit log captures filesystem activity. Subscribes to
+  // `droplet/index/+/indexed` and `droplet/index/+/deleted`. Best-
+  // effort like the bridge above — if MQTT is down we miss the rows.
+  attachFileIndexerActivityBridge();
 
   // Initialize Matter controller (non-fatal if unavailable)
   try {
@@ -200,6 +225,17 @@ async function main() {
   );
   logger.info({ reconcileMs }, "device reconcile poller started");
 
+  // WARP-446 (AC #1): mDNS coverage-extender discovery. Every
+  // DROPLET_AP_DISCOVERY_INTERVAL seconds (default 10 s) the poller
+  // queries the routing service's /aps/discovered endpoint and
+  // upserts each observed MAC into ApDevice via reconcileDiscovered.
+  // New extenders surface as AWAITING_APPROVAL within one tick — well
+  // inside the 30 s AC #1 budget. Same advisory-lock pattern as the
+  // schedule ticker / reconcile poller above so multi-instance
+  // deploys don't double-fire.
+  const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
+  startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+
   cronRuntime.scheduleCron(
     "0 3 * * *",
     async () => {
@@ -216,6 +252,22 @@ async function main() {
       );
     },
     { lockKey: "droplet:daily-purge" },
+  );
+
+  // WARP-455: nightly guest-expiry sweep. Fires 15 minutes after the
+  // daily purge so the two cron jobs don't contend on the advisory
+  // lock pool. Flips any ACTIVE GuestExpiry row past its expiresAt to
+  // EXPIRED, emitting one auth-kind ActivityRow per flip. Idempotent
+  // by construction (re-runs on the same minute walk zero rows).
+  cronRuntime.scheduleCron(
+    "15 3 * * *",
+    async () => {
+      const { expired } = await sweepExpiredGuests(prisma, new Date());
+      if (expired > 0) {
+        logger.info({ expired }, "guest-expiry-sweep flipped rows");
+      }
+    },
+    { lockKey: "droplet:guest-expiry-sweep" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the

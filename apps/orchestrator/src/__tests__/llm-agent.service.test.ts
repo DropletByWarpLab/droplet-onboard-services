@@ -262,6 +262,64 @@ describe("runAgent", () => {
       ncToken: "nct-from-route",
     });
   });
+
+  it("tool_choice='none' sends ZERO tools and tool_choice='none' to ai-gateway", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "it's 11 pm" } }],
+      }),
+    });
+    const listTools = vi.fn().mockResolvedValue([
+      { name: "list_cameras", description: "...", inputSchema: { type: "object", properties: {} } },
+      { name: "get_system_health", description: "...", inputSchema: { type: "object", properties: {} } },
+    ]);
+    const deps: AgentDeps = {
+      mcp: { listTools, callTool: vi.fn() } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "what time is it" }],
+      tool_choice: "none",
+    });
+    // The model received an empty tools array (defense-in-depth) AND
+    // tool_choice="none" (so the upstream / Ollama-format adapter also
+    // sees the explicit suppression).
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(chat.mock.calls[0][0]).toMatchObject({
+      tools: [],
+      tool_choice: "none",
+    });
+    // listTools is short-circuited to avoid the MCP round-trip when
+    // we already know the model can't see them.
+    expect(listTools).not.toHaveBeenCalled();
+  });
+
+  it("tool_choice defaults to 'auto' and forwards the full tool set when unset", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "done" } }],
+      }),
+    });
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          { name: "list_cameras", description: "...", inputSchema: { type: "object", properties: {} } },
+        ]),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "list cameras" }],
+      // tool_choice intentionally omitted
+    });
+    expect(chat.mock.calls[0][0]).toMatchObject({ tool_choice: "auto" });
+    expect((chat.mock.calls[0][0] as { tools: unknown[] }).tools).toHaveLength(1);
+  });
 });
 
 describe("presetForClass (WARP-437)", () => {

@@ -297,6 +297,48 @@ main() {
     start_stack
   fi
 
+  # --- Workspace settings seeder (WARP-457) ---
+  # Idempotent first-boot hook for the WorkspaceSetting table. The
+  # orchestrator's app.ts already invokes this at every start; calling
+  # it here from setup.sh makes the install path's intent explicit
+  # ("the settings table is bootstrapped before verify runs") and
+  # surfaces a clean log entry in the install transcript. Re-running
+  # is safe — the underlying seeder is insert-or-skip (createMany +
+  # skipDuplicates) and operator-edited values are never overwritten.
+  #
+  # WARP-484: capture the seeder's combined stdout+stderr in a variable
+  # and explicitly branch on the exit code. The previous form piped
+  # through `grep ... || true`, which the shell rewrites as "ignore
+  # every exit code in the pipeline" — a real failure surfaced as a
+  # silent green log line. The variable-capture form preserves
+  # `set -euo pipefail` while still treating seeder failure as a warn
+  # (the install continues; verify.sh runs next and surfaces follow-on
+  # damage if any).
+  if [ "$SKIP_START" != "true" ]; then
+    log_info "Seeding workspace settings (WARP-457; idempotent)..."
+    seeder_out=""
+    seeder_rc=0
+    seeder_out=$(run_docker_compose -f "$REPO_ROOT/docker/docker-compose.yml" \
+                   --env-file "$REPO_ROOT/.env" \
+                   exec -T orchestrator npm run --silent seed 2>&1) || seeder_rc=$?
+    if [ "$seeder_rc" -eq 0 ]; then
+      if printf '%s\n' "$seeder_out" | grep -qE "Workspace settings|Seed data"; then
+        log_success "Workspace settings seeder completed"
+      else
+        # Exit 0 but no recognizable output — surface the transcript so
+        # an operator can decide whether the orchestrator silently
+        # changed shape. Not a failure, but not a clean pass either.
+        log_warn "Workspace settings seeder returned 0 but emitted no recognizable output"
+        printf '%s\n' "$seeder_out" | head -20 >&2
+      fi
+    else
+      log_warn "Workspace settings seeder failed (exit $seeder_rc):"
+      printf '%s\n' "$seeder_out" | head -20 >&2
+      log_warn "Continuing install — verify.sh will surface follow-on damage if any. Check: docker compose logs orchestrator"
+    fi
+    unset seeder_out seeder_rc
+  fi
+
   # --- Phase 7: Verify ---
   log_step 7 $total_steps "Verify"
   if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then

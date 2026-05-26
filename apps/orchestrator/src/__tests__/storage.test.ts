@@ -105,6 +105,20 @@ function createPrismaMock() {
 function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
   const app = express();
   app.use(express.json());
+  // WARP-171: PATCH /api/storage/drives/:uuid now sits behind a
+  // requireRole("owner", "admin") guard. The real authMiddleware isn't
+  // in this test's pipeline; inject a synthetic owner so the guard
+  // lets the request reach the handler. Same shape the rbac matrix
+  // and the vpn test use.
+  app.use((req, _res, next) => {
+    (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
+      id: "stefan",
+      username: "stefan",
+      displayName: "Stefan",
+      role: "owner",
+    };
+    next();
+  });
   app.use("/api", createStorageRouter(prisma as any));
   return app;
 }

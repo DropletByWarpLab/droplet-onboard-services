@@ -139,6 +139,16 @@ export interface AgentRequest {
   /** If set, restrict the registry to this subset of tool names. */
   allowed_tools?: string[];
   /**
+   * Per-turn override for the model's tool advertisement.
+   * - `"auto"` (default when unset) lets the model choose whether to call a tool.
+   * - `"none"` sends ZERO tools to the model so it can't speculatively
+   *   dispatch one. voice-io's intent gate
+   *   (`services/voice-io/voice/pipeline.py::classify_tool_choice`) sets
+   *   this for greetings, time-of-day, and who-are-you utterances that
+   *   the system prompt already answers.
+   */
+  tool_choice?: "auto" | "none";
+  /**
    * Per-call session context passed verbatim to every `mcp.callTool`
    * invocation in this loop. Today the only field is `ncToken` so file
    * tools can authenticate to Nextcloud as the dashboard user. The
@@ -175,7 +185,15 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // Tools come from the MCP server (cached). Translate the MCP tool
   // descriptors into OpenAI-style function specs the ai-gateway forwards
   // to the model.
-  const allTools = await deps.mcp.listTools();
+  //
+  // tool_choice="none" suppresses tools entirely: send an empty array so
+  // a misbehaving model can't decode a tool_call from a phantom function
+  // (some llama-family fine-tunes emit `{"name": "get_time"}` as content
+  // even when told not to call tools). Defense in depth — the ai-gateway
+  // also receives tool_choice="none", but advertising zero tools makes
+  // it impossible by construction.
+  const toolChoice: "auto" | "none" = req.tool_choice ?? "auto";
+  const allTools = toolChoice === "none" ? [] : await deps.mcp.listTools();
   const filtered = req.allowed_tools?.length
     ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
     : allTools;
@@ -195,7 +213,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       stream: false,
       temperature: req.temperature,
       tools,
-      tool_choice: "auto",
+      tool_choice: toolChoice,
     });
     if (!gw.ok) {
       const error = `ai-gateway ${gw.status ?? "error"}`;
