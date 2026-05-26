@@ -297,6 +297,8 @@ describe("ChatPersistenceService (WARP-304)", () => {
         content: "hi",
         turnId: "t1",
         status: "completed",
+        toolCalls: null,
+        toolCallId: null,
       },
     });
     await prisma.chatMessage.create({
@@ -306,6 +308,8 @@ describe("ChatPersistenceService (WARP-304)", () => {
         content: "hello",
         turnId: "t1",
         status: "completed",
+        toolCalls: null,
+        toolCallId: null,
       },
     });
     await prisma.chatMessage.create({
@@ -315,6 +319,8 @@ describe("ChatPersistenceService (WARP-304)", () => {
         content: "",
         turnId: "t2",
         status: "failed",
+        toolCalls: null,
+        toolCallId: null,
       },
     });
     await prisma.chatMessage.create({
@@ -324,6 +330,8 @@ describe("ChatPersistenceService (WARP-304)", () => {
         content: "partial",
         turnId: "t3",
         status: "aborted",
+        toolCalls: null,
+        toolCallId: null,
       },
     });
     await prisma.chatMessage.create({
@@ -333,6 +341,8 @@ describe("ChatPersistenceService (WARP-304)", () => {
         content: "mid",
         turnId: "t4",
         status: "streaming",
+        toolCalls: null,
+        toolCallId: null,
       },
     });
 
