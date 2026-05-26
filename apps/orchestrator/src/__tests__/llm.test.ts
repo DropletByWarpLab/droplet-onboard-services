@@ -23,6 +23,11 @@ vi.mock("../middleware/auth.js", () => ({
     next();
   },
   requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  // WARP-485: app.ts calls setAuthPrisma() at boot to wire the OCS
+  // fallback to Prisma. This mock stubs out auth entirely, so the
+  // singleton init is a no-op — but the export must exist or app
+  // construction throws "No setAuthPrisma export on the mock".
+  setAuthPrisma: () => {},
 }));
 
 // Stub ChatPersistenceService so tests can spy on individual methods

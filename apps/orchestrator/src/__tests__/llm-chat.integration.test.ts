@@ -26,6 +26,10 @@ vi.mock("../middleware/auth.js", () => ({
     next();
   },
   requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  // WARP-485: app.ts wires the OCS-fallback Prisma reference via
+  // setAuthPrisma at boot. Stub the export so the mock isn't missing
+  // a symbol app.ts now imports.
+  setAuthPrisma: () => {},
 }));
 
 // Stub the MCP singleton so /api/llm/chat doesn't try to spawn the
