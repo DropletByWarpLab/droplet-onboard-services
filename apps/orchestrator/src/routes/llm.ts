@@ -16,6 +16,28 @@ import {
 } from "../services/chat-persistence.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+/** WARP-456: severity bucket the dashboard renders for the activity feed. */
+function activitySeverityForTurnStatus(
+  status: "completed" | "failed" | "aborted",
+): "ok" | "err" | "warn" {
+  if (status === "completed") return "ok";
+  if (status === "failed") return "err";
+  return "warn"; // aborted — neutral-bad
+}
+
+/** WARP-456: drop `undefined` keys so the signed `refs` JSON is dense
+ *  (matches the canonical-JSON shape the signer hashes). */
+function stripUndefined(
+  o: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
@@ -421,8 +443,37 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         status: "completed" | "failed" | "aborted",
       ): Promise<void> => {
         if (flushTimer) clearInterval(flushTimer);
-        if (!conversationId || !assistantMessageId) return;
         const completedAt = new Date();
+
+        // WARP-456: emit a signed audit row for the chat turn. Runs
+        // even when there's no persisted conversation (service-token
+        // callers, ephemeral wizard prompts) so the activity feed has
+        // a complete record of inference activity. `refs` only carries
+        // identifiers we actually have.
+        await recordActivity({
+          kind: "chat",
+          severity: activitySeverityForTurnStatus(status),
+          sourceIcon: "message-square",
+          what:
+            status === "completed"
+              ? "Chat turn completed"
+              : status === "failed"
+                ? "Chat turn failed"
+                : "Chat turn aborted",
+          sub: userId
+            ? `${userId} • ${chatReq.model}`
+            : `service • ${chatReq.model}`,
+          refs: stripUndefined({
+            userId,
+            model: chatReq.model,
+            conversationId: conversationId ?? undefined,
+            messageId: assistantMessageId ?? undefined,
+            iterations: liveToolCalls.length,
+            status,
+          }),
+        });
+
+        if (!conversationId || !assistantMessageId) return;
         try {
           await persistence.finalizeAssistantMessage({
             conversationId,
