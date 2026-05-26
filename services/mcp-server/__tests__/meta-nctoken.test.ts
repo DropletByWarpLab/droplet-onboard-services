@@ -217,4 +217,79 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     await client.close();
     await server.close();
   });
+
+  it("threads _meta._enhancement into ctx.searchHybrid for adaptive routing (WARP-437)", async () => {
+    // Stdio is the only transport that propagates `_meta._enhancement`
+    // (the HTTP path drops it on purpose so attackers can't smuggle
+    // pre-computed vectors past the strict input schema). The
+    // orchestrator's agent-loop is the only legitimate producer here.
+    const searchSpy = vi.fn().mockResolvedValue([]);
+    const deps: ContextDeps = {
+      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as never,
+      matter: {} as never,
+      httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
+      searchHybrid: searchSpy,
+    };
+    const server = createServer(deps);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "meta-enh-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const enhancement = {
+      hydeVector: [0.1, 0.2, 0.3],
+      searchOverrides: { rerankCandidates: 100 },
+      metadataFilter: { filenameContains: "invoice" },
+    };
+
+    const res = await client.callTool({
+      name: "search_content",
+      arguments: { query: "hello world" },
+      _meta: { userId: "alice", _enhancement: enhancement },
+    });
+
+    expect(res.isError).toBe(false);
+    expect(searchSpy).toHaveBeenCalledWith({
+      userId: "alice",
+      query: "hello world",
+      limit: 10,
+      _enhancement: enhancement,
+    });
+
+    await client.close();
+    await server.close();
+  });
+
+  it("drops malformed _meta._enhancement (defensive)", async () => {
+    // A non-object _enhancement (string, array, primitive) is ignored
+    // by the server-side extraction — the shim then receives undefined
+    // and falls back to baseline retrieval.
+    const searchSpy = vi.fn().mockResolvedValue([]);
+    const deps: ContextDeps = {
+      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as never,
+      matter: {} as never,
+      httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
+      searchHybrid: searchSpy,
+    };
+    const server = createServer(deps);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "meta-enh-bad-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const res = await client.callTool({
+      name: "search_content",
+      arguments: { query: "hello world" },
+      _meta: { userId: "alice", _enhancement: "not-an-object" },
+    });
+
+    expect(res.isError).toBe(false);
+    expect(searchSpy).toHaveBeenCalledWith({
+      userId: "alice",
+      query: "hello world",
+      limit: 10,
+      _enhancement: undefined,
+    });
+
+    await client.close();
+    await server.close();
+  });
 });

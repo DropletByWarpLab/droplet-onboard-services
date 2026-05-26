@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import {
+  presetForClass,
+  runAgent,
+  type AgentDeps,
+} from "../services/llm-agent.service.js";
 import type { SSEEvent } from "../types/sse-events.js";
 
 describe("runAgent", () => {
@@ -256,5 +260,42 @@ describe("runAgent", () => {
     expect(callTool).toHaveBeenCalledWith("list_files", {}, {
       ncToken: "nct-from-route",
     });
+  });
+});
+
+describe("presetForClass (WARP-437)", () => {
+  it("factual → rerankCandidates=100, no enhance", () => {
+    const p = presetForClass("factual");
+    expect(p.enhance).toBeUndefined();
+    expect(p.searchOverrides?.rerankCandidates).toBe(100);
+  });
+
+  it("analytical → multiQuery=true with n=3", () => {
+    const p = presetForClass("analytical");
+    expect(p.enhance?.multiQuery).toBe(true);
+    expect(p.enhance?.n).toBe(3);
+    expect(p.searchOverrides?.rerankCandidates).toBe(80);
+  });
+
+  it("conversational → minSimilarity=0.5, perArmK=50, no enhance", () => {
+    const p = presetForClass("conversational");
+    expect(p.searchOverrides?.minSimilarity).toBe(0.5);
+    expect(p.searchOverrides?.perArmK).toBe(50);
+    expect(p.enhance).toBeUndefined();
+  });
+
+  it("navigational extracts filename-shaped token", () => {
+    const p = presetForClass("navigational", "open camera-1 settings");
+    expect(p.filenameContains).toBe("camera-1");
+  });
+
+  it("navigational with no filename token returns empty preset", () => {
+    const p = presetForClass("navigational", "go");
+    expect(p).toEqual({});
+  });
+
+  it("unknown → no overrides", () => {
+    const p = presetForClass("unknown");
+    expect(p).toEqual({});
   });
 });

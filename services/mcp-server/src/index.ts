@@ -224,17 +224,32 @@ async function main(): Promise<void> {
     // (vector, lexical, RRF, rerank) to `searchHybrid`. If Redis is
     // unconfigured we still serve hybrid results without the rerank
     // cache (every call hits ai-gateway).
-    searchHybrid: async ({ userId, query, limit }) => {
+    searchHybrid: async ({ userId, query, limit, _enhancement }) => {
       const vectors = await embeddingClient.embed([query]);
       const vector = vectors[0];
       if (!vector || vector.length === 0) {
         throw new Error("embedding_service_returned_no_vector");
       }
+      // WARP-437: thread orchestrator-injected enhancement into the
+      // searchHybrid pipeline. `queryEnhancement` carries the precomputed
+      // HyDE vector / paraphrase vectors / soft filename filter;
+      // `minSimilarity` / `perArmK` / `rerank.candidates` are per-call
+      // overrides for adaptive routing (factual, analytical, conversational,
+      // navigational presets — see llm-agent.service.ts:presetForClass).
       return searchHybrid(prisma, {
         userId,
         vector,
         query,
         limit,
+        minSimilarity: _enhancement?.searchOverrides?.minSimilarity,
+        perArmK: _enhancement?.searchOverrides?.perArmK,
+        queryEnhancement: _enhancement
+          ? {
+              hydeVector: _enhancement.hydeVector,
+              extraQueryVectors: _enhancement.extraQueryVectors,
+              metadataFilter: _enhancement.metadataFilter,
+            }
+          : undefined,
         rerank: redis
           ? {
               redis: redis as unknown as {
@@ -242,6 +257,7 @@ async function main(): Promise<void> {
                 setex(k: string, ttl: number, v: string): Promise<unknown>;
               },
               reranker: rerankerClient,
+              candidates: _enhancement?.searchOverrides?.rerankCandidates,
             }
           : undefined,
       });

@@ -83,7 +83,16 @@ async function handler(
 
   let hits: Awaited<ReturnType<NonNullable<typeof ctx.searchHybrid>>>;
   try {
-    hits = await ctx.searchHybrid({ query, limit, enhance });
+    // WARP-437: forward the orchestrator-injected `_enhancement` bundle
+    // from the per-call context (delivered via MCP `_meta`, not args —
+    // it is NOT LLM-controllable). The shim threads it into
+    // `searchHybrid`'s `queryEnhancement` + `searchOverrides`.
+    hits = await ctx.searchHybrid({
+      query,
+      limit,
+      enhance,
+      _enhancement: ctx._enhancement,
+    });
   } catch {
     return err("SEARCH_FAILED", "search_failed");
   }

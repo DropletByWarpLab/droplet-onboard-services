@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import type { PrivateEnhancement } from "./private-enhancement.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
@@ -56,6 +57,13 @@ export interface ToolContext {
     query: string;
     limit: number;
     enhance?: { hyde?: boolean; multiQuery?: boolean; n?: number };
+    /**
+     * WARP-437 — orchestrator-injected enhancement bundle. NOT settable by
+     * the LLM (the tool's JSON schema rejects unknown args via
+     * `additionalProperties: false`). Routed via MCP `_meta._enhancement`
+     * and stashed on `ctx._enhancement`; the handler forwards it here.
+     */
+    _enhancement?: PrivateEnhancement;
   }) => Promise<
     Array<{
       source: "nextcloud" | "brain";
@@ -71,6 +79,13 @@ export interface ToolContext {
   userId?: string;
   role?: Role;
   ncToken?: string;
+  /**
+   * WARP-437 — orchestrator-injected enhancement bundle plumbed through
+   * MCP `_meta._enhancement`. Trusted-stdio-only; the HTTP transport
+   * does not propagate this field. Handlers (currently only
+   * `search_content`) forward it to `ctx.searchHybrid({ ..., _enhancement })`.
+   */
+  _enhancement?: PrivateEnhancement;
   signal: AbortSignal;
 }
 

@@ -12,6 +12,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import type { PrivateEnhancement } from "@droplet/tools-core";
+
 export interface McpClientOptions {
   command: string;
   args?: string[];
@@ -134,4 +136,14 @@ export interface McpCallContext {
    * the authoritative trust boundary there.
    */
   userId?: string;
+  /**
+   * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
+   * paraphrase vectors, filename filter, search overrides). Set by the
+   * agent loop right before dispatching `search_content`. Routed via
+   * MCP `_meta._enhancement` so it bypasses the tool's strict input
+   * schema (`additionalProperties: false`); only the trusted-stdio
+   * transport propagates it to handlers. Never set this from a user-
+   * facing route — the trust boundary is the agent loop itself.
+   */
+  _enhancement?: PrivateEnhancement;
 }
