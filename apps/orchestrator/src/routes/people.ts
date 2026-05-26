@@ -168,6 +168,21 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        // WARP-480 self-action guard. Runs FIRST so the refusal path
+        // skips the body parse + DB read entirely. Operators must use
+        // the appropriate workflow (re-invite, ownership-transfer) to
+        // change their own role — the people surface is for editing
+        // OTHER members, and a self-edit here is almost always a
+        // misclick that ends in lockout. Refusals do NOT emit an
+        // ActivityRow: the audit log is reserved for actual state
+        // changes; refused calls are noise that crowd out signal.
+        if (req.params.id === req.user?.id) {
+          return res.status(409).json({
+            error: "Cannot modify your own role, scope, or account",
+            code: "SELF_ACTION_NOT_ALLOWED",
+          });
+        }
+
         const parsed = roleSchema.safeParse(req.body);
         if (!parsed.success) {
           return res.status(400).json({
@@ -228,6 +243,17 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        // WARP-480 self-action guard. See the matching block on
+        // PATCH /people/:id/role for the full rationale; same shape
+        // here so the dashboard can render one error path. Runs
+        // BEFORE the body parse to save a roundtrip on the refusal.
+        if (req.params.id === req.user?.id) {
+          return res.status(409).json({
+            error: "Cannot modify your own role, scope, or account",
+            code: "SELF_ACTION_NOT_ALLOWED",
+          });
+        }
+
         const parsed = scopeSchema.safeParse(req.body);
         if (!parsed.success) {
           return res.status(400).json({
@@ -299,6 +325,18 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        // WARP-480 self-action guard. An owner could otherwise DELETE
+        // their own row and lock the household out of every owner-only
+        // route. Account removal goes through a separate workflow (not
+        // in this surface) so an operator can never accidentally delete
+        // themselves with one wrong click.
+        if (req.params.id === req.user?.id) {
+          return res.status(409).json({
+            error: "Cannot modify your own role, scope, or account",
+            code: "SELF_ACTION_NOT_ALLOWED",
+          });
+        }
+
         const existing = await prisma.user.findUnique({
           where: { id: req.params.id },
         });
