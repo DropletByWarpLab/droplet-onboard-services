@@ -154,18 +154,25 @@ CHECKS
                         scripts/factory-reset.sh, scripts/camera-drivers.sh,
                         scripts/install-device-bridge.sh,
                         scripts/test/ship-check.sh,
-                        scripts/test/ship-check.test.sh) has the +x bit
+                        scripts/test/ship-check.test.sh,
+                        openwrt/scripts/upgrade-router.sh) has the +x bit
                         set in the git index (mode 100755, not 100644).
                         The rule: any script whose docs tell operators to
-                        run it as `./scripts/<name>.sh` (or
-                        `sudo ./scripts/<name>.sh`) belongs on this list.
+                        run it as `./<path>/<name>.sh` (or
+                        `sudo ./<path>/<name>.sh`) belongs on this list,
+                        regardless of which sub-tree it lives under
+                        (top-level `scripts/`, `scripts/test/`, or
+                        `openwrt/scripts/`).
                         Prevents: WARP-487 class — scripts/test/ship-check.sh
                         shipped to main as 100644, so the canonical
                         `./scripts/test/ship-check.sh` invocation in its own
                         --help text was a no-op on filesystems that honour
-                        the index bit. The check reads `git ls-files --stage`,
-                        so it works regardless of the working-tree mode
-                        (which Windows can't track anyway).
+                        the index bit. WARP-489 extended the sweep to
+                        openwrt/scripts/upgrade-router.sh (same bug class,
+                        different sub-tree). The check reads
+                        `git ls-files --stage`, so it works regardless of
+                        the working-tree mode (which Windows can't track
+                        anyway).
 
   docker-build-smoke    (--full only) Spin up an Ubuntu 24.04 container,
                         mount the repo read-only, run
@@ -608,8 +615,8 @@ run_check_exec_bits() {
   # Verify that every shell script an operator invokes via its path
   # (./scripts/setup.sh, ./scripts/factory-reset.sh,
   # ./scripts/camera-drivers.sh, ./scripts/install-device-bridge.sh,
-  # the two ship-check scripts) has the +x bit set in the git index —
-  # mode 100755, not 100644.
+  # the two ship-check scripts, openwrt/scripts/upgrade-router.sh) has
+  # the +x bit set in the git index — mode 100755, not 100644.
   #
   # Why the INDEX mode, not the working-tree mode? Because the working-
   # tree bit is unreliable cross-platform: Windows filesystems don't
@@ -621,15 +628,17 @@ run_check_exec_bits() {
   #
   # The allowlist is intentionally narrow but covers EVERY operator-
   # facing entry point: the rule is that any script whose documentation
-  # tells an operator to invoke it as `./scripts/<name>.sh` (or
-  # `sudo ./scripts/<name>.sh`) must be on the list. Anything
-  # `bash`-invoked (most scripts under scripts/lib/, every test helper)
-  # works regardless of the bit and would only generate noise here.
+  # tells an operator to invoke it as `./<path>/<name>.sh` (or
+  # `sudo ./<path>/<name>.sh`) must be on the list — regardless of which
+  # sub-tree it lives under (top-level `scripts/`, `scripts/test/`, or
+  # `openwrt/scripts/`). Anything `bash`-invoked (most scripts under
+  # scripts/lib/, every test helper) works regardless of the bit and
+  # would only generate noise here.
   #
   # When you add a NEW operator-facing script, add its path to the
   # required list below AND set its index mode with
   # `git update-index --chmod=+x <path>` before pushing. When you add
-  # a `./scripts/<name>.sh` invocation to documentation (README,
+  # a `./<path>/<name>.sh` invocation to documentation (README,
   # docs/*.md, a service README), audit whether that script is already
   # on the list — same bug class, same fix.
   #
@@ -640,7 +649,9 @@ run_check_exec_bits() {
   # fell through to /bin/sh on hosts that respect the index bit).
   # QA on that same PR uncovered scripts/camera-drivers.sh and
   # scripts/install-device-bridge.sh shipped with the same 100644 bug;
-  # both are now on the allowlist below.
+  # both are now on the allowlist below. WARP-489 extended the same
+  # sweep to openwrt/scripts/upgrade-router.sh — proving the allowlist
+  # is path-keyed (not basename-keyed) and works across sub-trees.
   local label="exec-bits"
 
   # Scripts that MUST be executable in the git index. Add to this list
@@ -653,6 +664,7 @@ run_check_exec_bits() {
     "scripts/install-device-bridge.sh"
     "scripts/test/ship-check.sh"
     "scripts/test/ship-check.test.sh"
+    "openwrt/scripts/upgrade-router.sh"
   )
 
   local violations=""
