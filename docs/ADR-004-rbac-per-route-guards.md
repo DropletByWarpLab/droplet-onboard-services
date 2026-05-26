@@ -123,6 +123,19 @@ Group-name choices match what Nextcloud already provisions out of the box. Docum
 - Negative tests: `req.user.role` missing → 403; unknown role string → 403 (defense in depth — the enum should make this unreachable, but the middleware fails closed anyway).
 - Service-principal regression test: a request with `Authorization: Bearer <SERVICE_TOKEN_VOICE>` is rejected on every guarded write route, accepted on `GET`s.
 
+### 6. `req.user.id` shape contract (WARP-485 amendment)
+
+After WARP-485, `req.user.id` is **always** the local `User.id` UUID, regardless of which auth path populated the session. Previously the OCS fallback in `auth.ts` set `req.user.id = ocs.data.id` (the Nextcloud username string), which silently broke any consumer that compared it against a UUID-shaped value — most visibly the WARP-480 self-action guard on `/api/people/:id` mutations (`req.params.id === req.user?.id`), which always returned false-negative under OCS auth and let an owner authenticated via the OCS fallback DELETE themselves.
+
+Post-fix behavior:
+
+- **JWT path:** `req.user.id = jwtPayload.sub` (unchanged — already a local UUID).
+- **OCS path:** the middleware looks up `User` by `nextcloudUsername` (new column added by WARP-485 — see `prisma/migrations/20260526150000_warp_485_user_nextcloud_username/migration.sql`) and sets `req.user.id = localUser.id`. Fail-closed with **401 `USER_NOT_PROVISIONED`** when no matching row exists — silent auto-provision would be a privilege-escalation vector (an attacker holding a valid OCS token for an unrelated NC user could otherwise mint a local row with the default `family` role). Operators add new users via `/api/people` before they can authenticate.
+- **`req.user.username`** keeps the Nextcloud username on the OCS path for display continuity. Consumers that need the human-readable handle (e.g. brain-memory route filters) keep using `username`; consumers that need a stable per-user key (e.g. `ScopeBinding.userId` FK lookups, self-action comparisons) use `id`.
+- **Service principals** (`_service:voice`, `_service:mcp`) are unaffected — they have synthetic ids that never collide with user UUIDs.
+
+The contract is pinned in `apps/orchestrator/src/__tests__/auth.req-user-id.test.ts`, which covers JWT, OCS-with-matching-User, OCS-without-User, prisma-not-initialised (defense-in-depth fail-closed), and the end-to-end WARP-480 self-guard regression under OCS auth.
+
 ## Consequences
 
 **Positive:**
@@ -262,3 +275,5 @@ Rejected for v1: introduces a dependency the team would need to audit, and the a
 - [WARP-171](https://warp-lab.atlassian.net/browse/WARP-171) — this ticket.
 - [WARP-248](https://warp-lab.atlassian.net/browse/WARP-248) — ABAC follow-up, deferred.
 - [WARP-327](https://warp-lab.atlassian.net/browse/WARP-327) — parent epic, Auth/RBAC/Identity.
+- [WARP-480](https://warp-lab.atlassian.net/browse/WARP-480) — self-action + last-owner invariants on `/api/people` mutations (the consumer that surfaced the OCS-id-shape mismatch).
+- [WARP-485](https://warp-lab.atlassian.net/browse/WARP-485) — `req.user.id` normalization across JWT + OCS auth paths (the §6 amendment above).
