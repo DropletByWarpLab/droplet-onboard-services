@@ -389,6 +389,14 @@ rerank.candidates })`. Why the two channels stay separate:
    bypasses the args/schema layer entirely to keep the trust boundary
    crisp.
 
+When both channels carry the same field (e.g. the LLM sets `enhance.hyde = true`
+AND the orchestrator's adaptive preset already chose HyDE), the LLM's choice
+wins: `llmEnhance ?? preset.enhance` in
+`apps/orchestrator/src/services/llm-agent.service.ts:335-342`. The rationale
+is that the LLM has seen the query in conversational context and may correctly
+override a class-based default — the classifier is a cheap prior, not a hard
+constraint.
+
 ### Trust boundary (MCP `_meta._enhancement`)
 
 `_enhancement` is read from `_meta` ONLY on the trusted-stdio transport
@@ -418,6 +426,12 @@ calls (~190 ms), and `conversational` skips them with a tighter
 similarity floor on top (~150 ms). The adaptive layer is what bounds
 the worst case to the queries that benefit most.
 
+> **Numbers above are estimated.** Measured per-class latency lands once
+> the per-class eval (Task 9 / commit a1b3237) runs against the full
+> Linux CI Compose stack with `RAGAS_ENABLED=1` — the harness prints
+> per-pipeline timings and per-class NDCG deltas at the end of the run.
+> Until then this table is a budget, not a measurement.
+
 ### Eval gate (recording mode today)
 
 Per-class NDCG@10 slicing landed in commit `a1b3237` (Task 9). The
@@ -442,6 +456,12 @@ The spec gates that activate once baselines exist:
   conversational routing.
 - **full corpus** (q01..q30 plus all WARP-437 additions): `ndcg@10(all
   enhanced) ≥ baseline × 1.03`.
+
+> **Measured deltas are not yet recorded** in this doc — the harness is
+> in recording mode (`tests/retrieval-eval/run.integration.test.ts:252`)
+> and prints values to console without persisting them. Once the first
+> Linux CI run produces baselines, this section will be amended with the
+> measured per-class NDCG / RAGAS deltas alongside the spec gates.
 
 ### Files
 
