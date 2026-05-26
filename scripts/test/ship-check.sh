@@ -419,9 +419,102 @@ run_check_frigate_env_scan() {
 }
 
 run_check_shellcheck() {
-  printf "  ${_YELLOW}SKIP${_RESET}  shellcheck (not yet implemented)\n"
-  CHECK_RESULTS[shellcheck]=skip
-  return 0
+  # Run shellcheck across the three high-blast-radius script sets:
+  #   - scripts/setup.sh           (single-entry-point installer)
+  #   - scripts/factory-reset.sh   (wipe-and-restart path)
+  #   - scripts/lib/*.sh           (sourced helpers — every check pulls
+  #                                 these in transitively)
+  #
+  # Severity is `warning`, which includes the `error` band (SC2168
+  # "local outside function" — the very class of bug that escaped review
+  # in scripts/factory-reset.sh before WARP-482 fixed it).
+  #
+  # Excludes (apply ONLY to the pre-existing baseline; new code should
+  # not earn an exclude without a follow-up ticket to remove it):
+  #
+  #   SC2034 — appears unused. Several lib scripts declare variables
+  #            (SKIP_DOCKER_INSTALL, DOCKER_GROUP_ADDED,
+  #            DI_DEFAULT_SEALING_PCRS) for sourcing scripts to read;
+  #            shellcheck can't trace cross-file usage and flags them
+  #            even though they're load-bearing.
+  #   SC2024 — sudo doesn't affect redirects. local-dns.sh uses
+  #            `sudo … >>"$LOG_FILE"` where LOG_FILE is operator-owned
+  #            and writable; the redirect runs as the calling user,
+  #            which is the intended behaviour (don't chown LOG_FILE
+  #            to root just to silence shellcheck).
+  #   SC2155 — declare and assign separately. Pre-existing in
+  #            secrets.sh (two sites) and camera-drivers.sh. Genuine
+  #            cleanup but out of scope for WARP-482; flagged for
+  #            follow-up.
+  #
+  # If shellcheck is missing from PATH the check FAILs (NOT skips) —
+  # the operator needs to install it before the gate is meaningful.
+  local label="shellcheck"
+
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "  ${_RED}FAIL${_RESET}  %s — shellcheck not on PATH\n" "$label"
+    printf "    | Install: \n" >&2
+    printf "    |   macOS:        brew install shellcheck\n" >&2
+    printf "    |   Debian/Ubuntu: sudo apt-get install -y shellcheck\n" >&2
+    printf "    |   Arch:         sudo pacman -S shellcheck\n" >&2
+    printf "    | This check FAILS (not skips) by design — the gate must\n" >&2
+    printf "    | catch the local-dns.sh class of regressions, and that\n" >&2
+    printf "    | requires shellcheck running.\n" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # Build the target list. Glob expands lib/*.sh against the real tree;
+  # if any of these files is missing it's a setup precondition issue and
+  # shellcheck will surface it loudly.
+  local targets=()
+  local file
+  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh"; do
+    if [ -f "$file" ]; then
+      targets+=("$file")
+    fi
+  done
+  if [ -d "$REPO_ROOT/scripts/lib" ]; then
+    for file in "$REPO_ROOT"/scripts/lib/*.sh; do
+      [ -f "$file" ] && targets+=("$file")
+    done
+  fi
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — no target scripts found\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # SC2024 + SC2155 + SC2034 excluded per the docstring above. -x means
+  # follow `source` directives so cross-file undeclared-var detection
+  # works. --external-sources keeps it from bailing on dynamic-path
+  # sources that we can't statically resolve (the `source "$libdir/x"`
+  # pattern in setup.sh).
+  local out rc
+  out="$(shellcheck \
+    --severity=warning \
+    --exclude=SC2034,SC2024,SC2155 \
+    --external-sources \
+    "${targets[@]}" 2>&1)"
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s))\n" "$label" "${#targets[@]}"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  printf "  ${_RED}FAIL${_RESET}  %s — shellcheck flagged warning(s) in scripts\n" "$label"
+  printf '%s\n' "$out" | head -40 | sed 's/^/    | /' >&2
+  local total
+  total=$(printf '%s\n' "$out" | wc -l)
+  if [ "$total" -gt 40 ]; then
+    printf "    | (... %d more lines suppressed; run shellcheck --severity=warning directly)\n" \
+      "$((total - 40))" >&2
+  fi
+  CHECK_RESULTS[$label]=fail
+  return 1
 }
 
 run_check_matter_env_allowlist() {
