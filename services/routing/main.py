@@ -1256,20 +1256,32 @@ def _get_ap_namespace(router):
 
 @app.get("/aps/discovered")
 def aps_discovered():
-    """Return the in-memory discovery list (mock mode only).
+    """Return the live mDNS discovery snapshot.
 
-    Production discovery lives in the orchestrator's mDNS poller; this
-    endpoint exists so dev + integration tests can drive the full state
-    machine end-to-end against the mock router. When the SDK is talking
-    to a real OpenWrt box this returns an empty list — the real
-    "what's announcing on br-lan" answer comes from `umdns -d` and is
-    parsed by the orchestrator side.
+    Two layers:
+      - Mock mode (`ROUTING_MODE=mock`): the in-memory `_MockAp`
+        exposes a `discovered()` method seeded by `/aps/_test_seed`
+        so dev + integration tests can drive the full state machine
+        without a real OpenWrt box.
+      - Real mode: the SDK's `ApApi.browse_discovered()` issues a
+        `ubus call umdns browse` and parses `_droplet-ap._tcp` TXT
+        records (mac/model/serial/version) into the orchestrator-
+        friendly shape. The droplet-ai rpcd ACL already grants
+        `umdns: ["browse", "update"]`
+        (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json), so the
+        orchestrator's poller can drive this on a 10s cadence
+        without extra privileges (ADR-005 §1).
     """
     try:
         r = get_router()
         ap = _get_ap_namespace(r)
+        # Prefer the mock's seeded list when present — `_test_seed`
+        # populates it deterministically and we don't want a real umdns
+        # call leaking into mock-mode tests.
         if hasattr(ap, "discovered"):
             return {"discovered": ap.discovered()}
+        if hasattr(ap, "browse_discovered"):
+            return {"discovered": ap.browse_discovered()}
         return {"discovered": []}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

@@ -1080,6 +1080,100 @@ class ApApi:
                 return
             raise
 
+    def browse_discovered(self) -> list[dict[str, Any]]:
+        """Query umdns for `_droplet-ap._tcp` announcements on br-lan.
+
+        Returns one dict per extender currently visible on the LAN,
+        shaped like:
+            {
+                "mac": "B8:27:EB:12:34:56",
+                "model": "raspberrypi,5-model-b",
+                "serial": "RPi5-00000000a1b2c3d4",
+                "version": "1.0",
+                "last_ip": "192.168.50.42",
+                "hostname": "droplet-extender-b827eb123456",
+            }
+
+        Per ADR-005 §1, the extender's `99-droplet-setup` script writes
+        `/etc/umdns/droplet-ap.json` advertising `_droplet-ap._tcp` with
+        TXT records `mac=…`, `model=…`, `serial=…`, `version=…`,
+        `role=…`. The orchestrator's poller calls this every
+        DROPLET_AP_DISCOVERY_INTERVAL seconds; the droplet-ai rpcd ACL
+        already grants `umdns: ["browse", "update"]`
+        (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json) so no extra
+        privileges are needed.
+
+        Returns [] when umdns isn't installed, has no peers, or the
+        ubus call shape changes. This is read-only — never raises on
+        empty data; only network / auth failures bubble.
+        """
+        try:
+            raw = self._r._call("umdns", "browse")
+        except UbusError as exc:
+            # NOT_FOUND on the umdns object = service isn't running.
+            # Treat as "nothing to discover this tick"; the orchestrator
+            # poller swallows empty results silently.
+            if exc.code in (4, 5):
+                return []
+            raise
+
+        # umdns returns either {service-name: {host-name: {...}}} or a
+        # flat dict of records depending on the build. Tolerate both.
+        records: list[dict[str, Any]] = []
+        services = raw if isinstance(raw, dict) else {}
+        droplet_services = services.get("_droplet-ap._tcp", {})
+        if not isinstance(droplet_services, dict):
+            return []
+        for host_key, entry in droplet_services.items():
+            if not isinstance(entry, dict):
+                continue
+            parsed = self._parse_droplet_ap_txt(entry)
+            if parsed is None:
+                continue
+            # `ipv4` shape on umdns is just the address string; older
+            # builds sometimes nest it under `ipv4` -> "address". Tolerate.
+            ipv4 = entry.get("ipv4")
+            if isinstance(ipv4, dict):
+                ipv4 = ipv4.get("address") or ipv4.get("ip")
+            if isinstance(ipv4, str) and "last_ip" not in parsed:
+                parsed["last_ip"] = ipv4
+            # Use the host key as hostname when the TXT didn't carry one.
+            parsed.setdefault("hostname", host_key)
+            records.append(parsed)
+        return records
+
+    @staticmethod
+    def _parse_droplet_ap_txt(entry: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Pull TXT records out of a single umdns entry into our shape.
+
+        TXT records arrive as a list of "key=value" strings (umdns) or
+        sometimes as a dict (build-dependent). Tolerate both; drop any
+        entry that doesn't carry the mandatory `mac=` key, since that's
+        the orchestrator's primary key.
+        """
+        txt = entry.get("txt")
+        kv: dict[str, str] = {}
+        if isinstance(txt, list):
+            for item in txt:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, _, value = item.partition("=")
+                if key:
+                    kv[key.strip()] = value.strip()
+        elif isinstance(txt, dict):
+            kv = {str(k): str(v) for k, v in txt.items()}
+        else:
+            return None
+
+        mac = kv.get("mac")
+        if not mac:
+            return None
+        record: dict[str, Any] = {"mac": mac}
+        for k in ("model", "serial", "version"):
+            if v := kv.get(k):
+                record[k] = v
+        return record
+
 
 # ---------------------------------------------------------------------------
 # High-level API: File operations

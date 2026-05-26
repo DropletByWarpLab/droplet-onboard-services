@@ -236,6 +236,94 @@ class TestApApiPushWirelessConfig:
             ApApi.iface_section_for_mac("not a mac")
 
 
+class TestApApiBrowseDiscovered:
+    """WARP-446 (blocker #1) — `ApApi.browse_discovered()` parses
+    `ubus call umdns browse` output into the orchestrator's
+    discovered-AP shape so production discovery actually works.
+    """
+
+    def _api_with_umdns(self, umdns_response):
+        """Build an ApApi against a router whose `_call("umdns", "browse")`
+        returns `umdns_response`."""
+        class _FakeRouter:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def _call(self, obj: str, method: str, args=None):
+                self.calls.append((obj, method))
+                if isinstance(umdns_response, Exception):
+                    raise umdns_response
+                return umdns_response
+
+        router = _FakeRouter()
+        return ApApi(router), router
+
+    def test_parses_droplet_ap_txt_records_into_observation_shape(self) -> None:
+        api, _ = self._api_with_umdns({
+            "_droplet-ap._tcp": {
+                "droplet-ap-b827eb123456": {
+                    "ipv4": "192.168.50.42",
+                    "port": 80,
+                    "txt": [
+                        "mac=B8:27:EB:12:34:56",
+                        "model=raspberrypi,5-model-b",
+                        "serial=RPi5-00000000a1b2c3d4",
+                        "version=1.0",
+                        "role=extender",
+                    ],
+                },
+            }
+        })
+        result = api.browse_discovered()
+        assert len(result) == 1
+        rec = result[0]
+        assert rec["mac"] == "B8:27:EB:12:34:56"
+        assert rec["model"] == "raspberrypi,5-model-b"
+        assert rec["serial"] == "RPi5-00000000a1b2c3d4"
+        assert rec["version"] == "1.0"
+        assert rec["last_ip"] == "192.168.50.42"
+        assert rec["hostname"] == "droplet-ap-b827eb123456"
+
+    def test_ignores_records_without_mac_txt(self) -> None:
+        # A non-droplet TXT record that happens to share the service
+        # name shouldn't crash the parser — drop it silently and move on.
+        api, _ = self._api_with_umdns({
+            "_droplet-ap._tcp": {
+                "stranger": {"txt": ["foo=bar"]},
+                "real": {
+                    "ipv4": "192.168.50.43",
+                    "txt": ["mac=B8:27:EB:AA:BB:CC"],
+                },
+            }
+        })
+        result = api.browse_discovered()
+        assert [r["mac"] for r in result] == ["B8:27:EB:AA:BB:CC"]
+
+    def test_returns_empty_when_no_droplet_ap_service_announced(self) -> None:
+        # Common case on first boot — umdns is up but nothing is
+        # advertising `_droplet-ap._tcp` yet.
+        api, _ = self._api_with_umdns({"_http._tcp": {}})
+        assert api.browse_discovered() == []
+
+    def test_returns_empty_when_umdns_service_unavailable(self) -> None:
+        # UbusError code 4 (NOT_FOUND) means umdns isn't registered on
+        # this build — the orchestrator's poller treats empty as
+        # success so we return [] rather than raising.
+        api, _ = self._api_with_umdns(UbusError(4, "umdns not found"))
+        assert api.browse_discovered() == []
+
+    def test_propagates_unexpected_ubus_errors(self) -> None:
+        # Any non-NOT_FOUND code means something's actually wrong (auth,
+        # transport, etc.) — bubble it so handle_router_error() can
+        # surface a real 5xx rather than masking with []. The
+        # orchestrator's poller swallows the resulting RouterError
+        # itself (belt-and-suspenders), so the operator still doesn't
+        # see a runaway error cascade.
+        with pytest.raises(UbusError):
+            api, _ = self._api_with_umdns(UbusError(99, "auth failed"))
+            api.browse_discovered()
+
+
 # ---------------------------------------------------------------------------
 # 3. REST endpoints (MockRouter + state-machine round-trip)
 # ---------------------------------------------------------------------------
