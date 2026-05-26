@@ -353,6 +353,86 @@ test_shellcheck_catches_local_outside_function() {
 }
 
 # =============================================================================
+# Test: docker-build-smoke shim's allowlist rejects unknown docker subcommands
+# =============================================================================
+#
+# Original bug class (CR #1 on PR #266): the docker shim that ship-check
+# plants inside the Ubuntu smoke container originally had a fail-OPEN
+# default — any docker subcommand not explicitly cased (`info` / `run`)
+# returned `exit 0`. That meant a future setup.sh change adding e.g.
+# `docker version`, `docker pull`, or `docker buildx ls` would silently
+# pass the smoke test even though it would fail on a real host that
+# actually executes the call.
+#
+# The fix: explicit allowlist (`info` → 0, `run` → 1, `compose` → 0),
+# default case → `exit 1` (fail-CLOSED). Future docker subcommands
+# introduced into the `--skip-docker --skip-build --skip-start
+# --skip-drivers` codepath must be intentionally added to the allowlist
+# or the smoke test fails loudly.
+#
+# Synthetic regression: inject a `docker buildx ls >/dev/null` call into
+# setup.sh inside the SKIP_DOCKER block (which always runs in the smoke
+# path). The shim's `*) exit 1` default makes that call return non-zero,
+# setup.sh's `set -e` propagates the failure, the smoke check fails.
+# Restore the real setup.sh via `git checkout --` on RETURN.
+#
+# Cost: this test spins up the full Ubuntu 24.04 container and runs
+# setup.sh through phase 4 — ~5 minutes per run. Worth it: this is the
+# only test that proves the shim isn't fail-open. We deliberately skip
+# the unmutated-baseline pass (it's already exercised by
+# `bash scripts/test/ship-check.sh --full`) to keep this test at one
+# container run, not two.
+test_docker_build_smoke_shim_rejects_unknown_subcommand() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker daemon not reachable\n"
+    return 0
+  fi
+
+  local target_rel="scripts/setup.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # Apply regression: inject `docker buildx ls >/dev/null` right after the
+  # `Skipping Docker installation` log_info line. That line always runs
+  # in the smoke configuration (`--skip-docker` is passed by ship-check),
+  # and `buildx` is NOT in the shim's allowlist, so the default `exit 1`
+  # fires, `set -e` in setup.sh propagates the failure, and the smoke
+  # check ends with a non-zero rc.
+  awk '
+    /log_info "Skipping Docker installation \(--skip-docker\)"/ {
+      print
+      print "    docker buildx ls >/dev/null"
+      next
+    }
+    { print }
+  ' "$target" > "$target.tmp" && mv "$target.tmp" "$target"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — %s unchanged\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # docker-build-smoke should now FAIL because the shim refuses
+  # `docker buildx ls` (exit 1 from the default case).
+  _assert_check_fails "$REPO_ROOT_REAL" docker-build-smoke
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -370,6 +450,9 @@ _run_test "frigate-env-scan catches unresolved {VAR} substitution" \
 
 _run_test "shellcheck catches local-outside-function in scripts/lib" \
   test_shellcheck_catches_local_outside_function
+
+_run_test "docker-build-smoke shim rejects unknown docker subcommand" \
+  test_docker_build_smoke_shim_rejects_unknown_subcommand
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
