@@ -518,9 +518,65 @@ run_check_shellcheck() {
 }
 
 run_check_matter_env_allowlist() {
-  printf "  ${_YELLOW}SKIP${_RESET}  matter-env-allowlist (not yet implemented)\n"
-  CHECK_RESULTS[matter-env-allowlist]=skip
-  return 0
+  # Delegate to scripts/test-security.sh, which already encodes the
+  # architecture-guard rule 11 invariant: NO MATTER_* env vars outside the
+  # narrow allowlist (MATTER_STORAGE_PATH). The rationale is the matter.js
+  # `VariableService` collision documented in apps/orchestrator/src/config.ts
+  # and in test-security.sh's Test 7 docstring.
+  #
+  # We don't run the entire test-security.sh — that script has its own
+  # pre-existing failures (e.g. WARP-165 run_docker_compose --env-file
+  # accounting) which are out of WARP-482 scope. Instead we grep its
+  # output for the specific MATTER_* allowlist line:
+  #
+  #   PASS  no MATTER_* env vars outside allowlist { MATTER_STORAGE_PATH }
+  #
+  # If that line is PASS, the allowlist invariant holds. If FAIL or
+  # missing, the check fails and we surface enough output for the
+  # operator to find the violation.
+  local label="matter-env-allowlist"
+  local security_sh="$REPO_ROOT/scripts/test-security.sh"
+
+  if [ ! -f "$security_sh" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/test-security.sh not found\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # test-security.sh uses `set -e` and exits non-zero on any fail. We
+  # tolerate that here because we only care about the MATTER line; capture
+  # stdout+stderr so the diagnostic from the matter test reaches the
+  # operator even when other tests fail.
+  local out
+  out="$(bash "$security_sh" 2>&1 || true)"
+
+  # Walk for the canonical MATTER_* line. Both PASS and FAIL variants are
+  # printed by test-security.sh; grep for both with `-E`.
+  local matter_line
+  matter_line="$(printf '%s\n' "$out" | grep -E '(PASS|FAIL)[[:space:]]+(no MATTER_\*|MATTER_\* env var)' | head -1 || true)"
+
+  if [ -z "$matter_line" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — MATTER_* allowlist line missing from test-security.sh output\n" "$label"
+    printf "    | (Has Test 7 changed shape? Check scripts/test-security.sh.)\n" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  if printf '%s' "$matter_line" | grep -q 'PASS'; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (delegated to scripts/test-security.sh)\n" "$label"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  printf "  ${_RED}FAIL${_RESET}  %s — MATTER_* env var found outside allowlist\n" "$label"
+  # Replay enough of test-security.sh's output for the operator to find
+  # the violation. The matter section is the last grouped block; tail -25
+  # captures it plus the summary footer reliably.
+  printf '%s\n' "$out" | tail -25 | sed 's/^/    | /' >&2
+  printf "    | (Use DROPLET_MATTER_* prefix for new env vars — see\n" >&2
+  printf "    |  apps/orchestrator/src/config.ts for full rationale.)\n" >&2
+  CHECK_RESULTS[$label]=fail
+  return 1
 }
 
 run_check_docker_build_smoke() {
