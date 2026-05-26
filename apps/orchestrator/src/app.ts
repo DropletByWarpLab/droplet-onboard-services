@@ -31,6 +31,7 @@ import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createFipsRouter } from "./routes/fips.js";
+import { createActivityRouter } from "./routes/activity.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -108,6 +109,8 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
+  // WARP-456: signed append-only activity feed + export bundle.
+  app.use("/api", createActivityRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
