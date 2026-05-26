@@ -474,3 +474,132 @@ describe("searchHybrid with reranker", () => {
     expect(hits.map((h) => h.path)).toEqual(["/a.pdf"]);
   });
 });
+
+describe("searchHybrid with queryEnhancement (WARP-437)", () => {
+  function mkRow(path: string, chunkIdx: number, score = 0.9) {
+    return {
+      source: "nextcloud" as const,
+      path,
+      chunkIdx,
+      pageNumber: null,
+      brainItemId: null,
+      metadata: null,
+      snippet: "snippet",
+      score,
+    };
+  }
+
+  it("averages HyDE passage embedding with raw query vector before vector arm", async () => {
+    const captured: { sql: string; args: unknown[] }[] = [];
+    const prisma = {
+      $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) => {
+        captured.push({ sql, args });
+        return [];
+      }),
+    } as never;
+
+    await searchHybrid(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0, 0, 0],
+      query: "x",
+      queryEnhancement: { hydeVector: [0, 1, 0, 0, 0] },
+    });
+
+    // Element-wise mean of [1,0,0,0,0] and [0,1,0,0,0] = [0.5,0.5,0,0,0].
+    const vectorSql = captured.find((c) => c.sql.includes("::vector"));
+    expect(vectorSql).toBeDefined();
+    expect(vectorSql!.sql).toContain("[0.5,0.5,0,0,0]");
+  });
+
+  it("silently drops HyDE term when its length differs from raw vector", async () => {
+    const captured: { sql: string; args: unknown[] }[] = [];
+    const prisma = {
+      $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) => {
+        captured.push({ sql, args });
+        return [];
+      }),
+    } as never;
+    await searchHybrid(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0, 0, 0],
+      query: "x",
+      queryEnhancement: { hydeVector: [1, 2, 3] }, // wrong dimension
+    });
+    const vectorSql = captured.find((c) => c.sql.includes("::vector"));
+    expect(vectorSql!.sql).toContain("[1,0,0,0,0]");
+  });
+
+  it("fans out vector arms across raw + extra queries and RRF-fuses them first", async () => {
+    // 3 vector arms (raw + 2 extras) + 1 lexical arm → 4 $queryRawUnsafe calls.
+    // Match by SQL shape (vector arms include '::vector', lexical does not).
+    const prisma = {
+      $queryRawUnsafe: vi.fn(async (sql: string) => {
+        if (!sql.includes("::vector")) return []; // lexical arm
+        if (sql.includes("[1,0,0]")) return [mkRow("doc-a", 0)];
+        if (sql.includes("[0,1,0]")) return [mkRow("doc-b", 1)];
+        if (sql.includes("[0,0,1]")) return [mkRow("doc-c", 2)];
+        return [];
+      }),
+    } as never;
+
+    const out = await searchHybrid(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      query: "x",
+      queryEnhancement: {
+        extraQueryVectors: [
+          [0, 1, 0],
+          [0, 0, 1],
+        ],
+      },
+    });
+    const paths = out.map((h) => h.path);
+    expect(paths).toEqual(expect.arrayContaining(["doc-a", "doc-b", "doc-c"]));
+    expect(
+      (prisma as unknown as { $queryRawUnsafe: { mock: { calls: unknown[][] } } })
+        .$queryRawUnsafe.mock.calls,
+    ).toHaveLength(4);
+  });
+
+  it("applies filenameContains to both arms' SQL with parameterised LIKE", async () => {
+    const captured: { sql: string; args: unknown[] }[] = [];
+    const prisma = {
+      $queryRawUnsafe: vi.fn(async (sql: string, ...args: unknown[]) => {
+        captured.push({ sql, args });
+        return [];
+      }),
+    } as never;
+    await searchHybrid(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      query: "settings",
+      queryEnhancement: { metadataFilter: { filenameContains: "camera-1" } },
+    });
+    const arms = captured.filter((c) => /path LIKE \$\d+/.test(c.sql));
+    expect(arms.length).toBe(2);
+    // Both arms must bind the wrapped LIKE pattern as a positional param.
+    for (const arm of arms) {
+      expect(arm.args).toContain("%camera-1%");
+    }
+  });
+
+  it("no-enhancement path is equivalent to single vector + single lexical arm", async () => {
+    const prisma = {
+      $queryRawUnsafe: vi
+        .fn()
+        .mockResolvedValueOnce([mkRow("a", 0)])
+        .mockResolvedValueOnce([mkRow("b", 0)]),
+    } as never;
+    const out = await searchHybrid(prisma, {
+      userId: "u1",
+      vector: [1, 0, 0],
+      query: "x",
+    });
+    // 1 vector + 1 lexical = exactly 2 SQL calls.
+    expect(
+      (prisma as unknown as { $queryRawUnsafe: { mock: { calls: unknown[][] } } })
+        .$queryRawUnsafe.mock.calls,
+    ).toHaveLength(2);
+    expect(out.map((h) => h.path).sort()).toEqual(["a", "b"]);
+  });
+});
