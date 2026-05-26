@@ -762,8 +762,13 @@ su - droplet-test -c '
 INNER
 )
 
-  # docker run with --rm wouldn't let our trap re-attempt cleanup if the
-  # initial `docker rm -f` races. Use --name + explicit rm in the trap.
+  # Both-and cleanup: --rm on `docker run` is the SIGKILL safety net (the
+  # RETURN trap above doesn't fire on SIGKILL or on a shell kill -9, so
+  # without --rm a kill-9'd ship-check leaks the container until the next
+  # `docker rm -f`); the named-container + RETURN-trap path is the
+  # normal-exit cleanup that survives across re-runs and lets us target
+  # the container by name if --rm somehow races on cleanup. Resolves
+  # CR #2 on PR #266.
   #
   # MSYS_NO_PATHCONV=1 is necessary when this script runs under Git Bash
   # on Windows: MSYS auto-rewrites POSIX-looking paths in command args
@@ -773,6 +778,7 @@ INNER
   #   https://github.com/moby/moby/issues/24029#issuecomment-292499324
   local out rc
   out="$(MSYS_NO_PATHCONV=1 docker run \
+    --rm \
     --name "$container_name" \
     -v "$REPO_ROOT:/repo:ro" \
     "$image" \
