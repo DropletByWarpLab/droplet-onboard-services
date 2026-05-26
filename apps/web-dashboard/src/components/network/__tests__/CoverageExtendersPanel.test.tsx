@@ -97,19 +97,32 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("surfaces FAILED status with the failureReason", async () => {
+  it("surfaces FAILED status with friendly home-user copy keyed off failureReason (blocker #7)", async () => {
     (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
       aps: [
         makeAp({
           displayName: "Garage",
           status: "FAILED",
+          // "unreachable" in the failureReason maps to the
+          // ROUTER_UNREACHABLE copy bucket via the panel's
+          // copyForFailureReason heuristic. The raw technical string
+          // must NOT appear on the home-user surface — only the
+          // mapped friendly copy.
           failureReason: "Router unreachable during apply",
         }),
       ],
     });
     renderPanel();
     expect(await screen.findByText(/failed/i)).toBeInTheDocument();
-    expect(screen.getByText(/router unreachable during apply/i)).toBeInTheDocument();
+    // Friendly title from AP_ONBOARD_ERROR_COPY.ROUTER_UNREACHABLE.
+    expect(
+      screen.getByText(/couldn't reach the main router/i),
+    ).toBeInTheDocument();
+    // The raw "Router unreachable during apply" string must NOT leak
+    // to the user. The friendly body talks about the router not
+    // responding; the raw "during apply" technical phrasing should
+    // be absent.
+    expect(screen.queryByText(/during apply/i)).not.toBeInTheDocument();
   });
 
   it("falls back to model + last-3-MAC-octets when displayName is null", async () => {

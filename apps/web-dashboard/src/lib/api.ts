@@ -2109,7 +2109,10 @@ export async function approveApDevice(
     network?: string;
     displayName?: string;
   },
-): Promise<{ ap: import("./types").ApDeviceInfo }> {
+): Promise<{
+  ap: import("./types").ApDeviceInfo;
+  operationId: string | null;
+}> {
   // Colons in MAC are allowed unencoded in path segments per RFC 3986 §3.3.
   const res = await authFetch(`${BASE}/api/aps/${mac}/approve`, {
     method: "POST",
@@ -2118,20 +2121,33 @@ export async function approveApDevice(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Failed to approve extender: ${res.status}`);
+    // WARP-446 (blocker #7): the orchestrator surfaces a typed
+    // `code` on every ApOnboardError (PROVISIONING_TIMEOUT,
+    // ROUTER_UNREACHABLE, WIRELESS_CONFIG_REJECTED, UNKNOWN). Attach
+    // it to the thrown Error so the panel's AP_ONBOARD_ERROR_COPY
+    // table can key on the code rather than regex-matching the raw
+    // message.
+    const e = new Error(err.error || `Failed to approve extender: ${res.status}`);
+    if (err.code) (e as Error & { code?: string }).code = err.code;
+    throw e;
   }
   return res.json();
 }
 
 export async function decommissionApDevice(
   mac: string,
-): Promise<{ ap: import("./types").ApDeviceInfo }> {
+): Promise<{
+  ap: import("./types").ApDeviceInfo;
+  operationId: string | null;
+}> {
   const res = await authFetch(`${BASE}/api/aps/${mac}/decommission`, {
     method: "POST",
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Failed to decommission extender: ${res.status}`);
+    const e = new Error(err.error || `Failed to decommission extender: ${res.status}`);
+    if (err.code) (e as Error & { code?: string }).code = err.code;
+    throw e;
   }
   return res.json();
 }
