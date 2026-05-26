@@ -135,6 +135,14 @@ services:
       # so it can write extracted.txt + updated manifest) so a single
       # ingest step covers both write paths.
       - brain-memory-data:/data/brain-memory
+      # WARP-456: HMAC signing key for the append-only activity log.
+      # setup.sh writes the 32-byte key to <repo>/data/secrets/audit.key
+      # (mode 0600). The orchestrator's loadAuditKeyFromDisk() reads
+      # /data/secrets/audit.key inside the container; without this mount
+      # initActivityRecorder() throws at boot and the orchestrator
+      # restart-loops. Read-only — the key is loaded once and never
+      # mutated.
+      - ../data/secrets:/data/secrets:ro
       # WARP-230: share the device-identity sidecar's Unix-socket dir so
       # the orchestrator's gRPC client can reach it without exposing a
       # network port. Read-only — the orchestrator never writes.
@@ -241,6 +249,17 @@ services:
       # dev install override the whole pair with a single env var
       # without needing both names in their local .env.
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_MCP:-${ORCHESTRATOR_TOKEN:-}}
+      # WARP-229: FIPS self-test gating. The mcp-server's startup
+      # invokes @droplet/fips-selftest, which exits non-zero on
+      # development hosts where OpenSSL's FIPS provider isn't loaded —
+      # restart-looping the container. The orchestrator already opts
+      # out via this same env on non-production deployments (see its
+      # log: "FIPS boot self-test skipped (DROPLET_FIPS_REQUIRED=false
+      # or non-production env)"); mcp-server needs the same opt-out
+      # passed through compose. Defaults to `false` so single-box +
+      # multi-box dev deployments boot cleanly; set to `true` in
+      # production .env to re-enable strict FIPS enforcement.
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:

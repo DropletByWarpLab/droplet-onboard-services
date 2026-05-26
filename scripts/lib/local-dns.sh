@@ -246,9 +246,17 @@ setup_router_dns() {
   # mktemp (not /tmp/$$.xxx) so the response file can't be a dangling symlink
   # pre-planted by another user on the host. `trap` guarantees cleanup even if
   # the script is interrupted mid-curl.
-  local resp_file
+  #
+  # RETURN-trap quirk: bash evaluates the trap body when the function
+  # returns; under `set -u` accessing `$resp_file` errors with "unbound
+  # variable" if the function returned before the mktemp assignment OR
+  # if the trap fires in the caller's scope (older bash versions). Use
+  # the `${var:-}` default-empty form so `rm -f ""` is a benign no-op
+  # in either case. Surfaced by setup.sh failing at phase 7/7 on
+  # droplet-sys after a factory-reset.
+  local resp_file=""
   resp_file="$(mktemp -t droplet-dns-resp.XXXXXX 2>/dev/null || mktemp)"
-  trap 'rm -f "$resp_file"' RETURN
+  trap 'rm -f "${resp_file:-}"' RETURN
 
   local http_code
   http_code="$(curl -sS --max-time 10 -o "$resp_file" -w "%{http_code}" \

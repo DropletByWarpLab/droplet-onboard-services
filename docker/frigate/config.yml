@@ -63,10 +63,18 @@ objects:
 # PUT /api/config/set. Manual entries below are preserved across restarts
 # (the config.yml mount is writable so Frigate's in-place migrator and
 # auto-adoption round-trip work).
-cameras:
-  # Hanwha XNV-C8083R dome (8 MP) on switch port 6 / VLAN 100.
-  # profile2 = H.264 3328x1872 @ 30fps (Frigate downsamples to 1280x720 for
-  # detection per the top-level detect block).
+cameras: {}
+  # No cameras configured by default — a fresh provisioning has no per-
+  # camera credentials in .env yet, so the previous live `front_door:`
+  # block raised a KeyError on FRIGATE_CAMERA_FRONT_DOOR_PASSWORD and
+  # restart-looped frigate during factory-reset. Add cameras either via
+  # the dashboard (which discovers ONVIF/RTSP cameras + writes their
+  # credentials to .env + extends this file) OR by uncommenting the
+  # example below and dropping the raw password into .env.
+  #
+  # Hanwha XNV-C8083R dome (8 MP) on switch port 6 / VLAN 100, profile2 =
+  # H.264 3328x1872 @ 30fps (Frigate downsamples to 1280x720 for detection
+  # per the top-level detect block).
   #
   # The password comes from FRIGATE_CAMERA_FRONT_DOOR_PASSWORD via Frigate's
   # str.format substitution (frigate/config/env.py): the env value is dropped
@@ -75,10 +83,11 @@ cameras:
   # `Droplet123%21`. The bundled jetson ffmpeg does not URL-decode userinfo
   # before authenticating, so percent-escapes go on the wire literally and
   # the camera returns 401, then locks the account after ~5 retries.
-  front_door:
-    ffmpeg:
-      inputs:
-        - path: "rtsp://admin:{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}@192.168.100.219:554/profile2/media.smp"
-          roles:
-            - detect
-            - record
+  #
+  # front_door:
+  #   ffmpeg:
+  #     inputs:
+  #       - path: "rtsp://admin:{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}@192.168.100.219:554/profile2/media.smp"
+  #         roles:
+  #           - detect
+  #           - record
