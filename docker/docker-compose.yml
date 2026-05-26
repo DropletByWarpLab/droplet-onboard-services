@@ -249,6 +249,17 @@ services:
       # dev install override the whole pair with a single env var
       # without needing both names in their local .env.
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_MCP:-${ORCHESTRATOR_TOKEN:-}}
+      # WARP-229: FIPS self-test gating. The mcp-server's startup
+      # invokes @droplet/fips-selftest, which exits non-zero on
+      # development hosts where OpenSSL's FIPS provider isn't loaded —
+      # restart-looping the container. The orchestrator already opts
+      # out via this same env on non-production deployments (see its
+      # log: "FIPS boot self-test skipped (DROPLET_FIPS_REQUIRED=false
+      # or non-production env)"); mcp-server needs the same opt-out
+      # passed through compose. Defaults to `false` so single-box +
+      # multi-box dev deployments boot cleanly; set to `true` in
+      # production .env to re-enable strict FIPS enforcement.
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:
