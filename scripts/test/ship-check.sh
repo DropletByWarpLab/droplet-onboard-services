@@ -580,9 +580,186 @@ run_check_matter_env_allowlist() {
 }
 
 run_check_docker_build_smoke() {
-  printf "  ${_YELLOW}SKIP${_RESET}  docker-build-smoke (not yet implemented)\n"
-  CHECK_RESULTS[docker-build-smoke]=skip
-  return 0
+  # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
+  # into it (NOT mount — avoids mutating the operator's tree), installs
+  # the host-side prerequisites setup.sh expects (openssl, git, curl,
+  # docker.io client + plugin), then runs:
+  #
+  #   ./scripts/setup.sh --skip-docker --skip-build --skip-start --skip-drivers
+  #
+  # The four skips together exercise the BASH layer end-to-end on a
+  # vanilla Ubuntu LTS — env generation, secret materialization, library
+  # sourcing, hostname validation, the whole phase 1/4/5 of setup.sh —
+  # without requiring docker-in-docker or running the actual container
+  # build (which would take 30+ min in CI and need a writable Docker
+  # socket).
+  #
+  # Bugs this WILL catch:
+  #   - WARP-446 class: KeyError-equivalent at script execution time.
+  #   - WARP-329 class is already covered by tsc-full.
+  #   - PR #263 set-u/RETURN-trap class: setup.sh phase 7/7 fails
+  #     before the OpenWrt round-trip on a fresh Ubuntu (this is the
+  #     literal failure mode from droplet-sys 2026-05-25).
+  #   - Bash-version drift: a script that works on bash 5.2 (macOS via
+  #     brew) but breaks on bash 5.1 (Ubuntu 22.04) or 5.2.21
+  #     (Ubuntu 24.04 LTS default).
+  #
+  # Bugs this WILL NOT catch:
+  #   - WARP-456 missing audit-key mount (manifests at container start
+  #     via `docker compose up`).
+  #   - WARP-229 missing FIPS opt-out env (same).
+  #   Catching those requires a real `docker compose up` smoke — that's
+  #   a separate follow-up ticket; this check is the BASH-LAYER
+  #   counterpart.
+  #
+  # Why an Ubuntu 24.04 LTS image (not Alpine, not the latest tag)?
+  #   - 24.04 is the supported target host for production Droplet boxes.
+  #   - Pinning to LTS means the smoke test catches drift specifically
+  #     against what real boxes run, not a moving Latest target.
+  local label="docker-build-smoke"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    printf "  ${_RED}FAIL${_RESET}  %s — docker daemon not reachable\n" "$label"
+    printf "    | On macOS: start Docker Desktop.\n" >&2
+    printf "    | On Linux: ensure /var/run/docker.sock is accessible.\n" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  local image="ubuntu:24.04"
+  # A predictable container name lets the trap target it even if the
+  # docker run is mid-flight when we get SIGTERM.
+  local container_name="droplet-ship-check-$$"
+
+  # shellcheck disable=SC2064
+  trap "docker rm -f '$container_name' >/dev/null 2>&1 || true" RETURN
+
+  printf "  running %s (this may take 5-10 minutes)...\n" "$label"
+
+  # The inner script runs INSIDE the Ubuntu container. We pipe it via
+  # stdin so we don't have to write a second file. -y on apt-get keeps
+  # it non-interactive; DEBIAN_FRONTEND=noninteractive suppresses the
+  # tzdata-style prompts that otherwise block a fresh Ubuntu install.
+  #
+  # We deliberately DO NOT install docker.io inside the container — the
+  # `--skip-docker` flag tells setup.sh to bypass `install_docker()`,
+  # and the only call site of `detect_docker_sudo()` runs UNCONDITIONALLY
+  # at phase 2 (even with --skip-docker). To get past that without a
+  # real docker daemon, we plant a `docker` shim on PATH that responds
+  # to `docker info` with exit 0. The shim is enough to satisfy
+  # detect_docker_sudo's preflight; nothing in the --skip-start /
+  # --skip-build / --skip-drivers paths actually invokes docker
+  # afterward.
+  local inner_script
+  inner_script=$(cat <<'INNER'
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null
+apt-get install -y -qq --no-install-recommends \
+  bash openssl git curl ca-certificates rsync sudo >/dev/null
+
+# setup.sh refuses to run as root (preflight check), so we create a
+# normal user with passwordless sudo and drop privileges before running
+# the script. Mirrors the real-device path: an operator on Ubuntu does
+# NOT run setup as root; they run as their own account with sudo.
+useradd -m -s /bin/bash droplet-test
+echo 'droplet-test ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/droplet-test
+chmod 440 /etc/sudoers.d/droplet-test
+
+# Plant a docker shim that satisfies setup.sh's detect_docker_sudo. The
+# shim must be exec'able by droplet-test (not just root) — /usr/local/bin
+# is on the default PATH for both users so a chmod 755 suffices.
+#
+# `docker info` → exit 0 (lets detect_docker_sudo conclude "daemon
+#                 reachable, no sudo needed").
+# `docker run`  → exit 1 (forces secret-materialization callers like
+#                 _generate_mosquitto_passwd into their plaintext
+#                 fallback — no real container produces output here,
+#                 so the success branch would crash on "file not
+#                 written". The fallback path is the OLD pre-docker
+#                 path and exercises a different code path, which is
+#                 fine for smoke purposes.).
+# everything else → exit 0 (be permissive; setup.sh never inspects
+#                  output beyond these two cases in the --skip-* path).
+cat > /usr/local/bin/docker <<'SHIM'
+#!/bin/sh
+case "$1" in
+  info) exit 0 ;;
+  run)  exit 1 ;;
+  *)    exit 0 ;;
+esac
+SHIM
+chmod 755 /usr/local/bin/docker
+
+# /repo is the read-only host bind-mount. setup.sh writes .env, the
+# secrets/ tree, and .data/.setup.lock — none of which can land on the
+# operator's host tree. Copy into a writable workdir using rsync (skip
+# node_modules + .git + .next to keep the copy under 30s even on slow
+# disks). git-related setup.sh steps don't run with our --skip set, so
+# we don't need .git for this smoke.
+mkdir -p /work
+rsync -a \
+  --exclude '/node_modules' \
+  --exclude '**/node_modules' \
+  --exclude '/.git' \
+  --exclude '/.next' \
+  --exclude '/apps/*/.next' \
+  --exclude '/.data' \
+  /repo/ /work/
+chown -R droplet-test:droplet-test /work
+
+# Run setup.sh as droplet-test with every skip — we exercise the script
+# LAYER (preflight + secrets + env materialization + hostname validation
+# + sourcing) without touching docker, builds, or the LAN. ROUTING_MODE
+# = disabled stops local-dns.sh from trying to register with a router
+# that doesn't exist inside the container.
+su - droplet-test -c '
+  cd /work && \
+  ROUTING_MODE=disabled \
+  bash ./scripts/setup.sh \
+    --skip-docker \
+    --skip-build \
+    --skip-start \
+    --skip-drivers
+'
+INNER
+)
+
+  # docker run with --rm wouldn't let our trap re-attempt cleanup if the
+  # initial `docker rm -f` races. Use --name + explicit rm in the trap.
+  #
+  # MSYS_NO_PATHCONV=1 is necessary when this script runs under Git Bash
+  # on Windows: MSYS auto-rewrites POSIX-looking paths in command args
+  # into Windows form (`/repo` becomes `C:/Program Files/Git/repo`),
+  # which mangles the `-v <src>:<dst>:<opts>` syntax. On Linux/macOS
+  # the variable is unset and ignored. See
+  #   https://github.com/moby/moby/issues/24029#issuecomment-292499324
+  local out rc
+  out="$(MSYS_NO_PATHCONV=1 docker run \
+    --name "$container_name" \
+    -v "$REPO_ROOT:/repo:ro" \
+    "$image" \
+    bash -c "$inner_script" 2>&1)"
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (setup.sh ran clean on %s)\n" "$label" "$image"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  printf "  ${_RED}FAIL${_RESET}  %s — setup.sh failed inside %s (exit %d)\n" "$label" "$image" "$rc"
+  # Tail the output (head 80 lines is enough to see the failure phase
+  # and the immediate context; full output is reproducible by hand).
+  printf '%s\n' "$out" | tail -80 | sed 's/^/    | /' >&2
+  CHECK_RESULTS[$label]=fail
+  return 1
 }
 
 # =============================================================================
