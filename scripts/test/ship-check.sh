@@ -151,9 +151,14 @@ CHECKS
 
   exec-bits             Verify that every shell script the operator is
                         expected to invoke directly (scripts/setup.sh,
-                        scripts/factory-reset.sh, scripts/test/ship-check.sh,
+                        scripts/factory-reset.sh, scripts/camera-drivers.sh,
+                        scripts/install-device-bridge.sh,
+                        scripts/test/ship-check.sh,
                         scripts/test/ship-check.test.sh) has the +x bit
                         set in the git index (mode 100755, not 100644).
+                        The rule: any script whose docs tell operators to
+                        run it as `./scripts/<name>.sh` (or
+                        `sudo ./scripts/<name>.sh`) belongs on this list.
                         Prevents: WARP-487 class — scripts/test/ship-check.sh
                         shipped to main as 100644, so the canonical
                         `./scripts/test/ship-check.sh` invocation in its own
@@ -601,9 +606,10 @@ run_check_matter_env_allowlist() {
 
 run_check_exec_bits() {
   # Verify that every shell script an operator invokes via its path
-  # (./scripts/setup.sh, ./scripts/factory-reset.sh, the two ship-check
-  # scripts) has the +x bit set in the git index — mode 100755, not
-  # 100644.
+  # (./scripts/setup.sh, ./scripts/factory-reset.sh,
+  # ./scripts/camera-drivers.sh, ./scripts/install-device-bridge.sh,
+  # the two ship-check scripts) has the +x bit set in the git index —
+  # mode 100755, not 100644.
   #
   # Why the INDEX mode, not the working-tree mode? Because the working-
   # tree bit is unreliable cross-platform: Windows filesystems don't
@@ -613,21 +619,28 @@ run_check_exec_bits() {
   # canonical signal — it's what other clones will receive on checkout,
   # and it's what `core.fileMode=false` operators rely on.
   #
-  # The allowlist is intentionally narrow: only the scripts the
-  # documentation tells an operator to invoke as `./scripts/<name>.sh`
-  # need to be executable. Anything `bash`-invoked (most scripts under
-  # scripts/lib/, every test helper) works regardless of the bit and
-  # would only generate noise here.
+  # The allowlist is intentionally narrow but covers EVERY operator-
+  # facing entry point: the rule is that any script whose documentation
+  # tells an operator to invoke it as `./scripts/<name>.sh` (or
+  # `sudo ./scripts/<name>.sh`) must be on the list. Anything
+  # `bash`-invoked (most scripts under scripts/lib/, every test helper)
+  # works regardless of the bit and would only generate noise here.
   #
   # When you add a NEW operator-facing script, add its path to the
   # required list below AND set its index mode with
-  # `git update-index --chmod=+x <path>` before pushing.
+  # `git update-index --chmod=+x <path>` before pushing. When you add
+  # a `./scripts/<name>.sh` invocation to documentation (README,
+  # docs/*.md, a service README), audit whether that script is already
+  # on the list — same bug class, same fix.
   #
   # Bug class this catches: WARP-487 — scripts/test/ship-check.sh +
   # scripts/test/ship-check.test.sh shipped to main (PR #266) with
   # mode 100644. `bash <path>` invocation worked, but the canonical
   # `./<path>` form documented in --help became a silent no-op (or
   # fell through to /bin/sh on hosts that respect the index bit).
+  # QA on that same PR uncovered scripts/camera-drivers.sh and
+  # scripts/install-device-bridge.sh shipped with the same 100644 bug;
+  # both are now on the allowlist below.
   local label="exec-bits"
 
   # Scripts that MUST be executable in the git index. Add to this list
@@ -636,6 +649,8 @@ run_check_exec_bits() {
   local required=(
     "scripts/setup.sh"
     "scripts/factory-reset.sh"
+    "scripts/camera-drivers.sh"
+    "scripts/install-device-bridge.sh"
     "scripts/test/ship-check.sh"
     "scripts/test/ship-check.test.sh"
   )
