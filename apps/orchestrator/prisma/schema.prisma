@@ -884,11 +884,11 @@ model User {
   // so future per-membership metadata — joinedAt, addedBy — has a
   // place to land).
   memberships GroupMembership[]
-  // NOTE: `scopeBindings ScopeBinding[]` and `guestExpiry GuestExpiry?`
-  // relations are appended by the next WARP-455 schema chunks (Scope
-  // pgEnum + GuestExpiry). Keeping the User-side reverse-relation
-  // additions in their owning commits keeps each Prisma migration
-  // self-contained and re-runnable in isolation.
+  // Per-user scope bindings — controls which scopes this user can
+  // act inside via requireScope() (see src/middleware/scope.ts).
+  scopeBindings ScopeBinding[]
+  // NOTE: `guestExpiry GuestExpiry?` relation appended by the next
+  // WARP-455 schema chunk (GuestExpiry model).
 
   @@index([role])
 }
@@ -918,6 +918,59 @@ model GroupMembership {
   @@unique([userId, groupId])
   @@index([userId])
   @@index([groupId])
+}
+
+// ── WARP-455: Scope axis (second RBAC axis on top of WARP-171's Role) ──
+//
+// `Scope` is a pgEnum (not a separate Scope table) by design. The set is
+// small and fully known up front; the requireScope() middleware switches
+// on these values directly. Adding a new scope is a schema migration —
+// that's the desired velocity. A table would invert the cost: trivial to
+// add a row, expensive to keep code and data in sync.
+//
+// Values:
+//   - team        — household-wide default (every resource lands here
+//                   absent an explicit binding). Most files, devices,
+//                   chats sit at this scope.
+//   - exec_only   — leadership-tier (founders + COO peers). Private
+//                   docs, finance summaries, board prep.
+//   - finance     — bookkeeping, invoices, payroll.
+//   - engineering — code + technical-ops docs (mirror of the GH org).
+//   - ops         — runbooks, vendor records, day-to-day operations.
+//   - private     — user-owned, never shared. The dashboard hides
+//                   resources at this scope from anyone other than
+//                   the owner; service principals never see them.
+enum Scope {
+  team
+  exec_only
+  finance
+  engineering
+  ops
+  private
+}
+
+// User ↔ Scope many-to-many. A user can be bound to any subset of the
+// six scopes; the unique constraint stops the same scope from being
+// added twice for the same user.
+//
+// Owner / admin roles always pass requireScope() regardless of bindings
+// (they hold every scope by definition — see ADR-004 §3 for the
+// admin-tier-passes-every-write contract). Family / guest must have an
+// explicit binding for the resource's scope; family at `team` is the
+// default seed for new household members.
+model ScopeBinding {
+  id        String   @id @default(uuid())
+  userId    String
+  scope     Scope
+  // Who granted this binding. Audit-only; the dashboard renders
+  // "granted by Alice 3 days ago" from this pair.
+  grantedBy String?
+  grantedAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope])
+  @@index([userId])
+  @@index([scope])
 }
 
 // ── WARP-456: signed append-only activity log ──
