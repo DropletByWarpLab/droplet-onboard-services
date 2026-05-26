@@ -51,6 +51,17 @@ import {
 } from "../services/nextcloud-session.service.js";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+/** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
+ *  (set by the nginx gateway in production), falls back to req.ip. */
+function callerIpFromReq(req: Request): string | undefined {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    return xff.split(",")[0]!.trim();
+  }
+  return req.ip;
+}
 
 const logger = pino({ name: "auth-route" });
 
@@ -220,6 +231,21 @@ export function createPublicAuthRouter(
 
       const result = await ncLoginWithCredentials(parsed.data.username, parsed.data.password);
       if (!result) {
+        // WARP-456: failed login audit row. We intentionally include
+        // the attempted username so an audit reviewer can spot
+        // patterns; the password never reaches the recorder.
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Sign-in failed",
+          sub: `${parsed.data.username} • ${callerIpFromReq(req) ?? "unknown"}`,
+          refs: {
+            outcome: "invalid_credentials",
+            username: parsed.data.username,
+            ip: callerIpFromReq(req) ?? null,
+          },
+        });
         res.status(401).json({ error: "Invalid credentials" });
         return;
       }
@@ -267,6 +293,22 @@ export function createPublicAuthRouter(
         sameSite: "lax",
         path: "/api/auth",
         maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+      });
+
+      // WARP-456: successful sign-in audit row.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-in",
+        what: `${displayName} signed in`,
+        sub: `${role} • ${callerIpFromReq(req) ?? "unknown"}`,
+        refs: {
+          outcome: "success",
+          userId,
+          username,
+          role,
+          ip: callerIpFromReq(req) ?? null,
+        },
       });
 
       res.json({
@@ -742,6 +784,22 @@ export function createProtectedAuthRouter(
 
       res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
       res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+
+      // WARP-456: audit row for the logout. `req.user` is set by the
+      // authMiddleware before this handler runs.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-out",
+        what: req.user?.displayName
+          ? `${req.user.displayName} signed out`
+          : "Sign-out",
+        sub: callerIpFromReq(req) ?? null,
+        refs: {
+          userId: req.user?.id ?? null,
+          ip: callerIpFromReq(req) ?? null,
+        },
+      });
 
       res.json({ status: "ok" });
     } catch (err) {
