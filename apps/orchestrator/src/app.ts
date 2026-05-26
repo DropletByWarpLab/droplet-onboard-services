@@ -33,6 +33,7 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
+import { createSettingsRouter } from "./routes/settings.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -116,6 +117,11 @@ export function createApp(prisma: PrismaClient) {
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma));
+  // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
+  // PATCH section with per-type validation). Mutations emit ActivityRow
+  // rows via recordActivity (kind: system, severity: info — one row per
+  // changed key). Reads open to owner+admin+family; writes owner+admin.
+  app.use("/api", createSettingsRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
