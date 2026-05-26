@@ -44,16 +44,18 @@ export interface ToolContext {
    *  handlers should fall through to a clean error in that case. */
   embedText?: (texts: string[]) => Promise<number[][]>;
   /**
-   * WARP-286 — hybrid retrieval shim. Orchestrator binds this to
-   * `file-search.service.ts`'s `searchHybrid` so the MCP tool handler
-   * doesn't reach into Prisma + pgvector directly. Returns results
-   * already filtered by the calling user's RBAC boundary. When absent
-   * (e.g. embedder unavailable at context-build time) the handler
-   * returns `SEARCH_UNAVAILABLE`.
+   * WARP-286 / WARP-437 — hybrid retrieval shim. Orchestrator binds this
+   * to `file-search.service.ts`'s `searchHybrid`. The optional `enhance`
+   * block is the LLM-facing knob for HyDE / multi-query; the orchestrator
+   * may also inject pre-computed enhancement data via a private field
+   * (see Task 8). Returns results already filtered by RBAC. When absent
+   * (embedder unavailable at context-build time) the handler returns
+   * `SEARCH_UNAVAILABLE`.
    */
   searchHybrid?: (args: {
     query: string;
     limit: number;
+    enhance?: { hyde?: boolean; multiQuery?: boolean; n?: number };
   }) => Promise<
     Array<{
       source: "nextcloud" | "brain";
