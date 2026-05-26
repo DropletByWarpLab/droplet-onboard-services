@@ -31,5 +31,10 @@ COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
 COPY services/_shared/__init__.py /app/_shared/__init__.py
 COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
 
+# WARP-437: pre-download the deberta zero-shot model so first request
+# doesn't pay the 110 MB cold-load latency.
+RUN python -c "from query_classifier import QueryClassifierSingleton; QueryClassifierSingleton.instance()" \
+    || echo "WARP-437 prewarm soft-fail (first call will lazy-load)"
+
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

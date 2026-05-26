@@ -59,6 +59,11 @@ class InferenceServiceStub(object):
                 request_serializer=inference__pb2.RerankRequest.SerializeToString,
                 response_deserializer=inference__pb2.RerankResponse.FromString,
                 _registered_method=True)
+        self.ClassifyQuery = channel.unary_unary(
+                '/droplet.inference.InferenceService/ClassifyQuery',
+                request_serializer=inference__pb2.ClassifyQueryRequest.SerializeToString,
+                response_deserializer=inference__pb2.ClassifyQueryResponse.FromString,
+                _registered_method=True)
 
 
 class InferenceServiceServicer(object):
@@ -100,6 +105,15 @@ class InferenceServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ClassifyQuery(self, request, context):
+        """Zero-shot query classifier — used by the orchestrator's adaptive
+        retrieval router (WARP-437). Returns one of {factual, analytical,
+        conversational, navigational, unknown}.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_InferenceServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -127,6 +141,11 @@ def add_InferenceServiceServicer_to_server(servicer, server):
                     servicer.Rerank,
                     request_deserializer=inference__pb2.RerankRequest.FromString,
                     response_serializer=inference__pb2.RerankResponse.SerializeToString,
+            ),
+            'ClassifyQuery': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClassifyQuery,
+                    request_deserializer=inference__pb2.ClassifyQueryRequest.FromString,
+                    response_serializer=inference__pb2.ClassifyQueryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -264,6 +283,33 @@ class InferenceService(object):
             '/droplet.inference.InferenceService/Rerank',
             inference__pb2.RerankRequest.SerializeToString,
             inference__pb2.RerankResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClassifyQuery(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/droplet.inference.InferenceService/ClassifyQuery',
+            inference__pb2.ClassifyQueryRequest.SerializeToString,
+            inference__pb2.ClassifyQueryResponse.FromString,
             options,
             channel_credentials,
             insecure,
