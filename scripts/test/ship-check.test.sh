@@ -221,6 +221,72 @@ test_compose_config_catches_yaml_breakage() {
 }
 
 # =============================================================================
+# Test: frigate-env-scan catches WARP-446 class (operator-specific env in
+# committed config)
+# =============================================================================
+#
+# Original bug: docker/frigate/config.yml had a live `front_door:` block
+# whose RTSP URL referenced {FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}. The
+# secrets-generation heredoc in scripts/lib/secrets.sh doesn't write any
+# per-camera password (those flow through dashboard discovery), so Frigate
+# raised KeyError on first boot of a fresh `.env` and restart-looped the
+# whole container.
+#
+# Synthetic regression: re-insert exactly that broken block into the
+# committed config and assert the check fails.
+test_frigate_env_scan_catches_unresolved_substitution() {
+  local cfg_rel="docker/frigate/config.yml"
+  local cfg="$REPO_ROOT_REAL/$cfg_rel"
+
+  if [ ! -f "$cfg" ]; then
+    printf "    config file missing: %s\n" "$cfg" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$cfg_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$cfg_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$cfg_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree (the live config uses only
+  #    FRIGATE_MQTT_USER + FRIGATE_MQTT_PASSWORD, both seeded by
+  #    secrets.sh).
+  if ! _assert_check_passes "$REPO_ROOT_REAL" frigate-env-scan; then
+    printf "    baseline frigate-env-scan failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: replace the empty `cameras: {}` line with the
+  #    exact `front_door:` block that PR #263 stripped out — using the
+  #    operator-specific FRIGATE_CAMERA_FRONT_DOOR_PASSWORD env var that
+  #    secrets.sh does NOT seed.
+  awk '
+    /^cameras: \{\}/ {
+      print "cameras:"
+      print "  front_door:"
+      print "    ffmpeg:"
+      print "      inputs:"
+      print "        - path: \"rtsp://admin:{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}@192.168.100.219:554/profile2/media.smp\""
+      print "          roles:"
+      print "            - detect"
+      print "            - record"
+      next
+    }
+    { print }
+  ' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$cfg_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — config unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. frigate-env-scan should now FAIL.
+  _assert_check_fails "$REPO_ROOT_REAL" frigate-env-scan
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -232,6 +298,9 @@ _run_test "tsc-full catches WARP-329 fixture regression" \
 
 _run_test "compose-config catches YAML breakage in docker-compose.yml" \
   test_compose_config_catches_yaml_breakage
+
+_run_test "frigate-env-scan catches unresolved {VAR} substitution" \
+  test_frigate_env_scan_catches_unresolved_substitution
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
