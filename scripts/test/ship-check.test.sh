@@ -287,6 +287,72 @@ test_frigate_env_scan_catches_unresolved_substitution() {
 }
 
 # =============================================================================
+# Test: shellcheck catches PR #263 class (static analysis flags real bash bugs
+# in scripts/lib/*.sh)
+# =============================================================================
+#
+# Original bug class: scripts/lib/local-dns.sh had a `set -u` interaction
+# with a RETURN trap on an `local resp_file` that wasn't initialized, so the
+# trap evaluation in some bash versions hit "unbound variable" and aborted
+# setup.sh at phase 7/7. The fix in PR #263 added `local resp_file=""` plus
+# `${resp_file:-}` in the trap body — exactly the pattern shellcheck would
+# flag IF the regression class were static-analysis-detectable.
+#
+# Caveat: that specific runtime bug (set-u + RETURN trap on uninitialized
+# `local`) is NOT one shellcheck catches today (we verified — it produces
+# no diagnostic at warning or error severity). But the bug class
+# represented by static analysis — declared variables outside functions,
+# bad quoting, parse errors — is exactly what shellcheck is FOR, and we
+# want ship-check to guard the same class of lib/ regressions.
+#
+# Synthetic regression: insert a `local foo="bar"` at the top level of
+# scripts/lib/local-dns.sh (outside any function — SC2168 error). Assert
+# the shellcheck check fails. Restore via `git checkout --` on RETURN.
+test_shellcheck_catches_local_outside_function() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+
+  local target_rel="scripts/lib/local-dns.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" shellcheck; then
+    printf "    baseline shellcheck failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: prepend a `local foo="bar"` after the shebang.
+  #    This violates SC2168 ("local is only valid in functions"), which is
+  #    error-level — caught at any severity from `error` upward.
+  awk '
+    NR == 1 { print; print "local _shipcheck_test_violation=\"x\""; next }
+    { print }
+  ' "$target" > "$target.tmp" && mv "$target.tmp" "$target"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. shellcheck should now FAIL.
+  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -301,6 +367,9 @@ _run_test "compose-config catches YAML breakage in docker-compose.yml" \
 
 _run_test "frigate-env-scan catches unresolved {VAR} substitution" \
   test_frigate_env_scan_catches_unresolved_substitution
+
+_run_test "shellcheck catches local-outside-function in scripts/lib" \
+  test_shellcheck_catches_local_outside_function
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
