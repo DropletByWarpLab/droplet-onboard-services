@@ -845,6 +845,81 @@ enum ApDeviceStatus {
   DECOMMISSIONED
 }
 
+// ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
+//
+// `User` is the local household-directory record. ADDITIVE on top of the
+// Nextcloud-OCS auth fallback in middleware/auth.ts — it does not replace
+// OCS-validated sessions. A row here represents a person the household
+// has deliberately registered through the dashboard's People surface;
+// the Nextcloud fallback continues to populate `req.user` for legacy
+// sessions that haven't yet been mirrored locally.
+//
+// `role` references the WARP-171 `Role` enum (mirrors the TS `Role`
+// union in src/services/jwt.service.ts). No new role enum — that was
+// the contract from ADR-004 §1.
+//
+// `isLocal=true` marks records minted in this table. Nextcloud-mirrored
+// rows (future ticket) would set `isLocal=false` and the delete handler
+// refuses to mutate the OCS-owned identity. Today every row is local;
+// keeping the column lets the dashboard render the "Local" vs "OCS"
+// affordance without a schema migration when mirroring lands.
+model User {
+  id          String   @id @default(uuid())
+  // Login handle. Unique across the directory. For Nextcloud-mirror
+  // rows this matches the OCS user id so `req.user.username` from the
+  // auth middleware resolves directly to this row.
+  username    String   @unique
+  displayName String
+  email       String?
+  role        Role     @default(family)
+  // Locally provisioned vs. mirrored from Nextcloud. Today every row
+  // is local — the dashboard's People surface is the only writer. The
+  // delete handler refuses when isLocal=false to keep OCS-owned
+  // identities off-limits.
+  isLocal     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Many-to-many to Group via GroupMembership (explicit join model
+  // so future per-membership metadata — joinedAt, addedBy — has a
+  // place to land).
+  memberships GroupMembership[]
+  // NOTE: `scopeBindings ScopeBinding[]` and `guestExpiry GuestExpiry?`
+  // relations are appended by the next WARP-455 schema chunks (Scope
+  // pgEnum + GuestExpiry). Keeping the User-side reverse-relation
+  // additions in their owning commits keeps each Prisma migration
+  // self-contained and re-runnable in isolation.
+
+  @@index([role])
+}
+
+// User-curated grouping (households, family branches, work cohorts).
+// Many-to-many to User via GroupMembership.
+model Group {
+  id          String            @id @default(uuid())
+  name        String            @unique
+  description String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  memberships GroupMembership[]
+}
+
+// Explicit join table — `(userId, groupId)` unique so a user can't be
+// listed twice in the same group. `joinedAt` lets the dashboard show
+// "added X days ago" without a separate audit query.
+model GroupMembership {
+  id        String   @id @default(uuid())
+  userId    String
+  groupId   String
+  joinedAt  DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([userId])
+  @@index([groupId])
+}
+
 // ── WARP-456: signed append-only activity log ──
 //
 // Canonical audit trail of every observable event on the device — chat
