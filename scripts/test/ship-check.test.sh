@@ -169,6 +169,58 @@ test_tsc_full_catches_fixture_regression() {
 }
 
 # =============================================================================
+# Test: compose-config catches YAML breakage in docker-compose.yml
+# =============================================================================
+#
+# Original bug class: compose-time regressions where a service definition
+# breaks YAML parsing or references an env var that .env.example doesn't
+# declare. `docker compose config` is the canonical validator — it
+# resolves env interpolation + schema-validates the merged tree.
+#
+# Synthetic regression: corrupt one line of docker-compose.yml (delete the
+# colon after a key) and assert the check fails.
+test_compose_config_catches_yaml_breakage() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return 0
+  fi
+
+  local compose_rel="docker/docker-compose.yml"
+  local compose="$REPO_ROOT_REAL/$compose_rel"
+
+  if [ ! -f "$compose" ]; then
+    printf "    compose file missing: %s\n" "$compose" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$compose_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" compose-config; then
+    printf "    baseline compose-config failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: drop the colon from the first `services:` key so
+  #    YAML parsing errors with "could not find expected ':'".
+  awk 'BEGIN{done=0} /^services:$/ && !done {done=1; sub(/:$/, "", $0)} {print}' \
+       "$compose" > "$compose.tmp" && mv "$compose.tmp" "$compose"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — compose file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. compose-config should now FAIL.
+  _assert_check_fails "$REPO_ROOT_REAL" compose-config
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -177,6 +229,9 @@ printf "  ───────────────────────�
 
 _run_test "tsc-full catches WARP-329 fixture regression" \
   test_tsc_full_catches_fixture_regression
+
+_run_test "compose-config catches YAML breakage in docker-compose.yml" \
+  test_compose_config_catches_yaml_breakage
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
