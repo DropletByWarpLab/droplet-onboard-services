@@ -105,7 +105,13 @@ function createPrismaMock() {
   };
 }
 
-function buildApp(prismaMock: any, user = { username: "alice", role: "family" }) {
+// WARP-171: default test user is `owner` so all the VPN tests (which
+// historically didn't think about role) keep passing. The matrix
+// in `rbac.test.ts` is the canonical source for who-can-do-what;
+// these tests focus on the route's business logic, not the guard.
+// Tests that need a non-privileged caller pass `role: "family"`
+// explicitly.
+function buildApp(prismaMock: any, user = { username: "alice", role: "owner" }) {
   const app = express();
   app.use(express.json());
   // Inject a synthetic auth user so getUser() in the route picks it up.
@@ -161,12 +167,17 @@ describe("GET /api/vpn/status", () => {
 
 describe("GET /api/vpn/peers", () => {
   it("scopes to the calling user's peers by default", async () => {
+    // WARP-171: explicit family-tier caller — the per-user scoping
+    // (`!isAdmin(req) ? { userId: user.username } : {}`) still
+    // applies for GETs; only write routes were tightened to
+    // owner+admin. Default test user changed to owner in WARP-171
+    // so non-WARP-171 tests don't hit the guard.
     const prisma = createPrismaMock();
     prisma.rows.push(
       { id: "p1", userId: "alice", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(1) },
       { id: "p2", userId: "bob", deviceLabel: "laptop", publicKey: "B=", assignedIp: "10.13.13.6", status: "active", createdAt: new Date(2) },
     );
-    const app = buildApp(prisma);
+    const app = buildApp(prisma, { username: "alice", role: "family" });
     const res = await request(app).get("/api/vpn/peers");
     expect(res.status).toBe(200);
     expect(res.body.peers.map((p: any) => p.id)).toEqual(["p1"]);
@@ -369,12 +380,17 @@ describe("DELETE /api/vpn/peers/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("403s when peer belongs to someone else (non-admin)", async () => {
+  it("403s a family-tier caller (WARP-171 — VPN write is owner+admin only)", async () => {
+    // Pre-WARP-171 this test exercised the per-resource ownership
+    // guard ("you can delete YOUR peer but not bob's"). After WARP-171
+    // the route-level guard rejects every family-tier caller at the
+    // door — they don't even reach the ownership check. The 403 still
+    // happens, just from `requireRole("owner", "admin")` instead.
     const prisma = createPrismaMock();
     prisma.rows.push({
       id: "p1", userId: "bob", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(),
     });
-    const app = buildApp(prisma); // alice
+    const app = buildApp(prisma, { username: "alice", role: "family" });
     const res = await request(app).delete("/api/vpn/peers/p1");
     expect(res.status).toBe(403);
   });

@@ -195,13 +195,27 @@ describe("POST /api/auth/invites — create", () => {
     const app = buildApp(prisma);
     const res = await request(app)
       .post("/api/auth/invites")
+      // WARP-171: the legacy wire value "user" is preserved by the
+      // zod preprocessor and coerced to the canonical Role enum value
+      // "family" before it lands in the DB. Existing dashboard builds
+      // that haven't updated to send the canonical name keep working.
       .send({ username: "alice", displayName: "Alice", role: "user" });
     expect(res.status).toBe(200);
     expect(res.body.token).toMatch(/^[A-Za-z0-9_-]{40,}$/);
     expect(res.body.url).toContain(`/invite/${res.body.token}`);
     expect(new Date(res.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
     expect(prisma.rows[0].createdBy).toBe("admin-issuer");
-    expect(prisma.rows[0].role).toBe("user");
+    expect(prisma.rows[0].role).toBe("family");
+  });
+
+  it("admin can create an invite with the canonical Role enum value (WARP-171)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({ username: "alice", displayName: "Alice", role: "family" });
+    expect(res.status).toBe(200);
+    expect(prisma.rows[0].role).toBe("family");
   });
 
   it("non-admin gets 403", async () => {
@@ -323,10 +337,12 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     const publicApp = buildApp(prisma, null);
     const res = await request(publicApp).get(`/api/auth/invites/accept/${token}`);
     expect(res.status).toBe(200);
+    // WARP-171: the persisted role is the canonical Role enum value
+    // (the preprocessor coerced "user" to "family" at create time).
     expect(res.body).toMatchObject({
       username: "alice",
       displayName: "Alice",
-      role: "user",
+      role: "family",
     });
     expect(res.body.expiresAt).toBeDefined();
     // Token MUST NOT echo back to client (defense in depth).

@@ -13,6 +13,7 @@ import {
   setWifiChannel,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import { requireRole } from "../middleware/auth.js";
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -39,7 +40,10 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     }
   });
 
-  router.post("/network/wifi/ssid", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only — changing the
+  // household's SSID drops every connected device, so this stays in
+  // the household-admin tier.
+  router.post("/network/wifi/ssid", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { radio = "radio0", iface_section = "default_radio0", ssid } = req.body;
       if (!ssid || typeof ssid !== "string") {
@@ -62,7 +66,8 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     }
   });
 
-  router.post("/network/wifi/password", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.post("/network/wifi/password", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { iface_section = "default_radio0", password } = req.body;
       if (!password || typeof password !== "string") {
@@ -96,7 +101,8 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     }
   });
 
-  router.post("/network/wifi/channel", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.post("/network/wifi/channel", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { radio_section = "radio0", channel } = req.body;
       if (channel === undefined) {

@@ -25,13 +25,12 @@ const VALID_ROLES: readonly Role[] = ["owner", "admin", "family", "guest", "serv
 /**
  * Derive a role from a Nextcloud group list.
  * Single source of truth — used at login and in the Nextcloud OCS fallback.
- *
- * TODO(Phase 3 / M2.2): Expand to cover the full four-role system.
- * Today only `admin` group → `owner` and everything else → `family` is wired;
- * `admin` and `guest` roles exist in the type but have no group mapping yet.
+ * See ADR-004 §4 for the mapping.
  */
 export function roleFromGroups(groups: string[]): Role {
   if (groups.includes("admin")) return "owner";
+  if (groups.includes("staff")) return "admin";
+  if (groups.includes("guest")) return "guest";
   return "family";
 }
 

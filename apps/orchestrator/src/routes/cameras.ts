@@ -13,6 +13,7 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
+import { requireRole } from "../middleware/auth.js";
 import {
   getCameras,
   getEventsFiltered,
@@ -130,7 +131,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/groups", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family.
+  router.post("/cameras/groups", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { name, icon, cameraNames } = req.body ?? {};
       if (!isValidGroupName(name)) {
@@ -161,7 +163,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/cameras/groups/:id", async (req, res, next) => {
+  router.patch("/cameras/groups/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { name, icon, sortOrder } = req.body ?? {};
       if (name !== undefined && !isValidGroupName(name)) {
@@ -191,7 +193,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/groups/:id", async (req, res, next) => {
+  router.delete("/cameras/groups/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const ok = await groupsSvc.deleteGroup(prisma, req.params.id);
       if (!ok) return res.status(404).json({ error: "Group not found" });
@@ -201,7 +203,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/groups/:id/members", async (req, res, next) => {
+  router.post("/cameras/groups/:id/members", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { cameraNames } = req.body ?? {};
       if (
@@ -226,6 +228,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.delete(
     "/cameras/groups/:id/members/:cameraName",
+    requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {
         if (!isValidCameraName(req.params.cameraName)) {
@@ -270,7 +273,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/pins", async (req, res, next) => {
+  router.post("/cameras/pins", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!req.user?.id) {
         return res.status(401).json({ error: "Authentication required" });
@@ -286,7 +289,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/cameras/pins/reorder", async (req, res, next) => {
+  router.patch("/cameras/pins/reorder", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!req.user?.id) {
         return res.status(401).json({ error: "Authentication required" });
@@ -313,7 +316,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/pins/:cameraName", async (req, res, next) => {
+  router.delete("/cameras/pins/:cameraName", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!req.user?.id) {
         return res.status(401).json({ error: "Authentication required" });
@@ -384,7 +387,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/clips/share", async (req, res, next) => {
+  router.post("/cameras/clips/share", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         nc_path: z.string().min(1).max(2048),
@@ -472,7 +475,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/faces/:name", async (req, res, next) => {
+  router.delete("/cameras/faces/:name", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!FACE_NAME_RE.test(req.params.name)) {
         return res.status(400).json({ error: "Invalid face name" });
@@ -486,6 +489,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.delete(
     "/cameras/faces/:name/images/:image",
+    requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {
         if (!FACE_NAME_RE.test(req.params.name)) {
@@ -504,6 +508,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   router.post(
     "/cameras/faces/:name/from-event/:eventId",
+    requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {
         if (!FACE_NAME_RE.test(req.params.name)) {
@@ -534,7 +539,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.put("/cameras/plates/:plate", async (req, res, next) => {
+  router.put("/cameras/plates/:plate", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!PLATE_RE.test(req.params.plate)) {
         return res.status(400).json({ error: "Invalid plate format" });
@@ -550,7 +555,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/plates/:plate", async (req, res, next) => {
+  router.delete("/cameras/plates/:plate", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!PLATE_RE.test(req.params.plate)) {
         return res.status(400).json({ error: "Invalid plate format" });
@@ -622,7 +627,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/system/restart", async (req, res, next) => {
+  // WARP-171: per-route guard. owner ONLY — restarting the Frigate
+  // container drops every active stream and pauses event recording
+  // for the duration. Matches the matrix's service-restart row.
+  router.post("/cameras/system/restart", requireRole("owner"), async (req, res, next) => {
     try {
       // Restart is destructive (every camera goes dark for ~10s) so we
       // gate it behind the network-command tier-2 confirmation flow.
@@ -670,7 +678,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Manually add a camera (name + RTSP URL) ---
-  router.post("/cameras", async (req, res, next) => {
+  router.post("/cameras", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { name, rtspUrl, manufacturer, model } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
@@ -719,7 +727,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Trigger a discovery scan ---
-  router.post("/cameras/scan", async (_req, res) => {
+  router.post("/cameras/scan", requireRole("owner", "admin", "family"), async (_req, res) => {
     try {
       const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/scan`, {
         method: "POST",
@@ -819,6 +827,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // description hasn't landed yet.
   router.post(
     "/cameras/events/:eventId/regenerate-description",
+    requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {
         if (!isValidEventId(req.params.eventId)) {
@@ -850,7 +859,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // retention pass. Idempotent on Frigate's end. Returns 204 since the
   // dashboard already has the event DTO and just needs to flip the
   // boolean locally on success.
-  router.post("/cameras/events/:eventId/retain", async (req, res, next) => {
+  router.post("/cameras/events/:eventId/retain", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.eventId)) {
         return res.status(400).json({ error: "Invalid event ID format" });
@@ -929,7 +938,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
   /** Frigate review IDs are UUID-ish — looser than event IDs but bound
    *  to the same character class. Same regex serves both. */
-  router.post("/cameras/reviews/:reviewId/viewed", async (req, res, next) => {
+  router.post("/cameras/reviews/:reviewId/viewed", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
@@ -1174,7 +1183,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Accept a discovered camera ---
-  router.post("/cameras/discovered/:id/accept", async (req, res, next) => {
+  router.post("/cameras/discovered/:id/accept", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const camera = await prisma.camera.update({
         where: { id: req.params.id },
@@ -1187,7 +1196,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Reject a discovered camera ---
-  router.post("/cameras/discovered/:id/reject", async (req, res, next) => {
+  router.post("/cameras/discovered/:id/reject", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       await prisma.camera.delete({ where: { id: req.params.id } });
       res.json({ status: "rejected" });
@@ -1229,7 +1238,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/drivers/fix", async (_req, res, next) => {
+  // WARP-171: per-route guard. owner + admin — Frigate driver install
+  // is a system-config mutation, not a household-tier operation.
+  router.post("/cameras/drivers/fix", requireRole("owner", "admin"), async (_req, res, next) => {
     try {
       // Forward DEVICE_SECRET for authentication (the discovery service
       // requires it for kernel module operations like modprobe)
@@ -1270,7 +1281,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/subnet/setup", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin — subnet provisioning
+  // is a network-layer write (carves out 192.168.100.0/24 isolation).
+  router.post("/cameras/subnet/setup", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
@@ -1313,7 +1326,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/cameras/subnet", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin — same as subnet/setup.
+  router.delete("/cameras/subnet", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
@@ -1439,7 +1453,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Enable camera ---
-  router.post("/cameras/:name/enable", async (req, res, next) => {
+  router.post("/cameras/:name/enable", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -1456,7 +1470,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Disable camera (Tier 2 — requires confirmation) ---
-  router.post("/cameras/:name/disable", async (req, res, next) => {
+  router.post("/cameras/:name/disable", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -1490,7 +1504,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   });
 
   // --- Delete camera (Tier 2 — requires confirmation) ---
-  router.delete("/cameras/:name", async (req, res, next) => {
+  router.delete("/cameras/:name", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -1544,7 +1558,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.put("/cameras/:name/notifications", async (req, res, next) => {
+  router.put("/cameras/:name/notifications", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -1864,7 +1878,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/cameras/:name/settings", async (req, res, next) => {
+  router.patch("/cameras/:name/settings", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2075,7 +2089,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
    *   the user's Nextcloud. Returns the resulting Nextcloud path so the
    *   dashboard can deep-link into the Files app.
    */
-  router.post("/cameras/:name/clips/export", async (req, res, next) => {
+  router.post("/cameras/:name/clips/export", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2135,7 +2149,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/:name/ptz", async (req, res, next) => {
+  router.post("/cameras/:name/ptz", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -2162,7 +2176,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/:name/ptz/preset", async (req, res, next) => {
+  router.post("/cameras/:name/ptz/preset", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });

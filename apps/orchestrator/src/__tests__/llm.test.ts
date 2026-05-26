@@ -8,6 +8,9 @@ import { initDeviceService } from "../services/device.service.js";
 // Stub auth middleware — pulls a role from `x-test-role` so tests can
 // exercise both authenticated and unauthenticated paths. Matches the
 // pattern in `llm-chat.integration.test.ts` and `llm-tools-route.test.ts`.
+// WARP-171: also stub `requireRole` as a no-op so route files that now
+// import it (auth, devices, files, …) load cleanly. RBAC coverage for
+// these guards lives in `rbac.test.ts` which uses the real middleware.
 vi.mock("../middleware/auth.js", () => ({
   authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
     const role = req.headers["x-test-role"];
@@ -19,6 +22,7 @@ vi.mock("../middleware/auth.js", () => ({
     }
     next();
   },
+  requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
 }));
 
 // Stub ChatPersistenceService so tests can spy on individual methods
