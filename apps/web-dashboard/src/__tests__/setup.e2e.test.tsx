@@ -37,8 +37,14 @@ const createVpnPeerMock = vi.fn();
 const sendChatMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
-  setupAdmin: (...args: unknown[]) => setupAdminMock(...args),
-  loginUser: (...args: unknown[]) => loginUserMock(...args),
+  // Forwarders use typed Parameters<typeof …> so spread inference passes
+  // tsc --noEmit (the original `...args: unknown[]` form tripped TS2556
+  // because the real signatures aren't variadic). Uncovered by WARP-482's
+  // ship-check tsc-full; the actual mock surface is unchanged.
+  setupAdmin: (...args: Parameters<typeof setupAdminMock>) =>
+    setupAdminMock(...args),
+  loginUser: (...args: Parameters<typeof loginUserMock>) =>
+    loginUserMock(...args),
 
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),

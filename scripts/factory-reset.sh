@@ -220,7 +220,11 @@ if [ $remaining -gt 0 ]; then
       osascript -e 'quit app "Docker"' 2>/dev/null || true
       sleep 5
       open -a Docker
-      local docker_retries=30
+      # Top-level scope here (this block is at file scope, NOT inside a
+      # function), so `local` would be a no-op and SC2168 fires at the
+      # static-analysis layer. Plain assignment keeps the var visible to
+      # the loop below — which is the only thing that reads it.
+      docker_retries=30
       while [ $docker_retries -gt 0 ]; do
         docker info >/dev/null 2>&1 && break
         docker_retries=$((docker_retries - 1))
