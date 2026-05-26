@@ -285,9 +285,137 @@ run_check_compose_config() {
 }
 
 run_check_frigate_env_scan() {
-  printf "  ${_YELLOW}SKIP${_RESET}  frigate-env-scan (not yet implemented)\n"
-  CHECK_RESULTS[frigate-env-scan]=skip
-  return 0
+  # Walk docker/frigate/config.yml line by line, strip comments, then capture
+  # every `{NAME}` Python-format substitution. Cross-reference each name
+  # against three known-good sources:
+  #
+  #   1. .env.example keys           (canonical operator-facing env catalogue)
+  #   2. scripts/lib/secrets.sh keys (boot-time heredoc; always written into
+  #                                   .env by a fresh setup.sh run)
+  #   3. The frigate service's `environment:` block in docker-compose.yml
+  #      (covers static FRIGATE_MQTT_HOST/PORT and any compose-injected vars
+  #      that never appear in .env.example)
+  #
+  # Any {NAME} that resolves nowhere is the WARP-446 class — Frigate's
+  # str.format substitution at boot will KeyError and the container restart-
+  # loops the whole stack.
+  local label="frigate-env-scan"
+  local cfg="$REPO_ROOT/docker/frigate/config.yml"
+  local env_example="$REPO_ROOT/.env.example"
+  local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
+  local compose="$REPO_ROOT/docker/docker-compose.yml"
+
+  if [ ! -f "$cfg" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$cfg"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+  if [ ! -f "$env_example" ] && [ ! -f "$REPO_ROOT/.env" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — neither .env.example nor .env found at repo root\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # Build the known-good set: union of env-file keys, secrets.sh keys, and
+  # the frigate environment: block in docker-compose.yml. One name per line
+  # so `grep -Fx` can match cleanly.
+  #
+  # Comment-stripping limitation: `sed 's/#.*$//'` correctly handles the
+  # current frigate config (all # markers are leading or follow whitespace),
+  # but would false-positive on hash chars inside a string value. Frigate
+  # YAML for our use-case never quotes such strings — credentials come via
+  # env, paths don't contain hashes. Documented for future maintainers.
+  local known_names
+  known_names="$(
+    {
+      # 1. .env.example (preferred — checked into repo).
+      if [ -f "$env_example" ]; then
+        sed 's/#.*$//' "$env_example" \
+          | grep -oE '^[A-Z_][A-Z0-9_]*=' \
+          | sed 's/=$//'
+      fi
+      # 2. scripts/lib/secrets.sh — the boot-time heredoc writes these
+      #    into .env every fresh provisioning, so they're always present
+      #    at Frigate start time on a real device.
+      if [ -f "$secrets_sh" ]; then
+        sed 's/#.*$//' "$secrets_sh" \
+          | grep -oE '^[[:space:]]*[A-Z_][A-Z0-9_]*=' \
+          | sed -E 's/^[[:space:]]+//; s/=$//'
+      fi
+      # 3. Frigate service `environment:` block in docker-compose.yml.
+      #    Extracts the env keys from the lines between `frigate:` and
+      #    the next top-level service. Captures both `KEY=value` and
+      #    `KEY=${OTHER:-default}` forms.
+      if [ -f "$compose" ]; then
+        awk '
+          /^  frigate:[[:space:]]*$/ { in_frigate=1; next }
+          in_frigate && /^  [a-z]/    { in_frigate=0 }
+          in_frigate && /^[[:space:]]+- [A-Z_][A-Z0-9_]*=/ {
+            sub(/^[[:space:]]+-[[:space:]]+/, "")
+            sub(/=.*$/, "")
+            print
+          }
+        ' "$compose"
+      fi
+    } | sort -u
+  )"
+
+  # Extract every {NAME} reference outside comments. Each line gets its
+  # comment portion stripped, then we grep-only the matches and dedupe.
+  # We also keep file:line context so a violation report can point at the
+  # exact offender.
+  local matches
+  matches="$(
+    awk '
+      {
+        # Strip everything from the first `#` onward — handles leading
+        # comments and inline comments alike.
+        sub(/#.*$/, "")
+        line=$0
+        # Pull every {NAME} substring out, NAME-only (no braces).
+        while (match(line, /\{[A-Z_][A-Z0-9_]*\}/)) {
+          name = substr(line, RSTART+1, RLENGTH-2)
+          printf "%d:%s\n", NR, name
+          line = substr(line, RSTART + RLENGTH)
+        }
+      }
+    ' "$cfg"
+  )"
+
+  if [ -z "$matches" ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (no {VAR} substitutions in config)\n" "$label"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  # Cross-reference each match against the known set. `grep -Fx` does an
+  # exact full-line match so e.g. FRIGATE_MQTT_USER doesn't accidentally
+  # match FRIGATE_MQTT_USERNAME.
+  local violations=""
+  local lineno name
+  while IFS=: read -r lineno name; do
+    [ -n "$name" ] || continue
+    if ! printf '%s\n' "$known_names" | grep -Fxq "$name"; then
+      violations+="    docker/frigate/config.yml:${lineno}: unresolved {${name}}"$'\n'
+    fi
+  done <<< "$matches"
+
+  if [ -z "$violations" ]; then
+    local ref_count
+    ref_count="$(printf '%s\n' "$matches" | wc -l | tr -d ' ')"
+    printf "  ${_GREEN}PASS${_RESET}  %s (%d reference(s) all resolved)\n" "$label" "$ref_count"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  printf "  ${_RED}FAIL${_RESET}  %s — frigate config references env vars no source seeds\n" "$label"
+  printf '%s' "$violations" >&2
+  printf "    | Frigate substitutes at boot via Python str.format — unresolved\n" >&2
+  printf "    | refs raise KeyError and the container restart-loops the stack.\n" >&2
+  printf "    | Either remove the offending block from docker/frigate/config.yml\n" >&2
+  printf "    | or seed the variable in scripts/lib/secrets.sh / .env.example.\n" >&2
+  CHECK_RESULTS[$label]=fail
+  return 1
 }
 
 run_check_shellcheck() {
