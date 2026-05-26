@@ -1,0 +1,21 @@
+# WARP-436 RAG Phase 2 — RAGAS eval harness. NOT a production dependency.
+#
+# This file lives only in tests/retrieval-eval/ragas/. Production code
+# (services/file-indexer, apps/orchestrator, services/ai-gateway) must
+# never import from this directory. The harness is offline-only and runs
+# under scripts/test-rag.sh --with-ragas (added in batch C, step 2.5).
+#
+# Pinning rationale:
+#   - ragas: pinned to 0.4.3 because the metric API stabilized at 0.4 and
+#     0.5 is on the horizon with breaking changes (per upstream changelog).
+#     Bump deliberately, with a re-baseline run.
+#   - openai: >=1.0 for the OpenAI-compat client. Points at local Ollama
+#     by default (http://localhost:11434/v1) via ragas.llms.llm_factory.
+#   - datasets / pandas: needed by ragas.evaluate() return shape.
+#   - pyyaml: load goldens.yaml + queries.yaml.
+
+ragas==0.4.3
+openai>=1.0
+datasets>=2.14
+pandas>=2.0
+pyyaml>=6.0

@@ -1,0 +1,171 @@
+# WARP-436 RAG Phase 2 — RAGAS goldens for the WARP-286 query corpus.
+#
+# Each entry matches a query in ../queries.yaml by `id`. Adds two fields
+# that RAGAS metrics require but the NDCG@10 harness does not:
+#
+#   - expected_answer: the ground-truth answer string. Used by
+#     FactualCorrectness and AnswerRelevancy.
+#   - reference_contexts: short prose descriptions of the chunks that
+#     should appear in the retrieved context. Used by LLMContextRecall
+#     and LLMContextPrecision (where "reference" = the gold answer).
+#
+# Many of these expected_answers are derived from docs/RAG_TESTING.md's
+# "Flows under test" table (the WARP-224 chat-citation suite), where each
+# fixture has a documented sentinel substring. Queries that test retrieval
+# mechanics (rare-token lexical hits, path-token matches) rather than
+# answer synthesis get a best-effort answer with a TODO marker — those
+# need a fixture-walk pass by someone with the corpus loaded.
+#
+# Sourcing legend:
+#   [WARP-TESTING] — verified against docs/RAG_TESTING.md sentinels
+#   [INFERRED]     — derived from queries.yaml notes + fixture filename
+#                    conventions; correct in spirit, may need wording tweak
+#   [TODO]         — fixture-content not in current docs; team to verify
+#
+# Do not bump the schema (id / expected_answer / reference_contexts)
+# without updating ragas_runner.py in lockstep.
+
+goldens:
+  - id: q01
+    # [WARP-TESTING] sample.pdf has Q4 budget; warp224-audio says "hundred thousand"
+    expected_answer: "The Q4 budget is one hundred thousand dollars."
+    reference_contexts:
+      - "sample.pdf body discusses the Q4 budget"
+      - "warp224-audio.wav transcript mentions one hundred thousand"
+
+  - id: q02
+    # [WARP-TESTING] alphahotel is the documented sentinel in sample.pdf
+    expected_answer: "The string 'alphahotel' appears as a sentinel token in sample.pdf."
+    reference_contexts:
+      - "sample.pdf body contains the rare token 'alphahotel'"
+
+  - id: q03
+    # [WARP-TESTING] subtitle stream of warp224-video-subs contains the phrase
+    expected_answer: "The phrase 'budget meeting kickoff' appears in the subtitle track of warp224-video-subs.mp4."
+    reference_contexts:
+      - "warp224-video-subs.mp4 subtitle chunk contains 'budget meeting kickoff'"
+
+  - id: q04
+    # [WARP-TESTING] warp206-image.png OCR yields text including 'echofoxtrot'
+    expected_answer: "The screenshot's OCR-extracted text contains the sentinel 'echofoxtrot'."
+    reference_contexts:
+      - "warp206-image.png OCR-recovered text"
+
+  - id: q05
+    # [WARP-TESTING] echofoxtrot is the rare OCR sentinel
+    expected_answer: "'echofoxtrot' is a sentinel token visible via OCR in warp206-image.png."
+    reference_contexts:
+      - "warp206-image.png OCR token list"
+
+  - id: q06
+    # [WARP-TESTING] email body sentinel: "bob, see the attached pdf"
+    expected_answer: "Bob's email mentions an attached PDF proposal."
+    reference_contexts:
+      - "warp224-email.eml body sentence about Bob attaching a PDF"
+
+  - id: q07
+    # [INFERRED] same email; the attached-PDF reference is the answer
+    expected_answer: "The full proposal is attached as a PDF to the warp224-email.eml message."
+    reference_contexts:
+      - "warp224-email.eml body referencing the attached PDF"
+      - "warp224-email.eml '--- Attachment: ' separator chunk"
+
+  - id: q08
+    # [WARP-TESTING] 'ONE HUNDRED THOUSAND' appears in frame OCR and subtitles
+    expected_answer: "'ONE HUNDRED THOUSAND' appears both in the slide frame OCR and in the meeting recording's subtitles."
+    reference_contexts:
+      - "warp224-video-frame frame-OCR chunk containing 'ONE HUNDRED THOUSAND'"
+      - "warp224-video-subs subtitle chunk containing 'ONE HUNDRED THOUSAND'"
+
+  - id: q09
+    # [WARP-TESTING] BUDGET KICKOFF is the frame-OCR slide title
+    expected_answer: "The 'BUDGET KICKOFF' slide is visible in warp224-video-frame.mp4 via frame OCR."
+    reference_contexts:
+      - "warp224-video-frame.mp4 frame-OCR chunk for the BUDGET KICKOFF slide"
+
+  - id: q10
+    # [WARP-TESTING] simple.zip member contains the budget note
+    expected_answer: "The zip archive contains a note saying the Q4 budget is one hundred thousand."
+    reference_contexts:
+      - "simple.zip member chunk with '--- Member: ' separator and the budget note"
+
+  - id: q11
+    # [WARP-TESTING] exact phrase across the zip note + audio transcript
+    expected_answer: "The phrase 'the budget for q4 is one hundred thousand' appears in both the zip archive note and the warp224-audio.wav transcript."
+    reference_contexts:
+      - "simple.zip member chunk with the budget phrase"
+      - "warp224-audio.wav transcript chunk with the budget phrase"
+
+  - id: q12
+    # [INFERRED-CONFIRMED] 'Tesseract OCR' is the engine name used by
+    # the warp206-image extractor (services/file-indexer extractors). The
+    # query tests synonym/engine-name recall — answer reflects that the
+    # screenshot is OCR'd by Tesseract and contains the echofoxtrot
+    # sentinel as the recovered text.
+    expected_answer: "warp206-image.png is processed by the Tesseract OCR extractor; the recovered text includes the 'echofoxtrot' sentinel."
+    reference_contexts:
+      - "warp206-image.png OCR-recovered text containing the echofoxtrot sentinel"
+
+  - id: q13
+    # [INFERRED-CONFIRMED] Per RAG_TESTING.md, the documented sentinels in
+    # warp224-video-subs are 'budget meeting kickoff' and in warp224-audio
+    # are 'hundred thousand'. 'revenue' is NOT a literal sentinel — this
+    # query tests synonym-recall (does retrieval surface budget-related
+    # chunks when asked about 'revenue'?). Answer reflects that synonym
+    # bridge: the figures discussed are budget figures, not revenue.
+    expected_answer: "The Q4 budget figure of one hundred thousand dollars appears in both the warp224-video-subs.mp4 meeting subtitles and the warp224-audio.wav transcript; the fixtures discuss budget rather than revenue."
+    reference_contexts:
+      - "warp224-video-subs.mp4 subtitle chunk with the 'budget meeting kickoff' phrase"
+      - "warp224-audio.wav transcript chunk with the 'hundred thousand' figure"
+
+  - id: q14
+    # [INFERRED] 'rfc822' is the email MIME type — likely in metadata/MIME
+    # column, not body. This is a meta-query about format detection.
+    expected_answer: "warp224-email.eml is an RFC 822-formatted email message."
+    reference_contexts:
+      - "warp224-email.eml header chunk identifying the RFC 822 format"
+
+  - id: q15
+    # [INFERRED-CONFIRMED] Per RAG_TESTING.md Flow #5, the video-frame
+    # chunks carry a '--- Frame OCR ---' separator and contain BUDGET
+    # KICKOFF + ONE HUNDRED THOUSAND as the OCR-extracted slide text.
+    # This is a structural query about the frame-OCR separator/format,
+    # not a literal-substring query.
+    expected_answer: "warp224-video-frame.mp4 chunks include a '--- Frame OCR ---' separator marking the per-frame OCR extractions, with the BUDGET KICKOFF slide title and ONE HUNDRED THOUSAND figure visible in the OCR output."
+    reference_contexts:
+      - "warp224-video-frame.mp4 chunk with '--- Frame OCR ---' separator and the BUDGET KICKOFF slide text"
+
+  - id: q16
+    # [INFERRED-CONFIRMED] Per RAG_TESTING.md Flow #3, warp224-audio.wav
+    # is transcribed via faster-whisper ASR (WARP-197). 'faster-whisper'
+    # is the engine name, not literal transcript content. This query
+    # tests engine-name/synonym recall — answer reflects that the audio
+    # is transcribed by faster-whisper and the transcript content
+    # discusses the Q4 budget.
+    expected_answer: "warp224-audio.wav is transcribed by the faster-whisper ASR engine; the transcript discusses the Q4 budget at one hundred thousand dollars."
+    reference_contexts:
+      - "warp224-audio.wav transcript chunk produced by faster-whisper, mentioning the hundred thousand figure"
+
+  - id: q17
+    # [INFERRED] meta-query about image extraction; warp206-image is the test fixture
+    expected_answer: "warp206-image.png contains screenshot text extracted via OCR."
+    reference_contexts:
+      - "warp206-image.png OCR chunk"
+
+  - id: q18
+    # [INFERRED] path/name lexical match — query contains the folder name itself
+    expected_answer: "The 'test-rag-end-to-end' folder contains the sample.pdf fixture used by the end-to-end test suite."
+    reference_contexts:
+      - "sample.pdf chunk with 'test-rag-end-to-end' in its path"
+
+  - id: q19
+    # [INFERRED] same fixture as q10, different query wording
+    expected_answer: "simple.zip contains an archived note about the Q4 budget."
+    reference_contexts:
+      - "simple.zip member chunk with the budget note"
+
+  - id: q20
+    # [INFERRED] frame-OCR fixture, generic wording
+    expected_answer: "warp224-video-frame.mp4 has on-screen slide text captured via per-frame OCR."
+    reference_contexts:
+      - "warp224-video-frame.mp4 frame-OCR chunk"
