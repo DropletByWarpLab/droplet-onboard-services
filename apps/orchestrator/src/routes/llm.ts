@@ -4,6 +4,7 @@ import type { PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { TOOLS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
@@ -404,9 +405,24 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       }
 
+      // WARP-437 follow-up — production-wire EnhancementDeps behind a
+      // feature flag. `createEnhancementDeps` returns `undefined` unless
+      // `WARP_437_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
+      // default no-enhancement path runs (byte-for-byte WARP-286).
+      // `DEFAULT_MODEL` matches `routes/admin-retrieval-eval.ts` which
+      // already canonicalised the env var name for the eval harness.
+      const aiGatewayGrpcUrl =
+        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const defaultChatModel =
+        process.env.DEFAULT_MODEL ?? "mistral:7b-instruct";
+
       const deps: AgentDeps = {
         mcp: mcpClient,
         aiGateway: { chat: aiGateway.chat },
+        enhancement: createEnhancementDeps({
+          aiGatewayGrpcUrl,
+          defaultModel: defaultChatModel,
+        }),
       };
 
       // Track tool calls observed during streaming so we can include

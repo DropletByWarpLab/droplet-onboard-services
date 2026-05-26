@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyQuery,
   CLASSIFIER_CACHE_TTL_SEC,
+  createEnhancementDeps,
   hydeRewrite,
   multiQueryExpand,
   MULTI_QUERY_DEFAULT_N,
@@ -104,3 +105,44 @@ function makeMemoryCache() {
     },
   };
 }
+
+describe("createEnhancementDeps (WARP-437 production factory)", () => {
+  const orig = process.env.WARP_437_ENHANCEMENT_ENABLED;
+  afterEach(() => {
+    if (orig === undefined) delete process.env.WARP_437_ENHANCEMENT_ENABLED;
+    else process.env.WARP_437_ENHANCEMENT_ENABLED = orig;
+  });
+
+  it("returns undefined when WARP_437_ENHANCEMENT_ENABLED is not '1'", () => {
+    delete process.env.WARP_437_ENHANCEMENT_ENABLED;
+    const out = createEnhancementDeps({
+      aiGatewayGrpcUrl: "ai-gateway:50051",
+      defaultModel: "test-model",
+    });
+    expect(out).toBeUndefined();
+  });
+
+  it("returns undefined for any non-'1' value (e.g. 'true', '0', '')", () => {
+    for (const v of ["true", "0", "", "yes"]) {
+      process.env.WARP_437_ENHANCEMENT_ENABLED = v;
+      const out = createEnhancementDeps({
+        aiGatewayGrpcUrl: "ai-gateway:50051",
+        defaultModel: "test-model",
+      });
+      expect(out).toBeUndefined();
+    }
+  });
+
+  it("returns a deps object with all 4 methods when flag is '1'", () => {
+    process.env.WARP_437_ENHANCEMENT_ENABLED = "1";
+    const out = createEnhancementDeps({
+      aiGatewayGrpcUrl: "ai-gateway:50051",
+      defaultModel: "test-model",
+    });
+    expect(out).toBeDefined();
+    expect(typeof out?.classify).toBe("function");
+    expect(typeof out?.hyde).toBe("function");
+    expect(typeof out?.multiQuery).toBe("function");
+    expect(typeof out?.embed).toBe("function");
+  });
+});

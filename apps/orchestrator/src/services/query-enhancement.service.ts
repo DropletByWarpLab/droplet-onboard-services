@@ -13,6 +13,12 @@
 import { createHash } from "node:crypto";
 
 import type { QueryClass } from "../types/query-enhancement.js";
+import { EmbeddingClient } from "./embedding.client.js";
+import { QueryClassifierClient } from "./query-classifier.client.js";
+import * as aiGateway from "./ai-gateway.client.js";
+import { getRedis } from "./cache.service.js";
+import type { EnhancementDeps } from "./llm-agent.service.js";
+import type { ChatResponse } from "../types/index.js";
 
 // Re-export for type-narrowing call sites.
 export type { QueryClass } from "../types/query-enhancement.js";
@@ -183,4 +189,101 @@ function tryParseJsonArray(text: string): string[] | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Production binding (WARP-437 follow-up — keep below the unit-tested core).
+// The factory below wires `hydeRewrite`, `multiQueryExpand`, `classifyQuery`
+// into an `EnhancementDeps` consumable by the agent loop. Feature-flagged via
+// WARP_437_ENHANCEMENT_ENABLED — when the env var is not "1", the factory
+// returns `undefined` and the agent loop falls back to baseline retrieval.
+// ---------------------------------------------------------------------------
+
+export interface EnhancementFactoryOptions {
+  /** ai-gateway gRPC endpoint, e.g. "ai-gateway:50051". */
+  aiGatewayGrpcUrl: string;
+  /** Default chat model for HyDE / multi-query rewrites. */
+  defaultModel: string;
+}
+
+/**
+ * Build a chat adapter that wraps the HTTP `ai-gateway.client.chat` in the
+ * `ChatClient` shape expected by `hydeRewrite` / `multiQueryExpand`.
+ *
+ * Notes:
+ * - The HTTP route doesn't propagate `priority` — HyDE / multi-query are
+ *   intended as automation-priority (=5) calls but production HTTP doesn't
+ *   carry that field; the priority arg is accepted and discarded.
+ * - On any error or non-OK response the adapter returns `{ content: "" }`;
+ *   the upstream `hydeRewrite` / `multiQueryExpand` already fall back to the
+ *   raw query on empty content, so enhancement degrades gracefully.
+ *   (`aiGateway.chat` throws on non-OK non-stream responses; the catch
+ *   below subsumes both the throw path and any other transport error.)
+ */
+function makeHttpChatAdapter(defaultModel: string): ChatClient {
+  return async (args) => {
+    try {
+      const res = await aiGateway.chat({
+        model: defaultModel,
+        messages: [{ role: "user", content: args.prompt }],
+        stream: false,
+        temperature: args.temperature,
+        max_tokens: args.maxTokens,
+      });
+      if (!res.ok) return { content: "" };
+      const data = (await res.json()) as ChatResponse;
+      return { content: data.choices?.[0]?.message?.content ?? "" };
+    } catch {
+      return { content: "" };
+    }
+  };
+}
+
+/** ClassifyQueryCache adapter over the orchestrator's Redis singleton. */
+function makeRedisClassifierCache(): ClassifyQueryCache {
+  return {
+    async get(key: string): Promise<string | null> {
+      try {
+        return await getRedis().get(key);
+      } catch {
+        return null;
+      }
+    },
+    async setex(key: string, ttl: number, value: string): Promise<unknown> {
+      try {
+        return await getRedis().set(key, value, "EX", ttl);
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/**
+ * Build the production `EnhancementDeps` if the feature flag is on.
+ * Returns `undefined` otherwise — the agent loop treats that the same as
+ * a missing dep (no enhancement, byte-for-byte baseline behaviour).
+ */
+export function createEnhancementDeps(
+  opts: EnhancementFactoryOptions,
+): EnhancementDeps | undefined {
+  if (process.env.WARP_437_ENHANCEMENT_ENABLED !== "1") return undefined;
+
+  const embedder = new EmbeddingClient({ url: opts.aiGatewayGrpcUrl });
+  const classifier = new QueryClassifierClient({ url: opts.aiGatewayGrpcUrl });
+  const cache = makeRedisClassifierCache();
+  const chat = makeHttpChatAdapter(opts.defaultModel);
+
+  return {
+    classify: (query: string) =>
+      classifyQuery({
+        query,
+        rpc: (a) => classifier.classify(a),
+        cache,
+      }).then((r) => ({ cls: r.cls, confidence: r.confidence })),
+    hyde: (query: string) => hydeRewrite({ query, chat }),
+    multiQuery: (query: string, n: number) =>
+      multiQueryExpand({ query, chat, n }),
+    embed: (texts: string[]) => embedder.embed(texts),
+  };
 }

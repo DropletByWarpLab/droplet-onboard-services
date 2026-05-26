@@ -484,13 +484,37 @@ The spec gates that activate once baselines exist:
 
 ### Production wiring status
 
-The `EnhancementDeps` facade on `AgentDeps` is defined but **not yet
-wired in `apps/orchestrator/src/server.ts`** — the production `runAgent`
-call doesn't pass an `enhancement` field, so the LLM agent loop runs
-unmodified (preserving the WARP-286 behaviour) until that follow-up
-lands. The admin `hybrid-enhanced` retrieval-eval variant DOES use the
-full pipeline end-to-end; baselines + production wiring activate in
-follow-up tickets (per ADR-003 Phase 3 § Tickets).
+The agent loop's `EnhancementDeps` is wired in production behind the
+`WARP_437_ENHANCEMENT_ENABLED=1` feature flag (default OFF). When the
+flag is unset or any value other than `"1"`, `createEnhancementDeps` in
+`apps/orchestrator/src/services/query-enhancement.service.ts` returns
+`undefined` and the agent loop runs byte-for-byte the WARP-286 path.
+When the flag is `"1"`, the factory wires:
+
+- `EmbeddingClient` (existing) on `AI_GATEWAY_GRPC_URL` for HyDE /
+  multi-query vector encoding.
+- `QueryClassifierClient` (WARP-437 new) on the same gRPC endpoint for
+  the deberta zero-shot classify call.
+- A Redis-backed `ClassifyQueryCache` over the orchestrator's existing
+  singleton (`apps/orchestrator/src/services/cache.service.ts`).
+- An HTTP chat adapter wrapping `aiGateway.chat` in the `ChatClient`
+  shape expected by `hydeRewrite` / `multiQueryExpand`. The HTTP route
+  doesn't carry the gRPC `priority` field — the adapter accepts and
+  discards it; HyDE / multi-query land at default HTTP priority.
+
+The flag is per-environment, not per-user. Roll out by setting it in
+the orchestrator's `.env` (and recreate the container — `docker restart`
+doesn't re-read env files; see CLAUDE.md's "Updating `.env` on a running
+stack").
+
+First-time deberta model download is ~110 MB; the Dockerfile pre-warm
+covers it for fresh builds. On running containers, the first
+`search_content` call after the flag flip pays the cold-load latency
+(<60 s on the WARP appliance), then steady-state is ~50 ms per classify.
+
+The admin retrieval-eval `hybrid-enhanced` variant does NOT consult the
+feature flag — it always runs the full pipeline so eval coverage is
+independent of the rollout.
 
 ### See also
 
