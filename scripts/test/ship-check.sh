@@ -243,8 +243,44 @@ run_check_tsc_full() {
 }
 
 run_check_compose_config() {
-  printf "  ${_YELLOW}SKIP${_RESET}  compose-config (not yet implemented)\n"
-  CHECK_RESULTS[compose-config]=skip
+  local label="compose-config"
+  local compose="$REPO_ROOT/docker/docker-compose.yml"
+
+  if [ ! -f "$compose" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — %s not found\n" "$label" "$compose"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "  ${_RED}FAIL${_RESET}  %s — docker not on PATH (required for `compose config`)\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # Prefer .env.example (lives in the repo, no operator secrets). Fall back
+  # to .env, which is .gitignored but present on a provisioned device.
+  local env_file=""
+  if [ -f "$REPO_ROOT/.env.example" ]; then
+    env_file="$REPO_ROOT/.env.example"
+  elif [ -f "$REPO_ROOT/.env" ]; then
+    env_file="$REPO_ROOT/.env"
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — neither .env.example nor .env found at repo root\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  local out
+  if ! out="$(docker compose -f "$compose" --env-file "$env_file" config --quiet 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — `docker compose config` rejected the merged tree\n" "$label"
+    printf '%s\n' "$out" | sed 's/^/    | /' >&2
+    printf "    | (env-file used: %s)\n" "${env_file#$REPO_ROOT/}" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  printf "  ${_GREEN}PASS${_RESET}  %s (env-file: %s)\n" "$label" "${env_file#$REPO_ROOT/}"
+  CHECK_RESULTS[$label]=pass
   return 0
 }
 
