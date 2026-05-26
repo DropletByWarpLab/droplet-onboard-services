@@ -38,6 +38,8 @@ import { createDeviceIdentityClient } from "./services/device-identity.client.js
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
+import { seedWorkspaceSettings } from "./services/workspace-settings.service.js";
+import pino from "pino";
 
 export function createApp(prisma: PrismaClient) {
   const app = express();
@@ -136,6 +138,20 @@ export function createApp(prisma: PrismaClient) {
   // Web Push — initialise VAPID + log keys at startup. Idempotent;
   // safe to call before any subscribe/push attempt.
   initPushDispatch();
+
+  // WARP-457: workspace settings first-boot seeder. Idempotent
+  // (insert-or-skip via createMany({skipDuplicates: true})); operator-
+  // edited values survive every subsequent boot. Fire-and-forget here —
+  // if the DB is wedged the orchestrator's later /api/settings calls
+  // will surface the failure; we don't want to block app construction
+  // on a non-critical bootstrap.
+  const seedLogger = pino({ name: "app:workspace-settings" });
+  seedWorkspaceSettings(prisma).catch((err) => {
+    seedLogger.warn(
+      { err },
+      "workspace settings seeder failed (settings table may be unbootstrapped)",
+    );
+  });
 
   // Error handling
   app.use(errorHandler);

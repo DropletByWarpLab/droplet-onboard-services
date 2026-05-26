@@ -297,6 +297,26 @@ main() {
     start_stack
   fi
 
+  # --- Workspace settings seeder (WARP-457) ---
+  # Idempotent first-boot hook for the WorkspaceSetting table. The
+  # orchestrator's app.ts already invokes this at every start; calling
+  # it here from setup.sh makes the install path's intent explicit
+  # ("the settings table is bootstrapped before verify runs") and
+  # surfaces a clean log entry in the install transcript. Re-running
+  # is safe — the underlying seeder is insert-or-skip (createMany +
+  # skipDuplicates) and operator-edited values are never overwritten.
+  if [ "$SKIP_START" != "true" ]; then
+    log_info "Seeding workspace settings (WARP-457; idempotent)..."
+    if run_docker_compose -f "$REPO_ROOT/docker/docker-compose.yml" \
+         --env-file "$REPO_ROOT/.env" \
+         exec -T orchestrator npm run --silent seed 2>&1 \
+         | grep -E "Workspace settings|Seed data" || true; then
+      log_success "Workspace settings seeder completed"
+    else
+      log_warn "Workspace settings seeder exited non-zero — table may already be populated; check: docker compose logs orchestrator"
+    fi
+  fi
+
   # --- Phase 7: Verify ---
   log_step 7 $total_steps "Verify"
   if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
