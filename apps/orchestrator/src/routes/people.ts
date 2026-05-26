@@ -205,10 +205,42 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
           return res.json({ user: existing });
         }
 
-        const updated = await prisma.user.update({
-          where: { id: req.params.id },
-          data: { role: parsed.data.role },
+        // WARP-480 last-owner invariant. At least one user with
+        // role="owner" must remain at all times so owner-only routes
+        // (POST /api/network/system/reboot, the device-identity reseal,
+        // etc.) stay reachable without DB hand-edits. The count + the
+        // update run inside a single interactive $transaction so a
+        // concurrent demotion can't slip past the check window —
+        // serializable isolation is the default for Prisma $transaction
+        // on Postgres, which is what we need here.
+        //
+        // Only fires on owner→non-owner. Owner→owner is filtered out
+        // above by the no-op short-circuit, and non-owner→anything
+        // never touches the invariant.
+        const demotingOnlyOwner =
+          existing.role === "owner" && parsed.data.role !== "owner";
+
+        const result = await prisma.$transaction(async (tx) => {
+          if (demotingOnlyOwner) {
+            const owners = await tx.user.count({ where: { role: "owner" } });
+            if (owners <= 1) {
+              return { kind: "last-owner" as const };
+            }
+          }
+          const updated = await tx.user.update({
+            where: { id: req.params.id },
+            data: { role: parsed.data.role },
+          });
+          return { kind: "ok" as const, updated };
         });
+
+        if (result.kind === "last-owner") {
+          return res.status(409).json({
+            error:
+              "Cannot remove the only owner. Promote another user to owner first.",
+            code: "LAST_OWNER_INVARIANT",
+          });
+        }
 
         await recordActivity({
           kind: "system",
@@ -225,7 +257,7 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
           },
         });
 
-        res.json({ user: updated });
+        res.json({ user: result.updated });
       } catch (err) {
         next(err);
       }
@@ -352,7 +384,28 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
           });
         }
 
-        await prisma.user.delete({ where: { id: req.params.id } });
+        // WARP-480 last-owner invariant. Deleting an owner is only
+        // allowed when at least one other owner remains. count + delete
+        // run inside one interactive $transaction so a concurrent
+        // demotion of the other owner can't slip past the check window.
+        const result = await prisma.$transaction(async (tx) => {
+          if (existing.role === "owner") {
+            const owners = await tx.user.count({ where: { role: "owner" } });
+            if (owners <= 1) {
+              return { kind: "last-owner" as const };
+            }
+          }
+          await tx.user.delete({ where: { id: req.params.id } });
+          return { kind: "ok" as const };
+        });
+
+        if (result.kind === "last-owner") {
+          return res.status(409).json({
+            error:
+              "Cannot remove the only owner. Promote another user to owner first.",
+            code: "LAST_OWNER_INVARIANT",
+          });
+        }
 
         await recordActivity({
           kind: "auth",

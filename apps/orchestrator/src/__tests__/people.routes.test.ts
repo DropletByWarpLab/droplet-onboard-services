@@ -72,7 +72,13 @@ function seedUser(over: Partial<MockUser> = {}): MockUser {
 function createPrismaMock(initialRows: MockUser[] = []) {
   const rows = new Map<string, MockUser>(initialRows.map((u) => [u.id, u]));
   const scopeBindings = new Map<string, Set<string>>();
-  return {
+  // $transaction interactive form: just runs the callback with `this`
+  // as the tx handle. WARP-480's last-owner invariant uses this shape
+  // for the count + mutate pair; same mock idiom as
+  // network.schedules.test.ts and calendar-service.test.ts.
+  const self: any = {};
+  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  return Object.assign(self, {
     rows,
     scopeBindings,
     user: {
@@ -168,7 +174,7 @@ function createPrismaMock(initialRows: MockUser[] = []) {
         },
       ),
     },
-  };
+  });
 }
 
 function buildApp(
