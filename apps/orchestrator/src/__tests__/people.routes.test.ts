@@ -113,6 +113,16 @@ function createPrismaMock(initialRows: MockUser[] = []) {
         rows.delete(where.id);
         return existing;
       }),
+      count: vi.fn(
+        async ({ where }: { where?: { role?: string } } = {}) => {
+          if (!where || where.role === undefined) {
+            return rows.size;
+          }
+          let n = 0;
+          for (const u of rows.values()) if (u.role === where.role) n += 1;
+          return n;
+        },
+      ),
     },
     scopeBinding: {
       deleteMany: vi.fn(
@@ -468,5 +478,158 @@ describe("DELETE /api/people/:id", () => {
     const app = buildApp(prisma);
     const res = await request(app).delete("/api/people/nope");
     expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * WARP-480 — self-action invariants on /api/people mutations.
+ *
+ * Two guards layered on top of WARP-455's requireRole("owner","admin"):
+ *
+ *   1. SELF_ACTION_NOT_ALLOWED — the caller may never PATCH or DELETE
+ *      their own row. Owners must use ownership-transfer; admins must
+ *      go through re-invite. A self-edit on the people surface is
+ *      almost always a misclick that ends in lockout.
+ *
+ *   2. LAST_OWNER_INVARIANT — at least one user with role=owner must
+ *      remain at all times. PATCH owner→non-owner on the only owner,
+ *      and DELETE on the only owner, both refuse. Without this, an
+ *      admin can demote the only owner to family and lock the
+ *      household out of every owner-only route until someone hand-
+ *      edits Postgres.
+ *
+ * Both guards return 409 Conflict (not 400 / 403) — the request is
+ * well-formed and the caller IS authorized; the resource state is
+ * what forbids the change. Refused calls MUST NOT emit an ActivityRow:
+ * the audit log is reserved for actual state changes, not noise from
+ * a UI that lets you click your own row.
+ */
+describe("WARP-480 self-action invariants", () => {
+  it("PATCH /api/people/:id/role on self → 409 SELF_ACTION_NOT_ALLOWED, no ActivityRow", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
+      // Keep a second owner so this case fails on the self-action
+      // guard, NOT on the last-owner invariant.
+      seedUser({ id: "owner-2", username: "romain", role: "owner" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/owner-id/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("PATCH /api/people/:id/scope on self → 409 SELF_ACTION_NOT_ALLOWED, no ActivityRow", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/owner-id/scope")
+      .send({ scopes: ["finance"] });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(prisma.scopeBinding.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.scopeBinding.create).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("DELETE /api/people/:id on self → 409 SELF_ACTION_NOT_ALLOWED, no ActivityRow", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
+      // Second owner present so the refusal comes from the self-guard,
+      // not the last-owner invariant.
+      seedUser({ id: "owner-2", username: "romain", role: "owner" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app).delete("/api/people/owner-id");
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("PATCH owner→family on the only remaining owner → 409 LAST_OWNER_INVARIANT, no ActivityRow", async () => {
+    // Admin actor tries to demote the sole owner. Self-guard does NOT
+    // fire (different ids); requireRole passes (admin is allowed); the
+    // last-owner check is the only thing standing in the way.
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
+      seedUser({ id: "admin-id", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app)
+      .patch("/api/people/owner-id/role")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OWNER_INVARIANT");
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("DELETE on the only remaining owner → 409 LAST_OWNER_INVARIANT, no ActivityRow", async () => {
+    // Admin actor tries to remove the sole owner row.
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-id", username: "stefan", role: "owner" }),
+      seedUser({ id: "admin-id", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app).delete("/api/people/owner-id");
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("LAST_OWNER_INVARIANT");
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("DELETE one of two owners → 200 (last-owner invariant only fires at count <= 1)", async () => {
+    // Positive case: two owners exist, an admin can remove one of
+    // them. Proves the invariant is gated on `count <= 1`, not on
+    // \"target row is an owner\" — otherwise we couldn't ever
+    // off-board an owner who is no longer with the household.
+    const prisma = createPrismaMock([
+      seedUser({ id: "owner-1", username: "stefan", role: "owner" }),
+      seedUser({ id: "owner-2", username: "romain", role: "owner" }),
+      seedUser({ id: "admin-id", username: "sam", role: "admin" }),
+    ]);
+    const app = buildApp(prisma, {
+      id: "admin-id",
+      username: "sam",
+      role: "admin",
+    });
+
+    const res = await request(app).delete("/api/people/owner-2");
+
+    expect(res.status).toBe(200);
+    expect(prisma.user.delete).toHaveBeenCalledWith({
+      where: { id: "owner-2" },
+    });
+    // Happy path DOES emit an ActivityRow — only refused calls are
+    // silent. Asserting this here keeps a future refactor from
+    // accidentally swallowing the audit on the positive path.
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0][0].refs.targetUserId).toBe(
+      "owner-2",
+    );
   });
 });
