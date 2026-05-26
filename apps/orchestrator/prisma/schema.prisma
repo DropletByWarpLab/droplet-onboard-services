@@ -973,6 +973,41 @@ model ScopeBinding {
   @@index([scope])
 }
 
+// ── WARP-455: File scope registry ──
+//
+// The orchestrator does not own file bytes — Nextcloud does. This `File`
+// model is a thin scope-bearing registry keyed by Nextcloud's stable
+// `ncFileId`, the same identifier `FileContentChunk.ncFileId` already
+// uses. It exists so the dashboard's scope-filtered file surfaces can
+// JOIN one row per logical file instead of scanning per-chunk rows for
+// distinct ncFileIds.
+//
+// `scope` is an explicit Scope enum column, defaulting to `team` so a
+// new file (e.g. a Nextcloud upload caught by the file-indexer) lands
+// at the household-wide default without an explicit POST from the
+// dashboard. Operators tighten the scope from there via PATCH (in a
+// follow-up ticket — this ticket only ships the model + backfill).
+//
+// `ownerUserId` carries the file's owner (Nextcloud username; matches
+// the convention everywhere else — FileContentChunk.userId,
+// BrainMemoryItem.userId). The dashboard's per-user file lists join on
+// this column; the scope-filter pass narrows the join result by the
+// caller's ScopeBinding set.
+model File {
+  id          String   @id @default(uuid())
+  ncFileId    Int      @unique
+  ownerUserId String
+  scope       Scope    @default(team)
+  // Cached path for display. Refreshed from the file-indexer's MQTT
+  // bridge when Nextcloud renames or moves the file.
+  path        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerUserId])
+  @@index([scope])
+}
+
 // ── WARP-456: signed append-only activity log ──
 //
 // Canonical audit trail of every observable event on the device — chat
