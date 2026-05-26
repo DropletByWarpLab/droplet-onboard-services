@@ -887,8 +887,11 @@ model User {
   // Per-user scope bindings — controls which scopes this user can
   // act inside via requireScope() (see src/middleware/scope.ts).
   scopeBindings ScopeBinding[]
-  // NOTE: `guestExpiry GuestExpiry?` relation appended by the next
-  // WARP-455 schema chunk (GuestExpiry model).
+  // Optional guest time-box. Non-null when this user was minted as a
+  // guest with an expiry; the nightly `guest-expiry-sweep` cron walks
+  // GuestExpiry rows directly (no IS-NULL guessing — status is an
+  // explicit enum on GuestExpiry).
+  guestExpiry GuestExpiry?
 
   @@index([role])
 }
@@ -971,6 +974,48 @@ model ScopeBinding {
   @@unique([userId, scope])
   @@index([userId])
   @@index([scope])
+}
+
+// ── WARP-455: Guest time-box ──
+//
+// Guests are time-boxed: every guest User has at most one GuestExpiry
+// row carrying `expiresAt` and an explicit `status` enum. The nightly
+// cron (cron-runtime `guest-expiry-sweep`) walks rows where
+// `status = ACTIVE AND expiresAt < now()`, denylists their JWT via
+// jwt.service, flips them to EXPIRED, and emits an ActivityRow.
+//
+// Per the no-guessing rule (CLAUDE.md): `status` is an explicit Prisma
+// enum. Deriving "is this guest expired" from `expiresAt < now()` at
+// read time would (a) duplicate the derivation rule across every
+// reader and (b) leak the cron's tick cadence into UX (a guest is
+// only "expired" once the cron has actually denylisted their session).
+// WARP-218's BrainMemoryItemStatus is the canonical precedent.
+model GuestExpiry {
+  id        String              @id @default(uuid())
+  userId    String              @unique
+  // When the guest's session should be revoked. The cron sweep
+  // compares this against `now()` and flips status when it's past.
+  expiresAt DateTime
+  status    GuestExpiryStatus   @default(ACTIVE)
+  // When the cron actually flipped the row to EXPIRED. Non-null
+  // only when status = EXPIRED. Useful for the dashboard's
+  // "expired N hours ago" copy without re-querying ActivityRow.
+  expiredAt DateTime?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([status, expiresAt])
+}
+
+/// WARP-455: lifecycle of a guest's time-box.
+///   - ACTIVE   — session is live; the cron has not flipped this row yet.
+///   - EXPIRED  — terminal. The cron ran AFTER expiresAt, denylisted the
+///                guest's JWT, and emitted an `auth`-kind ActivityRow.
+enum GuestExpiryStatus {
+  ACTIVE
+  EXPIRED
 }
 
 // ── WARP-455: File scope registry ──
