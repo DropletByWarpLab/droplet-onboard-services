@@ -183,6 +183,37 @@ function resolveToken(req: import("express").Request): string | null {
 // it. When called without prisma those routes simply 404 (the dashboard's
 // `getInvite` / `acceptInvite` calls will treat that as "invite not found"
 // which is the right default for an under-configured deployment).
+//
+// WARP-485 round 2 — JWT-path normalization callsites (this file owns
+// the only places where `id` enters the JWT subject claim or the NC
+// token cache key; the OCS auth path was already normalized in round 1
+// inside `src/middleware/auth.ts`):
+//
+//   1. POST /api/auth/login        — line ~275: signAccessToken({ id })
+//                                  — line ~267: storeNcToken(id, ...)
+//   2. POST /api/auth/refresh      — line ~447: signAccessToken({ id })
+//                                  — line ~452: touchNcToken(id, ...)
+//   3. POST /api/auth/invites/accept/:token
+//                                  — line ~674: signAccessToken({ id })
+//   4. POST /api/auth/logout       — line ~768: getNcToken(req.user.id)
+//                                  — line ~776: deleteNcToken(req.user.id)
+//
+// Contract: every `id` fed to signAccessToken / signRefreshToken / NC
+// token store helpers in this file is the **local `User.id` UUID**,
+// resolved by looking up the local `User` row whose `nextcloudUsername`
+// matches the Nextcloud user id returned by OCS. The pre-WARP-485 shape
+// fed the NC username string into `JWT.sub`, which bypassed WARP-480's
+// self-action guard at `/api/people/:id` under JWT auth (`req.user.id`
+// = NC username, `req.params.id` = UUID → string mismatch → guard
+// silently skipped).
+//
+// Fail-closed posture (matches the OCS path's WARP-485 round-1
+// behavior): when no local User row exists for the authenticated
+// Nextcloud user, the route returns 401 + `USER_NOT_PROVISIONED`
+// instead of minting a synthetic id. Silent auto-provision would be
+// a privilege-escalation vector — an attacker holding a valid OCS
+// credential for an unrelated NC user could otherwise mint a default-
+// `family`-role local row.
 // ────────────────────────────────────────────────────────────────
 export function createPublicAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
