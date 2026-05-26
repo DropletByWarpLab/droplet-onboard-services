@@ -65,6 +65,12 @@ interface RelevantMatch {
 interface Query {
   id: string;
   query: string;
+  /**
+   * WARP-437: optional query class label used for per-class slicing in the
+   * enhanced-vs-baseline recording test. Pre-WARP-437 rows omit this and
+   * fall into the `unlabeled` bucket.
+   */
+  class?: "factual" | "analytical" | "conversational" | "navigational";
   relevant: RelevantMatch[];
   notes?: string;
 }
@@ -113,7 +119,7 @@ function ndcgAtK(results: SearchResult[], query: Query, k: number = NDCG_K): num
 }
 
 async function callSearchEndpoint(
-  variant: "vector" | "rrf" | "hybrid",
+  variant: "vector" | "rrf" | "hybrid" | "hybrid-enhanced",
   query: string,
 ): Promise<SearchResult[]> {
   // Single endpoint with a variant query parameter. The orchestrator
@@ -124,6 +130,19 @@ async function callSearchEndpoint(
   if (!res.ok) throw new Error(`eval search ${variant} failed: ${res.status}`);
   const body = (await res.json()) as { results: SearchResult[] };
   return body.results;
+}
+
+/**
+ * WARP-437: group queries by their `class` label so per-class NDCG@10 means
+ * can be reported. Queries without a label fall into `unlabeled`.
+ */
+function groupByClass(queries: Query[]): Record<string, Query[]> {
+  const out: Record<string, Query[]> = {};
+  for (const q of queries) {
+    const c = q.class ?? "unlabeled";
+    (out[c] ??= []).push(q);
+  }
+  return out;
 }
 
 describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
@@ -224,6 +243,65 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
       vecMean * NDCG_IMPROVEMENT_THRESHOLD,
     );
   }, 600_000);
+
+  // WARP-437 — per-class NDCG@10, baseline vs enhanced. RECORDING MODE:
+  // logs deltas but does not enforce a gate until per-class envelopes are
+  // populated in tests/retrieval-eval/ragas/baselines.json. The 20-minute
+  // timeout accommodates 65 queries × 2 passes; the enhanced pass runs an
+  // LLM call per query on local Ollama.
+  it("per-class NDCG@10 — baseline vs enhanced (WARP-437 recording mode)", async () => {
+    const byClass = groupByClass(queries);
+    const classes = Object.keys(byClass);
+
+    const results: Record<
+      string,
+      { baseline: number; enhanced: number; delta: number }
+    > = {};
+
+    for (const c of classes) {
+      const baselineN: number[] = [];
+      const enhancedN: number[] = [];
+      for (const q of byClass[c]!) {
+        const [base, enh] = await Promise.all([
+          callSearchEndpoint("hybrid", q.query),
+          callSearchEndpoint("hybrid-enhanced", q.query),
+        ]);
+        baselineN.push(ndcgAtK(base, q));
+        enhancedN.push(ndcgAtK(enh, q));
+      }
+      const mean = (xs: number[]) =>
+        xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
+      const baseline = mean(baselineN);
+      const enhanced = mean(enhancedN);
+      results[c] = {
+        baseline,
+        enhanced,
+        delta: baseline === 0 ? 0 : (enhanced - baseline) / baseline,
+      };
+    }
+
+    // eslint-disable-next-line no-console
+    console.log("\n[WARP-437] Per-class NDCG@10 (baseline → enhanced):");
+    for (const c of classes) {
+      const r = results[c]!;
+      const pct = (r.delta * 100).toFixed(1);
+      // eslint-disable-next-line no-console
+      console.log(
+        `  ${c.padEnd(15)} baseline=${r.baseline.toFixed(4)}  enhanced=${r.enhanced.toFixed(4)}  delta=${pct}%`,
+      );
+    }
+
+    // RECORDING MODE: do not assert per-class deltas. Once
+    // tests/retrieval-eval/ragas/baselines.json carries populated per-class
+    // envelopes, switch this to enforce per WARP-437 spec:
+    //   - short        : enhanced ≥ baseline × 1.05
+    //   - analytical   : context_recall(enhanced) ≥ baseline × 1.10 (RAGAS)
+    //   - conversational: if regress, default-off the preset
+    //   - full corpus  : enhanced ≥ baseline × 1.03
+    // The always-true assertion keeps the test green in CI; the console.log
+    // is the artifact.
+    expect(Object.keys(results).length).toBeGreaterThan(0);
+  }, 1_200_000);
 
   // WARP-436 — RAGAS metrics layered on top of NDCG@10. Gated by env so
   // we don't pay the judge-LLM cost on every PR's vitest run.

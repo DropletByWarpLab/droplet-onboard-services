@@ -104,6 +104,10 @@ def load_queries_and_goldens(repo_root: Path) -> list[dict[str, Any]]:
                 "user_input": q["query"],
                 "reference": g["expected_answer"],
                 "reference_contexts": g.get("reference_contexts", []) or [],
+                # WARP-437: optional class label propagated to the row so the
+                # summary writer can slice metrics by query class. Pre-WARP-437
+                # YAML rows omit `class`; those land in the "unlabeled" bucket.
+                "class": q.get("class") or "unlabeled",
             }
         )
     return merged
@@ -271,6 +275,11 @@ def run(
             }
         )
 
+    # WARP-437: keep the per-row class labels in a parallel list so the
+    # post-evaluate summary can slice metrics by class without polluting
+    # the RAGAS Dataset with an extra column it doesn't recognise.
+    row_classes: list[str] = [r["class"] for r in merged]
+
     ds = Dataset.from_pandas(pd.DataFrame(rows))
     print(f"   dataset   = {len(ds)} rows")
 
@@ -316,6 +325,33 @@ def run(
             "response",
         )
     ]
+    # WARP-437: per-class slicing of the metric columns. The integration
+    # test consumer only reads top-level `metrics` today; `metrics_by_class`
+    # is additive and ignored until the per-class context-recall gate
+    # consumes it. Gate fires once `tests/retrieval-eval/ragas/baselines.json`
+    # carries populated per-class envelopes (`envelopes_by_class.<class>.<metric>.floor`).
+    df_with_class = df.copy()
+    # `row_classes` is captured pre-evaluate from the source-of-truth list
+    # so it stays aligned with `merged`/`rows` ordering regardless of how
+    # ragas reorders its output dataframe internally.
+    if len(row_classes) == len(df_with_class):
+        df_with_class["_class"] = row_classes
+    else:
+        # Defensive: if RAGAS dropped/reshaped rows, skip per-class slicing
+        # rather than emit misaligned numbers.
+        df_with_class["_class"] = ["unlabeled"] * len(df_with_class)
+    metrics_by_class: dict[str, dict[str, dict[str, float]]] = {}
+    for cls_name, sub in df_with_class.groupby("_class"):
+        metrics_by_class[str(cls_name)] = {
+            col: {
+                "p50": float(sub[col].quantile(0.5)),
+                "p95": float(sub[col].quantile(0.95)),
+                "mean": float(sub[col].mean()),
+                "n": int(sub[col].count()),
+            }
+            for col in metric_cols
+        }
+
     summary = {
         "variant": variant,
         "limit": limit,
@@ -333,6 +369,10 @@ def run(
             }
             for col in metric_cols
         },
+        # WARP-437: additive per-class slices. Consumers that don't know
+        # about this field ignore it; the per-class gate (once enabled)
+        # reads `metrics_by_class[<class>][context_recall|...].mean`.
+        "metrics_by_class": metrics_by_class,
     }
     out_json.write_text(json.dumps(summary, indent=2) + "\n")
     print(f"\n   wrote {out_json}")
