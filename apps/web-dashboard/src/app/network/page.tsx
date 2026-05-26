@@ -22,6 +22,7 @@ import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
+import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -589,6 +590,13 @@ function DevicesTab() {
 
   return (
     <div>
+      {/* WARP-446: coverage extenders panel — auto-discovered + approved
+          AP listing. Renders above the devices grid so the operator sees
+          AWAITING_APPROVAL action-items before scanning the device list. */}
+      <div className="mb-6">
+        <CoverageExtendersPanel />
+      </div>
+
       {/* Header controls */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <input

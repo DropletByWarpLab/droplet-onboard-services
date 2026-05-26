@@ -734,3 +734,113 @@ model NotificationLog {
 
   @@index([userId, createdAt])
 }
+
+// ── WARP-446: Coverage extender APs (auto-onboarded OpenWrt APs) ──
+//
+// Per ADR-005 (docs/ADR-005-ap-auto-onboarding.md). Each row tracks one
+// extender AP the household has installed (or that's announced itself
+// on `_droplet-ap._tcp` mDNS but hasn't been approved yet). The main
+// router (192.168.50.1) is NOT in this table — it's the single source
+// of routing truth, not an extender.
+//
+// `mac` is the canonical primary key (uppercase, colon-separated; see
+// `normalizeMac()` in src/lib/mac.ts). Same convention as
+// `NetworkDevice.mac` from WARP-80. Every boundary normalizes before
+// querying so the dashboard's URL params and the mDNS poller's
+// observed values can't drift.
+//
+// `status` is an explicit enum (ApDeviceStatus). The CLAUDE.md
+// no-guessing rule forbids deriving state from `approvedAt IS NULL`
+// or similar nullable-absence patterns. WARP-218's
+// `BrainMemoryItemStatus` is the canonical precedent.
+//
+// `lastIp` carries the discovered DHCP lease for the AP so the
+// orchestrator can address its rpcd over the LAN without re-resolving
+// mDNS on every push.
+//
+// `failureReason` is non-null only when `status = FAILED`. Same shape
+// the WARP-218 brain-memory pattern uses for transient failures.
+model ApDevice {
+  mac              String         @id
+  // Operator-friendly label set at approval time. Defaults to the
+  // model name + last-3-octets of the MAC if the operator doesn't
+  // override it (e.g. "Pi5 AP (12:34:56)"). Editable from the
+  // dashboard later (PATCH /api/aps/:mac).
+  displayName      String?
+  // mDNS-reported product info — useful for the dashboard's "what is
+  // this" rendering and for the audit log on approval.
+  model            String?
+  serial           String?
+  // Overlay version reported by the AP at announce time. Diverging
+  // versions across APs is a yellow flag the dashboard surfaces; the
+  // orchestrator does NOT auto-upgrade.
+  version          String?
+  // Last IPv4 observed for this AP (from the mDNS announce or the
+  // DHCP lease the discovery poller cross-references). The
+  // orchestrator addresses the AP at this IP over rpcd.
+  lastIp           String?
+  // Last DHCP-reported hostname.
+  hostname         String?
+  status           ApDeviceStatus @default(DISCOVERED)
+  // Non-null only when status = FAILED. Free text, surfaced verbatim
+  // in the dashboard's "what went wrong" tile.
+  failureReason    String?
+  // SSID + iface section the orchestrator pushed (or will push) when
+  // the AP transitions to PROVISIONING. Stored so re-provisioning +
+  // decommission have everything they need without re-querying the
+  // main router.
+  approvedSsid     String?
+  // First time the orchestrator saw this MAC announce on mDNS.
+  firstSeen        DateTime       @default(now())
+  // Updated on every fresh announce — drives the "stale extender"
+  // dashboard warning.
+  lastSeen         DateTime       @default(now())
+  // Timestamp the operator hit Approve. Null until the row leaves
+  // AWAITING_APPROVAL.
+  approvedAt       DateTime?
+  // Operator (Nextcloud username) who approved this AP. Audit trail.
+  approvedBy       String?
+  // Timestamp the AP transitioned to DECOMMISSIONED. Null otherwise.
+  decommissionedAt DateTime?
+  // Last Operation-Id the orchestrator received from the routing
+  // service for a write touching this AP — lets the dashboard
+  // resume polling after a refresh.
+  lastOperationId  String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([status])
+  @@index([lastSeen])
+}
+
+/// WARP-446: lifecycle of an extender AP (per ADR-005 §"State machine").
+///   - `DISCOVERED`         — mDNS poller has seen this MAC announce; the
+///                            operator has not yet been shown the card.
+///                            Today this state is short-lived (the
+///                            poller flips to AWAITING_APPROVAL on the
+///                            same tick) but it exists so re-runs that
+///                            haven't fired yet are distinguishable
+///                            from approved-and-online.
+///   - `AWAITING_APPROVAL`  — rendered in the Add Extender wizard.
+///   - `PROVISIONING`       — orchestrator is mid-push to the AP's
+///                            rpcd. Set right before the routing
+///                            service call; cleared by the result.
+///   - `ONLINE`             — terminal-active; AP is serving the
+///                            household SSID and answering the post-
+///                            apply health probe.
+///   - `FAILED`             — the apply failed (router unreachable,
+///                            ubus refused, post-apply probe timed
+///                            out). `failureReason` is populated.
+///                            Operator can retry by re-approving.
+///   - `DECOMMISSIONED`     — terminal-removed; the operator hit
+///                            "Remove" and the orchestrator deleted
+///                            the wireless config off the AP. Row
+///                            kept for audit.
+enum ApDeviceStatus {
+  DISCOVERED
+  AWAITING_APPROVAL
+  PROVISIONING
+  ONLINE
+  FAILED
+  DECOMMISSIONED
+}

@@ -232,6 +232,38 @@ export interface VpnPeerCreatedInfo {
   conf: string;
 }
 
+// ── WARP-446: Coverage extender APs ──
+
+/** State machine values mirrored from the Prisma `ApDeviceStatus` enum.
+ *  Kept as a string-literal union so the dashboard's renderers can do
+ *  exhaustive switch checks at the type-system level. */
+export type ApDeviceStatus =
+  | "DISCOVERED"
+  | "AWAITING_APPROVAL"
+  | "PROVISIONING"
+  | "ONLINE"
+  | "FAILED"
+  | "DECOMMISSIONED";
+
+export interface ApDeviceInfo {
+  mac: string;
+  displayName: string | null;
+  model: string | null;
+  serial: string | null;
+  version: string | null;
+  lastIp: string | null;
+  hostname: string | null;
+  status: ApDeviceStatus;
+  failureReason: string | null;
+  approvedSsid: string | null;
+  firstSeen: string;
+  lastSeen: string;
+  approvedAt: string | null;
+  approvedBy: string | null;
+  decommissionedAt: string | null;
+  lastOperationId: string | null;
+}
+
 /** DuckDNS status. `tokenSet` is the only signal about the token —
  *  the token itself is never returned by the orchestrator. */
 export type DuckDnsStatus =

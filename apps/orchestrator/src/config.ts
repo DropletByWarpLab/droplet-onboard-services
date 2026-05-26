@@ -105,6 +105,27 @@ const envSchema = z.object({
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
 
+  // --- Coverage extender APs (WARP-446) ---
+  // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
+  // MATTER_* warning above for why — same risk).
+  //
+  // DISCOVERY_INTERVAL — mDNS scan cadence in seconds. The orchestrator's
+  //   discovery poller (cron-runtime.service.ts) queries
+  //   `_droplet-ap._tcp.local` and upserts each new MAC into ApDevice.
+  //   10s tracks new-AP-plugged-in within the 30s AC #1 budget.
+  // APPROVAL_TIMEOUT — safe_apply timeout passed to the routing service
+  //   on POST /aps/:mac/approve. 60s matches the rest of the codebase's
+  //   confirmation-token TTL convention (WARP-41).
+  // DAWN_ENABLED — master switch to disable dawn on every AP. Default on.
+  //   Off only as a debugging escape hatch when an operator suspects
+  //   dawn is the cause of an issue.
+  // DEFAULT_TXPOWER — dBm cap on extender radios. Keeps household-floor
+  //   cells small enough for clean roaming.
+  DROPLET_AP_DISCOVERY_INTERVAL: z.coerce.number().default(10),
+  DROPLET_AP_APPROVAL_TIMEOUT: z.coerce.number().default(60),
+  DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
+  DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

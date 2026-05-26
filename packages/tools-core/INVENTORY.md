@@ -21,6 +21,9 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | unblock_network_device | network | Restore internet for a previously blocked MAC. | true | true | both (canonical name; was `unblock_device` in orchestrator) |
 | add_port_forward | network | Add a port-forward rule (external port -> internal IP:port, tcp/udp). | true | true | gateway |
 | get_router_system_info | network | Router hardware, OpenWrt version, uptime, CPU/memory. | false | false | gateway |
+| list_ap_devices | network | List every coverage-extender AP the orchestrator knows about (status, model, IP, audit columns). | false | false | WARP-446 |
+| approve_ap | network | Approve a discovered extender AP and push wireless config. | true | true | WARP-446 |
+| decommission_ap | network | Remove an extender AP from the household network. | true | true | WARP-446 |
 | list_files | files | List entries at a Nextcloud path. | false | false | both |
 | read_file | files | Read text content of a Nextcloud file (capped at 10k chars; binary rejected). | false | false | gateway |
 | search_files | files | Filename substring search across the user's Nextcloud. | false | false | both |

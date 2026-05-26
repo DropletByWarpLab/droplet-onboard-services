@@ -12,7 +12,7 @@ and mock with zero per-endpoint branching.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger("droplet.routing.mock")
 
@@ -331,6 +331,117 @@ class _MockVpn:
         logger.info("mock: VPN setup_firewall iface=%s port=%s — no-op", interface, listen_port)
 
 
+class _MockAp:
+    """In-memory extender-AP state for ROUTING_MODE=mock (WARP-446).
+
+    Mirrors the real `ApApi` surface so dashboard / orchestrator dev
+    against the mock can drive the full discovery → approve → push →
+    decommission flow without a router. Section names are
+    deterministic per-MAC, same as the real SDK.
+
+    `_discovered` is the in-memory "seen this MAC announce on mDNS"
+    list. Tests inject MACs via the `/aps/_test_seed` endpoint so the
+    multicast layer doesn't need to be simulated.
+
+    `_pushed` mirrors the wireless-iface sections that would be
+    committed to /etc/config/wireless. Decommission removes the entry.
+    """
+
+    def __init__(self) -> None:
+        # { mac → { model, serial, version, last_ip, hostname, first_seen, last_seen } }
+        self._discovered: dict[str, dict[str, Any]] = {}
+        # { mac → { iface_section, ssid, encryption, key } }
+        self._pushed: dict[str, dict[str, Any]] = {}
+        # Track which MACs have been decommissioned so /aps/{mac} reports
+        # the right state after the row has been cleared from `_pushed`.
+        self._decommissioned: set[str] = set()
+
+    @staticmethod
+    def iface_section_for_mac(mac: str) -> str:
+        # Re-uses the real SDK helper so the mock can't drift from the
+        # production naming scheme.
+        from droplet_openwrt_sdk import ApApi
+        return ApApi.iface_section_for_mac(mac)
+
+    def discovered(self) -> list[dict[str, Any]]:
+        """Return the current discovery list, sorted by MAC for stable
+        output. Mirrors the shape the orchestrator's mDNS poller will
+        produce — see `iface_section_for_mac` for the section-name
+        convention used at approval time.
+        """
+        return [
+            {"mac": mac, **info}
+            for mac, info in sorted(self._discovered.items())
+        ]
+
+    def seed(self, mac: str, **info: Any) -> None:
+        """Inject a discovered AP. Test-only helper — production
+        populates this from the mDNS poller. The MAC is uppercased on
+        the way in so the rest of the SDK's normalisation invariants
+        hold."""
+        canonical = mac.upper()
+        existing = self._discovered.get(canonical, {})
+        existing.update({k: v for k, v in info.items() if v is not None})
+        self._discovered[canonical] = existing
+        # Re-seeding a previously-decommissioned MAC re-arms it.
+        self._decommissioned.discard(canonical)
+
+    def state(self, mac: str) -> str:
+        canonical = mac.upper()
+        if canonical in self._decommissioned:
+            return "decommissioned"
+        if canonical in self._pushed:
+            return "online"
+        if canonical in self._discovered:
+            return "discovered"
+        return "unknown"
+
+    def get(self, mac: str) -> Optional[dict[str, Any]]:
+        canonical = mac.upper()
+        info = self._discovered.get(canonical)
+        if info is None and canonical not in self._decommissioned:
+            return None
+        out: dict[str, Any] = {"mac": canonical, "state": self.state(canonical)}
+        if info:
+            out.update(info)
+        if canonical in self._pushed:
+            out["wireless"] = dict(self._pushed[canonical])
+        return out
+
+    def push_wireless_config(
+        self,
+        mac: str,
+        iface_section: str,
+        radio: str,
+        ssid: str,
+        encryption: str,
+        key: str,
+        network: str = "lan",
+    ) -> None:
+        canonical = mac.upper()
+        if canonical not in self._discovered:
+            raise KeyError(f"mock: AP {canonical} not in discovery list")
+        self._pushed[canonical] = {
+            "iface_section": iface_section,
+            "radio": radio,
+            "ssid": ssid,
+            "encryption": encryption,
+            # We DO NOT echo the key in the mock's state read — same
+            # contract the real SDK aspires to (don't leak PSKs to
+            # callers that didn't supply them).
+            "key_set": True,
+            "network": network,
+        }
+        self._decommissioned.discard(canonical)
+        logger.info("mock: AP push_wireless_config mac=%s ssid=%s — no-op", canonical, ssid)
+
+    def remove_wireless_config(self, mac: str) -> None:
+        canonical = mac.upper()
+        self._pushed.pop(canonical, None)
+        self._decommissioned.add(canonical)
+        logger.info("mock: AP remove_wireless_config mac=%s — no-op", canonical)
+
+
 class _MockUci:
     """Minimal uci mock — safe_apply happy path only."""
 
@@ -377,6 +488,7 @@ class MockRouter:
         self.firewall = _MockFirewall()
         self.uci = _MockUci()
         self.vpn = _MockVpn()
+        self.ap = _MockAp()  # WARP-446
 
     def disconnect(self) -> None:
         pass

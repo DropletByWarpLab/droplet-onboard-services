@@ -6,11 +6,14 @@ import { TOOLS } from "../src/index.js";
 const EXPECTED_TOOL_NAMES = [
   // network
   "add_port_forward",
+  "approve_ap",            // WARP-446
   "block_network_device",
+  "decommission_ap",       // WARP-446
   "get_firewall_rules",
   "get_network_status",
   "get_router_system_info",
   "get_wifi_settings",
+  "list_ap_devices",       // WARP-446
   "list_dhcp_leases",
   "list_network_devices",
   "scan_wifi_networks",

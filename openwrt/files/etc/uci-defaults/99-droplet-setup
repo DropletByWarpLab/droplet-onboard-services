@@ -71,6 +71,72 @@ cat > /etc/umdns/droplet.json << 'MDNS_EOF'
 }
 MDNS_EOF
 
+# WARP-446: extender APs announce themselves on _droplet-ap._tcp so
+# the main router's orchestrator can auto-discover them via mDNS.
+# See docs/ADR-005-ap-auto-onboarding.md.
+#
+# Role differentiation: the main router (this script's primary use)
+# advertises role=router; extender APs ALSO advertise on the same
+# service type but with role=extender (decided by a small marker
+# file at /etc/droplet/role). Operator's first-run flow on an
+# extender writes that file before running the same uci-defaults
+# script.
+DROPLET_ROLE_FILE=/etc/droplet/role
+if [ -f "${DROPLET_ROLE_FILE}" ]; then
+    DROPLET_ROLE=$(cat "${DROPLET_ROLE_FILE}" 2>/dev/null | tr -d '\n\r ')
+else
+    DROPLET_ROLE=router
+fi
+
+# Source-of-truth MAC for the box. Falls back to the onboard NIC's
+# MAC if /etc/droplet/mac isn't present.
+DROPLET_MAC=""
+if [ -f /sys/class/net/eth0/address ]; then
+    DROPLET_MAC=$(tr 'a-f' 'A-F' < /sys/class/net/eth0/address)
+fi
+if [ -n "${DROPLET_MAC}" ]; then
+    DROPLET_MAC_NORMALIZED=$(echo "${DROPLET_MAC}" | tr -d ':' | tr 'A-F' 'a-f')
+else
+    DROPLET_MAC_NORMALIZED="unknown"
+fi
+
+# Model + serial. Both best-effort; missing fields surface as
+# empty strings in the TXT record which the orchestrator tolerates.
+DROPLET_MODEL=""
+if [ -f /proc/device-tree/compatible ]; then
+    DROPLET_MODEL=$(tr -d '\0' < /proc/device-tree/compatible | head -c 64)
+fi
+
+DROPLET_SERIAL=""
+if [ -f /sys/firmware/devicetree/base/serial-number ]; then
+    DROPLET_SERIAL=$(tr -d '\0' < /sys/firmware/devicetree/base/serial-number | head -c 32)
+fi
+
+cat > /etc/umdns/droplet-ap.json << MDNS_AP_EOF
+{
+  "droplet-ap-${DROPLET_MAC_NORMALIZED}": {
+    "service": "_droplet-ap._tcp",
+    "port": 80,
+    "txt": [
+      "mac=${DROPLET_MAC}",
+      "model=${DROPLET_MODEL}",
+      "serial=${DROPLET_SERIAL}",
+      "version=1.0",
+      "role=${DROPLET_ROLE}"
+    ]
+  }
+}
+MDNS_AP_EOF
+
+# WARP-446: dawn band-steering daemon. Same package on every AP;
+# the daemon's own UDP multicast handles cross-AP coordination at
+# runtime. Defaults are reasonable for the Apple-roaming case (see
+# ADR-005 §2 for why we chose dawn over usteer); operators can tune
+# via the future Advanced panel.
+if [ -x /etc/init.d/dawn ]; then
+    /etc/init.d/dawn enable 2>/dev/null || true
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Enable and start essential services
 # ---------------------------------------------------------------------------
