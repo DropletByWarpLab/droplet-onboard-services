@@ -173,6 +173,32 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
 /**
  * Validate a token against Nextcloud OCS API with Redis cache.
  * Returns a user with default "family" role (Nextcloud doesn't have role claims).
+ *
+ * WARP-485 — `req.user.id` shape contract across the JWT vs OCS paths:
+ *
+ *   • JWT path (`verifyAccessToken` above): `req.user.id = jwtPayload.sub`,
+ *     which is the local `User.id` UUID. This is the source of truth.
+ *
+ *   • OCS path (this function, pre-WARP-485): `req.user.id = ocs.data.id`,
+ *     which is the **Nextcloud username string** (e.g. `stefan-cruceru`),
+ *     NOT a UUID. That mismatch silently broke WARP-480's self-action guard
+ *     (`req.params.id === req.user?.id` on /api/people/:id mutations) under
+ *     OCS auth — the comparison always returned false-negative, so an owner
+ *     authenticated via the OCS fallback could DELETE themselves and lock
+ *     the household out of every owner-only route.
+ *
+ *   • OCS path (WARP-485 fix): lookup `User` by `nextcloudUsername`, set
+ *     `req.user.id = localUser.id`. Fail-closed with 401 `USER_NOT_PROVISIONED`
+ *     when no matching User row exists — silent auto-provision would be a
+ *     privilege-escalation vector (an attacker who somehow holds a valid
+ *     OCS token for an unrelated NC user could otherwise mint a local row).
+ *     `req.user.username` keeps the Nextcloud username for display, and
+ *     `req.user.role` is still derived from OCS groups via `roleFromGroups`
+ *     (the JWT path's role takes precedence when a JWT is present).
+ *
+ * Downstream invariant: every `req.user.id` consumer (people self-action
+ * guard, camera pins, /auth/me, brain-memory ownership checks, etc.) may
+ * assume the value is a local User UUID regardless of auth path.
  */
 async function validateNextcloudToken(token: string): Promise<AuthUser | null> {
   const cacheKey = TOKEN_CACHE_PREFIX + hashToken(token);
