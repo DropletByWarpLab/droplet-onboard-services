@@ -435,3 +435,78 @@ def test_handle_uploaded_persists_failed_on_db_write_failure(
         and m["failure_reason"] == "db_failed"
         for m in fake_io["marked"]
     ), fake_io["marked"]
+
+
+# ── WARP-435 QA: PDF section_paths shape regression ──
+#
+# The first round of WARP-435 shipped PDF extractor metadata as
+# ``list[list[str]]`` indexed by page, while every downstream caller
+# (brain_ingest, watcher, transcription_worker) feeds it into
+# ``chunker.section_path_for_offset`` which expects
+# ``list[tuple[int, list[str]]]``. The mismatch raised
+# ``ValueError: not enough values to unpack`` on the first chunk of any
+# PDF with an empty-outline page (i.e. virtually every PDF — the leading
+# pages always carry ``[]``). Without try/except in the brain-ingest
+# handler the exception was swallowed by ``mqtt_client._on_message`` and
+# the row sat at status='indexing' forever. This test pins the full
+# extract → chunk_with_offsets → section_path_for_offset →
+# format_chunk_with_header chain so the bug can't drift back in.
+
+
+def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
+    fake_io, tmp_path
+):
+    """Full chain against the real sample.pdf fixture must not raise.
+
+    The fixture has no PDF outline so ``section_paths`` lands as the
+    extractor's "no outline" case for every page — exactly the input
+    shape the QA bug exploded on. Chunks must still be produced and the
+    contextual-header prefix must land on each stored text.
+    """
+    from brain_ingest import handle_brain_uploaded
+    from pathlib import Path as _Path
+
+    # Place the fixture under the canonical <user>/<item> layout that
+    # the handler reads side files from.
+    fixture_pdf = (
+        _Path(__file__).parent / "fixtures" / "sample.pdf"
+    )
+    assert fixture_pdf.exists(), f"missing fixture {fixture_pdf}"
+
+    item_dir = tmp_path / "alice" / "item-pdf"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    target = item_dir / "original.pdf"
+    target.write_bytes(fixture_pdf.read_bytes())
+
+    handle_brain_uploaded(
+        {
+            "itemId": "item-pdf",
+            "userId": "alice",
+            "path": str(target),
+            "mimeType": "application/pdf",
+            "filename": "sample.pdf",
+            "originatingChatId": "chat-pdf",
+        }
+    )
+
+    # No swallowed ValueError — the row landed at status='ready'.
+    assert len(fake_io["marked"]) == 1, fake_io["marked"]
+    assert fake_io["marked"][0]["item_id"] == "item-pdf"
+    assert fake_io["marked"][0]["status"] == "ready", fake_io["marked"]
+    assert fake_io["marked"][0]["failure_reason"] is None
+
+    # Chunks were created.
+    assert len(fake_io["upserts"]) >= 1, "expected ≥1 chunk from sample.pdf"
+
+    # Every stored chunk carries the WARP-435 contextual header prefix.
+    for upsert in fake_io["upserts"]:
+        assert upsert["source"] == "brain"
+        assert upsert["brain_item_id"] == "item-pdf"
+        text = upsert["text"]
+        assert text.startswith("Document: sample.pdf"), text[:80]
+
+    # Ready publish under the per-user namespace.
+    assert (
+        "droplet/files/alice/brain/indexed",
+        {"itemId": "item-pdf", "status": "ready"},
+    ) in fake_io["published"]

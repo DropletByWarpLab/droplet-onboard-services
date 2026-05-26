@@ -63,6 +63,16 @@ def _route(mime: str) -> Optional[Callable[..., ExtractedDoc]]:
     }:
         from extractors.docx import extract as docx_extract  # noqa: PLC0415
         return docx_extract
+    # WARP-435 (ADR-003 Phase 1): PPTX. python-pptx is heavy (lxml at
+    # import), so we lazy-import like the other extractors. Try/except
+    # so the registry stays usable on branches that haven't shipped
+    # python-pptx yet.
+    try:
+        from extractors import pptx as pptx_ext  # type: ignore  # noqa: PLC0415
+        if mime in pptx_ext.SUPPORTED_MIMES:
+            return pptx_ext.extract
+    except ImportError:
+        pass
     if mime.startswith("image/"):
         from extractors.image import extract as image_extract  # noqa: PLC0415
         return image_extract

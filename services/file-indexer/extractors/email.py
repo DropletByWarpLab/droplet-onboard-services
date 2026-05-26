@@ -237,11 +237,18 @@ def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
 
     metadata: dict = {
         "extractor_name": "email",
-        "extractor_version": "1.0",
+        "extractor_version": "1.1",
         "from": msg.get("From"),
         "to": msg.get("To"),
         "subject": msg.get("Subject"),
         "date": msg.get("Date"),
+        # WARP-435 (ADR-003 Phase 1): emails have no in-body structural
+        # hierarchy comparable to PDF/DOCX/PPTX — the headers + body +
+        # attachments live in a single flat stream. Use the filename as
+        # the document-level section anchor. The chain[] breadcrumb in
+        # ``metadata.chain`` already carries the attachment lineage for
+        # nested .eml/.zip/etc. cases.
+        "section_paths": [(0, [parent_filename])],
     }
     # WARP-214: surface the first attachment's chain on the doc-level metadata
     # so the chunker propagates it to FileContentChunk.metadata.chain. Multiple
@@ -311,11 +318,14 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
 
     metadata: dict = {
         "extractor_name": "email",
-        "extractor_version": "1.0",
+        "extractor_version": "1.1",
         "from": m.sender,
         "to": m.to,
         "subject": m.subject,
         "date": str(m.date) if m.date else None,
+        # WARP-435 (ADR-003 Phase 1): see _extract_eml — filename serves
+        # as the section anchor for emails.
+        "section_paths": [(0, [parent_filename])],
     }
     # WARP-214: see _extract_eml — first chain wins for doc-level metadata.
     if msg_chains:

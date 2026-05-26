@@ -54,6 +54,14 @@ def extract(path: str) -> ExtractedDoc:
     text = text.strip()
     word_count = len(text.split())
 
+    # WARP-435 (ADR-003 Phase 1): flat-text formats have no in-file
+    # structure, so the "section" is just the filename. The chunker
+    # plumbing in db.upsert_chunk's caller will use this as the path
+    # in the contextual-header prefix. Single entry covers the whole
+    # doc — every chunk inherits ``[filename]``.
+    filename = os.path.basename(path) or "document"
+    section_paths: list[tuple[int, list[str]]] = [(0, [filename])]
+
     return cast(
         ExtractedDoc,
         {
@@ -62,8 +70,9 @@ def extract(path: str) -> ExtractedDoc:
             "language": None,
             "metadata": {
                 "extractor_name": "text",
-                "extractor_version": "1.0",
+                "extractor_version": "1.1",
                 "word_count": word_count,
+                "section_paths": section_paths,
             },
             "warnings": [],
         },

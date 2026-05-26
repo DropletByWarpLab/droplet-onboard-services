@@ -172,3 +172,106 @@ queries:
       - source: brain
         path_contains: "warp224-video-frame"
         chunk_idx_any: true
+
+  # ── WARP-435 / ADR-003 Phase 1 disambiguation + sentence-boundary set ──
+  #
+  # These 10 queries exercise the sentence-aware chunker + contextual-
+  # header (sectionPath) plumbing that landed in WARP-435. Two themes:
+  #
+  #   (a) Sentence-spanning queries (q21-q26) — phrasings whose terms
+  #       span a sentence boundary the legacy word-split chunker would
+  #       have cut mid-sentence, breaking the recall path. The new
+  #       chunker preserves sentence boundaries, so the whole phrase
+  #       lives in one chunk and lexical/vector match both win.
+  #
+  #   (b) Section-path disambiguation (q27-q30) — queries phrased to
+  #       hinge on document/section context (e.g. "in the proposal
+  #       attachment" → only the email-with-PDF fixture should match,
+  #       not the bare PDF fixture). The contextual-header prefix
+  #       ("Document: foo.eml / Section: warp224-email") gives the
+  #       embedder + lexical engine the section signal they need to
+  #       prefer the correctly-scoped chunk over a same-body twin.
+  #
+  # Eval gate (per ADR-003 §"Phase 1 — Ingest enrichment"):
+  #   ndcg@10(hybrid + headers) ≥ ndcg@10(hybrid) × 1.05 on the
+  #   extended corpus (q01..q30).
+
+  - id: q21
+    query: "budget for the fourth quarter approved by the executive team"
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+    notes: "sentence-spanning phrase; legacy word-split could cut mid-clause"
+
+  - id: q22
+    query: "the meeting kickoff agenda items for next week"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "multi-noun phrase; new chunker keeps full sentence intact"
+
+  - id: q23
+    query: "screenshot text recovered via Tesseract OCR pipeline"
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+    notes: "compound noun phrase across sentence boundary"
+
+  - id: q24
+    query: "proposal sent by bob with the attached PDF document"
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+    notes: "long phrase blending sender + attachment context"
+
+  - id: q25
+    query: "transcript produced by faster-whisper for the audio recording"
+    relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "domain-specific phrase exercising token-aware capacity"
+
+  - id: q26
+    query: "frame OCR sentinel value extracted from the on-screen text"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+    notes: "sentence-spanning query for video-frame OCR chunks"
+
+  - id: q27
+    query: "proposal in the email attachment"
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+    notes: "section-path disambiguation: email scope, not bare PDF"
+
+  - id: q28
+    query: "budget figure in the audio transcript"
+    relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "section-path disambiguation: audio scope over PDF scope"
+
+  - id: q29
+    query: "kickoff content from the video frame slide"
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+    notes: "section-path disambiguation: video-frame channel only"
+
+  - id: q30
+    query: "note stored inside the zip archive bundle"
+    relevant:
+      - source: nextcloud
+        path_contains: "simple.zip"
+        chunk_idx_any: true
+    notes: "section-path disambiguation: archive-member chain[] anchor"

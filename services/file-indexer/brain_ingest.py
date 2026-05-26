@@ -26,7 +26,12 @@ import mimetypes
 import os
 from pathlib import Path
 
-from chunker import chunk_text
+from chunker import (
+    chunk_text,
+    chunk_text_with_offsets,
+    format_chunk_with_header,
+    section_path_for_offset,
+)
 from db import (
     delete_chunks_for_brain_item,
     mark_brain_item_indexed,
@@ -258,8 +263,16 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    # Chunk + embed.
-    chunks = chunk_text(text)
+    # Chunk + embed. WARP-435 (ADR-003 Phase 1): chunk_text_with_offsets
+    # returns (start_offset, chunk_text) tuples so we can look up each
+    # chunk's enclosing sectionPath from the extractor's
+    # metadata.section_paths and prepend a contextual header
+    # ("Document: foo / Section: bar > baz\n\n...") before embedding.
+    # The same prefixed text is what we persist on FileContentChunk.text
+    # so search results carry the path string the embedder saw — no
+    # divergence between embedding input and stored representation.
+    chunk_pairs = chunk_text_with_offsets(text)
+    chunks = [c for _off, c in chunk_pairs]
     if not chunks:
         logger.info("brain_ingest: chunker produced 0 chunks for %s", path)
         warnings.append("no_chunks")
@@ -275,8 +288,24 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
+    # WARP-435: build prefixed chunk texts. Filename resolution priority:
+    # MQTT payload's `filename` field (user-friendly), falling back to
+    # the storage-path basename. The section_paths lookup is best-effort
+    # — empty list → header is just "Document: filename".
+    doc_metadata_pre = doc.get("metadata") if isinstance(doc, dict) else None
+    section_paths_meta = (
+        doc_metadata_pre.get("section_paths") if doc_metadata_pre else None
+    )
+    display_filename = payload.get("filename") or os.path.basename(path) or "document"
+    prefixed_chunks: list[str] = []
+    for offset, chunk_str in chunk_pairs:
+        sp = section_path_for_offset(offset, section_paths_meta)
+        prefixed_chunks.append(
+            format_chunk_with_header(chunk_str, display_filename, sp)
+        )
+
     try:
-        vectors = embed_texts(chunks)
+        vectors = embed_texts(prefixed_chunks)
     except Exception as e:
         logger.warning("brain_ingest: embedding failed for %s: %s", path, e)
         # WARP-330: persist the failure on the row so the dashboard's
@@ -292,12 +321,12 @@ def handle_brain_uploaded(payload: dict) -> None:
             )
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
-    if len(vectors) != len(chunks):
+    if len(vectors) != len(prefixed_chunks):
         logger.warning(
             "brain_ingest: embedding count mismatch for %s (%d vs %d)",
             path,
             len(vectors),
-            len(chunks),
+            len(prefixed_chunks),
         )
         try:
             mark_brain_item_indexed(
@@ -317,9 +346,12 @@ def handle_brain_uploaded(payload: dict) -> None:
 
     # Upsert (delete-then-insert to keep brain rows independent of the
     # ncFileId-based unique constraint that the watcher relies on).
+    # WARP-435: persist the prefixed text — the exact string the
+    # embedder saw — so searchHybrid's lexical arm and the LLM's
+    # citation surface both reflect the contextual header.
     try:
         delete_chunks_for_brain_item(item_id)
-        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        for idx, (chunk, vec) in enumerate(zip(prefixed_chunks, vectors)):
             upsert_chunk(
                 user_id=user_id,
                 # Use a deterministic synthetic ncFileId so the existing

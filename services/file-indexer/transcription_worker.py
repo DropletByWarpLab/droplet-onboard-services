@@ -74,8 +74,14 @@ def _dispatch_and_index(item: dict) -> None:
     (faster-whisper + grpcio are heavy; we don't want them imported at
     test collection time).
     """
+    import os
+
     from extractors.registry import dispatch
-    from chunker import chunk_text
+    from chunker import (
+        chunk_text_with_offsets,
+        format_chunk_with_header,
+        section_path_for_offset,
+    )
     from embedder import embed_texts
     from brain_ingest import _synthetic_nc_file_id
 
@@ -89,24 +95,40 @@ def _dispatch_and_index(item: dict) -> None:
         raise RuntimeError(f"extractor refused mime={mime}")
 
     text = doc.get("text", "") if isinstance(doc, dict) else ""
-    chunks = chunk_text(text)
-    if not chunks:
+    # WARP-435 (ADR-003 Phase 1): sentence-aware chunking + sectionPath
+    # contextual headers. Audio/video typically produce a single big
+    # transcript so section_paths is just [(0, [filename])] — the
+    # contextual header still helps the embedder anchor cross-document
+    # similarity (e.g. two recordings of the same meeting).
+    chunk_pairs = chunk_text_with_offsets(text)
+    if not chunk_pairs:
         # Empty transcript is fine — extractor succeeded but produced no text.
         # Caller transitions to 'ready' so the chip stops spinning.
         return
 
-    vectors = embed_texts(chunks)
-    if len(vectors) != len(chunks):
+    metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    section_paths_meta = metadata.get("section_paths") if metadata else None
+    display_filename = os.path.basename(storage_path) or storage_path
+    prefixed_chunks: list[str] = []
+    for offset, chunk_str in chunk_pairs:
+        sp = section_path_for_offset(offset, section_paths_meta)
+        prefixed_chunks.append(
+            format_chunk_with_header(chunk_str, display_filename, sp)
+        )
+
+    vectors = embed_texts(prefixed_chunks)
+    if len(vectors) != len(prefixed_chunks):
         raise RuntimeError(
-            f"embedding count mismatch: {len(vectors)} vs {len(chunks)}"
+            f"embedding count mismatch: {len(vectors)} vs {len(prefixed_chunks)}"
         )
 
     # Wipe any stale chunks for this item, then upsert fresh ones. Mirrors
-    # brain_ingest's idempotency pattern.
+    # brain_ingest's idempotency pattern. WARP-435: persist the prefixed
+    # text so the lexical arm + LLM citation surface see the section
+    # path string.
     db.delete_chunks_for_brain_item(item_id)
     warnings = list(doc.get("warnings", [])) if isinstance(doc, dict) else []
-    metadata = doc.get("metadata") if isinstance(doc, dict) else None
-    for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+    for idx, (chunk, vec) in enumerate(zip(prefixed_chunks, vectors)):
         db.upsert_chunk(
             user_id=user_id,
             nc_file_id=_synthetic_nc_file_id(item_id),
