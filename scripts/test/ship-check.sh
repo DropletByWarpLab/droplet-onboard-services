@@ -48,7 +48,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Honour REPO_ROOT if the caller (typically the test harness) has already
+# pointed us at a synthetic worktree; otherwise resolve relative to this
+# script. Exporting it lets sub-processes (npm, docker compose, etc.) see
+# the same value.
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 export REPO_ROOT
 
 # --- Colors ---
@@ -168,8 +172,73 @@ USAGE
 # =============================================================================
 
 run_check_tsc_full() {
-  printf "  ${_YELLOW}SKIP${_RESET}  tsc-full (not yet implemented)\n"
-  CHECK_RESULTS[tsc-full]=skip
+  # Mirror the orchestrator Dockerfile's exact build order. The relevant
+  # bug class (WARP-329) was a TS2322 in a test fixture that only `tsc`
+  # caught — `npm run dev` skips test compilation. Walking each workspace
+  # with `tsc --noEmit` reproduces what `RUN npm run build` does inside
+  # the container.
+  #
+  # Order matters: dependent workspaces (orchestrator, mcp-server) need
+  # tools-core + fips-selftest BUILT (not just type-checked) so their
+  # @droplet/* imports resolve. We emit dist/ for those leaf packages
+  # and noEmit-check the consumers.
+  local label="tsc-full"
+  local rc=0
+  local out
+
+  # Phase 1: prisma generate (orchestrator's @prisma/client must reflect
+  # the current schema or every Prisma-typed call site shows TS2305).
+  if [ -d "$REPO_ROOT/apps/orchestrator/prisma" ]; then
+    if ! out="$(cd "$REPO_ROOT/apps/orchestrator" && npx prisma generate 2>&1)"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
+      printf '%s\n' "$out" | sed 's/^/    | /' >&2
+      CHECK_RESULTS[$label]=fail
+      return 1
+    fi
+  fi
+
+  # Phase 2: build leaf workspaces so their dist + .d.ts exist for
+  # downstream type resolution. These are the same RUN steps the
+  # orchestrator Dockerfile executes.
+  local leaf_pkg
+  for leaf_pkg in @droplet/tools-core @droplet/fips-selftest @droplet/mcp-server; do
+    if ! out="$(cd "$REPO_ROOT" && npm run -w "$leaf_pkg" build 2>&1)"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — %s build failed\n" "$label" "$leaf_pkg"
+      printf '%s\n' "$out" | tail -40 | sed 's/^/    | /' >&2
+      CHECK_RESULTS[$label]=fail
+      return 1
+    fi
+  done
+
+  # Phase 3: noEmit-check every workspace with a tsconfig.json. Keeps the
+  # check ~3x faster than `npm run build` everywhere (no .d.ts/.js write).
+  local ws
+  local failed_workspaces=()
+  for ws in apps/orchestrator apps/web-dashboard packages/tools-core packages/fips-selftest services/mcp-server; do
+    if [ ! -f "$REPO_ROOT/$ws/tsconfig.json" ]; then
+      continue
+    fi
+    if ! out="$(cd "$REPO_ROOT/$ws" && npx tsc --noEmit 2>&1)"; then
+      failed_workspaces+=("$ws")
+      printf "  ${_RED}FAIL${_RESET}  %s — tsc errors in %s\n" "$label" "$ws"
+      printf '%s\n' "$out" | head -20 | sed 's/^/    | /' >&2
+      local extra
+      extra=$(printf '%s\n' "$out" | wc -l)
+      if [ "$extra" -gt 20 ]; then
+        printf "    | (... %d more lines suppressed; cd %s && npx tsc --noEmit)\n" \
+          "$((extra - 20))" "$ws" >&2
+      fi
+      rc=1
+    fi
+  done
+
+  if [ "$rc" -ne 0 ]; then
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  printf "  ${_GREEN}PASS${_RESET}  %s (5 workspaces)\n" "$label"
+  CHECK_RESULTS[$label]=pass
   return 0
 }
 
