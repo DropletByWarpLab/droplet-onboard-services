@@ -39,6 +39,7 @@ from voice.pipeline import (
     DEFAULT_VISUAL_DECAY_S,
     PipelineStatus,
     WakePipeline,
+    classify_tool_choice,
 )
 from voice.llm import LLMClient, LLMUnavailable, MockLLM
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
@@ -1507,3 +1508,102 @@ class TestUpstreamReprobing:
         # And the LLM was NOT called (operator's callback is in charge now):
         assert llm.requests == []
         assert tts.texts_received == []
+
+
+class TestIntentClassifier:
+    """`classify_tool_choice(transcript)` is the pure-function intent
+    gate the pipeline calls on every transcript before dispatching to
+    the LLM. Returns "none" for utterances that the system prompt
+    already answers (greetings, time-of-day, who-are-you); None for
+    everything else so the agent loop's default "auto" applies.
+
+    The docstring on _INTENT_NO_TOOLS_PATTERNS pins that updates here
+    MUST be paired with a test addition. Mirror that contract — every
+    new regex pattern in pipeline.py gets a row in `should_be_none` or
+    `should_be_auto` below.
+    """
+
+    @pytest.mark.parametrize("transcript", [
+        # Greetings + check-ins
+        "hello",
+        "Hello",
+        "hi",
+        "hey",
+        "yo",
+        "sup",
+        "hello there",
+        "hey jarvis",
+        "Hey Jarvis",
+        "hey jarvis.",
+        "hey jarvis!",
+        "hey droplet",
+        "hey assistant",
+        "hello jarvis",
+        "good morning",
+        "good evening",
+        "good afternoon, jarvis",
+        "good night",
+        "Hey Jarvis, can you hear me?",
+        "can you hear me",
+        "are you there?",
+        "are you listening?",
+        "do you hear me",
+        # Time
+        "what time is it",
+        "What time is it?",
+        "what's the time",
+        "what is the time",
+        "what time is it now",
+        "what's the current time",
+        "current time",
+        "time now",
+        "tell me the time",
+        "do you know the time",
+        "got the time?",
+        # Date
+        "what's the date",
+        "what is the date",
+        "what's today's date",
+        "what day is it",
+        "what day of the week is it",
+        "what day is today",
+        "what's today",
+        # Who/what-are-you
+        "who are you",
+        "what's your name",
+        "what is your name",
+        "what are you",
+        "what can you do",
+        "are you jarvis",
+        "are you there",
+    ])
+    def test_no_tools_for_context_only_utterances(self, transcript: str):
+        assert classify_tool_choice(transcript) == "none"
+
+    @pytest.mark.parametrize("transcript", [
+        # Real appliance-state queries — must NOT be gated
+        "list my cameras",
+        "what cameras do I have",
+        "show me the front door camera",
+        "is the system OK?",
+        "is the system healthy",
+        "turn off the lights",
+        "block the kid's phone",
+        "what's on my calendar today",
+        "any new reminders",
+        "what's the weather like",  # not in our tools but not in our gate either
+        # Greeting + real request — keep auto so the request gets a tool
+        "hey jarvis, what cameras do I have",
+        "hey jarvis, turn off the lights",
+        "hello, is the system OK",
+        # Empty / nonsense
+        "",
+        "   ",
+    ])
+    def test_auto_for_real_queries_and_edge_cases(self, transcript: str):
+        assert classify_tool_choice(transcript) is None
+
+    def test_none_input_returns_none(self):
+        # Defensive: pipeline never passes None, but make sure the
+        # signature handles it without raising.
+        assert classify_tool_choice(None) is None  # type: ignore[arg-type]
