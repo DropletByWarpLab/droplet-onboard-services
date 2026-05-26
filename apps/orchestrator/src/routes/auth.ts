@@ -795,17 +795,54 @@ export function createPublicAuthRouter(
           : invite.role === "guest"
             ? "guest"
             : "family";
-      const userId = invite.username;
+
+      // WARP-485 round 2 — provision the local User row mapping this
+      // Nextcloud identity to a local UUID BEFORE signing the JWT, so
+      // `JWT.sub = localUser.id` (UUID) instead of the invite username
+      // string. Without this step, the invitee's first session would
+      // ship the bypassable shape we just fixed on /auth/login.
+      //
+      // Upsert (not create) so concurrent invite-accept POSTs that race
+      // through `await prisma.userInvite.update` don't trip
+      // P2002-unique on `nextcloudUsername` — the second caller still
+      // sees the existing row and gets a properly-shaped JWT.
+      //
+      // The User.role column uses the canonical Role enum value from
+      // the invite (so DB-level RBAC matches the operator's intent on
+      // the create endpoint); the JWT session `role` keeps the legacy
+      // mapping above (admin invite → owner session) which existing
+      // routes still depend on.
+      const userRow = await prisma.user.upsert({
+        where: { nextcloudUsername: invite.username },
+        update: {
+          // If a row already exists, keep its UUID — the invite-accept
+          // is essentially a re-acceptance of the same identity (rare
+          // but possible under retry). Refresh `displayName` from the
+          // invite in case the operator updated it.
+          displayName: invite.displayName || invite.username,
+        },
+        create: {
+          username: invite.username,
+          displayName: invite.displayName || invite.username,
+          email: invite.email ?? null,
+          nextcloudUsername: invite.username,
+          role: invite.role as any, // canonical Role enum from the invite
+          // `isLocal` defaults to true in the schema; mirror-from-NC
+          // would only flip false for setup-time admins.
+        },
+      });
+      const userId = userRow.id; // local UUID — fed into JWT.sub
+
       const accessToken = signAccessToken({
         id: userId,
-        username: userId,
-        displayName: invite.displayName || userId,
+        username: invite.username,
+        displayName: invite.displayName || invite.username,
         role,
       });
       const refreshToken = signRefreshToken({
         id: userId,
-        username: userId,
-        displayName: invite.displayName || userId,
+        username: invite.username,
+        displayName: invite.displayName || invite.username,
         role,
       });
 
@@ -833,8 +870,8 @@ export function createPublicAuthRouter(
       res.json({
         user: {
           id: userId,
-          username: userId,
-          displayName: invite.displayName || userId,
+          username: invite.username,
+          displayName: invite.displayName || invite.username,
           role,
         },
       });
