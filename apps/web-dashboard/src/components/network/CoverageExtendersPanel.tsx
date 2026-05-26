@@ -593,6 +593,24 @@ export function CoverageExtendersPanel() {
         </div>
       )}
 
+      {/* ADR-005 LRU cap surfacing — when the discovered-list hits the
+          25-entry cap (usually only under an mDNS-spoof flood), tell
+          the operator their list is bounded so a missing extender
+          doesn't look like a discovery bug. */}
+      {data?.discoveredCapReached && (
+        <div
+          role="status"
+          className="mb-3 dp-card border border-system-orange/30 bg-system-orange/5 flex items-start gap-3 px-3 py-2"
+        >
+          <AlertTriangle size={16} className="text-system-orange mt-0.5 shrink-0" />
+          <p className="type-footnote text-label-secondary flex-1">
+            Showing the {data.discoveredCap} most recently detected access
+            points. If yours isn&apos;t listed, unplug it for a moment and
+            plug it back in to refresh the list.
+          </p>
+        </div>
+      )}
+
       {isLoading && !data ? (
         <div
           role="status"

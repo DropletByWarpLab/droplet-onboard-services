@@ -32,6 +32,20 @@ import {
 const logger = pino({ name: "ap-onboard" });
 
 /**
+ * Per ADR-005 §"Consequences": the discovered-list is capped to
+ * 25 entries (LRU) as the mDNS-spoof DoS mitigation. A malicious LAN
+ * device CAN spoof `_droplet-ap._tcp` announces; capping bounds the
+ * worst-case dashboard noise. Eligible-for-eviction = the set of rows
+ * the operator hasn't acted on yet (DISCOVERED + AWAITING_APPROVAL);
+ * approved / online / failed / decommissioned rows are persistent and
+ * never evicted by this mechanism.
+ *
+ * The cap is also surfaced via `GET /api/aps/discovered` so the
+ * dashboard can show the operator when the list saturates.
+ */
+export const DISCOVERED_AP_LRU_CAP = 25;
+
+/**
  * Typed error codes for AP-onboard failures. Surfaces in
  * `ApOnboardError.code` and the JSON error body so the dashboard's
  * `AP_ONBOARD_ERROR_COPY` table can key on it instead of regex-matching
@@ -156,7 +170,7 @@ export interface DiscoveredApObservation {
 export async function reconcileDiscovered(
   prisma: PrismaClient,
   observed: DiscoveredApObservation[],
-): Promise<{ created: number; updated: number }> {
+): Promise<{ created: number; updated: number; evicted: number }> {
   let created = 0;
   let updated = 0;
   for (const obs of observed) {
@@ -196,7 +210,45 @@ export async function reconcileDiscovered(
     });
     created += 1;
   }
-  return { created, updated };
+  const evicted = await evictDiscoveredAps(prisma);
+  return { created, updated, evicted };
+}
+
+/**
+ * Enforce the LRU cap on the discovered-list per ADR-005. Counts rows
+ * in `AWAITING_APPROVAL` + `DISCOVERED` and deletes the oldest-`lastSeen`
+ * entries until the count is ≤ `DISCOVERED_AP_LRU_CAP`. Returns the
+ * number of rows removed.
+ *
+ * Approved / online / failed / decommissioned rows are excluded by
+ * design — the cap is about bounding the operator-actionable surface
+ * area, not about purging the audit trail.
+ */
+export async function evictDiscoveredAps(
+  prisma: PrismaClient,
+): Promise<number> {
+  const eligibleCount = await prisma.apDevice.count({
+    where: { status: { in: ["AWAITING_APPROVAL", "DISCOVERED"] } },
+  });
+  if (eligibleCount <= DISCOVERED_AP_LRU_CAP) return 0;
+  const overflow = eligibleCount - DISCOVERED_AP_LRU_CAP;
+  const stale = await prisma.apDevice.findMany({
+    where: { status: { in: ["AWAITING_APPROVAL", "DISCOVERED"] } },
+    orderBy: { lastSeen: "asc" },
+    take: overflow,
+    select: { mac: true },
+  });
+  if (stale.length === 0) return 0;
+  const result = await prisma.apDevice.deleteMany({
+    where: { mac: { in: stale.map((row) => row.mac) } },
+  });
+  if (result.count > 0) {
+    logger.warn(
+      { evicted: result.count, cap: DISCOVERED_AP_LRU_CAP },
+      "ap-onboard: discovered-list LRU cap reached, evicting oldest entries",
+    );
+  }
+  return result.count;
 }
 
 export interface ApproveOptions {

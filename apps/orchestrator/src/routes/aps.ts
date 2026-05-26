@@ -20,6 +20,7 @@ import {
   approveAp,
   decommissionAp,
   ApOnboardError,
+  DISCOVERED_AP_LRU_CAP,
 } from "../services/ap-onboard.service.js";
 import { normalizeMac } from "../lib/mac.js";
 
@@ -64,7 +65,18 @@ export function createApsRouter(prisma: PrismaClient): Router {
       const aps = await prisma.apDevice.findMany({
         orderBy: { lastSeen: "desc" },
       });
-      res.json({ aps });
+      // Surface the ADR-005 LRU cap alongside the list so the panel
+      // can show "discovery list is full" without a second request.
+      // `discoveredCapReached` is derived from the same set the cap
+      // controls (AWAITING_APPROVAL + DISCOVERED).
+      const discoveredCount = aps.filter(
+        (ap) => ap.status === "AWAITING_APPROVAL" || ap.status === "DISCOVERED",
+      ).length;
+      res.json({
+        aps,
+        discoveredCap: DISCOVERED_AP_LRU_CAP,
+        discoveredCapReached: discoveredCount >= DISCOVERED_AP_LRU_CAP,
+      });
     } catch (err) {
       next(err);
     }
@@ -85,7 +97,14 @@ export function createApsRouter(prisma: PrismaClient): Router {
         },
         orderBy: { lastSeen: "desc" },
       });
-      res.json({ discovered });
+      // cap + capReached surface the ADR-005 LRU cap so the dashboard
+      // can render "discovery list is full" when a flood of garbage
+      // announces is filling the list.
+      res.json({
+        discovered,
+        cap: DISCOVERED_AP_LRU_CAP,
+        capReached: discovered.length >= DISCOVERED_AP_LRU_CAP,
+      });
     } catch (err) {
       next(err);
     }

@@ -2085,7 +2085,13 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
 
 // ── WARP-446: Coverage extender APs ──
 
-export async function fetchApDevices(): Promise<{ aps: import("./types").ApDeviceInfo[] }> {
+export async function fetchApDevices(): Promise<{
+  aps: import("./types").ApDeviceInfo[];
+  // ADR-005 LRU cap on the discovered-list. Surfaces in the panel so
+  // the operator knows when an mDNS flood is filling the queue.
+  discoveredCap: number;
+  discoveredCapReached: boolean;
+}> {
   const res = await authFetch(`${BASE}/api/aps`);
   if (!res.ok) throw new Error(`Failed to fetch extender APs: ${res.status}`);
   return res.json();
@@ -2093,6 +2099,8 @@ export async function fetchApDevices(): Promise<{ aps: import("./types").ApDevic
 
 export async function fetchDiscoveredApDevices(): Promise<{
   discovered: import("./types").ApDeviceInfo[];
+  cap: number;
+  capReached: boolean;
 }> {
   const res = await authFetch(`${BASE}/api/aps/discovered`);
   if (!res.ok) throw new Error(`Failed to fetch discovered extenders: ${res.status}`);

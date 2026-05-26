@@ -161,6 +161,26 @@ describe("GET /api/aps", () => {
     const res = await request(app).get("/api/aps");
     expect(res.status).toBe(200);
   });
+
+  it("surfaces the ADR-005 LRU cap as discoveredCap + discoveredCapReached", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    // Empty list — cap not reached.
+    const res1 = await request(app).get("/api/aps");
+    expect(res1.body.discoveredCap).toBe(25);
+    expect(res1.body.discoveredCapReached).toBe(false);
+
+    // Seed 25 AWAITING_APPROVAL rows so the cap reads as reached.
+    for (let i = 0; i < 25; i += 1) {
+      prisma.rows.set(`AA:BB:CC:00:00:${i.toString(16).padStart(2, "0").toUpperCase()}`, {
+        mac: `AA:BB:CC:00:00:${i.toString(16).padStart(2, "0").toUpperCase()}`,
+        status: "AWAITING_APPROVAL",
+        lastSeen: new Date(i),
+      });
+    }
+    const res2 = await request(app).get("/api/aps");
+    expect(res2.body.discoveredCapReached).toBe(true);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────

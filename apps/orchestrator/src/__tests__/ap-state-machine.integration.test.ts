@@ -93,6 +93,46 @@ function createPrismaMock() {
         }
         return merged;
       }),
+      // Used by the ADR-005 LRU eviction in reconcileDiscovered.
+      count: vi.fn(async ({ where }: any = {}) => {
+        const statusIn: string[] | undefined = where?.status?.in;
+        let n = 0;
+        for (const row of rows.values()) {
+          if (!statusIn || statusIn.includes(row.status)) n += 1;
+        }
+        return n;
+      }),
+      findMany: vi.fn(async ({ where, orderBy, take, select }: any = {}) => {
+        const statusIn: string[] | undefined = where?.status?.in;
+        let list = Array.from(rows.values()).filter((row) =>
+          !statusIn || statusIn.includes(row.status),
+        );
+        if (orderBy?.lastSeen === "asc") {
+          list.sort((a, b) => new Date(a.lastSeen).getTime() - new Date(b.lastSeen).getTime());
+        } else if (orderBy?.lastSeen === "desc") {
+          list.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
+        }
+        if (typeof take === "number") list = list.slice(0, take);
+        if (select) {
+          return list.map((row) => {
+            const out: any = {};
+            for (const key of Object.keys(select)) {
+              if (select[key]) out[key] = row[key];
+            }
+            return out;
+          });
+        }
+        return list;
+      }),
+      deleteMany: vi.fn(async ({ where }: any = {}) => {
+        const macsIn: string[] | undefined = where?.mac?.in;
+        if (!macsIn) return { count: 0 };
+        let count = 0;
+        for (const mac of macsIn) {
+          if (rows.delete(mac)) count += 1;
+        }
+        return { count };
+      }),
     },
   };
 }
@@ -214,6 +254,73 @@ describe("AP state machine — full lifecycle (WARP-446 integration)", () => {
     const row = prisma.rows.get("B8:27:EB:00:00:01");
     expect(row.status).toBe("DECOMMISSIONED"); // not flipped back
     expect(row.model).toBe("raspberrypi,5-model-b"); // metadata still updated
+  });
+
+  it("evicts oldest DISCOVERED/AWAITING_APPROVAL rows to honor ADR-005 LRU cap of 25", async () => {
+    const prisma = createPrismaMock();
+    // Seed 25 AWAITING_APPROVAL rows so the cap is exactly hit.
+    // lastSeen incrementing so row 0 is oldest, row 24 is youngest.
+    for (let i = 0; i < 25; i += 1) {
+      const mac = `AA:BB:CC:00:00:${i.toString(16).padStart(2, "0").toUpperCase()}`;
+      prisma.rows.set(mac, {
+        mac,
+        status: "AWAITING_APPROVAL",
+        lastSeen: new Date(1_000_000 + i * 1000),
+      });
+    }
+    // Also seed one ONLINE row — must be EXEMPT from eviction even
+    // though it would be the absolute oldest entry overall.
+    prisma.rows.set("ZZ:ZZ:ZZ:00:00:01", {
+      mac: "ZZ:ZZ:ZZ:00:00:01",
+      status: "ONLINE",
+      lastSeen: new Date(0), // older than everything
+    });
+
+    // 3 fresh observations push the awaiting count to 28 → 3 evictions.
+    await reconcileDiscovered(prisma as any, [
+      { mac: "DE:AD:BE:EF:00:01" },
+      { mac: "DE:AD:BE:EF:00:02" },
+      { mac: "DE:AD:BE:EF:00:03" },
+    ]);
+
+    const awaiting = Array.from(prisma.rows.values()).filter(
+      (r) => r.status === "AWAITING_APPROVAL",
+    );
+    expect(awaiting.length).toBe(25);
+
+    // ONLINE row survives despite being the oldest by lastSeen.
+    expect(prisma.rows.get("ZZ:ZZ:ZZ:00:00:01")?.status).toBe("ONLINE");
+
+    // The 3 youngest of the original 25 (idx 22-24) should still be
+    // present; the 3 oldest (idx 0-2) should be gone; the 3 new MACs
+    // should be present.
+    expect(prisma.rows.has("AA:BB:CC:00:00:00")).toBe(false);
+    expect(prisma.rows.has("AA:BB:CC:00:00:01")).toBe(false);
+    expect(prisma.rows.has("AA:BB:CC:00:00:02")).toBe(false);
+    expect(prisma.rows.has("AA:BB:CC:00:00:18")).toBe(true); // idx 24
+    expect(prisma.rows.has("DE:AD:BE:EF:00:01")).toBe(true);
+    expect(prisma.rows.has("DE:AD:BE:EF:00:02")).toBe(true);
+    expect(prisma.rows.has("DE:AD:BE:EF:00:03")).toBe(true);
+  });
+
+  it("evicted count surfaces in reconcileDiscovered return value", async () => {
+    const prisma = createPrismaMock();
+    for (let i = 0; i < 26; i += 1) {
+      const mac = `AA:BB:CC:00:01:${i.toString(16).padStart(2, "0").toUpperCase()}`;
+      prisma.rows.set(mac, {
+        mac,
+        status: "AWAITING_APPROVAL",
+        lastSeen: new Date(2_000_000 + i * 1000),
+      });
+    }
+    // Re-observe one existing row; no new rows. Eviction should still
+    // run and trim the over-count.
+    const result = await reconcileDiscovered(prisma as any, [
+      { mac: "AA:BB:CC:00:01:19" },
+    ]);
+    expect(result.evicted).toBe(1);
+    expect(result.updated).toBe(1);
+    expect(result.created).toBe(0);
   });
 
   it("normalizeMac() canonicalises every ingress variant — full machine still keys on uppercase-colon form", async () => {
