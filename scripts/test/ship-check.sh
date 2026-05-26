@@ -676,23 +676,54 @@ chmod 440 /etc/sudoers.d/droplet-test
 # shim must be exec'able by droplet-test (not just root) — /usr/local/bin
 # is on the default PATH for both users so a chmod 755 suffices.
 #
-# `docker info` → exit 0 (lets detect_docker_sudo conclude "daemon
-#                 reachable, no sudo needed").
-# `docker run`  → exit 1 (forces secret-materialization callers like
-#                 _generate_mosquitto_passwd into their plaintext
-#                 fallback — no real container produces output here,
-#                 so the success branch would crash on "file not
-#                 written". The fallback path is the OLD pre-docker
-#                 path and exercises a different code path, which is
-#                 fine for smoke purposes.).
-# everything else → exit 0 (be permissive; setup.sh never inspects
-#                  output beyond these two cases in the --skip-* path).
+# The shim is an EXPLICIT ALLOWLIST: only the docker subcommands that
+# setup.sh's `--skip-docker --skip-build --skip-start --skip-drivers`
+# path actually invokes are cased. Any other subcommand hits the
+# default `exit 1` and fails the smoke. This is intentionally
+# fail-CLOSED so a future setup.sh change that introduces e.g.
+# `docker pull`, `docker version`, `docker buildx ls` etc. trips the
+# smoke check loudly instead of silently passing on the shim. See
+# CR #1 on PR #266 for the original fail-open bug rationale.
+#
+# When you add a real new docker call to setup.sh's --skip-* path,
+# you MUST add a corresponding case here with a one-line comment
+# explaining what return value setup.sh's caller expects.
 cat > /usr/local/bin/docker <<'SHIM'
 #!/bin/sh
+# Allowlisted docker subcommands for the ship-check smoke path.
 case "$1" in
-  info) exit 0 ;;
-  run)  exit 1 ;;
-  *)    exit 0 ;;
+  # `detect_docker_sudo` (scripts/lib/docker.sh) calls `docker info`
+  # unconditionally even when --skip-docker is set. exit 0 lets it
+  # conclude "daemon reachable, no sudo needed" and move on.
+  info)
+    exit 0
+    ;;
+  # `_generate_mosquitto_passwd` (scripts/lib/secrets.sh) does a
+  # `docker run --rm eclipse-mosquitto:2 ...` to bcrypt-hash the MQTT
+  # password. exit 1 forces the plaintext fallback branch, which is
+  # the pre-Docker code path and the right thing for a no-real-daemon
+  # smoke test (the success branch would crash on "file not written"
+  # because the shim doesn't actually produce the output file).
+  run)
+    exit 1
+    ;;
+  # `_generate_tls_cert` (scripts/lib/secrets.sh) probes for a running
+  # gateway via `docker compose -f … ps --services --filter status=running`
+  # and then pipes to `grep -qx gateway`. Returning exit 0 with no
+  # stdout makes the grep fail, the surrounding `if` short-circuits,
+  # and `docker compose exec gateway nginx -s reload` never runs.
+  # That's the desired behaviour for a fresh smoke container where
+  # no gateway is up.
+  compose)
+    exit 0
+    ;;
+  # Fail-closed default. Any new docker subcommand setup.sh starts
+  # invoking must be added to the allowlist above with an explicit
+  # return-value rationale, or this smoke test will catch it.
+  *)
+    echo "ship-check docker shim: unhandled docker subcommand '$1' (add to allowlist if intentional)" >&2
+    exit 1
+    ;;
 esac
 SHIM
 chmod 755 /usr/local/bin/docker
