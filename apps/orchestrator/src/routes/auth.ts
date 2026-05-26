@@ -284,16 +284,63 @@ export function createPublicAuthRouter(
       // Fetch user details (groups included) to determine role
       const ncUser = await ncGetCurrentUser(result.token);
 
-      const userId = ncUser?.id || result.loginName;
-      const username = ncUser?.id || result.loginName;
+      const ncUsername = ncUser?.id || result.loginName;
       const displayName = ncUser?.displayName || result.loginName;
       const role: Role = roleFromGroups(ncUser?.groups ?? []);
+
+      // WARP-485 round 2 — resolve the local User row by `nextcloudUsername`
+      // BEFORE signing the JWT, so `JWT.sub = localUser.id` (UUID) instead
+      // of the NC username string. Fail-closed when no local row matches:
+      // the operator must explicitly provision the user via /api/people
+      // before they can authenticate. Silent auto-provision would be a
+      // privilege-escalation vector — an attacker who somehow holds a
+      // valid OCS credential for an unrelated NC user could otherwise
+      // mint a default-`family`-role local row.
+      //
+      // The shim createAuthRouter() in legacy code paths calls
+      // createPublicAuthRouter() without prisma; we treat that the same
+      // as "no matching row" so a misconfigured deployment can't sneak
+      // past with an unnormalized id either.
+      if (!prisma) {
+        logger.warn(
+          { ncUsername },
+          "JWT login: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+        );
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+      const localUser = await prisma.user.findUnique({
+        where: { nextcloudUsername: ncUsername },
+      });
+      if (!localUser) {
+        logger.warn(
+          { ncUsername },
+          "JWT login: no local User row for Nextcloud user; operator must provision via /api/people (WARP-485 round 2)",
+        );
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+
+      const userId = localUser.id; // local UUID — fed into JWT.sub + NC store key
+      const username = ncUsername; // human-readable handle (display + audit only)
 
       // Stash the Nextcloud app-password server-side so downstream routes
       // (files, storage, user admin) can impersonate the caller against
       // Nextcloud's WebDAV/OCS APIs — the browser only ever sees our JWT.
       // TTL matches the refresh-token lifetime; the entry is overwritten on
       // every successful login and deleted at logout.
+      //
+      // WARP-485 round 2 — keyed by the local User.id UUID so logout's
+      // getNcToken(req.user.id) hits the same key (req.user.id is the
+      // UUID across all consumers post-round-2).
       try {
         await storeNcToken(userId, result.token, REFRESH_TOKEN_TTL_SECONDS);
       } catch (err) {
