@@ -29,6 +29,7 @@ import type {
   MatterGrouped,
   SmartHomeCategory,
 } from "../types/smart-home.js";
+import { recordActivity } from "./activity.singleton.js";
 
 const logger = pino({ name: "matter" });
 
@@ -220,6 +221,18 @@ export async function commissionDevice(
   // Set up listeners for the new node
   await setupNodeListeners(nodeId);
 
+  // WARP-456: audit row for the commission write. Commissioning is the
+  // highest-impact Matter operation — the appliance now owns the
+  // device's network credentials and can drive it.
+  await recordActivity({
+    kind: "smart_home",
+    severity: "ok",
+    sourceIcon: "plug",
+    what: "Commissioned Matter device",
+    sub: `nodeId ${String(nodeId)}`,
+    refs: { nodeId: String(nodeId) },
+  });
+
   return { nodeId: String(nodeId) };
 }
 
@@ -237,6 +250,16 @@ export async function decommissionDevice(nodeIdStr: string): Promise<void> {
     await controller.removeNode(nodeId, false);
   }
   logger.info("Device decommissioned: %s", nodeIdStr);
+
+  // WARP-456: audit row for the destructive write.
+  await recordActivity({
+    kind: "smart_home",
+    severity: "warn",
+    sourceIcon: "unplug",
+    what: "Decommissioned Matter device",
+    sub: `nodeId ${nodeIdStr}`,
+    refs: { nodeId: nodeIdStr },
+  });
 }
 
 // --- Device listing ---
@@ -463,6 +486,39 @@ function deriveStateString(
 // --- Commands ---
 
 export async function sendMatterCommand(
+  nodeIdStr: string,
+  command: string,
+  data?: Record<string, unknown>,
+): Promise<{ status: string; result?: unknown }> {
+  // WARP-456: wrap the dispatcher so every Matter write — success or
+  // failure — lands as one signed ActivityRow. `_sendMatterCommandInner`
+  // does the real work; the wrapper only reacts to the outcome.
+  let result: { status: string; result?: unknown } | undefined;
+  let threw: unknown = null;
+  try {
+    result = await _sendMatterCommandInner(nodeIdStr, command, data);
+    return result;
+  } catch (err) {
+    threw = err;
+    throw err;
+  } finally {
+    await recordActivity({
+      kind: "smart_home",
+      severity: threw ? "err" : "ok",
+      sourceIcon: "home",
+      what: threw
+        ? `Matter ${command} failed`
+        : `Matter ${command}`,
+      sub: `nodeId ${nodeIdStr}`,
+      refs: {
+        nodeId: nodeIdStr,
+        command,
+      },
+    });
+  }
+}
+
+async function _sendMatterCommandInner(
   nodeIdStr: string,
   command: string,
   data?: Record<string, unknown>,

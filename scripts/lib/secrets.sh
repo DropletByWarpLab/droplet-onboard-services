@@ -334,6 +334,50 @@ materialize_artifacts() {
   _write_mosquitto_conf
   _generate_tls_cert
   sync_openwrt_password_secret
+  sync_audit_signing_key
+}
+
+# Generate /data/secrets/audit.key on first boot for WARP-456.
+#
+# The orchestrator's audit-signing.service.ts reads this file at startup
+# (or AUDIT_SIGNING_KEY env var in dev/CI) and HMAC-SHA256 signs every
+# ActivityRow with it, forming a tamper-evident hash chain across all
+# events emitted on the device. Without the key the orchestrator refuses
+# to start (no unsigned activity rows ever leave the recorder).
+#
+# Stored as raw binary at mode 0600 because:
+#  - the orchestrator container reads bytes directly (no base64 decode)
+#  - any non-orchestrator process on the box must not be able to forge
+#    historical events.
+#
+# Idempotent: the existing key is preserved on every re-run so the chain
+# stays verifiable across upgrades. Rotation is a future ticket — when
+# it lands it'll write a new file with a versioned suffix and the
+# verifier will accept the union of (current, prior) keys.
+sync_audit_signing_key() {
+  local secret_dir="$REPO_ROOT/data/secrets"
+  local key_file="$secret_dir/audit.key"
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  if [ -f "$key_file" ] && [ -s "$key_file" ]; then
+    # Already provisioned — preserve the existing chain. `-s` (size > 0)
+    # is the guard against a half-written file from a previous crashed
+    # setup run.
+    log_success "Audit signing key already present at $key_file — skipping"
+    return 0
+  fi
+
+  # 32 bytes = HMAC-SHA256 strength floor matched by
+  # audit-signing.service.ts:MIN_KEY_BYTES. Write to a `.tmp` first so a
+  # crashed install never leaves an empty file that the orchestrator
+  # would then treat as a real key.
+  local tmp="$key_file.tmp"
+  openssl rand 32 > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$key_file"
+  log_success "Generated audit signing key at $key_file (chmod 600)"
 }
 
 # Write $OPENWRT_PASSWORD (from env or .env) into docker/secrets/openwrt_password

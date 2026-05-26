@@ -19,6 +19,7 @@ import {
   NETWORK_RATE_LIMIT_WINDOW_MS,
   NETWORK_CONFIRMATION_TOKEN_EXPIRY_MS,
 } from "../config/network-safety-rules.js";
+import { recordActivity } from "./activity.singleton.js";
 
 const logger = pino({ name: "network-safety" });
 
@@ -342,6 +343,37 @@ async function logNetworkCommand(
   } catch (err) {
     logger.error({ err, entityId: entry.entityId }, "Failed to write network audit log");
   }
+
+  // WARP-456: dual-write into the signed activity chain. CommandAuditLog
+  // becomes a read view going forward (per spec AC8); writes here keep
+  // legacy queries (admin-claude-activity route) working while
+  // ActivityRow becomes the canonical audit table the dashboard reads.
+  const severity = entry.blocked
+    ? "warn"
+    : entry.confirmed
+      ? "ok"
+      : "info";
+  await recordActivity({
+    kind: "network",
+    severity,
+    sourceIcon: "wifi",
+    what: entry.blocked
+      ? `Network ${entry.service} blocked`
+      : entry.confirmed
+        ? `Network ${entry.service}`
+        : `Network ${entry.service} pending`,
+    sub: `tier ${entry.tier} • ${entry.entityId}`,
+    refs: {
+      entityId: entry.entityId,
+      domain: entry.domain,
+      service: entry.service,
+      tier: entry.tier,
+      confirmed: entry.confirmed,
+      blocked: entry.blocked,
+      userId: entry.userId ?? null,
+      reason: entry.reason ?? null,
+    },
+  });
 }
 
 /**

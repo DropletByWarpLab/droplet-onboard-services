@@ -844,3 +844,89 @@ enum ApDeviceStatus {
   FAILED
   DECOMMISSIONED
 }
+
+// ── WARP-456: signed append-only activity log ──
+//
+// Canonical audit trail of every observable event on the device — chat
+// turns, MCP tool calls, file indexing, camera writes, network ops,
+// smart-home commands, email sends, auth events, scheduled tool runs,
+// system events. Replaces the per-domain `CommandAuditLog` (which is
+// now a read view; new writes go through `activity.service.record`).
+//
+// Tamper-evidence: every row carries an HMAC-SHA256 `signature` computed
+// over the canonical JSON of its own content (`at`, `kind`, `severity`,
+// `sourceIcon`, `what`, `sub`, `refs`) plus the `prevSignatureHash` of
+// the row immediately before it. This is a strict hash-chain — mutating
+// or removing any historical row breaks the chain at that point, so the
+// `POST /api/activity/export` sealed bundle is verifiable offline by
+// anyone holding the public key (today: the HMAC key bytes; tomorrow:
+// a TPM-attested key per the spec's note about pluggable signing).
+//
+// `kind` and `severity` are explicit enums (no IS-NULL state per
+// CLAUDE.md — mirrors WARP-218's BrainMemoryItemStatus pattern).
+//
+// `refs` is opaque JSON of foreign keys / external identifiers (e.g.
+// `{conversationId, messageId}` for chat, `{nodeId, command}` for
+// Matter writes, `{toolName, callId}` for MCP tool calls). The
+// exporter preserves it verbatim; the signature covers it.
+model ActivityRow {
+  id                BigInt           @id @default(autoincrement())
+  at                DateTime         @default(now())
+  severity          ActivitySeverity
+  // Lucide-icon name (or other agreed token). String so the dashboard
+  // can render without joining another table; not enforced beyond
+  // what the recorder validates because emitters are trusted in-
+  // process code.
+  sourceIcon        String
+  what              String
+  sub               String?
+  kind              ActivityKind
+  // Optional structured references. Today: small object literals
+  // from the emitter call site. Kept Json so future emitters can
+  // grow new fields without a migration. Covered by the signature.
+  refs              Json?
+  // Canonical-JSON HMAC-SHA256 over the row content + prevSignatureHash.
+  // Base64-url (no padding) so the value is URL-safe in audit-trail
+  // exports and dashboard URLs.
+  signature         String
+  // Hash of the signature of the immediately-preceding row, base64-
+  // url (no padding). Empty string for the genesis row (the very
+  // first entry per device). The chain semantics live in
+  // `activity.service.record`.
+  prevSignatureHash String
+
+  // Composite index for the GET /api/activity range/filter query
+  // (sorted by `at` descending within an optional `kind` filter), and
+  // a separate `at` index for unfiltered time-range queries.
+  @@index([at, kind])
+  @@index([at])
+}
+
+/// WARP-456: domain bucket for ActivityRow. Adding a new value here
+/// is a schema change — keep the set stable. The recorder is the
+/// single place that validates incoming `kind`.
+enum ActivityKind {
+  chat
+  tool_call
+  file
+  camera
+  network
+  smart_home
+  email
+  auth
+  tool_run
+  system
+}
+
+/// WARP-456: severity of an ActivityRow. Display-only; the dashboard
+/// renders the colour from this enum directly. `info` is neutral
+/// "happened" — no good/bad connotation — used by passive observations
+/// (file indexed, device joined). `ok` is "succeeded" — used for write
+/// operations that completed cleanly. `warn` and `err` follow standard
+/// logging semantics.
+enum ActivitySeverity {
+  ok
+  warn
+  err
+  info
+}
