@@ -108,7 +108,8 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
       trustedPrincipal &&
       meta &&
       typeof meta._enhancement === "object" &&
-      meta._enhancement !== null
+      meta._enhancement !== null &&
+      !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
         : undefined;
     const ctx = buildContext(

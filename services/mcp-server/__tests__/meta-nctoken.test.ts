@@ -292,4 +292,38 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     await client.close();
     await server.close();
   });
+
+  it("drops _meta._enhancement when it is an array (not an object)", async () => {
+    // Arrays have `typeof === "object"` and are non-null, so a naive guard
+    // would let them through. The Array.isArray() check rejects them so the
+    // shim still receives undefined and falls back to baseline retrieval.
+    const searchSpy = vi.fn().mockResolvedValue([]);
+    const deps: ContextDeps = {
+      prisma: { $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as never,
+      matter: {} as never,
+      httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
+      searchHybrid: searchSpy,
+    };
+    const server = createServer(deps);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "meta-enh-array-test", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const res = await client.callTool({
+      name: "search_content",
+      arguments: { query: "hello world" },
+      _meta: { userId: "alice", _enhancement: [1, 2, 3] },
+    });
+
+    expect(res.isError).toBe(false);
+    expect(searchSpy).toHaveBeenCalledWith({
+      userId: "alice",
+      query: "hello world",
+      limit: 10,
+      _enhancement: undefined,
+    });
+
+    await client.close();
+    await server.close();
+  });
 });
