@@ -10,7 +10,7 @@
 #   - any apps/*/src or services/*/src TypeScript that ships in a container
 #
 # Each check independently passes or fails. The script exits non-zero if any
-# check failed. Default mode runs five static checks in ~2 minutes. Adding
+# check failed. Default mode runs six static checks in ~2 minutes. Adding
 # `--full` runs an additional Ubuntu-container docker-build smoke test that
 # takes ~10-15 minutes.
 #
@@ -31,6 +31,11 @@
 #   matter-env-allowlist  — architecture-guard rule 11: MATTER_* env vars
 #                           outside the allowlist crash matter.js controller
 #                           init. Delegates to scripts/test-security.sh.
+#   exec-bits             — WARP-487 class: tracked shell scripts that
+#                           shipped to main with 100644 in the git index
+#                           when they need 100755. Canonical invocation
+#                           silently no-ops on platforms that honour the
+#                           index mode bit.
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -43,7 +48,7 @@
 #   2  invalid CLI args or required tool missing
 #   3  setup precondition failure (not in a git repo, etc.)
 #
-# WARP-482.
+# WARP-482, WARP-487.
 # =============================================================================
 set -euo pipefail
 
@@ -74,6 +79,7 @@ ALL_CHECKS=(
   frigate-env-scan
   shellcheck
   matter-env-allowlist
+  exec-bits
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -97,15 +103,16 @@ OPTIONS
 SUBCOMMAND
   CHECK_NAME          Run only the named check. One of:
                         tsc-full, compose-config, frigate-env-scan,
-                        shellcheck, matter-env-allowlist,
+                        shellcheck, matter-env-allowlist, exec-bits,
                         docker-build-smoke
                       Useful for iterating on a single failure.
 
 EXAMPLES
-  ./scripts/test/ship-check.sh             # five static checks (~2min)
+  ./scripts/test/ship-check.sh             # six static checks (~2min)
   ./scripts/test/ship-check.sh --full      # static + ubuntu smoke (~15min)
   ./scripts/test/ship-check.sh tsc-full    # only the tsc check
   ./scripts/test/ship-check.sh shellcheck  # only the shellcheck check
+  ./scripts/test/ship-check.sh exec-bits   # only the exec-bits check
 
 CHECKS
 
@@ -141,6 +148,19 @@ CHECKS
                         env vars outside the narrow allowlist collide with
                         matter.js's auto-imported VariableService and crash
                         controller init).
+
+  exec-bits             Verify that every shell script the operator is
+                        expected to invoke directly (scripts/setup.sh,
+                        scripts/factory-reset.sh, scripts/test/ship-check.sh,
+                        scripts/test/ship-check.test.sh) has the +x bit
+                        set in the git index (mode 100755, not 100644).
+                        Prevents: WARP-487 class — scripts/test/ship-check.sh
+                        shipped to main as 100644, so the canonical
+                        `./scripts/test/ship-check.sh` invocation in its own
+                        --help text was a no-op on filesystems that honour
+                        the index bit. The check reads `git ls-files --stage`,
+                        so it works regardless of the working-tree mode
+                        (which Windows can't track anyway).
 
   docker-build-smoke    (--full only) Spin up an Ubuntu 24.04 container,
                         mount the repo read-only, run
@@ -579,6 +599,96 @@ run_check_matter_env_allowlist() {
   return 1
 }
 
+run_check_exec_bits() {
+  # Verify that every shell script an operator invokes via its path
+  # (./scripts/setup.sh, ./scripts/factory-reset.sh, the two ship-check
+  # scripts) has the +x bit set in the git index — mode 100755, not
+  # 100644.
+  #
+  # Why the INDEX mode, not the working-tree mode? Because the working-
+  # tree bit is unreliable cross-platform: Windows filesystems don't
+  # track it at all (every checkout reports the same default mode), and
+  # Linux/macOS hosts can lose the bit if a script was edited via a
+  # tool that wrote a fresh file in place. The git index mode is the
+  # canonical signal — it's what other clones will receive on checkout,
+  # and it's what `core.fileMode=false` operators rely on.
+  #
+  # The allowlist is intentionally narrow: only the scripts the
+  # documentation tells an operator to invoke as `./scripts/<name>.sh`
+  # need to be executable. Anything `bash`-invoked (most scripts under
+  # scripts/lib/, every test helper) works regardless of the bit and
+  # would only generate noise here.
+  #
+  # When you add a NEW operator-facing script, add its path to the
+  # required list below AND set its index mode with
+  # `git update-index --chmod=+x <path>` before pushing.
+  #
+  # Bug class this catches: WARP-487 — scripts/test/ship-check.sh +
+  # scripts/test/ship-check.test.sh shipped to main (PR #266) with
+  # mode 100644. `bash <path>` invocation worked, but the canonical
+  # `./<path>` form documented in --help became a silent no-op (or
+  # fell through to /bin/sh on hosts that respect the index bit).
+  local label="exec-bits"
+
+  # Scripts that MUST be executable in the git index. Add to this list
+  # when a new operator-facing entry point lands; pair with
+  # `git update-index --chmod=+x <path>`.
+  local required=(
+    "scripts/setup.sh"
+    "scripts/factory-reset.sh"
+    "scripts/test/ship-check.sh"
+    "scripts/test/ship-check.test.sh"
+  )
+
+  local violations=""
+  local missing_files=""
+  local path stage_line mode
+  for path in "${required[@]}"; do
+    if [ ! -f "$REPO_ROOT/$path" ]; then
+      missing_files+="    ${path}: file not present in worktree"$'\n'
+      continue
+    fi
+
+    # `git ls-files --stage <path>` emits one line per tracked file:
+    #   <mode> SP <object> SP <stage> TAB <path>
+    # The first whitespace-separated column is the mode (octal).
+    stage_line="$(cd "$REPO_ROOT" && git ls-files --stage -- "$path" 2>/dev/null || true)"
+    if [ -z "$stage_line" ]; then
+      missing_files+="    ${path}: not tracked by git"$'\n'
+      continue
+    fi
+    # Parse column 1 (mode). awk handles tab + space mix robustly.
+    mode="$(printf '%s' "$stage_line" | awk '{print $1}')"
+
+    if [ "$mode" != "100755" ]; then
+      violations+="    ${path}: mode ${mode} (expected 100755) — fix with: git update-index --chmod=+x ${path}"$'\n'
+    fi
+  done
+
+  if [ -n "$missing_files" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — required script(s) missing or untracked\n" "$label"
+    printf '%s' "$missing_files" >&2
+    printf "    | Either restore the file(s) or update the required[] array\n" >&2
+    printf "    | in run_check_exec_bits if the script was intentionally removed.\n" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  if [ -n "$violations" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — operator-facing script(s) missing +x in git index\n" "$label"
+    printf '%s' "$violations" >&2
+    printf "    | The working-tree bit is unreliable cross-platform; the INDEX\n" >&2
+    printf "    | mode is the canonical signal. Run the suggested\n" >&2
+    printf "    | git update-index --chmod=+x command(s) and re-commit.\n" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  printf "  ${_GREEN}PASS${_RESET}  %s (%d script(s) all 100755 in index)\n" "$label" "${#required[@]}"
+  CHECK_RESULTS[$label]=pass
+  return 0
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -812,6 +922,7 @@ _dispatch_check() {
     frigate-env-scan)     run_check_frigate_env_scan ;;
     shellcheck)           run_check_shellcheck ;;
     matter-env-allowlist) run_check_matter_env_allowlist ;;
+    exec-bits)            run_check_exec_bits ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
