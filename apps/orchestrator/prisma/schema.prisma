@@ -845,6 +845,214 @@ enum ApDeviceStatus {
   DECOMMISSIONED
 }
 
+// ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
+//
+// `User` is the local household-directory record. ADDITIVE on top of the
+// Nextcloud-OCS auth fallback in middleware/auth.ts — it does not replace
+// OCS-validated sessions. A row here represents a person the household
+// has deliberately registered through the dashboard's People surface;
+// the Nextcloud fallback continues to populate `req.user` for legacy
+// sessions that haven't yet been mirrored locally.
+//
+// `role` references the WARP-171 `Role` enum (mirrors the TS `Role`
+// union in src/services/jwt.service.ts). No new role enum — that was
+// the contract from ADR-004 §1.
+//
+// `isLocal=true` marks records minted in this table. Nextcloud-mirrored
+// rows (future ticket) would set `isLocal=false` and the delete handler
+// refuses to mutate the OCS-owned identity. Today every row is local;
+// keeping the column lets the dashboard render the "Local" vs "OCS"
+// affordance without a schema migration when mirroring lands.
+model User {
+  id          String   @id @default(uuid())
+  // Login handle. Unique across the directory. For Nextcloud-mirror
+  // rows this matches the OCS user id so `req.user.username` from the
+  // auth middleware resolves directly to this row.
+  username    String   @unique
+  displayName String
+  email       String?
+  role        Role     @default(family)
+  // Locally provisioned vs. mirrored from Nextcloud. Today every row
+  // is local — the dashboard's People surface is the only writer. The
+  // delete handler refuses when isLocal=false to keep OCS-owned
+  // identities off-limits.
+  isLocal     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Many-to-many to Group via GroupMembership (explicit join model
+  // so future per-membership metadata — joinedAt, addedBy — has a
+  // place to land).
+  memberships GroupMembership[]
+  // Per-user scope bindings — controls which scopes this user can
+  // act inside via requireScope() (see src/middleware/scope.ts).
+  scopeBindings ScopeBinding[]
+  // Optional guest time-box. Non-null when this user was minted as a
+  // guest with an expiry; the nightly `guest-expiry-sweep` cron walks
+  // GuestExpiry rows directly (no IS-NULL guessing — status is an
+  // explicit enum on GuestExpiry).
+  guestExpiry GuestExpiry?
+
+  @@index([role])
+}
+
+// User-curated grouping (households, family branches, work cohorts).
+// Many-to-many to User via GroupMembership.
+model Group {
+  id          String            @id @default(uuid())
+  name        String            @unique
+  description String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  memberships GroupMembership[]
+}
+
+// Explicit join table — `(userId, groupId)` unique so a user can't be
+// listed twice in the same group. `joinedAt` lets the dashboard show
+// "added X days ago" without a separate audit query.
+model GroupMembership {
+  id        String   @id @default(uuid())
+  userId    String
+  groupId   String
+  joinedAt  DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([userId])
+  @@index([groupId])
+}
+
+// ── WARP-455: Scope axis (second RBAC axis on top of WARP-171's Role) ──
+//
+// `Scope` is a pgEnum (not a separate Scope table) by design. The set is
+// small and fully known up front; the requireScope() middleware switches
+// on these values directly. Adding a new scope is a schema migration —
+// that's the desired velocity. A table would invert the cost: trivial to
+// add a row, expensive to keep code and data in sync.
+//
+// Values:
+//   - team        — household-wide default (every resource lands here
+//                   absent an explicit binding). Most files, devices,
+//                   chats sit at this scope.
+//   - exec_only   — leadership-tier (founders + COO peers). Private
+//                   docs, finance summaries, board prep.
+//   - finance     — bookkeeping, invoices, payroll.
+//   - engineering — code + technical-ops docs (mirror of the GH org).
+//   - ops         — runbooks, vendor records, day-to-day operations.
+//   - private     — user-owned, never shared. The dashboard hides
+//                   resources at this scope from anyone other than
+//                   the owner; service principals never see them.
+enum Scope {
+  team
+  exec_only
+  finance
+  engineering
+  ops
+  private
+}
+
+// User ↔ Scope many-to-many. A user can be bound to any subset of the
+// six scopes; the unique constraint stops the same scope from being
+// added twice for the same user.
+//
+// Owner / admin roles always pass requireScope() regardless of bindings
+// (they hold every scope by definition — see ADR-004 §3 for the
+// admin-tier-passes-every-write contract). Family / guest must have an
+// explicit binding for the resource's scope; family at `team` is the
+// default seed for new household members.
+model ScopeBinding {
+  id        String   @id @default(uuid())
+  userId    String
+  scope     Scope
+  // Who granted this binding. Audit-only; the dashboard renders
+  // "granted by Alice 3 days ago" from this pair.
+  grantedBy String?
+  grantedAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope])
+  @@index([userId])
+  @@index([scope])
+}
+
+// ── WARP-455: Guest time-box ──
+//
+// Guests are time-boxed: every guest User has at most one GuestExpiry
+// row carrying `expiresAt` and an explicit `status` enum. The nightly
+// cron (cron-runtime `guest-expiry-sweep`) walks rows where
+// `status = ACTIVE AND expiresAt < now()`, denylists their JWT via
+// jwt.service, flips them to EXPIRED, and emits an ActivityRow.
+//
+// Per the no-guessing rule (CLAUDE.md): `status` is an explicit Prisma
+// enum. Deriving "is this guest expired" from `expiresAt < now()` at
+// read time would (a) duplicate the derivation rule across every
+// reader and (b) leak the cron's tick cadence into UX (a guest is
+// only "expired" once the cron has actually denylisted their session).
+// WARP-218's BrainMemoryItemStatus is the canonical precedent.
+model GuestExpiry {
+  id        String              @id @default(uuid())
+  userId    String              @unique
+  // When the guest's session should be revoked. The cron sweep
+  // compares this against `now()` and flips status when it's past.
+  expiresAt DateTime
+  status    GuestExpiryStatus   @default(ACTIVE)
+  // When the cron actually flipped the row to EXPIRED. Non-null
+  // only when status = EXPIRED. Useful for the dashboard's
+  // "expired N hours ago" copy without re-querying ActivityRow.
+  expiredAt DateTime?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([status, expiresAt])
+}
+
+/// WARP-455: lifecycle of a guest's time-box.
+///   - ACTIVE   — session is live; the cron has not flipped this row yet.
+///   - EXPIRED  — terminal. The cron ran AFTER expiresAt, denylisted the
+///                guest's JWT, and emitted an `auth`-kind ActivityRow.
+enum GuestExpiryStatus {
+  ACTIVE
+  EXPIRED
+}
+
+// ── WARP-455: File scope registry ──
+//
+// The orchestrator does not own file bytes — Nextcloud does. This `File`
+// model is a thin scope-bearing registry keyed by Nextcloud's stable
+// `ncFileId`, the same identifier `FileContentChunk.ncFileId` already
+// uses. It exists so the dashboard's scope-filtered file surfaces can
+// JOIN one row per logical file instead of scanning per-chunk rows for
+// distinct ncFileIds.
+//
+// `scope` is an explicit Scope enum column, defaulting to `team` so a
+// new file (e.g. a Nextcloud upload caught by the file-indexer) lands
+// at the household-wide default without an explicit POST from the
+// dashboard. Operators tighten the scope from there via PATCH (in a
+// follow-up ticket — this ticket only ships the model + backfill).
+//
+// `ownerUserId` carries the file's owner (Nextcloud username; matches
+// the convention everywhere else — FileContentChunk.userId,
+// BrainMemoryItem.userId). The dashboard's per-user file lists join on
+// this column; the scope-filter pass narrows the join result by the
+// caller's ScopeBinding set.
+model File {
+  id          String   @id @default(uuid())
+  ncFileId    Int      @unique
+  ownerUserId String
+  scope       Scope    @default(team)
+  // Cached path for display. Refreshed from the file-indexer's MQTT
+  // bridge when Nextcloud renames or moves the file.
+  path        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerUserId])
+  @@index([scope])
+}
+
 // ── WARP-456: signed append-only activity log ──
 //
 // Canonical audit trail of every observable event on the device — chat

@@ -92,6 +92,15 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/approve", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/decommission", allowed: ["owner", "admin"] },
 
+  // WARP-455: A1 local user directory — same admin-only posture as the
+  // existing user-management routes (POST /api/auth/users etc.). Reads
+  // and mutations are both gated; only the permissions matrix read
+  // (/api/people/permissions) is open to every auth role and so is
+  // intentionally absent from this matrix.
+  { method: "patch", path: "/api/people/u1/role", allowed: ["owner", "admin"] },
+  { method: "patch", path: "/api/people/u1/scope", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/people/u1", allowed: ["owner", "admin"] },
+
   // ── service restart ── (owner only — destructive, may interrupt the box) ──
   { method: "post", path: "/api/network/system/reboot", allowed: ["owner"] },
 

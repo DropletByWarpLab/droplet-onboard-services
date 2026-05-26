@@ -142,6 +142,102 @@ Group-name choices match what Nextcloud already provisions out of the box. Docum
 - ABAC for connector-source ACLs — [WARP-248](https://warp-lab.atlassian.net/browse/WARP-248).
 - MFA gate (`require-recent-mfa`) on `owner`-only routes — WARP-230/238, in flight.
 
+## Scope axis (WARP-455 extension)
+
+> **Status of this section:** added 2026-05-25 by WARP-455. The Role
+> axis below remains the canonical capability gate; this section
+> documents the orthogonal **Scope** axis layered on top.
+
+WARP-171 (this ADR's original scope) covered the capability axis —
+"can this role hit this *kind* of route" (admin actions, household
+reads, service-principal read-only). WARP-455 adds the second axis —
+"can this user see this *information bucket*". A resource at scope
+`exec_only` is invisible to a `family`-role user even if their role
+would otherwise permit the operation.
+
+### Decision
+
+Add a Prisma `Scope` pgEnum mirroring a TS literal in
+`src/middleware/scope.ts`:
+
+```prisma
+enum Scope {
+  team           // household-wide default (most resources)
+  exec_only      // founders + COO peers
+  finance        // bookkeeping, invoices, payroll
+  engineering    // code + technical-ops docs
+  ops            // runbooks, vendor records
+  private        // user-owned, never shared
+}
+```
+
+Add a `ScopeBinding` (User ↔ Scope) join table so users hold an
+explicit subset of scopes. `@@unique([userId, scope])` so the same
+scope can't be granted twice. `grantedBy` + `grantedAt` audit columns
+on the row let the dashboard render "granted by Alice 3 days ago"
+without joining ActivityRow.
+
+Add `requireScope(resource, loadUserScopes)` middleware in
+`src/middleware/scope.ts`. The truth table:
+
+| role | binding for `resource`? | result |
+|---|---|---|
+| `owner` | any | pass (no DB call) |
+| `admin` | any | pass (no DB call) |
+| `family` | yes | pass |
+| `family` | no | 403 |
+| `guest` | yes | pass |
+| `guest` | no | 403 |
+| `service` | any | 403 (read-only, scope axis is human-only) |
+| missing | — | 403 |
+| unknown | — | 403 |
+
+Owners + admins short-circuit before the loader runs — keeps the hot
+path off Postgres for the most common request profile. Service
+principals never pass scope-guarded routes by design.
+
+### File-scope registry
+
+WARP-455 also adds a `File` model (keyed by Nextcloud's stable
+`ncFileId`) carrying `scope: Scope @default(team)`. The migration
+backfills one row per distinct ncFileId already in `FileContentChunk`
+with scope `team`, idempotent via `ON CONFLICT (ncFileId) DO NOTHING`.
+Scope-filtered file surfaces JOIN against this registry instead of
+scanning per-chunk rows.
+
+### Guest time-box
+
+`GuestExpiry` carries an explicit `GuestExpiryStatus` enum (ACTIVE |
+EXPIRED) — no IS-NULL guessing per the CLAUDE.md no-guessing rule.
+Status follows the WARP-218 `BrainMemoryItemStatus` precedent: deriving
+"is this guest expired" from `expiresAt < now()` at read time would
+leak the cron tick cadence into UX (a guest is only "expired" once the
+cron has actually denylisted their session).
+
+A nightly cron at 03:15 (`guest-expiry-sweep` in
+`services/guest-expiry-sweep.service.ts`, wired through
+`cron-runtime.service`'s `scheduleCron`) flips ACTIVE rows past
+`expiresAt` to EXPIRED and emits one `auth`-kind ActivityRow per flip.
+
+The full live-revoke surface is intentionally scoped out of WARP-455 —
+the 15-min access-token TTL is the hard cap, and a follow-up ticket
+adds a refresh-handler short-circuit when User.role=guest AND
+GuestExpiry.status=EXPIRED. The 15-min ceiling is acceptable for a
+household-tier guest.
+
+### Per-route guard policy (additions on top of §3)
+
+| Endpoint family | Allowed roles |
+|---|---|
+| `GET /api/people` | `owner`, `admin` |
+| `PATCH /api/people/:id/role` | `owner`, `admin` |
+| `PATCH /api/people/:id/scope` | `owner`, `admin` |
+| `DELETE /api/people/:id` | `owner`, `admin` |
+| `GET /api/people/permissions` | every authenticated role (UX helper) |
+
+These rows are mirrored in `__tests__/rbac.test.ts`'s MATRIX so a
+guard regression on any of them trips a localized test failure.
+
 ## Alternatives considered
 
 ### A. Decorator-style guards on route handlers

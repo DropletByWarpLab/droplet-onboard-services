@@ -31,6 +31,7 @@ import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
+import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -251,6 +252,22 @@ async function main() {
       );
     },
     { lockKey: "droplet:daily-purge" },
+  );
+
+  // WARP-455: nightly guest-expiry sweep. Fires 15 minutes after the
+  // daily purge so the two cron jobs don't contend on the advisory
+  // lock pool. Flips any ACTIVE GuestExpiry row past its expiresAt to
+  // EXPIRED, emitting one auth-kind ActivityRow per flip. Idempotent
+  // by construction (re-runs on the same minute walk zero rows).
+  cronRuntime.scheduleCron(
+    "15 3 * * *",
+    async () => {
+      const { expired } = await sweepExpiredGuests(prisma, new Date());
+      if (expired > 0) {
+        logger.info({ expired }, "guest-expiry-sweep flipped rows");
+      }
+    },
+    { lockKey: "droplet:guest-expiry-sweep" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the
