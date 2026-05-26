@@ -92,3 +92,20 @@ Operator-facing query paths:
 - `GET /api/activity?kind=network&from=&to=&q=` — paginated, filterable, signed rows (owner/admin).
 - `POST /api/activity/export` — sealed JSONL bundle for offline verification.
 - `GET /api/network/audit` — legacy `CommandAuditLog` view (kept for backwards compatibility).
+
+### Factory-reset era boundary
+
+`scripts/factory-reset.sh` is treated as an explicit chain-era boundary, not a soft-reset of state under a preserved key. Specifically, `data/secrets/audit.key` is deleted alongside the ActivityRow table contents and the Postgres volume, so the next `setup.sh` run regenerates a fresh 32-byte key via `sync_audit_signing_key` (`scripts/lib/secrets.sh`). The first ActivityRow written after the reset is the new chain's genesis — `prevSignatureHash = ""` — signed by the new key.
+
+Why the boundary matters: preserving the old key against an empty ActivityRow table would silently fork the chain. Two distinct genesis rows would carry the same HMAC key, with no marker telling a verifier the rows belong to different histories. A signed export bundle from the new era would verify identically against the old era's archived bundle — meaningfully the same chain to any consumer, semantically two different ones.
+
+The old key can still be retained off-device by the operator (export the bundle before `factory-reset`, store the verification bytes alongside it) — the verifier accepts the union of (current, prior) keys, so historical bundles remain verifiable. The box itself only carries the current era's key.
+
+Era-boundary contract:
+
+| Event | `data/secrets/audit.key` | `ActivityRow` rows | First post-event row |
+|---|---|---|---|
+| `setup.sh` on a fresh device | generated | 0 | genesis |
+| `setup.sh` re-run on a provisioned device | preserved (existing chain continues) | N | next row in chain |
+| `factory-reset.sh` | deleted | 0 (table dropped) | (none yet) |
+| `setup.sh` after `factory-reset.sh` | regenerated (NEW key) | 0 | genesis of new era |
