@@ -871,6 +871,19 @@ model User {
   username    String   @unique
   displayName String
   email       String?
+  // WARP-485: stable mapping key from the Nextcloud OCS user id
+  // (`ocs.data.id`, e.g. `stefan-cruceru`) to this row's UUID. The auth
+  // middleware looks up `User` by `nextcloudUsername` on the OCS
+  // fallback path so `req.user.id` is always a local User.id UUID,
+  // regardless of whether the session originated from a JWT or an OCS
+  // token. Nullable because locally-minted rows that never authenticate
+  // via Nextcloud (service-only users, fresh invitees pre-first-login)
+  // don't have one. Unique because two local Users mapping to the same
+  // OCS identity would create an authentication ambiguity. Distinct
+  // from `username` to keep the local display handle decoupled from the
+  // OCS-mapping key — they often match today but the dashboard may
+  // edit `username` in the future without breaking OCS resolution.
+  nextcloudUsername String? @unique
   role        Role     @default(family)
   // Locally provisioned vs. mirrored from Nextcloud. Today every row
   // is local — the dashboard's People surface is the only writer. The
