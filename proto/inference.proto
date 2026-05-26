@@ -110,6 +110,7 @@ message ClassifyQueryRequest {
 message ClassifyQueryResponse {
   // One of: "factual" | "analytical" | "conversational" | "navigational" | "unknown".
   string class = 1;
-  // Top-1 confidence in [0, 1]. Callers may threshold via env.
+  // Top-1 confidence in [0, 1]. Server-side floor is applied via
+  // CLASSIFIER_CONFIDENCE_FLOOR; below the floor the class is "unknown".
   float confidence = 2;
 }

@@ -261,7 +261,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 "confidence": result.confidence,
             })
         except Exception as e:
-            logger.error("gRPC ClassifyQuery error: %s", e)
+            logger.exception("gRPC ClassifyQuery error")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Classify error: {str(e)}")
             return inference_pb2.ClassifyQueryResponse(**{"class": "unknown", "confidence": 0.0})

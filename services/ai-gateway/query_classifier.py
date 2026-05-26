@@ -13,7 +13,6 @@ below CLASSIFIER_CONFIDENCE_FLOOR (we don't route on noise — CLAUDE.md
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -46,12 +45,14 @@ class QueryClassifierSingleton:
         from transformers import pipeline
 
         CLASSIFIER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("HF_HOME", str(CLASSIFIER_CACHE_DIR))
         logger.info("Loading query classifier from %s", CLASSIFIER_MODEL_ID)
         self._pipeline = pipeline(
             "zero-shot-classification",
             model=CLASSIFIER_MODEL_ID,
             device=-1,  # CPU
+            # WARP-437: explicit cache_dir — relying on HF_HOME would collide
+            # with RerankerSingleton's os.environ.setdefault on the same env var.
+            model_kwargs={"cache_dir": str(CLASSIFIER_CACHE_DIR)},
         )
         logger.info("Query classifier loaded")
 

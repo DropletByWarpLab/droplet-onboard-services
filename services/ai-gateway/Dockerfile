@@ -32,9 +32,11 @@ COPY services/_shared/__init__.py /app/_shared/__init__.py
 COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
 
 # WARP-437: pre-download the deberta zero-shot model so first request
-# doesn't pay the 110 MB cold-load latency.
+# doesn't pay the 110 MB cold-load latency. Soft-fail (build does not
+# break on prewarm failure) but emits to stderr so build logs surface
+# the issue — otherwise a silent fail makes the prewarm pointless.
 RUN python -c "from query_classifier import QueryClassifierSingleton; QueryClassifierSingleton.instance()" \
-    || echo "WARP-437 prewarm soft-fail (first call will lazy-load)"
+    || (echo "WARP-437: query_classifier prewarm FAILED — first runtime call will pay the model-download cost" >&2; true)
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
