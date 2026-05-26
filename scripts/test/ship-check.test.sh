@@ -502,6 +502,75 @@ test_exec_bits_catches_chmod_stripped() {
 }
 
 # =============================================================================
+# Test: exec-bits catches a chmod-stripped tracked script in openwrt/scripts/
+# =============================================================================
+#
+# Bug class extension (WARP-489): WARP-487's regression test proved the
+# exec-bits check detects a stripped +x on `scripts/test/ship-check.sh` —
+# the FIRST entry in the allowlist. The allowlist is PATH-keyed (full
+# repo-relative path, not basename), and WARP-489 added a sibling sub-
+# tree entry (`openwrt/scripts/upgrade-router.sh`) to prove the check
+# scales beyond the top-level `scripts/` directory.
+#
+# This second test is explicit cross-subtree coverage: it specifically
+# strips +x from the `openwrt/scripts/` entry and asserts the check
+# fails. Without it, a future refactor that accidentally normalized
+# allowlist entries to basenames (or that broke the loop's REPO_ROOT
+# join) would still pass the WARP-487 test (which mutates a top-level
+# entry) while silently letting the openwrt sub-tree drift back to
+# 100644.
+#
+# Synthetic regression: identical mechanism to the WARP-487 test —
+# `git update-index --chmod=-x <openwrt/scripts/upgrade-router.sh>`,
+# assert the check fails, restore via `--chmod=+x` on RETURN. The
+# script is OPERATOR-FACING (its --help documents `./scripts/upgrade-
+# router.sh <firmware-image>` as the canonical invocation), so the
+# canonical-invocation rationale from WARP-487 applies one-for-one.
+test_exec_bits_catches_chmod_stripped_openwrt() {
+  local target_rel="openwrt/scripts/upgrade-router.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+
+  # Same index-mode dirty check as the WARP-487 test. `--cached` is
+  # mandatory; `git diff --quiet` alone misses pure-mode changes on
+  # Windows hosts where the working-tree bit is unreliable.
+  if ! (cd "$REPO_ROOT_REAL" && git diff --cached --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already staged — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git update-index --chmod=+x '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree (100755 from commit 1 of WARP-489).
+  if ! _assert_check_passes "$REPO_ROOT_REAL" exec-bits; then
+    printf "    baseline exec-bits failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: strip +x from the openwrt entry via the git
+  #    index. The mutation is index-side only — the working-tree file
+  #    is untouched.
+  if ! (cd "$REPO_ROOT_REAL" && git update-index --chmod=-x "$target_rel"); then
+    printf "    git update-index --chmod=-x failed for %s\n" "$target_rel" >&2
+    return 1
+  fi
+
+  if (cd "$REPO_ROOT_REAL" && git diff --cached --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — index mode unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. exec-bits should now FAIL — proves the path-keyed allowlist sees
+  #    the openwrt sub-tree, not just top-level scripts/.
+  _assert_check_fails "$REPO_ROOT_REAL" exec-bits
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -525,6 +594,9 @@ _run_test "docker-build-smoke shim rejects unknown docker subcommand" \
 
 _run_test "exec-bits catches chmod-stripped tracked script" \
   test_exec_bits_catches_chmod_stripped
+
+_run_test "exec-bits catches chmod-stripped tracked script in openwrt/scripts/" \
+  test_exec_bits_catches_chmod_stripped_openwrt
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
