@@ -33,7 +33,11 @@ vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: true },
 }));
 
-import { requireScope, type ScopeLoader } from "../middleware/scope.js";
+import {
+  requireScope,
+  type ScopeLoader,
+  type ScopeName,
+} from "../middleware/scope.js";
 
 function buildReq(role?: string, id = "u1"): Request {
   return (role === undefined
@@ -56,8 +60,8 @@ function buildRes() {
   };
 }
 
-function loaderReturning(scopes: string[]): ScopeLoader {
-  return vi.fn(async (_userId: string) => new Set(scopes));
+function loaderReturning(scopes: ScopeName[]): ScopeLoader {
+  return vi.fn(async (_userId: string) => new Set<ScopeName>(scopes));
 }
 
 describe("requireScope(resource, loadUserScopes) — truth table", () => {

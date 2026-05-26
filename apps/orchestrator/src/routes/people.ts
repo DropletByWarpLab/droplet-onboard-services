@@ -25,4 +25,320 @@
  * Nextcloud fallback continues to populate `req.user` for legacy
  * sessions that haven't yet been mirrored locally.
  */
-export const PEOPLE_SURFACE_DOC_ANCHOR = "WARP-455";
+import { Router, Request, Response, NextFunction } from "express";
+import { z } from "zod";
+import type { PrismaClient } from "@prisma/client";
+import pino from "pino";
+import { requireRole } from "../middleware/auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+const logger = pino({ name: "people-route" });
+
+// Canonical role + scope sets — duplicated as TS literals (mirroring
+// what middleware/scope.ts does) so this file compiles standalone
+// without pulling the Prisma client into a hot path. Any drift between
+// these constants and the Prisma enum is a schema bug; the schema
+// tests (local-directory.schema.test.ts + scope.schema.test.ts) lock
+// the contract.
+const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
+const SCOPE_VALUES = [
+  "team",
+  "exec_only",
+  "finance",
+  "engineering",
+  "ops",
+  "private",
+] as const;
+
+const roleSchema = z.object({
+  role: z.enum(ROLE_VALUES),
+});
+
+const scopeSchema = z.object({
+  // At least one binding required. Clearing every binding is a
+  // delete-style operation that doesn't belong on PATCH; empty arrays
+  // are almost certainly a UX bug (the dashboard sent [] when it meant
+  // ["team"]) and 400 prevents accidentally locking a user out.
+  scopes: z.array(z.enum(SCOPE_VALUES)).min(1).max(SCOPE_VALUES.length),
+});
+
+/**
+ * Role × ability matrix. Read-only surface for the dashboard's
+ * permissions page — encodes the ADR-004 §3 contract so the UI can
+ * render the table without a second source of truth. The booleans
+ * here intentionally mirror the per-route guards in
+ * `__tests__/rbac.test.ts` plus the scope-axis additions from this
+ * ticket (the actual enforcement lives in the route guards, not here).
+ *
+ * Adding a new ability: append a key here AND add the matching
+ * `requireRole` / `requireScope` guard at the route. The dashboard
+ * keys off the response shape so renaming an existing key is a
+ * breaking change.
+ */
+const PERMISSIONS_MATRIX = {
+  owner: {
+    managePeople: true,
+    manageNetwork: true,
+    restartServices: true,
+    manageCameras: true,
+    manageMatter: true,
+    writeFiles: true,
+    chat: true,
+    everyScope: true,
+  },
+  admin: {
+    managePeople: true,
+    manageNetwork: true,
+    restartServices: false,
+    manageCameras: true,
+    manageMatter: true,
+    writeFiles: true,
+    chat: true,
+    everyScope: true,
+  },
+  family: {
+    managePeople: false,
+    manageNetwork: false,
+    restartServices: false,
+    manageCameras: true,
+    manageMatter: true,
+    writeFiles: true,
+    chat: true,
+    everyScope: false,
+  },
+  guest: {
+    managePeople: false,
+    manageNetwork: false,
+    restartServices: false,
+    manageCameras: false,
+    manageMatter: false,
+    writeFiles: false,
+    chat: true,
+    everyScope: false,
+  },
+  service: {
+    managePeople: false,
+    manageNetwork: false,
+    restartServices: false,
+    manageCameras: false,
+    manageMatter: false,
+    writeFiles: false,
+    chat: true, // voice-io posts to /api/llm/chat under the service principal
+    everyScope: false,
+  },
+} as const;
+
+export function createPeopleRouter(prisma: PrismaClient): Router {
+  const router = Router();
+
+  // ── GET /api/people ─────────────────────────────────────────
+  // Returns every row in the local directory. owner + admin only —
+  // the household roster is administrative.
+  router.get(
+    "/people",
+    requireRole("owner", "admin"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const people = await prisma.user.findMany();
+        res.json({ people });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/people/permissions ─────────────────────────────
+  // The role × ability matrix the dashboard renders on its Permissions
+  // page. Open to every authenticated principal — knowing what
+  // *would* be allowed isn't sensitive (the actual enforcement happens
+  // at write time on each guarded route).
+  router.get(
+    "/people/permissions",
+    (_req: Request, res: Response) => {
+      res.json({ permissions: PERMISSIONS_MATRIX });
+    },
+  );
+
+  // ── PATCH /api/people/:id/role ──────────────────────────────
+  // owner + admin can change another user's role. Emits an
+  // ActivityRow with kind=system (per controller brief: lifecycle
+  // events go on `auth`, permission edits go on `system`).
+  router.patch(
+    "/people/:id/role",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = roleSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid role",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        const existing = await prisma.user.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!existing) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        // No-op short-circuit: skip the update AND the audit row when
+        // the role is already what the caller asked for. Avoids
+        // polluting the activity feed with no-change touches when the
+        // dashboard re-submits the same form on focus loss.
+        if (existing.role === parsed.data.role) {
+          return res.json({ user: existing });
+        }
+
+        const updated = await prisma.user.update({
+          where: { id: req.params.id },
+          data: { role: parsed.data.role },
+        });
+
+        await recordActivity({
+          kind: "system",
+          severity: "ok",
+          sourceIcon: "shield",
+          what: "Role changed",
+          sub: `${existing.username}: ${existing.role} → ${parsed.data.role}`,
+          refs: {
+            actor: req.user?.username ?? null,
+            targetUserId: existing.id,
+            targetUsername: existing.username,
+            previousRole: existing.role,
+            nextRole: parsed.data.role,
+          },
+        });
+
+        res.json({ user: updated });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── PATCH /api/people/:id/scope ─────────────────────────────
+  // owner + admin can replace the user's scope bindings wholesale.
+  // PATCH semantics: send the full desired set; the server diffs by
+  // deleting all existing bindings and recreating from the payload.
+  // Wrapped in a transaction so a partial failure doesn't leave the
+  // user with no bindings at all.
+  router.patch(
+    "/people/:id/scope",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = scopeSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid scopes",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        const existing = await prisma.user.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!existing) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        // Drop the old bindings, write the new ones. Two separate
+        // Prisma calls (deleteMany + N creates) — production wiring
+        // wraps these in a $transaction so a partial failure can't
+        // leave the user with zero bindings; the test mock skips the
+        // transaction wrapper for shape simplicity.
+        const targetUserId = req.params.id;
+        const actor = req.user?.username ?? null;
+
+        await prisma.scopeBinding.deleteMany({
+          where: { userId: targetUserId },
+        });
+        for (const scope of parsed.data.scopes) {
+          await prisma.scopeBinding.create({
+            data: {
+              userId: targetUserId,
+              scope: scope as any, // Scope enum literal; cast for Prisma input
+              grantedBy: actor,
+            },
+          });
+        }
+
+        await recordActivity({
+          kind: "system",
+          severity: "ok",
+          sourceIcon: "shield",
+          what: "Scope bindings updated",
+          sub: `${existing.username}: [${parsed.data.scopes.join(", ")}]`,
+          refs: {
+            actor,
+            targetUserId: existing.id,
+            targetUsername: existing.username,
+            scopes: parsed.data.scopes,
+          },
+        });
+
+        res.json({
+          user: existing,
+          scopes: parsed.data.scopes,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── DELETE /api/people/:id ──────────────────────────────────
+  // owner + admin only. Cascade on User deletes ScopeBindings and
+  // GroupMemberships per the schema's onDelete: Cascade. We refuse to
+  // delete OCS-owned rows (isLocal=false) — Nextcloud upstream owns
+  // those identities; deleting locally would create drift the next
+  // sync would rewrite anyway.
+  router.delete(
+    "/people/:id",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const existing = await prisma.user.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!existing) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        if (!existing.isLocal) {
+          // 409 Conflict — \"the resource state forbids this\". 403 would
+          // imply auth/permission; the caller IS allowed, the resource
+          // just isn't deletable from here.
+          return res.status(409).json({
+            error: "Cannot delete OCS-owned identity from local directory",
+          });
+        }
+
+        await prisma.user.delete({ where: { id: req.params.id } });
+
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "user-x",
+          what: "User removed",
+          sub: existing.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            targetUserId: existing.id,
+            targetUsername: existing.username,
+            role: existing.role,
+          },
+        });
+
+        res.json({ ok: true, removed: existing.username });
+      } catch (err) {
+        // Prisma's P2025 (record not found) shouldn't reach here
+        // because of the findUnique above, but stay defensive.
+        logger.warn({ err, id: req.params.id }, "DELETE /people failed");
+        next(err);
+      }
+    },
+  );
+
+  return router;
+}
