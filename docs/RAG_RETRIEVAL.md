@@ -321,3 +321,162 @@ Measured NDCG delta: *to be filled in by the live eval run* — Phase 1
 batch C (steps 1.8 + 1.9) requires the full integration stack
 (`./scripts/test-rag.sh`). The delta is recorded here once the
 parent-shell run completes and the harness reports per-pipeline NDCG@10.
+
+## Query enhancement (WARP-437 / ADR-003 Phase 3)
+
+Hybrid retrieval is still doing the same vector + lexical + RRF + rerank
+pipeline. WARP-437 layers **three optional knobs in front of it**: HyDE
+(hypothetical document embeddings), multi-query expansion, and adaptive
+routing via a zero-shot query classifier. When all three are off — the
+default — `searchHybrid` runs byte-for-byte the WARP-286 path. When the
+orchestrator's LLM agent loop decides a query benefits from enhancement,
+the relevant pre-computed vectors and overrides flow into `searchHybrid`
+through a single `queryEnhancement` block on `SearchHybridParams`.
+
+### Three orthogonal knobs
+
+- **HyDE** rewrites a short query into a hypothetical-answer passage,
+  embeds it, and the vector arm searches against the element-wise mean
+  of `[raw_query_vector, hyde_passage_vector]`. One ai-gateway chat call
+  per active query. Highest expected lift on under-specified (1–3 word)
+  queries.
+- **Multi-query expansion** generates `n` paraphrases of the query (one
+  LLM call returning a JSON array), embeds them in a single batched
+  `EmbedText` call, runs N+1 parallel vector arms, then RRF-fuses the
+  vector arms together before fusing with the lexical arm. Highest
+  expected lift on multi-faceted analytical queries.
+- **Adaptive routing** uses a `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`
+  zero-shot NLI classifier (~110 MB int8, ~50 ms CPU on Orin Nano) to
+  label each query and pick a preset. The classifier runs in ai-gateway
+  behind the new `ClassifyQuery` gRPC RPC; results are SHA-256-keyed and
+  cached for 24 h (`warp437:cls:` Redis prefix).
+
+### Adaptive routing preset map
+
+| Query class | Example | Preset |
+|---|---|---|
+| `factual` | "what is the budget for Q4" | `rerank.candidates = 100`, no HyDE, no multi-query — let the reranker do the heavy lifting on a wider candidate pool. |
+| `analytical` | "compare budget content between the PDF and the audio transcript" | `multiQuery = true (n=3)`, `rerank.candidates = 80` — fan out across paraphrases to recover recall the reranker can't synthesize. |
+| `conversational` | "hey what's up" | `minSimilarity = 0.5`, `perArmK = 50`, no enhance — tight floor + smaller arms so chit-chat doesn't burn retrieval budget. |
+| `navigational` | "open camera-1 settings" | metadata filter `path LIKE %<token>%` on both retrieval arms, derived from the first filename-shaped token in the query. |
+| `unknown` | top-1 confidence below `CLASSIFIER_CONFIDENCE_FLOOR` (0.40) | default `searchHybrid` parameters — don't route on noise. |
+
+The preset map lives in `presetForClass()` in
+`apps/orchestrator/src/services/llm-agent.service.ts`. Filename-token
+extraction prefers alphanum-with-dash tokens of length ≥3, falling back
+to undefined when no such token exists.
+
+### Wire surface: two separate enhancement channels
+
+The MCP `search_content` tool exposes an LLM-visible `enhance` field —
+`{ hyde?: boolean, multiQuery?: boolean, n?: integer 2..5 }` — so a
+sufficiently-confident model can opt in directly via its tool call. This
+is the simple, JSON-schema-validated channel.
+
+The orchestrator's agent loop separately attaches a richer
+`_enhancement` bundle (already-computed `hydeVector` / `extraQueryVectors`
+/ `metadataFilter` / `searchOverrides`) via the MCP `_meta` channel, NOT
+via the tool's args. The mcp-server's `ctx.searchHybrid` shim picks
+`_enhancement` off the per-call context and threads it into
+`searchHybrid(prisma, { …, queryEnhancement, minSimilarity, perArmK,
+rerank.candidates })`. Why the two channels stay separate:
+
+1. The LLM-visible `enhance` is for the model's own judgment. It's
+   bounded by `additionalProperties: false` on the tool's input schema
+   and validated like any other tool arg.
+2. The orchestrator-computed `_enhancement` carries 384-dim float
+   vectors and overrides that the LLM has no business synthesizing. It
+   bypasses the args/schema layer entirely to keep the trust boundary
+   crisp.
+
+### Trust boundary (MCP `_meta._enhancement`)
+
+`_enhancement` is read from `_meta` ONLY on the trusted-stdio transport
+(`services/mcp-server/src/server.ts`, gated on `claims === undefined`).
+The HTTP transport never reads `_enhancement` — an off-host MCP client
+with a valid JWT cannot smuggle pre-computed vectors past the input-
+schema validator. The extraction also drops anything that isn't an
+object (`null`, primitives, arrays — `typeof [] === "object"` so the
+array check is explicit).
+
+### Latency budget
+
+Per query, worst case (analytical class, both LLM calls active):
+
+| Stage | Cost (p95) |
+|---|---|
+| Classify (deberta zero-shot, CPU) | ~50 ms |
+| HyDE chat (Orin warm, mistral-7b) | ~600 ms |
+| Multi-query chat | ~600 ms |
+| 4 parallel vector arms (raw + 3 paraphrases, pgvector) | ~30 ms (parallel) |
+| Reranker batch (BGE-base int8 ONNX) | ~120 ms |
+| **Total** | **~1.4 s p95** |
+
+Compare to today's hybrid p95 of ~250 ms. The full budget applies ONLY
+to the `analytical` preset; `factual` and `navigational` skip both LLM
+calls (~190 ms), and `conversational` skips them with a tighter
+similarity floor on top (~150 ms). The adaptive layer is what bounds
+the worst case to the queries that benefit most.
+
+### Eval gate (recording mode today)
+
+Per-class NDCG@10 slicing landed in commit `a1b3237` (Task 9). The
+`it("per-class NDCG@10 — baseline vs enhanced", …)` block in
+`tests/retrieval-eval/run.integration.test.ts` calls both the existing
+`hybrid` and the new `hybrid-enhanced` admin variants for every query,
+groups by `class`, and logs per-class baseline → enhanced deltas. The
+test runs only when `SHOULD_RUN=1` (Linux CI with the full Compose
+stack), and the assertion is a benign "at least one class produced
+results" — **recording mode** until `tests/retrieval-eval/ragas/baselines.json`
+is populated by a Linux CI run.
+
+The spec gates that activate once baselines exist:
+
+- **short** (`q-short-*`): `ndcg@10(enhanced) ≥ ndcg@10(baseline) × 1.05`
+  AND no full-corpus regression above 2%.
+- **analytical** (`q-analytical-*`): RAGAS `context_recall(enhanced) ≥
+  baseline × 1.10`. Per-class context-recall is emitted into
+  `metrics_by_class` by `tests/retrieval-eval/ragas/ragas_runner.py`;
+  the assertion side wires up when baselines land.
+- **conversational** (`q-conv-*`): if the preset regresses, default-off
+  conversational routing.
+- **full corpus** (q01..q30 plus all WARP-437 additions): `ndcg@10(all
+  enhanced) ≥ baseline × 1.03`.
+
+### Files
+
+- `services/ai-gateway/query_classifier.py` — deberta zero-shot singleton.
+- `services/ai-gateway/grpc_server.py` — `ClassifyQuery` handler.
+- `apps/orchestrator/src/services/query-enhancement.service.ts` —
+  `hydeRewrite`, `multiQueryExpand`, `classifyQuery`.
+- `apps/orchestrator/src/services/query-classifier.client.ts` — gRPC wrapper.
+- `apps/orchestrator/src/services/llm-agent.service.ts` —
+  `presetForClass`, `EnhancementDeps`, the agent-loop pre-dispatch hook
+  on `search_content` calls.
+- `apps/orchestrator/src/services/file-search.service.ts` +
+  `services/mcp-server/src/file-search.service.ts` —
+  `QueryEnhancementOption` mirror, HyDE averaging, multi-query fan-out,
+  `filenameContains` plumbing on both retrieval arms.
+- `packages/tools-core/src/private-enhancement.ts` — shared
+  `PrivateEnhancement` type carried via MCP `_meta`.
+- `apps/orchestrator/src/routes/admin-retrieval-eval.ts` — the
+  `hybrid-enhanced` variant the eval harness consumes.
+
+### Production wiring status
+
+The `EnhancementDeps` facade on `AgentDeps` is defined but **not yet
+wired in `apps/orchestrator/src/server.ts`** — the production `runAgent`
+call doesn't pass an `enhancement` field, so the LLM agent loop runs
+unmodified (preserving the WARP-286 behaviour) until that follow-up
+lands. The admin `hybrid-enhanced` retrieval-eval variant DOES use the
+full pipeline end-to-end; baselines + production wiring activate in
+follow-up tickets (per ADR-003 Phase 3 § Tickets).
+
+### See also
+
+- ADR-003 §"Phase 3 — Query enhancement"
+  ([`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md))
+- Design spec:
+  [`docs/superpowers/specs/2026-05-25-warp-437-query-enhancement-design.md`](superpowers/specs/2026-05-25-warp-437-query-enhancement-design.md)
+- Implementation plan:
+  [`docs/superpowers/plans/2026-05-25-warp-437-query-enhancement-plan.md`](superpowers/plans/2026-05-25-warp-437-query-enhancement-plan.md)
