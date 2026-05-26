@@ -433,6 +433,75 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
 }
 
 # =============================================================================
+# Test: exec-bits catches a chmod-stripped tracked script
+# =============================================================================
+#
+# Original bug class (WARP-487): scripts/test/ship-check.sh +
+# scripts/test/ship-check.test.sh shipped to main (PR #266) with index
+# mode 100644 instead of 100755 — the executable bit never made it into
+# the tree. `bash <path>` worked everywhere, so the regression went
+# unnoticed, but `./scripts/test/ship-check.sh` (the canonical invocation
+# in the script's own --help) is a no-op on a filesystem that respects
+# the index mode bit. On Windows the working-tree bit is non-trackable;
+# the git INDEX mode is the only canonical signal.
+#
+# Synthetic regression: strip the exec bit from a tracked script via
+# `git update-index --chmod=-x` and assert the exec-bits check fails.
+# Restore via `git update-index --chmod=+x` on RETURN — works even on
+# Windows where filesystem chmod is a no-op.
+#
+# Why scripts/test/ship-check.sh (and not e.g. scripts/setup.sh)? Because
+# the check's allowlist (see run_check_exec_bits in ship-check.sh)
+# includes ship-check.sh itself by design — that's the file the original
+# WARP-487 bug shipped on, so the regression should specifically guard
+# THAT path. Mutating its index mode does NOT affect `bash <path>`
+# invocation, so the test driver keeps working even mid-mutation.
+test_exec_bits_catches_chmod_stripped() {
+  local target_rel="scripts/test/ship-check.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+
+  # Index-mode dirty check: `git diff --cached --quiet` detects a staged
+  # mode-only change even when the worktree file is byte-identical.
+  # `git diff --quiet` (no --cached) does NOT catch a pure mode-only
+  # difference on Windows hosts where the filesystem bit is unreliable.
+  if ! (cd "$REPO_ROOT_REAL" && git diff --cached --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already staged — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git update-index --chmod=+x '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree (100755 from commit 1 of WARP-487).
+  if ! _assert_check_passes "$REPO_ROOT_REAL" exec-bits; then
+    printf "    baseline exec-bits failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: strip +x from the tracked script via the git
+  #    index. Working-tree mode is left alone — the bug is index-side.
+  if ! (cd "$REPO_ROOT_REAL" && git update-index --chmod=-x "$target_rel"); then
+    printf "    git update-index --chmod=-x failed for %s\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # Confirm the mutation took. `--cached` is required (see dirty-check
+  # comment above).
+  if (cd "$REPO_ROOT_REAL" && git diff --cached --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — index mode unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. exec-bits should now FAIL.
+  _assert_check_fails "$REPO_ROOT_REAL" exec-bits
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -453,6 +522,9 @@ _run_test "shellcheck catches local-outside-function in scripts/lib" \
 
 _run_test "docker-build-smoke shim rejects unknown docker subcommand" \
   test_docker_build_smoke_shim_rejects_unknown_subcommand
+
+_run_test "exec-bits catches chmod-stripped tracked script" \
+  test_exec_bits_catches_chmod_stripped
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
