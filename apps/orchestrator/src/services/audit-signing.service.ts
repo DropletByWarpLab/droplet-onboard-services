@@ -13,13 +13,18 @@
  * Key on disk lives at `/data/secrets/audit.key`, mode 0600, owned by
  * the orchestrator service user. Generated first-boot by
  * `scripts/lib/secrets.sh::sync_audit_signing_key`. The helper's
- * `loadAuditKeyFromDisk()` reads it; in tests / dev environments
- * (`AUDIT_SIGNING_KEY` env var present) it picks up from env so the
- * orchestrator boots without writing to a fixed disk path.
+ * `loadAuditKeyFromDisk()` reads it; the `AUDIT_SIGNING_KEY` env var
+ * acts as a fallback when the disk file is absent (CI / dev hosts that
+ * don't have `/data` mounted), or as an override in dev/CI when the
+ * disk file exists with a different value. In production (`NODE_ENV
+ * === "production"`) a disk/env disagreement is fatal — silently
+ * preferring env over disk could let a misconfigured compose file or an
+ * attacker with env-override access fork the audit chain. See WARP-476.
  */
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import path from "node:path";
+import pino, { type Logger } from "pino";
 
 /** Lucide-icon name (or another agreed display token). */
 export type ActivitySourceIcon = string;
@@ -190,32 +195,108 @@ export function createHmacSigner(keyBytes: Buffer): ActivityRowSigner {
 export const AUDIT_KEY_PATH = "/data/secrets/audit.key";
 
 /**
+ * Module-level logger so production paths emit structured warns and
+ * tests can swap in a stub via `_setLoggerForTests`. Mirrors the pattern
+ * `activity.service.ts` already uses.
+ */
+let logger: Pick<Logger, "warn"> = pino({ name: "audit-signing" });
+
+/** Exposed only for tests; production code never replaces the logger. */
+export function _setLoggerForTests(next: Pick<Logger, "warn"> | null): void {
+  logger = next ?? pino({ name: "audit-signing" });
+}
+
+/**
  * Load the audit signing key.
  *
- * Resolution order:
- *   1. `AUDIT_SIGNING_KEY` env var (base64) — used in tests / CI / dev
- *      hosts that don't have `/data` mounted. Mirrors how `JWT_SECRET`
- *      is provided.
- *   2. File at `AUDIT_KEY_PATH` (binary bytes). The setup script
- *      generates it on first boot.
+ * Resolution order (WARP-476 — disk wins over env, the reverse of the
+ * pre-WARP-476 behavior):
+ *
+ *   1. **Disk first.** If the file at `AUDIT_KEY_PATH` exists and is
+ *      ≥ 32 bytes, use it.
+ *      - If `AUDIT_SIGNING_KEY` is ALSO set and decodes to the same
+ *        bytes: silent, use disk (env is harmless duplicate).
+ *      - If `AUDIT_SIGNING_KEY` is set and decodes to DIFFERENT bytes:
+ *          - `NODE_ENV === "production"` → throw FATAL. Two writers
+ *            with different keys would fork the audit chain; we refuse
+ *            to boot rather than emit rows that later signature-verify
+ *            against neither key. An attacker who has env-override
+ *            access but cannot touch `/data/secrets/audit.key` must
+ *            not be able to silently re-key the chain.
+ *          - Otherwise (dev / CI) → use env (it's the override), log
+ *            a structured warn so the divergence is visible in test
+ *            runs and the operator gets the same message production
+ *            would have fatal'd on.
+ *   2. **Env fallback.** Disk file absent → fall back to
+ *      `AUDIT_SIGNING_KEY` (base64). Mirrors how dev hosts that don't
+ *      have `/data` mounted run today.
  *
  * Throws if neither source is available — the orchestrator must fail
- * to start rather than emit unsigned activity rows.
+ * to start rather than emit unsigned activity rows (fail-closed posture
+ * from WARP-456: "no unsigned activity rows ever leave the recorder").
+ *
+ * @param diskPath  override for tests; defaults to `AUDIT_KEY_PATH`.
  */
 export function loadAuditKeyFromDisk(
   diskPath: string = AUDIT_KEY_PATH,
 ): Buffer {
-  const envKey = process.env.AUDIT_SIGNING_KEY;
-  if (envKey && envKey.length > 0) {
-    return Buffer.from(envKey, "base64");
+  const envKeyRaw = process.env.AUDIT_SIGNING_KEY;
+  const envKey = envKeyRaw && envKeyRaw.length > 0 ? envKeyRaw : undefined;
+  const nodeEnv = process.env.NODE_ENV;
+
+  // 1. Disk first.
+  let diskKey: Buffer | null = null;
+  if (fs.existsSync(diskPath)) {
+    // Read raw bytes — the secrets.sh helper writes binary, not base64.
+    diskKey = fs.readFileSync(diskPath);
+    if (diskKey.length < MIN_KEY_BYTES) {
+      throw new Error(
+        `audit signing key at ${diskPath} is shorter than ${MIN_KEY_BYTES} bytes (got ${diskKey.length})`,
+      );
+    }
   }
-  if (!fs.existsSync(diskPath)) {
-    throw new Error(
-      `audit signing key not found: set AUDIT_SIGNING_KEY env var or write ${diskPath} (mode 0600) via scripts/setup.sh`,
-    );
+
+  if (diskKey) {
+    if (envKey) {
+      const envBuf = Buffer.from(envKey, "base64");
+      if (diskKey.equals(envBuf)) {
+        // Env duplicates disk — harmless. Prefer disk so we don't carry
+        // a derived buffer when the canonical one is right there.
+        return diskKey;
+      }
+      // Disagreement.
+      if (nodeEnv === "production") {
+        throw new Error(
+          `FATAL: AUDIT_SIGNING_KEY env var conflicts with on-disk key at ${diskPath}. ` +
+            "Refusing to boot in production to prevent an audit-chain fork. " +
+            "Either remove the env var, align it with the disk file, or rotate the disk key via scripts/setup.sh.",
+        );
+      }
+      // Dev / CI: env override is allowed but loud.
+      logger.warn(
+        { diskPath, envOverride: true },
+        "AUDIT_SIGNING_KEY env var differs from on-disk audit key; using env override (dev/CI only — this would refuse to boot in production)",
+      );
+      return envBuf;
+    }
+    return diskKey;
   }
-  // Read raw bytes — the secrets.sh helper writes binary, not base64.
-  return fs.readFileSync(diskPath);
+
+  // 2. Disk absent → env fallback.
+  if (envKey) {
+    const envBuf = Buffer.from(envKey, "base64");
+    if (envBuf.length < MIN_KEY_BYTES) {
+      throw new Error(
+        `AUDIT_SIGNING_KEY env var decoded to fewer than ${MIN_KEY_BYTES} bytes (got ${envBuf.length})`,
+      );
+    }
+    return envBuf;
+  }
+
+  throw new Error(
+    `audit signing key not found: ${diskPath} does not exist and AUDIT_SIGNING_KEY env var is unset. ` +
+      "Run scripts/setup.sh to generate the key on first boot.",
+  );
 }
 
 /**
