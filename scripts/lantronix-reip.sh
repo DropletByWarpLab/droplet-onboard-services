@@ -75,8 +75,14 @@ ok()  { printf '\033[1;32m[reip]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[reip]\033[0m %s\n' "$*" >&2; exit 1; }
 
 login_at() {
+  # -f makes curl exit non-zero on 4xx/5xx so a rejected login (401/403)
+  # propagates via `|| die`. Without it, the SKIP_PRECHECKS=1 path at
+  # the bottom of pre-checks would silently pass through an invalid
+  # auth and then call the destructive step-4 re-IP. The pre-check-3
+  # and step-6 paths catch a silent reject via the get_at | jq -e
+  # follow-up, but only by accident — encode the intent here too.
   local url="$1"
-  curl -sk -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+  curl -fsk -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
     -X POST "$url" \
     -d "username=$SWITCH_USERNAME&password=$SWITCH_PASSWORD" \
     -o /dev/null
