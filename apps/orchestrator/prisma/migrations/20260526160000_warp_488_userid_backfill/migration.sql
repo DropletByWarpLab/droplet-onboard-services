@@ -61,3 +61,76 @@
 --
 -- Future deletions: tracked separately if the operator-tooling ticket
 -- lands. This migration is strictly additive.
+
+BEGIN;
+
+-- ── 1. CameraPin.userId : username → UUID ──
+--
+-- Resolve each pre-WARP-485 username key against `User.nextcloudUsername`,
+-- substitute the matching `User.id` (UUID). The UUID-regex filter on the
+-- WHERE clause means a row that already carries a UUID-shaped userId is
+-- not eligible — second-run = no-op.
+--
+-- We use a single UPDATE … FROM (a Postgres-ism the existing migrations
+-- use elsewhere) joined on `nextcloudUsername`. Rows whose userId is a
+-- non-UUID string with NO matching User row (= orphan) are untouched
+-- and surface via the NOTICE block at the bottom.
+--
+-- The `@@unique([userId, cameraName])` constraint on CameraPin is
+-- per-user → it can never block this UPDATE because we're flipping the
+-- key from username form to UUID form ATOMICALLY for one user at a time.
+-- Even if the same operator somehow has a (username-keyed) AND (UUID-
+-- keyed) row with the same cameraName — exceedingly unlikely without
+-- manual SQL — Postgres rejects the UPDATE with a unique violation,
+-- which is the correct fail-loud signal (manual operator review).
+UPDATE "CameraPin"
+   SET "userId" = "User"."id"
+  FROM "User"
+ WHERE "CameraPin"."userId" = "User"."nextcloudUsername"
+   AND "CameraPin"."userId" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+-- ── 2. CameraNotificationPref.userId : username → UUID ──
+--
+-- Same shape as the CameraPin update. The `@@unique([userId, cameraId])`
+-- constraint has the same per-user uniqueness so collisions can only
+-- happen in the pathological pre-existing duplicate case, which is a
+-- fail-loud rather than fail-silent path here.
+UPDATE "CameraNotificationPref"
+   SET "userId" = "User"."id"
+  FROM "User"
+ WHERE "CameraNotificationPref"."userId" = "User"."nextcloudUsername"
+   AND "CameraNotificationPref"."userId" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+-- ── 3. Orphan reporting (RAISE NOTICE, no deletions) ──
+--
+-- After the UPDATEs above, any row whose userId is STILL non-UUID
+-- shaped is an orphan: a username string that doesn't map to any
+-- `User.nextcloudUsername` in the directory. We RAISE NOTICE the
+-- counts so the operator can see them in the migrate output and
+-- decide whether to re-attribute (psql) or drop them in a follow-up.
+-- We DO NOT delete here — that's an operator decision.
+DO $$
+DECLARE
+    orphan_pins      INTEGER;
+    orphan_prefs     INTEGER;
+BEGIN
+    SELECT COUNT(*)
+      INTO orphan_pins
+      FROM "CameraPin"
+     WHERE "userId" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+    SELECT COUNT(*)
+      INTO orphan_prefs
+      FROM "CameraNotificationPref"
+     WHERE "userId" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+    IF orphan_pins > 0 THEN
+        RAISE NOTICE 'WARP-488: % CameraPin row(s) have non-UUID userId with no matching User.nextcloudUsername — operator review needed (rows NOT deleted).', orphan_pins;
+    END IF;
+
+    IF orphan_prefs > 0 THEN
+        RAISE NOTICE 'WARP-488: % CameraNotificationPref row(s) have non-UUID userId with no matching User.nextcloudUsername — operator review needed (rows NOT deleted).', orphan_prefs;
+    END IF;
+END $$;
+
+COMMIT;
