@@ -164,25 +164,41 @@ async function resolveProposal(
     res.status(400).json({ error: "id required" });
     return null;
   }
-  const existing = await prisma.autonomousProposal.findUnique({ where: { id } });
-  if (!existing) {
-    res.status(404).json({ error: "proposal not found" });
-    return null;
-  }
-  if (existing.status !== "pending") {
-    res.status(409).json({
-      error: `proposal is already ${existing.status}; cannot transition to ${newStatus}`,
-    });
-    return null;
-  }
-  return prisma.autonomousProposal.update({
-    where: { id },
+
+  // Atomic transition: only flip the row if it's still `pending`. A
+  // findUnique + update split lets two concurrent ops-console tabs
+  // (or operator + expiry-sweep) both pass the guard and overwrite
+  // each other silently. updateMany with the status filter pushes
+  // the check into the DB statement.
+  const updated = await prisma.autonomousProposal.updateMany({
+    where: { id, status: "pending" },
     data: {
       status: newStatus,
       resolvedByUserId: req.user?.id ?? null,
       resolvedAt: new Date(),
     },
   });
+
+  if (updated.count === 0) {
+    // count=0 collapses two cases: the row doesn't exist at all, OR
+    // it does but is no longer pending (concurrent resolve / sweep
+    // expired it). One follow-up read disambiguates so the operator
+    // gets a useful 404 vs 409 instead of a generic conflict.
+    const existing = await prisma.autonomousProposal.findUnique({
+      where: { id },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "proposal not found" });
+      return null;
+    }
+    res.status(409).json({
+      error: `proposal is already ${existing.status}; cannot transition to ${newStatus}`,
+    });
+    return null;
+  }
+
+  // Won the race — return the persisted row so the route can serialise it.
+  return prisma.autonomousProposal.findUniqueOrThrow({ where: { id } });
 }
 
 function serialise(row: {
