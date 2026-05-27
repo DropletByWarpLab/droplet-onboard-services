@@ -223,11 +223,21 @@ async def ops_approve_proposal(proposal_id: str) -> dict[str, Any]:
     (per WARP-399 §6) — the operator runs the action interactively from
     the dashboard. This endpoint just flips status + records the operator."""
     try:
-        return await ap.approve_proposal(proposal_id)
+        result = await ap.approve_proposal(proposal_id)
     except ap.OrchestratorUnauthenticated as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
         )
+    # Surface upstream non-success as a real HTTP error so the dashboard
+    # JS client's `throw if non-2xx` path fires. Returning the envelope
+    # dict at HTTP 200 silently swallows orchestrator 404/409s and the
+    # operator gets no feedback when they double-click a stale row.
+    if not result.get("ok", False):
+        raise HTTPException(
+            status_code=int(result.get("status_code", status.HTTP_502_BAD_GATEWAY)),
+            detail=result.get("body"),
+        )
+    return result
 
 
 @app.post(
@@ -237,11 +247,17 @@ async def ops_approve_proposal(proposal_id: str) -> dict[str, Any]:
 async def ops_reject_proposal(proposal_id: str) -> dict[str, Any]:
     """Reject a pending proposal."""
     try:
-        return await ap.reject_proposal(proposal_id)
+        result = await ap.reject_proposal(proposal_id)
     except ap.OrchestratorUnauthenticated as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc),
         )
+    if not result.get("ok", False):
+        raise HTTPException(
+            status_code=int(result.get("status_code", status.HTTP_502_BAD_GATEWAY)),
+            detail=result.get("body"),
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
