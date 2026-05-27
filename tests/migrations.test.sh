@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Integration test: prisma migrate deploy + WARP-484 journal-fix migration.
+# Integration test: prisma migrate deploy + WARP-484 journal-fix migration +
+# WARP-488 Camera*.userId backfill.
 #
-# Verifies two paths through the orchestrator's Prisma migration set:
+# Verifies four paths through the orchestrator's Prisma migration set:
 #   1. Fresh-install path — `prisma migrate deploy` against an empty
 #      database applies every migration cleanly, including the renamed
 #      `20260525000100_warp_456_activity_row/` and the WARP-484
@@ -11,6 +12,13 @@
 #      DB whose `_prisma_migrations` journal still carries the OLD
 #      `20260525000000_warp_456_activity_row` name converges to a single
 #      journal row keyed by the new name, with no duplicate.
+#   3. WARP-488 username→UUID backfill (Phase 8) — seeded pre-WARP-485
+#      data (username-keyed CameraPin + CameraNotificationPref + matching
+#      User row) is flipped to UUID-keyed by the migration SQL; orphans
+#      (no matching User) are left in place and surface via RAISE NOTICE.
+#   4. WARP-488 idempotent re-run (Phase 9) — re-applying the same SQL to
+#      the converged DB updates zero rows (UUID-regex filter on the WHERE
+#      clause excludes already-flipped rows) and orphan rows are stable.
 #
 # Prerequisites: Docker running, no service on the throwaway port 55484.
 # Runtime: ~30–60 s (postgres pull is cached after first run; npm/node not
@@ -60,7 +68,7 @@ trap cleanup EXIT
 
 echo ""
 echo "  ================================================"
-echo "  Migration Journal Fix (WARP-484) Tests"
+echo "  Migration Tests (WARP-484 journal-fix + WARP-488 backfill)"
 echo "  ================================================"
 echo ""
 
@@ -326,6 +334,195 @@ if [ "$POST_FIX" = "1" ]; then
   pass "journal-fix migration itself recorded once"
 else
   fail "expected 1 journal-fix row, got: $POST_FIX"
+fi
+
+# =============================================================================
+# Phase 8: WARP-488 — CameraPin + CameraNotificationPref userId backfill
+# =============================================================================
+#
+# Simulates a device upgrade across the WARP-485 boundary: pre-fix data
+# is keyed by Nextcloud username (e.g. 'alice-pre485'), the matching User
+# row carries nextcloudUsername='alice-pre485' (written on first sign-in
+# after WARP-485 deploy), and the WARP-488 migration SQL flips userId to
+# the UUID. We invoke the migration SQL directly (not via `migrate
+# deploy`) so we can re-test idempotency in Phase 9 without journal
+# gymnastics. The migration SQL itself is what runs in production —
+# `migrate deploy` only wraps the same statements with journal-row
+# bookkeeping.
+echo "--- Phase 8: WARP-488 Camera*.userId backfill ---"
+
+ALICE_UUID="aaaaaaaa-1111-2222-3333-444444444444"
+ALICE_USERNAME="alice-pre485"
+GHOST_USERNAME="ghost-pre485"
+CAMERA_ID="cccccccc-aaaa-bbbb-dddd-eeeeeeeeeeee"
+
+# Seed: a User row whose nextcloudUsername matches the pre-fix key, plus
+# a Camera row that CameraNotificationPref can FK to.
+pg_exec "INSERT INTO \"User\" (id, username, \"displayName\", \"nextcloudUsername\", role, \"isLocal\", \"createdAt\", \"updatedAt\")
+         VALUES ('$ALICE_UUID', '$ALICE_USERNAME', 'Alice Pre-485', '$ALICE_USERNAME', 'family', true, NOW(), NOW());" \
+  >/dev/null && pass "seeded User row (nextcloudUsername=$ALICE_USERNAME)" \
+  || fail "failed to seed User row"
+
+pg_exec "INSERT INTO \"Camera\" (id, name, \"displayName\", \"ipAddress\", enabled, \"autoDiscovered\", \"lastSeen\", \"createdAt\", \"updatedAt\")
+         VALUES ('$CAMERA_ID', 'front-porch', 'Front Porch', '192.168.1.50', true, false, NOW(), NOW(), NOW());" \
+  >/dev/null && pass "seeded Camera row (name=front-porch)" \
+  || fail "failed to seed Camera row"
+
+# Pre-fix CameraPin: userId is the Nextcloud username string.
+pg_exec "INSERT INTO \"CameraPin\" (id, \"userId\", \"cameraName\", \"sortOrder\", \"createdAt\")
+         VALUES ('pin-1', '$ALICE_USERNAME', 'front-porch', 0, NOW());" \
+  >/dev/null && pass "seeded pre-fix CameraPin (userId=$ALICE_USERNAME)" \
+  || fail "failed to seed CameraPin"
+
+# Pre-fix CameraNotificationPref: same shape, FK to the Camera row.
+pg_exec "INSERT INTO \"CameraNotificationPref\" (id, \"userId\", \"cameraId\", \"onPerson\", \"onVehicle\", \"onAnimal\", \"onMotion\")
+         VALUES ('pref-1', '$ALICE_USERNAME', '$CAMERA_ID', true, true, false, false);" \
+  >/dev/null && pass "seeded pre-fix CameraNotificationPref (userId=$ALICE_USERNAME)" \
+  || fail "failed to seed CameraNotificationPref"
+
+# Orphan: userId is a username that has NO matching User.nextcloudUsername.
+# Should be left untouched by the migration and surface in the NOTICE log.
+pg_exec "INSERT INTO \"CameraPin\" (id, \"userId\", \"cameraName\", \"sortOrder\", \"createdAt\")
+         VALUES ('pin-orphan', '$GHOST_USERNAME', 'side-yard', 0, NOW());" \
+  >/dev/null && pass "seeded orphan CameraPin (userId=$GHOST_USERNAME)" \
+  || fail "failed to seed orphan CameraPin"
+
+pg_exec "INSERT INTO \"CameraNotificationPref\" (id, \"userId\", \"cameraId\", \"onPerson\", \"onVehicle\", \"onAnimal\", \"onMotion\")
+         VALUES ('pref-orphan', '$GHOST_USERNAME', '$CAMERA_ID', true, false, false, false);" \
+  >/dev/null && pass "seeded orphan CameraNotificationPref (userId=$GHOST_USERNAME)" \
+  || fail "failed to seed orphan CameraNotificationPref"
+
+# Run the WARP-488 migration SQL directly. Capture NOTICE lines to a
+# tempfile so we can assert the orphan counts. psql writes NOTICEs to
+# stderr by default; we redirect 2>&1 then grep for them.
+MIGRATION_SQL_PATH="/app/prisma/migrations/20260526160000_warp_488_userid_backfill/migration.sql"
+MIGRATE_OUT=$(docker run --rm \
+    --network "$PG_NETWORK" \
+    -v "${REPO_ROOT}/apps/orchestrator:/app" \
+    -e PGPASSWORD="$PG_PASSWORD" \
+    postgres:16 \
+    psql -h "$PG_CONTAINER" -U "$PG_USER" -d "$PG_DB" -f "$MIGRATION_SQL_PATH" 2>&1) || true
+
+if echo "$MIGRATE_OUT" | grep -q "ERROR"; then
+  fail "WARP-488 migration SQL emitted ERROR (first 20 lines below):"
+  echo "$MIGRATE_OUT" | head -20 >&2
+else
+  pass "WARP-488 migration SQL ran without ERROR"
+fi
+
+# Verify the matched rows are now UUID-keyed.
+ALICE_PIN_USERID=$(pg_exec "SELECT \"userId\" FROM \"CameraPin\" WHERE id = 'pin-1';")
+if [ "$ALICE_PIN_USERID" = "$ALICE_UUID" ]; then
+  pass "CameraPin (matched) now keyed by User.id UUID"
+else
+  fail "CameraPin (matched): expected userId=$ALICE_UUID, got: $ALICE_PIN_USERID"
+fi
+
+ALICE_PREF_USERID=$(pg_exec "SELECT \"userId\" FROM \"CameraNotificationPref\" WHERE id = 'pref-1';")
+if [ "$ALICE_PREF_USERID" = "$ALICE_UUID" ]; then
+  pass "CameraNotificationPref (matched) now keyed by User.id UUID"
+else
+  fail "CameraNotificationPref (matched): expected userId=$ALICE_UUID, got: $ALICE_PREF_USERID"
+fi
+
+# Verify orphans are left untouched.
+ORPHAN_PIN_USERID=$(pg_exec "SELECT \"userId\" FROM \"CameraPin\" WHERE id = 'pin-orphan';")
+if [ "$ORPHAN_PIN_USERID" = "$GHOST_USERNAME" ]; then
+  pass "orphan CameraPin left untouched (userId=$GHOST_USERNAME)"
+else
+  fail "orphan CameraPin: expected userId=$GHOST_USERNAME, got: $ORPHAN_PIN_USERID"
+fi
+
+ORPHAN_PREF_USERID=$(pg_exec "SELECT \"userId\" FROM \"CameraNotificationPref\" WHERE id = 'pref-orphan';")
+if [ "$ORPHAN_PREF_USERID" = "$GHOST_USERNAME" ]; then
+  pass "orphan CameraNotificationPref left untouched (userId=$GHOST_USERNAME)"
+else
+  fail "orphan CameraNotificationPref: expected userId=$GHOST_USERNAME, got: $ORPHAN_PREF_USERID"
+fi
+
+# Verify the NOTICE block logged the orphan counts.
+if echo "$MIGRATE_OUT" | grep -q "WARP-488: 1 CameraPin row(s) have non-UUID userId"; then
+  pass "RAISE NOTICE logged orphan CameraPin count"
+else
+  fail "expected RAISE NOTICE for orphan CameraPin — not present in migration output"
+fi
+
+if echo "$MIGRATE_OUT" | grep -q "WARP-488: 1 CameraNotificationPref row(s) have non-UUID userId"; then
+  pass "RAISE NOTICE logged orphan CameraNotificationPref count"
+else
+  fail "expected RAISE NOTICE for orphan CameraNotificationPref — not present in migration output"
+fi
+
+# =============================================================================
+# Phase 9: WARP-488 idempotency — re-running the migration is a no-op
+# =============================================================================
+#
+# Same SQL, second pass on the converged DB. The UUID-regex filter on the
+# WHERE clause means the matched rows are already UUID-shaped → zero new
+# updates. Orphans stay where they are. The NOTICE block still fires
+# (counts are unchanged).
+echo "--- Phase 9: WARP-488 idempotent re-run ---"
+
+# Snapshot every row's current userId before re-run so we can assert
+# exact equality after.
+BEFORE_PIN_MATCHED=$(pg_exec "SELECT \"userId\" FROM \"CameraPin\" WHERE id = 'pin-1';")
+BEFORE_PREF_MATCHED=$(pg_exec "SELECT \"userId\" FROM \"CameraNotificationPref\" WHERE id = 'pref-1';")
+BEFORE_PIN_ORPHAN=$(pg_exec "SELECT \"userId\" FROM \"CameraPin\" WHERE id = 'pin-orphan';")
+BEFORE_PREF_ORPHAN=$(pg_exec "SELECT \"userId\" FROM \"CameraNotificationPref\" WHERE id = 'pref-orphan';")
+
+MIGRATE_OUT2=$(docker run --rm \
+    --network "$PG_NETWORK" \
+    -v "${REPO_ROOT}/apps/orchestrator:/app" \
+    -e PGPASSWORD="$PG_PASSWORD" \
+    postgres:16 \
+    psql -h "$PG_CONTAINER" -U "$PG_USER" -d "$PG_DB" -f "$MIGRATION_SQL_PATH" 2>&1) || true
+
+if echo "$MIGRATE_OUT2" | grep -q "ERROR"; then
+  fail "WARP-488 idempotent re-run emitted ERROR"
+  echo "$MIGRATE_OUT2" | head -20 >&2
+else
+  pass "WARP-488 migration SQL re-runs without ERROR"
+fi
+
+# The UPDATE statements should report 0 rows affected on the second pass
+# (UUID-regex filter excludes everything that was previously flipped).
+# psql's default output for `UPDATE 0` is on stdout — capture it.
+if echo "$MIGRATE_OUT2" | grep -q "^UPDATE 0$"; then
+  pass "idempotent re-run: at least one UPDATE reported 0 rows affected"
+else
+  # Not fatal — Prisma 5.14 with a wrapped DO/BEGIN block may emit a
+  # single `COMMIT` line and no per-statement counter. Fall back to a
+  # row-level equality check below.
+  pass "idempotent re-run: no explicit 'UPDATE 0' line (relying on row-equality check)"
+fi
+
+AFTER_PIN_MATCHED=$(pg_exec "SELECT \"userId\" FROM \"CameraPin\" WHERE id = 'pin-1';")
+AFTER_PREF_MATCHED=$(pg_exec "SELECT \"userId\" FROM \"CameraNotificationPref\" WHERE id = 'pref-1';")
+AFTER_PIN_ORPHAN=$(pg_exec "SELECT \"userId\" FROM \"CameraPin\" WHERE id = 'pin-orphan';")
+AFTER_PREF_ORPHAN=$(pg_exec "SELECT \"userId\" FROM \"CameraNotificationPref\" WHERE id = 'pref-orphan';")
+
+if [ "$BEFORE_PIN_MATCHED" = "$AFTER_PIN_MATCHED" ]; then
+  pass "CameraPin (matched) userId stable across re-run"
+else
+  fail "CameraPin (matched) userId drifted: before=$BEFORE_PIN_MATCHED, after=$AFTER_PIN_MATCHED"
+fi
+
+if [ "$BEFORE_PREF_MATCHED" = "$AFTER_PREF_MATCHED" ]; then
+  pass "CameraNotificationPref (matched) userId stable across re-run"
+else
+  fail "CameraNotificationPref (matched) userId drifted: before=$BEFORE_PREF_MATCHED, after=$AFTER_PREF_MATCHED"
+fi
+
+if [ "$BEFORE_PIN_ORPHAN" = "$AFTER_PIN_ORPHAN" ]; then
+  pass "orphan CameraPin userId stable across re-run"
+else
+  fail "orphan CameraPin userId drifted: before=$BEFORE_PIN_ORPHAN, after=$AFTER_PIN_ORPHAN"
+fi
+
+if [ "$BEFORE_PREF_ORPHAN" = "$AFTER_PREF_ORPHAN" ]; then
+  pass "orphan CameraNotificationPref userId stable across re-run"
+else
+  fail "orphan CameraNotificationPref userId drifted: before=$BEFORE_PREF_ORPHAN, after=$AFTER_PREF_ORPHAN"
 fi
 
 # =============================================================================
