@@ -1,0 +1,63 @@
+-- WARP-488: backfill three pre-WARP-485 user-id surfaces from username → UUID.
+--
+-- WARP-485 added `User.nextcloudUsername` and changed the auth middleware so
+-- `req.user.id` is now always the local `User.id` UUID, regardless of whether
+-- the session originated from a JWT or an OCS-token fallback. Before that
+-- normalization landed, the OCS fallback path set `req.user.id` to the raw
+-- Nextcloud user-id string (e.g. `stefan-cruceru`), and any row written
+-- using `req.user.id` AT THE TIME landed keyed by username rather than by
+-- the row's UUID.
+--
+-- Three surfaces persisted that pre-fix `req.user.id`:
+--
+--   1. `CameraPin.userId`             — keyed by username for rows minted
+--                                       via the OCS-auth path before WARP-485.
+--                                       Read at `routes/cameras.ts:269` via
+--                                       `pinsSvc.listPins(prisma, req.user.id)`.
+--   2. `CameraNotificationPref.userId` — same shape, read at
+--                                       `routes/cameras.ts:1549, :1577` via
+--                                       `userId_cameraId` composite where-clause.
+--   3. `BRAIN_ROOT/<userId>/` on-disk  — see
+--                                       `services/brain-memory.service.ts`
+--                                       `pathForItem` / `ensureItemDir`. Handled
+--                                       by the orchestrator's boot-time
+--                                       `migrateBrainMemoryDirectoryLayout`
+--                                       helper, NOT this SQL migration, because
+--                                       it touches the filesystem and reads
+--                                       the same `User.nextcloudUsername`
+--                                       table from Node land.
+--
+-- Without this backfill, a device upgraded across the WARP-485 boundary
+-- silently loses every CameraPin / CameraNotificationPref row whose
+-- userId is a username string, because the new `req.user.id` (UUID) will
+-- never match the old key on read. The on-disk brain-memory dirs strand
+-- the same way — files exist but the per-user RBAC + path-resolution
+-- can't see them under the new UUID-keyed scheme.
+--
+-- ── Mapping path ──
+--
+-- Username → UUID resolution uses `User.nextcloudUsername` (added in
+-- WARP-485 migration `20260526150000_warp_485_user_nextcloud_username`).
+-- Every pre-WARP-485 OCS-auth user that has authenticated since the
+-- WARP-485 deploy has a matching `User.nextcloudUsername` row written
+-- on first sign-in. The orphan case is a username with no matching User
+-- row — that's logged via RAISE NOTICE for operator review, never
+-- deleted (operators decide whether to re-attribute or drop).
+--
+-- ── Idempotency ──
+--
+-- UUID-regex filter on the WHERE clause:
+--   "userId" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+-- Rows that already carry a UUID userId are skipped, so re-running this
+-- migration on a converged DB updates zero rows. Same posture as the
+-- WARP-330 `backfill_brain_status` migration above.
+--
+-- ── No deletions ──
+--
+-- Orphan rows (non-UUID userId with no matching User.nextcloudUsername)
+-- stay in place. The operator decides whether to manually re-attribute
+-- them (via psql or the People surface in a follow-up ticket) or drop
+-- them. RAISE NOTICE captures the count for the operator's review.
+--
+-- Future deletions: tracked separately if the operator-tooling ticket
+-- lands. This migration is strictly additive.
