@@ -89,6 +89,99 @@ export interface AgentResult {
 
 const DEFAULT_MAX_ITER = 5;
 
+/**
+ * WARP-458 — parsed reasoning trace for a single assistant turn.
+ *
+ * `reasoningSteps[]` is in arrival order, ready to pump through
+ * `{type:"reasoning_step", text}` events. `cleanedContent` is the
+ * user-visible text with all `<reasoning>…</reasoning>` segments
+ * stripped. `fullReasoning` is the concatenated trace for
+ * `ChatMessage.reasoning` persistence — null when no reasoning was
+ * detected so the DB column stays NULL for the overwhelming majority
+ * of pre-WARP-458 historical-shape turns.
+ */
+export interface ParsedReasoningTrace {
+  reasoningSteps: string[];
+  cleanedContent: string;
+  fullReasoning: string | null;
+}
+
+/**
+ * WARP-458 — extract reasoning trace + clean user-visible content from
+ * a single assistant turn's raw output.
+ *
+ * Handles three input shapes:
+ *   1. Inline `<reasoning>…</reasoning>` segments interleaved with the
+ *      content (qwen3 / deepseek-r1 family). Multiple sibling segments
+ *      become multiple steps, in the order they appear.
+ *   2. A provider-native reasoning string (OpenAI o-series via LiteLLM,
+ *      Anthropic extended-thinking when exposed). Passed via
+ *      `providerReasoning` and treated as a single step that lands
+ *      BEFORE any inline-derived steps.
+ *   3. The defensive case: an opening `<reasoning>` tag with no close
+ *      (truncated stream, mid-stream abort) — the remainder is treated
+ *      as one step rather than leaked into the user-visible content.
+ *
+ * The regex uses a non-greedy match with the `s` flag so a single
+ * `<reasoning>` segment can span newlines; the no-close fallback
+ * handles the truncation case. Whitespace-only segments are dropped so
+ * `<reasoning>   </reasoning>` doesn't produce an empty step block.
+ */
+export function parseReasoningTrace(args: {
+  content: string | null;
+  providerReasoning?: string | null;
+}): ParsedReasoningTrace {
+  const steps: string[] = [];
+
+  // Provider-native reasoning (when present) is the FIRST step. Cloud
+  // providers that surface a separate reasoning field do so for the
+  // whole turn, not interleaved with the visible content, so it makes
+  // sense to render that summary before any inline-derived chunks.
+  if (args.providerReasoning) {
+    const trimmed = args.providerReasoning.trim();
+    if (trimmed.length > 0) steps.push(trimmed);
+  }
+
+  let working = args.content ?? "";
+
+  // Walk inline `<reasoning>…</reasoning>` segments in document order.
+  // `closedSegment` captures both the segment text and its placement so
+  // we can rebuild the cleaned content by splicing the matches out.
+  const closedSegment = /<reasoning>([\s\S]*?)<\/reasoning>/g;
+  let match: RegExpExecArray | null;
+  const cleanedParts: string[] = [];
+  let cursor = 0;
+  while ((match = closedSegment.exec(working)) !== null) {
+    // Whatever sits before this `<reasoning>` opening is user-visible
+    // content — append it to the cleaned output.
+    cleanedParts.push(working.slice(cursor, match.index));
+    const trimmed = match[1].trim();
+    if (trimmed.length > 0) steps.push(trimmed);
+    cursor = match.index + match[0].length;
+  }
+  // Trailing remainder after the last closed segment (if any).
+  cleanedParts.push(working.slice(cursor));
+  working = cleanedParts.join("");
+
+  // Defensive: an opening `<reasoning>` with no close. Treat the rest
+  // of the string as a single step and clean it from the visible
+  // output. This is the truncated-stream case.
+  const openIdx = working.indexOf("<reasoning>");
+  if (openIdx !== -1) {
+    const tail = working.slice(openIdx + "<reasoning>".length).trim();
+    if (tail.length > 0) steps.push(tail);
+    working = working.slice(0, openIdx);
+  }
+
+  // Collapse the leftover whitespace that the splice opens up — the
+  // model often emits ` <reasoning>…</reasoning> ` with a leading and
+  // trailing space we don't want doubled in the cleaned output.
+  const cleanedContent = working.replace(/\s+/g, " ").trim();
+
+  const fullReasoning = steps.length > 0 ? steps.join("\n\n") : null;
+  return { reasoningSteps: steps, cleanedContent, fullReasoning };
+}
+
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   const maxIter = Math.max(1, Math.min(req.max_iter ?? DEFAULT_MAX_ITER, 10));
   const trace: AgentTraceEntry[] = [];
