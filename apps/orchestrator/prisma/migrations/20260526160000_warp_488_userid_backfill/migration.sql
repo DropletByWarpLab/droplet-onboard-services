@@ -1,4 +1,4 @@
--- WARP-488: backfill three pre-WARP-485 user-id surfaces from username → UUID.
+-- WARP-488: backfill two pre-WARP-485 Camera user-id surfaces from username → UUID.
 --
 -- WARP-485 added `User.nextcloudUsername` and changed the auth middleware so
 -- `req.user.id` is now always the local `User.id` UUID, regardless of whether
@@ -8,7 +8,7 @@
 -- using `req.user.id` AT THE TIME landed keyed by username rather than by
 -- the row's UUID.
 --
--- Three surfaces persisted that pre-fix `req.user.id`:
+-- Two Camera surfaces persisted that pre-fix `req.user.id`:
 --
 --   1. `CameraPin.userId`             — keyed by username for rows minted
 --                                       via the OCS-auth path before WARP-485.
@@ -17,22 +17,22 @@
 --   2. `CameraNotificationPref.userId` — same shape, read at
 --                                       `routes/cameras.ts:1549, :1577` via
 --                                       `userId_cameraId` composite where-clause.
---   3. `BRAIN_ROOT/<userId>/` on-disk  — see
---                                       `services/brain-memory.service.ts`
---                                       `pathForItem` / `ensureItemDir`. Handled
---                                       by the orchestrator's boot-time
---                                       `migrateBrainMemoryDirectoryLayout`
---                                       helper, NOT this SQL migration, because
---                                       it touches the filesystem and reads
---                                       the same `User.nextcloudUsername`
---                                       table from Node land.
 --
 -- Without this backfill, a device upgraded across the WARP-485 boundary
 -- silently loses every CameraPin / CameraNotificationPref row whose
 -- userId is a username string, because the new `req.user.id` (UUID) will
--- never match the old key on read. The on-disk brain-memory dirs strand
--- the same way — files exist but the per-user RBAC + path-resolution
--- can't see them under the new UUID-keyed scheme.
+-- never match the old key on read.
+--
+-- Brain-memory (`BRAIN_ROOT/<userId>/` on-disk dirs AND `BrainMemoryItem.userId`
+-- column) is the third pre-WARP-485 surface with the same username-keyed
+-- drift, but it is OUT OF SCOPE for this migration. The on-disk migrator
+-- alone is not safe to ship because the read path (`routes/files-brain.ts`
+-- `getUserId()`) still resolves to the username string — renaming dirs
+-- without flipping the reader causes ENOENT on every brain-memory read.
+-- The brain-memory cutover is tracked separately in WARP-493 as an atomic
+-- deploy bundling the boot-time directory migrator, the `getUserId` flip
+-- to UUID, the DB column backfill, and the `brain_ingest` writer update —
+-- all in one release so reads and writes converge in lockstep.
 --
 -- ── Mapping path ──
 --
