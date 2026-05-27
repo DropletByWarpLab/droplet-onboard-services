@@ -336,6 +336,7 @@ check_camera_drivers() {
     for dev in /dev/video*; do
       if [ -c "$dev" ]; then
         local name=""
+        # shellcheck disable=SC2155  # `basename "$dev"` cannot fail here — $dev came from a glob match that the enclosing `for` + `[ -c ]` guard already validated.
         local sysdev="/sys/class/video4linux/$(basename "$dev")/name"
         [ -f "$sysdev" ] && name=$(cat "$sysdev")
         printf "  ${_GREEN}%s${_RESET}  %s\n" "$dev" "$name"

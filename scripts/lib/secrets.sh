@@ -26,6 +26,7 @@ generate_env() {
 
   # --- Backup existing .env if regenerating ---
   if [ -f "$env_file" ]; then
+    # shellcheck disable=SC2155  # `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
     local backup="$env_file.bak.$(date +%s)"
     cp "$env_file" "$backup"
     log_info "Backed up existing .env to $backup"
@@ -246,6 +247,7 @@ migrate_env() {
     local key="$1" value="$2"
     if ! grep -qE "^${key}=" "$env_file" 2>/dev/null; then
       if [ "$backed_up" = "false" ]; then
+        # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
         local backup="$env_file.bak.$(date +%s)"
         cp "$env_file" "$backup"
         log_info "Backed up existing .env to $backup before migration"
