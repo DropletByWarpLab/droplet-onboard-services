@@ -23,26 +23,36 @@ set -euo pipefail
 # --- Overridable knobs (override via /etc/default/droplet-poc-host-net)
 SWITCH_IP="${SWITCH_IP:-192.168.1.77}"
 HOST_SWITCH_SIDE_IP="${HOST_SWITCH_SIDE_IP:-192.168.1.250}"
+LAN_GATEWAY_IP="${LAN_GATEWAY_IP:-192.168.20.1/24}"
 LAN_BRIDGE="${LAN_BRIDGE:-br-lan}"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/droplet-poc-host-net/lan-dhcp.conf}"
 # ---------------------------------------------------------------------
 
-# 1) Route to the switch mgmt IP via br-lan. The /32 host route + a
+# 1) LAN-side gateway IP on br-lan. dnsmasq's `bind-interfaces +
+#    listen-address=192.168.20.1` calls bind() on the exact address —
+#    if it isn't on the interface, bind() fails with EADDRNOTAVAIL and
+#    the unit loops under Restart=on-failure. Whatever else configures
+#    br-lan (netplan, openwrt-attach) may not assign this address on a
+#    fresh install, so make it explicit here. `ip addr replace` is
+#    idempotent.
+ip addr replace "$LAN_GATEWAY_IP" dev "$LAN_BRIDGE"
+
+# 2) Route to the switch mgmt IP via br-lan. The /32 host route + a
 #    same-subnet source IP is the minimum that lets the host originate
 #    packets to the switch without re-IPing either side. `ip route
 #    replace` is idempotent (creates or updates).
 ip addr replace "$HOST_SWITCH_SIDE_IP/32" dev "$LAN_BRIDGE"
 ip route replace "$SWITCH_IP/32" dev "$LAN_BRIDGE" src "$HOST_SWITCH_SIDE_IP"
 
-# 2) Validate the dnsmasq config before exec'ing — a typo here would
+# 3) Validate the dnsmasq config before exec'ing — a typo here would
 #    otherwise leave systemd thrashing on Restart=on-failure.
 /usr/sbin/dnsmasq --test --conf-file="$DNSMASQ_CONF"
 
-# 3) Ensure the lease-file directory exists. The default
+# 4) Ensure the lease-file directory exists. The default
 #    /var/lib/misc/ ships on Debian/Ubuntu but a fresh container or a
 #    pruned host might be missing it.
 install -d -m 0755 /var/lib/misc
 
-# 4) Foreground exec under systemd. -k prevents dnsmasq from daemonizing
+# 5) Foreground exec under systemd. -k prevents dnsmasq from daemonizing
 #    so systemd sees the real PID and tracks restarts correctly.
 exec /usr/sbin/dnsmasq -k --conf-file="$DNSMASQ_CONF"

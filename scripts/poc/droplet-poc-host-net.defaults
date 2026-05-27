@@ -11,6 +11,12 @@
 #                        source address in the switch's subnet. Pick
 #                        something outside the upstream router's
 #                        DHCP pool on br-mgmt (which is also .1.x).
+# LAN_GATEWAY_IP       — host-side gateway address (CIDR) assigned to
+#                        br-lan so dnsmasq's bind-interfaces +
+#                        listen-address can call bind() successfully.
+#                        Must match the `listen-address` and
+#                        `dhcp-range` subnet in
+#                        droplet-poc-lan-dhcp.conf.
 # LAN_BRIDGE           — the host bridge the script binds dnsmasq to
 #                        and adds the switch route via. enp12s0 must
 #                        be a member.
@@ -20,5 +26,6 @@
 
 SWITCH_IP=192.168.1.77
 HOST_SWITCH_SIDE_IP=192.168.1.250
+LAN_GATEWAY_IP=192.168.20.1/24
 LAN_BRIDGE=br-lan
 DNSMASQ_CONF=/etc/droplet-poc-host-net/lan-dhcp.conf
