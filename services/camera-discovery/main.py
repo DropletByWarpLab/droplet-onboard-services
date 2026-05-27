@@ -756,8 +756,10 @@ async def reject_camera(mac: str):
         rejected_macs.add(mac)
     # WARP-400 §5 — drop any cached init credentials so a re-add (after
     # the operator clears the rejection) doesn't auto-populate the URL
-    # with stale credentials.
-    _initialized_creds.pop(camera.get("ip", ""), None)
+    # with stale credentials. `camera["ip"]` is an invariant (every
+    # pending camera is built with `"ip": ip` upstream); the .pop's
+    # `None` default handles the never-initialized case.
+    _initialized_creds.pop(camera["ip"], None)
     return {"status": "rejected", "mac": mac}
 
 

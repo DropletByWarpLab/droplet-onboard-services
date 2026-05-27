@@ -4,20 +4,11 @@
 
 - **`services/camera-discovery/frigate_client.py`** — `VENDOR_RTSP_TEMPLATES` + `build_rtsp_url(vendor, ip, user, pw)` helper covering Hanwha, Hikvision, Axis, Dahua, Reolink, Amcrest. URL-escapes embedded credentials. 12 unit tests in `services/camera-discovery/tests/test_frigate_client_vendor_urls.py`.
 
-  **Not yet plumbed into the accept-camera flow** — that's the integration step (see "Deferred" below).
+- **`build_rtsp_url` integration into `accept_camera`** — `services/camera-discovery/main.py:700-720` now calls `build_rtsp_url(vendor, ip, user, pw)` when the camera has a known vendor + cached init credentials, falling back to the probe URL otherwise. The `_initialized_creds: dict[str, dict]` cache (keyed by IP, value `{vendor, username, password}`) survives between `initialize_camera` and `accept_camera`; rejecting a camera evicts its entry so a later re-add doesn't replay stale creds. The `add_camera_to_frigate` tool stays for the unknown-vendor fallback path.
 
 - **`scripts/lantronix-reip.sh`** — the runbook from [WARP-400](https://warp-lab.atlassian.net/browse/WARP-400) §4 turned into a script with hard pre-checks. Will not run unless the operator's workstation has an IP on the destination subnet, can ping the gateway, and the switch responds at the current IP. Designed to be run by-hand from the box while the operator is physically present.
 
 ## Deferred (follow-ups on this branch or as siblings)
-
-### `build_rtsp_url` integration into `accept_camera`
-
-The helper exists but `services/camera-discovery/main.py:680` still uses `camera["rtsp_url"]` from the probe. Integration needs:
-
-- A vendor + credential cache that survives between `initialize_camera` and `accept_camera` (today the post-init state lives only in `_auto_init_attempted: set[str]`).
-- `accept_camera` to call `build_rtsp_url(vendor, ip, user, pw)` when vendor info is known, falling back to the probe URL otherwise.
-
-Until this lands, Phase 3's `add_camera_to_frigate` tool stays in the rotation as the manual override.
 
 ### VLAN 10 reactivation (`docker/openwrt/etc/config/{network,dhcp}` + `nftables.d/cams.nft`)
 
