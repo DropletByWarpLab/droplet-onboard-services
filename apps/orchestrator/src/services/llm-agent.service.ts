@@ -70,6 +70,16 @@ export interface AgentRequest {
    * in-process trusted, so it's safe to plumb session tokens this way.
    */
   toolCallContext?: McpCallContext;
+  /**
+   * WARP-458 — emit `{type:"reasoning_step", text}` blocks on the wire
+   * before the assistant's text. When `false` (or unset and the route
+   * defaults to false), the agent loop still PARSES and writes the
+   * concatenated trace to `result.message.reasoning` so the route layer
+   * can persist it to `ChatMessage.reasoning` — only the SSE emission
+   * is suppressed. When `true`, reasoning_step events are pushed before
+   * the matching content_delta. See spec §AC4.
+   */
+  captureReasoning?: boolean;
 }
 
 export interface AgentTraceEntry {
@@ -88,6 +98,106 @@ export interface AgentResult {
 }
 
 const DEFAULT_MAX_ITER = 5;
+
+/**
+ * WARP-458 — parsed reasoning trace for a single assistant turn.
+ *
+ * `reasoningSteps[]` is in arrival order, ready to pump through
+ * `{type:"reasoning_step", text}` events. `cleanedContent` is the
+ * user-visible text with all `<reasoning>…</reasoning>` segments
+ * stripped. `fullReasoning` is the concatenated trace for
+ * `ChatMessage.reasoning` persistence — null when no reasoning was
+ * detected so the DB column stays NULL for the overwhelming majority
+ * of pre-WARP-458 historical-shape turns.
+ */
+export interface ParsedReasoningTrace {
+  reasoningSteps: string[];
+  cleanedContent: string;
+  fullReasoning: string | null;
+}
+
+/**
+ * WARP-458 — extract reasoning trace + clean user-visible content from
+ * a single assistant turn's raw output.
+ *
+ * Handles three input shapes:
+ *   1. Inline `<reasoning>…</reasoning>` segments interleaved with the
+ *      content (qwen3 / deepseek-r1 family). Multiple sibling segments
+ *      become multiple steps, in the order they appear.
+ *   2. A provider-native reasoning string (OpenAI o-series via LiteLLM,
+ *      Anthropic extended-thinking when exposed). Passed via
+ *      `providerReasoning` and treated as a single step that lands
+ *      BEFORE any inline-derived steps.
+ *   3. The defensive case: an opening `<reasoning>` tag with no close
+ *      (truncated stream, mid-stream abort) — the remainder is treated
+ *      as one step rather than leaked into the user-visible content.
+ *
+ * The regex uses a non-greedy match with the `s` flag so a single
+ * `<reasoning>` segment can span newlines; the no-close fallback
+ * handles the truncation case. Whitespace-only segments are dropped so
+ * `<reasoning>   </reasoning>` doesn't produce an empty step block.
+ */
+export function parseReasoningTrace(args: {
+  content: string | null;
+  providerReasoning?: string | null;
+}): ParsedReasoningTrace {
+  const steps: string[] = [];
+
+  // Provider-native reasoning (when present) is the FIRST step. Cloud
+  // providers that surface a separate reasoning field do so for the
+  // whole turn, not interleaved with the visible content, so it makes
+  // sense to render that summary before any inline-derived chunks.
+  if (args.providerReasoning) {
+    const trimmed = args.providerReasoning.trim();
+    if (trimmed.length > 0) steps.push(trimmed);
+  }
+
+  let working = args.content ?? "";
+
+  // Walk inline `<reasoning>…</reasoning>` segments in document order.
+  // `closedSegment` captures both the segment text and its placement so
+  // we can rebuild the cleaned content by splicing the matches out.
+  const closedSegment = /<reasoning>([\s\S]*?)<\/reasoning>/g;
+  let match: RegExpExecArray | null;
+  const cleanedParts: string[] = [];
+  let cursor = 0;
+  while ((match = closedSegment.exec(working)) !== null) {
+    // Whatever sits before this `<reasoning>` opening is user-visible
+    // content — append it to the cleaned output.
+    cleanedParts.push(working.slice(cursor, match.index));
+    const trimmed = match[1].trim();
+    if (trimmed.length > 0) steps.push(trimmed);
+    cursor = match.index + match[0].length;
+  }
+  // Trailing remainder after the last closed segment (if any).
+  cleanedParts.push(working.slice(cursor));
+  working = cleanedParts.join("");
+
+  // Defensive: an opening `<reasoning>` with no close. Treat the rest
+  // of the string as a single step and clean it from the visible
+  // output. This is the truncated-stream case.
+  const openIdx = working.indexOf("<reasoning>");
+  if (openIdx !== -1) {
+    const tail = working.slice(openIdx + "<reasoning>".length).trim();
+    if (tail.length > 0) steps.push(tail);
+    working = working.slice(0, openIdx);
+  }
+
+  // Collapse the leftover whitespace that the splice opens up — the
+  // model often emits ` <reasoning>…</reasoning> ` with a leading and
+  // trailing space we don't want doubled in the cleaned output. Tidy
+  // horizontal runs and excess blank lines separately so paragraph
+  // breaks (`\n\n`) survive — the parser runs unconditionally on every
+  // chunk per AC4, so a blanket `\s+ → " "` would silently flatten
+  // every paragraph in every reply (WARP-458 R2 regression).
+  const cleanedContent = working
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const fullReasoning = steps.length > 0 ? steps.join("\n\n") : null;
+  return { reasoningSteps: steps, cleanedContent, fullReasoning };
+}
 
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   const maxIter = Math.max(1, Math.min(req.max_iter ?? DEFAULT_MAX_ITER, 10));
@@ -156,9 +266,40 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
     // Happy path: model produced a final answer with no more tool calls.
     if (!asst.tool_calls?.length) {
-      if (asst.content) emit({ type: "content_delta", text: asst.content });
+      // WARP-458 — extract `<reasoning>…</reasoning>` segments + the
+      // provider-native reasoning field (if any). The captureReasoning
+      // flag gates EMISSION on the wire; PARSING + the
+      // `result.message.reasoning` write happen regardless so the
+      // route layer can always persist to `ChatMessage.reasoning`
+      // (lazy-load on demand without re-running inference).
+      const reasoning = parseReasoningTrace({
+        content: asst.content ?? null,
+        providerReasoning: asst.reasoning_content ?? null,
+      });
+      if (req.captureReasoning) {
+        // Spec §AC3: reasoning_step blocks land BEFORE the content_delta.
+        for (const step of reasoning.reasoningSteps) {
+          emit({ type: "reasoning_step", text: step });
+        }
+      }
+      const visible = reasoning.cleanedContent;
+      if (visible) emit({ type: "content_delta", text: visible });
       emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
-      return { message: asst, trace, iterations: iter + 1, stop_reason: "model_done" };
+      // Surface cleaned content + concatenated reasoning on the
+      // returned ChatMessage so the route layer can persist.
+      const finalMessage: ChatMessage = {
+        ...asst,
+        content: visible,
+        ...(reasoning.fullReasoning != null
+          ? { reasoning: reasoning.fullReasoning }
+          : {}),
+      };
+      return {
+        message: finalMessage,
+        trace,
+        iterations: iter + 1,
+        stop_reason: "model_done",
+      };
     }
 
     // Otherwise: append the assistant's tool-call-issuing message

@@ -65,6 +65,14 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
     turnId: string | null;
     status: "pending" | "streaming" | "completed" | "failed" | "aborted";
     createdAt: string;
+    /**
+     * WARP-458 — concatenated deep-reasoning trace for this assistant
+     * message, or `null` when the model produced no reasoning (the
+     * overwhelming majority of pre-WARP-458 historical rows). The
+     * dashboard renders this as a collapsible "thinking" timeline above
+     * the visible content.
+     */
+    reasoning: string | null;
   }>;
 }
 
@@ -113,6 +121,11 @@ export class ChatPersistenceService {
         turnId: m.turnId,
         status: m.status as "pending" | "streaming" | "completed" | "failed" | "aborted",
         createdAt: m.createdAt.toISOString(),
+        // WARP-458 — surface the reasoning trace on rehydrate so the
+        // dashboard's chat surface can render the "thinking" timeline
+        // without re-running inference. `null` when the model produced
+        // no reasoning on this turn.
+        reasoning: m.reasoning ?? null,
       })),
     };
   }
@@ -330,6 +343,14 @@ export class ChatPersistenceService {
    *
    * Also bumps `updatedAt` on the session so a sidebar sorted by recency
    * surfaces the freshly-completed thread.
+   *
+   * WARP-458: `reasoning` (optional) carries the concatenated
+   * `<reasoning>…</reasoning>` trace + provider-native reasoning field
+   * the agent loop extracted from the model's output. ALWAYS persisted
+   * when present, regardless of the route's `captureReasoning` flag —
+   * the flag gates emission on the SSE wire, not durability. Passing
+   * `null` clears the column (the model on this turn produced no
+   * reasoning); passing `undefined` is a no-op (leave whatever's there).
    */
   async finalizeAssistantMessage(args: {
     conversationId: string;
@@ -337,20 +358,29 @@ export class ChatPersistenceService {
     content: string;
     toolCalls: PersistedToolCall[];
     status: "completed" | "failed" | "aborted";
+    reasoning?: string | null;
   }): Promise<void> {
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
+      const data: Prisma.ChatMessageUpdateInput = {
+        content: args.content,
+        toolCalls:
+          args.toolCalls.length > 0
+            ? (args.toolCalls as unknown as Prisma.InputJsonValue)
+            : Prisma.JsonNull,
+        status: args.status,
+        completedAt: now,
+      };
+      // WARP-458: only touch the reasoning column when the caller
+      // supplied a value (or explicit null to clear). `undefined`
+      // means "leave it alone" — important when a retried turn lands
+      // on an already-persisted row.
+      if (args.reasoning !== undefined) {
+        data.reasoning = args.reasoning;
+      }
       await tx.chatMessage.update({
         where: { id: args.messageId },
-        data: {
-          content: args.content,
-          toolCalls:
-            args.toolCalls.length > 0
-              ? (args.toolCalls as unknown as Prisma.InputJsonValue)
-              : Prisma.JsonNull,
-          status: args.status,
-          completedAt: now,
-        },
+        data,
       });
       await tx.chatSession.update({
         where: { id: args.conversationId },

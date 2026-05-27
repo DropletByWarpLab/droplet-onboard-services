@@ -81,6 +81,17 @@ model ChatSession {
 /// streaming-placeholder assistant row, and the WARP-329 MQTT signal
 /// fires when an in-flight turn finishes so other tabs / future mobile
 /// clients can update.
+///
+/// WARP-458: `reasoning` captures the per-turn deep-reasoning trace (the
+/// model's internal "thinking" wrapped in `<reasoning>…</reasoning>` in
+/// streamed output, or the native reasoning field on providers that
+/// surface it separately). Only present on `role=assistant` rows. Always
+/// persisted when the model emits one, regardless of the per-request
+/// `captureReasoning` flag — that flag gates EMISSION on the wire, not
+/// PERSISTENCE, so the dashboard can lazy-load reasoning on demand
+/// without re-running the turn. Nullable because the vast majority of
+/// turns do not carry reasoning content (small models, tool-only turns,
+/// system messages).
 model ChatMessage {
   id          String      @id @default(uuid())
   sessionId   String
@@ -92,6 +103,7 @@ model ChatMessage {
   turnId      String?
   status      ChatMessageStatus @default(completed)
   completedAt DateTime?
+  reasoning   String?
   createdAt   DateTime    @default(now())
 
   @@index([sessionId, createdAt])
