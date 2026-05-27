@@ -1,7 +1,7 @@
 """WARP-154 — LLM bridge contract.
 
 The contract these tests pin (per shared_brain
-`projects/droplet-pi-platform/docs/LLM_AGENT.md`):
+`projects/droplet-onboard-services/docs/LLM_AGENT.md`):
 
   - `OrchestratorLLM.available` GETs /api/orchestrator/health; returns
     False (not raise) on any transport or HTTP-error. /voice/status

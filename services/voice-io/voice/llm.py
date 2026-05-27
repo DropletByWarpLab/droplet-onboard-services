@@ -9,8 +9,8 @@ returns the final assistant text. The pipeline then feeds that through
 TTS to the speaker.
 
 Why we call the orchestrator (not ai-gateway directly) — per shared_brain
-`projects/droplet-pi-platform/docs/agentic-workflows.md` and
-`projects/droplet-pi-platform/docs/LLM_AGENT.md`:
+`projects/droplet-onboard-services/docs/agentic-workflows.md` and
+`projects/droplet-onboard-services/docs/LLM_AGENT.md`:
 
   * The **orchestrator owns the agent loop**. ai-gateway forwards
     `tools[]` to the model and returns the raw response untouched; it
@@ -73,7 +73,7 @@ DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
 # Model the orchestrator's agent loop will ask ai-gateway for. ai-gateway
 # routes `llama*`/`qwen*`/`mistral*`/`phi*` to the Jetson ollama-manager;
 # the model must already be installed on the appliance (see
-# `shared_brain/projects/droplet-jetson-ai/docs/model-management.md` for
+# `shared_brain/projects/droplet-local-LLM/docs/model-management.md` for
 # `/models/sync`). `qwen2.5:3b-instruct` is the agent docs' default —
 # tool-calling-capable, fits Orin Nano 7 GB RAM budget. Override via
 # LLM_MODEL env if the appliance has a larger / different model loaded.

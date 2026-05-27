@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ollama-manager's /proxy on :8002. ollama-manager owns model lifecycle
 # (pull/delete/manifest) and exposes an OPT-IN /proxy that adds tool-call
 # observability + JSON repair, but its 120s read timeout (TIMEOUT_PROXY
-# in droplet-jetson-ai/services/ollama-manager/timeouts.py) is too tight
+# in droplet-local-LLM/services/ollama-manager/timeouts.py) is too tight
 # for the orchestrator's agent loop on CPU. The compose default below
 # (`host.docker.internal:11434`) targets a host-installed Ollama for
 # local Docker Desktop dev — note ai-gateway does not currently have the
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # multi-box deployment with a separate Jetson, point at its static IP.
 # Override via JETSON_OLLAMA_URL to opt into the /proxy if you want the
 # tool-call repair + circuit-breaker for a specific deploy.
-# See ADR-004 in the droplet-jetson-ai repo for the original rationale.
+# See ADR-004 in the droplet-local-LLM repo for the original rationale.
 JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://host.docker.internal:11434")
 
 # Cold-loading a model on the Jetson can take 30-90s (8B Q4 with partial GPU offload),
@@ -78,7 +78,7 @@ class _LimitsCache:
 
     # Version of the /health schema this code knows. Bump in lockstep with
     # ``services/ollama-manager/main.py::_HEALTH_SCHEMA_VERSION`` in the
-    # appliance repo. See ``droplet-jetson-ai/docs/model-management.md``
+    # appliance repo. See ``droplet-local-LLM/docs/model-management.md``
     # for the canonical schema-history table.
     _KNOWN_SCHEMA_VERSION = 1
 

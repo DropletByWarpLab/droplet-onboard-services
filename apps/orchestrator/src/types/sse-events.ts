@@ -5,7 +5,7 @@
  * pushes one of these events per phase: token deltas from the model
  * (`content_delta`), each tool dispatch (`tool_call`/`tool_result`), and
  * a terminating `done`. The shape is the contract spec §8.2 promises to
- * MCP-aware downstream clients (dashboard chat, inference-engine, future
+ * MCP-aware downstream clients (dashboard chat, droplet-local-LLM, future
  * external CLIs).
  */
 export type SSEEvent =

@@ -10,7 +10,7 @@
 #   - any apps/*/src or services/*/src TypeScript that ships in a container
 #
 # Each check independently passes or fails. The script exits non-zero if any
-# check failed. Default mode runs six static checks in ~2 minutes. Adding
+# check failed. Default mode runs seven static checks in ~2 minutes. Adding
 # `--full` runs an additional Ubuntu-container docker-build smoke test that
 # takes ~10-15 minutes.
 #
@@ -36,6 +36,15 @@
 #                           when they need 100755. Canonical invocation
 #                           silently no-ops on platforms that honour the
 #                           index mode bit.
+#   stale-repo-names      — WARP-494 class: user-facing surfaces (README,
+#                           service READMEs, TESTING.md, code comments,
+#                           top-level scripts/*.sh, docker-compose.yml)
+#                           accumulating references to the LEGACY repo
+#                           names `inference-engine` / `droplet-jetson-ai`
+#                           after both renamed on the canonical remote.
+#                           Allowlists `inference-engine.local` (mDNS
+#                           hostname) and the docker-compose project-name
+#                           explanation block.
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -48,7 +57,7 @@
 #   2  invalid CLI args or required tool missing
 #   3  setup precondition failure (not in a git repo, etc.)
 #
-# WARP-482, WARP-487.
+# WARP-482, WARP-487, WARP-494.
 # =============================================================================
 set -euo pipefail
 
@@ -80,6 +89,7 @@ ALL_CHECKS=(
   shellcheck
   matter-env-allowlist
   exec-bits
+  stale-repo-names
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -104,15 +114,16 @@ SUBCOMMAND
   CHECK_NAME          Run only the named check. One of:
                         tsc-full, compose-config, frigate-env-scan,
                         shellcheck, matter-env-allowlist, exec-bits,
-                        docker-build-smoke
+                        stale-repo-names, docker-build-smoke
                       Useful for iterating on a single failure.
 
 EXAMPLES
-  ./scripts/test/ship-check.sh             # six static checks (~2min)
+  ./scripts/test/ship-check.sh             # seven static checks (~2min)
   ./scripts/test/ship-check.sh --full      # static + ubuntu smoke (~15min)
   ./scripts/test/ship-check.sh tsc-full    # only the tsc check
   ./scripts/test/ship-check.sh shellcheck  # only the shellcheck check
   ./scripts/test/ship-check.sh exec-bits   # only the exec-bits check
+  ./scripts/test/ship-check.sh stale-repo-names  # only the repo-name sweep
 
 CHECKS
 
@@ -173,6 +184,41 @@ CHECKS
                         `git ls-files --stage`, so it works regardless of
                         the working-tree mode (which Windows can't track
                         anyway).
+
+  stale-repo-names      Walk a curated set of user-facing surfaces
+                        (README.md, services/*/README.md,
+                        services/*/TESTING.md, scripts/*.sh,
+                        apps/orchestrator/src/**/*.ts,
+                        services/ai-gateway/**/*.py,
+                        services/voice-io/**/*.py,
+                        docker/docker-compose.yml) and FAIL on any
+                        reference to the LEGACY repo names
+                        `inference-engine` or `droplet-jetson-ai`.
+                        Both were renamed on the canonical
+                        DropletByWarpLab remote to `droplet-local-LLM`;
+                        the GitHub redirect keeps the old URLs alive
+                        but every stale doc/comment ref drifts the
+                        codebase further from the canonical name.
+                        Allowlist: the mDNS hostname
+                        `inference-engine.local` (lives in
+                        scripts/lib/secrets.sh — real DNS, not a repo
+                        name), the docker-compose.yml project-name
+                        explanation block (lines 6-10), the
+                        `droplet-pi-platform-*` compose container-name
+                        labels referenced by `docker exec` in
+                        scripts/verify.sh + services/voice-io/TESTING.md
+                        and the
+                        `com.docker.compose.project=droplet-pi-platform`
+                        label in services/ops-console/README.md — all
+                        of those are tied to the live compose project
+                        name and a coordinated rename is out of WARP-494
+                        scope. docs/ + ADRs + specs + plans + CLAUDE.md
+                        are exempt by design (historical record /
+                        intentional dual-name documentation).
+                        Prevents: WARP-494 class — a developer adding a
+                        "see related repo" note and reaching for the
+                        old name out of habit, silently re-introducing
+                        a stale reference that ships to a customer.
 
   docker-build-smoke    (--full only) Spin up an Ubuntu 24.04 container,
                         mount the repo read-only, run
@@ -725,6 +771,193 @@ run_check_exec_bits() {
   return 0
 }
 
+run_check_stale_repo_names() {
+  # Walk a curated set of user-facing surfaces and FAIL on any reference
+  # to the LEGACY repo names `inference-engine` or `droplet-jetson-ai`.
+  # Both were renamed on the canonical DropletByWarpLab remote — the
+  # canonical names are `droplet-local-LLM` (inference) and
+  # `droplet-onboard-services` (intelligence / this repo). The GitHub
+  # URL redirect still serves the old names, but every stale ref drifts
+  # documentation further from the canonical name and eventually has to
+  # be cleaned up by an audit pass. WARP-494 turns that audit into a
+  # static gate.
+  #
+  # COVERED SURFACES (curated — not the whole tree):
+  #   README.md
+  #   services/*/README.md
+  #   services/*/TESTING.md
+  #   scripts/*.sh                  (top-level scripts/, NOT scripts/lib/)
+  #   apps/orchestrator/src/**/*.ts
+  #   services/ai-gateway/**/*.py
+  #   services/voice-io/**/*.py
+  #   docker/docker-compose.yml
+  #
+  # NOT covered (intentional exemptions):
+  #   docs/                — historical record (ADRs, specs, plans,
+  #                          superpowers, agentic-workflows.md). Stale
+  #                          refs are an accurate record of what the doc
+  #                          said when it was written.
+  #   CLAUDE.md            — intentionally documents BOTH names so the
+  #                          architecture-guard skill can teach the
+  #                          rename to fresh assistants.
+  #   scripts/lib/         — secrets.sh:83,124 reference the mDNS
+  #                          hostname `inference-engine.local`, which is
+  #                          a hostname (not a repo name) — also covered
+  #                          by the inference-engine.local allowlist
+  #                          below for the cases where the same string
+  #                          appears in a covered surface.
+  #   package.json /       — workspace identifiers; not user-facing
+  #     package-lock.json     surface.
+  #   node_modules/ /      — transient, never tracked.
+  #     dist/ / .next/
+  #
+  # PER-LINE ALLOWLIST (file:line — exempt the literal occurrence):
+  #   docker/docker-compose.yml:7,10
+  #       The project-name explanation comment ("Explicit project name so
+  #       containers don't collide with the sibling `droplet-jetson-ai`
+  #       repo...") AND the `name: droplet-pi-platform` directive. The
+  #       directive itself is load-bearing — every running container's
+  #       name is prefixed `droplet-pi-platform-*`, and changing it would
+  #       orphan every existing operator's data volumes + restart
+  #       loops. Coordinated rename is a separate ticket.
+  #   scripts/verify.sh:161,164
+  #       `docker exec droplet-pi-platform-voice-io-1 …` — container
+  #       name is compose-derived (project-name + service + replica), so
+  #       tied to the docker-compose.yml `name:` directive above.
+  #   services/voice-io/TESTING.md:171
+  #       Same `docker exec droplet-pi-platform-voice-io-1 …` pattern as
+  #       verify.sh.
+  #   services/ops-console/README.md:58
+  #       `com.docker.compose.project=droplet-pi-platform` Docker label —
+  #       same compose-project-name tie.
+  #
+  # PATTERN: bare `inference-engine` (whole word) and bare
+  # `droplet-jetson-ai` (whole word). The mDNS hostname
+  # `inference-engine.local` is filtered out at match time — its trailing
+  # `.local` disqualifies it as a repo-name reference.
+  local label="stale-repo-names"
+
+  # Surface walk — build the file list. Each entry is a repo-relative path
+  # that grep -nE can ingest. We resolve recursive trees with find rather
+  # than relying on bash globstar (which is opt-in via `shopt -s globstar`
+  # and not guaranteed across operator shells).
+  local files=()
+  local f
+
+  # Top-level README + the compose file.
+  for f in "README.md" "docker/docker-compose.yml"; do
+    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
+  done
+
+  # services/*/README.md and services/*/TESTING.md (immediate children only).
+  if [ -d "$REPO_ROOT/services" ]; then
+    while IFS= read -r f; do
+      files+=("${f#$REPO_ROOT/}")
+    done < <(find "$REPO_ROOT/services" -mindepth 2 -maxdepth 2 -type f \
+             \( -name 'README.md' -o -name 'TESTING.md' \) 2>/dev/null | sort)
+  fi
+
+  # Top-level scripts/*.sh (NOT scripts/lib/ — that's intentionally
+  # exempt for the mDNS hostname allowlist).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      files+=("${f#$REPO_ROOT/}")
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # apps/orchestrator/src/**/*.ts (recursive, but NOT *.test.ts — those
+  # are test-only and not user-facing). All .ts files are in scope per
+  # the ticket; we include .test.ts deliberately because the canonical
+  # name should reach test fixtures too.
+  if [ -d "$REPO_ROOT/apps/orchestrator/src" ]; then
+    while IFS= read -r f; do
+      files+=("${f#$REPO_ROOT/}")
+    done < <(find "$REPO_ROOT/apps/orchestrator/src" -type f -name '*.ts' 2>/dev/null | sort)
+  fi
+
+  # services/ai-gateway/**/*.py and services/voice-io/**/*.py.
+  local svc
+  for svc in services/ai-gateway services/voice-io; do
+    if [ -d "$REPO_ROOT/$svc" ]; then
+      while IFS= read -r f; do
+        files+=("${f#$REPO_ROOT/}")
+      done < <(find "$REPO_ROOT/$svc" -type f -name '*.py' 2>/dev/null | sort)
+    fi
+  done
+
+  if [ "${#files[@]}" -eq 0 ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # Per-line allowlist. Keys are "<repo-relative-path>:<lineno>"; each
+  # value is documented above next to the corresponding rationale.
+  # Lookup is O(1) via an associative array.
+  declare -A allowlist
+  allowlist["docker/docker-compose.yml:7"]=1
+  allowlist["docker/docker-compose.yml:10"]=1
+  allowlist["scripts/verify.sh:161"]=1
+  allowlist["scripts/verify.sh:164"]=1
+  allowlist["services/voice-io/TESTING.md:171"]=1
+  allowlist["services/ops-console/README.md:58"]=1
+
+  # Run grep -nE per file, post-filter for the .local exemption and the
+  # per-line allowlist, collect violations.
+  local violations=""
+  local line lineno content
+  for f in "${files[@]}"; do
+    # Match either bare repo name. grep -nE returns "<lineno>:<text>".
+    # We don't anchor the pattern (the repo names can appear inside
+    # markdown links, code blocks, etc.); the .local post-filter handles
+    # the only ambiguous overlap.
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      lineno="${line%%:*}"
+      content="${line#*:}"
+
+      # Post-filter 1: if the line's only stale-name occurrence is
+      # `inference-engine.local` (the mDNS hostname), skip it. We do
+      # this by removing every `.local` suffix occurrence and re-grepping
+      # the residual for either bare pattern.
+      local residual
+      residual="$(printf '%s' "$content" | sed 's/inference-engine\.local//g')"
+      if ! printf '%s' "$residual" | grep -qE 'inference-engine|droplet-jetson-ai'; then
+        continue
+      fi
+
+      # Post-filter 2: per-line allowlist.
+      if [ -n "${allowlist[$f:$lineno]:-}" ]; then
+        continue
+      fi
+
+      violations+="    ${f}:${lineno}: ${content}"$'\n'
+    done < <(grep -nE 'inference-engine|droplet-jetson-ai' "$REPO_ROOT/$f" 2>/dev/null || true)
+  done
+
+  if [ -z "$violations" ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no stale refs)\n" "$label" "${#files[@]}"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  printf "  ${_RED}FAIL${_RESET}  %s — legacy repo-name reference(s) in user-facing surface(s)\n" "$label"
+  printf '%s' "$violations" >&2
+  printf "    | Canonical names on the DropletByWarpLab remote:\n" >&2
+  printf "    |   inference-engine     → droplet-local-LLM\n" >&2
+  printf "    |   droplet-jetson-ai    → droplet-local-LLM\n" >&2
+  printf "    |   droplet-pi-platform  → droplet-onboard-services (this repo)\n" >&2
+  printf "    | Use the canonical name in new/updated user-facing copy. The\n" >&2
+  printf "    | mDNS hostname inference-engine.local IS allowed (it's a\n" >&2
+  printf "    | hostname, not a repo name) — but it must literally appear\n" >&2
+  printf "    | as inference-engine.local, not bare inference-engine.\n" >&2
+  printf "    | If your reference belongs in the allowlist (compose project\n" >&2
+  printf "    | name / container labels / etc.), add it to the per-line\n" >&2
+  printf "    | allowlist in run_check_stale_repo_names with rationale.\n" >&2
+  CHECK_RESULTS[$label]=fail
+  return 1
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -959,6 +1192,7 @@ _dispatch_check() {
     shellcheck)           run_check_shellcheck ;;
     matter-env-allowlist) run_check_matter_env_allowlist ;;
     exec-bits)            run_check_exec_bits ;;
+    stale-repo-names)     run_check_stale_repo_names ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
