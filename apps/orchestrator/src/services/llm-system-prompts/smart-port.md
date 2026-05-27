@@ -24,7 +24,7 @@ Any field except `port` may be missing if the watcher hasn't observed it yet —
 | `get_switch_poe` | 1 | Confirm PoE class and that power is actually being delivered. |
 | `list_discovered_cameras` | 1 | See if camera-discovery has already ONVIF-probed this IP. |
 | `scan_for_cameras` | 2 | Trigger a fresh ONVIF + RTSP sweep on the cameras VLAN. Use sparingly — this is rate-limited. |
-| `get_camera_init_status` | 1 | Check whether the camera needs its first-run password set. Returns `{vendor, initialized, needs_initialization}`. `initialized=null` means the camera doesn't advertise a vendor-specific init flow (treat as 'unsupported / already initialised'). |
+| `get_camera_init_status` | 1 | Check whether the camera needs its first-run password set. Returns `{vendor, initialized, needs_initialization, ambiguous?}`. `initialized=true` → already done. `initialized=null` + `needs_initialization=false` → vendor known but flow finished. `needs_initialization=null` + `ambiguous=true` → upstream 404 collapsed two states (unknown vendor OR transient probe failure on a still-booting camera). Re-scan or ask the operator; **never** silently skip init in this state. |
 | `initialize_camera` | 2 | Run the vendor first-run admin-password flow. Only needed when `needs_initialization=true`. |
 | `accept_discovered_camera` | 2 | Standard adoption path — flips the discovered camera's `enabled` flag and the orchestrator pushes it to Frigate. Use this FIRST. |
 | `add_camera_to_frigate` | 2 | Manual override — name + full RTSP URL (with credentials). Use only when `accept_discovered_camera` would write the wrong URL (notably Hanwha Wisenet, whose RTSP path is `/profile2/media.smp` not Hikvision's `/Streaming/Channels/101`). |
@@ -50,7 +50,8 @@ If you only have **one** of these (e.g. just a known OUI but no PoE + no ONVIF r
 5. If now in the discovered list with an `id` and ONVIF info → continue. If still not but evidence is strong (OUI + PoE + hostname): treat as a camera anyway and proceed.
 6. `get_camera_init_status` — does it need first-run init?
     * `needs_initialization=true` → call `initialize_camera` (Tier-2 confirm). After success, re-run `scan_for_cameras` so camera-discovery picks up the now-authenticated stream.
-    * `initialized=true` (already done) or `initialized=null` (unsupported / not a known init vendor) → skip init.
+    * `initialized=true` (already done) or `needs_initialization=false` with `initialized=null` and **no `ambiguous` flag** (vendor known, no init flow advertised) → skip init.
+    * `ambiguous=true` → DO NOT silently skip. Re-call `scan_for_cameras` after 10–20 s to give a slow-booting camera (Hanwha can take 30 s post-PoE) time to come up, then `get_camera_init_status` again. If still `ambiguous=true`, ask the operator before proceeding to adoption — silently adopting an ambiguous-state camera risks accepting it with its factory-default password.
 7. Adopt:
     * Try `accept_discovered_camera` with the discovered `id` first.
     * If `accept_discovered_camera` succeeds but Frigate then fails to pull the stream (you can verify via `list_cameras` after a few seconds — the camera will show as offline), fall back to `add_camera_to_frigate` with the explicit vendor RTSP URL. Hanwha specifically: `rtsp://admin:<password>@<ip>:554/profile2/media.smp`.
