@@ -244,6 +244,27 @@ export function createPublicAuthRouter(
       await ncInstallAndCreateAdmin(username, password, displayName);
       logger.info({ username }, "Initial admin user created");
 
+      // WARP-485 follow-up (Romain on PR #269): mirror the Nextcloud
+      // admin into a local User row so the login path's
+      // findUnique({ where: { nextcloudUsername } }) succeeds. Without
+      // this, the very next login attempt by the freshly-created admin
+      // hits USER_NOT_PROVISIONED and the box is permanently locked
+      // out after setup. Same upsert shape as the invite-accept path
+      // (auth.ts ~L815). Role 'owner' because this is the first admin.
+      if (prisma) {
+        await prisma.user.upsert({
+          where: { nextcloudUsername: username },
+          update: { displayName: displayName || username },
+          create: {
+            username,
+            displayName: displayName || username,
+            email: null,
+            nextcloudUsername: username,
+            role: "owner" as any,
+          },
+        });
+      }
+
       res.json({ status: "ok", username });
     } catch (err: any) {
       logger.error({ err }, "Setup failed");
@@ -1050,6 +1071,27 @@ export function createProtectedAuthRouter(
       }
 
       await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
+
+      // WARP-485 follow-up (Romain on PR #269): mirror the new
+      // Nextcloud user into a local User row. Without this, the new
+      // user's first login attempt hits USER_NOT_PROVISIONED because
+      // the login path requires the local row keyed by
+      // nextcloudUsername. Role defaults to 'family' (matches the
+      // invite-accept path's empty-group default for non-admin
+      // invitees). Same upsert shape as the invite-accept route.
+      if (prisma) {
+        await prisma.user.upsert({
+          where: { nextcloudUsername: parsed.data.username },
+          update: { displayName: parsed.data.displayName || parsed.data.username },
+          create: {
+            username: parsed.data.username,
+            displayName: parsed.data.displayName || parsed.data.username,
+            email: null,
+            nextcloudUsername: parsed.data.username,
+            role: "family" as any,
+          },
+        });
+      }
 
       res.status(201).json({ status: "ok", username: parsed.data.username });
     } catch (err: any) {
