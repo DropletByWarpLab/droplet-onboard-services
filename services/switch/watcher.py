@@ -261,7 +261,18 @@ class SmartPortWatcher:
                     hostname=info.get("hostname"),
                     source="mac_table",
                 ))
-        self._known_macs = seen_by_port
+        # Merge, don't replace. The switch's FDB ages out idle devices
+        # at ~300 s; if we wholesale-replaced `_known_macs` here, a
+        # device that goes idle (no frames) for ~5 min then becomes
+        # active again — after the 60 s `_last_emit` dedup window has
+        # expired — would re-fire as a brand-new discovery and the
+        # docstring's "one event per genuinely-new device" contract
+        # breaks. Per-port `update()` keeps already-seen MACs sticky
+        # for the watcher's lifetime; a port flip (LAN → CAMS) is
+        # signaled separately via poe_class / dhcp_lease, so masking
+        # the FDB-age-out edge of mac_table is the right trade.
+        for port, current in seen_by_port.items():
+            self._known_macs.setdefault(port, set()).update(current)
 
         # 3) PoE class transitions on PoE-capable ports.
         try:
