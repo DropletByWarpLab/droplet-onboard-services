@@ -80,6 +80,9 @@ import listNotifications from "./handlers/notifications/list-notifications.js";
 // system
 import getSystemHealth from "./handlers/system/get-system-health.js";
 import listDrives from "./handlers/system/list-drives.js";
+// WARP-461: durable memory facts (Phase B4)
+import memoryRecall from "./handlers/memory/recall.js";
+import memoryExtractFact from "./handlers/memory/extract.js";
 
 // WARP-466: D2 email tools
 import emailSearch from "./handlers/email/search.js";
@@ -167,6 +170,9 @@ const allTools: Tool[] = [
   emailSummarizeThread,
   emailDraftReply,
   emailSend,
+  // WARP-461: durable memory facts
+  memoryRecall,
+  memoryExtractFact,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

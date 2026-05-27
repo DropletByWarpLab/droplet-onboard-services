@@ -9,6 +9,7 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createMemoryRouter } from "./routes/memory.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
@@ -103,6 +104,7 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
+  app.use("/api", createMemoryRouter(prisma));
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));
