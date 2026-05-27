@@ -659,6 +659,87 @@ test_exec_bits_catches_chmod_stripped_openwrt() {
 }
 
 # =============================================================================
+# Test: tsc-full uses orchestrator's workspace-pinned prisma binary (WARP-492)
+# =============================================================================
+#
+# Bug class this guards (WARP-492): before WARP-492, `run_check_tsc_full`
+# invoked `npx prisma generate` directly inside apps/orchestrator. `npx`
+# without `--no-install` (and without a resolvable local `node_modules/
+# .bin/prisma`) silently fetches the LATEST published prisma off the npm
+# registry — at the time of the bug, that was 7.8.0. The orchestrator's
+# `prisma/schema.prisma` is authored for the workspace's pinned `^5.14.0`;
+# Prisma 7 rejects the schema with `P1012` ("datasource property `url`
+# is no longer supported"), so ship-check tsc-full fails on a fresh
+# worktree even though `npm install` + Docker build would succeed.
+#
+# The WARP-492 fix pins phase 1 to the orchestrator's `db:generate`
+# script: `npm run -w @droplet/orchestrator db:generate`. The script's
+# command (`prisma generate`) runs via npm-injected PATH which resolves
+# to `node_modules/.bin/prisma` — the workspace's pinned binary — so the
+# npm registry is never consulted.
+#
+# Synthetic regression: remove the `db:generate` script line from
+# apps/orchestrator/package.json. With the fix in place, the workspace
+# no longer exposes the script, `npm run -w` returns "Missing script:
+# db:generate", and tsc-full fails. With the pre-WARP-492 code
+# (`npx prisma generate`), removing `db:generate` has zero effect — the
+# check passes (or hits a different unrelated failure mode). Therefore
+# this test specifically proves the implementation routes through the
+# workspace's pinned script.
+#
+# Pre-condition: this test requires `node_modules` to be installed in
+# the real REPO_ROOT — otherwise BOTH the pre-WARP-492 code (which
+# would fetch 7.x off the registry) AND the WARP-492 fix (which would
+# fail "prisma not recognized") fail, so the mutation can't distinguish
+# them. On hosts without node_modules the test SKIPs gracefully.
+test_tsc_full_uses_workspace_pinned_prisma() {
+  if [ ! -d "$REPO_ROOT_REAL/node_modules" ]; then
+    printf "    ${_YELLOW}SKIP${_RESET}  REPO_ROOT_REAL has no node_modules — install first\n"
+    return 0
+  fi
+
+  local pkg_rel="apps/orchestrator/package.json"
+  local pkg="$REPO_ROOT_REAL/$pkg_rel"
+
+  if [ ! -f "$pkg" ]; then
+    printf "    package.json missing: %s\n" "$pkg" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$pkg_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$pkg_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$pkg_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: tsc-full PASSES on the unmutated tree.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" tsc-full; then
+    printf "    baseline tsc-full failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression — drop the `"db:generate": "prisma generate",` line.
+  #    The WARP-492 fix calls this script by name; with the script removed,
+  #    `npm run -w @droplet/orchestrator db:generate` exits non-zero ("Missing
+  #    script") and phase 1 of run_check_tsc_full fails. The pre-WARP-492
+  #    code (`npx prisma generate`) ignores apps/orchestrator's package.json
+  #    scripts entirely, so removing the line is a no-op against the old
+  #    implementation — which is what makes this mutation a discriminating
+  #    test for the fix.
+  awk '!/^    "db:generate": "prisma generate",$/' \
+       "$pkg" > "$pkg.tmp" && mv "$pkg.tmp" "$pkg"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$pkg_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. tsc-full should now FAIL.
+  _assert_check_fails "$REPO_ROOT_REAL" tsc-full
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -667,6 +748,9 @@ printf "  ───────────────────────�
 
 _run_test "tsc-full catches WARP-329 fixture regression" \
   test_tsc_full_catches_fixture_regression
+
+_run_test "tsc-full uses workspace-pinned prisma (WARP-492)" \
+  test_tsc_full_uses_workspace_pinned_prisma
 
 _run_test "compose-config catches YAML breakage in docker-compose.yml" \
   test_compose_config_catches_yaml_breakage
