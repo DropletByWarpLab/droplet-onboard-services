@@ -932,7 +932,13 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
-      test: ["CMD", "ollama", "--version"]
+      # `ollama --version` only confirms the binary executes; the
+      # container can be healthy while the HTTP server on :11434 is
+      # still starting (or has died). `ollama list` makes a real call
+      # to the daemon at the default OLLAMA_HOST (loopback), so a
+      # non-zero exit signals the server isn't listening. No extra
+      # tools required — `ollama` is already in the image.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
       interval: 30s
       timeout: 5s
       retries: 5
