@@ -150,7 +150,7 @@ Three new tool handlers + one bug fix in camera-discovery are what stand between
 
 ## Inter-VLAN policy
 
-Default deny between VLAN 1 and VLAN 50. Specific allowances:
+Default deny between VLAN 1 and VLAN 10. Specific allowances:
 
 | From | To | Allow | Reason |
 |------|----|-------|--------|
