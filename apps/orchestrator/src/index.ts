@@ -37,6 +37,7 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { expirePendingProposals } from "./services/autonomous-proposals-sweep.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import {
   initSmartPortAgent,
@@ -240,6 +241,25 @@ async function main() {
       );
     },
     { lockKey: "droplet:daily-purge" },
+  );
+
+  // WARP-399: expire pending AutonomousProposals past their `expiresAt`.
+  // 60s tick balances responsiveness with DB load — the operator-facing
+  // delay between "1h elapsed" and "shows as expired in the inbox" is
+  // bounded by this. lockKey scopes the per-tick advisory lock so only
+  // one orchestrator instance runs the sweep at any given second.
+  const proposalSweepMs = Number(
+    process.env.AUTONOMOUS_PROPOSAL_SWEEP_MS ?? 60_000,
+  );
+  cronRuntime.scheduleInterval(
+    proposalSweepMs,
+    async () => {
+      const expired = await expirePendingProposals(prisma);
+      if (expired > 0) {
+        logger.info({ expired }, "autonomous proposals expired");
+      }
+    },
+    { lockKey: "droplet:autonomous-proposals-sweep" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the
