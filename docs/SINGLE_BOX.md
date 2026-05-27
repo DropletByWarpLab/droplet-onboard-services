@@ -157,6 +157,40 @@ Three concrete reasons this exists as a doc instead of a "PoC mode":
    `openwrt-overlay`. A clean rebuild produces the same state as a
    first install.
 
+## Gotchas when running compose manually (dev workflow)
+
+`./scripts/setup.sh` writes single-box overrides to `.env` before
+starting compose — `FRIGATE_RENDER_NODE=/dev/dri/renderD129`,
+`OLLAMA_URL=http://ollama:11434`, etc. If you start the stack
+**without** going through `setup.sh` (e.g. `docker compose -f
+docker/docker-compose.yml --env-file .env up -d` during iteration on
+a host that already has `.env`), the compose defaults take effect for
+any var not present in `.env`.
+
+The one with teeth: `FRIGATE_RENDER_NODE` defaults to
+`/dev/dri/renderD128` in `docker-compose.yml`. On a single-box host,
+`renderD128` is the **dGPU** that Ollama is using. Frigate and Ollama
+then fight for the same VAAPI device — Frigate falls back to CPU
+decode silently, FPS drops, and `nvidia-smi` / `radeontop` shows
+Ollama getting throttled. The visible symptom in the dashboard:
+"AI slow" + "camera detection laggy", neither flagged with a clear
+error.
+
+If you see those symptoms on a manually-started stack:
+
+```bash
+grep -E '^FRIGATE_RENDER_NODE=' .env || \
+  echo "FRIGATE_RENDER_NODE=/dev/dri/renderD129" >> .env
+docker compose -f docker/docker-compose.yml --env-file .env up -d
+```
+
+Or just re-run `./scripts/setup.sh --single-box`, which appends the
+single-box knobs idempotently.
+
+A future Phase will add a runtime guard in the orchestrator's health
+endpoint that warns when the wrong render node is wired given the
+detected deployment shape.
+
 ## What's deferred to later phases
 
 - **Phase 3c (cross-repo):** Add `ollama-manager` (from `droplet-local-LLM`)
