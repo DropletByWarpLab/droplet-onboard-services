@@ -7,9 +7,13 @@
 # the OpenWrt container's dnsmasq is scoped to the AP-side LAN, not the
 # host's br-lan. See scripts/poc/droplet-poc-host-net.sh for details.
 Description=Droplet POC host networking (br-lan DHCP + Lantronix switch route)
+# After= orders the unit but does NOT pull docker.service in. The script
+# only adds IPs/routes and exec's dnsmasq — no Docker calls. A hard
+# Requires= would cascade-stop us whenever Docker restarts (upgrade,
+# transient crash), dropping br-lan DHCP and the switch route until the
+# next reboot. Wants= keeps the soft ordering without the hard coupling.
 After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
+Wants=network-online.target docker.service
 
 [Service]
 Type=simple
