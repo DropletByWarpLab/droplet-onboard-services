@@ -43,6 +43,10 @@ import {
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
+import {
+  BRAIN_ROOT,
+  migrateBrainMemoryDirectoryLayout,
+} from "./services/brain-memory.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -97,6 +101,38 @@ async function main() {
     sub: `pid ${process.pid}`,
   });
   logger.info("Activity recorder initialized");
+
+  // WARP-488: one-shot rename of pre-WARP-485 username-keyed brain-memory
+  // dirs (e.g. `BRAIN_ROOT/stefan-cruceru/`) into UUID-keyed dirs (e.g.
+  // `BRAIN_ROOT/<user.id>/`). Pairs with the SQL migration of the same
+  // ticket that flips `CameraPin.userId` + `CameraNotificationPref.userId`
+  // from username to UUID. Idempotent: UUID-named dirs are skipped, so
+  // re-running on a converged tree walks every dir but performs zero
+  // renames. Non-fatal if it throws — log it loud but let the
+  // orchestrator boot so the operator can still recover via the
+  // dashboard / SSH.
+  try {
+    const result = await migrateBrainMemoryDirectoryLayout(prisma, BRAIN_ROOT);
+    if (
+      result.renamed > 0 ||
+      result.orphans.length > 0 ||
+      result.conflicts.length > 0
+    ) {
+      logger.info(
+        {
+          renamed: result.renamed,
+          orphans: result.orphans.length,
+          conflicts: result.conflicts.length,
+        },
+        "WARP-488: brain-memory directory layout migration ran at boot",
+      );
+    }
+  } catch (err) {
+    logger.error(
+      { err },
+      "WARP-488: brain-memory directory layout migration failed — operator review needed",
+    );
+  }
 
   // Initialize services
   initDeviceService(prisma);
