@@ -9,6 +9,7 @@ preflight_check() {
   if [ "$(uname)" = "Darwin" ]; then
     log_warn "OS: macOS detected — skipping Linux-specific checks"
     log_warn "Docker Desktop must be installed separately on macOS"
+    # shellcheck disable=SC2034  # Read cross-file by scripts/lib/docker.sh (install_docker + ensure_docker_group) to short-circuit apt-get install; shellcheck can't trace the cross-source guard.
     SKIP_DOCKER_INSTALL=true
     return 0
   fi

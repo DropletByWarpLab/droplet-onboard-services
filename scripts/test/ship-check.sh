@@ -461,23 +461,21 @@ run_check_shellcheck() {
   # "local outside function" — the very class of bug that escaped review
   # in scripts/factory-reset.sh before WARP-482 fixed it).
   #
-  # Excludes (apply ONLY to the pre-existing baseline; new code should
-  # not earn an exclude without a follow-up ticket to remove it):
+  # NO GLOBAL EXCLUDES. Every waiver lives as a per-line
+  # `# shellcheck disable=SCxxxx` directive inline at the offending
+  # site, with a one-line comment explaining WHY the warning is wrong
+  # for THAT specific line. Audit trail: WARP-486 converted the legacy
+  # global --exclude=SC2034,SC2024,SC2155 blanket (which masked NEW
+  # violations of those codes in NEW lib code as well as the original
+  # baseline) into per-line directives. The convention is now: any
+  # waiver must be explicit, reviewable, and localized.
   #
-  #   SC2034 — appears unused. Several lib scripts declare variables
-  #            (SKIP_DOCKER_INSTALL, DOCKER_GROUP_ADDED,
-  #            DI_DEFAULT_SEALING_PCRS) for sourcing scripts to read;
-  #            shellcheck can't trace cross-file usage and flags them
-  #            even though they're load-bearing.
-  #   SC2024 — sudo doesn't affect redirects. local-dns.sh uses
-  #            `sudo … >>"$LOG_FILE"` where LOG_FILE is operator-owned
-  #            and writable; the redirect runs as the calling user,
-  #            which is the intended behaviour (don't chown LOG_FILE
-  #            to root just to silence shellcheck).
-  #   SC2155 — declare and assign separately. Pre-existing in
-  #            secrets.sh (two sites) and camera-drivers.sh. Genuine
-  #            cleanup but out of scope for WARP-482; flagged for
-  #            follow-up.
+  # If you need to add a NEW disable: put it on the line immediately
+  # above the offender, with a one-line comment explaining the
+  # rationale. If the same code triggers on 4+ sites in one file with
+  # uniform rationale, a single file-level disable at the top of the
+  # file (below the shebang) is acceptable — but most cases warrant
+  # per-line for localization.
   #
   # If shellcheck is missing from PATH the check FAILs (NOT skips) —
   # the operator needs to install it before the gate is meaningful.
@@ -518,15 +516,14 @@ run_check_shellcheck() {
     return 1
   fi
 
-  # SC2024 + SC2155 + SC2034 excluded per the docstring above. -x means
-  # follow `source` directives so cross-file undeclared-var detection
-  # works. --external-sources keeps it from bailing on dynamic-path
-  # sources that we can't statically resolve (the `source "$libdir/x"`
-  # pattern in setup.sh).
+  # No global --exclude flags (see WARP-486 — every waiver is a per-line
+  # directive inline at the offending site). --external-sources follows
+  # `source` directives so cross-file undeclared-var detection works AND
+  # so the analyzer doesn't bail on dynamic-path sources we can't
+  # statically resolve (the `source "$libdir/x"` pattern in setup.sh).
   local out rc
   out="$(shellcheck \
     --severity=warning \
-    --exclude=SC2034,SC2024,SC2155 \
     --external-sources \
     "${targets[@]}" 2>&1)"
   rc=$?

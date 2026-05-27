@@ -433,6 +433,95 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
 }
 
 # =============================================================================
+# Test: shellcheck catches new SC2034 violation in scripts/lib (WARP-486)
+# =============================================================================
+#
+# Bug class this guards (WARP-486 → ADR-style): before WARP-486, the
+# shellcheck ship-check ran with a global `--exclude=SC2034,SC2024,SC2155`
+# blanket. That muted the pre-existing baseline (load-bearing-but-unused
+# vars in device-identity.sh / docker.sh / preflight.sh, sudo+redirect in
+# local-dns.sh, declare+assign in secrets.sh / camera-drivers.sh), but it
+# ALSO masked any NEW violation of those three codes that appeared in lib
+# code after the original waiver. A new dead `local foo=$(bar)` could ship
+# to main with no signal.
+#
+# The WARP-486 fix moves every existing waiver to a per-line
+# `# shellcheck disable=SCxxxx` directive with rationale, and DROPS the
+# global excludes. After the fix, any NEW SC2034 / SC2024 / SC2155 hit in
+# lib/* surfaces immediately.
+#
+# Synthetic regression: inject an SC2034 ("unused variable") violation
+# into scripts/lib/local-dns.sh — a fresh top-level `WARP_486_TEST_UNUSED="x"`
+# line (all-caps; the inline comment in the test body explains why a
+# leading underscore would NOT trigger SC2034). With the global SC2034
+# exclude in place the check would (incorrectly) PASS; once the exclude
+# is removed the check correctly FAILS. Restore via `git checkout --`
+# on RETURN.
+#
+# Note on test target: we deliberately re-use scripts/lib/local-dns.sh
+# (already exercised by test_shellcheck_catches_local_outside_function).
+# These two tests run sequentially against the same file and rely on the
+# per-test RETURN trap (`git checkout -- "$target_rel"`) to restore
+# scripts/lib/local-dns.sh between runs. If the first test's trap fails
+# to fire (signal interrupt, git lock contention, etc.) the second
+# test's `refusing to mutate` guard will trip and the test will fail
+# loudly rather than silently re-mutate a dirty file — but the coupling
+# is real. Future SC2024 / SC2155 regression tests SHOULD target a
+# distinct file in scripts/lib/ to avoid this dependency entirely.
+test_shellcheck_catches_new_sc2034_violation() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+
+  local target_rel="scripts/lib/local-dns.sh"
+  local target="$REPO_ROOT_REAL/$target_rel"
+
+  if [ ! -f "$target" ]; then
+    printf "    target file missing: %s\n" "$target" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$target_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$target_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" shellcheck; then
+    printf "    baseline shellcheck failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: prepend an unused top-level variable after the
+  #    shebang. SC2034 ("X appears unused. Verify use (or export if used
+  #    externally)") fires at warning severity. With WARP-486's per-file
+  #    convention in place (no global SC2034 exclude), this MUST surface.
+  #
+  # Important: shellcheck silently exempts variable names starting with
+  # `_` from SC2034 (the underscore-prefix-means-intentional-unused
+  # convention). Use a non-underscore name so the diagnostic actually
+  # fires. `WARP_486_TEST_UNUSED` mirrors the all-caps style of the
+  # pre-existing waiver sites (DI_DEFAULT_SEALING_PCRS,
+  # SKIP_DOCKER_INSTALL) without colliding with any real variable name
+  # in the lib tree.
+  awk '
+    NR == 1 { print; print "WARP_486_TEST_UNUSED=\"x\""; next }
+    { print }
+  ' "$target" > "$target.tmp" && mv "$target.tmp" "$target"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$target_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. shellcheck should now FAIL because the global SC2034 exclude is gone.
+  _assert_check_fails "$REPO_ROOT_REAL" shellcheck
+}
+
+# =============================================================================
 # Test: exec-bits catches a chmod-stripped tracked script
 # =============================================================================
 #
@@ -588,6 +677,9 @@ _run_test "frigate-env-scan catches unresolved {VAR} substitution" \
 
 _run_test "shellcheck catches local-outside-function in scripts/lib" \
   test_shellcheck_catches_local_outside_function
+
+_run_test "shellcheck catches new SC2034 violation in scripts/lib (WARP-486)" \
+  test_shellcheck_catches_new_sc2034_violation
 
 _run_test "docker-build-smoke shim rejects unknown docker subcommand" \
   test_docker_build_smoke_shim_rejects_unknown_subcommand
