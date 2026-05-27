@@ -493,8 +493,16 @@ test_shellcheck_catches_new_sc2034_violation() {
   #    shebang. SC2034 ("X appears unused. Verify use (or export if used
   #    externally)") fires at warning severity. With WARP-486's per-file
   #    convention in place (no global SC2034 exclude), this MUST surface.
+  #
+  # Important: shellcheck silently exempts variable names starting with
+  # `_` from SC2034 (the underscore-prefix-means-intentional-unused
+  # convention). Use a non-underscore name so the diagnostic actually
+  # fires. `WARP_486_TEST_UNUSED` mirrors the all-caps style of the
+  # pre-existing waiver sites (DI_DEFAULT_SEALING_PCRS,
+  # SKIP_DOCKER_INSTALL) without colliding with any real variable name
+  # in the lib tree.
   awk '
-    NR == 1 { print; print "_warp_486_test_unused=\"x\""; next }
+    NR == 1 { print; print "WARP_486_TEST_UNUSED=\"x\""; next }
     { print }
   ' "$target" > "$target.tmp" && mv "$target.tmp" "$target"
 
