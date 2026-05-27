@@ -70,6 +70,16 @@ export interface AgentRequest {
    * in-process trusted, so it's safe to plumb session tokens this way.
    */
   toolCallContext?: McpCallContext;
+  /**
+   * WARP-458 — emit `{type:"reasoning_step", text}` blocks on the wire
+   * before the assistant's text. When `false` (or unset and the route
+   * defaults to false), the agent loop still PARSES and writes the
+   * concatenated trace to `result.message.reasoning` so the route layer
+   * can persist it to `ChatMessage.reasoning` — only the SSE emission
+   * is suppressed. When `true`, reasoning_step events are pushed before
+   * the matching content_delta. See spec §AC4.
+   */
+  captureReasoning?: boolean;
 }
 
 export interface AgentTraceEntry {
@@ -249,9 +259,40 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
     // Happy path: model produced a final answer with no more tool calls.
     if (!asst.tool_calls?.length) {
-      if (asst.content) emit({ type: "content_delta", text: asst.content });
+      // WARP-458 — extract `<reasoning>…</reasoning>` segments + the
+      // provider-native reasoning field (if any). The captureReasoning
+      // flag gates EMISSION on the wire; PARSING + the
+      // `result.message.reasoning` write happen regardless so the
+      // route layer can always persist to `ChatMessage.reasoning`
+      // (lazy-load on demand without re-running inference).
+      const reasoning = parseReasoningTrace({
+        content: asst.content ?? null,
+        providerReasoning: asst.reasoning_content ?? null,
+      });
+      if (req.captureReasoning) {
+        // Spec §AC3: reasoning_step blocks land BEFORE the content_delta.
+        for (const step of reasoning.reasoningSteps) {
+          emit({ type: "reasoning_step", text: step });
+        }
+      }
+      const visible = reasoning.cleanedContent;
+      if (visible) emit({ type: "content_delta", text: visible });
       emit({ type: "done", iterations: iter + 1, stop_reason: "model_done" });
-      return { message: asst, trace, iterations: iter + 1, stop_reason: "model_done" };
+      // Surface cleaned content + concatenated reasoning on the
+      // returned ChatMessage so the route layer can persist.
+      const finalMessage: ChatMessage = {
+        ...asst,
+        content: visible,
+        ...(reasoning.fullReasoning != null
+          ? { reasoning: reasoning.fullReasoning }
+          : {}),
+      };
+      return {
+        message: finalMessage,
+        trace,
+        iterations: iter + 1,
+        stop_reason: "model_done",
+      };
     }
 
     // Otherwise: append the assistant's tool-call-issuing message

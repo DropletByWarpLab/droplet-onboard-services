@@ -19,6 +19,21 @@ export type SSEEvent =
       status?: string;
       message?: string;
     }
+  /**
+   * WARP-458 — one step of the assistant's deep-reasoning trace. Emitted
+   * BEFORE any `content_delta` block on the same turn, in arrival order
+   * (one event per `<reasoning>…</reasoning>` segment, plus an extra
+   * leading step for the provider-native reasoning field when present).
+   * The dashboard renders these as a collapsible "thinking" timeline
+   * above the answer; the orchestrator persists the concatenated trace
+   * to `ChatMessage.reasoning` so a refresh / rehydrate can re-render
+   * them without re-running inference.
+   *
+   * Gated on the per-request `captureReasoning` flag (default false).
+   * When the flag is false the agent loop still parses + persists, but
+   * suppresses these events on the wire. See WARP-458 AC §4.
+   */
+  | { type: "reasoning_step"; text: string }
   | {
       type: "done";
       iterations: number;

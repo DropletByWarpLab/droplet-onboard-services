@@ -247,10 +247,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   });
 
   // Chat completion — drives the orchestrator agent loop end-to-end.
-  // When stream=true the client receives the four SSE event types
-  // defined in spec §8.2 (content_delta, tool_call, tool_result, done).
-  // Non-streaming returns the AgentResult shape (assistant message +
-  // trace + iterations + stop_reason).
+  // When stream=true the client receives the SSE event types defined
+  // in spec §8.2 (content_delta, tool_call, tool_result, done) plus
+  // WARP-458's `reasoning_step` (when the per-request
+  // `captureReasoning` flag is true). Non-streaming returns the
+  // AgentResult shape (assistant message + trace + iterations +
+  // stop_reason). The persisted assistant `ChatMessage.reasoning`
+  // column is written REGARDLESS of `captureReasoning` so the
+  // dashboard can lazy-load reasoning on demand without re-running
+  // inference.
   //
   // WARP-304: every turn is persisted to `ChatSession` / `ChatMessage`.
   // On the very first turn (no `conversationId` in the body) the server
@@ -414,6 +419,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       const liveToolCalls: PersistedToolCall[] = [];
       let liveAssistantContent = "";
       let lastFlushedContent = "";
+      // WARP-458 — captured reasoning trace for the assistant message.
+      // Populated from `AgentResult.message.reasoning` (set by the
+      // agent loop's parser regardless of `captureReasoning`). The
+      // route persists this to `ChatMessage.reasoning` so a refresh /
+      // rehydrate can re-render the trace without re-running inference.
+      // `null` is the explicit "no reasoning on this turn" value, which
+      // clears any previously-persisted reasoning if the same row is
+      // overwritten (retried turn). `undefined` would skip the write.
+      let liveReasoning: string | null = null;
 
       // WARP-329: debounced flush of streaming content to Postgres so
       // refreshes mid-turn see progress. setInterval keeps the flush
@@ -481,6 +495,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             content: liveAssistantContent,
             toolCalls: liveToolCalls,
             status,
+            reasoning: liveReasoning,
           });
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -532,7 +547,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           if (!res.writableEnded) clientAborted = true;
         });
         try {
-          await runAgent({ ...deps, onEvent }, {
+          const streamResult = await runAgent({ ...deps, onEvent }, {
             model: chatReq.model,
             messages: chatReq.messages,
             temperature: chatReq.temperature,
@@ -541,6 +556,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             tool_choice: chatReq.tool_choice,
             toolCallContext,
           });
+          // WARP-458 — the agent loop populates message.reasoning
+          // REGARDLESS of the (future) captureReasoning flag (only
+          // the wire-emit is gated). Capture it here so
+          // finalizeAndNotify persists. The Zod-schema captureReasoning
+          // flag lands in a follow-up commit (chunk 4); for now the
+          // parse+persist path runs unconditionally.
+          liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
           terminal = "failed";
           // eslint-disable-next-line no-console
@@ -566,6 +588,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           toolCallContext,
         });
         liveAssistantContent = result.message.content;
+        // WARP-458 — agent loop populates message.reasoning regardless
+        // of captureReasoning; persist whenever present so the
+        // dashboard can lazy-load the trace later.
+        liveReasoning = result.message.reasoning ?? null;
         for (const t of result.trace) {
           liveToolCalls.push({
             id: t.tool_call_id,

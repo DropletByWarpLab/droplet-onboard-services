@@ -19,6 +19,26 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
   // Set on tool-role messages to correlate the result with the request.
   tool_call_id?: string;
+  /**
+   * WARP-458 — concatenated deep-reasoning trace (`<reasoning>` segments
+   * joined by blank line; or the provider-native reasoning field, when
+   * surfaced separately). Only set on assistant messages where the model
+   * produced a reasoning trace; nullable everywhere else. The route layer
+   * persists this verbatim to `ChatMessage.reasoning` (regardless of the
+   * per-request `captureReasoning` flag — that flag gates EMISSION on the
+   * wire, not PERSISTENCE, so the dashboard can lazy-load reasoning on
+   * demand).
+   */
+  reasoning?: string;
+  /**
+   * WARP-458 — provider-native reasoning field, used by ai-gateway when
+   * the upstream provider surfaces reasoning separately (LiteLLM's
+   * `reasoning_content` for OpenAI o-series, Anthropic extended-thinking
+   * when exposed). The agent loop reads this off the response and folds
+   * it into the parsed trace alongside any inline `<reasoning>` segments
+   * in `content`. Not part of the request side — only the response.
+   */
+  reasoning_content?: string;
 }
 
 export interface ToolDefinition {
