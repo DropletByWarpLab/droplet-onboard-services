@@ -4,7 +4,7 @@ import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { PrismaClient } from "@prisma/client";
 import { requestLogger } from "./middleware/request-logger.js";
-import { authMiddleware } from "./middleware/auth.js";
+import { authMiddleware, setAuthPrisma } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
@@ -73,6 +73,14 @@ export function createApp(prisma: PrismaClient) {
   // Lives under `/_/fips` (not `/api/...`) so it sits in the
   // orchestrator's internal namespace, parallel to other operator probes.
   app.use(createFipsRouter("orchestrator"));
+
+  // WARP-485 — wire the Prisma client into the auth middleware so the
+  // OCS fallback can resolve `ocs.data.id` (Nextcloud username) to the
+  // local `User.id` UUID. Must run before `app.use(authMiddleware)` so
+  // the very first request after boot gets a populated singleton; pre-
+  // boot requests fall into the fail-closed `USER_NOT_PROVISIONED`
+  // branch instead of regressing the OCS-username-as-id leak.
+  setAuthPrisma(prisma);
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);

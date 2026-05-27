@@ -1,12 +1,45 @@
 import { Request, Response, NextFunction } from "express";
 import { Buffer } from "node:buffer";
 import { createHash, timingSafeEqual } from "node:crypto";
+import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { config } from "../config.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
 
 const logger = pino({ name: "auth" });
+
+/**
+ * WARP-485 — process-wide Prisma reference used by the OCS fallback to
+ * look up the local `User` row that matches the Nextcloud user id. Set
+ * once at app boot via `setAuthPrisma(prisma)`; null before boot or in
+ * tests that don't wire one. Mirrors the `activity.singleton.ts`
+ * pattern so the orchestrator's existing app-construction order
+ * doesn't need a refactor.
+ *
+ * Kept in module scope (rather than threaded through `authMiddleware`
+ * as a closure) so the dozens of `app.use(authMiddleware)` callsites
+ * — including the tests that mount the production middleware directly —
+ * don't all need to pass a prisma client. The fail-closed branch in
+ * `validateNextcloudToken` covers the "not yet initialised" case so a
+ * pre-boot request can never sneak past with an un-normalized id.
+ */
+let authPrisma: PrismaClient | null = null;
+
+/**
+ * Wire the Prisma client used by the OCS fallback to resolve
+ * `nextcloudUsername → User.id`. Called once at app boot from
+ * `createApp(prisma)`. Idempotent — subsequent calls overwrite the
+ * binding, which is what tests want when they reset between cases.
+ */
+export function setAuthPrisma(prisma: PrismaClient): void {
+  authPrisma = prisma;
+}
+
+/** Test-only handle — exported so vitest can reset between cases. */
+export function _setAuthPrismaForTests(prisma: PrismaClient | null): void {
+  authPrisma = prisma;
+}
 
 export interface AuthUser {
   id: string;
@@ -128,17 +161,31 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   }
 
   // Fallback: validate against Nextcloud OCS (legacy tokens)
-  validateNextcloudToken(token)
-    .then((user) => {
-      if (!user) {
-        if (cookieToken) {
-          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
-        }
-        res.status(401).json({ error: "Invalid or expired token" });
+  validateNextcloudTokenDetailed(token)
+    .then((result) => {
+      if (result.kind === "ok") {
+        req.user = result.user;
+        next();
         return;
       }
-      req.user = user;
-      next();
+      if (cookieToken) {
+        res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+      }
+      // WARP-485 — surface a distinct structured error for "OCS token
+      // is valid, but no local User row maps to it" so the dashboard
+      // can prompt the operator to add the user via /api/people
+      // instead of treating it as a generic auth failure. Same 401
+      // status code (no privilege change) — just a code field clients
+      // can branch on.
+      if (result.kind === "user-not-provisioned") {
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+      res.status(401).json({ error: "Invalid or expired token" });
     })
     .catch((err) => {
       logger.error({ err }, "Token validation failed");
@@ -171,14 +218,57 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
 }
 
 /**
+ * WARP-485 — discriminated return so the middleware can distinguish
+ * "OCS token is valid but no local User row maps to it" (the fail-
+ * closed branch) from "OCS rejected the token outright". Same 401
+ * status either way; clients (and tests) branch on the `code` field
+ * we render in the response body.
+ */
+type OcsValidationResult =
+  | { kind: "ok"; user: AuthUser }
+  | { kind: "invalid" } // OCS rejected the token (bad creds, meta.status !== ok, network fail)
+  | { kind: "user-not-provisioned" }; // OCS accepted, no matching local User row
+
+/**
  * Validate a token against Nextcloud OCS API with Redis cache.
  * Returns a user with default "family" role (Nextcloud doesn't have role claims).
+ *
+ * WARP-485 — `req.user.id` shape contract across the JWT vs OCS paths:
+ *
+ *   • JWT path (`verifyAccessToken` above): `req.user.id = jwtPayload.sub`,
+ *     which is the local `User.id` UUID. This is the source of truth.
+ *
+ *   • OCS path (this function, pre-WARP-485): `req.user.id = ocs.data.id`,
+ *     which is the **Nextcloud username string** (e.g. `stefan-cruceru`),
+ *     NOT a UUID. That mismatch silently broke WARP-480's self-action guard
+ *     (`req.params.id === req.user?.id` on /api/people/:id mutations) under
+ *     OCS auth — the comparison always returned false-negative, so an owner
+ *     authenticated via the OCS fallback could DELETE themselves and lock
+ *     the household out of every owner-only route.
+ *
+ *   • OCS path (WARP-485 fix): lookup `User` by `nextcloudUsername`, set
+ *     `req.user.id = localUser.id`. Fail-closed with 401 `USER_NOT_PROVISIONED`
+ *     when no matching User row exists — silent auto-provision would be a
+ *     privilege-escalation vector (an attacker who somehow holds a valid
+ *     OCS token for an unrelated NC user could otherwise mint a local row).
+ *     `req.user.username` keeps the Nextcloud username for display, and
+ *     `req.user.role` is still derived from OCS groups via `roleFromGroups`
+ *     (the JWT path's role takes precedence when a JWT is present).
+ *
+ * Downstream invariant: every `req.user.id` consumer (people self-action
+ * guard, camera pins, /auth/me, brain-memory ownership checks, etc.) may
+ * assume the value is a local User UUID regardless of auth path.
  */
-async function validateNextcloudToken(token: string): Promise<AuthUser | null> {
+async function validateNextcloudTokenDetailed(
+  token: string,
+): Promise<OcsValidationResult> {
   const cacheKey = TOKEN_CACHE_PREFIX + hashToken(token);
 
+  // The Redis cache stores fully-normalised AuthUser rows (already
+  // post-WARP-485 lookup). On hit we still return { kind: "ok", user }
+  // so the discriminator stays consistent end-to-end.
   const cached = await cacheGet<AuthUser>(cacheKey);
-  if (cached) return cached;
+  if (cached) return { kind: "ok", user: cached };
 
   try {
     const url = `${config.NEXTCLOUD_URL}/ocs/v1.php/cloud/user`;
@@ -194,26 +284,68 @@ async function validateNextcloudToken(token: string): Promise<AuthUser | null> {
       signal: AbortSignal.timeout(OCS_VALIDATION_TIMEOUT_MS),
     });
 
-    if (!resp.ok) return null;
+    if (!resp.ok) return { kind: "invalid" };
 
     const data = await resp.json();
     const ocs = data?.ocs;
-    if (ocs?.meta?.status !== "ok") return null;
+    if (ocs?.meta?.status !== "ok") return { kind: "invalid" };
 
     const groups: string[] = ocs.data.groups || [];
+    const ncUsername: string = ocs.data.id;
+
+    // WARP-485 — normalize req.user.id to the local User.id UUID so
+    // downstream consumers (people self-action guard, camera pins,
+    // /auth/me, etc.) get the same shape regardless of which path
+    // populated the session. Fail-closed when prisma isn't wired or
+    // when no local row matches — silent auto-provision would be a
+    // privilege-escalation vector (an attacker holding a valid OCS
+    // token for an unrelated NC user could otherwise mint a local
+    // row with the default `family` role).
+    if (!authPrisma) {
+      logger.warn(
+        { ncUsername },
+        "OCS auth: Prisma not initialised; refusing to populate req.user (WARP-485 fail-closed)",
+      );
+      return { kind: "user-not-provisioned" };
+    }
+    const localUser = await authPrisma.user.findUnique({
+      where: { nextcloudUsername: ncUsername },
+    });
+    if (!localUser) {
+      logger.warn(
+        { ncUsername },
+        "OCS auth: no local User row for Nextcloud user; operator must provision via /api/people",
+      );
+      return { kind: "user-not-provisioned" };
+    }
+
     const user: AuthUser = {
-      id: ocs.data.id,
-      username: ocs.data.id,
-      displayName: ocs.data["display-name"] || ocs.data.id,
+      id: localUser.id,
+      username: ncUsername,
+      displayName: ocs.data["display-name"] || ncUsername,
       role: roleFromGroups(groups),
     };
 
     await cacheSet(cacheKey, user, TOKEN_CACHE_TTL);
-    return user;
+    return { kind: "ok", user };
   } catch (err) {
     logger.warn({ err }, "Failed to reach Nextcloud for token validation");
-    return null;
+    return { kind: "invalid" };
   }
+}
+
+/**
+ * Validate a Nextcloud OCS token and return the normalized AuthUser,
+ * or null if the token is invalid OR the OCS user has no matching
+ * local User row. Thin wrapper around `validateNextcloudTokenDetailed`
+ * for the WebSocket-upgrade path (which has no way to surface a
+ * structured error code — it just rejects the upgrade).
+ */
+async function validateNextcloudToken(
+  token: string,
+): Promise<AuthUser | null> {
+  const result = await validateNextcloudTokenDetailed(token);
+  return result.kind === "ok" ? result.user : null;
 }
 
 function hashToken(token: string): string {

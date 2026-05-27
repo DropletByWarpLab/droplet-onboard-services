@@ -94,12 +94,56 @@ vi.mock("../services/brain-memory.service.js", () => ({
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 
-// ── In-memory userInvite store ──
+// ── In-memory userInvite + user store ──
 function createPrismaMock() {
   const rows: any[] = [];
+  // WARP-485 round 2: invite-accept now upserts a local User row keyed
+  // by `nextcloudUsername` before signing the JWT, so the prismaMock
+  // needs a minimal `user` surface for the upsert path. Other invite
+  // tests don't touch `user`, so the mock stays small.
+  const userRows: any[] = [];
+  let userCounter = 0;
   let counter = 0;
   return {
     rows,
+    userRows,
+    user: {
+      upsert: vi.fn(async ({ where, create, update }: any) => {
+        const idx = userRows.findIndex((u) => {
+          if (where?.nextcloudUsername !== undefined) {
+            return u.nextcloudUsername === where.nextcloudUsername;
+          }
+          if (where?.id !== undefined) return u.id === where.id;
+          if (where?.username !== undefined) return u.username === where.username;
+          return false;
+        });
+        if (idx >= 0) {
+          userRows[idx] = { ...userRows[idx], ...update, updatedAt: new Date() };
+          return userRows[idx];
+        }
+        const row = {
+          id: create.id ?? `u-uuid-${++userCounter}`,
+          username: create.username,
+          displayName: create.displayName ?? create.username,
+          email: create.email ?? null,
+          nextcloudUsername: create.nextcloudUsername ?? null,
+          role: create.role ?? "family",
+          isLocal: create.isLocal ?? true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        userRows.push(row);
+        return row;
+      }),
+      findUnique: vi.fn(async ({ where }: any) => {
+        if (where?.nextcloudUsername !== undefined) {
+          return userRows.find((u) => u.nextcloudUsername === where.nextcloudUsername) ?? null;
+        }
+        if (where?.id !== undefined) return userRows.find((u) => u.id === where.id) ?? null;
+        if (where?.username !== undefined) return userRows.find((u) => u.username === where.username) ?? null;
+        return null;
+      }),
+    },
     userInvite: {
       create: vi.fn(async ({ data }: any) => {
         if (rows.some((r) => r.token === data.token)) {

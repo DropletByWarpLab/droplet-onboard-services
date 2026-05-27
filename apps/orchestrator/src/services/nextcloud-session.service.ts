@@ -17,6 +17,19 @@ import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
  * token — is worse (single point of failure, can't audit per-user actions).
  * We mitigate by (1) scoping the TTL to the refresh-token lifetime, (2)
  * revoking at logout, and (3) requiring Redis to be password-protected.
+ *
+ * Key shape contract (WARP-485 round 2):
+ *   `userId` in every helper below is the **local `User.id` UUID** —
+ *   resolved via `User.nextcloudUsername` lookup at login time. The
+ *   store side (`storeNcToken` at `routes/auth.ts:~load-time`) and the
+ *   fetch side (`getNcToken(req.user.id)` at `routes/auth.ts:~logout`)
+ *   both hit the same UUID-keyed slot because `req.user.id` is
+ *   normalised to the UUID in `middleware/auth.ts` (OCS path, round 1)
+ *   and in this file's signing callers (JWT login/refresh/invite-accept,
+ *   round 2). Legacy NC-username-keyed entries from pre-WARP-485
+ *   deployments orphan and self-expire on the refresh-token TTL.
+ *   Operators on a long-running deploy can hard-flush by restarting
+ *   the Redis container (`docker compose restart cache`).
  */
 
 const NC_TOKEN_PREFIX = "auth:nc-token:";

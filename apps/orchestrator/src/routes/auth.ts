@@ -183,6 +183,37 @@ function resolveToken(req: import("express").Request): string | null {
 // it. When called without prisma those routes simply 404 (the dashboard's
 // `getInvite` / `acceptInvite` calls will treat that as "invite not found"
 // which is the right default for an under-configured deployment).
+//
+// WARP-485 round 2 — JWT-path normalization callsites (this file owns
+// the only places where `id` enters the JWT subject claim or the NC
+// token cache key; the OCS auth path was already normalized in round 1
+// inside `src/middleware/auth.ts`):
+//
+//   1. POST /api/auth/login        — line ~275: signAccessToken({ id })
+//                                  — line ~267: storeNcToken(id, ...)
+//   2. POST /api/auth/refresh      — line ~447: signAccessToken({ id })
+//                                  — line ~452: touchNcToken(id, ...)
+//   3. POST /api/auth/invites/accept/:token
+//                                  — line ~674: signAccessToken({ id })
+//   4. POST /api/auth/logout       — line ~768: getNcToken(req.user.id)
+//                                  — line ~776: deleteNcToken(req.user.id)
+//
+// Contract: every `id` fed to signAccessToken / signRefreshToken / NC
+// token store helpers in this file is the **local `User.id` UUID**,
+// resolved by looking up the local `User` row whose `nextcloudUsername`
+// matches the Nextcloud user id returned by OCS. The pre-WARP-485 shape
+// fed the NC username string into `JWT.sub`, which bypassed WARP-480's
+// self-action guard at `/api/people/:id` under JWT auth (`req.user.id`
+// = NC username, `req.params.id` = UUID → string mismatch → guard
+// silently skipped).
+//
+// Fail-closed posture (matches the OCS path's WARP-485 round-1
+// behavior): when no local User row exists for the authenticated
+// Nextcloud user, the route returns 401 + `USER_NOT_PROVISIONED`
+// instead of minting a synthetic id. Silent auto-provision would be
+// a privilege-escalation vector — an attacker holding a valid OCS
+// credential for an unrelated NC user could otherwise mint a default-
+// `family`-role local row.
 // ────────────────────────────────────────────────────────────────
 export function createPublicAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
@@ -253,16 +284,63 @@ export function createPublicAuthRouter(
       // Fetch user details (groups included) to determine role
       const ncUser = await ncGetCurrentUser(result.token);
 
-      const userId = ncUser?.id || result.loginName;
-      const username = ncUser?.id || result.loginName;
+      const ncUsername = ncUser?.id || result.loginName;
       const displayName = ncUser?.displayName || result.loginName;
       const role: Role = roleFromGroups(ncUser?.groups ?? []);
+
+      // WARP-485 round 2 — resolve the local User row by `nextcloudUsername`
+      // BEFORE signing the JWT, so `JWT.sub = localUser.id` (UUID) instead
+      // of the NC username string. Fail-closed when no local row matches:
+      // the operator must explicitly provision the user via /api/people
+      // before they can authenticate. Silent auto-provision would be a
+      // privilege-escalation vector — an attacker who somehow holds a
+      // valid OCS credential for an unrelated NC user could otherwise
+      // mint a default-`family`-role local row.
+      //
+      // The shim createAuthRouter() in legacy code paths calls
+      // createPublicAuthRouter() without prisma; we treat that the same
+      // as "no matching row" so a misconfigured deployment can't sneak
+      // past with an unnormalized id either.
+      if (!prisma) {
+        logger.warn(
+          { ncUsername },
+          "JWT login: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+        );
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+      const localUser = await prisma.user.findUnique({
+        where: { nextcloudUsername: ncUsername },
+      });
+      if (!localUser) {
+        logger.warn(
+          { ncUsername },
+          "JWT login: no local User row for Nextcloud user; operator must provision via /api/people (WARP-485 round 2)",
+        );
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+
+      const userId = localUser.id; // local UUID — fed into JWT.sub + NC store key
+      const username = ncUsername; // human-readable handle (display + audit only)
 
       // Stash the Nextcloud app-password server-side so downstream routes
       // (files, storage, user admin) can impersonate the caller against
       // Nextcloud's WebDAV/OCS APIs — the browser only ever sees our JWT.
       // TTL matches the refresh-token lifetime; the entry is overwritten on
       // every successful login and deleted at logout.
+      //
+      // WARP-485 round 2 — keyed by the local User.id UUID so logout's
+      // getNcToken(req.user.id) hits the same key (req.user.id is the
+      // UUID across all consumers post-round-2).
       try {
         await storeNcToken(userId, result.token, REFRESH_TOKEN_TTL_SECONDS);
       } catch (err) {
@@ -439,6 +517,53 @@ export function createPublicAuthRouter(
         }
 
         const { sub, username, displayName, role } = refreshResult;
+
+        // WARP-485 round 2 — re-validate that the local User row backing
+        // this refresh token still exists before rotating. Three things
+        // this catches:
+        //   1. Owner removed the user via /api/people mid-session — the
+        //      stale cookie must not silently mint fresh credentials.
+        //   2. Legacy refresh tokens issued pre-WARP-485 carry the NC
+        //      username in `sub` (not a UUID); `findUnique({ id: sub })`
+        //      returns null on those, invalidating them so the holder
+        //      re-logs in and gets a properly-shaped token pair. This is
+        //      the deliberate cache-bump for the JWT layer.
+        //   3. Defense in depth against forged tokens that somehow
+        //      verify but reference no real user.
+        // Fail-closed with the same error code as the OCS path so the
+        // dashboard's auth-error handler can branch consistently.
+        if (!prisma) {
+          logger.warn(
+            { sub },
+            "JWT refresh: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+          );
+          await denyRefreshToken(refreshTokenCookie);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "User not provisioned. Please log in again.",
+            code: "USER_NOT_PROVISIONED",
+          });
+          return;
+        }
+        const localUser = await prisma.user.findUnique({ where: { id: sub } });
+        if (!localUser) {
+          logger.warn(
+            { sub },
+            "JWT refresh: no local User row for refresh-token subject; refusing rotation (WARP-485 round 2)",
+          );
+          // Burn the old refresh token so a retry can't re-enter this
+          // branch repeatedly — denylist entry auto-expires with the
+          // token's own TTL.
+          await denyRefreshToken(refreshTokenCookie);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "User not provisioned. Please log in again.",
+            code: "USER_NOT_PROVISIONED",
+          });
+          return;
+        }
 
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
@@ -670,17 +795,54 @@ export function createPublicAuthRouter(
           : invite.role === "guest"
             ? "guest"
             : "family";
-      const userId = invite.username;
+
+      // WARP-485 round 2 — provision the local User row mapping this
+      // Nextcloud identity to a local UUID BEFORE signing the JWT, so
+      // `JWT.sub = localUser.id` (UUID) instead of the invite username
+      // string. Without this step, the invitee's first session would
+      // ship the bypassable shape we just fixed on /auth/login.
+      //
+      // Upsert (not create) so concurrent invite-accept POSTs that race
+      // through `await prisma.userInvite.update` don't trip
+      // P2002-unique on `nextcloudUsername` — the second caller still
+      // sees the existing row and gets a properly-shaped JWT.
+      //
+      // The User.role column uses the canonical Role enum value from
+      // the invite (so DB-level RBAC matches the operator's intent on
+      // the create endpoint); the JWT session `role` keeps the legacy
+      // mapping above (admin invite → owner session) which existing
+      // routes still depend on.
+      const userRow = await prisma.user.upsert({
+        where: { nextcloudUsername: invite.username },
+        update: {
+          // If a row already exists, keep its UUID — the invite-accept
+          // is essentially a re-acceptance of the same identity (rare
+          // but possible under retry). Refresh `displayName` from the
+          // invite in case the operator updated it.
+          displayName: invite.displayName || invite.username,
+        },
+        create: {
+          username: invite.username,
+          displayName: invite.displayName || invite.username,
+          email: invite.email ?? null,
+          nextcloudUsername: invite.username,
+          role: invite.role as any, // canonical Role enum from the invite
+          // `isLocal` defaults to true in the schema; mirror-from-NC
+          // would only flip false for setup-time admins.
+        },
+      });
+      const userId = userRow.id; // local UUID — fed into JWT.sub
+
       const accessToken = signAccessToken({
         id: userId,
-        username: userId,
-        displayName: invite.displayName || userId,
+        username: invite.username,
+        displayName: invite.displayName || invite.username,
         role,
       });
       const refreshToken = signRefreshToken({
         id: userId,
-        username: userId,
-        displayName: invite.displayName || userId,
+        username: invite.username,
+        displayName: invite.displayName || invite.username,
         role,
       });
 
@@ -708,8 +870,8 @@ export function createPublicAuthRouter(
       res.json({
         user: {
           id: userId,
-          username: userId,
-          displayName: invite.displayName || userId,
+          username: invite.username,
+          displayName: invite.displayName || invite.username,
           role,
         },
       });

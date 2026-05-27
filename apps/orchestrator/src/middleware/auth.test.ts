@@ -39,7 +39,7 @@ vi.mock("../services/jwt.service.js", () => ({
   REFRESH_TOKEN_TTL_SECONDS: 60 * 60 * 24 * 30,
 }));
 
-import { authMiddleware } from "./auth.js";
+import { authMiddleware, _setAuthPrismaForTests } from "./auth.js";
 
 function mockReq(token: string): Request {
   return {
@@ -63,10 +63,16 @@ describe("authMiddleware — Nextcloud OCS validation", () => {
 
   beforeEach(() => {
     global.fetch = vi.fn();
+    // WARP-485: by default each test runs without a Prisma binding so
+    // the OCS path falls into the fail-closed USER_NOT_PROVISIONED
+    // branch. Tests that need a populated User row (the happy-path
+    // "bounded AbortSignal" case below) wire a per-test mock.
+    _setAuthPrismaForTests(null);
   });
 
   afterEach(() => {
     global.fetch = realFetch;
+    _setAuthPrismaForTests(null);
   });
 
   it("passes a bounded AbortSignal to the OCS fetch", async () => {
@@ -80,6 +86,25 @@ describe("authMiddleware — Nextcloud OCS validation", () => {
         },
       }),
     } as unknown as Response);
+    // WARP-485: the OCS fallback now resolves `ocs.data.id` to a local
+    // User row before populating req.user. Wire a minimal mock that
+    // returns a UUID-shaped id so the happy path completes and `next()`
+    // gets called (which is what this test still asserts).
+    _setAuthPrismaForTests({
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "u-uuid-alice-0001",
+          username: "alice",
+          displayName: "Alice",
+          email: null,
+          nextcloudUsername: "alice",
+          role: "family",
+          isLocal: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      },
+    } as any);
 
     const req = mockReq("legacy-token");
     const res = mockRes();
