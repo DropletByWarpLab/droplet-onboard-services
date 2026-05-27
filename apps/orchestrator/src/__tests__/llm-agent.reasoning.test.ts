@@ -168,4 +168,39 @@ describe("parseReasoningTrace", () => {
     expect(result.cleanedContent).toBe("");
     expect(result.fullReasoning).toBe("Decided to call list_files.");
   });
+
+  // Regression — WARP-458 R2.
+  // The parser runs unconditionally on every assistant chunk per AC4,
+  // so it must NOT damage content that has no reasoning tags. Earlier
+  // implementations used `\s+ → " "` as a catch-all whitespace tidy
+  // which silently collapsed every paragraph break in every chat reply.
+  it("preserves paragraph breaks in content with no reasoning tags", () => {
+    const result = parseReasoningTrace({
+      content: "Para one.\n\nPara two.",
+    });
+    expect(result.cleanedContent).toBe("Para one.\n\nPara two.");
+    expect(result.reasoningSteps).toEqual([]);
+    expect(result.fullReasoning).toBeNull();
+  });
+
+  it("preserves paragraph breaks in cleanedContent after extracting reasoning", () => {
+    const result = parseReasoningTrace({
+      content: "Hello.\n\n<reasoning>step</reasoning>\n\nGoodbye.",
+    });
+    expect(result.cleanedContent).toBe("Hello.\n\nGoodbye.");
+    expect(result.reasoningSteps).toEqual(["step"]);
+  });
+
+  // Regression — WARP-458 R1.
+  // Locks in the current non-greedy regex behavior so any future tweak
+  // to the `<reasoning>…</reasoning>` matcher surfaces here in CI. The
+  // outer opener pairs with the FIRST `</reasoning>`, so the inner
+  // opener becomes part of the captured step content.
+  it("treats inner reasoning opener as content when wrapped by outer reasoning tags (regex non-greedy)", () => {
+    const result = parseReasoningTrace({
+      content: "<reasoning>unclosed <reasoning>closed</reasoning>after",
+    });
+    expect(result.reasoningSteps).toEqual(["unclosed <reasoning>closed"]);
+    expect(result.cleanedContent).toBe("after");
+  });
 });

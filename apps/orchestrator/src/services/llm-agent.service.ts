@@ -185,8 +185,15 @@ export function parseReasoningTrace(args: {
 
   // Collapse the leftover whitespace that the splice opens up — the
   // model often emits ` <reasoning>…</reasoning> ` with a leading and
-  // trailing space we don't want doubled in the cleaned output.
-  const cleanedContent = working.replace(/\s+/g, " ").trim();
+  // trailing space we don't want doubled in the cleaned output. Tidy
+  // horizontal runs and excess blank lines separately so paragraph
+  // breaks (`\n\n`) survive — the parser runs unconditionally on every
+  // chunk per AC4, so a blanket `\s+ → " "` would silently flatten
+  // every paragraph in every reply (WARP-458 R2 regression).
+  const cleanedContent = working
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
   const fullReasoning = steps.length > 0 ? steps.join("\n\n") : null;
   return { reasoningSteps: steps, cleanedContent, fullReasoning };
