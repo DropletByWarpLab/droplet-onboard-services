@@ -220,8 +220,20 @@ run_check_tsc_full() {
 
   # Phase 1: prisma generate (orchestrator's @prisma/client must reflect
   # the current schema or every Prisma-typed call site shows TS2305).
+  #
+  # Pinned to the orchestrator workspace's `db:generate` script (WARP-492).
+  # The script body is `prisma generate`; npm resolves it through the
+  # workspace's `node_modules/.bin/prisma`, which is the `^5.14.0` pin
+  # declared in apps/orchestrator/package.json. The earlier form
+  # (`npx prisma generate`) silently fetched the LATEST published prisma
+  # (7.x at time of writing) off the npm registry whenever no local
+  # node_modules tree was present — and prisma 7 rejects this schema with
+  # P1012 ("datasource property `url` is no longer supported"), wedging
+  # ship-check on a fresh worktree. The `npm run -w` form fails LOUDLY
+  # ("prisma is not recognized" / "Missing script") when node_modules is
+  # missing instead of misleading the operator with a phantom P1012.
   if [ -d "$REPO_ROOT/apps/orchestrator/prisma" ]; then
-    if ! out="$(cd "$REPO_ROOT/apps/orchestrator" && npx prisma generate 2>&1)"; then
+    if ! out="$(cd "$REPO_ROOT" && npm run -w @droplet/orchestrator db:generate 2>&1)"; then
       printf "  ${_RED}FAIL${_RESET}  %s — prisma generate failed\n" "$label"
       printf '%s\n' "$out" | sed 's/^/    | /' >&2
       CHECK_RESULTS[$label]=fail
