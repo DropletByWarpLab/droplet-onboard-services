@@ -723,6 +723,16 @@ async def accept_camera(mac: str):
         pending_cameras[mac] = camera  # Put back
         raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
 
+    # WARP-400 §5 — guard rtsp_url before handing it to Frigate. The
+    # auto-scan path already does this at L527-532; the vendor-template
+    # path above is a new exception. is_safe_rtsp_url enforces the
+    # LAN-IP invariant introduced by commit 3045d3d (camera VMS security
+    # fixes) as a universal pre-frigate.add_camera check.
+    if not is_safe_rtsp_url(rtsp_url):
+        logger.warning("Rejecting unsafe RTSP URL for %s: %s", ip, rtsp_url)
+        pending_cameras[mac] = camera  # Put back
+        raise HTTPException(status_code=400, detail="Camera RTSP URL failed safety check")
+
     name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
     success = await frigate.add_camera(name, rtsp_url)
     if success:
