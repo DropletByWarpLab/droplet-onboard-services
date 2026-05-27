@@ -54,6 +54,17 @@ def build_rtsp_url(vendor: str, ip: str, user: str, pw: str) -> str:
     """
     if not ip:
         raise ValueError("ip is required")
+    # Templates hardcode `:554`, so an embedded port on `ip` would
+    # double-up (`192.168.1.10:8554:554`). Today's callers
+    # (urlparse().hostname from ONVIF, separate ip/port fields in
+    # rtsp_prober) all pass bare IPs, so no current path triggers this
+    # — but reject it loudly so a future caller doesn't silently ship
+    # a malformed URL to Frigate.
+    if ":" in ip:
+        raise ValueError(
+            f"ip must be a bare address without port (got {ip!r}); "
+            "templates supply the RTSP port",
+        )
     vendor_key = (vendor or "").strip().lower()
     template = VENDOR_RTSP_TEMPLATES.get(vendor_key)
     if not template:
