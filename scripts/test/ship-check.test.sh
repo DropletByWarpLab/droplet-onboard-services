@@ -504,9 +504,8 @@ test_shellcheck_catches_new_sc2034_violation() {
   # `_` from SC2034 (the underscore-prefix-means-intentional-unused
   # convention). Use a non-underscore name so the diagnostic actually
   # fires. `WARP_486_TEST_UNUSED` mirrors the all-caps style of the
-  # pre-existing waiver sites (DI_DEFAULT_SEALING_PCRS,
-  # SKIP_DOCKER_INSTALL) without colliding with any real variable name
-  # in the lib tree.
+  # pre-existing waiver sites (DOCKER_GROUP_ADDED, SKIP_DOCKER_INSTALL)
+  # without colliding with any real variable name in the lib tree.
   awk '
     NR == 1 { print; print "WARP_486_TEST_UNUSED=\"x\""; next }
     { print }

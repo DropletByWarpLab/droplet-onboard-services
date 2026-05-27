@@ -3,11 +3,6 @@
 # Shared between provision-device-identity.sh and droplet-admin device-identity.
 # Source this file; do not execute directly.
 
-# Canonical sealing PCR set per the WARP-230 spec. Override via
-# DROPLET_TPM_PCRS env if the device's UEFI/cboot uses a different
-# set. Documented in docs/security/device-identity.md.
-# shellcheck disable=SC2034  # Public library default; consumed by external sealing scripts and droplet-admin reseal flow per the WARP-230 spec — shellcheck can't trace dynamic sourcing.
-DI_DEFAULT_SEALING_PCRS="0,2,4,7"
 DI_DEFAULT_STORAGE="/var/lib/droplet/tpm"
 DI_DEFAULT_SOCKET="/var/run/droplet/device-identity.sock"
 
