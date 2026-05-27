@@ -34,14 +34,25 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
   const res = await ctx.http.cameras.get(`/cameras/${encodeURIComponent(ip)}/init-status`);
   if (res.status === 404) {
+    // camera-discovery's vendor_init.check_status returns None for BOTH
+    // "no vendor matched" AND "probe failed transiently" (connection
+    // refused, timeout). A Hanwha that's still booting (10–30 s
+    // post-PoE) presents the same 404 as a brand-X camera that's
+    // genuinely not a known vendor. Don't collapse the two states into
+    // `needs_initialization=false` — that would tell the smart-port
+    // agent to silently adopt the camera with its factory-default
+    // password. Return `null` with `ambiguous=true` so the agent
+    // re-scans or surfaces to the operator instead.
     return {
       ok: true,
       data: {
         ip,
         vendor: null,
         initialized: null,
-        needs_initialization: false,
-        details: "No recognized init vendor for this IP — camera does not advertise a known first-run flow.",
+        needs_initialization: null,
+        ambiguous: true,
+        details:
+          "init-status returned 404 — could be (a) genuinely-unknown vendor, or (b) a known vendor whose first-run probe timed out / got connection-refused. Re-scan or ask the operator before adopting.",
       },
     };
   }
