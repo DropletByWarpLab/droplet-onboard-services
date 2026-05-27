@@ -85,7 +85,7 @@ When you have access to a Jetson device (physical or remote):
 1. Deploy Ollama on the Jetson:
    ```bash
    # On the Jetson
-   cd inference-engine/docker && docker compose up -d
+   cd droplet-local-LLM/docker && docker compose up -d
    ```
 
 2. Point the ai-gateway to the Jetson:
@@ -96,7 +96,7 @@ When you have access to a Jetson device (physical or remote):
 
 3. Ensure the model is provisioned on the appliance. Model lifecycle is
    owned by the `ollama-manager` sidecar (`:8002`) in the
-   [`droplet-jetson-ai`](https://github.com/DropletByWarpLab/droplet-jetson-ai)
+   [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM)
    repo, not a manual `pull` script in this repo. The canonical path is:
 
    ```bash
@@ -104,9 +104,9 @@ When you have access to a Jetson device (physical or remote):
    curl -X POST http://<jetson-ip>:8002/models/sync
    ```
 
-   See `droplet-jetson-ai/services/ollama-manager/` for the full
+   See `droplet-local-LLM/services/ollama-manager/` for the full
    `/models/*` API. To add a new model the appliance can serve, edit
-   `droplet-jetson-ai/models/model-manifest.json` and re-run
+   `droplet-local-LLM/models/model-manifest.json` and re-run
    `/models/sync` — no code changes in either repo.
 
    > **One Model Rule.** Do NOT `ollama pull` a different model from

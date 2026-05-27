@@ -210,14 +210,14 @@ services:
 
   # --- MCP Server (HTTP transport) ---
   # WARP-103: streamable-HTTP MCP transport for off-process consumers
-  # (inference-engine, Claude Desktop, dev tools). The orchestrator's
+  # (droplet-local-LLM, Claude Desktop, dev tools). The orchestrator's
   # in-process agent already talks to the mcp-server over stdio inside
   # its own container (see apps/orchestrator/Dockerfile + WARP-101); this
   # service is the JWT-gated network surface.
   #
   # Internal-only by default — no `ports:` section. JWT_SECRET must
   # match the orchestrator so externally-issued admin JWTs verify here.
-  # Add a host port mapping if/when inference-engine runs off-box.
+  # Add a host port mapping if/when droplet-local-LLM runs off-box.
   mcp-server:
     build:
       # Repo root context, mirroring the orchestrator's WARP-101 pattern,
@@ -659,7 +659,7 @@ services:
       # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
       # the Orin Nano 7 GB RAM budget with the rest of the stack up).
       # Override via env if the appliance has a larger/different model
-      # loaded (see droplet-jetson-ai /models/sync).
+      # loaded (see droplet-local-LLM /models/sync).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
       # Context the LLM gets in its system prompt at every reply():
       # current local time + the device's location. Both auto-detected
