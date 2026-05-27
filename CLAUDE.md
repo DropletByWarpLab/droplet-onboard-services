@@ -116,7 +116,7 @@ interchangeable proxy layers — each owns separate concerns:
 
 If you're debugging an "AI not reachable" issue, the first thing to
 check is `OLLAMA_URL` inside the running ai-gateway container
-(`docker exec droplet-pi-platform-ai-gateway-1 env | grep JETSON`).
+(`docker exec droplet-pi-platform-ai-gateway-1 env | grep OLLAMA`).
 A trailing `/proxy` is the smoking gun for "manager timed out my agent
 loop"; a stale `inference-engine.local` is the smoking gun for "mDNS
 doesn't resolve from inside Docker on macOS" (use

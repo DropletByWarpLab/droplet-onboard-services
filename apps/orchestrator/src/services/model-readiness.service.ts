@@ -9,22 +9,24 @@
  *
  * Why this exists
  * ---------------
- * Before Phase 3, the single-box PoC needed someone to manually run
- * `docker exec droplet-ollama ollama pull gpt-oss:20b` before the
- * dashboard model list would surface anything. With `setup.sh --poc`
- * writing `LLM_MODEL=gpt-oss:20b` to .env (Phase 2) and the manifest
- * declaring it as the default (droplet-local-LLM Phase 3a), this
- * service notices the gap on first orchestrator boot and closes it
- * by hitting Ollama's HTTP API directly. The user vision: plug the
+ * Before Phase 3, the single-box deployment needed someone to manually
+ * run `docker exec droplet-ollama ollama pull gpt-oss:20b` before the
+ * dashboard model list would surface anything. With `setup.sh
+ * --single-box` writing `LLM_MODEL=gpt-oss:20b` to .env (via
+ * configure_single_box_env in scripts/lib/single-box.sh) and the
+ * manifest declaring it as the default (droplet-local-LLM Phase 3a),
+ * this service notices the gap on first orchestrator boot and closes
+ * it by hitting Ollama's HTTP API directly. The user vision: plug the
  * WAN cable in, walk away, come back to a working dashboard with
  * the model already loaded.
  *
  * Why not via ai-gateway
  * ----------------------
- * Per architecture-guard rule 2, ai-gateway is a thin provider router
- * (LiteLLM for cloud, httpx for local Ollama). Tool dispatch + model
- * lifecycle live in the orchestrator. This service is the orchestrator
- * owning the lifecycle half.
+ * ai-gateway is a thin provider router (LiteLLM for cloud, httpx for
+ * local Ollama) — see CLAUDE.md's architecture rules and the
+ * droplet-architecture-guard skill. Tool dispatch + model lifecycle
+ * live in the orchestrator. This service is the orchestrator owning
+ * the lifecycle half.
  *
  * Why not via ollama-manager
  * --------------------------
