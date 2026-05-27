@@ -451,17 +451,23 @@ test_docker_build_smoke_shim_rejects_unknown_subcommand() {
 # lib/* surfaces immediately.
 #
 # Synthetic regression: inject an SC2034 ("unused variable") violation
-# into scripts/lib/local-dns.sh — a fresh top-level `_warp_486_unused="x"`
-# line. With the global SC2034 exclude in place the check would
-# (incorrectly) PASS; once the exclude is removed the check correctly
-# FAILS. Restore via `git checkout --` on RETURN.
+# into scripts/lib/local-dns.sh — a fresh top-level `WARP_486_TEST_UNUSED="x"`
+# line (all-caps; the inline comment in the test body explains why a
+# leading underscore would NOT trigger SC2034). With the global SC2034
+# exclude in place the check would (incorrectly) PASS; once the exclude
+# is removed the check correctly FAILS. Restore via `git checkout --`
+# on RETURN.
 #
 # Note on test target: we deliberately re-use scripts/lib/local-dns.sh
-# (already exercised by test_shellcheck_catches_local_outside_function)
-# so we don't introduce a new file dependency. The mutation site (top of
-# file, after shebang) is distinct from the SC2168 test's mutation site,
-# so the two tests don't interfere when run back-to-back via the trap
-# restore.
+# (already exercised by test_shellcheck_catches_local_outside_function).
+# These two tests run sequentially against the same file and rely on the
+# per-test RETURN trap (`git checkout -- "$target_rel"`) to restore
+# scripts/lib/local-dns.sh between runs. If the first test's trap fails
+# to fire (signal interrupt, git lock contention, etc.) the second
+# test's `refusing to mutate` guard will trip and the test will fail
+# loudly rather than silently re-mutate a dirty file — but the coupling
+# is real. Future SC2024 / SC2155 regression tests SHOULD target a
+# distinct file in scripts/lib/ to avoid this dependency entirely.
 test_shellcheck_catches_new_sc2034_violation() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
