@@ -141,6 +141,14 @@ const chatRequestSchema = z.object({
   // shows up in the customer's /chat history sidebar — confusing
   // first-run UX (their oldest conversation is the wizard's probe).
   ephemeral: z.boolean().optional().default(false),
+  // WARP-458 — emit `{type:"reasoning_step", text}` blocks on the
+  // SSE wire BEFORE any content_delta on the same turn. Defaults to
+  // `false` so existing clients (legacy dashboard, voice-io) see no
+  // wire-shape change. The orchestrator ALWAYS parses + persists the
+  // trace to `ChatMessage.reasoning` regardless of this flag — the
+  // flag gates EMISSION, not PERSISTENCE — so the dashboard can
+  // lazy-load reasoning on demand without re-running the turn.
+  captureReasoning: z.boolean().optional().default(false),
 });
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
@@ -555,13 +563,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
             toolCallContext,
+            captureReasoning: chatReq.captureReasoning,
           });
           // WARP-458 — the agent loop populates message.reasoning
-          // REGARDLESS of the (future) captureReasoning flag (only
-          // the wire-emit is gated). Capture it here so
-          // finalizeAndNotify persists. The Zod-schema captureReasoning
-          // flag lands in a follow-up commit (chunk 4); for now the
-          // parse+persist path runs unconditionally.
+          // REGARDLESS of captureReasoning (only the wire-emit is
+          // gated by the flag). Capture it here so finalizeAndNotify
+          // persists, enabling lazy-load reasoning on rehydrate
+          // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
           terminal = "failed";
@@ -586,6 +594,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
           toolCallContext,
+          captureReasoning: chatReq.captureReasoning,
         });
         liveAssistantContent = result.message.content;
         // WARP-458 — agent loop populates message.reasoning regardless
