@@ -434,7 +434,14 @@ services:
     # SWITCH_PASSWORD: a `${SWITCH_PASSWORD:-}` interpolation here would
     # override the env_file value with "" whenever compose's own env
     # doesn't see the var (compose runs from docker/ — root .env not
-    # auto-discovered). Same logic for SERVICE_SECRET / DEVICE_SECRET_KEY.
+    # auto-discovered).
+    #
+    # SERVICE_SECRET is the one exception: services/switch/main.py reads
+    # SERVICE_SECRET (not DEVICE_SECRET_KEY), and .env only carries the
+    # latter. The `:?` form fails compose loudly if DEVICE_SECRET_KEY
+    # is unset in compose's interpolation env (compose.sh always invokes
+    # with --env-file ../.env, so the value resolves). Per handbook
+    # security-rules §1: fail-closed for secrets — never default to "".
     env_file:
       - path: ../.env
         required: false
@@ -443,6 +450,7 @@ services:
       - SWITCH_PORT=${SWITCH_PORT:-443}
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
+      - SERVICE_SECRET=${DEVICE_SECRET_KEY:?DEVICE_SECRET_KEY must be set in .env (run scripts/setup.sh)}
       - PORT=8081
     profiles: ["full"]
     restart: always
