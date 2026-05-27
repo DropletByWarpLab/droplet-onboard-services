@@ -740,6 +740,74 @@ test_tsc_full_uses_workspace_pinned_prisma() {
 }
 
 # =============================================================================
+# Test: stale-repo-names catches a re-introduced legacy repo name (WARP-494)
+# =============================================================================
+#
+# Bug class this guards (WARP-494): user-facing surfaces (README, service
+# READMEs, TESTING.md files, code comments, top-level scripts/*.sh) keep
+# accumulating references to the LEGACY GitHub repo names
+# `inference-engine` and `droplet-jetson-ai` — both renamed to
+# `droplet-local-LLM` on the canonical remote. The redirects still work,
+# but every stale ref drifts the documentation away from the canonical
+# name we put on a customer-facing doc surface, so a code-comment audit
+# eventually has to swing through and clean them up. WARP-494 makes that
+# a static check that fails the gate on re-introduction.
+#
+# Note: this check covers the LEGACY repo names only. The sibling rename
+# `droplet-pi-platform` → `droplet-onboard-services` is intentionally
+# excluded from the check until the compose project-name + container-
+# name labels (`droplet-pi-platform-voice-io-1`, etc.) are renamed in a
+# coordinated PR — those are real string identifiers the running stack
+# depends on, not documentation drift. See ticket scope for the
+# exempted call sites.
+#
+# Synthetic regression: inject `inference-engine` into README.md (a
+# covered surface that the unmutated tree has already been swept clean
+# of), assert the stale-repo-names check FAILS, restore via
+# `git checkout --` on RETURN. The injection point is the architecture-
+# note line which already mentions related repos, so the regression
+# reads like the real bug class (a developer adding a "see related
+# repo" reference and reaching for the old name out of habit).
+test_stale_repo_names_catches_inference_engine_reintro() {
+  local readme_rel="README.md"
+  local readme="$REPO_ROOT_REAL/$readme_rel"
+
+  if [ ! -f "$readme" ]; then
+    printf "    README missing: %s\n" "$readme" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$readme_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$readme_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$readme_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: passes on the unmutated tree (commit 3 of WARP-494 sweeps
+  #    the 9 active-bug refs out of README + the rest of the covered
+  #    surfaces). If this baseline fails, the sweep regressed.
+  if ! _assert_check_passes "$REPO_ROOT_REAL" stale-repo-names; then
+    printf "    baseline stale-repo-names failed against unmodified real repo\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: append a fresh `inference-engine` reference at
+  #    the bottom of README. Newline-prefixed so we don't fuse with the
+  #    trailing line.
+  printf '\n<!-- WARP-494 test mutation: do not commit. inference-engine -->\n' >> "$readme"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$readme_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — README unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. stale-repo-names should now FAIL — the surface walk + grep should
+  #    catch the injected `inference-engine` token against the allowlist.
+  _assert_check_fails "$REPO_ROOT_REAL" stale-repo-names
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -772,6 +840,9 @@ _run_test "exec-bits catches chmod-stripped tracked script" \
 
 _run_test "exec-bits catches chmod-stripped tracked script in openwrt/scripts/" \
   test_exec_bits_catches_chmod_stripped_openwrt
+
+_run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)" \
+  test_stale_repo_names_catches_inference_engine_reintro
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
