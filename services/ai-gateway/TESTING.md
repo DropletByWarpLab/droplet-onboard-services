@@ -94,11 +94,26 @@ When you have access to a Jetson device (physical or remote):
    JETSON_OLLAMA_URL=http://<jetson-ip>:11434 python -m uvicorn main:app --reload
    ```
 
-3. Pull models:
+3. Ensure the model is provisioned on the appliance. Model lifecycle is
+   owned by the `ollama-manager` sidecar (`:8002`) in the
+   [`droplet-jetson-ai`](https://github.com/DropletByWarpLab/droplet-jetson-ai)
+   repo, not a manual `pull` script in this repo. The canonical path is:
+
    ```bash
-   cd inference-engine
-   ./scripts/pull-models.sh http://<jetson-ip>:11434
+   # On the Jetson — idempotent sync against models/model-manifest.json
+   curl -X POST http://<jetson-ip>:8002/models/sync
    ```
+
+   See `droplet-jetson-ai/services/ollama-manager/` for the full
+   `/models/*` API. To add a new model the appliance can serve, edit
+   `droplet-jetson-ai/models/model-manifest.json` and re-run
+   `/models/sync` — no code changes in either repo.
+
+   > **One Model Rule.** Do NOT `ollama pull` a different model from
+   > the host or change `LLM_MODEL` to swap models at runtime — voice +
+   > dashboard + every agent loop runs on the single configured model.
+   > See [CLAUDE.md](../../CLAUDE.md) and
+   > `docs/agentic-workflows.md` for the rationale.
 
 ### Option B: SSH tunnel to remote Jetson
 
