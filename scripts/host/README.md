@@ -1,15 +1,25 @@
-# scripts/host/ — captured PoC box state (Phase 0)
+# scripts/host/ — captured single-box host state (Phase 0)
 
 This directory is a **read-only capture** of files that exist on the live
-single-box PoC at `192.168.1.87` (`droplet-sys`) but are NOT yet declared
-anywhere in this repo. Captured 2026-05-24 from the running box on branch
-`feat/poc-single-box-rebuild`.
+single-box deployment at `192.168.1.87` (`droplet-sys`) but are NOT yet
+declared anywhere in this repo. Captured 2026-05-24 from the running box on
+branch `feat/poc-single-box-rebuild`.
 
 > **Phase 0 is CAPTURE ONLY.** Nothing here is wired into `setup.sh` or
 > the compose stack yet — these are reference copies so a future
-> rebuild-from-scratch doesn't strip away the PoC's hand-built integrations.
-> Phase 1 will design how these get installed cleanly (`setup.sh` flag,
+> rebuild-from-scratch doesn't strip away the box's hand-built integrations.
+> Phase 1 designs how these get installed cleanly (`setup.sh` flag,
 > profile, ADR on which parts belong in compose vs systemd).
+
+## Filename conventions
+
+| Prefix | Meaning |
+|---|---|
+| `_*.md` | **Point-in-time snapshot, may be stale.** `_box-snapshot-2026-05-24.md` and `_uncommitted-on-box.md` are dated captures of the box at the moment they were written. Their contents drift the instant the live box is touched; treat them as archaeological reference, not current state. |
+| (no underscore) | Active files / docs that should track the repo. Edit normally. |
+
+If you add a new dated snapshot to this directory, prefix it with `_` so future
+readers don't mistake it for current state.
 
 ## Why this exists
 
