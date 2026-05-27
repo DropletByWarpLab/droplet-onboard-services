@@ -7,8 +7,8 @@
  * deployment relies on.
  */
 
-import { describe, it, expect, beforeEach, afterEach, beforeAll } from "vitest";
-import { mkdtemp, readFile, stat, rm } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from "vitest";
+import { mkdtemp, mkdir, writeFile, readFile, stat, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -201,5 +201,226 @@ describe("brain-memory.service", () => {
       "ghost-user",
     );
     expect(result).toEqual({ items: 0, chunks: 0 });
+  });
+});
+
+// ── WARP-488 ──
+// Boot-time migrator that renames username-keyed per-user dirs to
+// UUID-keyed dirs after WARP-485's auth-id normalization. The pre-WARP-485
+// OCS fallback stored req.user.id as the Nextcloud username string, and
+// any item uploaded under that session landed in BRAIN_ROOT/<username>/.
+// Post-WARP-485 req.user.id is the local User.id UUID, so old dirs are
+// orphaned. This migrator looks up User.nextcloudUsername to resolve the
+// rename target and uses fs.renameSync (atomic on the same filesystem) so
+// inodes are preserved.
+describe("brain-memory migrateBrainMemoryDirectoryLayout (WARP-488)", () => {
+  // Use a sibling tempdir so we don't fight the suite-wide beforeEach that
+  // wipes the outer tmpRoot. We mint and tear down our own dir per case.
+  let migRoot: string;
+
+  beforeEach(async () => {
+    migRoot = await mkdtemp(join(tmpdir(), "brain-memory-migrate-"));
+  });
+
+  afterEach(async () => {
+    await rm(migRoot, { recursive: true, force: true });
+  });
+
+  // Minimal Prisma stub. The migrator only calls user.findUnique with
+  // `{ where: { nextcloudUsername } }`; everything else can throw.
+  function makePrisma(
+    rows: { id: string; nextcloudUsername: string }[],
+  ): import("@prisma/client").PrismaClient {
+    return {
+      user: {
+        findUnique: vi.fn(
+          async ({ where }: { where: { nextcloudUsername: string } }) => {
+            return (
+              rows.find((r) => r.nextcloudUsername === where.nextcloudUsername) ??
+              null
+            );
+          },
+        ),
+      },
+    } as unknown as import("@prisma/client").PrismaClient;
+  }
+
+  it("renames a username-keyed dir to its matching UUID", async () => {
+    // Seed: BRAIN_ROOT/stefan-cruceru/item-1/original.pdf
+    const username = "stefan-cruceru";
+    const uuid = "11111111-2222-3333-4444-555555555555";
+    await mkdir(join(migRoot, username, "item-1"), { recursive: true });
+    await writeFile(join(migRoot, username, "item-1", "original.pdf"), "x");
+
+    const prisma = makePrisma([{ id: uuid, nextcloudUsername: username }]);
+
+    const result = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+
+    expect(result.renamed).toBe(1);
+    expect(result.skippedUuid).toBe(0);
+    expect(result.orphans).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+
+    // Old name gone, new UUID name present with bytes intact.
+    const oldGone = await stat(join(migRoot, username)).catch(() => null);
+    expect(oldGone).toBeNull();
+    const newDir = await stat(join(migRoot, uuid));
+    expect(newDir.isDirectory()).toBe(true);
+    const bytes = await readFile(
+      join(migRoot, uuid, "item-1", "original.pdf"),
+      "utf8",
+    );
+    expect(bytes).toBe("x");
+  });
+
+  it("is idempotent — UUID-named dirs are skipped, second run is a no-op", async () => {
+    const uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    await mkdir(join(migRoot, uuid, "item-1"), { recursive: true });
+
+    const prisma = makePrisma([]); // No user lookups should fire.
+
+    const r1 = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+    expect(r1.renamed).toBe(0);
+    expect(r1.skippedUuid).toBe(1);
+    expect(r1.orphans).toEqual([]);
+
+    // Lookup must not have been called — dir is already a UUID.
+    expect(
+      (prisma.user.findUnique as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBe(0);
+
+    const r2 = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+    expect(r2.renamed).toBe(0);
+    expect(r2.skippedUuid).toBe(1);
+  });
+
+  it("logs orphan (username with no matching User) and leaves dir untouched", async () => {
+    const orphan = "ghost-user";
+    await mkdir(join(migRoot, orphan, "item-x"), { recursive: true });
+
+    const prisma = makePrisma([]); // No matching User row.
+
+    const result = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+
+    expect(result.renamed).toBe(0);
+    expect(result.orphans).toEqual([orphan]);
+
+    // Dir still in place.
+    const stillThere = await stat(join(migRoot, orphan));
+    expect(stillThere.isDirectory()).toBe(true);
+  });
+
+  it("logs conflict and skips when BOTH username dir AND UUID dir exist (no overwrite)", async () => {
+    // Data-loss scenario: rename would clobber an existing UUID-named dir.
+    // The migrator MUST skip, log, and let the operator resolve manually.
+    const username = "stefan-cruceru";
+    const uuid = "11111111-2222-3333-4444-555555555555";
+    await mkdir(join(migRoot, username, "old-item"), { recursive: true });
+    await writeFile(join(migRoot, username, "old-item", "x.txt"), "old");
+    await mkdir(join(migRoot, uuid, "new-item"), { recursive: true });
+    await writeFile(join(migRoot, uuid, "new-item", "y.txt"), "new");
+
+    const prisma = makePrisma([{ id: uuid, nextcloudUsername: username }]);
+
+    const result = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+
+    expect(result.renamed).toBe(0);
+    expect(result.conflicts).toEqual([
+      { username, uuid, reason: "uuid_dir_exists" },
+    ]);
+
+    // BOTH dirs still in place with original contents.
+    const oldStill = await readFile(
+      join(migRoot, username, "old-item", "x.txt"),
+      "utf8",
+    );
+    expect(oldStill).toBe("old");
+    const newStill = await readFile(
+      join(migRoot, uuid, "new-item", "y.txt"),
+      "utf8",
+    );
+    expect(newStill).toBe("new");
+  });
+
+  it("is safe on an empty BRAIN_ROOT (no entries → zero work)", async () => {
+    const prisma = makePrisma([]);
+    const result = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+    expect(result).toEqual({
+      renamed: 0,
+      skippedUuid: 0,
+      orphans: [],
+      conflicts: [],
+    });
+  });
+
+  it("ignores non-directory entries at the BRAIN_ROOT level", async () => {
+    // A stray file at the root (e.g. .DS_Store, or a manifest the operator
+    // copied in) MUST NOT trip the migrator. Only top-level directories
+    // are candidate per-user trees.
+    await writeFile(join(migRoot, ".DS_Store"), "");
+    await mkdir(join(migRoot, "stefan-cruceru", "item-1"), {
+      recursive: true,
+    });
+
+    const uuid = "33333333-4444-5555-6666-777777777777";
+    const prisma = makePrisma([
+      { id: uuid, nextcloudUsername: "stefan-cruceru" },
+    ]);
+
+    const result = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+    expect(result.renamed).toBe(1);
+    expect(result.orphans).toEqual([]);
+
+    // Stray file untouched at root.
+    const stray = await stat(join(migRoot, ".DS_Store"));
+    expect(stray.isFile()).toBe(true);
+
+    // Migrated dir present, old gone.
+    const newDir = await stat(join(migRoot, uuid));
+    expect(newDir.isDirectory()).toBe(true);
+    const oldGone = await stat(join(migRoot, "stefan-cruceru")).catch(
+      () => null,
+    );
+    expect(oldGone).toBeNull();
+  });
+
+  it("processes multiple users in one pass — renames each independently", async () => {
+    await mkdir(join(migRoot, "alice", "i1"), { recursive: true });
+    await mkdir(join(migRoot, "bob", "i2"), { recursive: true });
+    await mkdir(join(migRoot, "ghost", "i3"), { recursive: true });
+    const aliceUuid = "aaaaaaaa-1111-1111-1111-111111111111";
+    const bobUuid = "bbbbbbbb-2222-2222-2222-222222222222";
+
+    const prisma = makePrisma([
+      { id: aliceUuid, nextcloudUsername: "alice" },
+      { id: bobUuid, nextcloudUsername: "bob" },
+      // No row for "ghost" → orphan.
+    ]);
+
+    const result = await svc.migrateBrainMemoryDirectoryLayout(prisma, migRoot);
+    expect(result.renamed).toBe(2);
+    expect(result.orphans).toEqual(["ghost"]);
+
+    const entries = await readdir(migRoot);
+    entries.sort();
+    expect(entries).toEqual([aliceUuid, bobUuid, "ghost"].sort());
+  });
+
+  it("is safe when BRAIN_ROOT itself does not exist (missing tmpdir)", async () => {
+    // Operator runs the orchestrator before any brain-memory item has
+    // ever been written → the bind-mount target may not exist yet. The
+    // migrator must succeed cleanly and report zero work.
+    const missingRoot = join(migRoot, "does", "not", "exist");
+    const prisma = makePrisma([]);
+    const result = await svc.migrateBrainMemoryDirectoryLayout(
+      prisma,
+      missingRoot,
+    );
+    expect(result).toEqual({
+      renamed: 0,
+      skippedUuid: 0,
+      orphans: [],
+      conflicts: [],
+    });
   });
 });
