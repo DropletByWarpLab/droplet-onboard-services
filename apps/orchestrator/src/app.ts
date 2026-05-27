@@ -41,6 +41,7 @@ import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { createModelsRouter } from "./routes/models.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -149,6 +150,7 @@ export function createApp(prisma: PrismaClient) {
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+
   // WARP-466 (D2): wire the §2.4 analysis endpoint to the agent loop.
   // Single fn override at module level so createEmailRouter keeps its
   // existing (prisma, gate) signature. Tests can call wireEmailAnalysis
@@ -207,6 +209,9 @@ export function createApp(prisma: PrismaClient) {
     },
   };
   app.use("/api", createToolsRouter(prisma, toolStepDispatcher));
+
+  // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
+  app.use("/api", createModelsRouter());
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
