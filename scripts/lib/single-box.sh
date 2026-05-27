@@ -65,13 +65,27 @@ detect_single_box_mode() {
   # succeed without there being a real Jetson on the LAN. The curl below is
   # the authoritative check: an Ollama instance answering /api/version means
   # we're multi-box, anything else means we're not.
+  #
+  # The body grep for `"version":` defends against something unrelated
+  # squatting on 192.168.50.197:11434 with a 200 response (rare but not
+  # impossible on a noisy LAN). Ollama always returns a JSON object that
+  # includes the `"version"` key.
+  #
+  # The CI / DROPLET_SKIP_NETWORK_PROBE escape hatch lets dev re-runs of
+  # the script skip the two 2-second curl probes (≤4 s added latency on
+  # every fresh install). Real provisions still do the probe.
   local jetson_reachable=0
-  if command -v curl >/dev/null 2>&1; then
+  local skip_probe=0
+  if [ -n "${CI:-}" ] || [ -n "${DROPLET_SKIP_NETWORK_PROBE:-}" ]; then
+    skip_probe=1
+  fi
+  if [ "$skip_probe" = 0 ] && command -v curl >/dev/null 2>&1; then
     # Try the documented static IP first, then the mDNS name. Both need a
-    # real /api/version response; a name that resolves to a dead IP fails
-    # the curl and correctly stays at jetson_reachable=0.
-    if curl -fsS -m 2 http://192.168.50.197:11434/api/version >/dev/null 2>&1 \
-       || curl -fsS -m 2 http://inference-engine.local:11434/api/version >/dev/null 2>&1; then
+    # real /api/version response with the expected JSON body; a name that
+    # resolves to a dead IP fails the curl, and an unrelated 200-responder
+    # fails the body grep.
+    if curl -fsS -m 2 http://192.168.50.197:11434/api/version 2>/dev/null | grep -q '"version":' \
+       || curl -fsS -m 2 http://inference-engine.local:11434/api/version 2>/dev/null | grep -q '"version":'; then
       jetson_reachable=1
     fi
   fi
