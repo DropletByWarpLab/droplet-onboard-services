@@ -56,22 +56,30 @@ def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _ensure_dirs() -> None:
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_dirs(target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
 
 
-def run_once() -> Path:
+def run_once(target_dir: Path | None = None) -> Path:
     """Execute one RAGAS pass. Returns the results.json path.
+
+    target_dir:
+      Directory to write results-<stamp>.{json,md} into. Defaults to
+      RUNS_DIR (the scheduler's canonical directory). The bootstrap
+      flow passes its own per-bootstrap subdir so the aggregator only
+      sees the runs that bootstrap just produced — never the rolling
+      history written by the hourly scheduler.
 
     Raises:
       subprocess.CalledProcessError: ragas_runner.py exited non-zero.
-        The scheduler logs + swallows; the failure surfaces in
-        /data/rag-eval/runs/ as a missing slot.
+        The scheduler logs + swallows; the failure surfaces in the
+        target directory as a missing slot.
     """
-    _ensure_dirs()
+    target = target_dir if target_dir is not None else RUNS_DIR
+    _ensure_dirs(target)
     stamp = _utc_stamp()
-    out_json = RUNS_DIR / f"results-{stamp}.json"
-    out_md = RUNS_DIR / f"results-{stamp}.md"
+    out_json = target / f"results-{stamp}.json"
+    out_md = target / f"results-{stamp}.md"
 
     cmd = [
         sys.executable,
@@ -97,16 +105,24 @@ def run_once() -> Path:
     return out_json
 
 
-def aggregate_to_baselines(out_path: Path) -> Path:
-    """Roll all results-*.json in RUNS_DIR into a baselines.json at out_path."""
+def aggregate_to_baselines(
+    out_path: Path, results_dir: Path | None = None
+) -> Path:
+    """Roll all results-*.json in `results_dir` into a baselines.json
+    at `out_path`. Defaults `results_dir` to RUNS_DIR for ad-hoc use,
+    but the bootstrap flow passes its own subdir so the aggregation is
+    scoped strictly to the runs it just produced — see WARP-RAG-EVAL
+    review #1.
+    """
+    src = results_dir if results_dir is not None else RUNS_DIR
     cmd = [
         sys.executable,
         str(RUNNER_SCRIPT),
         "aggregate",
-        "--results-dir", str(RUNS_DIR),
-        "--out", str(out_path),
+        "--results-dir", str(src),
+        "--out-baselines", str(out_path),
         "--judge", RAGAS_JUDGE,
     ]
-    logger.info("aggregating runs → %s", out_path)
+    logger.info("aggregating runs in %s → %s", src, out_path)
     subprocess.run(cmd, check=True)
     return out_path

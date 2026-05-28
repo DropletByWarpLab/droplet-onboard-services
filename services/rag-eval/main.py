@@ -52,10 +52,22 @@ def cmd_schedule() -> int:
         return 0
 
     sched = scheduler_service.build_scheduler()
+    # Apscheduler raises SchedulerNotRunningError if `shutdown()` is
+    # called when the scheduler isn't running. Both the signal handler
+    # and the KeyboardInterrupt branch below would otherwise call it
+    # back-to-back on Ctrl-C; guard with a small flag.
+    shutdown_done = False
+
+    def _safe_shutdown() -> None:
+        nonlocal shutdown_done
+        if shutdown_done:
+            return
+        shutdown_done = True
+        sched.shutdown(wait=True)
 
     def _on_signal(signum: int, _frame: object) -> None:
         logger.info("received signal %d — shutting scheduler down", signum)
-        sched.shutdown(wait=True)
+        _safe_shutdown()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -64,7 +76,7 @@ def cmd_schedule() -> int:
     try:
         sched.start()  # blocks until shutdown
     except (KeyboardInterrupt, SystemExit):
-        sched.shutdown(wait=True)
+        _safe_shutdown()
     return 0
 
 
@@ -83,12 +95,22 @@ def cmd_bootstrap(n_runs: int) -> int:
     if n_runs < 1:
         logger.error("bootstrap requires --runs >= 1, got %d", n_runs)
         return 2
-    logger.info("bootstrap: running RAGAS %d× then aggregating", n_runs)
+    # Isolated per-bootstrap subdir so we never roll the rolling-history
+    # results-*.json files written by the scheduler into the aggregator.
+    # Without this, `bootstrap --runs 5` after a few days of cron runs
+    # would silently include dozens of stale runs in baselines.json.
+    bootstrap_stamp = runner._utc_stamp()
+    bootstrap_dir = RESULTS_DIR / f"bootstrap-{bootstrap_stamp}"
+    logger.info(
+        "bootstrap: running RAGAS %d× into %s then aggregating",
+        n_runs,
+        bootstrap_dir,
+    )
     failures = 0
     for i in range(1, n_runs + 1):
         logger.info("bootstrap run %d / %d", i, n_runs)
         try:
-            runner.run_once()
+            runner.run_once(target_dir=bootstrap_dir)
         except Exception:
             failures += 1
             logger.exception("bootstrap run %d failed", i)
@@ -97,15 +119,17 @@ def cmd_bootstrap(n_runs: int) -> int:
         return 1
     out_path = RESULTS_DIR / "baselines.candidate.json"
     try:
-        runner.aggregate_to_baselines(out_path)
+        runner.aggregate_to_baselines(out_path, results_dir=bootstrap_dir)
     except Exception:
         logger.exception("aggregate step failed")
         return 1
     logger.info(
-        "bootstrap complete — %d/%d runs successful, baselines at %s",
+        "bootstrap complete — %d/%d runs successful, baselines at %s "
+        "(per-run artifacts at %s)",
         n_runs - failures,
         n_runs,
         out_path,
+        bootstrap_dir,
     )
     return 0
 

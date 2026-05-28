@@ -29,10 +29,14 @@ GPU-bound and adds nothing for end users.)
    with cron `hour=$RAG_EVAL_CRON_HOUR minute=$RAG_EVAL_CRON_MINUTE` in
    the container's local timezone.
 2. Each tick: spawns a subprocess for `ragas_runner.py` baked into the
-   image at `/opt/rag-eval/ragas_runner.py`. The subprocess hits the
-   orchestrator's `/api/admin/retrieval-eval/search` for each query,
-   synthesizes answers, scores via the judge LLM, and writes
-   `/data/rag-eval/runs/results-<UTC>.json` + `.md`.
+   image at `/opt/rag-eval/tests/retrieval-eval/ragas/ragas_runner.py`.
+   The runner sits at this exact repo-tree-shaped path so its own
+   `Path(__file__).resolve().parents[3]` repo-root lookup resolves
+   to `/opt/rag-eval/` and the sibling `queries.yaml` + `goldens.yaml`
+   load with no patching — same invocation as the offline docs. The
+   subprocess hits the orchestrator's `/api/admin/retrieval-eval/search`
+   for each query, synthesizes answers, scores via the judge LLM, and
+   writes `/data/rag-eval/runs/results-<UTC>.json` + `.md`.
 3. Per-run output is isolated under `/data/rag-eval/runs/`. The
    container never deletes old runs — operator sweeps `runs/` when the
    volume grows uncomfortably.

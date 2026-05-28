@@ -525,16 +525,24 @@ def main() -> int:
         type=Path,
         help="Directory containing results-*.json files (one per RAGAS run).",
     )
+    # Deliberately named --out-baselines (not --out) so it doesn't
+    # collide with the top-level parser's --out flag for the default
+    # run-mode. argparse silently lets you redefine the same dest at
+    # both levels but the resolution order is fragile — explicit
+    # names rule it out.
     agg.add_argument(
-        "--out",
+        "--out-baselines",
         required=True,
         type=Path,
+        dest="out_baselines",
         help="Output baselines.json path.",
     )
+    # Same anti-collision reasoning for the judge label.
     agg.add_argument(
         "--judge",
         choices=["local", "cloud"],
         default=os.environ.get("RAGAS_JUDGE", "local"),
+        dest="aggregate_judge",
         help="Judge LLM mode label to record in the baselines (default: local).",
     )
 
@@ -576,7 +584,9 @@ def main() -> int:
 
     # WARP-436 batch D bootstrap path: aggregate subcommand short-circuits
     # before the run-mode arg resolution so it can be invoked without
-    # --variant / --api-url / etc.
+    # --variant / --api-url / etc. Subparser uses distinct `dest`s
+    # (out_baselines, aggregate_judge) to avoid colliding with the
+    # top-level run-mode flags.
     if args.command == "aggregate":
         results_dir = (
             args.results_dir
@@ -584,10 +594,14 @@ def main() -> int:
             else Path.cwd() / args.results_dir
         )
         out_path = (
-            args.out if args.out.is_absolute() else Path.cwd() / args.out
+            args.out_baselines
+            if args.out_baselines.is_absolute()
+            else Path.cwd() / args.out_baselines
         )
         return aggregate_runs(
-            results_dir=results_dir, out_path=out_path, judge=args.judge
+            results_dir=results_dir,
+            out_path=out_path,
+            judge=args.aggregate_judge,
         )
 
     # Repo root = three parents up from this file

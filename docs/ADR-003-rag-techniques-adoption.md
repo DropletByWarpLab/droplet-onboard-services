@@ -145,7 +145,7 @@ Each step row carries:
 | 2.3 | Implement `ragas_runner.py`: load goldens, call orchestrator's `/api/admin/retrieval-eval/search` for each query, build a `Dataset`, run `evaluate(..., metrics=[Faithfulness, LLMContextRecall, LLMContextPrecision, AnswerRelevancy, FactualCorrectness], llm=local_llm)`. Emit JSON + Markdown summary. | `tests/retrieval-eval/ragas/ragas_runner.py` | 2.1, 2.2 | B |
 | 2.4 | Add `RAGAS_ENABLED=1` mode to `tests/retrieval-eval/run.integration.test.ts` that shells out to `ragas_runner.py` and asserts threshold envelopes (set in 2.7). | `tests/retrieval-eval/run.integration.test.ts` | 2.3 | C |
 | 2.5 | Add `--with-ragas` flag + `RAGAS_JUDGE={local\|cloud}` env handling to `scripts/test-rag.sh`. Default judge: local Ollama. Cloud judge requires explicit env var. | `scripts/test-rag.sh` | 2.3 | C |
-| 2.6 | Add nightly GitHub Actions job that runs `RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas` on the appliance test runner. PR CI stays NDCG-only (RAGAS too slow per-PR). | `.github/workflows/rag-eval-nightly.yml` (new) | 2.5 | C |
+| 2.6 | Run RAGAS on a schedule via an on-appliance service (`services/rag-eval/`, opt-in via Compose profile `eval`), invoking `ragas_runner.py` against the running stack — not via GitHub Actions (project convention: GHA is for dev tasks, not on-machine functionality). PR CI stays NDCG-only (RAGAS too slow per-PR; the appliance cadence is hourly off-hours). | `services/rag-eval/` (new) | 2.5 | C |
 | 2.7 | Run baselines 5×, record p50/p95 per metric, set thresholds at `baseline_p50 - 1.5 × IQR` as the regression envelope. Commit baselines to `tests/retrieval-eval/ragas/baselines.json`. | `tests/retrieval-eval/ragas/baselines.json` | 2.4 | D |
 | 2.8 | Document RAGAS metrics + judge-LLM policy + threshold rationale in a new `## RAGAS metrics` section of `docs/RAG_TESTING.md`. | `docs/RAG_TESTING.md` | 2.7 | E |
 
@@ -322,7 +322,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 ### M-RAG.2 RAGAS eval harness (Phase 2 of ADR-003)
 - **Scope:** Faithfulness / context-relevance / answer-correctness metrics.
 - **Framework:** ragas==0.4.x with native Ollama via OpenAI-compat.
-- **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh, .github/workflows/rag-eval-nightly.yml
+- **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh, services/rag-eval/
 - **Status:** [ ] Not started
 - **Eval gate:** Baselines established; thresholds set for M-RAG.3+.
 - **Ticket:** WARP-RAG.2
