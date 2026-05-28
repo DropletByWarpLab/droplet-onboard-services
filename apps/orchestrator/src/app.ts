@@ -36,7 +36,9 @@ import { createPeopleRouter } from "./routes/people.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
+import { createToolsRouter } from "./routes/tools.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -169,6 +171,30 @@ export function createApp(prisma: PrismaClient) {
       },
     }),
   );
+
+  // WARP-462 (C1): productized ToolSpec registry — CRUD + imperative
+  // run-now. The dispatcher uses the singleton MCP client so specs
+  // dispatch the same registry as chat tool calls. The walker halts
+  // on the first failure; per-step trace returned to the caller.
+  const toolStepDispatcher: StepDispatcher = {
+    async call(tool, args) {
+      const result = await mcpClient.callTool(tool, args);
+      if (result.isError) {
+        const detail = result.content?.[0]?.text ?? "tool reported error";
+        throw new Error(typeof detail === "string" ? detail : String(detail));
+      }
+      const text = result.content?.[0]?.text;
+      if (typeof text === "string" && text.length > 0) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { raw: text };
+        }
+      }
+      return null;
+    },
+  };
+  app.use("/api", createToolsRouter(prisma, toolStepDispatcher));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
