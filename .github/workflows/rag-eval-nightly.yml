@@ -1,31 +1,58 @@
 name: rag-eval-nightly
 
-# WARP-436 — RAGAS eval harness, run nightly + on demand.
+# WARP-436 + WARP-437 follow-up — RAGAS eval harness on the self-hosted
+# GPU box.
 #
-# Two reasons this lives in its own workflow rather than tagging onto
-# rag-tests.yml:
-#   1. RAGAS calls a judge LLM per metric per query. With 20 queries
-#      and 5 metrics that's 100 judge calls per run; on local Ollama
-#      it's slow, on cloud judges it costs money. PR CI must stay on
-#      the cheaper NDCG@10 lane.
-#   2. The nightly schedule lets us track metric drift over time
-#      independently of PR throughput.
+# Why this workflow exists separately from rag-tests.yml:
+#   1. RAGAS calls a judge LLM per metric per query. With 65 queries
+#      and 5 metrics that's 325 judge calls per run; even with a warm
+#      GPU and Ollama already running, that's the slow leg of the
+#      eval lane and we don't want it gating PRs.
+#   2. The schedule lets us track metric drift over time independently
+#      of PR throughput.
+#
+# Runner: the self-hosted GPU appliance test box. Ollama, the
+# embedder, and pgvector layers are already warm-cached on disk; the
+# Compose stack starts in ~1 min instead of the 15+ min GHA-hosted
+# cold boot. With the GPU doing the judge work, a single run lands
+# in ~10–15 min p95 (vs ~50 min on `ubuntu-latest`).
 #
 # Triggers:
-#   - schedule: 09:00 UTC daily (= 02:00 PT, off-peak)
-#   - workflow_dispatch: manual run before/after a Phase 3 or Phase 4
-#     change to compare against last night's baseline
+#   - schedule: hourly during off-business-hours (22:00–05:00 PT),
+#     8 data points per night. That cadence lets us collapse RAGAS
+#     metric variance via IQR-derived envelopes within a single
+#     night instead of needing a week of nightlies.
+#   - push to main with paths matching the RAG retrieval surface —
+#     real-time signal within ~15 min of merge.
+#   - workflow_dispatch: manual run before/after a notable retrieval
+#     change. With baseline_runs > 1 it also loops + aggregates the
+#     results into baselines.json in one shot (WARP-436 batch D).
 #
-# Judge LLM defaults to "local" (Ollama). To run with the cloud judge,
-# trigger workflow_dispatch and set the ragas_judge input to "cloud"
-# — requires the OPENAI_API_KEY secret to be configured at the repo
-# or org level.
+# Judge LLM defaults to "local" (Ollama on the appliance). To run with
+# the cloud judge (Claude/GPT-4o), trigger workflow_dispatch with
+# ragas_judge=cloud — requires OPENAI_API_KEY in secrets.
 
 on:
   schedule:
-    # Daily at 09:00 UTC. Picks up overnight regressions before the
-    # team's working day starts.
-    - cron: "0 9 * * *"
+    # Hourly during off-hours: 05:00–12:00 UTC = 22:00–05:00 PT (8 slots).
+    # If a run overruns its hour, the `concurrency:` block below skips
+    # the next slot rather than stacking — see cancel-in-progress: false.
+    - cron: "0 5-12 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "services/file-indexer/**"
+      - "services/ai-gateway/**"
+      - "services/mcp-server/src/file-search.service.ts"
+      - "apps/orchestrator/src/services/file-search.service.ts"
+      - "apps/orchestrator/src/services/query-enhancement.service.ts"
+      - "apps/orchestrator/src/services/query-classifier.client.ts"
+      - "apps/orchestrator/src/services/llm-agent.service.ts"
+      - "packages/tools-core/src/handlers/files/search-content.ts"
+      - "packages/tools-core/src/private-enhancement.ts"
+      - "tests/retrieval-eval/**"
+      - "proto/inference.proto"
+      - ".github/workflows/rag-eval-nightly.yml"
   workflow_dispatch:
     inputs:
       ragas_judge:
@@ -33,48 +60,62 @@ on:
         type: choice
         default: "local"
         options: ["local", "cloud"]
+      baseline_runs:
+        description: >
+          Number of sequential RAGAS runs to aggregate into
+          tests/retrieval-eval/ragas/baselines.json. Default 1 = single
+          run, no aggregation. Set to 5 to bootstrap fresh baselines
+          (WARP-436 batch D). Max 10.
+        type: string
+        default: "1"
 
+# Workflow-level concurrency. cancel-in-progress: false means an
+# overshooting hourly run does NOT clobber itself — the next hour's
+# cron skips instead. push-triggered runs and schedule-triggered runs
+# share the same lock so a merge during the off-hours window doesn't
+# stack on top of a cron run.
 concurrency:
-  group: rag-eval-nightly-${{ github.ref }}
-  cancel-in-progress: true
+  group: rag-eval-self-hosted
+  cancel-in-progress: false
 
 jobs:
-  rag-eval-nightly:
+  rag-eval:
     name: RAGAS eval suite
-    runs-on: ubuntu-latest
-    # Same envelope as rag-tests.yml (35 min) plus ~20 min for the RAGAS
-    # judge-LLM passes. Local-judge runs are CPU-bound on the Ollama
-    # warmup; expect p95 ~50 min on a cold runner.
-    timeout-minutes: 60
+    # Self-hosted GPU appliance test box. If the runner label drifts,
+    # update this single line. Same label is used by no other workflow
+    # today; if more lanes migrate here, give each its own group: in
+    # the concurrency block above.
+    runs-on: [self-hosted, linux, gpu]
+    # GPU + warm caches collapse a single run to ~10–15 min p95. The
+    # 60-min envelope holds for baseline_runs=5 (~5×12 ≈ 60 min) and
+    # leaves headroom for transient slowness.
+    timeout-minutes: ${{ fromJSON(inputs.baseline_runs || '1') > 1 && 180 || 60 }}
 
     env:
       RUN_RAG_INTEGRATION: "1"
       RAGAS_ENABLED: "1"
       RAGAS_JUDGE: ${{ inputs.ragas_judge || 'local' }}
       API_URL: http://localhost:3000
+      # baseline_runs is a string input; coerce + clamp below.
+      BASELINE_RUNS_RAW: ${{ inputs.baseline_runs || '1' }}
 
     steps:
       - uses: actions/checkout@v4
 
-      # Same disk reclamation as rag-tests.yml — Compose + Ollama push
-      # ubuntu-latest's 14 GB envelope hard.
-      - name: Free disk space
+      # Clamp baseline_runs to [1, 10] and export to subsequent steps.
+      # No coercion magic — explicit integer parse + clamp.
+      - name: Resolve baseline_runs
         run: |
-          set -eux
-          df -h /
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/powershell \
-            /usr/local/share/chromium \
-            /usr/local/share/boost \
-            "$AGENT_TOOLSDIRECTORY/Ruby" \
-            "$AGENT_TOOLSDIRECTORY/PyPy" \
-            || true
-          sudo apt-get clean
-          df -h /
+          set -euo pipefail
+          n="${BASELINE_RUNS_RAW:-1}"
+          if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+            echo "::error::baseline_runs must be an integer, got '$n'"
+            exit 1
+          fi
+          if [ "$n" -lt 1 ]; then n=1; fi
+          if [ "$n" -gt 10 ]; then n=10; fi
+          echo "BASELINE_RUNS=$n" >> "$GITHUB_ENV"
+          echo "Resolved baseline_runs=$n"
 
       - uses: actions/setup-node@v4
         with:
@@ -102,9 +143,6 @@ jobs:
       - name: Generate Prisma client
         run: npm run -w @droplet/orchestrator db:generate
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Generate .env (secrets only)
         run: ./scripts/setup.sh --skip-docker --skip-drivers --skip-start --verbose
 
@@ -118,26 +156,24 @@ jobs:
           fi
           grep -E '^AUTH_ENABLED=' .env
 
-      # Local judge needs Ollama + a chat model. Install a minimal
-      # Ollama and pull mistral:7b-instruct on the runner. Pin a
-      # specific Ollama version so behavior is reproducible across runs.
-      - name: Install Ollama (local judge)
+      # Sanity-check the local judge model is present on the box. Idempotent:
+      # `ollama pull` is a no-op fast check when the model is already cached.
+      # Fails the run loudly if the appliance's Ollama is unreachable or
+      # mistral:7b-instruct isn't installed — that's a box-maintenance issue
+      # and shouldn't be silently auto-installed in CI.
+      - name: Verify Ollama + mistral model present (local judge)
         if: env.RAGAS_JUDGE == 'local'
         run: |
-          set -eux
-          curl -fsSL https://ollama.com/install.sh | sh
-          # Start Ollama as a background process. The systemd unit the
-          # install script writes doesn't run on ubuntu-latest without
-          # extra setup, so just nohup it.
-          nohup ollama serve > /tmp/ollama.log 2>&1 &
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:11434/api/tags >/dev/null; then
-              echo "Ollama is up."
-              break
-            fi
-            sleep 1
-          done
+          set -euo pipefail
+          if ! curl -sf http://localhost:11434/api/tags >/dev/null; then
+            echo "::error::Ollama not reachable on host. Verify ollama systemd unit on the runner."
+            exit 1
+          fi
           ollama pull mistral:7b-instruct
+          ollama list | grep -E "^mistral:7b-instruct" || {
+            echo "::error::mistral:7b-instruct missing after pull"
+            exit 1
+          }
 
       - name: Compose up (RAG stack)
         run: |
@@ -194,8 +230,6 @@ jobs:
           echo "::error::Nextcloud never bootstrapped"
           exit 1
 
-      # Install the RAGAS deps once; the NDCG harness's beforeAll seeds
-      # fixtures, and the RAGAS test then runs against the same stack.
       - name: Install RAGAS deps
         run: |
           python -m venv tests/retrieval-eval/ragas/.ragas-venv
@@ -203,18 +237,45 @@ jobs:
           pip install --upgrade pip
           pip install -r tests/retrieval-eval/ragas/requirements.txt
 
-      - name: Run retrieval-eval (NDCG + RAGAS)
+      # Loop the RAGAS pass N times. For N=1 (cron / push triggers) the
+      # `for` runs once, mv's results.json → results-1.json, and the
+      # aggregate step writes a single-sample envelope. For N=5+ (manual
+      # baseline bootstrap) it loops, then aggregate computes p50 / p95 /
+      # IQR / floor across all runs.
+      - name: Run retrieval-eval (NDCG + RAGAS) — ${{ env.BASELINE_RUNS }}x
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         working-directory: tests
-        # tee runner stdout/stderr so the JSON+MD artifacts always have a
-        # paired log even when the test process is SIGKILL'd (e.g. timeout
-        # mid-judge). Without this, a runner crash leaves nothing to triage.
         run: |
           set -o pipefail
-          npx vitest run --no-file-parallelism \
-            retrieval-eval/run.integration.test.ts \
-            2>&1 | tee /tmp/ragas-runner.log
+          mkdir -p retrieval-eval/ragas/runs
+          for i in $(seq 1 "$BASELINE_RUNS"); do
+            echo "::group::RAGAS run $i of $BASELINE_RUNS"
+            npx vitest run --no-file-parallelism \
+              retrieval-eval/run.integration.test.ts \
+              2>&1 | tee "/tmp/ragas-run-${i}.log"
+            # The runner writes results.json at a fixed path; rotate it
+            # so the next iteration doesn't clobber it.
+            mv retrieval-eval/ragas/results.json \
+               "retrieval-eval/ragas/runs/results-${i}.json"
+            mv retrieval-eval/ragas/results.md \
+               "retrieval-eval/ragas/runs/results-${i}.md"
+            echo "::endgroup::"
+          done
+
+      # Aggregate the N per-run summaries into baselines.json. For N=1
+      # this still runs — the resulting envelopes have zero IQR (single
+      # point), which is fine for record-keeping but the gate-enforcement
+      # baselines.json should always come from an N>=5 manual dispatch.
+      # See docs/RAG_TESTING.md.
+      - name: Aggregate RAGAS runs → baselines.json
+        run: |
+          set -euo pipefail
+          python3 tests/retrieval-eval/ragas/ragas_runner.py aggregate \
+            --results-dir tests/retrieval-eval/ragas/runs \
+            --out tests/retrieval-eval/ragas/baselines.candidate.json \
+            --judge "$RAGAS_JUDGE"
+          echo "Wrote tests/retrieval-eval/ragas/baselines.candidate.json"
 
       - name: Upload RAGAS results
         if: always()
@@ -222,9 +283,9 @@ jobs:
         with:
           name: ragas-results-${{ github.run_id }}
           path: |
-            tests/retrieval-eval/ragas/results.json
-            tests/retrieval-eval/ragas/results.md
-            /tmp/ragas-runner.log
+            tests/retrieval-eval/ragas/runs/
+            tests/retrieval-eval/ragas/baselines.candidate.json
+            /tmp/ragas-run-*.log
           retention-days: 30
 
       - name: Capture container logs (on failure)
@@ -236,15 +297,12 @@ jobs:
               -f docker/docker-compose.test.override.yml \
               logs --no-color "$svc" > "/tmp/rag-logs/${svc}.log" 2>&1 || true
           done
-          if [[ -f /tmp/ollama.log ]]; then
-            cp /tmp/ollama.log /tmp/rag-logs/
-          fi
 
       - name: Upload logs artifact (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: rag-eval-nightly-logs-${{ github.run_id }}
+          name: rag-eval-logs-${{ github.run_id }}
           path: /tmp/rag-logs
           retention-days: 7
 
