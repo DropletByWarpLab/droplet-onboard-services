@@ -1,10 +1,16 @@
 FROM python:3.11-slim
 
-# Build context is the monorepo root (see docker-compose.yml service block)
-# so we can COPY the canonical queries.yaml + goldens.yaml + ragas_runner.py
-# directly from their tree locations. All COPY paths below are therefore
-# relative to the repo root.
-
+# Build context is the monorepo root (see docker-compose.yml service block).
+# All COPY paths below are relative to the repo root.
+#
+# Layout inside the container is chosen to satisfy ragas_runner.py's own
+# `repo_root = Path(__file__).resolve().parents[3]` lookup. The script
+# uses that to find queries.yaml + goldens.yaml as siblings under
+# `<repo_root>/tests/retrieval-eval/`. We mirror that tree shape under
+# /opt/rag-eval/ so the script works WITHOUT any patching — the same
+# `python ragas_runner.py --variant hybrid ...` invocation that the
+# original docs document still works byte-for-byte from inside the
+# container.
 WORKDIR /opt/rag-eval
 
 # System deps — minimal. RAGAS itself is pure Python; we just need:
@@ -20,13 +26,15 @@ RUN apt-get update && \
 COPY services/rag-eval/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Goldens + queries + the canonical runner. Baked at build time per the
-# project's "image-first, no repo on appliance" deploy convention. Operators
-# rebuild + redeploy the image when goldens change — there's no runtime
-# mount for these files.
-COPY tests/retrieval-eval/queries.yaml /opt/rag-eval/queries.yaml
-COPY tests/retrieval-eval/ragas/goldens.yaml /opt/rag-eval/goldens.yaml
-COPY tests/retrieval-eval/ragas/ragas_runner.py /opt/rag-eval/ragas_runner.py
+# Goldens + queries + the canonical runner — baked at build time per the
+# "image-first, no repo on appliance" deploy convention. Mirror the repo
+# tree so ragas_runner.py's relative-path lookup works unchanged.
+COPY tests/retrieval-eval/queries.yaml \
+     /opt/rag-eval/tests/retrieval-eval/queries.yaml
+COPY tests/retrieval-eval/ragas/goldens.yaml \
+     /opt/rag-eval/tests/retrieval-eval/ragas/goldens.yaml
+COPY tests/retrieval-eval/ragas/ragas_runner.py \
+     /opt/rag-eval/tests/retrieval-eval/ragas/ragas_runner.py
 
 # Service-local Python: scheduler wiring + main + subprocess runner.
 COPY services/rag-eval/*.py /opt/rag-eval/

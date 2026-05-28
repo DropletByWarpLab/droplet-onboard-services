@@ -8,19 +8,25 @@ its `run()` function:
     still fires.
   - Memory hygiene: ragas + langchain leak references in long-running
     processes; subprocess teardown reclaims everything cleanly.
-  - CLI surface unchanged: the same script the CI / dev runner uses, so
-    behavior matches "offline" and "in-container" runs by construction.
+  - CLI surface unchanged: the exact same script the offline docs
+    document (`python ragas_runner.py --variant hybrid ...`) runs
+    inside the container with no per-environment shim — outputs match
+    by construction.
+
+The image bakes the canonical files under /opt/rag-eval/ in a tree
+that mirrors the repo layout, so ragas_runner.py's own
+`Path(__file__).resolve().parents[3]` repo-root lookup works without
+patching. See services/rag-eval/Dockerfile for the layout.
 
 Outputs land at /data/rag-eval/runs/results-<timestamp>.{json,md}. The
 scheduler ticks once per hour during off-hours; each tick is a fresh
-subprocess. The aggregator (ragas_runner.py aggregate ...) is also
-invoked here on the `bootstrap` path.
+subprocess. The aggregator (`ragas_runner.py aggregate ...`) is also
+invoked here on the bootstrap path.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -36,10 +42,13 @@ from config import (
 
 logger = logging.getLogger("rag-eval.runner")
 
-# Baked into the image at /opt/rag-eval/ — see Dockerfile.
-RUNNER_SCRIPT = Path("/opt/rag-eval/ragas_runner.py")
-QUERIES_YAML = Path("/opt/rag-eval/queries.yaml")
-GOLDENS_YAML = Path("/opt/rag-eval/goldens.yaml")
+# Baked into the image — see Dockerfile. The runner script lives at the
+# canonical repo-relative path; ragas_runner.py's `parents[3]` resolves
+# to /opt/rag-eval/, and queries.yaml + goldens.yaml are siblings under
+# /opt/rag-eval/tests/retrieval-eval/.
+RUNNER_SCRIPT = Path(
+    "/opt/rag-eval/tests/retrieval-eval/ragas/ragas_runner.py"
+)
 
 
 def _utc_stamp() -> str:
@@ -49,21 +58,6 @@ def _utc_stamp() -> str:
 
 def _ensure_dirs() -> None:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _link_canonical_paths_into_runner_cwd(tmpdir: Path) -> None:
-    """ragas_runner.py looks up queries.yaml + goldens.yaml under
-    `<repo_root>/tests/retrieval-eval/...` relative to its own location.
-    The image bakes them at /opt/rag-eval/{queries,goldens}.yaml; we
-    fake the directory layout via symlinks rather than patching the
-    script. Keeps ragas_runner.py byte-for-byte identical to the source
-    file in the repo so we never drift.
-    """
-    fake_root = tmpdir / "tests" / "retrieval-eval"
-    (fake_root / "ragas").mkdir(parents=True, exist_ok=True)
-    (fake_root / "queries.yaml").symlink_to(QUERIES_YAML)
-    (fake_root / "ragas" / "goldens.yaml").symlink_to(GOLDENS_YAML)
-    (fake_root / "ragas" / "ragas_runner.py").symlink_to(RUNNER_SCRIPT)
 
 
 def run_once() -> Path:
@@ -79,45 +73,28 @@ def run_once() -> Path:
     out_json = RUNS_DIR / f"results-{stamp}.json"
     out_md = RUNS_DIR / f"results-{stamp}.md"
 
-    # ragas_runner.py computes repo_root = three parents up from itself.
-    # We fake a parent tree under a temp dir so its yaml lookups resolve.
-    tmpdir = RUNS_DIR / f".workdir-{stamp}"
-    tmpdir.mkdir(parents=True, exist_ok=True)
-    try:
-        _link_canonical_paths_into_runner_cwd(tmpdir)
-        runner_in_tmp = (
-            tmpdir / "tests" / "retrieval-eval" / "ragas" / "ragas_runner.py"
-        )
-
-        cmd = [
-            sys.executable,
-            str(runner_in_tmp),
-            "--variant", RAGAS_VARIANT,
-            "--limit", str(RAGAS_LIMIT),
-            "--judge", RAGAS_JUDGE,
-            "--api-url", ORCHESTRATOR_URL,
-            "--out", str(out_json),
-            "--out-md", str(out_md),
-        ]
-        logger.info("starting RAGAS run → %s", out_json.name)
-        completed = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        # ragas_runner.py prints progress to stdout. Surface its tail
-        # in case operators tail the container logs.
-        for line in completed.stdout.splitlines()[-10:]:
-            logger.info("[ragas] %s", line)
-        return out_json
-    finally:
-        # Best-effort cleanup; failures during teardown shouldn't mask
-        # a successful or already-failed run.
-        try:
-            shutil.rmtree(tmpdir)
-        except OSError as e:
-            logger.warning("failed to clean %s: %s", tmpdir, e)
+    cmd = [
+        sys.executable,
+        str(RUNNER_SCRIPT),
+        "--variant", RAGAS_VARIANT,
+        "--limit", str(RAGAS_LIMIT),
+        "--judge", RAGAS_JUDGE,
+        "--api-url", ORCHESTRATOR_URL,
+        "--out", str(out_json),
+        "--out-md", str(out_md),
+    ]
+    logger.info("starting RAGAS run → %s", out_json.name)
+    completed = subprocess.run(
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # ragas_runner.py prints progress to stdout. Surface its tail in
+    # case operators tail the container logs.
+    for line in completed.stdout.splitlines()[-10:]:
+        logger.info("[ragas] %s", line)
+    return out_json
 
 
 def aggregate_to_baselines(out_path: Path) -> Path:

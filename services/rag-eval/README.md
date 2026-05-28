@@ -3,12 +3,12 @@
 Scheduled RAGAS evaluation service. Lives on the appliance test box,
 runs hourly during off-hours, writes results to a shared volume.
 
-This is the **production-shape** path for measuring retrieval quality —
-it talks to the running orchestrator over the internal Docker network
-and uses the appliance's existing local-judge LLM (Ollama). The
-historical GHA-runner approach (`./.github/workflows/rag-eval-nightly.yml`)
-remains in the repo for ad-hoc PR-side runs but is not the canonical
-cadence anymore.
+This is the path for measuring retrieval quality on a deployed
+appliance — it talks to the running orchestrator over the internal
+Docker network and uses the appliance's existing local-judge LLM
+(Ollama). GitHub Actions does NOT run the eval; per project
+convention, GHA is for dev tasks (PR CI, image-build verification),
+not for functionality that runs on the machine.
 
 ## Deploy
 
