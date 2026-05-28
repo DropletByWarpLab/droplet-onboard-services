@@ -79,6 +79,13 @@ import listNotifications from "./handlers/notifications/list-notifications.js";
 import getSystemHealth from "./handlers/system/get-system-health.js";
 import listDrives from "./handlers/system/list-drives.js";
 
+// WARP-466: D2 email tools
+import emailSearch from "./handlers/email/search.js";
+import emailRead from "./handlers/email/read.js";
+import emailSummarizeThread from "./handlers/email/summarize-thread.js";
+import emailDraftReply from "./handlers/email/draft-reply.js";
+import emailSend from "./handlers/email/send.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -150,6 +157,12 @@ const allTools: Tool[] = [
   // system
   getSystemHealth,
   listDrives,
+  // WARP-466: D2 email
+  emailSearch,
+  emailRead,
+  emailSummarizeThread,
+  emailDraftReply,
+  emailSend,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
