@@ -214,6 +214,18 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001 — non-fatal startup task
             logger.warning("throughput scheduler failed to start: %s", exc)
 
+    # WARP-468: start the 60 s off-LAN egress counter. Non-fatal —
+    # if the openwrt overlay hasn't dropped the nftables chains yet,
+    # the meter logs once and emits zero samples until they appear.
+    egress_meter_scheduler = None
+    if router_instance is not None:
+        try:
+            from egress_meter import start_egress_meter
+
+            egress_meter_scheduler = start_egress_meter(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("off-LAN egress meter failed to start: %s", exc)
+
     yield
 
     if throughput_scheduler is not None:
@@ -221,6 +233,12 @@ async def lifespan(app: FastAPI):
             throughput_scheduler.shutdown(wait=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("throughput scheduler shutdown failed: %s", exc)
+
+    if egress_meter_scheduler is not None:
+        try:
+            egress_meter_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("off-LAN egress meter shutdown failed: %s", exc)
 
     if router_instance:
         router_instance.disconnect()

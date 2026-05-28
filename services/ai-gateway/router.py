@@ -15,6 +15,7 @@ import logging
 from collections.abc import AsyncGenerator
 
 from auth.byok import get_api_key
+from middleware.off_lan_gating import check_off_lan_gate
 from providers.anthropic_cloud import AnthropicCloudProvider
 from providers.ollama_local import OllamaLocalProvider
 from providers.openai_cloud import OpenAICloudProvider
@@ -89,6 +90,17 @@ class ProviderRouter:
         """
         await self.refresh_keys()
         provider = self.resolve_provider(request.model, request.provider)
+
+        # WARP-468: off-LAN gate. Refuses any non-local provider with
+        # HTTP 451 when `cloud_model_escape` is disabled. The provider
+        # name is the canonical key in `_providers`; we reverse-lookup
+        # here so the gate sees `"ollama"` / `"anthropic"` / `"openai"`
+        # rather than the BaseProvider instance.
+        provider_name = next(
+            (n for n, p in self._providers.items() if p is provider),
+            "unknown",
+        )
+        await check_off_lan_gate(provider_name)
 
         kwargs = dict(
             temperature=request.temperature,
