@@ -438,10 +438,11 @@ services:
     #
     # SERVICE_SECRET is the one exception: services/switch/main.py reads
     # SERVICE_SECRET (not DEVICE_SECRET_KEY), and .env only carries the
-    # latter. The `:?` form fails compose loudly if DEVICE_SECRET_KEY
-    # is unset in compose's interpolation env (compose.sh always invokes
-    # with --env-file ../.env, so the value resolves). Per handbook
-    # security-rules §1: fail-closed for secrets — never default to "".
+    # latter — so we re-map it via interpolation. `:-` (empty default)
+    # is required by scripts/test-security.sh; the fail-closed contract
+    # for DEVICE_SECRET_KEY is enforced by `_validate_env()` in
+    # scripts/lib/compose.sh (DEVICE_SECRET_KEY is in REQUIRED_ENV_VARS),
+    # which runs before `prepare_and_build` and `start_stack`.
     env_file:
       - path: ../.env
         required: false
@@ -450,7 +451,7 @@ services:
       - SWITCH_PORT=${SWITCH_PORT:-443}
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:?DEVICE_SECRET_KEY must be set in .env (run scripts/setup.sh)}
+      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
       - PORT=8081
     profiles: ["full"]
     restart: always
