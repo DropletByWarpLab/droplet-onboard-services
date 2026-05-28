@@ -32,6 +32,7 @@ import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
+import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -351,6 +352,35 @@ async function main() {
       }
     },
     { lockKey: "droplet:pattern-miner-hourly" },
+  );
+
+  // WARP-475 (G3): nightly camera-retention purge. Fires at 03:30 so
+  // it doesn't contend with the 03:00 daily purge or the 03:15 guest
+  // sweep on the advisory-lock pool. Reads retention from
+  // WorkspaceSetting on every tick (no in-process cache that could
+  // drift past a dashboard edit) and calls Frigate's delete API.
+  // Failures are logged inside the service — the cron keeps ticking.
+  cronRuntime.scheduleCron(
+    "30 3 * * *",
+    async () => {
+      try {
+        const result = await purgeCameraArtifacts(prisma);
+        if (
+          result.clipsDeleted > 0 ||
+          result.eventsDeleted > 0 ||
+          !result.clipsSkipped ||
+          !result.eventsSkipped
+        ) {
+          logger.info(result, "camera-retention-purge complete");
+        }
+      } catch (err) {
+        logger.warn(
+          { err: (err as Error).message },
+          "camera-retention-purge failed (non-fatal)",
+        );
+      }
+    },
+    { lockKey: "droplet:camera-retention-purge" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the

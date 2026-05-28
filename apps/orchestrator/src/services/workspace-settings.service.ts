@@ -100,6 +100,12 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "hardware.cameras_enabled", section: "hardware", type: "bool", value: true },
   { key: "hardware.switch_supervision", section: "hardware", type: "bool", value: true },
   { key: "hardware.matter_enabled", section: "hardware", type: "bool", value: true },
+  // WARP-475 (G3) — camera retention windows. `camera_retention_days`
+  // is the §2.5 "14 days · then deleted" promise; `event_retention_days`
+  // is null (the explicit "events kept forever" state — NOT IS NULL
+  // ambiguity, the seeder writes `null` deliberately).
+  { key: "hardware.camera_retention_days", section: "hardware", type: "number", value: 14 },
+  { key: "hardware.event_retention_days", section: "hardware", type: "json", value: null },
 
   // ── appearance ──
   // Dashboard theme, density, and the initial landing page. The
