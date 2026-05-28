@@ -44,6 +44,7 @@ import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
+import { purgeNetworkThroughputSamples } from "./routes/network-throughput.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
@@ -291,11 +292,16 @@ async function main() {
       const eventsDeleted = await purgeScheduleEvents(prisma, 7);
       const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
       const presenceDeleted = await deviceRegistry.purgePresenceRows(30);
+      // WARP-470: NetworkThroughputSample retention. 30 days keeps the
+      // 24 h area chart's range comfortably within scope while bounding
+      // table growth at ~43k rows (60 s sampler × 30 d).
+      const throughputDeleted = await purgeNetworkThroughputSamples(prisma, 30);
       logger.info(
         {
           eventsDeleted,
           overridesDeleted,
           presenceDeleted: presenceDeleted.count,
+          throughputDeleted,
         },
         "daily purges complete",
       );
