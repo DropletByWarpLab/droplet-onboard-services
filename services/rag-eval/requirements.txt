@@ -1,0 +1,25 @@
+# WARP-RAG-EVAL — pinned to match tests/retrieval-eval/ragas/requirements.txt
+# so the in-container eval produces the same numbers as the offline runner.
+# Bump these in lockstep with that file (CI guards via a tiny diff check).
+
+# RAGAS + LangChain wrapper (judge-LLM scoring)
+ragas==0.2.13
+langchain-openai>=0.2.0
+openai>=1.0
+datasets>=3.0.0
+
+# Data wrangling for the aggregator
+pandas>=2.0.0
+
+# Goldens / queries parsing
+PyYAML>=6.0
+
+# Scheduler (CLAUDE.md "no while True for scheduling" rule)
+# Same primitive used by services/file-indexer/scheduler_service.py.
+apscheduler>=3.10.4
+tzlocal>=5.2
+
+# HTTP to the orchestrator (used by ragas_runner.py's call_search).
+# Already a stdlib option (urllib) but explicit requests is friendlier
+# for timeout + retry semantics if we expand later.
+requests>=2.31

@@ -435,6 +435,56 @@ services:
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
 
+  # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
+  # WARP-RAG-EVAL: opt-in via `eval` profile because running this on every
+  # user appliance is overkill — RAGAS is GPU-bound and only needed on
+  # development / staging / test boxes where we're tracking retrieval
+  # quality. Enable with `COMPOSE_PROFILES=eval` (or comma-append to the
+  # existing list).
+  #
+  # The container bakes queries.yaml + goldens.yaml + ragas_runner.py at
+  # build time. Goldens are part of the image version; updating them
+  # means rebuilding + redeploying the rag-eval image.
+  #
+  # Results land in the `rag-eval-data` named volume at /data/rag-eval/.
+  # Per-run JSON + Markdown summaries are written under runs/; the
+  # bootstrap mode (`docker exec rag-eval python main.py bootstrap`)
+  # writes baselines.candidate.json at the volume root.
+  rag-eval:
+    build:
+      context: ..
+      dockerfile: services/rag-eval/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:3000
+      # RAGAS_OLLAMA_URL points at the host's Ollama (the appliance's
+      # local judge LLM). On Linux the bridge network reaches the host
+      # via host-gateway; on macOS dev compose uses host.docker.internal.
+      - RAGAS_OLLAMA_URL=${RAGAS_OLLAMA_URL:-http://host.docker.internal:11434/v1}
+      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-mistral}
+      - RAGAS_JUDGE=${RAGAS_JUDGE:-local}
+      - RAGAS_VARIANT=${RAGAS_VARIANT:-hybrid}
+      - RAGAS_LIMIT=${RAGAS_LIMIT:-10}
+      - RAG_EVAL_CRON_HOUR=${RAG_EVAL_CRON_HOUR:-22-23,0-5}
+      - RAG_EVAL_CRON_MINUTE=${RAG_EVAL_CRON_MINUTE:-0}
+      - RAG_EVAL_DISABLED=${RAG_EVAL_DISABLED:-0}
+      # OPENAI_API_KEY only consumed when RAGAS_JUDGE=cloud.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - rag-eval-data:/data/rag-eval
+    extra_hosts:
+      # So RAGAS_OLLAMA_URL can resolve `host.docker.internal` on Linux
+      # the same way it does on macOS / WSL. Mirrors the pattern used by
+      # the routing service for OpenWrt access.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      orchestrator:
+        condition: service_started
+    profiles: ["eval"]
+    restart: always
+
   # --- Routing (OpenWrt control) ---
   # WARP-44: default dependency — starts on every `docker compose up`. Set
   # ROUTING_MODE=mock in .env to run without a real router (fixtures).
@@ -879,6 +929,12 @@ volumes:
   ops-audit:
   matter-data:
   brain-memory-data:
+  # WARP-RAG-EVAL: per-run RAGAS JSON + Markdown + the bootstrap
+  # baselines.candidate.json. Named volume so results survive container
+  # restarts during ops work and don't require an operator-created host
+  # dir. Retention is unbounded today; the rag-eval container's runner
+  # leaves cleanup to the operator. Add a sweep if it grows.
+  rag-eval-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.
