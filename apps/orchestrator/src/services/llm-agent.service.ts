@@ -20,12 +20,29 @@
  * model can't burn unbounded tokens.
  */
 
+import type { PrivateEnhancement } from "@droplet/tools-core";
+
 import type {
   McpCallContext,
   McpClientService,
 } from "./mcp-client.service.js";
 import type { ChatMessage, ChatResponse, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
+import type { QueryClass } from "../types/query-enhancement.js";
+
+/**
+ * WARP-437 — pluggable enhancement deps. The agent loop calls these to
+ * classify + pre-compute the HyDE / multi-query vectors BEFORE dispatching
+ * `search_content`. All four are required when `AgentDeps.enhancement` is
+ * present; pass `undefined` for `AgentDeps.enhancement` to disable
+ * adaptive routing entirely (back-compat default).
+ */
+export interface EnhancementDeps {
+  classify(query: string): Promise<{ cls: QueryClass; confidence: number }>;
+  hyde(query: string): Promise<string>;
+  multiQuery(query: string, n: number): Promise<string[]>;
+  embed(texts: string[]): Promise<number[][]>;
+}
 
 export interface AgentDeps {
   mcp: McpClientService;
@@ -42,7 +59,76 @@ export interface AgentDeps {
       tool_choice?: "auto" | "none";
     }) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
   };
+  /**
+   * WARP-437 — when present, the agent loop classifies every
+   * `search_content` query and pre-computes HyDE + multi-query embeddings
+   * based on the resulting class preset. When absent (the default), the
+   * loop dispatches `search_content` unchanged — no enhancement,
+   * byte-for-byte the pre-WARP-437 behaviour. Enhancement failures NEVER
+   * propagate; the loop falls through to the baseline tool call.
+   */
+  enhancement?: EnhancementDeps;
   onEvent?: (e: SSEEvent) => void;
+}
+
+export interface AdaptivePreset {
+  enhance?: { hyde?: boolean; multiQuery?: boolean; n?: number };
+  searchOverrides?: {
+    minSimilarity?: number;
+    perArmK?: number;
+    rerankCandidates?: number;
+  };
+  filenameContains?: string;
+}
+
+/**
+ * Token-shape heuristic for the `navigational` class. We're not trying to
+ * find every conceivable filename — only the obvious "open camera-1
+ * settings" / "show me invoice-2024.pdf" cases. Prefer tokens that have
+ * filename-y shape (a digit or a `-`/`_`/`.`) so "open" / "show" /
+ * "settings" don't beat "camera-1" to first match. Downstream
+ * `metadataFilter` applies the chosen token as a soft `ILIKE %x%` and
+ * the lexical arm still runs unfiltered, so misclassification can't
+ * tank recall.
+ */
+function extractFilenameToken(query: string): string | undefined {
+  const tokens = query.match(/\b[a-zA-Z0-9][a-zA-Z0-9_\-.]{2,}\b/g);
+  if (!tokens || tokens.length === 0) return undefined;
+  const filenameShaped = tokens.find((t) => /[0-9\-_.]/.test(t));
+  return (filenameShaped ?? tokens[0])?.toLowerCase();
+}
+
+/**
+ * WARP-437 — map a classified query class to an adaptive search preset.
+ *
+ *   - factual:        narrow + deep rerank (rerankCandidates=100).
+ *   - analytical:     fan out via multi-query (n=3), moderate rerank.
+ *   - conversational: be permissive (low minSimilarity, larger per-arm K)
+ *                     since conversational queries rarely lexical-overlap
+ *                     with their target chunk.
+ *   - navigational:   apply a soft filename filter when the query carries
+ *                     a filename-shaped token; otherwise no overrides.
+ *   - unknown:        no overrides (baseline).
+ */
+export function presetForClass(cls: QueryClass, query?: string): AdaptivePreset {
+  switch (cls) {
+    case "factual":
+      return { searchOverrides: { rerankCandidates: 100 } };
+    case "analytical":
+      return {
+        enhance: { multiQuery: true, n: 3 },
+        searchOverrides: { rerankCandidates: 80 },
+      };
+    case "conversational":
+      return { searchOverrides: { minSimilarity: 0.5, perArmK: 50 } };
+    case "navigational": {
+      const token = query ? extractFilenameToken(query) : undefined;
+      return token ? { filenameContains: token } : {};
+    }
+    case "unknown":
+    default:
+      return {};
+  }
 }
 
 export interface AgentRequest {
@@ -309,10 +395,27 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     for (const call of asst.tool_calls) {
       const args = safeParseArgs(call);
       emit({ type: "tool_call", id: call.id, name: call.function.name, args });
+
+      // WARP-437 — adaptive routing. For `search_content` calls we
+      // classify the query, derive a per-class preset, pre-compute any
+      // HyDE / multi-query embeddings, and attach the result via
+      // `_meta._enhancement` (NOT as a tool argument — the tool's input
+      // schema rejects unknown properties). Failures fall through to the
+      // baseline tool call so a flaky classifier / embedder can never
+      // block retrieval.
+      let toolContext = req.toolCallContext;
+      if (call.function.name === "search_content" && deps.enhancement) {
+        toolContext = await resolveSearchEnhancement(
+          deps.enhancement,
+          args,
+          req.toolCallContext,
+        );
+      }
+
       const result = await deps.mcp.callTool(
         call.function.name,
         args,
-        req.toolCallContext,
+        toolContext,
       );
       const text = result.content[0]?.text ?? "{}";
       let parsed: unknown;
@@ -363,6 +466,69 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     iterations: maxIter,
     stop_reason: "iteration_limit",
   };
+}
+
+/**
+ * WARP-437 — classify the query, derive a preset, pre-compute HyDE +
+ * multi-query embeddings, and return a fresh `McpCallContext` carrying
+ * the resulting `_enhancement` bundle. Any failure (classifier
+ * unreachable, embedder down, malformed LLM output) is swallowed and we
+ * return the original context unchanged: retrieval MUST never be blocked
+ * by an enhancement-side problem.
+ */
+async function resolveSearchEnhancement(
+  enhancement: EnhancementDeps,
+  args: Record<string, unknown>,
+  baseContext: McpCallContext | undefined,
+): Promise<McpCallContext | undefined> {
+  const query = String(args.query ?? "").trim();
+  if (query.length < 2) return baseContext;
+  try {
+    const { cls } = await enhancement.classify(query);
+    const preset = presetForClass(cls, query);
+
+    // Merge LLM-emitted `enhance` (highest precedence — model can opt
+    // in explicitly) with the class preset. The LLM's `enhance` lives
+    // on the args; the orchestrator-injected vectors live on
+    // `_enhancement`. Both feed `searchHybrid`.
+    const llmEnhance = (args as Record<string, unknown>).enhance as
+      | { hyde?: boolean; multiQuery?: boolean; n?: number }
+      | undefined;
+    const effective = {
+      hyde: llmEnhance?.hyde ?? preset.enhance?.hyde ?? false,
+      multiQuery: llmEnhance?.multiQuery ?? preset.enhance?.multiQuery ?? false,
+      n: llmEnhance?.n ?? preset.enhance?.n ?? 3,
+    };
+
+    let hydeVector: number[] | undefined;
+    let extraQueryVectors: number[][] | undefined;
+    if (effective.hyde) {
+      const passage = await enhancement.hyde(query);
+      const embeddings = await enhancement.embed([passage]);
+      hydeVector = embeddings[0];
+    }
+    if (effective.multiQuery) {
+      const rewrites = await enhancement.multiQuery(query, effective.n);
+      if (rewrites.length > 0) {
+        extraQueryVectors = await enhancement.embed(rewrites);
+      }
+    }
+
+    const privateEnhancement: PrivateEnhancement = {
+      hydeVector,
+      extraQueryVectors,
+      metadataFilter: preset.filenameContains
+        ? { filenameContains: preset.filenameContains }
+        : undefined,
+      searchOverrides: preset.searchOverrides,
+    };
+    return { ...baseContext, _enhancement: privateEnhancement };
+  } catch (e) {
+    // Enhancement failure must NEVER block retrieval. Log at warn for
+    // post-hoc debugging; fall through with the unmodified context.
+    console.warn("[agent] enhancement failed, falling back to baseline:", e);
+    return baseContext;
+  }
 }
 
 function safeParseArgs(call: ToolCall): Record<string, unknown> {

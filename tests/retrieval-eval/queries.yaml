@@ -9,10 +9,19 @@
 # Growth path (post-WARP-286): once Phase B (activity graph + click data)
 # lands, extend with (query, clicked_chunk) pairs mined from
 # ActivityEvent. Until then, manual curation.
+#
+# WARP-437 — Phase 3 adaptive routing. Each query carries a `class` label
+# the adaptive layer uses to decide whether to apply HyDE / multi-query /
+# skip retrieval entirely:
+#   - factual:       single-fact lookup; baseline hybrid is fine
+#   - analytical:    needs synthesis across docs; multi-query candidate
+#   - conversational: chit-chat; gate should skip retrieval (no relevance)
+#   - navigational:  filename-token jump (deferred; not used in this corpus)
 
 queries:
   - id: q01
     query: "what is the budget for Q4"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "sample.pdf"
@@ -24,6 +33,7 @@ queries:
 
   - id: q02
     query: "alphahotel"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "sample.pdf"
@@ -32,6 +42,7 @@ queries:
 
   - id: q03
     query: "budget meeting kickoff"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-subs"
@@ -40,6 +51,7 @@ queries:
 
   - id: q04
     query: "what does the screenshot say"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp206-image"
@@ -48,6 +60,7 @@ queries:
 
   - id: q05
     query: "echofoxtrot"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp206-image"
@@ -56,6 +69,7 @@ queries:
 
   - id: q06
     query: "bob attached the proposal"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-email"
@@ -64,6 +78,7 @@ queries:
 
   - id: q07
     query: "attached PDF for the full proposal"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-email"
@@ -71,6 +86,7 @@ queries:
 
   - id: q08
     query: "ONE HUNDRED THOUSAND"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-frame"
@@ -82,6 +98,7 @@ queries:
 
   - id: q09
     query: "budget kickoff slide"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-frame"
@@ -89,6 +106,7 @@ queries:
 
   - id: q10
     query: "note inside the zip"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "simple.zip"
@@ -97,6 +115,7 @@ queries:
 
   - id: q11
     query: "the budget for q4 is one hundred thousand"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "simple.zip"
@@ -108,6 +127,7 @@ queries:
 
   - id: q12
     query: "Tesseract OCR"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp206-image"
@@ -115,6 +135,7 @@ queries:
 
   - id: q13
     query: "q4 revenue"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-subs"
@@ -125,6 +146,7 @@ queries:
 
   - id: q14
     query: "rfc822 email message"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-email"
@@ -132,6 +154,7 @@ queries:
 
   - id: q15
     query: "frame OCR sentinel"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-frame"
@@ -139,6 +162,7 @@ queries:
 
   - id: q16
     query: "audio transcript faster-whisper"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-audio"
@@ -146,6 +170,7 @@ queries:
 
   - id: q17
     query: "image extracted text screenshot"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp206-image"
@@ -153,6 +178,7 @@ queries:
 
   - id: q18
     query: "test-rag-end-to-end folder PDF"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "test-rag-end-to-end"
@@ -161,6 +187,7 @@ queries:
 
   - id: q19
     query: "zip archive note budget"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "simple.zip"
@@ -168,6 +195,7 @@ queries:
 
   - id: q20
     query: "video clip on-screen text slide"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-frame"
@@ -198,6 +226,7 @@ queries:
 
   - id: q21
     query: "budget for the fourth quarter approved by the executive team"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "sample.pdf"
@@ -206,6 +235,7 @@ queries:
 
   - id: q22
     query: "the meeting kickoff agenda items for next week"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-subs"
@@ -214,6 +244,7 @@ queries:
 
   - id: q23
     query: "screenshot text recovered via Tesseract OCR pipeline"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp206-image"
@@ -222,6 +253,7 @@ queries:
 
   - id: q24
     query: "proposal sent by bob with the attached PDF document"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-email"
@@ -230,6 +262,7 @@ queries:
 
   - id: q25
     query: "transcript produced by faster-whisper for the audio recording"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-audio"
@@ -238,6 +271,7 @@ queries:
 
   - id: q26
     query: "frame OCR sentinel value extracted from the on-screen text"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-frame"
@@ -246,6 +280,7 @@ queries:
 
   - id: q27
     query: "proposal in the email attachment"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-email"
@@ -254,6 +289,7 @@ queries:
 
   - id: q28
     query: "budget figure in the audio transcript"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-audio"
@@ -262,6 +298,7 @@ queries:
 
   - id: q29
     query: "kickoff content from the video frame slide"
+    class: factual
     relevant:
       - source: brain
         path_contains: "warp224-video-frame"
@@ -270,8 +307,377 @@ queries:
 
   - id: q30
     query: "note stored inside the zip archive bundle"
+    class: factual
     relevant:
       - source: nextcloud
         path_contains: "simple.zip"
         chunk_idx_any: true
     notes: "section-path disambiguation: archive-member chain[] anchor"
+
+  # ── WARP-437 Phase 3 — adaptive routing eval set ──
+  #
+  # The next 35 rows exercise the query-classification + adaptive-pipeline
+  # gates added in WARP-437:
+  #
+  #   (a) Short factual queries (q-short-001..q-short-015) — 1-3 word
+  #       queries that embed into vague vectors. These are HyDE candidates:
+  #       the gate should pass them through a doc-shaped expansion before
+  #       embedding to widen recall against the existing fixtures.
+  #
+  #   (b) Analytical queries (q-analytical-001..q-analytical-010) — span
+  #       multiple fixtures. Multi-query rewriting is the candidate gate
+  #       here: split the question into sub-queries, retrieve per-sub, and
+  #       fuse. Each row's `relevant` lists every fixture the synthesis
+  #       would have to touch.
+  #
+  #   (c) Conversational queries (q-conv-001..q-conv-010) — chit-chat /
+  #       non-information-seeking utterances. The adaptive gate should
+  #       short-circuit retrieval entirely. Modelled with `relevant: []`,
+  #       which the NDCG@10 harness scores as 0 (see `ndcgAtK`'s
+  #       `idealScore === 0` guard in run.integration.test.ts) — i.e.
+  #       any retrieval call against these is wasted budget that we
+  #       expect the adaptive layer to skip.
+
+  - id: q-short-001
+    query: "Q4 budget"
+    class: factual
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-002
+    query: "alphahotel"
+    class: factual
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate (rare-token edge case)"
+
+  - id: q-short-003
+    query: "meeting notes"
+    class: factual
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-004
+    query: "video subs"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-005
+    query: "kickoff"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-006
+    query: "audio transcript"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-007
+    query: "email proposal"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-008
+    query: "zip archive"
+    class: factual
+    relevant:
+      - source: nextcloud
+        path_contains: "simple.zip"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-009
+    query: "image text"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-010
+    query: "frame OCR"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-011
+    query: "end to end"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "test-rag-end-to-end"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate (path-token)"
+
+  - id: q-short-012
+    query: "budget pdf"
+    class: factual
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-013
+    query: "audio budget"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-014
+    query: "email attachment"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-short-015
+    query: "subtitle stream"
+    class: factual
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "WARP-437 — short query, HyDE candidate"
+
+  - id: q-analytical-001
+    query: "compare budget content between the PDF and the audio transcript"
+    class: analytical
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate (cross-channel synthesis)"
+
+  - id: q-analytical-002
+    query: "summarise everything related to the kickoff meeting across formats"
+    class: analytical
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate (3 fixtures)"
+
+  - id: q-analytical-003
+    query: "what does the kickoff meeting discuss across the audio, video, and PDF channels"
+    class: analytical
+    relevant:
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+    notes: "WARP-437 — multi-fixture synthesis across audio/video/PDF kickoff content"
+
+  - id: q-analytical-004
+    query: "which channels carry budget-related content"
+    class: analytical
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate"
+
+  - id: q-analytical-005
+    query: "synthesize the proposal content from the email and the body PDF"
+    class: analytical
+    relevant:
+      - source: brain
+        path_contains: "warp224-email"
+        chunk_idx_any: true
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate"
+
+  - id: q-analytical-006
+    query: "where does the kickoff agenda appear — video frames or subtitles"
+    class: analytical
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate"
+
+  - id: q-analytical-007
+    query: "draw out budget figures from text, audio, and video sources"
+    class: analytical
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate (tri-channel)"
+
+  - id: q-analytical-008
+    query: "find every reference to meeting kickoff materials"
+    class: analytical
+    relevant:
+      - source: brain
+        path_contains: "warp224-video-subs"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate"
+
+  - id: q-analytical-009
+    query: "consolidate everything about the Q4 budget across all channels"
+    class: analytical
+    relevant:
+      - source: nextcloud
+        path_contains: "sample.pdf"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-audio"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate"
+
+  - id: q-analytical-010
+    query: "compare image-only OCR vs video-frame OCR coverage"
+    class: analytical
+    relevant:
+      - source: brain
+        path_contains: "warp206-image"
+        chunk_idx_any: true
+      - source: brain
+        path_contains: "warp224-video-frame"
+        chunk_idx_any: true
+    notes: "WARP-437 — analytical, multi-query candidate (OCR comparison)"
+
+  # Conversational set — relevant: [] is intentional.
+  # ndcgAtK() in run.integration.test.ts returns 0 when idealScore === 0,
+  # so empty-relevance rows don't crash the harness. The adaptive layer's
+  # job is to skip retrieval entirely for these; if it does retrieve,
+  # NDCG@10 = 0 (no expected docs to hit) — i.e. wasted budget.
+  - id: q-conv-001
+    query: "hey what's up"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-002
+    query: "good morning"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-003
+    query: "thanks"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-004
+    query: "can you help me"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-005
+    query: "what can you do"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-006
+    query: "tell me a joke"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-007
+    query: "are you there"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-008
+    query: "i'm tired"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-009
+    query: "how's the weather"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"
+
+  - id: q-conv-010
+    query: "ok cool"
+    class: conversational
+    relevant: []
+    notes: "WARP-437 — conversational; adaptive gate should skip retrieval"

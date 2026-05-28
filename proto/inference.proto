@@ -14,6 +14,10 @@ service InferenceService {
   // Text reranker — used by the orchestrator for hybrid retrieval (WARP-286).
   // Scores each passage against the query using a cross-encoder.
   rpc Rerank(RerankRequest) returns (RerankResponse);
+  // Zero-shot query classifier — used by the orchestrator's adaptive
+  // retrieval router (WARP-437). Returns one of {factual, analytical,
+  // conversational, navigational, unknown}.
+  rpc ClassifyQuery(ClassifyQueryRequest) returns (ClassifyQueryResponse);
 }
 
 message ChatRequest {
@@ -93,4 +97,20 @@ message RerankRequest {
 message RerankResponse {
   // One float per input passage, same order.
   repeated float scores = 1;
+}
+
+// ── Query classification (WARP-437 — orchestrator adaptive routing) ──
+
+message ClassifyQueryRequest {
+  string query = 1;
+  // Optional model override. Default: "MoritzLaurer/deberta-v3-base-zeroshot-v2.0".
+  optional string model = 2;
+}
+
+message ClassifyQueryResponse {
+  // One of: "factual" | "analytical" | "conversational" | "navigational" | "unknown".
+  string class = 1;
+  // Top-1 confidence in [0, 1]. Server-side floor is applied via
+  // CLASSIFIER_CONFIDENCE_FLOOR; below the floor the class is "unknown".
+  float confidence = 2;
 }
