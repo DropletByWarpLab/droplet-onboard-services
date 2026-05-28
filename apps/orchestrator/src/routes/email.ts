@@ -436,5 +436,99 @@ export function createEmailRouter(
     },
   );
 
+  // ── WARP-466 (D2) — §2.4 AI side-panel analysis endpoint ──────
+  // GET /api/email/:accountId/threads/:threadId/analysis
+  //
+  // Returns `{summary, callouts, suggestedActions, related}` shaped
+  // for the dashboard's §2.4 AI side panel. The orchestrator drives
+  // the agent loop internally so the LLM sees the same tool registry
+  // as a chat turn — retrieval is NOT duplicated here.
+  //
+  // Pluggable `EmailAnalysisService` so tests can inject a stub
+  // without standing up the MCP child / ai-gateway / Ollama. Prod
+  // wiring (app.ts) injects an implementation backed by `runAgent`
+  // (see services/email-analysis.service.ts).
+  router.get(
+    "/email/:accountId/threads/:threadId/analysis",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const thread = (await prisma.emailThread.findUnique({
+          where: { id: req.params.threadId },
+          include: { messages: { orderBy: { receivedAt: "asc" } } },
+        })) as unknown as
+          | (ThreadRow & { messages: MessageRow[] })
+          | null;
+        if (!thread || thread.accountId !== req.params.accountId) {
+          res.status(404).json({ error: "Thread not found" });
+          return;
+        }
+        const analysisFn = analysisOverride;
+        if (!analysisFn) {
+          // Module-init ordering can leave the override undefined in
+          // narrow test setups. Return a 503 rather than a 500 so
+          // dashboard retry logic kicks in correctly.
+          res.status(503).json({ error: "Analysis service not wired" });
+          return;
+        }
+        const analysis = await analysisFn({
+          accountId: thread.accountId,
+          threadId: thread.id,
+          subject: thread.subject,
+          messages: thread.messages.map((m) => ({
+            from: m.fromName ? `${m.fromName} <${m.fromAddr}>` : m.fromAddr,
+            receivedAt: m.receivedAt.toISOString(),
+            bodyText: (m.bodyText ?? "").slice(0, 8_000),
+          })),
+        });
+        res.json(analysis);
+      } catch (err) {
+        logger.warn(
+          { err, threadId: req.params.threadId },
+          "email analysis failed",
+        );
+        next(err);
+      }
+    },
+  );
+
   return router;
+}
+
+/**
+ * WARP-466 — analysis function injected per-router.
+ *
+ * Module-level state lets `createEmailRouter` continue to accept its
+ * historical (prisma, gate) signature without a breaking change for
+ * existing callers / tests. `wireEmailAnalysis(fn)` is called once at
+ * boot from `app.ts`; tests can also call it directly to inject a
+ * stub.
+ */
+let analysisOverride: EmailAnalysisFn | null = null;
+
+export interface EmailAnalysisInput {
+  accountId: string;
+  threadId: string;
+  subject: string;
+  messages: Array<{ from: string; receivedAt: string; bodyText: string }>;
+}
+
+export interface EmailAnalysis {
+  summary: string;
+  callouts: Array<{ label: string }>;
+  suggestedActions: Array<{ label: string; safety: "Read" | "Write · confirm" }>;
+  related: {
+    files: string[];
+    threads: string[];
+    cameras: string[];
+    tools: string[];
+  };
+}
+
+export type EmailAnalysisFn = (
+  input: EmailAnalysisInput,
+) => Promise<EmailAnalysis>;
+
+export function wireEmailAnalysis(fn: EmailAnalysisFn | null): void {
+  analysisOverride = fn;
 }
