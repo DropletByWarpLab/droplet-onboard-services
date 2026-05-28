@@ -1,13 +1,25 @@
 # Plane (PM stack) on Droplet — design
 
 **Date:** 2026-05-27
-**Status:** Skeleton — open questions unresolved
+**Status:** Draft — 4 of 5 open questions resolved; OQ4 pending iOS/Android lead input
 **Scope:** New `services/pm/` directory + `docker/docker-compose.yml` wiring + `apps/orchestrator/src/routes/pm/*` + `apps/web-dashboard/src/app/projects/page.tsx` + `packages/tools-core/src/handlers/pm/*` + `services/mcp-server` auto-discovery + `docs/mobile-api-contract.md` additions.
 **ADR:** [ADR-007 — Plane self-hosted PM stack adoption](../../ADR-007-pm-stack-selection.md) (Proposed)
 **Epic:** WARP-496
 **Ticket:** WARP-498
 
-> **This is a skeleton.** Sections marked `TBD` need to be filled in before any Phase 1 ticket starts. The five **Open questions** at the bottom are the gates — Phase 1 cannot begin until they're resolved.
+> **Status update 2026-05-27 (Stefan):** OQ1, OQ2, OQ3, OQ5 resolved to the recommended defaults. OQ4 (mobile API envelope mapping) remains open — needs iOS + Android lead input on whether Plane's data shapes fit the existing envelope. Phase 1 tickets (WARP-500..504) can begin work on the resolved surfaces; Phase 4 ticket WARP-513 is blocked until OQ4 lands.
+
+## Engineering handbook references (binding)
+
+All implementation tickets under Epic WARP-496 must comply with:
+
+- [`04-coding-standards/code-quality-rules.md`](https://github.com/DropletByWarpLab/warp-lab-engineering-handbook) — rules 1 (shipping-product mindset), 7 (no `any`), 9 (no `while True` scheduling), 11 (no `MATTER_*` env vars), 13 (one configured LLM only), 14 (no host-specific defaults), 17 (no "poc"/"test"/"dev"/"prototype" framing in user-facing surfaces).
+- `04-coding-standards/security-rules.md` — fail-CLOSED on auth, no fail-OPEN, secrets in `.env` mode 0600.
+- `04-coding-standards/pr-scope-and-coherence.md` — body matches diff, no mixed-scope PRs; sweep on rename.
+- `08-templates/new-service-checklist.md` — every item required before any Phase 1 PR can merge.
+- `07-jira-workflow/lifecycle.md` — AC-drift rule applies if Plane's actual API diverges from this spec mid-implementation: STOP, surface, decide.
+- `03-claude-harness/skills/droplet-architecture-guard/SKILL.md` — rules 1–21, especially repo-boundary rules 1–8 and the pre-flight checklist for every coding ticket.
+- `02-architecture/adrs/ADR-004-rbac-per-route-guards.md` — authority for the JWT shape, role claims, and mobile API contract conventions.
 
 ---
 
@@ -21,9 +33,9 @@ This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https:/
 
 ## Container topology
 
-> TBD — locked by Open Question 1 (shared vs. dedicated Postgres).
+> **Decision (OQ1 resolved):** Dedicated `postgres-pm` + `redis-pm` containers. Plane's schema migrations are quarantined from the orchestrator's Prisma migrations; backup/restore granularity is per-volume; ~200MB RAM cost is acceptable on every shipping deployment shape (architecture-guard rule 16 — every shape is shipping product).
 
-**Proposed (dedicated PG/Redis):**
+**Final topology:**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -47,16 +59,16 @@ This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https:/
 | `pm-web` | `makeplane/plane-frontend:<pinned-sha>` | 3000 | `single-box`, `multi-box` | Next.js. Behind Nginx; never exposed on host. |
 | `pm-api` | `makeplane/plane-backend:<pinned-sha>` | 8000 | `single-box`, `multi-box` | Django REST API. Server-to-server only from orchestrator. |
 | `pm-worker` | `makeplane/plane-worker:<pinned-sha>` | — | `single-box`, `multi-box` | Celery worker for async jobs. |
-| `postgres-pm` | `postgres:15-alpine` | 5432 | `single-box`, `multi-box` | **Dedicated** per OQ1 default. Volume `postgres-pm-data`. |
-| `redis-pm` | `redis:7-alpine` | 6379 | `single-box`, `multi-box` | **Dedicated** per OQ1 default. Volume `redis-pm-data`. |
+| `postgres-pm` | `postgres:15-alpine` | 5432 | `single-box`, `multi-box` | Dedicated per OQ1 resolution. Volume `postgres-pm-data`. |
+| `redis-pm` | `redis:7-alpine` | 6379 | `single-box`, `multi-box` | Dedicated per OQ1 resolution. Volume `redis-pm-data`. |
 
 ---
 
 ## Nginx routing
 
-> TBD — locked by Open Question 2 (iframe vs. full redirect).
+> **Decision (OQ2 resolved):** Iframe at `/pm/` — keeps Droplet chrome (left nav, top bar) so the user feels like they're still on the appliance. Plane's CSP `frame-ancestors` must allow `'self'` (verified at Phase 1 start; patched if upstream doesn't allow it — patch recorded in `services/pm/PATCHES.md` per ADR-007 posture).
 
-**Proposed (iframe at `/pm/`):**
+**Final routing:**
 
 ```nginx
 location /pm/ {
@@ -222,59 +234,61 @@ Plane's `postgres-pm` volume + attachments volume folded into the existing Dropl
 
 ---
 
-## Open questions (gates Phase 1)
+## Open questions
 
-These five must be resolved (defaults locked or alternatives chosen) before any Phase 1 ticket starts. Each question is also surfaced on the Epic WARP-496 risk list.
+Originally 5 gates on Phase 1. As of 2026-05-27, 4 are resolved (locked to the recommended default by Stefan). OQ4 remains open — Phase 1 + Phases 2–3 can proceed; only WARP-513 (mobile contract) is blocked.
 
-### OQ1 — Shared vs. dedicated Postgres/Redis
+### OQ1 — Shared vs. dedicated Postgres/Redis — **RESOLVED**
 
 **Question:** Does Plane share the orchestrator's existing Postgres + Redis containers, or get its own?
 
 **Options:**
-- **A (recommended):** Dedicated `postgres-pm` + `redis-pm` containers. Costs ~200MB RAM. Simplifies backup/restore (separate volumes). Plane's schema migrations don't touch orchestrator data.
-- **B:** Shared with the orchestrator. Saves RAM. Complicates backup (must restore at table-granularity). Forces coordination between Plane's migration tooling and Droplet's Prisma migrations — risk of one breaking the other.
+- **A (chosen):** Dedicated `postgres-pm` + `redis-pm` containers. Costs ~200MB RAM. Simplifies backup/restore (separate volumes). Plane's schema migrations don't touch orchestrator data.
+- B: Shared with the orchestrator. Saves RAM. Complicates backup (must restore at table-granularity). Forces coordination between Plane's migration tooling and Droplet's Prisma migrations — risk of one breaking the other.
 
-**Decision needed by:** Phase 1 start (WARP-501 compose wiring). Cascade: WARP-514 (backup design).
+**Decision (2026-05-27):** **A — dedicated.** The migration-coordination risk in B outweighs the RAM saving on every shipping deployment shape (architecture-guard rule 16 — `single-box`, `multi-box`, `v2-6` are all production). Cascade unblocked: WARP-501 (compose wiring) + WARP-514 (backup design).
 
-### OQ2 — Iframe vs. full redirect for dashboard `/projects`
+### OQ2 — Iframe vs. full redirect for dashboard `/projects` — **RESOLVED**
 
 **Question:** Does the dashboard `/projects` route iframe Plane (keeping Droplet chrome) or redirect to it (showing Plane chrome)?
 
 **Options:**
-- **A (recommended):** Iframe. Better UX — left nav and top bar stay. Requires Plane's CSP `frame-ancestors` to allow `'self'` (verify in Plane config; potentially patch).
-- **B:** Full redirect. Simpler CSP. Worse UX — user feels like they left the appliance.
+- **A (chosen):** Iframe. Better UX — left nav and top bar stay. Requires Plane's CSP `frame-ancestors` to allow `'self'` (verify in Plane config; potentially patch).
+- B: Full redirect. Simpler CSP. Worse UX — user feels like they left the appliance.
 
-**Decision needed by:** Phase 4 start (WARP-512 dashboard route).
+**Decision (2026-05-27):** **A — iframe.** UX continuity matters more than CSP simplicity for the regulated-SMB persona (ADR-002 home-user supervision). Any required CSP patch is recorded in `services/pm/PATCHES.md` per ADR-007 AGPL posture. Cascade unblocked: WARP-512 (dashboard route).
 
-### OQ3 — Plane upstream pin strategy
+### OQ3 — Plane upstream pin strategy — **RESOLVED**
 
 **Question:** Pin Plane to a release tag (e.g. `v0.18.0`) or a commit SHA?
 
 **Options:**
-- **A (recommended):** Commit SHA. Reproducible across rebuilds. Updated explicitly per Droplet release.
-- **B:** Release tag. Simpler. Plane could move the tag (unlikely but possible).
+- **A (chosen):** Commit SHA. Reproducible across rebuilds. Updated explicitly per Droplet release.
+- B: Release tag. Simpler. Plane could move the tag (unlikely but possible).
 
-**Decision needed by:** WARP-500 (service skeleton — picks the Dockerfile FROM line).
+**Decision (2026-05-27):** **A — commit SHA.** Pinning to a SHA matches code-quality rule 1 (shipping-product mindset — no implicit drift between Droplet releases). The SHA refresh is a deliberate per-release decision, not an upstream-induced surprise. Cascade unblocked: WARP-500 (Dockerfile FROM line).
 
-### OQ4 — Mobile API envelope mapping
+### OQ4 — Mobile API envelope mapping — **STILL OPEN**
 
 **Question:** Does Plane's data shape fit the existing mobile-API response envelope cleanly, or does the envelope need to flex?
 
 **Options:**
-- **A:** Plane data fits the existing envelope as-is. Map at the orchestrator wrapper.
-- **B:** Envelope needs a new variant — coordinate with iOS/Android leads, possibly extend ADR-004.
+- A: Plane data fits the existing envelope as-is. Map at the orchestrator wrapper.
+- B: Envelope needs a new variant — coordinate with iOS/Android leads, possibly extend ADR-004.
 
-**Decision needed by:** WARP-513 (mobile contract). If B, escalate per AC-drift rule before coding.
+**Status:** Awaiting iOS + Android lead input. **Next action:** before WARP-513 starts, post a side-by-side of Plane's `Issue` + `Project` JSON vs. the existing mobile envelope in the WARP-513 ticket comment; request explicit A/B from both leads. If B, escalate per AC-drift rule (`07-jira-workflow/lifecycle.md`) and extend ADR-004 in a separate PR before WARP-513 begins.
 
-### OQ5 — Workspace-owner downgrade behavior
+**Phase impact:** does NOT block Phase 1, Phase 2, Phase 3, or Phase 5. Blocks only Phase 4's WARP-513 (mobile contract). Phase 4's WARP-512 (dashboard route) is unblocked by OQ2 resolution.
+
+### OQ5 — Workspace-owner downgrade behavior — **RESOLVED**
 
 **Question:** Plane's workspace-role API may not allow programmatic downgrade of the workspace owner. What's the fallback?
 
 **Options:**
-- **A:** Document that the workspace owner cannot be downgraded automatically; surface as a manual reconciliation alert.
-- **B:** Re-create the workspace under a different owner whenever a Droplet admin downgrades the original.
+- **A (chosen):** Document that the workspace owner cannot be downgraded automatically; surface as a manual reconciliation alert.
+- B: Re-create the workspace under a different owner whenever a Droplet admin downgrades the original.
 
-**Decision needed by:** WARP-506 (RBAC mapping). Default to A; B is heavyweight.
+**Decision (2026-05-27):** **A — manual reconciliation alert.** B is heavyweight and destructive (re-creating a workspace loses local history, breaks integrations). The reconciliation alert routes through the existing alert channel (per security-rules.md fail-CLOSED posture — user is denied PM access until reconciled). Cascade unblocked: WARP-506 (RBAC mapping).
 
 ---
 
