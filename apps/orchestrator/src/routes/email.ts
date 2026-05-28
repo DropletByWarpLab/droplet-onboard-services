@@ -1,0 +1,366 @@
+/**
+ * WARP-465 (D1) — email backbone CRUD.
+ *
+ * Routes owned by this file:
+ *   GET    /api/email/accounts                       — list accounts
+ *   GET    /api/email/:accountId/threads?filter=     — threads paged
+ *   GET    /api/email/:accountId/threads/:threadId   — full thread
+ *   POST   /api/email/:accountId/drafts              — create draft
+ *   PATCH  /api/email/drafts/:id                     — edit draft
+ *   POST   /api/email/drafts/:id/send                — queue send
+ *
+ * Send-tier (POST .../drafts/:id/send) is gated by the WARP-467/468
+ * `outbound_email` off-LAN channel. When the channel is disabled
+ * (sovereignty default for off-LAN escape; outbound email is ON by
+ * default per §8) we 451 instead of dispatching. Bringing the actual
+ * SMTP send up is a Phase D1 follow-up — the route currently writes
+ * `status=queued` and waits for the email-indexer service (see PR
+ * description) to pick it up via the indexer's outbound poller.
+ */
+import { Router, Request, Response, NextFunction } from "express";
+import { z } from "zod";
+import type { PrismaClient } from "@prisma/client";
+import pino from "pino";
+import { requireRole } from "../middleware/auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+const logger = pino({ name: "email-route" });
+
+const FILTERS = ["inbox", "triaged", "archived", "droplet"] as const;
+type Filter = (typeof FILTERS)[number];
+
+const addressSchema = z.string().email().max(254);
+
+const createDraftSchema = z.object({
+  threadId: z.string().uuid().nullable().optional(),
+  toAddrs: z.array(addressSchema).min(1).max(50),
+  ccAddrs: z.array(addressSchema).max(50).optional(),
+  bccAddrs: z.array(addressSchema).max(50).optional(),
+  subject: z.string().min(1).max(998),
+  body: z.string().max(64_000).optional(),
+  draftedByDroplet: z.boolean().optional(),
+});
+
+const patchDraftSchema = z.object({
+  toAddrs: z.array(addressSchema).min(1).max(50).optional(),
+  ccAddrs: z.array(addressSchema).max(50).nullable().optional(),
+  bccAddrs: z.array(addressSchema).max(50).nullable().optional(),
+  subject: z.string().min(1).max(998).optional(),
+  body: z.string().max(64_000).optional(),
+});
+
+interface AccountRow {
+  id: string;
+  userId: string | null;
+  displayName: string;
+  address: string;
+  imapStatus: "idle" | "reconnecting" | "error" | "paused";
+  lastIdleAt: Date | null;
+  lastErrorAt: Date | null;
+  lastError: string | null;
+}
+interface ThreadRow {
+  id: string;
+  accountId: string;
+  threadKey: string;
+  subject: string;
+  lastSender: string | null;
+  snippet: string | null;
+  messageCount: number;
+  triageStatus: "inbox" | "triaged" | "archived";
+  draftedByDroplet: boolean;
+  lastMessageAt: Date;
+}
+interface MessageRow {
+  id: string;
+  threadId: string;
+  messageId: string;
+  fromAddr: string;
+  fromName: string | null;
+  toAddrs: unknown;
+  ccAddrs: unknown;
+  subject: string;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  receivedAt: Date;
+}
+interface DraftRow {
+  id: string;
+  accountId: string;
+  threadId: string | null;
+  toAddrs: unknown;
+  ccAddrs: unknown;
+  bccAddrs: unknown;
+  subject: string;
+  body: string;
+  draftedByDroplet: boolean;
+  status: "draft" | "queued" | "sent" | "failed";
+  sentAt: Date | null;
+  error: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Pluggable off-LAN gate. Production wiring (app.ts) injects a
+ * function that reads `OffLanAllowlistChannel.outbound_email` (from
+ * WARP-467). Returning `false` raises a 451 in POST /drafts/:id/send.
+ * Tests pass a stub that always returns `true` unless they exercise
+ * the refusal path.
+ */
+export interface EmailGate {
+  outboundEmailEnabled(): Promise<boolean>;
+}
+
+export function createEmailRouter(
+  prisma: PrismaClient,
+  gate: EmailGate,
+): Router {
+  const router = Router();
+
+  router.get(
+    "/email/accounts",
+    requireRole("owner", "admin", "family"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const rows = (await prisma.emailAccount.findMany({
+          orderBy: { address: "asc" },
+          select: {
+            id: true,
+            userId: true,
+            displayName: true,
+            address: true,
+            imapStatus: true,
+            lastIdleAt: true,
+            lastErrorAt: true,
+            lastError: true,
+          },
+        })) as unknown as AccountRow[];
+        res.json({ accounts: rows });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/threads",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const filterRaw = String(req.query.filter ?? "inbox");
+        if (!(FILTERS as readonly string[]).includes(filterRaw)) {
+          res.status(400).json({ error: "Invalid filter", allowed: FILTERS });
+          return;
+        }
+        const filter = filterRaw as Filter;
+        const limit = Math.max(
+          1,
+          Math.min(100, Number.parseInt(String(req.query.limit ?? "20"), 10) || 20),
+        );
+
+        const where: {
+          accountId: string;
+          triageStatus?: "inbox" | "triaged" | "archived";
+          draftedByDroplet?: boolean;
+        } = { accountId: req.params.accountId };
+        if (filter === "droplet") {
+          where.draftedByDroplet = true;
+        } else {
+          where.triageStatus = filter;
+        }
+
+        const rows = (await prisma.emailThread.findMany({
+          where: where as any,
+          orderBy: { lastMessageAt: "desc" },
+          take: limit,
+        })) as unknown as ThreadRow[];
+        res.json({ filter, threads: rows });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/threads/:threadId",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const thread = (await prisma.emailThread.findUnique({
+          where: { id: req.params.threadId },
+          include: {
+            messages: { orderBy: { receivedAt: "asc" } },
+          },
+        })) as unknown as
+          | (ThreadRow & { messages: MessageRow[] })
+          | null;
+        if (!thread || thread.accountId !== req.params.accountId) {
+          res.status(404).json({ error: "Thread not found" });
+          return;
+        }
+        res.json(thread);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/email/:accountId/drafts",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = createDraftSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res
+            .status(400)
+            .json({ error: "Invalid draft", details: parsed.error.flatten() });
+          return;
+        }
+        // Confirm account exists (returns 404 otherwise — the dashboard
+        // sometimes posts a draft against an account that was removed
+        // out-of-band).
+        const account = (await prisma.emailAccount.findUnique({
+          where: { id: req.params.accountId },
+          select: { id: true },
+        })) as { id: string } | null;
+        if (!account) {
+          res.status(404).json({ error: "Account not found" });
+          return;
+        }
+
+        const draft = (await prisma.emailDraft.create({
+          data: {
+            accountId: req.params.accountId,
+            threadId: parsed.data.threadId ?? null,
+            toAddrs: parsed.data.toAddrs as any,
+            ccAddrs: (parsed.data.ccAddrs ?? null) as any,
+            bccAddrs: (parsed.data.bccAddrs ?? null) as any,
+            subject: parsed.data.subject,
+            body: parsed.data.body ?? "",
+            draftedByDroplet: parsed.data.draftedByDroplet ?? false,
+          },
+        })) as unknown as DraftRow;
+        res.status(201).json(draft);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.patch(
+    "/email/drafts/:id",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = patchDraftSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res
+            .status(400)
+            .json({ error: "Invalid patch", details: parsed.error.flatten() });
+          return;
+        }
+        const existing = (await prisma.emailDraft.findUnique({
+          where: { id: req.params.id },
+        })) as unknown as DraftRow | null;
+        if (!existing) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
+        if (existing.status !== "draft") {
+          // Once queued / sent / failed the row is immutable — editing
+          // a queued draft mid-flight would be a race with the indexer.
+          res.status(409).json({ error: "Draft is no longer editable", status: existing.status });
+          return;
+        }
+        const updated = (await prisma.emailDraft.update({
+          where: { id: req.params.id },
+          data: {
+            toAddrs: (parsed.data.toAddrs ?? undefined) as any,
+            ccAddrs: parsed.data.ccAddrs === undefined ? undefined : (parsed.data.ccAddrs as any),
+            bccAddrs: parsed.data.bccAddrs === undefined ? undefined : (parsed.data.bccAddrs as any),
+            subject: parsed.data.subject,
+            body: parsed.data.body,
+          },
+        })) as unknown as DraftRow;
+        res.json(updated);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/email/drafts/:id/send",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const draft = (await prisma.emailDraft.findUnique({
+          where: { id: req.params.id },
+        })) as unknown as DraftRow | null;
+        if (!draft) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
+        if (draft.status !== "draft") {
+          res.status(409).json({ error: "Draft already dispatched", status: draft.status });
+          return;
+        }
+
+        // WARP-467/468 off-LAN gate. When `outbound_email` is
+        // disabled the operator has explicitly opted out of letting
+        // mail leave the LAN; 451 (Unavailable For Legal Reasons) is
+        // the sovereignty signal — same posture as the ai-gateway
+        // cloud_model_escape refusal.
+        const allowed = await gate.outboundEmailEnabled();
+        if (!allowed) {
+          res.status(451).json({
+            error: "off_lan_blocked",
+            channel: "outbound_email",
+            message:
+              "Outbound email is disabled by the off-LAN allowlist. An admin can enable outbound_email from Settings → Off-LAN allowlist with a reason.",
+          });
+          return;
+        }
+
+        // Flip to `queued` — the email-indexer service's outbound
+        // poller (separate Python service, follow-up PR) picks rows
+        // up from here and drives the SMTP transaction. We track the
+        // transition with one ActivityRow regardless of eventual
+        // SMTP outcome so the audit feed has a clean enqueue record.
+        const queued = (await prisma.emailDraft.update({
+          where: { id: req.params.id },
+          data: { status: "queued" },
+        })) as unknown as DraftRow;
+
+        await recordActivity({
+          kind: "email",
+          severity: "info",
+          sourceIcon: "send",
+          what: "Email draft queued for send",
+          sub: queued.subject,
+          refs: {
+            draftId: queued.id,
+            accountId: queued.accountId,
+            actor: req.user?.username ?? null,
+          },
+        });
+
+        res.status(202).json({
+          id: queued.id,
+          status: queued.status,
+          message: "Queued for SMTP send by the email-indexer service",
+        });
+      } catch (err) {
+        logger.warn(
+          { err, id: req.params.id },
+          "draft send dispatch failed",
+        );
+        next(err);
+      }
+    },
+  );
+
+  return router;
+}

@@ -34,6 +34,7 @@ import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createSettingsRouter } from "./routes/settings.js";
+import { createEmailRouter } from "./routes/email.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -132,6 +133,34 @@ export function createApp(prisma: PrismaClient) {
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+  // WARP-465 (D1): email backbone — accounts list, threads list +
+  // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468
+  // off-LAN `outbound_email` allowlist channel; refusal raises 451.
+  // The OffLanAllowlistChannel model lands in WARP-467 — until that
+  // PR is in main, this gate falls back to default-allow on any error
+  // (missing table, missing key, etc.) so chat → reply doesn't 451 on
+  // a stack that hasn't merged E1 yet.
+  app.use(
+    "/api",
+    createEmailRouter(prisma, {
+      outboundEmailEnabled: async () => {
+        try {
+          // Use the raw client so the type checker doesn't trip when
+          // the model is absent on stacks pre-WARP-467.
+          const rows = await prisma.$queryRawUnsafe<
+            Array<{ enabled: boolean }>
+          >(
+            `SELECT enabled FROM "OffLanAllowlistChannel" WHERE key = 'outbound_email' LIMIT 1`,
+          );
+          if (rows.length === 0) return true;
+          return rows[0].enabled === true;
+        } catch {
+          // Table missing (pre-WARP-467) → default-allow.
+          return true;
+        }
+      },
+    }),
+  );
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
