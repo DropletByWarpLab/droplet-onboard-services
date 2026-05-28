@@ -34,7 +34,9 @@ import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createSettingsRouter } from "./routes/settings.js";
-import { createEmailRouter } from "./routes/email.js";
+import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
+import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
+import { mcpClient } from "./services/mcp-client.singleton.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -133,6 +135,12 @@ export function createApp(prisma: PrismaClient) {
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+  // WARP-466 (D2): wire the §2.4 analysis endpoint to the agent loop.
+  // Single fn override at module level so createEmailRouter keeps its
+  // existing (prisma, gate) signature. Tests can call wireEmailAnalysis
+  // directly with a stub.
+  wireEmailAnalysis(createEmailAnalysisFn(mcpClient));
+
   // WARP-465 (D1): email backbone — accounts list, threads list +
   // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468
   // off-LAN `outbound_email` allowlist channel; refusal raises 451.
