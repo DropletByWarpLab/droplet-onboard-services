@@ -47,7 +47,10 @@ import { createDeviceIdentityClient } from "./services/device-identity.client.js
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
-import { seedWorkspaceSettings } from "./services/workspace-settings.service.js";
+import {
+  seedWorkspaceSettings,
+  seedOffLanChannels,
+} from "./services/workspace-settings.service.js";
 import pino from "pino";
 
 export function createApp(prisma: PrismaClient) {
@@ -241,6 +244,18 @@ export function createApp(prisma: PrismaClient) {
     seedLogger.warn(
       { err },
       "workspace settings seeder failed (settings table may be unbootstrapped)",
+    );
+  });
+
+  // WARP-467: off-LAN allowlist first-boot seeder. Same insert-or-skip
+  // posture as the workspace settings seeder — operator toggles from
+  // the dashboard are never clobbered on subsequent boots. Fire-and-
+  // forget: a DB hiccup at boot surfaces on the first GET /api/settings/off-lan
+  // rather than blocking startup.
+  seedOffLanChannels(prisma).catch((err) => {
+    seedLogger.warn(
+      { err },
+      "off-LAN allowlist seeder failed (channels table may be unbootstrapped)",
     );
   });
 
