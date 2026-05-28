@@ -16,6 +16,8 @@ import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createMatterRouter } from "./routes/matter.js";
+import { createScenesRouter } from "./routes/scenes.js";
+import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
@@ -101,6 +103,16 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-474 (G2): smart-home scenes CRUD + batch-run. Run dispatches
+  // each action through `sendMatterCommand` — partial-failure tolerant,
+  // per-action results returned to the dashboard.
+  app.use(
+    "/api",
+    createScenesRouter(prisma, {
+      sendCommand: (nodeId, command, args) =>
+        sendMatterCommand(nodeId, command, args),
+    }),
+  );
   app.use("/api", createNetworkRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
