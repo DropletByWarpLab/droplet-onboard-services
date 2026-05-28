@@ -436,6 +436,203 @@ export function createEmailRouter(
     },
   );
 
+  // ── D1 follow-up — service-principal draft status PATCH ──────
+  // PATCH /api/email/drafts/:id/status
+  // Body: { status: "sent" | "failed", error?: string }
+  //
+  // The email-indexer's outbound poller flips a queued draft to sent
+  // (with sentAt=now) or failed (with the SMTP error). Status is the
+  // only mutable surface here — operator content edits go through
+  // PATCH /api/email/drafts/:id which 409s once status != draft.
+  const draftStatusSchema = z.object({
+    status: z.enum(["sent", "failed"]),
+    error: z.string().max(1024).optional(),
+  });
+
+  router.patch(
+    "/email/drafts/:id/status",
+    requireRole("service"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = draftStatusSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res
+            .status(400)
+            .json({ error: "Invalid status patch", details: parsed.error.flatten() });
+          return;
+        }
+        const draft = (await prisma.emailDraft.findUnique({
+          where: { id: req.params.id },
+        })) as unknown as DraftRow | null;
+        if (!draft) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
+        if (draft.status !== "queued") {
+          // Idempotent: re-asserting a status the row already holds
+          // is a 200 no-op (the indexer may redeliver a callback on
+          // reconnect). Anything else is a contract violation.
+          if (draft.status === parsed.data.status) {
+            res.json({ id: draft.id, status: draft.status });
+            return;
+          }
+          res.status(409).json({
+            error: "Draft not in queued state",
+            currentStatus: draft.status,
+          });
+          return;
+        }
+        const updated = (await prisma.emailDraft.update({
+          where: { id: req.params.id },
+          data: {
+            status: parsed.data.status,
+            sentAt: parsed.data.status === "sent" ? new Date() : undefined,
+            error: parsed.data.status === "failed" ? (parsed.data.error ?? null) : null,
+          },
+        })) as unknown as DraftRow;
+        res.json({ id: updated.id, status: updated.status });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── D1 follow-up — service-principal ingest from email-indexer ─
+  // POST /api/email/:accountId/messages-ingest
+  // Body: { messageId, inReplyTo?, fromAddr, fromName?, toAddrs[],
+  //          ccAddrs[]?, subject, bodyText?, bodyHtml?, receivedAt,
+  //          threadKey }
+  //
+  // The email-indexer service parses MIME, computes the threadKey
+  // (root Message-ID or References chain), and POSTs each new
+  // message here. The orchestrator owns the upsert into EmailThread
+  // (one row per accountId/threadKey) and the create into
+  // EmailMessage. Conflict on (accountId, messageId) → 200 no-op so
+  // a re-delivery doesn't error the IDLE loop.
+  //
+  // Service-principal gated — same posture as /network/throughput-sample
+  // and /network/off-lan-sample-batch.
+  const ingestSchema = z.object({
+    messageId: z.string().min(1).max(998),
+    inReplyTo: z.string().max(998).nullable().optional(),
+    fromAddr: z.string().email().max(254),
+    fromName: z.string().max(254).nullable().optional(),
+    toAddrs: z.array(z.string().email().max(254)).min(1).max(100),
+    ccAddrs: z.array(z.string().email().max(254)).max(100).nullable().optional(),
+    subject: z.string().max(998),
+    bodyText: z.string().max(1_000_000).nullable().optional(),
+    bodyHtml: z.string().max(2_000_000).nullable().optional(),
+    receivedAt: z.string().datetime(),
+    threadKey: z.string().min(1).max(998),
+  });
+
+  router.post(
+    "/email/:accountId/messages-ingest",
+    requireRole("service"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = ingestSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res
+            .status(400)
+            .json({ error: "Invalid ingest payload", details: parsed.error.flatten() });
+          return;
+        }
+        const account = (await prisma.emailAccount.findUnique({
+          where: { id: req.params.accountId },
+          select: { id: true },
+        })) as { id: string } | null;
+        if (!account) {
+          res.status(404).json({ error: "Account not provisioned" });
+          return;
+        }
+
+        const receivedAt = new Date(parsed.data.receivedAt);
+        const snippet = (parsed.data.bodyText ?? "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 280);
+
+        // Upsert the thread first so the FK on EmailMessage resolves.
+        const thread = (await prisma.emailThread.upsert({
+          where: {
+            accountId_threadKey: {
+              accountId: account.id,
+              threadKey: parsed.data.threadKey,
+            },
+          },
+          update: {
+            // Re-running on the same threadKey updates only the
+            // mutable fields. messageCount is bumped after the create
+            // below so an idempotent re-delivery doesn't double-count.
+            subject: parsed.data.subject,
+            lastSender: parsed.data.fromName ?? parsed.data.fromAddr,
+            snippet: snippet.length > 0 ? snippet : undefined,
+            lastMessageAt: receivedAt,
+          },
+          create: {
+            accountId: account.id,
+            threadKey: parsed.data.threadKey,
+            subject: parsed.data.subject,
+            lastSender: parsed.data.fromName ?? parsed.data.fromAddr,
+            snippet,
+            messageCount: 0,
+            lastMessageAt: receivedAt,
+          },
+        })) as unknown as ThreadRow;
+
+        // EmailMessage_accountId_messageId_key dedupes redelivery.
+        try {
+          await prisma.emailMessage.create({
+            data: {
+              accountId: account.id,
+              threadId: thread.id,
+              messageId: parsed.data.messageId,
+              inReplyTo: parsed.data.inReplyTo ?? null,
+              fromAddr: parsed.data.fromAddr,
+              fromName: parsed.data.fromName ?? null,
+              toAddrs: parsed.data.toAddrs as any,
+              ccAddrs: (parsed.data.ccAddrs ?? null) as any,
+              subject: parsed.data.subject,
+              bodyText: parsed.data.bodyText ?? null,
+              bodyHtml: parsed.data.bodyHtml ?? null,
+              receivedAt,
+            },
+          });
+          await prisma.emailThread.update({
+            where: { id: thread.id },
+            data: { messageCount: { increment: 1 } },
+          });
+        } catch (err) {
+          if ((err as { code?: string }).code === "P2002") {
+            // Re-delivery of a message we've already stored. Idempotent
+            // success — return the thread id so the indexer can decide
+            // whether to surface the duplicate or move on.
+            res.json({
+              ok: true,
+              threadId: thread.id,
+              duplicate: true,
+            });
+            return;
+          }
+          throw err;
+        }
+
+        res.status(201).json({
+          ok: true,
+          threadId: thread.id,
+          duplicate: false,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, accountId: req.params.accountId },
+          "messages-ingest failed",
+        );
+        next(err);
+      }
+    },
+  );
+
   // ── WARP-466 (D2) — §2.4 AI side-panel analysis endpoint ──────
   // GET /api/email/:accountId/threads/:threadId/analysis
   //

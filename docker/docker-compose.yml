@@ -474,6 +474,38 @@ services:
       - openwrt_password
     restart: always
 
+  # --- Email indexer (IMAP IDLE + MIME parser + outbound SMTP) ---
+  # WARP-465 D1 follow-up. One async task per EmailAccount via
+  # apscheduler — no `while True`. Reads accounts from postgres at
+  # boot + every 5 min, POSTs parsed messages to the orchestrator
+  # ingest endpoint, drains queued EmailDraft rows via SMTP every 10 s.
+  # Fernet key for password decryption lives at /data/secrets/email.key
+  # (mode 0600, setup.sh-generated). Health endpoint on :8086 for
+  # the docker healthcheck.
+  email-indexer:
+    build:
+      context: ..
+      dockerfile: services/email-indexer/Dockerfile
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://droplet:droplet@postgres:5432/droplet}
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
+      - ORCHESTRATOR_SERVICE_TOKEN=${ORCHESTRATOR_SERVICE_TOKEN:-}
+      - MQTT_HOST=${MQTT_HOST:-mosquitto}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - EMAIL_KEY_PATH=/data/secrets/email.key
+      - OUTBOUND_POLL_SECONDS=${OUTBOUND_POLL_SECONDS:-10}
+      - ACCOUNT_REFRESH_SECONDS=${ACCOUNT_REFRESH_SECONDS:-300}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
+    volumes:
+      - ../data/secrets:/data/secrets:ro
+    depends_on:
+      - postgres
+      - mosquitto
+    restart: always
+    profiles: ["full"]
+
   # --- Managed Switch (PoE + VLAN control) ---
   switch:
     build:
