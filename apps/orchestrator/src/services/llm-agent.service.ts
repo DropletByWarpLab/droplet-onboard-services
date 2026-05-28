@@ -44,6 +44,25 @@ export interface EnhancementDeps {
   embed(texts: string[]): Promise<number[][]>;
 }
 
+/**
+ * WARP-473 — fire-and-forget file-citation enqueue. The agent loop
+ * calls `enqueue` after every tool dispatch whose parsed result
+ * references one or more file paths. The implementation MUST NOT
+ * await; the loop never blocks on citation persistence.
+ *
+ * Pass `undefined` for `AgentDeps.citation` to disable (back-compat
+ * default — existing tests pass nothing and observe no behavior
+ * change).
+ */
+export interface CitationDeps {
+  /**
+   * Record citations for `filePaths` against the given chat context.
+   * Implementation runs the actual insert via `setImmediate` so a
+   * slow DB doesn't propagate into the agent loop's latency.
+   */
+  enqueue(filePaths: string[], context: { threadId: string; messageId: string }): void;
+}
+
 export interface AgentDeps {
   mcp: McpClientService;
   aiGateway: {
@@ -68,6 +87,13 @@ export interface AgentDeps {
    * propagate; the loop falls through to the baseline tool call.
    */
   enhancement?: EnhancementDeps;
+  /**
+   * WARP-473 — file-citation enqueue. When present, the agent loop
+   * extracts file paths from every parsed tool result and hands them
+   * off to `citation.enqueue` fire-and-forget. When absent, no
+   * citations are recorded — same byte-for-byte behavior as before.
+   */
+  citation?: CitationDeps;
   onEvent?: (e: SSEEvent) => void;
 }
 
@@ -166,6 +192,15 @@ export interface AgentRequest {
    * the matching content_delta. See spec §AC4.
    */
   captureReasoning?: boolean;
+  /**
+   * WARP-473 — chat context the agent loop uses when handing file
+   * paths off to `deps.citation.enqueue`. Required when
+   * `deps.citation` is present (otherwise the citations have no
+   * threadId/messageId to attach to). Omitted by callers that don't
+   * persist chat messages (e.g. one-shot scripted invocations) —
+   * those callers also leave `deps.citation` unset.
+   */
+  citationContext?: { threadId: string; messageId: string };
 }
 
 export interface AgentTraceEntry {
@@ -449,6 +484,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       }
       emit(evt);
 
+      // WARP-473 — fire-and-forget citation enqueue. We extract file
+      // paths from the parsed result here (rather than after the tool
+      // loop) so a single helper call captures every result this turn.
+      // `deps.citation.enqueue` MUST NOT await — see CitationDeps.
+      if (deps.citation && req.citationContext && !result.isError) {
+        const paths = extractCitedFilePaths(parsed);
+        if (paths.length > 0) {
+          deps.citation.enqueue(paths, req.citationContext);
+        }
+      }
+
       // Bound the tool result we feed back to the model so one giant
       // payload doesn't blow the next-turn context window.
       messages.push({
@@ -540,4 +586,52 @@ function safeParseArgs(call: ToolCall): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * WARP-473 — extract file paths from a parsed tool result.
+ *
+ * Heuristic walker that covers every file-shaped result the registry
+ * emits today:
+ *   - `data.path`              — read_file, write_file, move_file, …
+ *   - `data.results[].path`    — search_content hits
+ *   - `data.files[].path`      — list_files, list_recent_files
+ *   - `data.items[].path`      — older listings
+ *
+ * Anything outside these shapes is ignored — no path-finding by
+ * regex across arbitrary text. Bounded to 20 paths per result so a
+ * list_files on a giant directory can't enqueue thousands of rows.
+ *
+ * The function is exported for direct testing.
+ */
+export function extractCitedFilePaths(parsed: unknown): string[] {
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const root = parsed as { data?: unknown };
+  const data = root.data;
+  if (typeof data !== "object" || data === null) return [];
+
+  const out: string[] = [];
+  const push = (val: unknown) => {
+    if (typeof val === "string" && val.length > 0 && out.length < 20) {
+      out.push(val);
+    }
+  };
+  const pushFrom = (arr: unknown) => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      if (item && typeof item === "object" && "path" in item) {
+        push((item as { path?: unknown }).path);
+      }
+      if (out.length >= 20) return;
+    }
+  };
+
+  const d = data as { path?: unknown; results?: unknown; files?: unknown; items?: unknown };
+  push(d.path);
+  pushFrom(d.results);
+  pushFrom(d.files);
+  pushFrom(d.items);
+  // De-dup within the same tool result so one path cited twice doesn't
+  // produce two rows.
+  return Array.from(new Set(out));
 }
