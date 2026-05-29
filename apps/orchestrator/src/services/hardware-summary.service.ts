@@ -21,7 +21,10 @@ export interface HardwareCompute {
 }
 
 export interface HardwareDrive {
-  size_tb: number;
+  // size_tb is nullable until the device-bridge inventory wires capacity.
+  // `0` would be indistinguishable from a real 0 TB drive; null says
+  // "unknown" and lets the dashboard render an "unknown" pill.
+  size_tb: number | null;
   display_name: string | null;
   encrypted: boolean | null;
 }
@@ -29,7 +32,10 @@ export interface HardwareDrive {
 export interface HardwareStorage {
   drives: HardwareDrive[];
   raid: string | null;
-  encrypted: boolean;
+  // encrypted is nullable: the device-bridge probe that decides this
+  // doesn't exist on this branch. `false` would falsely assert "not
+  // encrypted" when the truth is unknown. Matches raid / used_tb.
+  encrypted: boolean | null;
   used_tb: number | null;
 }
 
@@ -42,7 +48,11 @@ export interface HardwareNetwork {
 
 export interface HardwareDisplay {
   kind: string;
-  online: boolean;
+  // online is nullable until the service-health rollup (WARP-43) is
+  // wired into the hardware composer. Hardcoding `true` falsely
+  // claims the display is up on every host, including those with no
+  // display hardware.
+  online: boolean | null;
 }
 
 export interface HardwareSupplyChain {
@@ -88,11 +98,11 @@ async function getStorage(prisma: PrismaClient): Promise<HardwareStorage> {
       take: 16,
     });
     // The current Drive model doesn't carry `size_tb` directly —
-    // until the device-bridge inventory wires capacity, we surface
-    // the row count + name. dashboard's spec field is `size_tb`;
-    // we report 0 to honour the shape without fabricating sizes.
+    // until the device-bridge inventory wires capacity, surface null.
+    // `0` would be indistinguishable from a real 0 TB drive (CLAUDE.md
+    // "no guessing" rule).
     drives = rows.map((r: { displayName: string; notes: string | null }) => ({
-      size_tb: 0,
+      size_tb: null,
       display_name: r.displayName,
       encrypted: null,
     }));
@@ -101,11 +111,11 @@ async function getStorage(prisma: PrismaClient): Promise<HardwareStorage> {
   }
   return {
     drives,
-    // RAID mode / used_tb / encrypted come from a device-bridge probe
-    // that doesn't exist on this branch. Returning null lets the
+    // RAID mode / used_tb / encrypted all come from a device-bridge
+    // probe that doesn't exist on this branch. Returning null lets the
     // dashboard render an "unknown" pill rather than a fake value.
     raid: null,
-    encrypted: false,
+    encrypted: null,
     used_tb: null,
   };
 }
@@ -134,9 +144,11 @@ function getDisplay(): HardwareDisplay {
   // display-service has its own /health surface; calling it from the
   // hardware composer adds a sync coupling we don't want on every
   // hardware-page render. Static "PyPortal" tag matches the v2.6 HW
-  // contract; the `online` field flips once the service-health
-  // rollup (WARP-43) is wired here as a follow-up.
-  return { kind: "Adafruit PyPortal", online: true };
+  // contract; `online: null` says "unknown" until the service-health
+  // rollup (WARP-43) is wired. Hardcoding `true` would falsely claim
+  // the display is up on every host, including those with no display
+  // hardware. Matches every other unresolved field in this service.
+  return { kind: "Adafruit PyPortal", online: null };
 }
 
 function getNetwork(): HardwareNetwork {
