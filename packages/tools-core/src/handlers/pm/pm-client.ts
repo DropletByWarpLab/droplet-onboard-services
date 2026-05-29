@@ -1,25 +1,60 @@
 /**
- * WARP-509 — Plane HTTP client for the four `pm_*` write tools.
+ * Plane HTTP client for the `pm_*` tool handlers (WARP-508 read +
+ * WARP-509 write).
  *
- * The handlers (create-work-item, update-work-item, add-work-item-comment,
- * transition-work-item) all reach Plane through this single module so the
- * URL / auth / error-mapping policy stays in one place. The orchestrator
- * matches the broader Droplet contract: service-principals proxy through
- * the orchestrator, so this client targets `DROPLET_PM_API_URL` over the
- * compose bridge network and presents `DROPLET_PM_ADMIN_TOKEN` as
- * `X-API-Key` (Plane's accepted shape).
+ * The handlers (list/get/search work items + create/update/comment/
+ * transition) all reach Plane through this single module so the URL /
+ * auth / error-mapping policy stays in one place. Per spec WARP-498:
+ * "All HTTP calls go through packages/tools-core/src/handlers/pm/
+ * pm-client.ts — single auth + retry + error-mapping point." Mirrors
+ * the orchestrator-side client in apps/orchestrator/src/services/
+ * pm.client.ts but lives in tools-core because each tool handler runs
+ * in the mcp-server child process and doesn't share the orchestrator's
+ * import graph.
+ *
+ * Auth: `X-API-Key: ${DROPLET_PM_ADMIN_TOKEN}` (verified 2026-05-28
+ * against Plane API ref). NOT `Authorization: Bearer`.
  *
  * Errors:
- *   - HTTP 4xx / 5xx           → throw PlaneApiError with `.status`
- *   - Network / DNS / timeout  → throw PlaneApiError with status 0
- *   - JSON parse failure       → throw PlaneApiError with status 0 + raw text
+ *   - HTTP 4xx / 5xx           → PlaneApiError with `.status`
+ *   - Network / DNS / timeout  → PlaneApiError with status 0
+ *   - JSON parse failure       → PlaneApiError with status 0
  *
  * The handlers catch `PlaneApiError` and translate to the tool-result
  * code surface (PM_WORK_ITEM_NOT_FOUND on 404, PM_API_ERROR otherwise).
  * Anything else is a bug — let it bubble to the agent loop's catch.
+ *
+ * Per architecture-guard rule 4 — chat traffic does NOT touch this
+ * client. Control-plane integration only.
  */
 
 const HTTP_TIMEOUT_MS = 8_000;
+
+// --- Public types ---
+
+export interface PlaneWorkspace {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+export interface PlaneProject {
+  id: string;
+  name: string;
+  identifier: string;
+  workspace: string;
+}
+
+export interface PlaneWorkItem {
+  id: string;
+  name: string;
+  description_html?: string;
+  state?: string;
+  assignees?: string[];
+  labels?: string[];
+  created_at: string;
+  updated_at: string;
+}
 
 export class PlaneApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -27,6 +62,8 @@ export class PlaneApiError extends Error {
     this.name = "PlaneApiError";
   }
 }
+
+// --- Internals ---
 
 /**
  * Resolve the Plane base URL at call-time (not module-load) so a test
@@ -39,7 +76,7 @@ function resolveBase(): string {
   const base = process.env.DROPLET_PM_API_URL ?? "";
   if (!base) {
     throw new PlaneApiError(
-      "DROPLET_PM_API_URL not configured — refusing PM write",
+      "DROPLET_PM_API_URL not configured — refusing PM call",
       0,
     );
   }
@@ -48,9 +85,9 @@ function resolveBase(): string {
 
 /**
  * Returns `X-API-Key` if `DROPLET_PM_ADMIN_TOKEN` is set, empty header
- * map otherwise. The Plane upstream rejects unauthenticated calls
- * with 401 in either case; we let that surface as PlaneApiError(401)
- * rather than refuse at the client layer.
+ * map otherwise. Plane rejects unauthenticated calls with 401; we let
+ * that surface as PlaneApiError(401) rather than refuse at the client
+ * layer — keeps the error path uniform across reads and writes.
  */
 function authHeaders(): Record<string, string> {
   const tok = process.env.DROPLET_PM_ADMIN_TOKEN ?? "";
@@ -58,22 +95,30 @@ function authHeaders(): Record<string, string> {
 }
 
 async function call<T>(
-  method: "GET" | "POST" | "PATCH",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
-  body?: unknown,
+  options: {
+    body?: unknown;
+    queryParams?: Record<string, string | number | undefined>;
+  } = {},
 ): Promise<T> {
-  const url = new URL(path, resolveBase()).toString();
+  const url = new URL(path, resolveBase());
+  if (options.queryParams) {
+    for (const [k, v] of Object.entries(options.queryParams)) {
+      if (v !== undefined) url.searchParams.set(k, String(v));
+    }
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(url.toString(), {
       method,
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
         ...authHeaders(),
       },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
     });
     const text = await resp.text();
@@ -109,7 +154,65 @@ async function call<T>(
   }
 }
 
-// --- Public API consumed by handlers/ ---
+// --- Read API (WARP-508) ---
+
+export async function listWorkspaces(): Promise<PlaneWorkspace[]> {
+  return call<PlaneWorkspace[]>("GET", "/api/v1/workspaces/");
+}
+
+export async function listProjects(
+  workspace_slug: string,
+  per_page?: number,
+): Promise<PlaneProject[]> {
+  return call<PlaneProject[]>(
+    "GET",
+    `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/`,
+    { queryParams: { per_page } },
+  );
+}
+
+export async function listWorkItems(
+  workspace_slug: string,
+  project_id: string,
+  options: { perPage?: number; state?: string; assignee?: string } = {},
+): Promise<PlaneWorkItem[]> {
+  return call<PlaneWorkItem[]>(
+    "GET",
+    `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/`,
+    {
+      queryParams: {
+        per_page: options.perPage,
+        state: options.state,
+        assignee: options.assignee,
+      },
+    },
+  );
+}
+
+export async function getWorkItem(
+  workspace_slug: string,
+  project_id: string,
+  work_item_id: string,
+): Promise<PlaneWorkItem> {
+  return call<PlaneWorkItem>(
+    "GET",
+    `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
+  );
+}
+
+export async function searchWorkItems(
+  workspace_slug: string,
+  query: string,
+  per_page?: number,
+): Promise<PlaneWorkItem[]> {
+  return call<PlaneWorkItem[]>(
+    "GET",
+    `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/search/`,
+    { queryParams: { query, per_page } },
+  );
+}
+
+// --- Write API (WARP-509) ---
 
 export interface CreateWorkItemFields {
   name: string;
@@ -134,7 +237,7 @@ export async function createWorkItem(
   return call(
     "POST",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/`,
-    fields,
+    { body: fields },
   );
 }
 
@@ -147,7 +250,7 @@ export async function updateWorkItem(
   return call(
     "PATCH",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
-    fields,
+    { body: fields },
   );
 }
 
@@ -160,7 +263,7 @@ export async function addWorkItemComment(
   return call(
     "POST",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/comments/`,
-    { comment_html },
+    { body: { comment_html } },
   );
 }
 
@@ -173,6 +276,6 @@ export async function transitionWorkItem(
   return call(
     "PATCH",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
-    { state_id },
+    { body: { state_id } },
   );
 }

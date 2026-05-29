@@ -85,6 +85,12 @@ const EXPECTED_TOOL_NAMES = [
   "pm_create_work_item",
   "pm_transition_work_item",
   "pm_update_work_item",
+  // WARP-508 — Plane PM read tools
+  "pm_get_work_item",
+  "pm_list_projects",
+  "pm_list_work_items",
+  "pm_list_workspaces",
+  "pm_search_work_items",
 ];
 
 describe("TOOLS registry", () => {
