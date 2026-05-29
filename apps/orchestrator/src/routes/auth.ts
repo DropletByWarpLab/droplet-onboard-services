@@ -261,16 +261,27 @@ export function createPublicAuthRouter(
         return;
       }
 
-      await ncInstallAndCreateAdmin(username, password, displayName);
-      logger.info({ username }, "Initial admin user created");
-
-      // Mirror the Nextcloud admin into a local User row so the login
-      // path's findUnique({ where: { nextcloudUsername } }) succeeds.
-      // Same upsert shape as the invite-accept path (auth.ts ~L815).
-      // Role 'owner' because this is the first admin. If this throws,
-      // the outer catch returns 500 — the operator gets a real error
-      // instead of a misleading `{ status: "ok" }` over a
-      // half-provisioned setup.
+      // Romain PR #279 round 2: order matters here because the two
+      // calls have very different recovery profiles.
+      //
+      //   prisma.user.upsert     — idempotent on `nextcloudUsername`;
+      //                            infinitely safe to retry.
+      //   ncInstallAndCreateAdmin — ONE-SHOT. Nextcloud refuses a
+      //                            second install once `installed=true`
+      //                            (status.php), so on a partial-failure
+      //                            retry the route would be permanently
+      //                            stuck unless the operator dropped
+      //                            into the box and reset state.
+      //
+      // Do the idempotent step FIRST so a transient DB failure leaves
+      // Nextcloud untouched and the operator can simply retry. If the
+      // upsert succeeds and ncInstall later fails, the next retry
+      // hits the same idempotent upsert (no-op) and re-attempts
+      // ncInstall — exactly what we want for transient infrastructure
+      // failures. An orphan local row from this path is harmless: the
+      // login route 401s USER_NOT_PROVISIONED anyway (no NC user
+      // exists yet), so there's no security or UX gap from the
+      // orphan.
       await prisma.user.upsert({
         where: { nextcloudUsername: username },
         update: { displayName: displayName || username },
@@ -282,6 +293,9 @@ export function createPublicAuthRouter(
           role: "owner" as any,
         },
       });
+
+      await ncInstallAndCreateAdmin(username, password, displayName);
+      logger.info({ username }, "Initial admin user created");
 
       res.json({ status: "ok", username });
     } catch (err: any) {
@@ -1107,15 +1121,32 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
-
-      // Mirror the new Nextcloud user into a local User row. Role
-      // defaults to 'family' (matches the invite-accept path's
-      // empty-group default for non-admin invitees). Same upsert
-      // shape as the invite-accept route. If this throws, the outer
-      // catch + next(err) routes to the Express error handler — the
-      // caller gets an explicit error rather than `{ status: "ok" }`
-      // over a half-provisioned account.
+      // Romain PR #279 round 2: idempotent upsert FIRST, ncCreateUser
+      // SECOND. Without this ordering, a transient failure between
+      // the two writes produces a misleading 409 on retry:
+      //
+      //   attempt 1 → ncCreateUser OK → upsert THROWS → caller 500
+      //   attempt 2 → ncCreateUser THROWS NextcloudUserExistsError
+      //               → outer catch maps to 409 "user already exists"
+      //               → admin gets a 409 that masks the real bug
+      //                 (the missing local row from attempt 1), and
+      //                 the freshly-provisioned NC user is locked out
+      //                 forever with USER_NOT_PROVISIONED
+      //
+      // Reordered the calls so the idempotent step lands first:
+      //
+      //   attempt 1 → upsert OK → ncCreateUser THROWS (transient)
+      //                         → caller 500, local row orphaned
+      //   attempt 2 → upsert no-op → ncCreateUser succeeds
+      //                            → caller 201, system is consistent
+      //
+      // The orphan-local-row edge case (transient NC failure on the
+      // first try) is acceptable because: (a) the orphan row carries
+      // no privileges any code path honors without a matching NC
+      // user, and (b) the next retry collapses it back into the
+      // happy path. Worst real-world impact: a defunct row sits in
+      // `User` if the admin abandons the username — operator can
+      // purge via the standard delete-user flow.
       await prisma.user.upsert({
         where: { nextcloudUsername: parsed.data.username },
         update: { displayName: parsed.data.displayName || parsed.data.username },
@@ -1127,6 +1158,8 @@ export function createProtectedAuthRouter(
           role: "family" as any,
         },
       });
+
+      await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
 
       res.status(201).json({ status: "ok", username: parsed.data.username });
     } catch (err: any) {
