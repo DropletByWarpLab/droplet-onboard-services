@@ -122,12 +122,34 @@ export function nextFireFromRrule(
 
   // FREQ=WEEKLY
   const byDay = parsed.byDay ?? [after.getUTCDay()];
+  // Anchor "week 0" at the UTC week (Sun-start) containing `after`. For
+  // INTERVAL=N we only accept candidates that fall in week 0, N, 2N, ...
+  // — without this gate the loop returns the first byDay match within
+  // the search window, which collapses INTERVAL=N to INTERVAL=1 for any
+  // matching weekday found before the next interval-aligned week.
+  const baseWeekStart = startOfUtcWeek(after);
   for (let ahead = 0; ahead < 8 * parsed.interval; ahead += 1) {
     const candidate = buildAt(after, parsed, ahead);
     if (candidate.getTime() <= after.getTime()) continue;
-    if (byDay.includes(candidate.getUTCDay())) return candidate;
+    if (!byDay.includes(candidate.getUTCDay())) continue;
+    if (parsed.interval > 1) {
+      const candidateWeekStart = startOfUtcWeek(candidate);
+      const weeksFromBase = Math.round(
+        (candidateWeekStart.getTime() - baseWeekStart.getTime()) /
+          (7 * 86_400_000),
+      );
+      if (weeksFromBase % parsed.interval !== 0) continue;
+    }
+    return candidate;
   }
   return null;
+}
+
+function startOfUtcWeek(d: Date): Date {
+  const w = new Date(d);
+  w.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  w.setUTCHours(0, 0, 0, 0);
+  return w;
 }
 
 /** Exported for direct testing of edge-case strings without a Date. */

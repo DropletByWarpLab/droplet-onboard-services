@@ -287,40 +287,51 @@ export function createToolsRouter(
           return;
         }
 
-        // If steps are present, replace wholesale (drag-reorder UX).
-        if (parsed.data.steps) {
-          await prisma.toolStep.deleteMany({
-            where: { specId: existing.id },
-          });
-        }
-
         // Bump version on every PATCH that actually mutates the spec —
         // simple, conservative: even a description-only edit bumps. The
         // dashboard's run-detail drawer pins runs to the spec version
         // they were dispatched against.
-        const updated = (await prisma.toolSpec.update({
-          where: { slug: req.params.slug },
-          data: {
-            name: parsed.data.name,
-            category: parsed.data.category ?? undefined,
-            description: parsed.data.description ?? undefined,
-            share: parsed.data.share ?? undefined,
-            safety: parsed.data.safety,
-            writes: parsed.data.writes,
-            reversible: parsed.data.reversible,
-            status: parsed.data.status as any,
-            version: { increment: 1 },
-            steps: parsed.data.steps
-              ? {
-                  create: parsed.data.steps.map((s, idx) => ({
-                    idx,
-                    kind: s.kind,
-                    args: { tool: s.tool, args: s.args ?? {} } as any,
-                  })),
-                }
-              : undefined,
-          },
-          include: { steps: { orderBy: { idx: "asc" } } },
+        //
+        // Step replacement (drag-reorder UX) MUST be transactional with
+        // the spec update: a crash between deleteMany + update would
+        // leave a spec with zero steps, silently producing empty-trace
+        // runs on the next run-now. $transaction is on the same client
+        // so the deleteMany is rolled back on update failure.
+        //
+        // For nullable string fields (category/description/share) we
+        // pass `parsed.data.X` directly — Zod's `.nullable().optional()`
+        // surfaces `undefined` when the key is absent (Prisma skip) and
+        // `null` when the operator explicitly clears it (Prisma sets
+        // column to NULL). The previous `?? undefined` collapse mapped
+        // both cases to skip and made clears impossible.
+        const updated = (await prisma.$transaction(async (tx) => {
+          if (parsed.data.steps) {
+            await tx.toolStep.deleteMany({ where: { specId: existing.id } });
+          }
+          return tx.toolSpec.update({
+            where: { slug: req.params.slug },
+            data: {
+              name: parsed.data.name,
+              category: parsed.data.category,
+              description: parsed.data.description,
+              share: parsed.data.share,
+              safety: parsed.data.safety,
+              writes: parsed.data.writes,
+              reversible: parsed.data.reversible,
+              status: parsed.data.status as any,
+              version: { increment: 1 },
+              steps: parsed.data.steps
+                ? {
+                    create: parsed.data.steps.map((s, idx) => ({
+                      idx,
+                      kind: s.kind,
+                      args: { tool: s.tool, args: s.args ?? {} } as any,
+                    })),
+                  }
+                : undefined,
+            },
+            include: { steps: { orderBy: { idx: "asc" } } },
+          });
         })) as unknown as SpecRow & { steps: StepRow[] };
 
         res.json(projectSpec(updated));
