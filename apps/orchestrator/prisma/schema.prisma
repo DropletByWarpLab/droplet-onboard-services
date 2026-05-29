@@ -1393,3 +1393,126 @@ enum EmailDraftStatus {
   sent
   failed
 }
+
+/// WARP-462 — Phase C1. Productized workflow spec ("call carrier-delay
+/// recap every weekday morning"). Distinct from `packages/tools-core`
+/// (the capability registry) — a ToolSpec composes capabilities into
+/// an operator-shareable, scheduled, versioned routine.
+///
+/// `status` is an explicit enum (`live | draft | suggested`); the
+/// dashboard renders three tabs against it. `suggested` rows are
+/// written by the WARP-464 pattern-miner; `draft` is operator-authored
+/// and not yet executed; `live` is publishable + schedulable.
+///
+/// `safety` is the maximum safety tier across the spec's steps —
+/// computed at publish time so a "tier 3" spec never silently sneaks
+/// into the live tab. `writes` mirrors the step-aggregated
+/// requiresWrite. `reversible` is operator-declared: true if every
+/// action in the spec can be undone (e.g. flip a switch back); false
+/// otherwise. Together (writes && !reversible) gates a confirm_action
+/// card before run-now (handled in route layer + C2 scheduler).
+model ToolSpec {
+  id          String          @id @default(uuid())
+  slug        String          @unique
+  name        String
+  category    String?
+  description String?
+  version     Int             @default(1)
+  status      ToolSpecStatus  @default(draft)
+  ownerId     String?
+  share       String?
+  safety      Int             @default(1)
+  writes      Boolean         @default(false)
+  reversible  Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  steps       ToolStep[]
+  runs        ToolRun[]
+  schedules   ToolSchedule[]
+
+  @@index([status, updatedAt(sort: Desc)])
+}
+
+/// WARP-462 — one ordered step inside a ToolSpec. `kind` is the
+/// dispatch class ("call" for an MCP tool call; future kinds may
+/// include "branch", "wait"). `args` carries the per-kind payload —
+/// for `kind=call` it is `{ tool: "tool_name", args: { ... } }`.
+///
+/// idx is the explicit ordering column; the imperative walker
+/// (services/tool-spec-runner.service.ts) walks ascending.
+model ToolStep {
+  id      String   @id @default(uuid())
+  specId  String
+  spec    ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  idx     Int
+  kind    String   @default("call")
+  args    Json
+
+  @@index([specId, idx])
+}
+
+/// WARP-462 — one execution record of a ToolSpec.
+///
+/// `status` is explicit (`pending | running | ok | failed | cancelled`);
+/// the dashboard renders per-run chips against the enum. `pending` is
+/// the non-terminal initial state for pre-created rows (scheduler or
+/// any future op that materializes a row before dispatch). `running`
+/// is in-flight. `error` carries the last-step failure message for
+/// `failed` runs; null otherwise. `trace` captures per-step results so
+/// the dashboard's run-detail drawer can show "step 2 of 5 failed: ...".
+model ToolRun {
+  id        String        @id @default(uuid())
+  specId    String
+  spec      ToolSpec      @relation(fields: [specId], references: [id], onDelete: Cascade)
+  triggeredBy String?
+  startedAt DateTime      @default(now())
+  endedAt   DateTime?
+  status    ToolRunStatus @default(pending)
+  error     String?
+  trace     Json?
+
+  @@index([specId, startedAt(sort: Desc)])
+}
+
+/// WARP-462 — RRULE-driven schedule for a ToolSpec. `nextFireAt` is
+/// advanced by the WARP-463 tool-schedule-ticker after each
+/// successful (or failed) run. Multiple schedules per spec allowed —
+/// the §7 example carrier-delay spec has both a 09:00 weekday cron
+/// and an ad-hoc "high-priority client" trigger.
+model ToolSchedule {
+  id          String   @id @default(uuid())
+  specId      String
+  spec        ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  rrule       String
+  nextFireAt  DateTime
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([nextFireAt])
+  @@index([specId])
+}
+
+/// WARP-462 — ToolSpec lifecycle. `suggested` rows are written by the
+/// pattern miner (WARP-464); `draft` is operator-authored and not yet
+/// runnable; `live` is publishable + schedulable. Adding a new state
+/// is a schema change so the dashboard's three-tab UX can't drift.
+enum ToolSpecStatus {
+  live
+  draft
+  suggested
+}
+
+/// WARP-462 — ToolRun outcome. Non-terminal: `pending` (pre-created
+/// but not dispatched), `running` (in flight). Terminal: `ok`,
+/// `failed`, `cancelled`. Per CLAUDE.md "no guessing" rule (mirrors
+/// WARP-218's BrainMemoryItemStatus), the default is the non-terminal
+/// `pending` — a row that wasn't explicitly transitioned to a terminal
+/// state must NOT appear as a successful run.
+enum ToolRunStatus {
+  pending
+  running
+  ok
+  failed
+  cancelled
+}
