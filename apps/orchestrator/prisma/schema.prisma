@@ -94,6 +94,42 @@ enum ContextPinKind {
   camera_window
 }
 
+/// WARP-461 — Durable per-workspace memory facts the model can recall
+/// (FEATURES.md §5). Distinct from `BrainMemoryItem`, which is the
+/// chat-attachment file-bytes table — keep concerns separate per the
+/// WARP-461 architecture note.
+///
+/// `addedBy` is a free-form identifier (username today; will become a
+/// User.id UUID after the chat-user-id backfill lands). `evidenceChatId`
+/// optionally points at the conversation where the fact was extracted.
+/// `active` is a soft-disable flag so users can pause a fact without
+/// deleting the row (preserving evidence chain).
+model MemoryFact {
+  id              String              @id @default(uuid())
+  category        MemoryFactCategory
+  fact            String
+  addedBy         String
+  evidenceChatId  String?
+  active          Boolean             @default(true)
+  addedAt         DateTime            @default(now())
+  updatedAt       DateTime            @default(now()) @updatedAt
+
+  @@index([category, active])
+  @@index([active, addedAt(sort: Desc)])
+}
+
+/// WARP-461 — per FEATURES.md §5 fact taxonomy. Explicit enum, never
+/// derived (CLAUDE.md no-guessing rule). `Other` is the catch-all so the
+/// agent has somewhere to put a fact that doesn't fit the four named
+/// categories.
+enum MemoryFactCategory {
+  Tone
+  Workflow
+  Scope
+  Schedule
+  Other
+}
+
 /// WARP-304 / WARP-329: persisted message in a `ChatSession`. Stored in
 /// order of `createdAt`; for the same millisecond the `id` (uuid) breaks
 /// the tie.
