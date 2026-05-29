@@ -43,6 +43,7 @@ import {
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
@@ -301,6 +302,28 @@ async function main() {
       }
     },
     { lockKey: "droplet:guest-expiry-sweep" },
+  );
+
+  // WARP-464 (C3): hourly tool-call pattern miner. Reads the last
+  // 7 days of kind=tool_call ActivityRow rows, detects repeating
+  // N-gram sequences (N=2..5, ≥3 occurrences), writes ToolSpec rows
+  // with status=suggested. Dedupe is by SHA-256 fingerprint slug, so
+  // re-running the same hour writes zero rows the second time.
+  //
+  // Let errors propagate naked to cron-runtime's `safeRun` — it logs +
+  // increments the per-handler consecutiveFailures counter that
+  // downstream alerting reads. Swallowing here would zero out the
+  // counter and silence the canary; every other cron handler in this
+  // file follows the same pattern.
+  cronRuntime.scheduleCron(
+    "0 * * * *",
+    async () => {
+      const result = await mineToolCallPatterns(prisma);
+      if (result.inserted > 0) {
+        logger.info(result, "pattern-miner produced suggestions");
+      }
+    },
+    { lockKey: "droplet:pattern-miner-hourly" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the
