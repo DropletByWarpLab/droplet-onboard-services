@@ -66,7 +66,12 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
 
   router.get(
     "/network/off-lan",
-    requireRole("owner", "admin", "family", "guest"),
+    // `service` role is required because ai-gateway's off_lan_gating
+    // middleware presents the AI_GATEWAY_SAMPLER_TOKEN here to read
+    // cloud_model_escape before allowing a cloud-LLM call. Without
+    // `service` on this gate the middleware permanently fails closed
+    // (every cloud request 451s) regardless of operator configuration.
+    requireRole("owner", "admin", "family", "guest", "service"),
     async (req, res, next) => {
       try {
         const q = querySchema.safeParse(req.query);

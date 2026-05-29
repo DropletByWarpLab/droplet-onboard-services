@@ -275,7 +275,12 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
 
   router.get(
     "/settings/off-lan",
-    requireRole("owner", "admin", "family"),
+    // `service` role added so ai-gateway's off_lan_gating middleware
+    // can read cloud_model_escape before allowing a cloud-LLM call.
+    // Without `service` here the gate fails closed and every cloud
+    // request 451s. The POST below stays at owner+admin (writes are
+    // sovereignty surface).
+    requireRole("owner", "admin", "family", "service"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
         const rows = (await prisma.offLanAllowlistChannel.findMany({
