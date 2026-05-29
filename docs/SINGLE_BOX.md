@@ -82,7 +82,7 @@ Some services run on the orchestrator host regardless of deployment shape
 (`single-box` AND `multi-box`). They share the host's RAM + SSD with the
 profile-gated services above and the orchestrator stack itself.
 
-### Embedded Plane PM stack (WARP-501 / ADR-007)
+### Embedded Plane PM stack (WARP-501 / ADR-010)
 
 Spec OQ1 chose dedicated `postgres-pm` + `redis-pm` over sharing with the
 orchestrator's main DB so backup granularity (WARP-514) is per-volume and
