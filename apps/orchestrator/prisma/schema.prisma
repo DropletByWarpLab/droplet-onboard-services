@@ -1516,3 +1516,44 @@ enum ToolRunStatus {
   failed
   cancelled
 }
+
+/// WARP-474 — Phase G2. Smart-home scene definition.
+///
+/// One row per operator-created scene ("Movie night", "Goodnight").
+/// Pressing a scene from §2.7 is a write op that emits a
+/// `confirm_action` card before applying — the dashboard surfaces
+/// every action that will fire. Per ADR-005 these are owner+admin
+/// write surfaces; family can read but not author.
+///
+/// `actions` is the ordered list of Matter commands the run-handler
+/// dispatches via `sendMatterCommand`. Failures are tolerated
+/// per-action (the run-handler captures and surfaces them) so a
+/// dead bulb mid-scene doesn't abort the lights that work.
+model Scene {
+  id        String        @id @default(uuid())
+  name      String
+  icon      String?
+  createdBy String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  actions   SceneAction[]
+
+  @@index([createdAt])
+}
+
+/// WARP-474 — one Matter command in a Scene. `idx` is the explicit
+/// ordering column (0-based); the run-handler walks them in
+/// ascending order. `args` is opaque JSON forwarded to
+/// `sendMatterCommand` — see matter.service.ts for the per-command
+/// shape (e.g. on/off has no args, levelControl wants `level`).
+model SceneAction {
+  id           String   @id @default(uuid())
+  sceneId      String
+  scene        Scene    @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  idx          Int
+  deviceNodeId String
+  command      String
+  args         Json?
+
+  @@index([sceneId, idx])
+}

@@ -38,6 +38,8 @@ import controlDevice from "./handlers/smart-home/control-device.js";
 import discoverMatterDevices from "./handlers/smart-home/discover-matter-devices.js";
 import commissionDevice from "./handlers/smart-home/commission-device.js";
 import getCommandHistory from "./handlers/smart-home/get-command-history.js";
+// WARP-474: G2 smart-home scenes
+import runScene from "./handlers/smart-home/run-scene.js";
 
 // cameras
 import listCameras from "./handlers/cameras/list-cameras.js";
@@ -123,6 +125,8 @@ const allTools: Tool[] = [
   discoverMatterDevices,
   commissionDevice,
   getCommandHistory,
+  // WARP-474: G2 smart-home scenes (run by name or id)
+  runScene,
   // cameras
   listCameras,
   listDiscoveredCameras,
