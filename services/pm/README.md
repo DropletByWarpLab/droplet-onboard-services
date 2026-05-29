@@ -2,7 +2,7 @@
 
 Wraps [Plane](https://plane.so) (AGPL-3.0) as Droplet's on-prem project-management surface.
 
-- **ADR:** [ADR-007 — Plane self-hosted PM stack adoption](../../docs/ADR-007-pm-stack-selection.md)
+- **ADR:** [ADR-010 — Plane self-hosted PM stack adoption](../../docs/ADR-010-pm-stack-selection.md)
 - **Spec:** [`docs/superpowers/specs/2026-05-27-warp-498-pm-stack-design.md`](../../docs/superpowers/specs/2026-05-27-warp-498-pm-stack-design.md)
 - **Epic:** WARP-496
 
@@ -20,7 +20,7 @@ services/pm/
 ├── requirements-dev.txt
 ├── pytest.ini
 ├── docker-compose.local.yml ← local-dev only: runs the full Plane stack
-├── PATCHES.md               ← AGPL-3 obligation tracking (per ADR-007)
+├── PATCHES.md               ← AGPL-3 obligation tracking (per ADR-010)
 ├── .env.example             ← documented env vars
 └── tests/
     └── test_health.py       ← happy-path + Plane-unreachable failure mode
@@ -94,7 +94,7 @@ This service follows [`08-templates/new-service-checklist.md`](https://github.co
 
 ## AGPL-3 compliance
 
-Per [ADR-007](../../docs/ADR-007-pm-stack-selection.md): we ship vanilla Plane upstream. Any local patches are recorded in [`PATCHES.md`](PATCHES.md). The dashboard footer links to the Plane upstream source.
+Per [ADR-010](../../docs/ADR-010-pm-stack-selection.md): we ship vanilla Plane upstream. Any local patches are recorded in [`PATCHES.md`](PATCHES.md). The dashboard footer links to the Plane upstream source.
 
 ## See also
 

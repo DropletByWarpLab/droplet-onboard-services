@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY services/pm/main.py services/pm/config.py ./
 
 # Plane upstream pin SHA — injected at image build time via --build-arg.
-# Surfaced in /health responses. See ADR-007 + spec OQ3.
+# Surfaced in /health responses. See ADR-010 + spec OQ3.
 ARG PLANE_PIN_SHA=unknown
 ENV DROPLET_PM_PLANE_VERSION=${PLANE_PIN_SHA}
 

@@ -8,7 +8,7 @@
 # Usage from repo root:
 #   docker compose -f services/pm/docker-compose.local.yml up
 #
-# Plane upstream pin SHA — must match production. See ADR-007 OQ3.
+# Plane upstream pin SHA — must match production. See ADR-010 OQ3.
 
 services:
   postgres-pm:
@@ -36,7 +36,7 @@ services:
       retries: 5
 
   pm-api:
-    # Pinned upstream SHA — verify before bumping (ADR-007 OQ3).
+    # Pinned upstream SHA — verify before bumping (ADR-010 OQ3).
     image: makeplane/plane-backend:v0.24.1
     depends_on:
       postgres-pm:

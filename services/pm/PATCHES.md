@@ -1,6 +1,6 @@
 # Plane upstream patches
 
-Per [ADR-007](../../docs/ADR-007-pm-stack-selection.md): we ship vanilla Plane. Any local modification of Plane source code that ends up on a customer appliance must be recorded here, and the customer must be offered the corresponding source per AGPL-3 §13.
+Per [ADR-010](../../docs/ADR-010-pm-stack-selection.md): we ship vanilla Plane. Any local modification of Plane source code that ends up on a customer appliance must be recorded here, and the customer must be offered the corresponding source per AGPL-3 §13.
 
 Currently: **no patches**. We pin upstream by commit SHA in [`docker-compose.local.yml`](docker-compose.local.yml) and the root [`docker/docker-compose.yml`](../../docker/docker-compose.yml).
 
