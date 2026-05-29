@@ -80,6 +80,11 @@ const EXPECTED_TOOL_NAMES = [
   "network_summary",
   // WARP-474 — smart-home scenes (Phase G2)
   "run_scene",
+  // WARP-509 — Plane PM write tools
+  "pm_add_work_item_comment",
+  "pm_create_work_item",
+  "pm_transition_work_item",
+  "pm_update_work_item",
 ];
 
 describe("TOOLS registry", () => {
