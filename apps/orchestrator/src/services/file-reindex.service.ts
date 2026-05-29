@@ -68,7 +68,11 @@ export async function reindexFile(
   if (!_prisma) {
     throw new Error("reindexFile: prisma not initialised — call setPrismaForReindex() at boot");
   }
-  return _prisma.$transaction(async (tx: PrismaClient) => {
+  // Let `tx` infer as Prisma.TransactionClient (the interactive-tx
+  // overload). Annotating it `PrismaClient` made TS reject the overload
+  // (TransactionClient lacks $transaction/$connect/…) and fall back to
+  // the batch-array overload, whose `any[]` return broke ReindexResult.
+  return _prisma.$transaction(async (tx) => {
     const lockKey = hashFileId(fileId);
     const rows = (await (
       tx as unknown as {
