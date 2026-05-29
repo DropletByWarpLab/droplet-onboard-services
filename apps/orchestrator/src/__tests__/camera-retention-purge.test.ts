@@ -11,7 +11,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: {
+    AUTH_ENABLED: false,
+    // Romain on #292 round 2: the service now reads
+    // `config.FRIGATE_URL` (not `process.env.FRIGATE_API_URL`), so the
+    // test config needs a sensible value here too. Default matches
+    // config.ts's Zod default.
+    FRIGATE_URL: "http://frigate:5000",
+  },
 }));
 
 const { recordActivityMock } = vi.hoisted(() => ({

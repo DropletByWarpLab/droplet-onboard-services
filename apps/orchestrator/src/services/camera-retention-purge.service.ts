@@ -37,13 +37,18 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
+import { config } from "../config.js";
 import { recordActivity } from "./activity.singleton.js";
 
 const logger = pino({ name: "camera-retention-purge" });
 
-const FRIGATE_BASE_URL = (
-  process.env.FRIGATE_API_URL ?? "http://frigate:5000"
-).replace(/\/+$/, "");
+// Read from `config.FRIGATE_URL` so we go through Zod validation and
+// share the same env-var contract as every other Frigate caller
+// (e.g. `frigate.client.ts:13`). Romain on PR #292 round 2: the
+// previous `process.env.FRIGATE_API_URL` bypassed validation, was
+// undocumented, and silently ignored the operator's `FRIGATE_URL`
+// setting in `.env` — falling back to a hardcoded host.
+const FRIGATE_BASE_URL = config.FRIGATE_URL.replace(/\/+$/, "");
 
 export interface CameraRetentionPolicy {
   /** Days to keep recorded clips. `null` = forever. */
@@ -61,9 +66,22 @@ interface SettingRow {
 }
 
 /**
- * Read the current retention policy from WorkspaceSetting. Returns the
- * seeded defaults (14 / null) when rows are missing — first-boot races
- * shouldn't crash the cron tick.
+ * Read the current retention policy from WorkspaceSetting.
+ *
+ * Missing rows resolve to `{ clipsDays: null, eventsDays: null }` —
+ * i.e. "keep forever for both" — NOT to the seeded `14 / null`
+ * defaults. This is deliberate first-boot race-safety: if the
+ * settings seeder hasn't run yet (or the row was deleted manually),
+ * the safe stance is "delete nothing" rather than "delete with an
+ * assumed window the operator never agreed to". Romain on PR #292
+ * round 2 caught a previous version of this comment that claimed the
+ * opposite — the test at `camera-retention-purge.test.ts:57`
+ * ("treats missing rows as null (forever) — first-boot race-safe")
+ * locks in the actual behavior.
+ *
+ * Also collapses `0` / negative / non-number values to `null`
+ * (forever) — those aren't valid retention windows and the seeded
+ * default for "forever" IS null.
  */
 export async function loadCameraRetentionPolicy(
   prisma: PrismaClient,
