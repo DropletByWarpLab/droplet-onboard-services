@@ -44,6 +44,33 @@ import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 
 const logger = pino({ name: "pm-oidc-route" });
 
+/**
+ * Pre-registered Plane OIDC callback URIs derived from
+ * `DROPLET_PM_WEB_URL`. RFC 6749 §10.6 and OIDC Core §3.1.2.1 require
+ * the authorization server to validate `redirect_uri` against
+ * pre-registered values — anything less is an open-redirect that
+ * leaks the authorization code to attacker-controlled hosts.
+ *
+ * The two paths are from Plane's documented self-hosted OIDC RP
+ * (https://developers.plane.so/self-hosting/govern/oidc-sso):
+ *   - `<web>/auth/oidc/`          — initial RP entry (rarely the
+ *                                    redirect_uri, but included for
+ *                                    spec parity).
+ *   - `<web>/auth/oidc/callback/` — the post-auth landing the RP
+ *                                    sends as `redirect_uri`.
+ *
+ * The third documented path (`/auth/oidc/logout/`) is the
+ * `post_logout_redirect_uri` for the end-session endpoint, not the
+ * `/authorize` endpoint — deliberately excluded here.
+ *
+ * If Plane adds another callback path in a future release, add it
+ * explicitly. NEVER widen this to a prefix check.
+ */
+export function buildAllowedRedirectUris(): readonly string[] {
+  const base = config.DROPLET_PM_WEB_URL.replace(/\/+$/, "");
+  return [`${base}/auth/oidc/`, `${base}/auth/oidc/callback/`];
+}
+
 export function createPmRouter(): Router {
   const router = Router();
 
@@ -119,8 +146,23 @@ export function createPmRouter(): Router {
         if (clientId !== config.DROPLET_PM_OIDC_CLIENT_ID) {
           return res.status(400).json({ error: "invalid_client" });
         }
-        if (!redirectUri) {
-          return res.status(400).json({ error: "invalid_request", error_description: "redirect_uri required" });
+        // RFC 6749 §10.6 / OIDC Core §3.1.2.1: exact-match the
+        // presented redirect_uri against the pre-registered set.
+        // Romain on #307: prior code only checked non-emptiness — an
+        // open-redirect vector that leaks the authorization code.
+        // CRITICAL: never echo a non-allowlisted redirect_uri back in
+        // the error response, never 302 to it. Always 400 with no
+        // attacker-controlled data reflected in the body.
+        const allowedRedirectUris = buildAllowedRedirectUris();
+        if (!redirectUri || !allowedRedirectUris.includes(redirectUri)) {
+          logger.warn(
+            { clientId, presentedRedirectUri: redirectUri },
+            "OIDC /authorize: redirect_uri not pre-registered — refusing",
+          );
+          return res.status(400).json({
+            error: "invalid_request",
+            error_description: "redirect_uri not pre-registered",
+          });
         }
         if (responseType !== "code") {
           return res.status(400).json({ error: "unsupported_response_type" });

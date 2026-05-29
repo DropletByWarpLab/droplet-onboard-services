@@ -6,16 +6,24 @@
  * (Plane verifies via JWKS — HMAC won't work because Plane fetches the
  * public key from /api/pm/oidc/.well-known/jwks.json).
  *
- * The private key (PEM) and key id (kid) come from `setup.sh`-generated
- * secrets pinned in `.env` as `DROPLET_PM_OIDC_PRIVATE_KEY_PEM` +
- * `DROPLET_PM_OIDC_KID`. Operators rotate by re-running
- * `setup.sh --regenerate-pm-oidc-key`.
+ * The private key (PEM), key id (kid), and client secret come from
+ * `setup.sh`-generated values pinned in `.env` as
+ * `DROPLET_PM_OIDC_PRIVATE_KEY_PEM`, `DROPLET_PM_OIDC_KID`, and
+ * `DROPLET_PM_OIDC_CLIENT_SECRET`. To rotate the keypair: remove
+ * those three lines from `.env` then re-run `./scripts/setup.sh` —
+ * `sync_pm_oidc_keypair` in `scripts/lib/secrets.sh` is idempotent
+ * (skips when the key is present, regenerates when empty).
+ * `./scripts/setup.sh --regenerate-env` works too but discards every
+ * other device secret in the file alongside these three. There is no
+ * dedicated `--regenerate-pm-oidc-key` flag — Romain on #307 caught
+ * a previous version of this comment that claimed otherwise.
  *
  * Access tokens are SHORT-LIVED signed JWTs too (same key) — userinfo
  * verifies the bearer JWT directly without a Redis lookup.
  */
 
-import { createPublicKey } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { createPublicKey, timingSafeEqual } from "node:crypto";
 import jwt, { type JwtPayload } from "jsonwebtoken";
 
 import { config } from "../config.js";
@@ -137,15 +145,24 @@ export function publicJwk(): Record<string, string> {
 /**
  * Validate Plane's client-secret presentation at /token.
  * Plane sends it either via Basic auth or form-encoded body.
+ *
+ * Constant-time compare via `crypto.timingSafeEqual`. Same pattern as
+ * `middleware/auth.ts` L443-445 for the SERVICE_TOKEN_* surface. The
+ * length pre-check is mandatory because `timingSafeEqual` throws on
+ * unequal-length buffers (Node 18+); the comparison itself is
+ * length-leaky on purpose since the secret length is a configuration
+ * value, not a per-request secret.
+ *
+ * Romain on #307: the previous `presented === expected` was the
+ * timing-leaky path the inline comment falsely claimed to mirror.
  */
 export function verifyClientSecret(presented: string): boolean {
   const expected = config.DROPLET_PM_OIDC_CLIENT_SECRET;
   if (!expected) return false;
-  // Constant-time compare via Buffer length + crypto.timingSafeEqual would
-  // be ideal; for now a length-guard + direct compare matches the existing
-  // SERVICE_TOKEN_* pattern in middleware/auth.ts.
-  if (presented.length !== expected.length) return false;
-  return presented === expected;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /** Decoded export — useful for the discovery doc to surface supported algs. */
