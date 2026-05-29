@@ -5,6 +5,7 @@ import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
+import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
@@ -441,7 +442,31 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           aiGatewayGrpcUrl,
           defaultModel: defaultChatModel,
         }),
+        // WARP-473 — fire-and-forget file citation enqueue. Only
+        // wired when the turn is persisted (conversationId +
+        // assistantMessageId present); a service-token caller
+        // without a chat thread has no thread/message to attach to.
+        citation:
+          conversationId && assistantMessageId
+            ? createFileCitationService(prisma)
+            : undefined,
       };
+      // Carry the authenticated user.id (UUID, not username) onto every
+      // citation insert so the related-chats route can scope by owner.
+      // userId is required by createFileCitationService's IDOR guard
+      // — without it the service skips the insert and logs warn.
+      const citationUserId =
+        (req as AuthedRequest).user?.id ??
+        (req as AuthedRequest).user?.username ??
+        null;
+      const citationContext =
+        conversationId && assistantMessageId && citationUserId
+          ? {
+              userId: citationUserId,
+              threadId: conversationId,
+              messageId: assistantMessageId,
+            }
+          : undefined;
 
       // Track tool calls observed during streaming so we can include
       // them in the persisted assistant message at the end of the turn.
@@ -630,6 +655,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             tool_choice: chatReq.tool_choice,
             toolCallContext,
             captureReasoning: chatReq.captureReasoning,
+            citationContext,
           });
           // WARP-458 — the agent loop populates message.reasoning
           // REGARDLESS of captureReasoning (only the wire-emit is
@@ -661,6 +687,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           tool_choice: chatReq.tool_choice,
           toolCallContext,
           captureReasoning: chatReq.captureReasoning,
+          citationContext,
         });
         liveAssistantContent = result.message.content;
         // WARP-458 — agent loop populates message.reasoning regardless
