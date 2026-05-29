@@ -117,6 +117,73 @@ export interface SeedResult {
 }
 
 /**
+ * WARP-467 — canonical off-LAN channel defaults per FEATURES.md §8.
+ * The sovereignty contract: software updates ON, cloud model escape
+ * OFF, outbound email ON, telemetry ON, web fetch OFF. Operators
+ * change individual rows via PATCH /api/settings/off-lan/:key; this
+ * table is the first-boot bootstrap, not the runtime config.
+ *
+ * `key` literals must match the Prisma `OffLanChannelKey` enum. Adding
+ * a new channel requires a schema migration (the enum is closed by
+ * design) AND a new entry here.
+ */
+export interface OffLanChannelDefault {
+  key:
+    | "software_updates"
+    | "cloud_model_escape"
+    | "outbound_email"
+    | "telemetry"
+    | "web_fetch";
+  enabled: boolean;
+  requiresAdmin: boolean;
+}
+
+export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
+  { key: "software_updates", enabled: true, requiresAdmin: true },
+  { key: "cloud_model_escape", enabled: false, requiresAdmin: true },
+  { key: "outbound_email", enabled: true, requiresAdmin: true },
+  { key: "telemetry", enabled: true, requiresAdmin: true },
+  { key: "web_fetch", enabled: false, requiresAdmin: true },
+];
+
+/**
+ * Insert the five canonical off-LAN channels if not already present.
+ * Same insert-or-skip posture as seedWorkspaceSettings — operator
+ * mutations from the dashboard are never clobbered on subsequent
+ * boots. `lastChangedBy` / `lastChangedAt` start blank/now on first
+ * insert (system seed, no actor).
+ */
+export async function seedOffLanChannels(
+  prisma: PrismaClient,
+): Promise<SeedResult> {
+  const payload = OFF_LAN_CHANNEL_DEFAULTS.map((def) => ({
+    key: def.key as any, // Prisma enum literal; cast for createMany input
+    enabled: def.enabled,
+    requiresAdmin: def.requiresAdmin,
+  }));
+
+  const result = await prisma.offLanAllowlistChannel.createMany({
+    data: payload,
+    skipDuplicates: true,
+  });
+
+  const inserted = result?.count ?? 0;
+  if (inserted > 0) {
+    logger.info(
+      { inserted, total: OFF_LAN_CHANNEL_DEFAULTS.length },
+      "off-LAN allowlist channels seeded",
+    );
+  } else {
+    logger.debug(
+      { total: OFF_LAN_CHANNEL_DEFAULTS.length },
+      "off-LAN allowlist channels already seeded (no-op)",
+    );
+  }
+
+  return { inserted };
+}
+
+/**
  * Insert every canonical default that isn't already present.
  *
  * Idempotent: backed by `createMany({skipDuplicates: true})`. The

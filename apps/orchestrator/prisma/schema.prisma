@@ -1557,3 +1557,39 @@ model SceneAction {
 
   @@index([sceneId, idx])
 }
+
+/// WARP-467 — Phase E1. Five off-LAN egress channels the operator can
+/// enable/disable. Lives in its own table (not WorkspaceSetting) so
+/// `requiresAdmin`, `lastChangedBy`, `lastChangedAt`, and `reason` can
+/// be modelled as first-class columns instead of opaque JSON. Defaults
+/// are seeded by `services/workspace-settings.service.ts` per
+/// FEATURES.md §8:
+///   - software_updates    enabled  (operator opts in by leasing a Droplet)
+///   - cloud_model_escape  disabled (sovereignty default — must opt-in)
+///   - outbound_email      enabled  (notifications + invites)
+///   - telemetry           enabled  (Warp Lab fleet ops; can be revoked)
+///   - web_fetch           disabled (must opt-in; LLM tool blocked by default)
+///
+/// `reason` is required on every PATCH so the audit feed answers
+/// "who turned cloud escape back on, and why" without a Slack archaeology
+/// expedition. Per ADR-005, off-LAN channels are sovereignty surface —
+/// changes are owner+admin only.
+model OffLanAllowlistChannel {
+  key             OffLanChannelKey @id
+  enabled         Boolean
+  requiresAdmin   Boolean          @default(true)
+  lastChangedBy   String?
+  lastChangedAt   DateTime         @default(now())
+  reason          String?
+}
+
+/// WARP-467 — closed set of off-LAN egress channels. Extending the
+/// vocabulary is a schema change so the dashboard and the egress
+/// metering pipeline (WARP-468 / E2) can't drift apart silently.
+enum OffLanChannelKey {
+  software_updates
+  cloud_model_escape
+  outbound_email
+  telemetry
+  web_fetch
+}
