@@ -2,11 +2,22 @@
  * WARP-475 (G3) — nightly camera-retention purge.
  *
  * Reads `hardware.camera_retention_days` + `hardware.event_retention_days`
- * from the WorkspaceSetting table (seeded by workspace-settings.service.ts
- * with 14 / null defaults — the §2.5 "14 days · then deleted; events
- * kept forever" promise). Calls Frigate's delete API to remove clips
- * older than the window; events stay untouched when their retention
- * is `null`.
+ * from the WorkspaceSetting table on every tick. These rows are
+ * operator-editable from the dashboard via `PATCH /api/settings`, so
+ * the cron does NOT cache them in-process — a value changed in the UI
+ * at 03:25 must take effect at the 03:30 fire. workspace-settings.service.ts
+ * seeds the rows on first boot:
+ *
+ *   hardware.camera_retention_days = 14   (number; the §2.5
+ *                                          first-boot default — operator
+ *                                          can raise to 90, drop to 7,
+ *                                          or set anything in between)
+ *   hardware.event_retention_days  = null (json; "kept forever" — the
+ *                                          §2.5 default, also editable)
+ *
+ * Calls Frigate's delete API to remove clips older than whatever the
+ * current `camera_retention_days` row says; events stay untouched
+ * when `event_retention_days` is `null`.
  *
  * `null` is the explicit "kept forever" state — NOT IS NULL ambiguity
  * per CLAUDE.md. The seeder writes `null` deliberately so the dashboard

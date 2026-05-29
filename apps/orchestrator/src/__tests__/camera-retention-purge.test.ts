@@ -102,7 +102,11 @@ describe("WARP-475 — purgeCameraArtifacts", () => {
 
   it("posts the correct before=<unix-seconds> cutoff to Frigate", async () => {
     const now = new Date("2026-05-27T12:00:00Z");
-    // 14 days before now == 2026-05-13T12:00:00Z == 1778328000 seconds since epoch.
+    // This test pins clipsDays=14 in the prisma mock below; the
+    // expected cutoff is therefore (now - 14d) in unix seconds.
+    // 14 is the *test fixture* here, not the production policy —
+    // production reads whatever `hardware.camera_retention_days`
+    // currently holds in the WorkspaceSetting table.
     const expectedCutoff = Math.floor(
       (now.getTime() - 14 * 86400_000) / 1000,
     );
