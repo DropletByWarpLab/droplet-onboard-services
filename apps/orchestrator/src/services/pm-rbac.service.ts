@@ -56,7 +56,11 @@ export function mapDropletRoleToPlane(role: Role): PlaneWorkspaceRole | null {
 export class PmRbacError extends Error {
   constructor(
     message: string,
-    readonly code: "RECONCILE_REQUIRED" | "PM_API_ERROR",
+    readonly code:
+      | "RECONCILE_REQUIRED"
+      | "PM_API_ERROR"
+      | "PM_API_TIMEOUT"
+      | "PM_API_NETWORK",
   ) {
     super(message);
     this.name = "PmRbacError";
@@ -86,6 +90,18 @@ export async function syncPlaneUserRole(input: {
     return { applied: null };
   }
 
+  // Romain's PR #322 review: `new URL(path, undefined)` throws
+  // TypeError("Invalid URL") if DROPLET_PM_API_URL was never registered
+  // in config.ts's Zod schema (so resolves to undefined at runtime).
+  // Surface a typed PmRbacError instead — the fail-closed posture
+  // documented in the module header depends on every error path being
+  // a PmRbacError, not a raw TypeError or DOMException.
+  if (!config.DROPLET_PM_API_URL) {
+    throw new PmRbacError(
+      "DROPLET_PM_API_URL not configured — refusing to sync PM role",
+      "PM_API_ERROR",
+    );
+  }
   const url = new URL(
     `/api/v1/workspaces/${encodeURIComponent(input.workspaceSlug)}/members/${encodeURIComponent(input.planeUserId)}/`,
     config.DROPLET_PM_API_URL,
@@ -130,6 +146,26 @@ export async function syncPlaneUserRole(input: {
       );
     }
     return { applied: target };
+  } catch (err) {
+    // Romain's PR #322 review: when controller.abort() fires the
+    // 8-second timeout, fetch() throws a DOMException with
+    // name="AbortError". The previous try/finally let it escape as a
+    // raw DOMException, breaking `instanceof PmRbacError` checks at
+    // every caller and silently violating the module's fail-closed
+    // contract. Translate to a typed PmRbacError. Other network-layer
+    // failures (DNS, refused connection) come through as TypeError
+    // with name="TypeError" — same handling.
+    if (err instanceof PmRbacError) throw err;
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new PmRbacError(
+        `Plane PATCH member timed out after ${HTTP_TIMEOUT_MS}ms`,
+        "PM_API_TIMEOUT",
+      );
+    }
+    throw new PmRbacError(
+      `Plane PATCH member network error: ${err instanceof Error ? err.message : String(err)}`,
+      "PM_API_NETWORK",
+    );
   } finally {
     clearTimeout(timer);
   }
