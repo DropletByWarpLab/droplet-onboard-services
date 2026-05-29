@@ -1,0 +1,23 @@
+[Unit]
+# Bootstrap the droplet-openwrt container after docker comes up:
+#   - move the AP wireless phy into the container netns
+#   - un-bridge eth0 from br-lan + restore Docker's L3 IP/route
+#   - opkg install hostapd-mbedtls + wireguard-tools (idempotent)
+#   - set OpenWrt root password from /home/droplet/edge-platform/docker/secrets/openwrt_password
+#   - generate /etc/hostapd.conf + /etc/dnsmasq-ap.conf, start AP
+#   - re-kick routing service if it's caught with a stale OpenWrt session
+#
+# This is the systemd glue around scripts/poc/droplet-openwrt-attach.sh —
+# install via `bash scripts/poc/install-attach-service.sh` on the POC box.
+Description=Bootstrap droplet-openwrt container (AP + RPC + routing recovery)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/droplet-openwrt-attach
+ExecStart=/usr/local/sbin/droplet-openwrt-attach
+
+[Install]
+WantedBy=multi-user.target

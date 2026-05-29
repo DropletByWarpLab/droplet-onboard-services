@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Override KEYS_DIR to a temp directory for tests
 os.environ["KEYS_DIR"] = tempfile.mkdtemp(prefix="droplet-test-keys-")
 os.environ["DEVICE_SECRET"] = "test-secret-for-unit-tests"
-os.environ["JETSON_OLLAMA_URL"] = "http://fake-jetson:11434"
+os.environ["OLLAMA_URL"] = "http://fake-ollama:11434"
 # No REDIS_URL — forces InMemorySessionStore and in-memory middleware backends
 # High rate limit so tests don't trip over each other
 os.environ["RATE_LIMIT_RPM"] = "10000"

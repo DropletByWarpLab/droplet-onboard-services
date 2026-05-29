@@ -13,6 +13,8 @@ import blockNetworkDevice from "./handlers/network/block-network-device.js";
 import unblockNetworkDevice from "./handlers/network/unblock-network-device.js";
 import addPortForward from "./handlers/network/add-port-forward.js";
 import getRouterSystemInfo from "./handlers/network/get-router-system-info.js";
+// WARP-470: F2 network throughput summary (network_check card)
+import networkSummary from "./handlers/network/summary.js";
 // WARP-446 — coverage extender AP onboarding
 import listApDevices from "./handlers/network/list-ap-devices.js";
 import approveAp from "./handlers/network/approve-ap.js";
@@ -38,6 +40,8 @@ import controlDevice from "./handlers/smart-home/control-device.js";
 import discoverMatterDevices from "./handlers/smart-home/discover-matter-devices.js";
 import commissionDevice from "./handlers/smart-home/commission-device.js";
 import getCommandHistory from "./handlers/smart-home/get-command-history.js";
+// WARP-474: G2 smart-home scenes
+import runScene from "./handlers/smart-home/run-scene.js";
 
 // cameras
 import listCameras from "./handlers/cameras/list-cameras.js";
@@ -78,6 +82,29 @@ import listNotifications from "./handlers/notifications/list-notifications.js";
 // system
 import getSystemHealth from "./handlers/system/get-system-health.js";
 import listDrives from "./handlers/system/list-drives.js";
+// WARP-461: durable memory facts (Phase B4)
+import memoryRecall from "./handlers/memory/recall.js";
+import memoryExtractFact from "./handlers/memory/extract.js";
+
+// WARP-466: D2 email tools
+import emailSearch from "./handlers/email/search.js";
+import emailRead from "./handlers/email/read.js";
+import emailSummarizeThread from "./handlers/email/summarize-thread.js";
+import emailDraftReply from "./handlers/email/draft-reply.js";
+import emailSend from "./handlers/email/send.js";
+
+// Embedded Plane PM stack (ADR-010, spec WARP-498)
+// WARP-509 — write tools
+import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
+import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
+import pmAddWorkItemComment from "./handlers/pm/add-work-item-comment.js";
+import pmTransitionWorkItem from "./handlers/pm/transition-work-item.js";
+// WARP-508 — read tools
+import pmListWorkspaces from "./handlers/pm/list-workspaces.js";
+import pmListProjects from "./handlers/pm/list-projects.js";
+import pmListWorkItems from "./handlers/pm/list-work-items.js";
+import pmGetWorkItem from "./handlers/pm/get-work-item.js";
+import pmSearchWorkItems from "./handlers/pm/search-work-items.js";
 
 const allTools: Tool[] = [
   // network
@@ -93,6 +120,8 @@ const allTools: Tool[] = [
   unblockNetworkDevice,
   addPortForward,
   getRouterSystemInfo,
+  // WARP-470: F2 network KPI rollup → network_check card
+  networkSummary,
   // WARP-446: coverage extender AP onboarding
   listApDevices,
   approveAp,
@@ -116,6 +145,8 @@ const allTools: Tool[] = [
   discoverMatterDevices,
   commissionDevice,
   getCommandHistory,
+  // WARP-474: G2 smart-home scenes (run by name or id)
+  runScene,
   // cameras
   listCameras,
   listDiscoveredCameras,
@@ -150,6 +181,26 @@ const allTools: Tool[] = [
   // system
   getSystemHealth,
   listDrives,
+  // WARP-466: D2 email
+  emailSearch,
+  emailRead,
+  emailSummarizeThread,
+  emailDraftReply,
+  emailSend,
+  // WARP-461: durable memory facts
+  memoryRecall,
+  memoryExtractFact,
+  // WARP-509: embedded Plane PM (write tools — requiresWrite + requiresConfirmation)
+  pmCreateWorkItem,
+  pmUpdateWorkItem,
+  pmAddWorkItemComment,
+  pmTransitionWorkItem,
+  // WARP-508: embedded Plane PM (read tools — list/get/search)
+  pmListWorkspaces,
+  pmListProjects,
+  pmListWorkItems,
+  pmGetWorkItem,
+  pmSearchWorkItems,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

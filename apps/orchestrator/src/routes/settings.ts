@@ -40,6 +40,13 @@ const logger = pino({ name: "settings-route" });
 // router compiles standalone without pulling the Prisma client into the
 // path-param validator. Any drift between these and the Prisma enum is
 // a schema bug; workspace-settings.schema.test.ts locks the contract.
+// IMPORTANT: `off_lan` (underscore) is the legacy WorkspaceSetting
+// section for VPN/DDNS config (off_lan.vpn_enabled etc.). The new
+// sovereignty channels (cloud_model_escape, outbound_email, etc.)
+// live under `/api/settings/off-lan` (hyphen) which is mounted as
+// a separate router below — NOT through this enum. Do NOT add
+// "off-lan" here; that would re-route the hyphen path through the
+// parameterized handler and return the wrong data shape.
 const SECTION_VALUES = [
   "workspace",
   "memory_privacy",
@@ -227,6 +234,198 @@ function isKnownSection(name: string): name is SectionLiteral {
 
 export function createSettingsRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // ── /api/settings/off-lan ────────────────────────────────────
+  // WARP-467 — sovereignty surface. Lives under the same /api/settings
+  // namespace as the A3 workspace settings (one Settings page in the
+  // dashboard) but the underlying table is OffLanAllowlistChannel,
+  // not WorkspaceSetting.
+  //
+  // Mounted BEFORE the parameterized /settings/:section routes so the
+  // literal `off-lan` path wins. Otherwise express would match
+  // `:section = "off-lan"` first and return 404 (off-lan is not a
+  // SettingSection enum member).
+  //
+  // Reads: owner+admin+family. The household needs to see the current
+  // posture (e.g. "cloud model escape is disabled") even when only
+  // admins can change it.
+  //
+  // Writes: owner+admin only, PATCH per key with a non-empty `reason`.
+  // Each PATCH emits one ActivityRow kind=`system`, severity=`info`
+  // capturing actor + reason + previousEnabled + nextEnabled.
+  const OFF_LAN_CHANNEL_KEYS = [
+    "software_updates",
+    "cloud_model_escape",
+    "outbound_email",
+    "telemetry",
+    "web_fetch",
+  ] as const;
+  type OffLanKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
+  const isOffLanKey = (k: string): k is OffLanKey =>
+    (OFF_LAN_CHANNEL_KEYS as readonly string[]).includes(k);
+
+  interface OffLanRow {
+    key: string;
+    enabled: boolean;
+    requiresAdmin: boolean;
+    lastChangedBy: string | null;
+    lastChangedAt: Date;
+    reason: string | null;
+  }
+
+  router.get(
+    "/settings/off-lan",
+    // `service` role added so ai-gateway's off_lan_gating middleware
+    // can read cloud_model_escape before allowing a cloud-LLM call.
+    // Without `service` here the gate fails closed and every cloud
+    // request 451s. The POST below stays at owner+admin (writes are
+    // sovereignty surface).
+    requireRole("owner", "admin", "family", "service"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const rows = (await prisma.offLanAllowlistChannel.findMany({
+          orderBy: { key: "asc" },
+        })) as unknown as OffLanRow[];
+        res.json({
+          channels: rows.map((r) => ({
+            key: r.key,
+            enabled: r.enabled,
+            requiresAdmin: r.requiresAdmin,
+            lastChangedBy: r.lastChangedBy,
+            lastChangedAt: r.lastChangedAt,
+            reason: r.reason,
+          })),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.patch(
+    "/settings/off-lan/:key",
+    // Gate widened to family+ so the per-row `requiresAdmin` flag can
+    // actually fire. If row.requiresAdmin is true the handler 403s
+    // family-and-below; if false, family can toggle. Without this
+    // dynamic check the requiresAdmin column was display-only and a
+    // future toggle to `false` wouldn't relax the static middleware
+    // gate.
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const key = req.params.key;
+        if (!isOffLanKey(key)) {
+          return res.status(404).json({ error: "Unknown channel key" });
+        }
+
+        const body = req.body ?? {};
+        if (typeof body !== "object" || Array.isArray(body)) {
+          return res.status(400).json({ error: "Invalid body" });
+        }
+
+        const enabled = body.enabled;
+        if (typeof enabled !== "boolean") {
+          return res
+            .status(400)
+            .json({ error: "`enabled` (boolean) is required" });
+        }
+
+        const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+        if (reason.length === 0) {
+          return res
+            .status(400)
+            .json({ error: "`reason` is required when toggling an off-LAN channel" });
+        }
+        if (reason.length > 1024) {
+          return res
+            .status(400)
+            .json({ error: "`reason` exceeds 1024-character limit" });
+        }
+
+        const row = (await prisma.offLanAllowlistChannel.findUnique({
+          where: { key: key as any },
+        })) as unknown as OffLanRow | null;
+        if (!row) {
+          return res.status(404).json({ error: "Channel not provisioned" });
+        }
+
+        // Per-row admin gate: if the channel requires admin, refuse
+        // anyone below admin. All seeded channels currently have
+        // requiresAdmin=true so this is the universal gate today; the
+        // dynamic check exists so future channels can drop it without
+        // touching the route.
+        const role = req.user?.role;
+        if (
+          row.requiresAdmin &&
+          role !== "owner" &&
+          role !== "admin"
+        ) {
+          return res.status(403).json({
+            error: "this channel requires admin role to toggle",
+            channel: key,
+          });
+        }
+
+        const actor = req.user?.username ?? null;
+        const now = new Date();
+
+        if (row.enabled === enabled && (row.reason ?? "") === reason) {
+          return res.json({
+            key,
+            enabled: row.enabled,
+            requiresAdmin: row.requiresAdmin,
+            lastChangedBy: row.lastChangedBy,
+            lastChangedAt: row.lastChangedAt,
+            reason: row.reason,
+            changed: false,
+          });
+        }
+
+        const updated = (await prisma.offLanAllowlistChannel.update({
+          where: { key: key as any },
+          data: {
+            enabled,
+            reason,
+            lastChangedBy: actor,
+            lastChangedAt: now,
+          },
+        })) as unknown as OffLanRow;
+
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "shield",
+          what: enabled
+            ? "Off-LAN channel enabled"
+            : "Off-LAN channel disabled",
+          sub: key,
+          refs: {
+            actor,
+            channel: key,
+            previousEnabled: row.enabled,
+            nextEnabled: enabled,
+            reason,
+          },
+        });
+
+        res.json({
+          key: updated.key,
+          enabled: updated.enabled,
+          requiresAdmin: updated.requiresAdmin,
+          lastChangedBy: updated.lastChangedBy,
+          lastChangedAt: updated.lastChangedAt,
+          reason: updated.reason,
+          changed: true,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, key: req.params.key },
+          "PATCH /settings/off-lan failed",
+        );
+        next(err);
+      }
+    },
+  );
 
   // ── GET /api/settings ────────────────────────────────────────
   // Returns the full tree grouped by section. owner+admin+family

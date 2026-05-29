@@ -419,7 +419,7 @@ npm run dev
 cd services/ai-gateway
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-JETSON_OLLAMA_URL=http://localhost:11434 uvicorn main:app --reload --port 8000
+OLLAMA_URL=http://localhost:11434 uvicorn main:app --reload --port 8000
 
 # Web Dashboard (Next.js 14.2 dev server, port 3001)
 cd apps/web-dashboard
@@ -436,7 +436,7 @@ npm run dev
 | `REDIS_URL` | `redis://cache:6379` | Redis 7 connection string |
 | `MQTT_BROKER` | `mqtt://broker:1883` | Mosquitto 2 broker URL |
 | `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway internal URL |
-| `JETSON_OLLAMA_URL` | `http://host.docker.internal:8002/proxy` | ollama-manager chat-proxy URL on the Jetson appliance. Provides tool-call observability + JSON repair + circuit breaker; ai-gateway reads `/health.limits` to size outbound concurrency. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. |
+| `OLLAMA_URL` | `http://host.docker.internal:11434` (multi-box) / `http://ollama:11434` (single-box) | Canonical chat path: direct to Ollama. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. The legacy `:8002/proxy` URL (ollama-manager) still exists as an opt-in observability layer — tool-call JSON repair + circuit breaker + concurrency limits via `/health.limits` — point this var there only if you want those signals and can tolerate the 120 s upstream read timeout that bites heavy agent-loop prompts on CPU. |
 | `FILES_ROOT` | `/data/files` | File storage root |
 | `STORAGE_BACKEND` | `nextcloud` | `nextcloud` (WebDAV) or `legacy` (local filesystem) |
 | `NEXTCLOUD_URL` | `http://nextcloud:80` | Nextcloud 29 internal URL |

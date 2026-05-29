@@ -9,6 +9,7 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
+import { createMemoryRouter } from "./routes/memory.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
@@ -16,7 +17,14 @@ import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createMatterRouter } from "./routes/matter.js";
+import { createPmWebhookRouter } from "./routes/pm-webhook.js";
+import { createPmOnboardRouter } from "./routes/pm-onboard.js";
+import { createPmMobileRouter } from "./routes/mobile/pm.js";
+import { createScenesRouter } from "./routes/scenes.js";
+import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
+import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
+import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -29,16 +37,29 @@ import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
+import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
+import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createSettingsRouter } from "./routes/settings.js";
+import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
+import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
+import { createToolsRouter } from "./routes/tools.js";
+import { mcpClient } from "./services/mcp-client.singleton.js";
+import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { createModelsRouter } from "./routes/models.js";
+import { createHardwareRouter } from "./routes/hardware.js";
+import { createHomeRouter } from "./routes/home.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
-import { seedWorkspaceSettings } from "./services/workspace-settings.service.js";
+import {
+  seedWorkspaceSettings,
+  seedOffLanChannels,
+} from "./services/workspace-settings.service.js";
 import pino from "pino";
 
 export function createApp(prisma: PrismaClient) {
@@ -68,6 +89,11 @@ export function createApp(prisma: PrismaClient) {
   // BEFORE auth middleware so forwarded links work without a Droplet account.
   app.use("/api", createCameraSharePublicRouter());
 
+  // WARP-511 — Plane → orchestrator webhook receiver. Plane has no
+  // dashboard session; HMAC-SHA256 signature over the timestamp + body is
+  // the only auth. Fail-CLOSED on any mismatch. Mounted BEFORE authMiddleware.
+  app.use(createPmWebhookRouter());
+
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
   // Lives under `/_/fips` (not `/api/...`) so it sits in the
@@ -90,13 +116,35 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
+  app.use("/api", createMemoryRouter(prisma));
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-507 — Plane onboarding endpoint for the setup wizard.
+  app.use(createPmOnboardRouter());
+  // WARP-513 — read-only mobile wrappers around Plane upstream
+  // (workspaces, projects, work-items). iOS/Android/Windows consume.
+  app.use(createPmMobileRouter());
+  // WARP-474 (G2): smart-home scenes CRUD + batch-run. Run dispatches
+  // each action through `sendMatterCommand` — partial-failure tolerant,
+  // per-action results returned to the dashboard.
+  app.use(
+    "/api",
+    createScenesRouter(prisma, {
+      sendCommand: (nodeId, command, args) =>
+        sendMatterCommand(nodeId, command, args),
+    }),
+  );
   app.use("/api", createNetworkRouter(prisma));
+  // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
+  // Network page. Service-principal POST for the routing sampler push.
+  app.use("/api", createNetworkThroughputRouter(prisma));
+  // WARP-468: Phase E2 — off-LAN egress byte counter read + sampler push.
+  // GET aggregator is admin/family/guest read; sample push is service-only.
+  app.use("/api", createOffLanNetworkRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
@@ -119,6 +167,10 @@ export function createApp(prisma: PrismaClient) {
   // WARP-286: retrieval-eval endpoint — exposes vector/rrf/hybrid pipelines
   // to the offline NDCG@10 harness. 404 in production.
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
+  // WARP-519: rag-eval HTTP trigger proxy — ad-hoc RAGAS runs + bootstrap
+  // + run listing. Auth-gated (admin/owner); 503 when the `eval` Compose
+  // profile is inactive (rag-eval service unreachable). NOT prod-gated.
+  app.use("/api", createAdminRagEvalRouter());
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
@@ -127,11 +179,94 @@ export function createApp(prisma: PrismaClient) {
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma));
+  // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
+  // GET available to any authenticated user (drives chrome pill);
+  // POST is owner-only (flip the workspace type).
+  //
+  // MUST mount BEFORE `createSettingsRouter` (WARP-457). The settings
+  // router's `GET /settings/:section` matches `"workspace"` (it lives
+  // in SECTION_VALUES) and would shadow the GET here if registered
+  // first — Express is first-match on path-prefix routes. Consolidation
+  // of `/settings/workspace` into the broader WARP-457 settings tree
+  // is a follow-up; this ordering keeps both routers working until then.
+  app.use("/api", createSettingsWorkspaceRouter(prisma));
+
   // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
   // PATCH section with per-type validation). Mutations emit ActivityRow
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+
+  // WARP-472: F4 hardware contract endpoint (admin/owner only).
+  app.use("/api", createHardwareRouter(prisma));
+
+  // WARP-466 (D2): wire the §2.4 analysis endpoint to the agent loop.
+  // Single fn override at module level so createEmailRouter keeps its
+  // existing (prisma, gate) signature. Tests can call wireEmailAnalysis
+  // directly with a stub.
+  wireEmailAnalysis(createEmailAnalysisFn(mcpClient));
+
+  // WARP-465 (D1): email backbone — accounts list, threads list +
+  // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468
+  // off-LAN `outbound_email` allowlist channel; refusal raises 451.
+  // The OffLanAllowlistChannel model lands in WARP-467 — until that
+  // PR is in main, this gate falls back to default-allow on any error
+  // (missing table, missing key, etc.) so chat → reply doesn't 451 on
+  // a stack that hasn't merged E1 yet.
+  app.use(
+    "/api",
+    createEmailRouter(prisma, {
+      outboundEmailEnabled: async () => {
+        try {
+          // Use the raw client so the type checker doesn't trip when
+          // the model is absent on stacks pre-WARP-467.
+          const rows = await prisma.$queryRawUnsafe<
+            Array<{ enabled: boolean }>
+          >(
+            `SELECT enabled FROM "OffLanAllowlistChannel" WHERE key = 'outbound_email' LIMIT 1`,
+          );
+          if (rows.length === 0) return true;
+          return rows[0].enabled === true;
+        } catch {
+          // Table missing (pre-WARP-467) → default-allow.
+          return true;
+        }
+      },
+    }),
+  );
+
+  // WARP-462 (C1): productized ToolSpec registry — CRUD + imperative
+  // run-now. The dispatcher uses the singleton MCP client so specs
+  // dispatch the same registry as chat tool calls. The walker halts
+  // on the first failure; per-step trace returned to the caller.
+  const toolStepDispatcher: StepDispatcher = {
+    async call(tool, args) {
+      const result = await mcpClient.callTool(tool, args);
+      if (result.isError) {
+        const detail = result.content?.[0]?.text ?? "tool reported error";
+        throw new Error(typeof detail === "string" ? detail : String(detail));
+      }
+      const text = result.content?.[0]?.text;
+      if (typeof text === "string" && text.length > 0) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { raw: text };
+        }
+      }
+      return null;
+    },
+  };
+  app.use("/api", createToolsRouter(prisma, toolStepDispatcher));
+
+  // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
+  app.use("/api", createModelsRouter());
+
+  // WARP-469: F1 home aggregation. Single round-trip backing
+  // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
+  // Per-user Redis cache with 30s TTL.
+  app.use("/api", createHomeRouter(prisma));
+
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
@@ -158,6 +293,18 @@ export function createApp(prisma: PrismaClient) {
     seedLogger.warn(
       { err },
       "workspace settings seeder failed (settings table may be unbootstrapped)",
+    );
+  });
+
+  // WARP-467: off-LAN allowlist first-boot seeder. Same insert-or-skip
+  // posture as the workspace settings seeder — operator toggles from
+  // the dashboard are never clobbered on subsequent boots. Fire-and-
+  // forget: a DB hiccup at boot surfaces on the first GET /api/settings/off-lan
+  // rather than blocking startup.
+  seedOffLanChannels(prisma).catch((err) => {
+    seedLogger.warn(
+      { err },
+      "off-LAN allowlist seeder failed (channels table may be unbootstrapped)",
     );
   });
 

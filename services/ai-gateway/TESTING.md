@@ -22,7 +22,7 @@ The mock provides:
 
 ```bash
 # In a separate terminal
-JETSON_OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload --port 8000
+OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload --port 8000
 ```
 
 ### 3. Test with curl
@@ -68,7 +68,7 @@ Tests use an in-memory session store and don't require Redis or Ollama.
 ```bash
 cd edge-platform/docker
 # Set mock Ollama URL
-export JETSON_OLLAMA_URL=http://host.docker.internal:11434
+export OLLAMA_URL=http://host.docker.internal:11434
 docker compose up
 ```
 
@@ -91,7 +91,7 @@ When you have access to a Jetson device (physical or remote):
 2. Point the ai-gateway to the Jetson:
    ```bash
    # On your dev machine
-   JETSON_OLLAMA_URL=http://<jetson-ip>:11434 python -m uvicorn main:app --reload
+   OLLAMA_URL=http://<jetson-ip>:11434 python -m uvicorn main:app --reload
    ```
 
 3. Ensure the model is provisioned on the appliance. Model lifecycle is
@@ -124,17 +124,17 @@ If the Jetson is behind a firewall or on a different network:
 ssh -L 11434:localhost:11434 user@jetson-host
 
 # In another terminal, run ai-gateway
-JETSON_OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload
+OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload
 ```
 
 ### Option C: Docker Compose with real Jetson
 
-Edit `edge-platform/docker/docker-compose.yml` and change `JETSON_OLLAMA_URL`:
+Edit `edge-platform/docker/docker-compose.yml` and change `OLLAMA_URL`:
 
 ```yaml
 ai-gateway:
   environment:
-    - JETSON_OLLAMA_URL=http://<jetson-ip>:11434
+    - OLLAMA_URL=http://<jetson-ip>:11434
 ```
 
 ---

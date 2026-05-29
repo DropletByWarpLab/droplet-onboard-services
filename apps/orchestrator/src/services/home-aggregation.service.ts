@@ -1,0 +1,258 @@
+/**
+ * WARP-469 Phase F1 — Home aggregation service.
+ *
+ * Composes the single round-trip payload for `/api/home`
+ * (FEATURES.md §2.1). Reads from data Phases A-E produced:
+ * ActivityRow (A2 / WARP-456), MemoryFact (B4 / WARP-461),
+ * ChatSession.title (chat persistence), plus tile-stat counts from
+ * existing Prisma models (BrainMemoryItem, Camera, NetworkDevice,
+ * DeviceClient).
+ *
+ * Single internal Promise.all over the per-section queries — keeps the
+ * page latency bounded to the slowest individual query rather than
+ * summing them.
+ */
+import type { PrismaClient } from "@prisma/client";
+
+export interface HomeGreeting {
+  text: string;
+  timeOfDay: "morning" | "afternoon" | "evening";
+}
+
+export interface HomeSystemChip {
+  label: string;
+  severity: "ok" | "warn" | "degraded";
+}
+
+export interface HomeTile {
+  count: number;
+  sub: string;
+  status: "ok" | "warn" | "offline" | "unknown";
+}
+
+export interface HomeTiles {
+  files: HomeTile;
+  cameras: HomeTile;
+  network: HomeTile;
+  devices: HomeTile;
+}
+
+export interface HomeTimelineEntry {
+  at: string;
+  severity: "ok" | "warn" | "err" | "info";
+  sourceIcon: string;
+  what: string;
+  sub: string | null;
+  kind: string;
+}
+
+export interface HomePayload {
+  greeting: HomeGreeting;
+  systemChip: HomeSystemChip;
+  tiles: HomeTiles;
+  timeline: HomeTimelineEntry[];
+  suggestedTools: Array<{ slug: string; name: string; description: string }>;
+  suggestionChips: string[];
+}
+
+export interface HomeAggregationUser {
+  displayName?: string;
+  username?: string;
+  id?: string;
+  role?: string;
+}
+
+/**
+ * Compute the time-of-day bucket for the greeting based on the
+ * appliance's local timezone. Pure function — easy to snapshot-test.
+ *
+ * The boundaries match FEATURES.md §2.1 ("morning" / "afternoon" /
+ * "evening"): morning < 12:00, afternoon 12:00-17:59, evening 18:00+.
+ */
+export function timeOfDay(now: Date): "morning" | "afternoon" | "evening" {
+  const h = now.getHours();
+  if (h < 12) return "morning";
+  if (h < 18) return "afternoon";
+  return "evening";
+}
+
+function buildGreeting(now: Date, user: HomeAggregationUser): HomeGreeting {
+  const tod = timeOfDay(now);
+  const name = user.displayName ?? user.username ?? "there";
+  const prefix = tod === "morning" ? "Good morning" : tod === "afternoon" ? "Good afternoon" : "Good evening";
+  return { text: `${prefix}, ${name}`, timeOfDay: tod };
+}
+
+/**
+ * Build today's timeline from ActivityRow.
+ *
+ * "Today" is bounded by the appliance's local midnight, not UTC, so
+ * a row created at 23:50 local-time appears under today (not
+ * tomorrow). De-dupe by `(what, sub)` so a noisy emitter doesn't
+ * dominate the feed.
+ */
+async function getTimeline(prisma: PrismaClient, now: Date): Promise<HomeTimelineEntry[]> {
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const rows = await prisma.activityRow.findMany({
+    where: { at: { gte: startOfDay } },
+    orderBy: { at: "desc" },
+    take: 200,
+    select: {
+      at: true,
+      severity: true,
+      sourceIcon: true,
+      what: true,
+      sub: true,
+      kind: true,
+    },
+  });
+  const seen = new Set<string>();
+  const out: HomeTimelineEntry[] = [];
+  for (const r of rows) {
+    const key = `${r.what}${r.sub ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      at: r.at.toISOString(),
+      severity: r.severity,
+      sourceIcon: r.sourceIcon,
+      what: r.what,
+      sub: r.sub ?? null,
+      kind: r.kind,
+    });
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+
+/**
+ * Heuristic suggestion chips: the four most-recurring leading words
+ * from the user's ChatSession.title in the last 7 days. Cheap, no
+ * embeddings; revisit when the pattern miner (WARP-464) lands.
+ */
+async function getSuggestionChips(
+  prisma: PrismaClient,
+  userId: string | undefined,
+  now: Date,
+): Promise<string[]> {
+  if (!userId) return [];
+  const since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const rows = await prisma.chatSession.findMany({
+    where: { userId, updatedAt: { gte: since }, title: { not: null } },
+    select: { title: true },
+    take: 200,
+  });
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const t = (r.title ?? "").trim();
+    if (t.length === 0) continue;
+    // Take the first 4 words as the chip seed — preserves intent
+    // without exploding cardinality.
+    const seed = t.split(/\s+/).slice(0, 4).join(" ");
+    counts.set(seed, (counts.get(seed) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([s]) => s);
+}
+
+// Mirror `ONLINE_WINDOW_MS` from network-device.service.ts — the
+// canonical "active" window. Keeping it local avoids a cross-service
+// import for a single 2-minute constant; if either drifts the tile
+// label diverges from the network page count.
+const NETWORK_ONLINE_WINDOW_MS = 2 * 60_000;
+
+async function getTiles(prisma: PrismaClient, userId: string | undefined): Promise<HomeTiles> {
+  // Each tile resolves independently; failure of one section degrades
+  // gracefully rather than blanking the whole home page.
+  const onlineSince = new Date(Date.now() - NETWORK_ONLINE_WINDOW_MS);
+  const [filesCount, camerasCount, networkCount, devicesCount] = await Promise.all([
+    userId
+      ? prisma.brainMemoryItem.count({ where: { userId, status: "ready" } }).catch(() => 0)
+      : Promise.resolve(0),
+    // `enabled: true` filters disabled cameras — the column exists
+    // precisely to express this state (CLAUDE.md no-guessing rule).
+    prisma.camera.count({ where: { enabled: true } }).catch(() => 0),
+    // "active client" must be lastSeen-bounded; raw count returns every
+    // row ever registered (blocked, long-inactive). Matches the network
+    // page's online window so the home tile and the network page agree.
+    prisma.networkDevice
+      .count({ where: { lastSeen: { gte: onlineSince } } })
+      .catch(() => 0),
+    prisma.deviceClient.count({ where: { status: "active" } }).catch(() => 0),
+  ]);
+  return {
+    files: {
+      count: filesCount,
+      sub: filesCount === 1 ? "1 file indexed" : `${filesCount} files indexed`,
+      status: "ok",
+    },
+    cameras: {
+      count: camerasCount,
+      sub: camerasCount === 1 ? "1 camera" : `${camerasCount} cameras`,
+      status: "ok",
+    },
+    network: {
+      count: networkCount,
+      sub: networkCount === 1 ? "1 active client" : `${networkCount} active clients`,
+      status: "ok",
+    },
+    devices: {
+      count: devicesCount,
+      sub: devicesCount === 1 ? "1 paired device" : `${devicesCount} paired devices`,
+      status: "ok",
+    },
+  };
+}
+
+/**
+ * Aggregate everything the Home page needs into one payload.
+ *
+ * `now` is injected so the snapshot test can pin the greeting + timeline
+ * bound without faking the system clock.
+ */
+export async function getHomePayload(
+  prisma: PrismaClient,
+  user: HomeAggregationUser,
+  now: Date = new Date(),
+): Promise<HomePayload> {
+  // ActivityRow is a device-wide log with no userId column. Privacy
+  // boundary: guest / family roles see other users' file-indexing
+  // events, smart-home commands, etc. through this surface. Match
+  // /api/activity's owner/admin gate — guests and family get an empty
+  // timeline. (Same rationale as activity.ts file header.)
+  const role = user.role;
+  const canSeeTimeline = role === "owner" || role === "admin";
+  // .catch on each top-level call so a DB timeout on activityRow.findMany
+  // or chatSession.findMany degrades the section instead of 500-ing the
+  // whole page — matches the per-tile pattern in getTiles. Bounds page
+  // latency to the slowest individual query without taking the page
+  // down on a transient blip.
+  const [timeline, suggestionChips, tiles] = await Promise.all([
+    canSeeTimeline
+      ? getTimeline(prisma, now).catch(() => [] as HomeTimelineEntry[])
+      : Promise.resolve([] as HomeTimelineEntry[]),
+    getSuggestionChips(prisma, user.id ?? user.username, now).catch(
+      () => [] as string[],
+    ),
+    getTiles(prisma, user.id ?? user.username),
+  ]);
+  return {
+    greeting: buildGreeting(now, user),
+    // WARP-469 v1: aggregate severity not yet wired through. The
+    // dashboard's existing /api/orchestrator/health rollup is the
+    // future input; placeholder "ok" keeps the chip rendering until
+    // the wire lands.
+    systemChip: { label: "all systems operational", severity: "ok" },
+    tiles,
+    timeline,
+    // WARP-462 (Phase C1 ToolSpec) is the upstream for this section.
+    // Empty array preserves the response shape so the dashboard's
+    // Suggested-tools card renders an empty-state pass-through until
+    // C1 lands.
+    suggestedTools: [],
+    suggestionChips,
+  };
+}

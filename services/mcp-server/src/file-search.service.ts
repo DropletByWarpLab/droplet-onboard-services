@@ -53,6 +53,8 @@ export interface SearchByVectorParams {
   minSimilarity: number;
   source?: FileContentSource;
   since?: Date;
+  /** WARP-437: optional case-sensitive substring match on `path` (SQL LIKE). */
+  filenameContains?: string;
 }
 
 export async function searchByVector(
@@ -71,6 +73,11 @@ export async function searchByVector(
   if (params.since !== undefined) {
     where.push(`"indexedAt" >= $${p}`);
     args.push(params.since);
+    p++;
+  }
+  if (params.filenameContains !== undefined) {
+    where.push(`path LIKE $${p}`);
+    args.push(`%${params.filenameContains}%`);
     p++;
   }
   const limitParam = p;
@@ -116,6 +123,8 @@ export interface SearchByLexicalParams {
   limit: number;
   source?: FileContentSource;
   since?: Date;
+  /** WARP-437: optional case-sensitive substring match on `path` (SQL LIKE). */
+  filenameContains?: string;
 }
 
 export async function searchByLexical(
@@ -136,6 +145,11 @@ export async function searchByLexical(
   if (params.since !== undefined) {
     where.push(`"indexedAt" >= $${p}`);
     args.push(params.since);
+    p++;
+  }
+  if (params.filenameContains !== undefined) {
+    where.push(`path LIKE $${p}`);
+    args.push(`%${params.filenameContains}%`);
     p++;
   }
   const limitParam = p;
@@ -297,6 +311,35 @@ export interface SearchHybridRerankOption {
   cacheTtlSec?: number;
 }
 
+/**
+ * WARP-437 — query enhancement bundle. When omitted (the default),
+ * `searchHybrid` behaves byte-for-byte like the pre-WARP-437 pipeline.
+ * Callers (orchestrator's agent loop) own the LLM calls + embedding —
+ * by the time these vectors land here they are already computed.
+ */
+export interface QueryEnhancementOption {
+  /**
+   * Embedding of a HyDE (hypothetical document) passage. When provided
+   * AND length matches `params.vector.length`, the vector arm uses the
+   * element-wise mean of `[params.vector, hydeVector]`. Length mismatch
+   * silently drops the HyDE term to avoid a dimensional surprise.
+   */
+  hydeVector?: number[];
+  /**
+   * Additional query embeddings to run parallel vector arms for. The
+   * lexical arm still runs once against `params.query`. Vector arms RRF-
+   * fuse together before fusing with lexical.
+   */
+  extraQueryVectors?: number[][];
+  /**
+   * Class-derived metadata filter applied to BOTH arms. Today only
+   * `filenameContains` is supported.
+   */
+  metadataFilter?: {
+    filenameContains?: string;
+  };
+}
+
 export interface SearchHybridParams {
   userId: string;
   vector: number[];
@@ -307,6 +350,8 @@ export interface SearchHybridParams {
   source?: FileContentSource;
   since?: Date;
   rerank?: SearchHybridRerankOption;
+  /** WARP-437 enhancement bundle. Omit for pre-WARP-437 behaviour. */
+  queryEnhancement?: QueryEnhancementOption;
 }
 
 export async function searchHybrid(
@@ -315,25 +360,60 @@ export async function searchHybrid(
 ): Promise<SearchHit[]> {
   const perArmK = params.perArmK ?? SEARCH_HYBRID_DEFAULT_PER_ARM_K;
   const limit = params.limit ?? SEARCH_HYBRID_DEFAULT_LIMIT;
-  const [vectorHits, lexicalHits] = await Promise.all([
-    searchByVector(prisma, {
-      userId: params.userId,
-      vector: params.vector,
-      limit: perArmK,
-      minSimilarity:
-        params.minSimilarity ?? SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY,
-      source: params.source,
-      since: params.since,
-    }),
+
+  // WARP-437: HyDE averaging — element-wise mean when dimensions match.
+  // Length mismatch silently drops the HyDE term (CLAUDE.md "no guessing":
+  // we don't pad/truncate behind the caller's back).
+  const enhancement = params.queryEnhancement;
+  const effectiveVector =
+    enhancement?.hydeVector &&
+    enhancement.hydeVector.length === params.vector.length
+      ? params.vector.map(
+          (v, i) => (v + (enhancement.hydeVector as number[])[i]!) / 2,
+        )
+      : params.vector;
+
+  // WARP-437: multi-query fan-out. One vector arm per query (raw + extras);
+  // single lexical arm against `params.query`.
+  const vectorQueries: number[][] = [
+    effectiveVector,
+    ...(enhancement?.extraQueryVectors ?? []),
+  ];
+  const filenameContains = enhancement?.metadataFilter?.filenameContains;
+
+  const [vectorHitLists, lexicalHits] = await Promise.all([
+    Promise.all(
+      vectorQueries.map((vec) =>
+        searchByVector(prisma, {
+          userId: params.userId,
+          vector: vec,
+          limit: perArmK,
+          minSimilarity:
+            params.minSimilarity ?? SEARCH_HYBRID_DEFAULT_MIN_SIMILARITY,
+          source: params.source,
+          since: params.since,
+          filenameContains,
+        }),
+      ),
+    ),
     searchByLexical(prisma, {
       userId: params.userId,
       query: params.query,
       limit: perArmK,
       source: params.source,
       since: params.since,
+      filenameContains,
     }),
   ]);
-  const fused = reciprocalRankFusion(vectorHits, lexicalHits);
+
+  // Fuse vector arms together first, then fuse the result with lexical.
+  // Single-arm fan-out collapses to "RRF of one list vs empty list" — which
+  // assigns 1/(k+rank) to every hit, identical to the pre-WARP-437 path.
+  const vectorFused = vectorHitLists.reduce(
+    (acc, list) => reciprocalRankFusion(acc, list),
+    [] as SearchHit[],
+  );
+  const fused = reciprocalRankFusion(vectorFused, lexicalHits);
 
   if (params.rerank) {
     const candidatesN =

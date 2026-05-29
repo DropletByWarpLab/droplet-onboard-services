@@ -113,8 +113,111 @@ function handleFileError(
   next(err);
 }
 
-export function createFilesRouter(_prisma: PrismaClient): Router {
+export function createFilesRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // ── WARP-473 — file citations (related chats for §2.3 file drawer)
+  // GET /api/files/:path(*)/citations?limit=20 — returns recent
+  // ChatMessage→ChatSession rows that referenced this filePath.
+  //
+  // The `:path(*)` wildcard captures arbitrary slashes in the file
+  // path (Nextcloud paths look like `/Documents/foo.pdf`). The route
+  // is mounted at top-level so this matches `/api/files/Documents/foo.pdf/citations`.
+  // Read access is owner+admin+family — guests don't see chat history.
+  interface CitationRow {
+    id: string;
+    filePath: string;
+    userId: string;
+    threadId: string;
+    messageId: string;
+    citedAt: Date;
+  }
+  router.get(
+    "/files/:filePath(*)/citations",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const filePath = req.params.filePath
+          ? `/${req.params.filePath}`.replace(/\/+/g, "/")
+          : "";
+        if (filePath === "" || filePath === "/") {
+          res.status(400).json({ error: "filePath path-param is required" });
+          return;
+        }
+        const rawLimit = Number.parseInt(String(req.query.limit ?? "20"), 10);
+        const limit = Math.max(
+          1,
+          Math.min(50, Number.isFinite(rawLimit) ? rawLimit : 20),
+        );
+
+        // IDOR boundary: FileCitation has no built-in per-row owner check
+        // — cross-user leak unless we filter on userId. Owner/admin see
+        // every household citation (consistent with /api/activity); other
+        // roles are scoped to their own sessions.
+        const role = (req as { user?: { role?: string; id?: string } }).user?.role;
+        const requesterId =
+          (req as { user?: { role?: string; id?: string } }).user?.id ?? "__none__";
+        const isPrivileged = role === "owner" || role === "admin";
+        const where = isPrivileged
+          ? { filePath }
+          : { filePath, userId: requesterId };
+
+        const rows = (await prisma.fileCitation.findMany({
+          where,
+          orderBy: { citedAt: "desc" },
+          take: limit,
+        })) as unknown as CitationRow[];
+
+        if (rows.length === 0) {
+          res.json({ filePath, citations: [] });
+          return;
+        }
+
+        // Resolve session metadata (title + updatedAt) so the dashboard
+        // can render the related-chats list without N round-trips. We
+        // de-dup by threadId because one message can fire-and-forget
+        // many file paths per turn — the dashboard wants one row per
+        // *chat*, not per citation.
+        const threadIds = Array.from(new Set(rows.map((r) => r.threadId)));
+        const sessions = (await prisma.chatSession.findMany({
+          where: { id: { in: threadIds } },
+          select: { id: true, title: true, updatedAt: true, userId: true },
+        })) as Array<{
+          id: string;
+          title: string | null;
+          updatedAt: Date;
+          userId: string;
+        }>;
+        const sessionById = new Map(sessions.map((s) => [s.id, s]));
+
+        // One row per thread, latest citation wins.
+        const seen = new Set<string>();
+        const citations: Array<{
+          threadId: string;
+          messageId: string;
+          title: string | null;
+          citedAt: Date;
+          updatedAt: Date | null;
+        }> = [];
+        for (const r of rows) {
+          if (seen.has(r.threadId)) continue;
+          seen.add(r.threadId);
+          const session = sessionById.get(r.threadId);
+          citations.push({
+            threadId: r.threadId,
+            messageId: r.messageId,
+            title: session?.title ?? null,
+            citedAt: r.citedAt,
+            updatedAt: session?.updatedAt ?? null,
+          });
+        }
+
+        res.json({ filePath, citations });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ── Multer error handler ──
   function handleUpload(req: Request, res: Response, next: NextFunction) {
@@ -989,7 +1092,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       // best chunk), outer query sorts by score and applies the limit.
       const vecLiteral = `[${embedVec.join(",")}]`;
       const rows: Array<{ path: string; score: number; text: string }> =
-        await _prisma.$queryRawUnsafe(
+        await prisma.$queryRawUnsafe(
           `
           SELECT path, score, text FROM (
             SELECT DISTINCT ON ("ncFileId")
@@ -1072,7 +1175,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       let lastIndexedAt: string | null = null;
       try {
         const rows: Array<{ count: bigint; last: Date | null }> =
-          await _prisma.$queryRawUnsafe(
+          await prisma.$queryRawUnsafe(
             'SELECT COUNT(*)::bigint AS count, MAX("createdAt") AS last ' +
               'FROM "FileContentChunk" WHERE "userId" = $1',
             user,

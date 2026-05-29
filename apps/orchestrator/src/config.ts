@@ -178,6 +178,59 @@ const envSchema = z.object({
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
 
+  // SERVICE_TOKEN_EMAIL — WARP-465. Bearer the email-indexer service
+  // presents on POST /api/email/_ingest/* and PATCH
+  // /api/email/_ingest/drafts/:id. authMiddleware's matchServiceToken
+  // sets `_service:email`. To rotate: change here AND in the
+  // email-indexer's compose env (ORCHESTRATOR_SERVICE_TOKEN).
+  SERVICE_TOKEN_EMAIL: z.string().default(""),
+
+  // ORCHESTRATOR_SAMPLER_TOKEN — WARP-468 / WARP-470. Bearer presented
+  // by the routing service's egress_meter (off-LAN sample POST) and
+  // scheduler (throughput sample POST). Both run with network_mode: host
+  // so they reach the orchestrator on localhost:3000 rather than via
+  // compose service DNS. authMiddleware's matchServiceToken sets
+  // `_service:sampler` for either source. To rotate: change here AND in
+  // services/routing's compose env (ORCHESTRATOR_SAMPLER_TOKEN).
+  ORCHESTRATOR_SAMPLER_TOKEN: z.string().default(""),
+
+  // AI_GATEWAY_SAMPLER_TOKEN — WARP-468. Bearer presented by ai-gateway's
+  // off_lan_gating middleware on GET /api/network/off-lan and
+  // /api/settings/off-lan to read the cloud_model_escape posture. The
+  // gate fails closed (451) without a valid reading, so a missing or
+  // mis-registered token blocks every cloud-model call. authMiddleware's
+  // matchServiceToken sets `_service:ai-gateway`. To rotate: change here
+  // AND in services/ai-gateway's compose env (AI_GATEWAY_SAMPLER_TOKEN).
+  AI_GATEWAY_SAMPLER_TOKEN: z.string().default(""),
+
+  // --- Embedded Plane PM stack (ADR-010 / WARP-501) ---
+  // Service principals reach Plane via the orchestrator — never
+  // direct from the dashboard or external MCP. These three vars
+  // identify and authenticate that channel:
+  //
+  //   DROPLET_PM_API_URL — Plane API base URL on the compose network
+  //   (default `http://pm-api:8000`). Used by pm-rbac.service.ts +
+  //   pm-onboard route + pm.client.ts for all outbound calls. Missing
+  //   → URL constructor throws → fail-closed (per pm-rbac module
+  //   contract).
+  //
+  //   DROPLET_PM_ADMIN_TOKEN — Plane admin API key. Sent as
+  //   `X-API-Key` on every PATCH/POST. Rotation: change here AND in
+  //   the PM compose env (pm-api service).
+  //
+  //   DROPLET_PM_WEB_URL — Public-facing Plane URL (used by the
+  //   onboarding wizard's success card to deep-link the user to
+  //   their newly-provisioned workspace).
+  DROPLET_PM_API_URL: z.string().default(""),
+  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
+  DROPLET_PM_WEB_URL: z.string().default(""),
+
+  // DROPLET_PM_WEBHOOK_SECRET — HMAC signing key for Plane webhooks
+  // delivered to POST /api/pm/webhook (WARP-511). Empty default —
+  // the webhook handler fail-CLOSEs (503) when this is unset, per
+  // engineering-handbook 04-coding-standards/security-rules.md §1.
+  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if

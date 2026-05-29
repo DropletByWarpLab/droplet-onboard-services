@@ -126,6 +126,14 @@ services:
       # a separate effort (split migration into init container without
       # FIPS, or get Postgres to use FIPS-approved ciphers server-side).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      # WARP-519: rag-eval HTTP trigger server. The orchestrator's
+      # /api/admin/rag-eval/* route proxies ad-hoc RAGAS runs here. rag-eval
+      # is in the `eval` Compose profile — when that profile is inactive the
+      # service name doesn't resolve and the proxy route returns 503
+      # (rag_eval_unavailable), which the dashboard renders as a "enable the
+      # eval profile" banner. Setting the URL unconditionally is correct;
+      # the route detects the connection failure at request time.
+      - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
     volumes:
       - matter-data:/data/matter-storage
       # WARP-203: chat-attached "brain memory" files. Per-user dirs at
@@ -378,6 +386,17 @@ services:
     env_file:
       - path: ../.env
         required: false
+    # Mirrors orchestrator + mcp-server: the chat path's default
+    # OLLAMA_URL is `http://host.docker.internal:11434` (host-installed
+    # Ollama for local Docker Desktop dev). Without this mapping, ai-gateway
+    # cannot resolve the name and chat throws "Temporary failure in name
+    # resolution". On the single-box deployment shape
+    # (COMPOSE_PROFILES=single-box) the bundled `ollama` service below
+    # resolves via compose DNS and this mapping is unused — but it's
+    # harmless and keeps the local-dev story intact. See .env.example
+    # "AI Gateway" block for the deployment matrix.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
@@ -435,6 +454,66 @@ services:
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
 
+  # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
+  # WARP-RAG-EVAL: opt-in via `eval` profile because running this on every
+  # user appliance is overkill — RAGAS is GPU-bound and only needed on
+  # development / staging / test boxes where we're tracking retrieval
+  # quality. Enable with `COMPOSE_PROFILES=eval` (or comma-append to the
+  # existing list).
+  #
+  # The container bakes queries.yaml + goldens.yaml + ragas_runner.py at
+  # build time. Goldens are part of the image version; updating them
+  # means rebuilding + redeploying the rag-eval image.
+  #
+  # Results land in the `rag-eval-data` named volume at /data/rag-eval/.
+  # Per-run JSON + Markdown summaries are written under runs/; the
+  # bootstrap mode (`docker exec rag-eval python main.py bootstrap`)
+  # writes baselines.candidate.json at the volume root.
+  rag-eval:
+    build:
+      context: ..
+      dockerfile: services/rag-eval/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:3000
+      # RAGAS_OLLAMA_URL points at the host's Ollama (the appliance's
+      # local judge LLM). On Linux the bridge network reaches the host
+      # via host-gateway; on macOS dev compose uses host.docker.internal.
+      - RAGAS_OLLAMA_URL=${RAGAS_OLLAMA_URL:-http://host.docker.internal:11434/v1}
+      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-mistral}
+      - RAGAS_JUDGE=${RAGAS_JUDGE:-local}
+      - RAGAS_VARIANT=${RAGAS_VARIANT:-hybrid}
+      - RAGAS_LIMIT=${RAGAS_LIMIT:-10}
+      - RAG_EVAL_CRON_HOUR=${RAG_EVAL_CRON_HOUR:-22-23,0-5}
+      - RAG_EVAL_CRON_MINUTE=${RAG_EVAL_CRON_MINUTE:-0}
+      - RAG_EVAL_DISABLED=${RAG_EVAL_DISABLED:-0}
+      # OPENAI_API_KEY only consumed when RAGAS_JUDGE=cloud.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # WARP-519: HTTP trigger server bind port. The orchestrator proxies
+      # ad-hoc /run, /bootstrap, and run-listing here via RAG_EVAL_URL
+      # (set on the orchestrator service). Keep in sync with the expose
+      # below and EXPOSE in services/rag-eval/Dockerfile.
+      - RAG_EVAL_HTTP_PORT=${RAG_EVAL_HTTP_PORT:-8090}
+    # WARP-519: internal-network only — no host publish. The orchestrator
+    # reaches this by service name (rag-eval:8090) and is the auth wall;
+    # the HTTP server itself has no auth.
+    expose:
+      - "8090"
+    volumes:
+      - rag-eval-data:/data/rag-eval
+    extra_hosts:
+      # So RAGAS_OLLAMA_URL can resolve `host.docker.internal` on Linux
+      # the same way it does on macOS / WSL. Mirrors the pattern used by
+      # the routing service for OpenWrt access.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      orchestrator:
+        condition: service_started
+    profiles: ["eval"]
+    restart: always
+
   # --- Routing (OpenWrt control) ---
   # WARP-44: default dependency — starts on every `docker compose up`. Set
   # ROUTING_MODE=mock in .env to run without a real router (fixtures).
@@ -462,6 +541,52 @@ services:
     secrets:
       - openwrt_password
     restart: always
+
+  # --- Email indexer (IMAP IDLE + MIME parser + outbound SMTP) ---
+  # WARP-465 D1 follow-up. One async task per EmailAccount via
+  # apscheduler — no `while True`. Reads accounts from postgres at
+  # boot + every 5 min, POSTs parsed messages to the orchestrator
+  # ingest endpoint, drains queued EmailDraft rows via SMTP every 10 s.
+  # Fernet key for password decryption lives at /data/secrets/email.key
+  # (mode 0600, setup.sh-generated). Health endpoint on :8086 for
+  # the docker healthcheck.
+  email-indexer:
+    build:
+      context: ..
+      dockerfile: services/email-indexer/Dockerfile
+    environment:
+      # Compose service names are `db` and `broker` (NOT `postgres` /
+      # `mosquitto`). Match the rest of the file's interpolations
+      # otherwise the indexer can't open its Prisma connection.
+      - DATABASE_URL=${DATABASE_URL:-postgresql://droplet:droplet@db:5432/droplet}
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:3000}
+      # SERVICE_TOKEN_EMAIL is generated by scripts/lib/secrets.sh into
+      # .env on first install. The email-indexer reads it as
+      # ORCHESTRATOR_SERVICE_TOKEN (Python convention "the token I use
+      # to call the orchestrator"); the orchestrator stores it as
+      # SERVICE_TOKEN_EMAIL (TS convention SERVICE_TOKEN_<consumer>).
+      - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_EMAIL:-}
+      - MQTT_HOST=${MQTT_HOST:-broker}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - EMAIL_KEY_PATH=/data/secrets/email.key
+      - OUTBOUND_POLL_SECONDS=${OUTBOUND_POLL_SECONDS:-10}
+      - ACCOUNT_REFRESH_SECONDS=${ACCOUNT_REFRESH_SECONDS:-300}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
+    volumes:
+      - ../data/secrets:/data/secrets:ro
+    depends_on:
+      # `db` / `broker` are the canonical service names. `orchestrator`
+      # is required because the indexer POSTs ingest deltas on every
+      # IDLE cycle; without it, first-boot deliveries land before the
+      # orchestrator accepts connections and are permanently lost (the
+      # client has no retry queue — a failed POST drops the message).
+      - db
+      - broker
+      - orchestrator
+    restart: always
+    profiles: ["full"]
 
   # --- Managed Switch (PoE + VLAN control) ---
   switch:
@@ -512,7 +637,14 @@ services:
       - "127.0.0.1:5000:5000"
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
-      - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
+      # GPU render node. Default `/dev/dri/renderD128` matches every host
+      # with a single render node (Jetson Orin's nvgpu, x86 single-GPU
+      # boxes). Override via `FRIGATE_RENDER_NODE` in .env when the dGPU
+      # is reserved for another container — on the single-box deployment
+      # shape the AMD dGPU (renderD128) hosts Ollama, so Frigate detects
+      # on the iGPU at renderD129. Setup wizard / `setup.sh --single-box`
+      # writes this.
+      - ${FRIGATE_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128  # GPU render node
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
@@ -595,8 +727,9 @@ services:
   # §"Hardware compatibility" for the supported configurations.
   #
   # Profile-gated to "linux" because /dev/snd doesn't exist on Docker
-  # Desktop for macOS; dev installs there skip it. POC + production both
-  # run Linux so the profile is on by default via setup.sh.
+  # Desktop for macOS; dev installs there skip it. Single-box and
+  # multi-box deployments both run Linux so the profile is on by
+  # default via setup.sh.
   voice-io:
     build:
       context: ..
@@ -606,7 +739,7 @@ services:
     # specific devices — sounddevice picks them up via PortAudio.
     devices:
       - "/dev/snd:/dev/snd"
-    # The host's audio group GID. On Ubuntu/Debian (POC + Jetson) it's 29;
+    # The host's audio group GID. On Ubuntu/Debian (single-box + Jetson) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
     # match for /dev/snd's owner.
@@ -861,6 +994,213 @@ services:
     profiles: ["ops"]
     restart: unless-stopped
 
+  # ==========================================================================
+  # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498)
+  # ==========================================================================
+  # Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
+  # pinned by SHA per spec OQ3) plus a Droplet-side health sidecar.
+  #
+  # No profile attribute — Plane is a core customer service like Nextcloud,
+  # runs on the orchestrator host regardless of deployment shape (single-box
+  # OR multi-box). The `services/pm/PATCHES.md` ledger tracks any local
+  # modifications per ADR-010 AGPL §13 posture.
+  #
+  # OQ1 resolution: dedicated postgres-pm + redis-pm — backup/restore
+  # granularity + Plane schema-migration quarantine outweigh ~200MB RAM cost.
+
+  postgres-pm:
+    image: postgres:15-alpine
+    container_name: droplet-postgres-pm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DROPLET_PM_DB_NAME:-plane}
+      POSTGRES_USER: ${DROPLET_PM_DB_USER:-plane}
+      POSTGRES_PASSWORD: ${DROPLET_PM_DB_PASSWORD:-}
+    volumes:
+      - postgres-pm-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DROPLET_PM_DB_USER:-plane}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  redis-pm:
+    image: redis:7-alpine
+    container_name: droplet-redis-pm
+    restart: unless-stopped
+    volumes:
+      - redis-pm-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  pm-api:
+    # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
+    # per-Droplet-release decision; do not bump without spec update.
+    image: makeplane/plane-backend:v0.24.1
+    container_name: droplet-pm-api
+    restart: unless-stopped
+    depends_on:
+      postgres-pm:
+        condition: service_healthy
+      redis-pm:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      WEB_URL: ${DROPLET_PM_WEB_URL:-}
+
+  pm-worker:
+    image: makeplane/plane-worker:v0.24.1
+    container_name: droplet-pm-worker
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY}
+
+  pm-web:
+    image: makeplane/plane-frontend:v0.24.1
+    container_name: droplet-pm-web
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${DROPLET_PM_API_URL:-http://pm-api:8000}
+    # No host-port exposure — Nginx reverse-proxies at /pm/ (WARP-502).
+    expose:
+      - "3000"
+
+  pm-health:
+    # Droplet-side standardized /health sidecar (WARP-500).
+    build:
+      context: ..
+      dockerfile: services/pm/Dockerfile
+      args:
+        PLANE_PIN_SHA: v0.24.1
+    container_name: droplet-pm-health
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+    environment:
+      DROPLET_PM_API_URL: http://pm-api:8000
+    # Internal only — orchestrator + ship-check poll this.
+    expose:
+      - "8090"
+
+  # ==========================================================================
+  # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
+  # deployment shape services.
+  # ==========================================================================
+  # The multi-box deployment runs Ollama on a separate Jetson (the dGPU
+  # host) and a real OpenWrt router (the Pi 5). The single-box shape
+  # collapses both into containers on the same x86 host. Services below
+  # ONLY start when the `single-box` profile is active; on every other
+  # deployment shape they're invisible.
+  #
+  # Activation: `COMPOSE_PROFILES=single-box` in .env (setup.sh writes this
+  # when it detects single-box hardware: dGPU + iGPU + no separate Jetson
+  # on LAN). Operators can also force it with
+  # `COMPOSE_PROFILES=single-box,linux docker compose up -d` for testing.
+  #
+  # Captured 2026-05-24 from /home/droplet/edge-platform/docker/docker-compose.override.yml
+  # on the box at 192.168.1.87 — Phase 1 of the "box = repo" cleanup.
+  # See scripts/host/_box-snapshot-2026-05-24.md for the full inventory.
+
+  # --- Ollama (ROCm) ---------------------------------------------------------
+  # Local LLM inference on the AMD dGPU. Image is the upstream rocm variant
+  # which natively supports gfx1200 (RDNA4) — do NOT set HSA_OVERRIDE_GFX_VERSION,
+  # it would force gfx1100 emulation and break things.
+  #
+  # Bound to host loopback so the ollama-manager sidecar (Phase 3) can reach
+  # it without exposing :11434 off-box. The chat path from ai-gateway uses
+  # the compose service name `ollama` (resolved via the default bridge
+  # network), not the host loopback.
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: droplet-ollama
+    profiles: ["single-box"]
+    restart: unless-stopped
+    expose:
+      - "11434"
+    ports:
+      # Host loopback for ollama-manager + host-side `ollama` CLI. Public
+      # access goes through ai-gateway, not direct.
+      - "127.0.0.1:11434:11434"
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "${OLLAMA_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128"
+    group_add:
+      - "993"  # render
+      - "44"   # video
+    environment:
+      ROCR_VISIBLE_DEVICES: "0"
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      # `ollama --version` only confirms the binary executes; the
+      # container can be healthy while the HTTP server on :11434 is
+      # still starting (or has died). `ollama list` makes a real call
+      # to the daemon at the default OLLAMA_HOST (loopback), so a
+      # non-zero exit signals the server isn't listening. No extra
+      # tools required — `ollama` is already in the image.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- OpenWrt (router-in-container) ---------------------------------------
+  # Hosts the Wi-Fi AP (after `droplet-openwrt-attach` moves the host's
+  # MT7922 PHY into this container's netns) plus the WireGuard VPN
+  # endpoint. The routing service (above) talks to this via 127.0.0.1:8181
+  # over host networking — see scripts/host/usr-local-sbin/droplet-openwrt-attach
+  # for the full bootstrap sequence.
+  #
+  # Privileged + NET_ADMIN/SYS_ADMIN because OpenWrt's procd does a lot of
+  # network interface manipulation that requires real capabilities. tmpfs
+  # for /tmp and /run because OpenWrt expects writable scratch space at
+  # init time and these are runtime-state-only.
+  openwrt:
+    image: openwrt/rootfs:x86_64-24.10.2
+    container_name: droplet-openwrt
+    hostname: openwrt
+    profiles: ["single-box"]
+    command: /sbin/init
+    privileged: true
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    ports:
+      - "${WIREGUARD_PORT:-51820}:51820/udp"  # WireGuard listen (customer-facing)
+      - "127.0.0.1:8181:80"                   # uhttpd / ubus, host-only —
+                                              # routing service reaches it
+                                              # via 127.0.0.1:8181 (Phase L).
+    tmpfs:
+      - /tmp
+      - /run
+    volumes:
+      - openwrt-config:/etc/config
+      - openwrt-overlay:/overlay
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
@@ -879,9 +1219,28 @@ volumes:
   ops-audit:
   matter-data:
   brain-memory-data:
+  # WARP-RAG-EVAL: per-run RAGAS JSON + Markdown + the bootstrap
+  # baselines.candidate.json. Named volume so results survive container
+  # restarts during ops work and don't require an operator-created host
+  # dir. Retention is unbounded today; the rag-eval container's runner
+  # leaves cleanup to the operator. Add a sweep if it grows.
+  rag-eval-data:
+  # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498 OQ1).
+  # Dedicated postgres/redis volumes so backup/restore (WARP-514) and
+  # factory-reset granularity are per-volume.
+  postgres-pm-data:
+  redis-pm-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.
   whisper-models:
   # WARP-154 — Piper voice cache (~70 MB per voice).
   piper-voices:
+  # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
+  # ollama + openwrt services are active. Declared unconditionally so
+  # `docker volume ls` shows the names whether the profile is on or off;
+  # the volumes themselves are only materialized when the services start.
+  # factory-reset.sh includes these in its wipe list.
+  ollama-data:
+  openwrt-config:
+  openwrt-overlay:

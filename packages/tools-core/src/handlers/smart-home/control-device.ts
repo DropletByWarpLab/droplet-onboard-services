@@ -19,6 +19,46 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
+// Lock-like commands always require human confirmation, regardless of
+// which MCP client called the tool. Server-side enforcement so a model
+// can't bypass by:
+//   - using a synonym ("LOCK", "set_lock", "lock_door")
+//   - stuffing the verb into `data` ({ set_locked: true })
+//   - chaining `commission_device` then a non-"lock" string command
+// Per PR #233 review (Romain): "lock refusal is client-side string
+// matching, not server-side enforcement... real enforcement should be
+// on the orchestrator side." Voice now routes through /api/llm/chat,
+// so this check fires for every caller (dashboard, voice, external MCP).
+//
+// Returning confirmation_required (not an outright error) preserves the
+// supervised-execution path: the dashboard surfaces a confirm dialog,
+// the human approves, and the agent loop re-issues the same call with
+// a confirmation token. This matches the matter.service.ts safety-tier
+// flow for unrelated paths (extreme thermostat settings, etc.).
+const LOCKLIKE_COMMAND_TOKENS = ["lock", "unlock"] as const;
+
+function isLockLikeCommand(command: string, data?: Record<string, unknown>): boolean {
+  const lc = command.toLowerCase();
+  for (const token of LOCKLIKE_COMMAND_TOKENS) {
+    if (lc === token || lc.includes(token)) return true;
+  }
+  if (data) {
+    for (const [key, value] of Object.entries(data)) {
+      const kl = key.toLowerCase();
+      // Detect `set_locked`, `locked`, `lockState`, `lock_door`, etc.
+      // We don't need to enumerate every variant — substring on a small
+      // token vocabulary is enough to block the model's bypass attempts
+      // while staying readable.
+      if (kl.includes("lock")) return true;
+      if (typeof value === "string") {
+        const vl = value.toLowerCase();
+        if (vl === "lock" || vl === "unlock" || vl.includes("locked")) return true;
+      }
+    }
+  }
+  return false;
+}
+
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const nodeId = typeof args.node_id === "string" ? args.node_id : null;
   const command = typeof args.command === "string" ? args.command : null;
@@ -30,6 +70,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     };
   }
   const data = args.data && typeof args.data === "object" ? (args.data as Record<string, unknown>) : undefined;
+
+  if (isLockLikeCommand(command, data)) {
+    return confirmationRequired(
+      "Locking or unlocking a door from voice or chat requires confirmation in the Droplet dashboard.",
+      { node_id: nodeId, command, data, reason: "locklike_command" },
+    );
+  }
+
   let result: unknown;
   try {
     result = await ctx.matter.sendCommand(nodeId, command, data);

@@ -1,0 +1,141 @@
+# Captured 2026-05-24 from /home/droplet/edge-platform/docker/docker-compose.override.yml
+# on the single-box PoC at 192.168.1.87 (droplet-sys).
+#
+# This file is THE source of the "orphan containers" pattern: docker compose
+# auto-loads any file named docker-compose.override.yml in the working
+# directory, but `docker compose -f docker-compose.yml ...` does NOT
+# (because -f means "use ONLY these files"). The team has been running the
+# stack via `docker compose up -d` (no -f), which picks this file up.
+#
+# Phase 0: captured for reference. Not symlinked, not loaded, not auto-applied.
+# Phase 1 will decide whether to:
+#   (a) merge into docker/docker-compose.yml under `profiles: [poc]`, or
+#   (b) move to docker/docker-compose.poc.yml + update setup.sh / droplet.service
+#       to load it with `-f docker-compose.yml -f docker-compose.poc.yml`.
+#
+# Either way, the override file on the box stops being the source of truth.
+#
+# Do NOT edit this captured copy — it's a snapshot. Edit the on-box version
+# and re-capture if it changes mid-flight (then we know the box has drifted
+# again and Phase 0 is incomplete).
+
+# POC overrides on top of docker-compose.yml.
+#   - FIPS provider not layered on host -> stock OpenSSL on Node services.
+#   - No /dev/tpm0 on consumer Ryzen -> mock TPM backend.
+#   - dGPU reserved for Ollama -> Frigate's render node remapped to iGPU.
+#   - Ollama runs in-container with native gfx1200 (no HSA_OVERRIDE), pinned
+#     to the dGPU, models persisted in named volume.
+#   - OpenWrt runs in-container, owns the MT7921 WiFi card (passed via netns
+#     by scripts/poc-attach-wifi.sh after start) for the customer AP.
+services:
+  orchestrator:
+    environment:
+      OPENSSL_CONF: ""
+      DROPLET_FIPS_REQUIRED: "false"
+  mcp-server:
+    environment:
+      OPENSSL_CONF: ""
+      DROPLET_FIPS_REQUIRED: "false"
+  ai-gateway:
+    environment:
+      OPENSSL_CONF: ""
+      DROPLET_FIPS_REQUIRED: "false"
+      JETSON_OLLAMA_URL: "http://ollama:11434"
+  device-identity-svc:
+    environment:
+      DROPLET_TPM_BACKEND: "mock"
+      DROPLET_FIPS_REQUIRED: "false"
+  frigate:
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+      - "/dev/dri/renderD129:/dev/dri/renderD128"
+
+  # ============================================================
+  # Ollama (ROCm) - local LLM inference on the AMD dGPU.
+  # ============================================================
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: droplet-ollama
+    restart: unless-stopped
+    expose:
+      - "11434"
+    ports:
+      - "127.0.0.1:11434:11434"
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri/renderD128:/dev/dri/renderD128"
+    group_add:
+      - "993"
+      - "44"
+    environment:
+      ROCR_VISIBLE_DEVICES: "0"
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+
+  # Move /var/www/html/data (user uploads) to the 1.4 TB SATA drive.
+  # Upstream compose mounts nextcloud-data:/var/www/html ? the bind below
+  # overlays just the data subdir, so app code + config stay on the OS volume.
+  # On first start with this override, /mnt/droplet/data/nextcloud-data must
+  # contain the rsync'd /data content from the nextcloud-data Docker volume.
+  nextcloud:
+    volumes:
+      - nextcloud-data:/var/www/html
+      - ./nextcloud-skeleton:/skeleton:ro
+      - ./nextcloud-init.sh:/docker-entrypoint-hooks.d/post-installation/init-droplet.sh:ro
+      - /mnt/droplet:/host
+      - /mnt/droplet/data/nextcloud-data:/var/www/html/data:rw
+
+  # ============================================================
+  # OpenWrt router-in-container (POC).
+  # ============================================================
+  openwrt:
+    image: openwrt/rootfs:x86_64-24.10.2
+    ports:
+      - "51820:51820/udp"      # WireGuard listen (customer-facing)
+      - "127.0.0.1:8181:80"    # uhttpd / ubus, host-only — routing service
+                               # talks to it on host net (Phase L).
+                               # Was 8081 until the smart-port PR moved it
+                               # out of the way of services/switch (also :8081).
+    container_name: droplet-openwrt
+    hostname: openwrt
+    command: /sbin/init
+    privileged: true
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    tmpfs:
+      - /tmp
+      - /run
+    volumes:
+      - openwrt-config:/etc/config
+      - openwrt-overlay:/overlay
+
+  # Phase L: routing service stays on host network mode (so camera-discovery
+  # paths still work), but now reaches the in-container OpenWrt via the
+  # 127.0.0.1:8181 host port that openwrt publishes. (Was 8081 — moved to
+  # 8181 so services/switch can keep its canonical :8081.) OPENWRT_USERNAME
+  # =root because the only authenticated rpcd user we provision in the POC
+  # is root (its password is in /run/secrets/openwrt_password, kept by attach
+  # script).
+  routing:
+    environment:
+      - OPENWRT_HOST=127.0.0.1
+      - OPENWRT_PORT=8181
+      - OPENWRT_USERNAME=root
+      - ROUTING_MODE=real
+      - PORT=8080
+
+volumes:
+  ollama-data:
+  openwrt-config:
+  openwrt-overlay:

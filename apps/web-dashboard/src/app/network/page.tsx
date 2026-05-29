@@ -15,6 +15,7 @@ import {
   WifiOff,
   XCircle,
 } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
@@ -135,17 +136,29 @@ export default function NetworkPage() {
     };
   }, [opStatus, refresh]);
 
+  // Shared Topbar for loading + error states. Keeps the chrome in place
+  // while the body swaps so the user doesn't see a flash of bare title.
+  const networkChrome = (status: { tone: "ok" | "warn" | "error" | "neutral"; label: string }) => (
+    <Topbar
+      crumbs={[
+        { label: "Workspace", href: "/" },
+        { label: "Operations" },
+        { label: "Network" },
+      ]}
+      status={status}
+    />
+  );
+
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-48 bg-surface-secondary rounded animate-pulse" />
-          <div className="h-4 w-32 bg-surface-secondary rounded animate-pulse" />
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card h-28 animate-pulse bg-surface-secondary" />
-          ))}
+      <div>
+        {networkChrome({ tone: "neutral", label: "Loading network state…" })}
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="dp-card h-28 animate-pulse bg-surface-secondary" />
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -160,30 +173,36 @@ export default function NetworkPage() {
     // Don't use role="alert" or a retry button in that state.
     const isDisabled = routerErrorCode === "DISABLED";
     return (
-      <div className="p-6">
-        <div
-          className="dp-card text-center py-12"
-          role={isDisabled ? "status" : "alert"}
-        >
-          <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            {copy.body}
-          </p>
-          {routerErrorMessage && !isDisabled && (
-            <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
-              {routerErrorMessage}
+      <div>
+        {networkChrome({
+          tone: isDisabled ? "neutral" : "warn",
+          label: isDisabled ? "Networking disabled" : "Router unreachable",
+        })}
+        <div className="p-6">
+          <div
+            className="dp-card text-center py-12"
+            role={isDisabled ? "status" : "alert"}
+          >
+            <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
+            <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
+            <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+              {copy.body}
             </p>
-          )}
-          {!isDisabled && (
-            <button
-              onClick={refresh}
-              className="dp-btn-secondary text-sm mt-4"
-              disabled={isRefreshing}
-            >
-              {isRefreshing ? "Retrying…" : "Retry now"}
-            </button>
-          )}
+            {routerErrorMessage && !isDisabled && (
+              <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
+                {routerErrorMessage}
+              </p>
+            )}
+            {!isDisabled && (
+              <button
+                onClick={refresh}
+                className="dp-btn-secondary text-sm mt-4"
+                disabled={isRefreshing}
+              >
+                {isRefreshing ? "Retrying…" : "Retry now"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -198,16 +217,21 @@ export default function NetworkPage() {
     { id: "system", label: "System", icon: Router },
   ];
 
+  const deviceCount = overview?.connectedDeviceCount ?? 0;
+  const networkStatus =
+    deviceCount === 0
+      ? { tone: "neutral" as const, label: "No devices seen yet" }
+      : { tone: "ok" as const, label: `${deviceCount} device${deviceCount === 1 ? "" : "s"} on network` };
+
   return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Network</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {overview?.connectedDeviceCount ?? 0} device{(overview?.connectedDeviceCount ?? 0) !== 1 ? "s" : ""} on network
-          </p>
-        </div>
+    <div>
+      {networkChrome(networkStatus)}
+
+      <div className="p-6">
+      {/* Refresh action — moved out of the Topbar so it sits next to the
+          tab strip where the operator's eye lands. Keeps the Topbar
+          chrome single-row at 360px. */}
+      <div className="flex justify-end mb-4">
         <button
           onClick={refresh}
           disabled={isRefreshing}
@@ -438,6 +462,7 @@ export default function NetworkPage() {
         hidden={activeTab !== "system"}
       >
         {activeTab === "system" && <SystemTab overview={overview} />}
+      </div>
       </div>
     </div>
   );

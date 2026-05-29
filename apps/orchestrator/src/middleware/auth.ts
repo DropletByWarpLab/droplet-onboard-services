@@ -391,6 +391,49 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  {
+    // WARP-465: email-indexer presents this Bearer on ingest POSTs to
+    // /api/email/_ingest/* and PATCH /api/email/_ingest/drafts/:id.
+    // The Python client sends it as `ORCHESTRATOR_SERVICE_TOKEN`; the
+    // orchestrator stores it as SERVICE_TOKEN_EMAIL — compose wires
+    // both ends to the same `secrets.sh`-generated value.
+    token: config.SERVICE_TOKEN_EMAIL,
+    principal: {
+      id: "_service:email",
+      username: "_service:email",
+      displayName: "Email Indexer",
+      role: "service",
+    },
+  },
+  {
+    // WARP-468: routing service's egress_meter.py presents this Bearer
+    // on POST /api/network/off-lan-sample-batch. WARP-470: routing's
+    // scheduler.py presents the same shared token on POST
+    // /api/network/throughput-sample. Both samplers run under
+    // network_mode: host so service-name DNS doesn't resolve — the
+    // sampler hits the orchestrator on localhost:3000 with this bearer.
+    token: config.ORCHESTRATOR_SAMPLER_TOKEN,
+    principal: {
+      id: "_service:sampler",
+      username: "_service:sampler",
+      displayName: "Routing Sampler",
+      role: "service",
+    },
+  },
+  {
+    // WARP-468: ai-gateway's off_lan_gating middleware presents this
+    // Bearer on GET /api/network/off-lan and /api/settings/off-lan
+    // to read the cloud_model_escape posture before allowing a
+    // cloud-model call. Without this, the gate fails closed and every
+    // cloud LLM request 451s regardless of operator configuration.
+    token: config.AI_GATEWAY_SAMPLER_TOKEN,
+    principal: {
+      id: "_service:ai-gateway",
+      username: "_service:ai-gateway",
+      displayName: "AI Gateway Sampler",
+      role: "service",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {

@@ -178,6 +178,7 @@ def handle_router_error(exc: Exception):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global router_instance
+    throughput_scheduler = None
     if ROUTING_MODE == "mock":
         # WARP-44: fixture-driven router — dev laptops, CI, demos.
         from mock_router import MockRouter
@@ -200,7 +201,44 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to OpenWrt router: %s", exc)
         router_instance = None
 
+    # WARP-470: start the 60 s WAN throughput sampler once we have a
+    # real router connection. Skipped in mock mode (the mock doesn't
+    # carry traffic counters worth sampling). Failure to start is
+    # non-fatal — the routing service must keep serving even if the
+    # sampler can't reach the orchestrator.
+    if router_instance is not None:
+        try:
+            from scheduler import start_throughput_scheduler
+
+            throughput_scheduler = start_throughput_scheduler(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("throughput scheduler failed to start: %s", exc)
+
+    # WARP-468: start the 60 s off-LAN egress counter. Non-fatal —
+    # if the openwrt overlay hasn't dropped the nftables chains yet,
+    # the meter logs once and emits zero samples until they appear.
+    egress_meter_scheduler = None
+    if router_instance is not None:
+        try:
+            from egress_meter import start_egress_meter
+
+            egress_meter_scheduler = start_egress_meter(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("off-LAN egress meter failed to start: %s", exc)
+
     yield
+
+    if throughput_scheduler is not None:
+        try:
+            throughput_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("throughput scheduler shutdown failed: %s", exc)
+
+    if egress_meter_scheduler is not None:
+        try:
+            egress_meter_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("off-LAN egress meter shutdown failed: %s", exc)
 
     if router_instance:
         router_instance.disconnect()

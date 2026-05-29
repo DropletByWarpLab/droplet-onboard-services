@@ -11,6 +11,7 @@ import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
 import { RerankerClient } from "./reranker.client.js";
 import { searchHybrid } from "./file-search.service.js";
+import { createMatterController } from "./matter.controller.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -205,18 +206,13 @@ async function main(): Promise<void> {
   // first connection on demand.
   const deps: ContextDeps = {
     prisma,
-    // Matter stub stays minimal until WARP-102 decides whether the
-    // mcp-server hosts its own Matter controller or proxies HTTP back to
-    // the orchestrator. WARP-101 only exercises tools that don't touch
-    // Matter, so a no-op shim is the safest default.
-    matter: {
-      listDevices: async () => ({}),
-      getDevice: async () => ({}),
-      sendCommand: async () => ({}),
-      discover: async () => ({}),
-      commission: async () => ({}),
-      getAuditLog: async () => ({}),
-    },
+    // WARP-102 (resolved 2026-05-15): the Matter fabric lives inside
+    // the orchestrator process (matter.js + /data/matter-storage
+    // volume), so we DO NOT dual-host a controller here. The
+    // mcp-server proxies every Matter tool call back to
+    // `http://orchestrator:3000/matter/*` via the shared HttpClient
+    // factory. See `matter.controller.ts` for the route mapping.
+    matter: createMatterController(createHttpClient("orchestrator")),
     httpFactory: createHttpClient,
     embedText: (texts) => embeddingClient.embed(texts),
     // WARP-286: hybrid retrieval shim consumed by the `search_content`
@@ -224,17 +220,32 @@ async function main(): Promise<void> {
     // (vector, lexical, RRF, rerank) to `searchHybrid`. If Redis is
     // unconfigured we still serve hybrid results without the rerank
     // cache (every call hits ai-gateway).
-    searchHybrid: async ({ userId, query, limit }) => {
+    searchHybrid: async ({ userId, query, limit, _enhancement }) => {
       const vectors = await embeddingClient.embed([query]);
       const vector = vectors[0];
       if (!vector || vector.length === 0) {
         throw new Error("embedding_service_returned_no_vector");
       }
+      // WARP-437: thread orchestrator-injected enhancement into the
+      // searchHybrid pipeline. `queryEnhancement` carries the precomputed
+      // HyDE vector / paraphrase vectors / soft filename filter;
+      // `minSimilarity` / `perArmK` / `rerank.candidates` are per-call
+      // overrides for adaptive routing (factual, analytical, conversational,
+      // navigational presets — see llm-agent.service.ts:presetForClass).
       return searchHybrid(prisma, {
         userId,
         vector,
         query,
         limit,
+        minSimilarity: _enhancement?.searchOverrides?.minSimilarity,
+        perArmK: _enhancement?.searchOverrides?.perArmK,
+        queryEnhancement: _enhancement
+          ? {
+              hydeVector: _enhancement.hydeVector,
+              extraQueryVectors: _enhancement.extraQueryVectors,
+              metadataFilter: _enhancement.metadataFilter,
+            }
+          : undefined,
         rerank: redis
           ? {
               redis: redis as unknown as {
@@ -242,6 +253,7 @@ async function main(): Promise<void> {
                 setex(k: string, ttl: number, v: string): Promise<unknown>;
               },
               reranker: rerankerClient,
+              candidates: _enhancement?.searchOverrides?.rerankCandidates,
             }
           : undefined,
       });

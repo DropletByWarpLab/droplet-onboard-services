@@ -104,6 +104,10 @@ def load_queries_and_goldens(repo_root: Path) -> list[dict[str, Any]]:
                 "user_input": q["query"],
                 "reference": g["expected_answer"],
                 "reference_contexts": g.get("reference_contexts", []) or [],
+                # WARP-437: optional class label propagated to the row so the
+                # summary writer can slice metrics by query class. Pre-WARP-437
+                # YAML rows omit `class`; those land in the "unlabeled" bucket.
+                "class": q.get("class") or "unlabeled",
             }
         )
     return merged
@@ -271,6 +275,11 @@ def run(
             }
         )
 
+    # WARP-437: keep the per-row class labels in a parallel list so the
+    # post-evaluate summary can slice metrics by class without polluting
+    # the RAGAS Dataset with an extra column it doesn't recognise.
+    row_classes: list[str] = [r["class"] for r in merged]
+
     ds = Dataset.from_pandas(pd.DataFrame(rows))
     print(f"   dataset   = {len(ds)} rows")
 
@@ -316,6 +325,33 @@ def run(
             "response",
         )
     ]
+    # WARP-437: per-class slicing of the metric columns. The integration
+    # test consumer only reads top-level `metrics` today; `metrics_by_class`
+    # is additive and ignored until the per-class context-recall gate
+    # consumes it. Gate fires once `tests/retrieval-eval/ragas/baselines.json`
+    # carries populated per-class envelopes (`envelopes_by_class.<class>.<metric>.floor`).
+    df_with_class = df.copy()
+    # `row_classes` is captured pre-evaluate from the source-of-truth list
+    # so it stays aligned with `merged`/`rows` ordering regardless of how
+    # ragas reorders its output dataframe internally.
+    if len(row_classes) == len(df_with_class):
+        df_with_class["_class"] = row_classes
+    else:
+        # Defensive: if RAGAS dropped/reshaped rows, skip per-class slicing
+        # rather than emit misaligned numbers.
+        df_with_class["_class"] = ["unlabeled"] * len(df_with_class)
+    metrics_by_class: dict[str, dict[str, dict[str, float]]] = {}
+    for cls_name, sub in df_with_class.groupby("_class"):
+        metrics_by_class[str(cls_name)] = {
+            col: {
+                "p50": float(sub[col].quantile(0.5)),
+                "p95": float(sub[col].quantile(0.95)),
+                "mean": float(sub[col].mean()),
+                "n": int(sub[col].count()),
+            }
+            for col in metric_cols
+        }
+
     summary = {
         "variant": variant,
         "limit": limit,
@@ -333,6 +369,10 @@ def run(
             }
             for col in metric_cols
         },
+        # WARP-437: additive per-class slices. Consumers that don't know
+        # about this field ignore it; the per-class gate (once enabled)
+        # reads `metrics_by_class[<class>][context_recall|...].mean`.
+        "metrics_by_class": metrics_by_class,
     }
     out_json.write_text(json.dumps(summary, indent=2) + "\n")
     print(f"\n   wrote {out_json}")
@@ -355,11 +395,160 @@ def run(
     return 0
 
 
+def aggregate_runs(
+    results_dir: Path,
+    out_path: Path,
+    judge: str,
+) -> int:
+    """Aggregate N per-run results-*.json files into a baselines.json.
+
+    Schema matches tests/retrieval-eval/ragas/baselines.json:
+      envelopes.<metric> = { floor, p50, p95, iqr }
+      envelopes_by_class.<class>.<metric> = { floor, p50, p95, iqr }
+
+    `floor = p50 − 1.5 × IQR` per the schema's documented formula. Each
+    per-run sample is that run's `metrics.<m>.mean` — each run counts as
+    one data point of the metric's central tendency, percentiles across
+    runs.
+
+    N=1 collapses to iqr=0, floor=p50. Cron-driven single runs still call
+    this so artifacts always carry a baselines.candidate.json for diff
+    against the canonical one; gate-enforcing baselines.json should only
+    be promoted from an N>=5 dispatch.
+
+    Used by services/rag-eval/ on the appliance for the WARP-436 batch D
+    bootstrap path (manual `bootstrap --runs=5` from inside the container).
+    """
+    run_files = sorted(results_dir.glob("results-*.json"))
+    if not run_files:
+        print(
+            f"::error::aggregate: no results-*.json in {results_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
+    runs: list[dict[str, Any]] = []
+    for f in run_files:
+        try:
+            runs.append(json.loads(f.read_text()))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"::warning::aggregate: skipped {f}: {e}", file=sys.stderr)
+
+    if not runs:
+        print("::error::aggregate: no valid runs after parse", file=sys.stderr)
+        return 1
+
+    n_runs = len(runs)
+    n_queries = runs[0].get("n_queries", 0)
+
+    metric_keys: set[str] = set()
+    for r in runs:
+        metric_keys.update(r.get("metrics", {}).keys())
+
+    def envelope(samples: list[float]) -> dict[str, float]:
+        s = pd.Series(samples)
+        p50 = float(s.quantile(0.5))
+        p95 = float(s.quantile(0.95))
+        # IQR = Q3 - Q1; well-defined for n>=2, zero for n=1.
+        iqr = float(s.quantile(0.75) - s.quantile(0.25)) if len(s) > 1 else 0.0
+        floor = p50 - 1.5 * iqr
+        return {"floor": floor, "p50": p50, "p95": p95, "iqr": iqr}
+
+    envelopes: dict[str, dict[str, float]] = {}
+    for m in sorted(metric_keys):
+        samples = [
+            float(r["metrics"][m]["mean"])
+            for r in runs
+            if m in r.get("metrics", {})
+        ]
+        if samples:
+            envelopes[m] = envelope(samples)
+
+    # Per-class envelopes (WARP-437 `metrics_by_class`). Classes missing
+    # from a given run just don't contribute samples for that run.
+    class_keys: set[str] = set()
+    for r in runs:
+        class_keys.update(r.get("metrics_by_class", {}).keys())
+
+    envelopes_by_class: dict[str, dict[str, dict[str, float]]] = {}
+    for cls in sorted(class_keys):
+        per_metric: dict[str, dict[str, float]] = {}
+        for m in sorted(metric_keys):
+            samples = [
+                float(r["metrics_by_class"][cls][m]["mean"])
+                for r in runs
+                if cls in r.get("metrics_by_class", {})
+                and m in r["metrics_by_class"][cls]
+            ]
+            if samples:
+                per_metric[m] = envelope(samples)
+        if per_metric:
+            envelopes_by_class[cls] = per_metric
+
+    summary = {
+        "_comment": (
+            "WARP-436 — RAGAS metric baselines, aggregated by ragas_runner.py "
+            "aggregate. Per-run mean is the unit sample; floor = p50 − 1.5 × IQR."
+        ),
+        "recorded_at": pd.Timestamp.now("UTC").isoformat(),
+        "judge": judge,
+        "n_queries": n_queries,
+        "n_runs": n_runs,
+        "runs": [str(f.name) for f in run_files],
+        "envelopes": envelopes,
+        "envelopes_by_class": envelopes_by_class,
+        "_threshold_formula": "floor = p50 − 1.5 × IQR, computed over N runs",
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(summary, indent=2) + "\n")
+    print(
+        f"   aggregated {n_runs} runs × {len(envelopes)} metrics "
+        f"× {len(envelopes_by_class)} classes → {out_path}"
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+
+    # Subcommand surface — additive to the default "run" mode (no
+    # subcommand needed for backwards-compat with the existing vitest
+    # invocation `python ragas_runner.py --variant hybrid --limit 10 ...`).
+    subparsers = parser.add_subparsers(dest="command")
+    agg = subparsers.add_parser(
+        "aggregate",
+        help="Aggregate N per-run results-*.json files into a baselines.json.",
+    )
+    agg.add_argument(
+        "--results-dir",
+        required=True,
+        type=Path,
+        help="Directory containing results-*.json files (one per RAGAS run).",
+    )
+    # Deliberately named --out-baselines (not --out) so it doesn't
+    # collide with the top-level parser's --out flag for the default
+    # run-mode. argparse silently lets you redefine the same dest at
+    # both levels but the resolution order is fragile — explicit
+    # names rule it out.
+    agg.add_argument(
+        "--out-baselines",
+        required=True,
+        type=Path,
+        dest="out_baselines",
+        help="Output baselines.json path.",
+    )
+    # Same anti-collision reasoning for the judge label.
+    agg.add_argument(
+        "--judge",
+        choices=["local", "cloud"],
+        default=os.environ.get("RAGAS_JUDGE", "local"),
+        dest="aggregate_judge",
+        help="Judge LLM mode label to record in the baselines (default: local).",
+    )
+
     parser.add_argument(
         "--variant",
-        choices=["vector", "rrf", "hybrid"],
+        choices=["vector", "rrf", "hybrid", "hybrid-enhanced"],
         default="hybrid",
         help="Retrieval pipeline variant (default: hybrid).",
     )
@@ -392,6 +581,28 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+
+    # WARP-436 batch D bootstrap path: aggregate subcommand short-circuits
+    # before the run-mode arg resolution so it can be invoked without
+    # --variant / --api-url / etc. Subparser uses distinct `dest`s
+    # (out_baselines, aggregate_judge) to avoid colliding with the
+    # top-level run-mode flags.
+    if args.command == "aggregate":
+        results_dir = (
+            args.results_dir
+            if args.results_dir.is_absolute()
+            else Path.cwd() / args.results_dir
+        )
+        out_path = (
+            args.out_baselines
+            if args.out_baselines.is_absolute()
+            else Path.cwd() / args.out_baselines
+        )
+        return aggregate_runs(
+            results_dir=results_dir,
+            out_path=out_path,
+            judge=args.aggregate_judge,
+        )
 
     # Repo root = three parents up from this file
     # (tests/retrieval-eval/ragas/ragas_runner.py).

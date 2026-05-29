@@ -238,6 +238,34 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_details(f"Rerank error: {str(e)}")
             return inference_pb2.RerankResponse()
 
+    async def ClassifyQuery(self, request, context):
+        """Zero-shot query classifier; routes orchestrator's retrieval presets.
+
+        Delegates to `query_classifier.QueryClassifierSingleton`. First call
+        lazy-loads the model (~110 MB int8). Subsequent calls are ~50 ms CPU.
+        Returns 'unknown' when confidence falls below CLASSIFIER_CONFIDENCE_FLOOR.
+        """
+        try:
+            query = request.query
+            if not query:
+                return inference_pb2.ClassifyQueryResponse(**{"class": "unknown", "confidence": 0.0})
+
+            from query_classifier import QueryClassifierSingleton
+
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, QueryClassifierSingleton.instance().classify, query
+            )
+            return inference_pb2.ClassifyQueryResponse(**{
+                "class": result.cls,
+                "confidence": result.confidence,
+            })
+        except Exception as e:
+            logger.exception("gRPC ClassifyQuery error")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Classify error: {str(e)}")
+            return inference_pb2.ClassifyQueryResponse(**{"class": "unknown", "confidence": 0.0})
+
 
 async def start_grpc_server(
     provider_router: ProviderRouter,
