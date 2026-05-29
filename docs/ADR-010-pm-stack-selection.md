@@ -1,4 +1,4 @@
-# ADR-007: Adopt Plane as Droplet's embedded project-management stack
+# ADR-010: Adopt Plane as Droplet's embedded project-management stack
 
 - **Status:** Accepted
 - **Date:** 2026-05-27 (accepted 2026-05-29)
@@ -6,7 +6,7 @@
 - **Related tickets:** WARP-496 (Epic), WARP-497 (this ADR), WARP-498 (spec)
 - **Related ADRs:** ADR-002 (network page UX persona), ADR-004 (mobile API + RBAC), ADR-005 (AP onboarding pattern), ADR-006 (poc-rebuild → main reconciliation — concurrent work)
 
-> **ADR-number note:** Originally drafted as ADR-006 against the 2026-05-25 engineering-handbook snapshot. ADR-006 was claimed by `ADR-006-reconcile-poc-rebuild-branch-with-main.md` (Proposed, 2026-05-24) after that snapshot. Renumbered to ADR-007 per `07-jira-workflow/adr-creation-flow.md` collision rule ("the second branch renames to ADR-007 before merging").
+> **ADR-number note:** Originally drafted as ADR-006 against the 2026-05-25 engineering-handbook snapshot, then renumbered to ADR-007 after the ADR-006 collision. ADR-007 was subsequently claimed by `ADR-007-dashboard-redesign-violet-brand-dual-workspace.md` (Accepted, 2026-05-28) — along with ADR-008/ADR-009 for the native-mobile and canonical-architecture ADRs in the same renumber pass. Renumbered again to ADR-010 per `07-jira-workflow/adr-creation-flow.md` collision rule ("the later-merging branch renames before merging").
 
 ## Context
 
