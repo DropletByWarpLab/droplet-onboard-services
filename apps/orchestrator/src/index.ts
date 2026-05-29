@@ -40,6 +40,9 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
+import { mcpClient } from "./services/mcp-client.singleton.js";
+import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
@@ -224,6 +227,36 @@ async function main() {
     { lockKey: "droplet:device-reconcile-poller" },
   );
   logger.info({ reconcileMs }, "device reconcile poller started");
+
+  // WARP-463 (C2): tool-schedule-ticker. Every 60s scans due
+  // ToolSchedule rows, dispatches via the imperative walker shared
+  // with run-now. Multi-instance deploys lock on `droplet:tool-
+  // schedule-ticker` so only one replica fires each due schedule.
+  const toolSchedulerDispatcher: StepDispatcher = {
+    async call(tool, args) {
+      const result = await mcpClient.callTool(tool, args);
+      if (result.isError) {
+        const detail = result.content?.[0]?.text ?? "tool reported error";
+        throw new Error(typeof detail === "string" ? detail : String(detail));
+      }
+      const text = result.content?.[0]?.text;
+      if (typeof text === "string" && text.length > 0) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { raw: text };
+        }
+      }
+      return null;
+    },
+  };
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      await tickToolSchedules(prisma, toolSchedulerDispatcher);
+    },
+    { lockKey: "droplet:tool-schedule-ticker" },
+  );
 
   // WARP-446 (AC #1): mDNS coverage-extender discovery. Every
   // DROPLET_AP_DISCOVERY_INTERVAL seconds (default 10 s) the poller
