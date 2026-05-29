@@ -32,6 +32,7 @@ import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
+import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -351,6 +352,39 @@ async function main() {
       }
     },
     { lockKey: "droplet:pattern-miner-hourly" },
+  );
+
+  // WARP-475 (G3): nightly camera-retention purge. Fires at 03:30 so
+  // it doesn't contend with the 03:00 daily purge or the 03:15 guest
+  // sweep on the advisory-lock pool. Reads retention from
+  // WorkspaceSetting on every tick (no in-process cache that could
+  // drift past a dashboard edit) and calls Frigate's delete API.
+  //
+  // Let errors propagate naked to cron-runtime's `safeRun` — same
+  // posture as the pattern-miner above and every other cron handler
+  // in this file. Swallowing here would zero out the per-handler
+  // `consecutiveFailures` counter that downstream alerting reads.
+  // Per-call Frigate API failures are already absorbed inside
+  // `purgeCameraArtifacts` (the service logs WARN and returns a
+  // result with `clipsSkipped/eventsSkipped` flags), so this only
+  // bubbles up the unexpected — Prisma down, programming errors —
+  // which are exactly what the canary should escalate. Romain on
+  // PR #292 round 2 caught the inner try/catch wrapper that
+  // contradicted this convention.
+  cronRuntime.scheduleCron(
+    "30 3 * * *",
+    async () => {
+      const result = await purgeCameraArtifacts(prisma);
+      if (
+        result.clipsDeleted > 0 ||
+        result.eventsDeleted > 0 ||
+        !result.clipsSkipped ||
+        !result.eventsSkipped
+      ) {
+        logger.info(result, "camera-retention-purge complete");
+      }
+    },
+    { lockKey: "droplet:camera-retention-purge" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the
