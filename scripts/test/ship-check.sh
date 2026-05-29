@@ -90,6 +90,7 @@ ALL_CHECKS=(
   matter-env-allowlist
   exec-bits
   stale-repo-names
+  pm-invariants
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -958,6 +959,101 @@ run_check_stale_repo_names() {
   return 1
 }
 
+run_check_pm_invariants() {
+  # WARP-504: invariants the embedded Plane PM stack (ADR-007, spec WARP-498)
+  # must hold on every PR that touches services/pm/, the Plane block in
+  # docker/docker-compose.yml, the /pm/ block in docker/nginx.conf, or the
+  # Plane secret section in scripts/lib/secrets.sh. Catches the four classes
+  # we already pay for in architecture-guard rules 11, 14, 17 plus the
+  # DROPLET_PM_* prefix requirement.
+  #
+  # Skipped (with PASS) when services/pm/ does not exist — the stack is
+  # additive; ship-check shouldn't fail on branches that pre-date WARP-500.
+  local label="pm-invariants"
+  local pm_dir="$REPO_ROOT/services/pm"
+  local env_example="$pm_dir/.env.example"
+
+  if [ ! -d "$pm_dir" ]; then
+    printf "  ${_DIM}SKIP${_RESET}  %s (services/pm/ not present — pre-WARP-500 branch)\n" "$label"
+    CHECK_RESULTS[$label]=skip
+    return 0
+  fi
+
+  local failures=0
+
+  # ----- Rule 17: no lifecycle-stage framing in user-facing surfaces -------
+  # Greps services/pm/ excluding tests/ (test names legitimately use "test_").
+  # Word-boundary match (\b... in PCRE) so substrings like "production-tested"
+  # don't trigger; we want the bare tokens.
+  local pm_files
+  pm_files="$(find "$pm_dir" -type f -not -path "*/tests/*" -not -name "PATCHES.md" 2>/dev/null)"
+  if [ -n "$pm_files" ]; then
+    local framing_hits
+    framing_hits="$(printf '%s\n' "$pm_files" | xargs grep -nIE '\b(poc|prototype)\b' 2>/dev/null || true)"
+    if [ -n "$framing_hits" ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — rule 17 violation: lifecycle-stage framing in services/pm/\n" "$label"
+      printf '%s\n' "$framing_hits" | sed 's/^/    | /' >&2
+      printf "    | (Name things by what they ARE, not by their lifecycle stage —\n" >&2
+      printf "    |  see 03-claude-harness/skills/droplet-architecture-guard rule 17.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
+  # ----- Rule 11: no MATTER_* env vars in Plane-touching paths -------------
+  # matter.js scans process.env at startup and auto-imports every MATTER_*
+  # into VariableService, colliding with root-node behavior ids and
+  # throwing UnsupportedCastError. Use DROPLET_MATTER_* for our own vars.
+  if [ -n "$pm_files" ]; then
+    local matter_hits
+    matter_hits="$(printf '%s\n' "$pm_files" | xargs grep -nIE '\bMATTER_[A-Z_]+' 2>/dev/null \
+                  | grep -v 'DROPLET_MATTER_' \
+                  | grep -v 'MATTER_STORAGE_PATH' || true)"
+    if [ -n "$matter_hits" ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — rule 11 violation: MATTER_* env var in services/pm/\n" "$label"
+      printf '%s\n' "$matter_hits" | sed 's/^/    | /' >&2
+      printf "    | (Use DROPLET_MATTER_* prefix or DROPLET_PM_* for PM-specific vars.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
+  # ----- Rule 14: no host-specific IP defaults -----------------------------
+  # Match private-range IPs that look like dev-machine defaults. The compose
+  # network's resolver line (`resolver 127.0.0.11`) is in nginx.conf, not
+  # services/pm/, so this scope avoids false positives.
+  if [ -n "$pm_files" ]; then
+    local ip_hits
+    ip_hits="$(printf '%s\n' "$pm_files" | xargs grep -nIE '\b(192\.168\.|10\.[0-9]+\.|172\.(1[6-9]|2[0-9]|3[01])\.|host\.docker\.internal)' 2>/dev/null || true)"
+    if [ -n "$ip_hits" ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — rule 14 violation: host-specific default in services/pm/\n" "$label"
+      printf '%s\n' "$ip_hits" | sed 's/^/    | /' >&2
+      printf "    | (Defaults must work on a brand-new install OR fail loud.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
+  # ----- Env-var prefix: every assignment in .env.example must be DROPLET_PM_*
+  # Skips comment and blank lines.
+  if [ -f "$env_example" ]; then
+    local bad_prefix
+    bad_prefix="$(grep -nE '^[A-Za-z_][A-Za-z0-9_]*=' "$env_example" \
+                  | grep -vE '^[0-9]+:DROPLET_PM_' || true)"
+    if [ -n "$bad_prefix" ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — env vars in .env.example must use DROPLET_PM_* prefix (rule 11)\n" "$label"
+      printf '%s\n' "$bad_prefix" | sed 's/^/    | /' >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if [ "$failures" -gt 0 ]; then
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  printf "  ${_GREEN}PASS${_RESET}  %s (services/pm/ clean: rules 11, 14, 17 + DROPLET_PM_* prefix)\n" "$label"
+  CHECK_RESULTS[$label]=pass
+  return 0
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -1193,6 +1289,7 @@ _dispatch_check() {
     matter-env-allowlist) run_check_matter_env_allowlist ;;
     exec-bits)            run_check_exec_bits ;;
     stale-repo-names)     run_check_stale_repo_names ;;
+    pm-invariants)        run_check_pm_invariants ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
