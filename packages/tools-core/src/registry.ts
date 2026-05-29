@@ -93,6 +93,12 @@ import emailSummarizeThread from "./handlers/email/summarize-thread.js";
 import emailDraftReply from "./handlers/email/draft-reply.js";
 import emailSend from "./handlers/email/send.js";
 
+// WARP-509: embedded Plane PM stack — write tools (ADR-007, spec WARP-498)
+import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
+import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
+import pmAddWorkItemComment from "./handlers/pm/add-work-item-comment.js";
+import pmTransitionWorkItem from "./handlers/pm/transition-work-item.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -177,6 +183,11 @@ const allTools: Tool[] = [
   // WARP-461: durable memory facts
   memoryRecall,
   memoryExtractFact,
+  // WARP-509: embedded Plane PM (write tools — requiresWrite + requiresConfirmation)
+  pmCreateWorkItem,
+  pmUpdateWorkItem,
+  pmAddWorkItemComment,
+  pmTransitionWorkItem,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));
