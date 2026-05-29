@@ -231,3 +231,113 @@ If a route gets a breaking change, gate it behind a versioned path
       push (background) + polling.
 - [ ] WebRTC vs HLS for camera streams. Frigate supports both; HLS is
       simpler client-side, WebRTC has lower latency. v1 ships HLS.
+## Project Management (Plane integration)
+
+> Implemented in [WARP-513](https://warp-lab.atlassian.net/browse/WARP-513).
+> ADR: [ADR-010](ADR-010-pm-stack-selection.md). Spec:
+> [`superpowers/specs/2026-05-27-warp-498-pm-stack-design.md`](superpowers/specs/2026-05-27-warp-498-pm-stack-design.md).
+
+V1 = read-only on mobile. The orchestrator wraps Plane's upstream API
+(`X-API-Key`, workspace-slug-centric, `work-items` per spec OQ-set
+verified 2026-05-28) and transforms responses into Droplet's existing
+mobile envelope per OQ4 resolution. iOS/Android/Windows clients call
+the endpoints below; they MUST NOT call Plane directly.
+
+### `GET /api/mobile/pm/workspaces`
+
+List workspaces visible to the caller. Used for `workspace_slug`
+discovery before downstream calls.
+
+**Response:**
+```json
+{
+  "workspaces": [
+    { "id": "<uuid>", "slug": "<slug>", "name": "<string>" }
+  ]
+}
+```
+
+### `GET /api/mobile/pm/projects?workspace=<slug>&per_page=<n>`
+
+Paginated list of projects under a workspace.
+
+**Query params:**
+- `workspace` (required) — workspace slug from `/workspaces`.
+- `per_page` (optional) — 1..100, default 50.
+
+**Response:**
+```json
+{
+  "projects": [
+    {
+      "id": "<uuid>",
+      "name": "<string>",
+      "identifier": "<short-code>"
+    }
+  ]
+}
+```
+
+### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&per_page=<n>`
+
+Paginated list of work items (issues/tickets — Plane's name).
+
+**Query params:**
+- `workspace` (required), `project_id` (required).
+- `state` (optional) — filter by state id.
+- `assignee` (optional) — filter by assignee id.
+- `per_page` (optional) — 1..100, default 50.
+
+**Response:**
+```json
+{
+  "work_items": [
+    {
+      "id": "<uuid>",
+      "name": "<string>",
+      "state": "<state-id>",
+      "assignees": ["<user-id>"],
+      "labels": ["<label-id>"],
+      "created_at": "<iso8601>",
+      "updated_at": "<iso8601>"
+    }
+  ]
+}
+```
+
+### `GET /api/mobile/pm/work-items/{id}?workspace=<slug>&project_id=<id>`
+
+Fetch a single work item with description body.
+
+**Query params:**
+- `workspace` (required), `project_id` (required).
+
+**Response:**
+```json
+{
+  "work_item": {
+    "id": "<uuid>",
+    "name": "<string>",
+    "description_html": "<string>",
+    "state": "<state-id>",
+    "assignees": ["<user-id>"],
+    "labels": ["<label-id>"],
+    "created_at": "<iso8601>",
+    "updated_at": "<iso8601>"
+  }
+}
+```
+
+**Status codes:**
+- `200` — found.
+- `404` — work item not in this project/workspace.
+- `401` — JWT missing or invalid.
+- `502` — Plane API unreachable (orchestrator logs the upstream error).
+
+### Out of scope for V1
+
+- Mobile writes (create/update/comment/transition). Mobile is read-only.
+- Push notifications when work items change. Webhook receiver
+  (WARP-511) lands the event bus; mobile push is a follow-up epic.
+- Custom field reads — orchestrator returns default Plane fields only.
+- Native UI for project/work-item editing — out of scope.
