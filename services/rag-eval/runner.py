@@ -107,10 +107,15 @@ def run_once(target_dir: Path | None = None) -> Path:
         text=True,
         bufsize=1,  # line-buffered
     )
-    # proc.stdout is guaranteed non-None because stdout=PIPE.
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        logger.info("[ragas] %s", line.rstrip())
+    # proc.stdout is guaranteed non-None because stdout=PIPE; guard
+    # explicitly rather than `assert` (which `python -O` would strip).
+    if proc.stdout is None:  # pragma: no cover
+        raise RuntimeError("subprocess stdout pipe unexpectedly None")
+    # `with` closes the pipe deterministically once drained, instead of
+    # leaving it open until the proc object is GC'd.
+    with proc.stdout:
+        for line in proc.stdout:
+            logger.info("[ragas] %s", line.rstrip())
     proc.wait()
     if proc.returncode != 0:
         # Preserve the existing contract: non-zero exit raises
