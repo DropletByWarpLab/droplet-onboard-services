@@ -1,6 +1,14 @@
+const path = require("path");
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // Monorepo: tell Next where the workspace root is so the standalone
+  // file-trace walks up to the hoisted node_modules instead of stopping
+  // at apps/web-dashboard. In Next 14.2 this lives under `experimental`.
+  experimental: {
+    outputFileTracingRoot: path.join(__dirname, "../../"),
+  },
   async rewrites() {
     // In dev mode (outside Docker), proxy API calls to local services.
     // Docker dev (docker/docker-compose.dev.yml) sets the *_INTERNAL_URL

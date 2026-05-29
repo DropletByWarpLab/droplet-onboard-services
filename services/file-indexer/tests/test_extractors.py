@@ -30,7 +30,9 @@ def test_dispatch_text_returns_extracted_doc(tmp_path):
     f.write_text("hello world\n")
     result = dispatch(str(f), "text/plain")
     assert result is not None
-    assert "hello world" in result["text"]
+    # WARP-287: spans replace the old text blob.
+    full = " ".join(s.text for s in result["spans"])
+    assert "hello world" in full
     assert result["metadata"]["extractor_name"] == "text"
 
 

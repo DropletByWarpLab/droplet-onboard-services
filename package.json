@@ -19,7 +19,8 @@
     "test:all": "npm run test:security && npm run test:ai-gateway && npm run test",
     "test:setup": "bash tests/setup.test.sh",
     "test:integration": "cd tests && npm run test:docker",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "gen:anchor-schema": "node scripts/gen-anchor-schema.mjs"
   },
   "packageManager": "npm@10.9.2",
   "devDependencies": {

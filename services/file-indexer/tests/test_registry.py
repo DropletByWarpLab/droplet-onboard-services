@@ -37,7 +37,8 @@ def test_dispatch_returns_warning_when_recursion_too_deep(tmp_path):
         str(fake), "text/plain", depth=registry.MAX_RECURSION_DEPTH + 1
     )
     assert result is not None
-    assert result["text"] == ""
+    # WARP-287: depth-cap returns an empty spans list, not the old text="".
+    assert result["spans"] == []
     assert "max_recursion_depth_exceeded" in result["warnings"]
 
 
@@ -47,7 +48,9 @@ def test_dispatch_existing_callers_without_depth_still_work(tmp_path):
     f.write_text("hello world\n")
     result = registry.dispatch(str(f), "text/plain")
     assert result is not None
-    assert "hello world" in result["text"]
+    # WARP-287: spans replace the old text blob.
+    full = " ".join(s.text for s in result["spans"])
+    assert "hello world" in full
 
 
 def test_cap_for_mime_returns_default_for_unknown_mime():
@@ -102,8 +105,12 @@ def test_dispatch_routes_eml_to_email_extractor(tmp_path):
     )
     result = registry.dispatch(str(eml_path), "message/rfc822")
     assert result is not None
-    assert "Subject: hi" in result["text"]
-    assert "body text" in result["text"]
+    # WARP-287: email extractor emits one span per MIME text part. The
+    # "Subject:" header is folded into the first part's text per the
+    # email extractor's contract (see test_extractor_email_anchors.py).
+    full = " ".join(s.text for s in result["spans"])
+    assert "Subject: hi" in full
+    assert "body text" in full
 
 
 # ── archive registration (WARP-200 Task 4.4) ─────────────────────────
@@ -127,8 +134,13 @@ def test_archive_mime_dispatches_through_registry(tmp_path):
     fixtures = _Path(__file__).parent / "fixtures"
     result = registry.dispatch(str(fixtures / "simple.zip"), "application/zip")
     assert result is not None
-    assert "one hundred thousand" in result["text"]
-    assert "--- Member: note.txt ---" in result["text"]
+    # WARP-287: each archive member surfaces as its own span with an
+    # ArchiveMemberAnchor (separator banners no longer exist; each
+    # span's anchor identifies the member).
+    full = " ".join(s.text for s in result["spans"])
+    assert "one hundred thousand" in full
+    anchors = [s.anchor for s in result["spans"]]
+    assert any(getattr(a, "kind", None) == "archive-member" and getattr(a, "member", None) == "note.txt" for a in anchors)
 
 
 def test_archive_handler_resolves_via_route():

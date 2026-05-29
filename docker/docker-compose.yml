@@ -31,8 +31,8 @@ services:
   # This avoids conflicts with local dev servers (npm run dev on 3000/3001).
   web-dashboard:
     build:
-      context: ../apps/web-dashboard
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/web-dashboard/Dockerfile
     expose:
       - "3001"
     environment:

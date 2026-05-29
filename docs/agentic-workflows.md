@@ -129,3 +129,15 @@ When making changes that touch both repos:
 If you're making a change that touches **only this repo** (e.g. adding a new model, changing the lifecycle API), the orchestrator side needs no PR.
 
 If you're making a change that touches **only the orchestrator** (e.g. new tool, new agent prompt), this repo needs no PR.
+
+## Citations & anchors (WARP-287)
+
+Citations from `/api/files/knowledge/search` and `/api/llm/chat` carry a structured
+`anchor` field per WARP-287; the dashboard `<CitationCard>` renders deep-link
+viewers (PDF at page N, audio/video at MM:SS, email modal, archive drawer).
+The schema source of truth is `schemas/anchor.schema.json`; codegen produces
+the Python `anchor_schema` module (consumed by `services/file-indexer`) and the
+TypeScript `@droplet/shared-types` package (consumed by the orchestrator + web
+dashboard). Legacy pre-WARP-287 chunks have `metadata.anchor` absent and
+surface as `anchor: null`; the admin re-index route
+(`POST /api/admin/files/:id/reindex`) upgrades them in place.

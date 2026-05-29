@@ -1,33 +1,30 @@
 """PDF extractor using pypdf.
 
-Records per-page text plus the cumulative character offset where each
-page ended, so chunkers / citation rendering can deep-link to a page
-number.
+Emits one Span per non-empty page with ``Anchor(kind="pdf-page", page=N)``
+(WARP-287). Blank pages are skipped (the Span dataclass rejects empty
+text).
 
 WARP-435 / ADR-003 Phase 1: also walks the document's outline (a.k.a.
-bookmarks) tree to assign every page a hierarchical ``sectionPath``
-(e.g. ``["Chapter 2", "2.1 Background"]``). The per-page section paths
-land on ``metadata.section_paths`` so downstream code in
-``brain_ingest`` / ``watcher`` / ``transcription_worker`` can derive a
-per-chunk path from each chunk's start char offset → section path.
-PDFs without an outline (the majority of scanned + auto-generated PDFs)
-just get an empty list — the caller falls back to ``[filename]`` at
-chunk time.
+bookmarks) tree to assign every page a hierarchical ``section_path``
+(e.g. ``["Chapter 2", "2.1 Background"]``). The unified design carries
+that path on each page's Span (``Span.section_path``) rather than on a
+global offset table — the page-span's section_path is the outline section
+covering that page's start (best-effort). Pages with no covering outline
+entry fall back to ``[filename]``.
 
-QA follow-up (WARP-435): ``section_paths`` is emitted as
-``list[tuple[int, list[str]]]`` — `(char_offset_of_page_start, path)` —
-matching the shape ``chunker.section_path_for_offset`` consumes and
-matching the DOCX / PPTX / TXT / EML extractors. The previous shape
-(``list[list[str]]`` indexed by page) raised ``ValueError`` on the
-first chunk of any PDF with an empty-outline page.
+PDFs without an outline (the majority of scanned + auto-generated PDFs)
+get ``[filename]`` for every page.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+import os
+from typing import Any
 
 from pypdf import PdfReader
 
+from anchor_schema import PdfPageAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 logger = logging.getLogger(__name__)
@@ -62,8 +59,7 @@ def _flatten_outline(
 
     ``page_index`` resolution: each ``Destination`` carries a
     ``.page`` reference. ``reader.get_destination_page_number(dest)``
-    is the canonical way to turn that into a 0-based page index; we
-    fall back to scanning ``reader.pages`` for older pypdf shapes.
+    is the canonical way to turn that into a 0-based page index.
 
     Bounded traversal (WARP-435 reviewer finding 2):
       * ``max_depth`` caps recursion depth (default 32). When hit we log
@@ -95,8 +91,6 @@ def _flatten_outline(
         outline = [outline]
 
     # Cycle guard: if we've already walked this exact list object, skip.
-    # id() is stable for the object's lifetime and unhashable Destination
-    # objects don't reach this branch (lists are always hashable by id).
     list_id = id(outline)
     if list_id in _visited:
         logger.warning(
@@ -157,111 +151,103 @@ def _flatten_outline(
             i += 1
 
 
-def _build_section_paths(
-    reader: PdfReader, page_start_offsets: list[int]
-) -> list[tuple[int, list[str]]]:
-    """Return ``(char_offset_of_page_start, path)`` tuples for the doc.
+def _section_path_by_page(reader: PdfReader, n_pages: int) -> dict[int, list[str]]:
+    """Return a ``{page_index: section_path}`` map derived from the outline.
 
-    ``page_start_offsets`` is the per-page char offset into ``full_text``
-    where each page's content begins (page 0 starts at 0, page 1 starts
-    just after page 0's text + "\\n\\n" join, etc.). We map each outline
-    entry's page index through that lookup so downstream callers can
-    feed the result straight into ``chunker.section_path_for_offset``
-    without any extra page-→-offset translation.
+    Each outline entry's section path covers every page from its target
+    page up to (but not including) the next entry's target page. We build
+    a sparse map of "section starts here" entries, then forward-fill so
+    every page index gets the most recent section path at or before it.
 
-    Only outline entries with a *change* in section path get an entry in
-    the output (no redundant tuples for pages that inherit the previous
-    section). Pages preceding any outline entry are implicitly covered
-    by the chunker's fallback (returns ``[]`` when offset precedes the
-    first entry, so the chunk header degrades to just the filename).
+    Empty dict when the PDF has no outline — callers fall back to
+    ``[filename]`` per page.
     """
-    if not page_start_offsets:
-        return []
+    if n_pages <= 0:
+        return {}
 
     try:
         outline = reader.outline
     except Exception as e:
         logger.debug("pdf: outline unavailable (%s); skipping section paths", e)
-        return []
+        return {}
 
     if not outline:
-        return []
+        return {}
 
     entries: list[tuple[int, list[str]]] = []
     try:
         _flatten_outline(reader, outline, [], entries)
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("pdf: outline walk failed (%s); skipping", e)
-        return []
+        return {}
 
     if not entries:
-        return []
+        return {}
 
     # Sort by page index, stable so siblings on the same page retain
-    # in-document recursion order.
+    # in-document recursion order (last one wins as the page's path).
     entries.sort(key=lambda t: t[0])
 
-    n_pages = len(page_start_offsets)
-    out: list[tuple[int, list[str]]] = []
-    prev_path: list[str] | None = None
+    # Sparse "section starts here" map: page_index -> path.
+    starts: dict[int, list[str]] = {}
     for page_idx, path in entries:
-        if page_idx < 0 or page_idx >= n_pages:
-            # Outline pointing at a page we don't have text for (e.g.
-            # an empty page that got dropped). Skip rather than crash.
-            continue
-        if prev_path is not None and path == prev_path:
-            # Same path as previous entry — no new tuple needed; the
-            # earlier offset already covers this page.
-            continue
-        out.append((page_start_offsets[page_idx], list(path)))
-        prev_path = path
+        if 0 <= page_idx < n_pages:
+            starts[page_idx] = list(path)
 
-    return out
+    if not starts:
+        return {}
+
+    # Forward-fill: every page inherits the most recent section start.
+    by_page: dict[int, list[str]] = {}
+    current: list[str] = []
+    for idx in range(n_pages):
+        if idx in starts:
+            current = starts[idx]
+        if current:
+            by_page[idx] = current
+    return by_page
 
 
 def extract(path: str) -> ExtractedDoc:
     reader = PdfReader(path)
-    parts: list[str] = []
-    page_breaks: list[int] = []
-    # Per-page start offset into the joined ``full_text``. Page 0
-    # always starts at 0; subsequent pages start just past the prior
-    # page's text + the "\n\n" separator. Pages that yielded no text
-    # don't contribute to ``parts`` (and so don't get a join separator)
-    # — their start offset collapses to the running ``cum`` cursor.
-    page_start_offsets: list[int] = []
-    cum = 0
-    for page in reader.pages:
-        text = (page.extract_text() or "").strip()
-        if text:
-            page_start_offsets.append(cum)
-            parts.append(text)
-            cum += len(text) + 2  # +2 for "\n\n" join below
-        else:
-            page_start_offsets.append(cum)
-        page_breaks.append(cum)
+    spans: list[Span] = []
+    warnings: list[str] = []
 
-    full_text = "\n\n".join(parts)
-    section_paths = _build_section_paths(reader, page_start_offsets)
+    filename = os.path.basename(path)
+    n_pages = len(reader.pages)
+    section_by_page = _section_path_by_page(reader, n_pages)
 
-    return cast(
-        ExtractedDoc,
-        {
-            "text": full_text,
-            "page_breaks": page_breaks,
-            "language": None,
-            "metadata": {
-                "extractor_name": "pdf",
-                "extractor_version": "1.2",
-                "page_count": len(reader.pages),
-                "word_count": len(full_text.split()),
-                # WARP-435 (QA fix): (char_offset, path) tuples derived
-                # from the PDF outline, matching the shape DOCX / PPTX /
-                # TXT / EML emit so ``chunker.section_path_for_offset``
-                # consumes them directly. Empty list when the PDF has
-                # no outline — the chunker then falls back to a
-                # filename-only header per chunk.
-                "section_paths": section_paths,
-            },
-            "warnings": [],
+    for idx, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception as exc:  # noqa: BLE001 — per-page failure must not abort the file
+            logger.warning(
+                "extractor.span.failed",
+                extra={"extractor": "pdf", "page": idx, "error": str(exc)},
+            )
+            warnings.append(f"page_{idx}_extract_failed")
+            continue
+
+        if not text or not text.strip():
+            continue
+
+        # section_by_page is 0-based; our page anchor is 1-based.
+        section_path = section_by_page.get(idx - 1) or [filename]
+        spans.append(
+            Span(
+                text=text,
+                anchor=PdfPageAnchor(page=idx),
+                section_path=section_path,
+            )
+        )
+
+    return ExtractedDoc(
+        spans=spans,
+        language=None,
+        metadata={
+            "extractor_name": "pdf",
+            "extractor_version": "2",
+            "page_count": n_pages,
         },
+        warnings=warnings,
     )

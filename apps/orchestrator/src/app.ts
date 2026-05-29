@@ -20,6 +20,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
+import { createPmRouter } from "./routes/pm.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -37,6 +38,8 @@ import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
+import { adminFilesRouter } from "./routes/admin-files.js";
+import { setPrismaForReindex } from "./services/file-reindex.service.js";
 import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
@@ -93,6 +96,19 @@ export function createApp(prisma: PrismaClient) {
   // dashboard session; HMAC-SHA256 signature over the timestamp + body is
   // the only auth. Fail-CLOSED on any mismatch. Mounted BEFORE authMiddleware.
   app.use(createPmWebhookRouter());
+
+  // WARP-505 — Plane OIDC IdP. Five endpoints under /api/pm/oidc/*:
+  //   - .well-known/openid-configuration + jwks.json (public discovery)
+  //   - authorize (verifies the dashboard `droplet_session` cookie INLINE
+  //     via jwt.service.ts — does NOT want authMiddleware to short-circuit
+  //     it with a 401 before the OIDC redirect chain can run)
+  //   - token (Plane → orchestrator server-to-server; client_secret auth)
+  //   - userinfo (validates its own RS256 access token, NOT the session
+  //     cookie)
+  // Every endpoint handles its own auth shape, so the router mounts
+  // BEFORE authMiddleware — matches the webhook + camera-share pattern
+  // above. Stefan flagged this explicitly in the PR redesign comment.
+  app.use(createPmRouter());
 
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
@@ -167,6 +183,12 @@ export function createApp(prisma: PrismaClient) {
   // WARP-286: retrieval-eval endpoint — exposes vector/rrf/hybrid pipelines
   // to the offline NDCG@10 harness. 404 in production.
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
+  // WARP-287: admin re-index route — forces re-extraction of a single file
+  // to upgrade legacy chunks (no metadata.anchor) without a global backfill.
+  // Prisma is injected at module level so the router itself can be a
+  // pre-built constant (the spec mounts it as a value, not a factory).
+  setPrismaForReindex(prisma);
+  app.use("/api/admin", adminFilesRouter);
   // WARP-519: rag-eval HTTP trigger proxy — ad-hoc RAGAS runs + bootstrap
   // + run listing. Auth-gated (admin/owner); 503 when the `eval` Compose
   // profile is inactive (rag-eval service unreachable). NOT prod-gated.

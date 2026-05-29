@@ -17,7 +17,8 @@ import {
   Ghost,
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
-import { CitationChip } from "@/components/CitationChip";
+import { CitationCard } from "@/components/citations/CitationCard";
+import { mimeFromPath } from "@/lib/mime-icons";
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -197,24 +198,28 @@ export const ChatMessage = memo(function ChatMessage({
           </div>
         )}
       </div>
-      {/* WARP-295: citation chips below the assistant bubble.
-          Rendered through the shared <CitationChip> component for
-          visual parity with /knowledge/SearchTab. */}
+      {/* WARP-295/WARP-287: citation cards below the assistant bubble.
+          Rendered through the shared <CitationCard> component for visual
+          parity with /knowledge/SearchTab. The wire-shaped ChatCitation
+          is projected into the canonical CitationHit DTO; chat citations
+          don't carry a per-chunk `anchor` yet, so they fall through to
+          <FileCitation> (the same chip the old <CitationChip> rendered). */}
       {!isUser && hasCitations ? (
         <div
           data-testid="chat-citations"
           className="flex flex-wrap gap-1.5 mt-0.5"
         >
           {citations!.map((c, i) => (
-            <CitationChip
+            <CitationCard
               key={`${c.source}:${c.path}:${c.pageNumber ?? ""}:${i}`}
-              source={c.source}
-              path={c.path}
-              pageNumber={c.pageNumber}
-              score={c.score}
-              brainItemId={c.brainItemId}
-              snippet={c.snippet}
-              mimeType={c.mimeType}
+              hit={{
+                fileId: c.brainItemId ? String(c.brainItemId) : c.path,
+                filename: c.path.split("/").pop() || c.path,
+                mimeType: c.mimeType ?? mimeFromPath(c.path),
+                chunkText: c.snippet ?? "",
+                score: c.score ?? 0,
+                anchor: null,
+              }}
             />
           ))}
         </div>

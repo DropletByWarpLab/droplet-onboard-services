@@ -14,6 +14,7 @@ import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
+import { loadCameraRetentionPolicy } from "../services/camera-retention-purge.service.js";
 import {
   getCameras,
   getEventsFiltered,
@@ -667,11 +668,23 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- List all cameras ---
   router.get("/cameras", async (_req, res, next) => {
     try {
+      // WARP-475 (G3): expose retention block so the §2.5 retention
+      // notice has a backing value to render. The retention window is
+      // operator-editable via the dashboard — clip days come from the
+      // `hardware.camera_retention_days` WorkspaceSetting row (seeded
+      // to 14 by workspace-settings.service.ts, then mutable through
+      // `PATCH /api/settings`); event retention comes from
+      // `hardware.event_retention_days` (seeded `null` = "kept
+      // forever"). loadCameraRetentionPolicy() reads both rows fresh
+      // on every request — no in-process cache that could drift past
+      // a dashboard edit. Loaded BEFORE the Frigate check so the
+      // disconnected case still surfaces the operator-visible policy.
+      const retention = await loadCameraRetentionPolicy(prisma);
       if (!isInitialized()) {
-        return res.json({ cameras: [], _status: "disconnected" });
+        return res.json({ cameras: [], retention, _status: "disconnected" });
       }
       const cameras = await getCameras(prisma);
-      res.json({ cameras });
+      res.json({ cameras, retention });
     } catch (err) {
       next(err);
     }
