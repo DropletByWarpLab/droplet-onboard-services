@@ -977,6 +977,115 @@ services:
     restart: unless-stopped
 
   # ==========================================================================
+  # WARP-501 — embedded Plane PM stack (ADR-007, spec WARP-498)
+  # ==========================================================================
+  # Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
+  # pinned by SHA per spec OQ3) plus a Droplet-side health sidecar.
+  #
+  # No profile attribute — Plane is a core customer service like Nextcloud,
+  # runs on the orchestrator host regardless of deployment shape (single-box
+  # OR multi-box). The `services/pm/PATCHES.md` ledger tracks any local
+  # modifications per ADR-007 AGPL §13 posture.
+  #
+  # OQ1 resolution: dedicated postgres-pm + redis-pm — backup/restore
+  # granularity + Plane schema-migration quarantine outweigh ~200MB RAM cost.
+
+  postgres-pm:
+    image: postgres:15-alpine
+    container_name: droplet-postgres-pm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DROPLET_PM_DB_NAME:-plane}
+      POSTGRES_USER: ${DROPLET_PM_DB_USER:-plane}
+      POSTGRES_PASSWORD: ${DROPLET_PM_DB_PASSWORD:?DROPLET_PM_DB_PASSWORD required}
+    volumes:
+      - postgres-pm-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DROPLET_PM_DB_USER:-plane}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  redis-pm:
+    image: redis:7-alpine
+    container_name: droplet-redis-pm
+    restart: unless-stopped
+    volumes:
+      - redis-pm-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  pm-api:
+    # Plane upstream pinned per ADR-007 OQ3. SHA refresh is a deliberate
+    # per-Droplet-release decision; do not bump without spec update.
+    image: makeplane/plane-backend:v0.24.1
+    container_name: droplet-pm-api
+    restart: unless-stopped
+    depends_on:
+      postgres-pm:
+        condition: service_healthy
+      redis-pm:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:?DROPLET_PM_SECRET_KEY required}
+      WEB_URL: ${DROPLET_PM_WEB_URL:?DROPLET_PM_WEB_URL required}
+
+  pm-worker:
+    image: makeplane/plane-worker:v0.24.1
+    container_name: droplet-pm-worker
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY}
+
+  pm-web:
+    image: makeplane/plane-frontend:v0.24.1
+    container_name: droplet-pm-web
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${DROPLET_PM_API_URL:-http://pm-api:8000}
+    # No host-port exposure — Nginx reverse-proxies at /pm/ (WARP-502).
+    expose:
+      - "3000"
+
+  pm-health:
+    # Droplet-side standardized /health sidecar (WARP-500).
+    build:
+      context: ..
+      dockerfile: services/pm/Dockerfile
+      args:
+        PLANE_PIN_SHA: v0.24.1
+    container_name: droplet-pm-health
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+    environment:
+      DROPLET_PM_API_URL: http://pm-api:8000
+    # Internal only — orchestrator + ship-check poll this.
+    expose:
+      - "8090"
+
+  # ==========================================================================
   # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
   # deployment shape services.
   # ==========================================================================
@@ -1098,6 +1207,11 @@ volumes:
   # dir. Retention is unbounded today; the rag-eval container's runner
   # leaves cleanup to the operator. Add a sweep if it grows.
   rag-eval-data:
+  # WARP-501 — embedded Plane PM stack (ADR-007, spec WARP-498 OQ1).
+  # Dedicated postgres/redis volumes so backup/restore (WARP-514) and
+  # factory-reset granularity are per-volume.
+  postgres-pm-data:
+  redis-pm-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.
