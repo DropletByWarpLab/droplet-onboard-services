@@ -58,8 +58,40 @@ model ChatSession {
   createdAt DateTime      @default(now())
   updatedAt DateTime      @default(now()) @updatedAt
   messages  ChatMessage[]
+  pins      ContextPin[]
 
   @@index([userId, updatedAt(sort: Desc)])
+}
+
+/// WARP-460 — Context pins per chat session. The dashboard's right-side
+/// "Context · N sources" panel (FEATURES.md §2.2.7) lists these; the
+/// agent loop reads them on every turn and prepends pin descriptions to
+/// the system prompt so retrieval/tool calls are scoped accordingly.
+///
+/// `kind` is an explicit enum (no string-soup per CLAUDE.md "no guessing").
+/// `ref` is kind-specific (path / id / external ref). `meta` carries
+/// kind-specific extras (e.g. `{from, to}` for camera_window).
+model ContextPin {
+  id        String         @id @default(uuid())
+  sessionId String
+  session   ChatSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kind      ContextPinKind
+  ref       String
+  meta      Json?
+  addedAt   DateTime       @default(now())
+
+  @@index([sessionId, addedAt])
+}
+
+/// WARP-460 — kinds of context the user can pin to a chat thread.
+/// Maps 1:1 to the dashboard's side-panel pill types and to the
+/// `context_pins` request shape in FEATURES.md §4.1.
+enum ContextPinKind {
+  folder
+  file
+  email_thread
+  camera
+  camera_window
 }
 
 /// WARP-304 / WARP-329: persisted message in a `ChatSession`. Stored in

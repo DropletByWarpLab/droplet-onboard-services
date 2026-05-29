@@ -10,7 +10,7 @@ import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
-import type { ModelsResponse } from "../types/index.js";
+import type { ChatMessage, ModelsResponse } from "../types/index.js";
 import {
   ChatPersistenceService,
   type PersistedToolCall,
@@ -180,7 +180,12 @@ const WRITE_TOOLS = new Set(
 // RBAC helpers for /api/llm/chat. Threat model: the LLM is steered by
 // user-controlled prompt text; only owner/admin sessions are allowed to
 // touch write tools.
-type AuthedRequest = { user?: { username?: string; role?: string } };
+// WARP-485: `id` is the canonical User.id UUID set by authMiddleware
+// when the OCS or invite paths resolve a Nextcloud username to the
+// local User row. `username` is kept for back-compat (pre-WARP-485 rows
+// where ChatSession.userId is still the Nextcloud username). Both
+// fields populate the `candidates` array in `loadOwnedSession`.
+type AuthedRequest = { user?: { id?: string; username?: string; role?: string } };
 
 function isPrivilegedRole(role: string | undefined): boolean {
   return role === "owner" || role === "admin";
@@ -534,6 +539,51 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
       };
 
+      // ── WARP-460 Phase B3 — Context-pin injection ─────────────────
+      //
+      // If the user has pinned folders/files/email-threads/cameras to
+      // this session, prepend a system message describing the pinned
+      // working set. The model uses this to scope retrieval (e.g.
+      // search_content gets a `folder:` hint) per FEATURES.md §2.2.7.
+      //
+      // Pins are PER-SESSION; we only fetch when we have a known
+      // conversationId. New (just-created) sessions on the first turn
+      // skip cleanly — no pins yet.
+      //
+      // Injection is additive: we splice a new system message at index
+      // 0 rather than mutating an existing system message. Safer if
+      // the caller already provided their own system message (voice-io
+      // does this).
+      if (conversationId) {
+        try {
+          const pins = await prisma.contextPin.findMany({
+            where: { sessionId: conversationId },
+            orderBy: { addedAt: "asc" },
+          });
+          if (pins.length > 0) {
+            const lines = pins.map((p: { kind: string; ref: string; meta: unknown }) => {
+              const metaSuffix =
+                p.meta && typeof p.meta === "object"
+                  ? ` ${JSON.stringify(p.meta)}`
+                  : "";
+              return `- ${p.kind}: ${p.ref}${metaSuffix}`;
+            });
+            const pinSystemMessage: ChatMessage = {
+              role: "system",
+              content:
+                "Context pins for this conversation — prefer these as " +
+                "scope hints when calling retrieval tools:\n" +
+                lines.join("\n"),
+            };
+            chatReq.messages = [pinSystemMessage, ...chatReq.messages];
+          }
+        } catch (err) {
+          // Pin-load failure must NOT block chat — degrade gracefully.
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] context-pin load failed:", err);
+        }
+      }
+
       // ── Streaming path ──
       if (chatReq.stream) {
         res.writeHead(200, {
@@ -835,6 +885,128 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // Postgres via WARP-304 (`/llm/conversations/*` above). The
   // ai-gateway's session endpoints stay available for direct callers
   // of the gateway, but the orchestrator no longer fronts them.
+
+  // ── WARP-460 Phase B3 — Context pins ───────────────────────────────
+  //
+  // Per-thread bindings (folder / file / email_thread / camera /
+  // camera_window) listed in the dashboard's side-panel "Context · N
+  // sources" section (FEATURES.md §2.2.7). The agent loop reads pins on
+  // every turn and prepends pin descriptions to the system prompt so
+  // retrieval tools are scoped accordingly.
+  //
+  // Ownership check matches the chat-persistence pattern: the session's
+  // `userId` column carries whatever the orchestrator wrote at session
+  // creation (today: `req.user.username`; per WARP-485+WARP-488 the
+  // backfill to UUID lands separately on ChatSession in a follow-up).
+  // Read both shapes so the gate works through the transition.
+  const pinCreateSchema = z.object({
+    kind: z.enum(["folder", "file", "email_thread", "camera", "camera_window"]),
+    ref: z.string().min(1).max(512),
+    meta: z.record(z.unknown()).optional(),
+  });
+
+  async function loadOwnedSession(
+    sessionId: string,
+    req: import("express").Request,
+  ): Promise<{ ok: true; userId: string } | { ok: false; status: number; error: string }> {
+    const u = (req as AuthedRequest).user ?? {};
+    const candidates: string[] = [];
+    if (typeof u.id === "string") candidates.push(u.id);
+    if (typeof u.username === "string") candidates.push(u.username);
+    if (candidates.length === 0) {
+      return { ok: false, status: 401, error: "Authentication required" };
+    }
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId: { in: candidates } },
+      select: { userId: true },
+    });
+    if (!session) {
+      return { ok: false, status: 404, error: "session not found" };
+    }
+    return { ok: true, userId: session.userId };
+  }
+
+  router.get(
+    "/llm/:sessionId/pins",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const owned = await loadOwnedSession(req.params.sessionId!, req);
+        if (!owned.ok) {
+          res.status(owned.status).json({ error: owned.error });
+          return;
+        }
+        const pins = await prisma.contextPin.findMany({
+          where: { sessionId: req.params.sessionId },
+          orderBy: { addedAt: "asc" },
+        });
+        res.json({ pins });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/llm/:sessionId/pins",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const owned = await loadOwnedSession(req.params.sessionId!, req);
+        if (!owned.ok) {
+          res.status(owned.status).json({ error: owned.error });
+          return;
+        }
+        const parsed = pinCreateSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid pin",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const pin = await prisma.contextPin.create({
+          data: {
+            sessionId: req.params.sessionId!,
+            kind: parsed.data.kind,
+            ref: parsed.data.ref,
+            meta: parsed.data.meta as object | undefined,
+          },
+        });
+        res.status(201).json({ pin });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.delete(
+    "/llm/:sessionId/pins/:pinId",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const owned = await loadOwnedSession(req.params.sessionId!, req);
+        if (!owned.ok) {
+          res.status(owned.status).json({ error: owned.error });
+          return;
+        }
+        // Atomic ownership-scoped delete — if the pin doesn't exist or
+        // belongs to a different session, count===0 and we 404. No
+        // separate findUnique pre-check (avoids the TOCTOU pattern
+        // captured in droplet-pr-review-patterns P1).
+        const r = await prisma.contextPin.deleteMany({
+          where: { id: req.params.pinId, sessionId: req.params.sessionId },
+        });
+        if (r.count === 0) {
+          res.status(404).json({ error: "pin not found" });
+          return;
+        }
+        res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   return router;
 }
