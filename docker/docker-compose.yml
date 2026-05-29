@@ -997,7 +997,7 @@ services:
     environment:
       POSTGRES_DB: ${DROPLET_PM_DB_NAME:-plane}
       POSTGRES_USER: ${DROPLET_PM_DB_USER:-plane}
-      POSTGRES_PASSWORD: ${DROPLET_PM_DB_PASSWORD:?DROPLET_PM_DB_PASSWORD required}
+      POSTGRES_PASSWORD: ${DROPLET_PM_DB_PASSWORD:-}
     volumes:
       - postgres-pm-data:/var/lib/postgresql/data
     healthcheck:
@@ -1036,8 +1036,8 @@ services:
     environment:
       DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
       REDIS_URL: redis://redis-pm:6379
-      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:?DROPLET_PM_SECRET_KEY required}
-      WEB_URL: ${DROPLET_PM_WEB_URL:?DROPLET_PM_WEB_URL required}
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      WEB_URL: ${DROPLET_PM_WEB_URL:-}
 
   pm-worker:
     image: makeplane/plane-worker:v0.24.1
