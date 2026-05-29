@@ -481,6 +481,61 @@ materialize_artifacts() {
   _generate_tls_cert
   sync_openwrt_password_secret
   sync_audit_signing_key
+  sync_pm_oidc_keypair
+}
+
+# WARP-505 — Generate the OIDC IdP keypair on first run + backfill .env.
+#
+# Per spec WARP-498 OQ6: orchestrator runs a minimal OIDC IdP for the
+# embedded Plane PM stack. ID tokens are signed RS256 — Plane verifies
+# via JWKS (HMAC won't work). RSA-2048 is the OIDC interop floor.
+#
+# Idempotent — only generates + appends when the key is missing. Existing
+# installs with a key already in .env preserve it across re-runs.
+#
+# Stored as a single \n-escaped line so the .env file stays parseable by
+# every consumer (bash source, docker compose env interpolation, Zod
+# parser at orchestrator startup — pm-oidc.service.ts decodes back to PEM).
+sync_pm_oidc_keypair() {
+  local env_file="$REPO_ROOT/.env"
+  [ -f "$env_file" ] || return 0
+
+  if grep -qE '^DROPLET_PM_OIDC_PRIVATE_KEY_PEM=.+' "$env_file" 2>/dev/null; then
+    log_success "PM OIDC keypair already present — skipping"
+    return 0
+  fi
+
+  log_info "Generating PM OIDC keypair (RS256, 2048-bit)..."
+
+  local key_tmp escaped_pem kid client_secret
+  key_tmp="$(mktemp)"
+  if ! openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+       -out "$key_tmp" 2>/dev/null; then
+    log_error "openssl genpkey failed — PM OIDC IdP will not work until this is fixed"
+    rm -f "$key_tmp"
+    return 1
+  fi
+  # Encode multi-line PEM as \n-separated single line so the .env line
+  # stays parseable. orchestrator's pm-oidc.service.ts decodes the
+  # literal `\n` back to a real newline before handing to jwt.sign.
+  escaped_pem="$(awk 'BEGIN{ORS="\\n"} {print}' "$key_tmp")"
+  rm -f "$key_tmp"
+
+  kid="$(openssl rand -hex 16)"
+  client_secret="$(openssl rand -hex 32)"
+
+  {
+    printf '\n# --- WARP-505 PM OIDC IdP (spec WARP-498 OQ6) ---\n'
+    printf 'DROPLET_PM_OIDC_PRIVATE_KEY_PEM=%s\n' "$escaped_pem"
+    printf 'DROPLET_PM_OIDC_KID=%s\n' "$kid"
+    printf 'DROPLET_PM_OIDC_CLIENT_SECRET=%s\n' "$client_secret"
+  } >> "$env_file"
+  chmod 600 "$env_file"
+
+  log_success "PM OIDC keypair generated (kid ${kid:0:8}****)"
+  log_info "  Configure Plane god-mode /authentication/oidc/ with:"
+  log_info "    client_id     = plane (or override DROPLET_PM_OIDC_CLIENT_ID)"
+  log_info "    client_secret = ${client_secret:0:8}**** (full value in .env)"
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.
