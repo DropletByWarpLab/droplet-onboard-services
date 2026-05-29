@@ -1,9 +1,9 @@
 # ADR-007: Adopt Plane as Droplet's embedded project-management stack
 
-- **Status:** Proposed
-- **Date:** 2026-05-27
-- **Authors:** Stefan Cruceru (CEO), with input from Romain Vasilescu (CPO)
-- **Related tickets:** WARP-496 (Epic), WARP-497 (this ADR), WARP-498 (spec), WARP-499 (AGPL legal review)
+- **Status:** Accepted
+- **Date:** 2026-05-27 (accepted 2026-05-29)
+- **Authors:** Stefan Cruceru (CEO)
+- **Related tickets:** WARP-496 (Epic), WARP-497 (this ADR), WARP-498 (spec)
 - **Related ADRs:** ADR-002 (network page UX persona), ADR-004 (mobile API + RBAC), ADR-005 (AP onboarding pattern), ADR-006 (poc-rebuild → main reconciliation — concurrent work)
 
 > **ADR-number note:** Originally drafted as ADR-006 against the 2026-05-25 engineering-handbook snapshot. ADR-006 was claimed by `ADR-006-reconcile-poc-rebuild-branch-with-main.md` (Proposed, 2026-05-24) after that snapshot. Renumbered to ADR-007 per `07-jira-workflow/adr-creation-flow.md` collision rule ("the second branch renames to ADR-007 before merging").
