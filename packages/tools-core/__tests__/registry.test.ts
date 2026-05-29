@@ -67,6 +67,19 @@ const EXPECTED_TOOL_NAMES = [
   "share_clip",
   "complete_reminder",
   "update_event",
+  // WARP-461 — memory facts (Phase B4)
+  "memory_extract_fact",
+  "memory_recall",
+  // WARP-466 — email tools (Phase D2)
+  "email_draft_reply",
+  "email_read",
+  "email_search",
+  "email_send",
+  "email_summarize_thread",
+  // WARP-470 — network summary (Phase F2)
+  "network_summary",
+  // WARP-474 — smart-home scenes (Phase G2)
+  "run_scene",
 ];
 
 describe("TOOLS registry", () => {

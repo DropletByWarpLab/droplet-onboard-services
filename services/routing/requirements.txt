@@ -4,3 +4,11 @@ pydantic==2.10.4
 # WireGuard X25519 keypair generation lives in VPNApi (droplet_openwrt_sdk.py).
 # Doing keygen in Python avoids needing `file.exec` in the rpcd ACL.
 cryptography==44.0.0
+# WARP-470: 60s WAN throughput sampler in scheduler.py. APScheduler is
+# the canonical pattern per droplet-architecture-guard rule 9 (no
+# `while True` for scheduling).
+APScheduler==3.10.4
+# WARP-470: throughput sampler POSTs to orchestrator's
+# /api/network/throughput-sample. httpx is the canonical Python HTTP
+# client across services (already used by camera-discovery, ops-console).
+httpx==0.27.2

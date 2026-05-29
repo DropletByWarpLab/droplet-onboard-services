@@ -20,6 +20,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
+import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -122,6 +123,9 @@ export function createApp(prisma: PrismaClient) {
     }),
   );
   app.use("/api", createNetworkRouter(prisma));
+  // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
+  // Network page. Service-principal POST for the routing sampler push.
+  app.use("/api", createNetworkThroughputRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
