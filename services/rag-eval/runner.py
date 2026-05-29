@@ -22,6 +22,11 @@ Outputs land at /data/rag-eval/runs/results-<timestamp>.{json,md}. The
 scheduler ticks once per hour during off-hours; each tick is a fresh
 subprocess. The aggregator (`ragas_runner.py aggregate ...`) is also
 invoked here on the bootstrap path.
+
+run_once() uses subprocess.Popen with stdout=PIPE so each output line is
+forwarded to the logger as it arrives — operators can tail `docker logs -f`
+during the 10-30 min run and see live progress instead of a 30-min silence
+followed by a wall of text (WARP-520).
 """
 
 from __future__ import annotations
@@ -92,16 +97,26 @@ def run_once(target_dir: Path | None = None) -> Path:
         "--out-md", str(out_md),
     ]
     logger.info("starting RAGAS run → %s", out_json.name)
-    completed = subprocess.run(
+    # Stream child output line-by-line so `docker logs -f` shows judge-call
+    # progress during the 10-30 min run instead of a 30-min silence, and so
+    # we don't buffer the entire run's stdout in memory (WARP-520).
+    proc = subprocess.Popen(
         cmd,
-        check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # fold stderr into the same stream, in order
         text=True,
+        bufsize=1,  # line-buffered
     )
-    # ragas_runner.py prints progress to stdout. Surface its tail in
-    # case operators tail the container logs.
-    for line in completed.stdout.splitlines()[-10:]:
-        logger.info("[ragas] %s", line)
+    # proc.stdout is guaranteed non-None because stdout=PIPE.
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        logger.info("[ragas] %s", line.rstrip())
+    proc.wait()
+    if proc.returncode != 0:
+        # Preserve the existing contract: non-zero exit raises
+        # CalledProcessError so the scheduler's _safe_run catches + skips
+        # the slot, and bootstrap counts it as a failure.
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
     return out_json
 
 
