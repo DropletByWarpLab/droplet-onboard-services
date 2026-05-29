@@ -76,6 +76,46 @@ Plus 3 named volumes:
 
 All three are wiped by `./scripts/factory-reset.sh`.
 
+## Always-on customer services (no profile gate)
+
+Some services run on the orchestrator host regardless of deployment shape
+(`single-box` AND `multi-box`). They share the host's RAM + SSD with the
+profile-gated services above and the orchestrator stack itself.
+
+### Embedded Plane PM stack (WARP-501 / ADR-010)
+
+Spec OQ1 chose dedicated `postgres-pm` + `redis-pm` over sharing with the
+orchestrator's main DB so backup granularity (WARP-514) is per-volume and
+Plane's Django migrations are quarantined from Prisma's.
+
+| Container | Image | Port | RAM (idle, ~) | RAM (busy P95) |
+|---|---|---|---|---|
+| `pm-web` | `makeplane/plane-frontend:v0.24.1` | 3000 (internal, Nginx /pm/) | ~120 MB | ~250 MB |
+| `pm-api` | `makeplane/plane-backend:v0.24.1` | 8000 (internal) | ~180 MB | ~400 MB |
+| `pm-worker` | `makeplane/plane-worker:v0.24.1` | — | ~140 MB | ~300 MB |
+| `postgres-pm` | `postgres:15-alpine` | 5432 (internal) | ~30 MB | ~80 MB |
+| `redis-pm` | `redis:7-alpine` | 6379 (internal) | ~10 MB | ~25 MB |
+| `pm-health` (sidecar) | `services/pm/Dockerfile` | 8090 (internal) | ~25 MB | ~30 MB |
+
+**Total Plane stack footprint at idle: ~500 MB RAM.** Acceptable on every
+shipping deployment shape (x86 single-box has 32 GB; Pi-class single-box
+has 8 GB minus other services). For Pi-class deployments operating near
+RAM ceiling, monitor `pm-worker` first — Celery's per-task memory dominates.
+
+**Storage budget (per spec OQ1 cascade):**
+- `postgres-pm-data` — Plane DB. ~10 MB seed, ~50 MB per 1k issues with
+  full comment history. Linear growth.
+- `pm-attachments-data` — file uploads attached to issues. Operator-cap
+  via Plane's per-workspace attachment limit; defaults to 5 MB per upload,
+  no global cap. Document customer storage budget in their pilot doc.
+
+**Backup:** Use `scripts/host/pm-backup.sh` (WARP-514). Restore via
+`scripts/host/pm-restore.sh`. Both wipe + reload, not merge.
+
+**Reverse-proxy:** Nginx serves Plane at `https://<gateway>/pm/` per
+WARP-502. Websocket upgrade headers are forwarded; CSP `frame-ancestors`
+(per spec OQ2 iframe decision) tracked in `services/pm/PATCHES.md`.
+
 ## Host-level integration (installed by `setup.sh` in single-box mode)
 
 The single-box shape needs three host-level integrations that the compose
