@@ -43,6 +43,7 @@ import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
+import { createHomeRouter } from "./routes/home.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
@@ -154,6 +155,7 @@ export function createApp(prisma: PrismaClient) {
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
   app.use("/api", createSettingsRouter(prisma));
+
   // WARP-472: F4 hardware contract endpoint (admin/owner only).
   app.use("/api", createHardwareRouter(prisma));
 
@@ -218,6 +220,11 @@ export function createApp(prisma: PrismaClient) {
 
   // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
   app.use("/api", createModelsRouter());
+
+  // WARP-469: F1 home aggregation. Single round-trip backing
+  // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
+  // Per-user Redis cache with 30s TTL.
+  app.use("/api", createHomeRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
