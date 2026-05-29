@@ -17,6 +17,7 @@ import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createMatterRouter } from "./routes/matter.js";
+import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -84,6 +85,11 @@ export function createApp(prisma: PrismaClient) {
   // session; the HMAC-signed token in ?t=... is the authorization. Mounted
   // BEFORE auth middleware so forwarded links work without a Droplet account.
   app.use("/api", createCameraSharePublicRouter());
+
+  // WARP-511 — Plane → orchestrator webhook receiver. Plane has no
+  // dashboard session; HMAC-SHA256 signature over the timestamp + body is
+  // the only auth. Fail-CLOSED on any mismatch. Mounted BEFORE authMiddleware.
+  app.use(createPmWebhookRouter());
 
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
