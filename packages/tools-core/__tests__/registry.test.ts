@@ -110,5 +110,15 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("write_file")?.requiresWrite).toBe(true);
     expect(TOOLS.get("write_file")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("set_wifi_ssid")?.requiresConfirmation).toBe(true);
+    // WARP-508/509 — embedded Plane PM. Read tools are read-only; write
+    // tools (create / update / comment / transition) are
+    // requiresWrite=true AND requiresConfirmation=true because every
+    // Plane write hits a customer's tracked project state.
+    expect(TOOLS.get("pm_list_workspaces")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("pm_get_work_item")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("pm_create_work_item")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("pm_transition_work_item")?.requiresConfirmation).toBe(true);
   });
 });
