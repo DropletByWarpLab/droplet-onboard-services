@@ -1,14 +1,14 @@
 # Embedded PM stack — photo-studio pilot procedure
 
 > **WARP-517** — first real-customer deploy of the embedded Plane PM stack
-> introduced in Epic WARP-496 (ADR-007, spec WARP-498). This doc is the
+> introduced in Epic WARP-496 (ADR-010, spec WARP-498). This doc is the
 > step-by-step the operator follows on the day of the pilot. It is NOT
 > the design — for design see the linked ADR + spec.
 
 ## When to run this
 
 After **all** of these have merged to `main`:
-- ADR-007 (#286) at status `Accepted` (Romain AGPL sign-off recorded — WARP-499)
+- ADR-010 (#286) at status `Accepted` (Romain AGPL sign-off recorded — WARP-499)
 - Spec PR #287
 - Phase 1 PRs: #301 (skeleton), #302 (compose), #303 (nginx), #304 (provisioning), #305 (ship-check)
 - Phase 2 PR #307 (SSO bridge) + the downstream Phase 2 PRs
@@ -168,7 +168,7 @@ one outcome — record in this ticket as a comment:
 - Migrating customer's existing project data from elsewhere (per-
   customer ticket if requested; not part of WARP-517).
 - Per-customer Plane UI customization.
-- Bumping the Plane upstream pin (separate spec update + ADR-007 OQ3
+- Bumping the Plane upstream pin (separate spec update + ADR-010 OQ3
   refresh).
 
 ## Engineering-handbook references (binding)
@@ -187,6 +187,6 @@ one outcome — record in this ticket as a comment:
 ## Cross-references
 
 - Epic: WARP-496
-- ADR: [ADR-007](ADR-007-pm-stack-selection.md)
+- ADR: [ADR-010](ADR-010-pm-stack-selection.md)
 - Spec: [spec WARP-498](superpowers/specs/2026-05-27-warp-498-pm-stack-design.md)
 - All Phase 1–5 tickets: WARP-500..516
