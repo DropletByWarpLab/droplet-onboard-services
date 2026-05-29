@@ -241,29 +241,47 @@ export function createPublicAuthRouter(
 
       const { username, password, displayName } = parsed.data;
 
+      // WARP-485 follow-up (Romain PR #279 review): the local User
+      // mirror is a HARD precondition for setup, not a best-effort
+      // side-effect. Fail-CLOSED here BEFORE touching Nextcloud so we
+      // never leave an NC admin without a local row — the alternative
+      // is the exact lockout this PR exists to prevent (login path
+      // 401s USER_NOT_PROVISIONED at lines 325-351 below). Matches the
+      // login route's fail-CLOSED stance for the legacy
+      // createAuthRouter() shim that wires this router without prisma.
+      if (!prisma) {
+        logger.error(
+          { username },
+          "setup: prisma client not wired into public auth router; refusing to create NC admin without local mirror",
+        );
+        res.status(500).json({
+          error: "Setup misconfigured: local user database not wired",
+          code: "SETUP_NO_PRISMA",
+        });
+        return;
+      }
+
       await ncInstallAndCreateAdmin(username, password, displayName);
       logger.info({ username }, "Initial admin user created");
 
-      // WARP-485 follow-up (Romain on PR #269): mirror the Nextcloud
-      // admin into a local User row so the login path's
-      // findUnique({ where: { nextcloudUsername } }) succeeds. Without
-      // this, the very next login attempt by the freshly-created admin
-      // hits USER_NOT_PROVISIONED and the box is permanently locked
-      // out after setup. Same upsert shape as the invite-accept path
-      // (auth.ts ~L815). Role 'owner' because this is the first admin.
-      if (prisma) {
-        await prisma.user.upsert({
-          where: { nextcloudUsername: username },
-          update: { displayName: displayName || username },
-          create: {
-            username,
-            displayName: displayName || username,
-            email: null,
-            nextcloudUsername: username,
-            role: "owner" as any,
-          },
-        });
-      }
+      // Mirror the Nextcloud admin into a local User row so the login
+      // path's findUnique({ where: { nextcloudUsername } }) succeeds.
+      // Same upsert shape as the invite-accept path (auth.ts ~L815).
+      // Role 'owner' because this is the first admin. If this throws,
+      // the outer catch returns 500 — the operator gets a real error
+      // instead of a misleading `{ status: "ok" }` over a
+      // half-provisioned setup.
+      await prisma.user.upsert({
+        where: { nextcloudUsername: username },
+        update: { displayName: displayName || username },
+        create: {
+          username,
+          displayName: displayName || username,
+          email: null,
+          nextcloudUsername: username,
+          role: "owner" as any,
+        },
+      });
 
       res.json({ status: "ok", username });
     } catch (err: any) {
@@ -1070,28 +1088,45 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-485 follow-up (Romain PR #279 review): fail-CLOSED if
+      // prisma isn't wired so we never create an NC user that we
+      // can't mirror locally. Without this guard, the new user would
+      // be permanently locked out on first login (login path 401s
+      // USER_NOT_PROVISIONED at lines 325-351). Mirrors the login
+      // route's fail-CLOSED behavior for the legacy
+      // createAuthRouter() shim.
+      if (!prisma) {
+        logger.error(
+          { username: parsed.data.username },
+          "admin create-user: prisma not wired into protected auth router; refusing to create NC user without local mirror",
+        );
+        res.status(500).json({
+          error: "Server misconfigured: local user database not wired",
+          code: "USERS_NO_PRISMA",
+        });
+        return;
+      }
+
       await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
 
-      // WARP-485 follow-up (Romain on PR #269): mirror the new
-      // Nextcloud user into a local User row. Without this, the new
-      // user's first login attempt hits USER_NOT_PROVISIONED because
-      // the login path requires the local row keyed by
-      // nextcloudUsername. Role defaults to 'family' (matches the
-      // invite-accept path's empty-group default for non-admin
-      // invitees). Same upsert shape as the invite-accept route.
-      if (prisma) {
-        await prisma.user.upsert({
-          where: { nextcloudUsername: parsed.data.username },
-          update: { displayName: parsed.data.displayName || parsed.data.username },
-          create: {
-            username: parsed.data.username,
-            displayName: parsed.data.displayName || parsed.data.username,
-            email: null,
-            nextcloudUsername: parsed.data.username,
-            role: "family" as any,
-          },
-        });
-      }
+      // Mirror the new Nextcloud user into a local User row. Role
+      // defaults to 'family' (matches the invite-accept path's
+      // empty-group default for non-admin invitees). Same upsert
+      // shape as the invite-accept route. If this throws, the outer
+      // catch + next(err) routes to the Express error handler — the
+      // caller gets an explicit error rather than `{ status: "ok" }`
+      // over a half-provisioned account.
+      await prisma.user.upsert({
+        where: { nextcloudUsername: parsed.data.username },
+        update: { displayName: parsed.data.displayName || parsed.data.username },
+        create: {
+          username: parsed.data.username,
+          displayName: parsed.data.displayName || parsed.data.username,
+          email: null,
+          nextcloudUsername: parsed.data.username,
+          role: "family" as any,
+        },
+      });
 
       res.status(201).json({ status: "ok", username: parsed.data.username });
     } catch (err: any) {
