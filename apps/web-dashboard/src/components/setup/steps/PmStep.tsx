@@ -18,7 +18,7 @@ import { ArrowRight, FolderKanban, Loader2 } from "lucide-react";
 interface PmStepProps {
   /** Customer's business name from a prior wizard step — used as a default. */
   defaultWorkspaceName?: string;
-  onNext: () => void;
+  onComplete: () => void;
   onSkip: () => void;
 }
 
@@ -30,7 +30,7 @@ interface OnboardResponse {
 
 export function PmStep({
   defaultWorkspaceName = "",
-  onNext,
+  onComplete,
   onSkip,
 }: PmStepProps): JSX.Element {
   const [workspaceName, setWorkspaceName] = useState(defaultWorkspaceName);
@@ -88,7 +88,7 @@ export function PmStep({
           </a>
           <button
             type="button"
-            onClick={onNext}
+            onClick={onComplete}
             className="rounded-md bg-gray-200 px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-300"
           >
             Continue
@@ -169,7 +169,7 @@ export function PmStep({
           className="rounded-md bg-gray-200 px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-300"
           data-testid="pm-skip-btn"
         >
-          Skip
+          Skip for now
         </button>
       </div>
     </div>

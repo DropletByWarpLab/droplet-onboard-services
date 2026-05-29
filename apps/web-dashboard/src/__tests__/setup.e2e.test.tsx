@@ -328,6 +328,15 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       );
     });
 
+    // 8b. PM → skip (WARP-507). The wizard lands on PmStep between AI
+    // and Done so the operator can seed their first Plane workspace.
+    // The skip path is the V1 e2e contract; the create path is covered
+    // by component tests of PmStep itself.
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(screen.getByTestId("pm-skip-btn"));
+    });
+
     // 9. Done → WelcomeFlourish.
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
     // Personalised — display name from account step survived.

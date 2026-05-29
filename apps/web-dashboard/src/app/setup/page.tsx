@@ -10,6 +10,7 @@ import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { CamerasStep } from "@/components/setup/steps/CamerasStep";
 import { VpnStep } from "@/components/setup/steps/VpnStep";
 import { AiStep } from "@/components/setup/steps/AiStep";
+import { PmStep } from "@/components/setup/steps/PmStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 
 /**
@@ -40,6 +41,7 @@ type Step =
   | "cameras"
   | "vpn"
   | "ai"
+  | "pm"
   | "done";
 const STEPS: Step[] = [
   "welcome",
@@ -50,6 +52,12 @@ const STEPS: Step[] = [
   "cameras",
   "vpn",
   "ai",
+  // WARP-507: Plane PM stack onboarding. Sits between AI and Done so
+  // the customer's first workspace + project is seeded right after the
+  // AI model config (the LLM read/write tools target this workspace,
+  // and /projects in the dashboard lands there via the WARP-505 OIDC
+  // bridge). Skip is supported — Plane can be onboarded from /projects.
+  "pm",
   "done",
 ];
 
@@ -116,6 +124,18 @@ export default function SetupPage() {
 
         {step === "ai" && (
           <AiStep
+            onComplete={() => setStep("pm")}
+            onSkip={() => setStep("pm")}
+          />
+        )}
+
+        {step === "pm" && (
+          // No defaultWorkspaceName — AccountStep captures the operator's
+          // display name (a person), not a workspace. Let PmStep's
+          // placeholder ("e.g. Acme Photography") prompt the user. When
+          // the wizard later captures a business name (separate ticket),
+          // pass it here.
+          <PmStep
             onComplete={() => setStep("done")}
             onSkip={() => setStep("done")}
           />

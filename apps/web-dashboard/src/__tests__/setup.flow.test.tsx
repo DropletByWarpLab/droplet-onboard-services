@@ -126,11 +126,18 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
-    // AI step → skip → Done. fetchModels mocked empty so the picker
+    // AI step → skip → PM. fetchModels mocked empty so the picker
     // just shows "No models available yet"; the Skip link is always
     // rendered.
     await act(async () => {
       await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // WARP-507: PM step → skip → Done. PmStep doesn't fetch on mount
+    // so no MSW stub is required for /api/pm/onboard.
+    await act(async () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
