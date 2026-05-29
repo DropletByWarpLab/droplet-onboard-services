@@ -46,8 +46,8 @@ function isValidNodeId(id: string): boolean {
  *
  * We pattern-match on the raw message rather than relying on a stable
  * error-code surface because matter.js doesn't export one yet
- * (project-chip/matter.js#1438). Tracked as WARP-XXX; bump to a
- * proper enum when matter.js exposes typed errors.
+ * (project-chip/matter.js#1438). Promote to a typed enum once that
+ * upstream issue ships.
  */
 function translateCommissionError(err: unknown): {
   status: number;
@@ -66,7 +66,11 @@ function translateCommissionError(err: unknown): {
   if (/already.*commissioned|node.*exists/i.test(raw)) {
     return {
       status: 409,
-      message: "This device is already paired with the Droplet. Open it from the Devices page, or factory-reset the device first if you want to re-pair.",
+      // Factory-reset procedures are vendor-specific (Aqara holds a
+      // button 10s, Hue uses Hue app, Eve uses a paperclip). Don't
+      // promise a universal sequence — point the user at the device's
+      // own instructions.
+      message: "This device is already paired with the Droplet. Open it from the Devices page, or factory-reset it following the device's instructions if you want to re-pair.",
       internalReason: raw,
     };
   }
@@ -80,7 +84,13 @@ function translateCommissionError(err: unknown): {
   if (/PASE|SPAKE2|wrong (passcode|secret)/i.test(raw)) {
     return {
       status: 400,
-      message: "The pairing handshake failed — usually because the code didn't match the device. Double-check the code and try again.",
+      // PASE / SPAKE2 failures are usually "right code, wrong moment"
+      // (the device dropped out of its 60-second pairing window or
+      // someone else commissioned it first), not "the code looks
+      // wrong" — that's covered by the "invalid pairing code" branch
+      // above. Surface the actionable next step rather than a generic
+      // "double-check" instruction.
+      message: "The device didn't accept the code — it may have left pairing mode. Put it back into pairing mode and try again.",
       internalReason: raw,
     };
   }

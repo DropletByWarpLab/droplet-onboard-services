@@ -42,7 +42,33 @@ export type ScanStatus =
   | "decoded"        // QR found, about to call onResult
   | "denied"         // camera permission denied
   | "no-camera"      // no media device available (desktop)
+  | "insecure"       // page served over http:// — getUserMedia would throw
   | "error";         // any other failure (driver, lost device)
+
+/**
+ * Browsers refuse `navigator.mediaDevices.getUserMedia` on insecure
+ * origins (anything except https:// or http://localhost/127.0.0.1).
+ * The Droplet's first-boot UX often lands the customer on
+ * `http://droplet.local/` because mDNS resolves before they accept
+ * the self-signed cert at `https://192.168.10.1`. Without this
+ * pre-flight check, `getUserMedia` throws a vague NotAllowedError
+ * and the customer sees a generic "camera failed" — they have no
+ * way to know the actual blocker is the protocol.
+ *
+ * Returning false here flips the scanner into the `insecure` status
+ * which renders a "switch to HTTPS first" card; the manual-entry
+ * fallback still works because pairing-code entry doesn't need the
+ * camera at all.
+ */
+function isCameraOriginSecure(): boolean {
+  if (typeof window === "undefined") return true; // SSR — irrelevant
+  const { protocol, hostname } = window.location;
+  if (protocol === "https:") return true;
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+    return true;
+  }
+  return false;
+}
 
 interface MatterQrScannerProps {
   /** Invoked once with the decoded QR string OR the manually-entered
@@ -97,7 +123,13 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
   // --- Camera lifecycle ---
 
   const stopCamera = useCallback(() => {
-    readerRef.current?.reset();
+    // @zxing/browser v0.1.x dropped the public `reset()` method on
+    // BrowserMultiFormatReader in favor of the IScannerControls API
+    // (which our callback-style decodeFromVideoElement call doesn't
+    // expose). Releasing the underlying MediaStream tracks is what
+    // actually frees the camera; the decoder loop terminates the next
+    // time it tries to read from the now-ended video element. Drop
+    // the ref so a re-start gets a fresh instance.
     readerRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
@@ -105,6 +137,18 @@ export function MatterQrScanner({ onResult, disabled = false }: MatterQrScannerP
 
   const startCamera = useCallback(async () => {
     if (disabled) return;
+    // Pre-flight: refuse to even prompt for camera permission when
+    // the page origin isn't secure — getUserMedia would throw a
+    // generic NotAllowedError otherwise and leave the customer with
+    // no actionable hint. Manual-entry fallback is unaffected (no
+    // camera needed).
+    if (!isCameraOriginSecure()) {
+      setStatus("insecure");
+      setErrorMsg(
+        "Camera scanning needs HTTPS. Open the dashboard at https:// (accept the certificate prompt) — or enter the pairing code below.",
+      );
+      return;
+    }
     setStatus("starting");
     setErrorMsg(null);
     try {
