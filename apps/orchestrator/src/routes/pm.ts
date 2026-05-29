@@ -23,7 +23,7 @@ import pino from "pino";
 
 import { config } from "../config.js";
 import {
-  ID_TOKEN_TTL_SECONDS,
+  ACCESS_TOKEN_TTL_SECONDS,
   oidcIssuer,
   publicJwk,
   signAccessToken,
@@ -223,7 +223,9 @@ export function createPmRouter(): Router {
         return res.json({
           access_token: accessToken,
           token_type: "Bearer",
-          expires_in: ID_TOKEN_TTL_SECONDS,
+          // expires_in describes the access_token lifetime per RFC 6749
+          // §5.1 — NOT the ID token's. ID token carries its own `exp`.
+          expires_in: ACCESS_TOKEN_TTL_SECONDS,
           id_token: idToken,
           scope: "openid email profile",
         });
