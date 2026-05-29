@@ -50,6 +50,30 @@ const envSchema = z.object({
   MATTER_STORAGE_PATH: z.string().default(defaultMatterStorage),
   DROPLET_MATTER_CONTROLLER_NAME: z.string().default("Droplet"),
 
+  // --- WARP-505/506/507/511 — embedded Plane PM stack (ADR-010, spec WARP-498) ---
+  // All vars use DROPLET_PM_* prefix per architecture-guard rule 11.
+  // Defaults work on a brand-new install OR fail loud (rule 14).
+  DROPLET_PM_API_URL: z.string().url().default("http://pm-api:8000"),
+  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local/pm"),
+  // tools-core handlers/pm/* use this for server-to-server LLM-driven tool
+  // dispatch (WARP-508/509). Per-user attribution flows through Plane's
+  // OIDC-linked service tokens, not this admin key.
+  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
+  // HMAC signing key for Plane → orchestrator webhooks (WARP-511).
+  // Empty default = webhook receiver fail-CLOSED (every payload 401s) per
+  // engineering-handbook 04-coding-standards/security-rules.md §1.
+  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
+  // WARP-505 OIDC IdP (spec WARP-498 OQ6). The orchestrator runs a minimal
+  // OIDC provider that Plane points at as its relying-party IdP. ID tokens
+  // are signed RS256 (HMAC won't work — Plane verifies via JWKS). setup.sh
+  // generates a 2048-bit RSA keypair on first run and pins both halves
+  // below. Empty defaults make the OIDC endpoints 500 with a clear error
+  // (signIdToken throws) until setup.sh has populated .env.
+  DROPLET_PM_OIDC_PRIVATE_KEY_PEM: z.string().default(""),
+  DROPLET_PM_OIDC_KID: z.string().default(""),
+  DROPLET_PM_OIDC_CLIENT_ID: z.string().default("plane"),
+  DROPLET_PM_OIDC_CLIENT_SECRET: z.string().default(""),
+
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.
   // The default is intentionally weak so tests work without env setup.
@@ -202,34 +226,6 @@ const envSchema = z.object({
   // matchServiceToken sets `_service:ai-gateway`. To rotate: change here
   // AND in services/ai-gateway's compose env (AI_GATEWAY_SAMPLER_TOKEN).
   AI_GATEWAY_SAMPLER_TOKEN: z.string().default(""),
-
-  // --- Embedded Plane PM stack (ADR-010 / WARP-501) ---
-  // Service principals reach Plane via the orchestrator — never
-  // direct from the dashboard or external MCP. These three vars
-  // identify and authenticate that channel:
-  //
-  //   DROPLET_PM_API_URL — Plane API base URL on the compose network
-  //   (default `http://pm-api:8000`). Used by pm-rbac.service.ts +
-  //   pm-onboard route + pm.client.ts for all outbound calls. Missing
-  //   → URL constructor throws → fail-closed (per pm-rbac module
-  //   contract).
-  //
-  //   DROPLET_PM_ADMIN_TOKEN — Plane admin API key. Sent as
-  //   `X-API-Key` on every PATCH/POST. Rotation: change here AND in
-  //   the PM compose env (pm-api service).
-  //
-  //   DROPLET_PM_WEB_URL — Public-facing Plane URL (used by the
-  //   onboarding wizard's success card to deep-link the user to
-  //   their newly-provisioned workspace).
-  DROPLET_PM_API_URL: z.string().default(""),
-  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
-  DROPLET_PM_WEB_URL: z.string().default(""),
-
-  // DROPLET_PM_WEBHOOK_SECRET — HMAC signing key for Plane webhooks
-  // delivered to POST /api/pm/webhook (WARP-511). Empty default —
-  // the webhook handler fail-CLOSEs (503) when this is unset, per
-  // engineering-handbook 04-coding-standards/security-rules.md §1.
-  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
 
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push

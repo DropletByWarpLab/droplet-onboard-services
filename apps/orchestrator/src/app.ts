@@ -20,6 +20,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
+import { createPmRouter } from "./routes/pm.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -93,6 +94,19 @@ export function createApp(prisma: PrismaClient) {
   // dashboard session; HMAC-SHA256 signature over the timestamp + body is
   // the only auth. Fail-CLOSED on any mismatch. Mounted BEFORE authMiddleware.
   app.use(createPmWebhookRouter());
+
+  // WARP-505 — Plane OIDC IdP. Five endpoints under /api/pm/oidc/*:
+  //   - .well-known/openid-configuration + jwks.json (public discovery)
+  //   - authorize (verifies the dashboard `droplet_session` cookie INLINE
+  //     via jwt.service.ts — does NOT want authMiddleware to short-circuit
+  //     it with a 401 before the OIDC redirect chain can run)
+  //   - token (Plane → orchestrator server-to-server; client_secret auth)
+  //   - userinfo (validates its own RS256 access token, NOT the session
+  //     cookie)
+  // Every endpoint handles its own auth shape, so the router mounts
+  // BEFORE authMiddleware — matches the webhook + camera-share pattern
+  // above. Stefan flagged this explicitly in the PR redesign comment.
+  app.use(createPmRouter());
 
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
