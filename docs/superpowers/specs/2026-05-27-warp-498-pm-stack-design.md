@@ -1,13 +1,17 @@
 # Plane (PM stack) on Droplet — design
 
 **Date:** 2026-05-27
-**Status:** Draft — 4 of 5 open questions resolved; OQ4 pending iOS/Android lead input
+**Status:** Draft — 5 of 6 open questions resolved (OQ4 locked 2026-05-28); OQ6 (Plane SSO architecture) added 2026-05-28 after upstream-API verification, resolved same day to OIDC.
 **Scope:** New `services/pm/` directory + `docker/docker-compose.yml` wiring + `apps/orchestrator/src/routes/pm/*` + `apps/web-dashboard/src/app/projects/page.tsx` + `packages/tools-core/src/handlers/pm/*` + `services/mcp-server` auto-discovery + `docs/mobile-api-contract.md` additions.
 **ADR:** [ADR-007 — Plane self-hosted PM stack adoption](../../ADR-007-pm-stack-selection.md) (Proposed)
 **Epic:** WARP-496
 **Ticket:** WARP-498
 
-> **Status update 2026-05-27 (Stefan):** OQ1, OQ2, OQ3, OQ5 resolved to the recommended defaults. OQ4 (mobile API envelope mapping) remains open — needs iOS + Android lead input on whether Plane's data shapes fit the existing envelope. Phase 1 tickets (WARP-500..504) can begin work on the resolved surfaces; Phase 4 ticket WARP-513 is blocked until OQ4 lands.
+> **Status update 2026-05-27 (Stefan):** OQ1, OQ2, OQ3, OQ5 resolved to the recommended defaults. OQ4 (mobile envelope) and OQ6 (SSO architecture, added below) still open. Phase 1 tickets (WARP-500..504) can begin work on the resolved surfaces.
+>
+> **Status update 2026-05-28 (Stefan):** OQ4 locked to **A** — orchestrator transforms Plane shapes into the existing mobile envelope, no new variant. WARP-513 unblocked.
+>
+> **Status update 2026-05-28 (Plane-API verification pass):** Hit reality during WARP-505 PR #307. Plane upstream API is **workspace-slug-centric** (`/api/v1/workspaces/{slug}/...`), uses **`X-API-Key`** auth header (not `Authorization: Bearer`), calls issues **`work-items`**, and exposes **no documented admin-mints-per-user-session-token endpoint**. Plane's only documented SSO path is **OIDC** (Plane is the relying party, an external IdP authenticates the user). Added OQ6 to capture this and locked it to **A** — orchestrator runs a minimal OIDC IdP for Plane. PR #307 (WARP-505) needs a redesign per OQ6 before merge.
 
 ## Engineering handbook references (binding)
 
@@ -113,21 +117,31 @@ Flow:
 1. User clicks "Projects" in dashboard.
 2. Dashboard JS calls POST /api/pm/sso-token (orchestrator).
 3. Orchestrator validates the dashboard JWT (existing middleware per ADR-004).
-4. Orchestrator looks up the Plane user by email claim:
-   - If user exists → reuse.
-   - If absent → create via DROPLET_PM_ADMIN_TOKEN against pm-api.
-5. Orchestrator exchanges admin-token for a per-user session token via Plane's API.
-6. Orchestrator returns { url: "https://gateway/pm/?token=...", expires_at }.
-7. Dashboard redirects (or sets iframe src) to the returned URL.
-```
+4. Orchestrator already authenticated via dashboard JWT → issues OIDC ID token + access token (signed with the orchestrator's existing JWT_SECRET HMAC key OR a dedicated RS256 keypair if Plane requires it).
+5. Plane's OIDC callback receives the tokens, exchanges via `/auth/userinfo`, creates/updates the local Plane user with the `email` claim (and optional `first_name` / `last_name`).
+6. Plane sets its own session cookie; user is in.
+
+**Plane upstream config required (per https://developers.plane.so/self-hosting/govern/oidc-sso):**
+
+- Plane god-mode → `/god-mode/authentication/oidc/` — set CLIENT_ID, CLIENT_SECRET, TOKEN_URL, USER_INFO_URL, AUTHORIZE_URL, JWKS_URL.
+- Callbacks Plane expects:
+  - Origin: `https://<gateway>/pm/auth/oidc/`
+  - Callback: `https://<gateway>/pm/auth/oidc/callback/`
+  - Logout: `https://<gateway>/pm/auth/oidc/logout/`
+
+**Orchestrator OIDC IdP endpoints (per OQ6 resolution):**
+
+- `GET /api/pm/oidc/.well-known/openid-configuration` — discovery doc
+- `GET /api/pm/oidc/.well-known/jwks.json` — public key set
+- `GET /api/pm/oidc/authorize` — redirects to dashboard login if no session, otherwise back to Plane callback with `code`
+- `POST /api/pm/oidc/token` — exchanges `code` for ID token + access token
+- `GET /api/pm/oidc/userinfo` — returns `{ sub, email, first_name, last_name }` from the existing dashboard session
 
 **Failure modes:**
 
-- Invalid JWT → 401, no Plane user touched.
-- Plane API down → 503, dashboard shows actionable error per UX guidelines.
-- Per-user token issuance fails → 500, structured log emitted, no fail-OPEN.
-
-Session lifetime: ≤ 15 min, refreshable via the same endpoint.
+- Invalid JWT → 401 on the orchestrator side, OIDC flow short-circuits before Plane sees anything.
+- Plane misconfigured → Plane displays its own error; orchestrator logs OIDC discovery probes as warnings.
+- ID token signature mismatch → Plane refuses; orchestrator structured log emits `event_type=oidc_token_issued` with the requesting `sub`.
 
 ---
 
@@ -157,23 +171,28 @@ Per architecture-guard rule 3: tools live ONLY in `packages/tools-core/src/handl
 
 ### Read tools (all `requiresWrite=false`, `requiresConfirmation=false`)
 
+**Verified against Plane upstream API docs 2026-05-28:** endpoints are workspace-slug-centric, auth header is `X-API-Key` (NOT `Authorization: Bearer`), and issues are called `work-items`. Spec adjusted to match.
+
 | Tool | Args | Plane endpoint | Notes |
 |---|---|---|---|
-| `pm.list_projects` | `(workspace_id?)` | `GET /api/v1/workspaces/{ws}/projects/` | Default = user's primary workspace. |
-| `pm.list_issues` | `(project_id, status?, assignee?, limit?)` | `GET /api/v1/workspaces/{ws}/projects/{p}/issues/` | Limit capped at 100 per rule 11. |
-| `pm.get_issue` | `(project_id, issue_id)` | `GET /api/v1/.../issues/{id}/` | |
-| `pm.search_issues` | `(query, project_id?, limit?)` | `GET /api/v1/workspaces/{ws}/search/` | Fallback to client-side filter if Plane search is too narrow. |
+| `pm.list_projects` | `(workspace_slug)` | `GET /api/v1/workspaces/{workspace_slug}/projects/` | Slug discovered via `pm.list_workspaces`. |
+| `pm.list_workspaces` | `()` | `GET /api/v1/workspaces/` | New — workspace_slug discovery for downstream tools. |
+| `pm.list_work_items` | `(workspace_slug, project_id, status?, assignee?, per_page?)` | `GET /api/v1/workspaces/{ws}/projects/{p}/work-items/` | `per_page` capped at 100 per rule 11. Cursor pagination. |
+| `pm.get_work_item` | `(workspace_slug, project_id, work_item_id)` | `GET /api/v1/workspaces/{ws}/projects/{p}/work-items/{id}/` | |
+| `pm.search_work_items` | `(workspace_slug, query, per_page?)` | `GET /api/v1/workspaces/{ws}/search/?query=...` | Fallback to client-side filter over `list_work_items` if upstream search is narrow. |
 
 ### Write tools (all `requiresWrite=true`, `requiresConfirmation=true`)
 
 | Tool | Args | Plane endpoint | Notes |
 |---|---|---|---|
-| `pm.create_issue` | `(project_id, title, description?, assignee?, labels?)` | `POST /api/v1/.../issues/` | Confirmation prompt before execute. |
-| `pm.update_issue` | `(issue_id, fields)` | `PATCH /api/v1/.../issues/{id}/` | |
-| `pm.add_comment` | `(issue_id, body)` | `POST /api/v1/.../issues/{id}/comments/` | |
-| `pm.transition_issue` | `(issue_id, state)` | `PATCH /api/v1/.../issues/{id}/` (state field) | Confirmation includes from→to state. |
+| `pm.create_work_item` | `(workspace_slug, project_id, name, description_html?, assignees?, labels?)` | `POST /api/v1/workspaces/{ws}/projects/{p}/work-items/` | Confirmation prompt before execute. |
+| `pm.update_work_item` | `(workspace_slug, project_id, work_item_id, fields)` | `PATCH /api/v1/workspaces/{ws}/projects/{p}/work-items/{id}/` | |
+| `pm.add_work_item_comment` | `(workspace_slug, project_id, work_item_id, comment_html)` | `POST /api/v1/workspaces/{ws}/projects/{p}/work-items/{id}/comments/` | |
+| `pm.transition_work_item` | `(workspace_slug, project_id, work_item_id, state_id)` | `PATCH /api/v1/workspaces/{ws}/projects/{p}/work-items/{id}/` (state field) | Confirmation includes from→to state. |
 
-All HTTP calls go through `packages/tools-core/src/handlers/pm/pm-client.ts` — single auth + retry + error-mapping point. Write tools attribute to the user via the per-user token from SSO (not admin token), so Plane's audit log is correct.
+**Auth (verified 2026-05-28):** All Plane HTTP calls send `X-API-Key: <token>` — **NOT** `Authorization: Bearer`. The orchestrator-side `DROPLET_PM_ADMIN_TOKEN` is used for tools-core write actions (server-side LLM operation). Per-user API keys (issued via Plane's user-settings page or via OIDC-linked service tokens, depending on Plane's per-tenant config) attribute write-tool calls to the requesting user in Plane's audit log; spec leaves the per-user-token flow open until WARP-509 implementation surfaces the concrete path.
+
+All HTTP calls go through `packages/tools-core/src/handlers/pm/pm-client.ts` — single auth + retry + error-mapping point.
 
 ---
 
@@ -202,11 +221,12 @@ V1 = read-only on mobile. Endpoints:
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/api/mobile/pm/projects` | Paginated list of user's projects (limit 50, max 100). |
-| `GET` | `/api/mobile/pm/issues?project_id=&status=&assignee=` | Paginated issues. |
-| `GET` | `/api/mobile/pm/issues/{id}` | Single issue with comments. |
+| `GET` | `/api/mobile/pm/workspaces` | List of user's Plane workspaces (for slug discovery). |
+| `GET` | `/api/mobile/pm/projects?workspace=<slug>` | Paginated list of projects (limit 50, max 100). |
+| `GET` | `/api/mobile/pm/work-items?workspace=<slug>&project_id=&status=&assignee=` | Paginated work items. |
+| `GET` | `/api/mobile/pm/work-items/{id}?workspace=<slug>&project_id=<id>` | Single work item with comments. |
 
-All wrap Plane's API via per-user token from SSO. JWT middleware from existing mobile-API stack. Response envelope mirrors existing mobile endpoints (no new envelope shape).
+Wraps Plane's upstream API with `X-API-Key` auth (verified 2026-05-28). Orchestrator transforms Plane's response shape into the existing mobile envelope per OQ4 resolution — no new envelope variant. JWT middleware from existing mobile-API stack.
 
 **Out of scope for V1:** writes from mobile, push notifications, native UI beyond list/detail views.
 
@@ -268,17 +288,34 @@ Originally 5 gates on Phase 1. As of 2026-05-27, 4 are resolved (locked to the r
 
 **Decision (2026-05-27):** **A — commit SHA.** Pinning to a SHA matches code-quality rule 1 (shipping-product mindset — no implicit drift between Droplet releases). The SHA refresh is a deliberate per-release decision, not an upstream-induced surprise. Cascade unblocked: WARP-500 (Dockerfile FROM line).
 
-### OQ4 — Mobile API envelope mapping — **STILL OPEN**
+### OQ4 — Mobile API envelope mapping — **RESOLVED**
 
 **Question:** Does Plane's data shape fit the existing mobile-API response envelope cleanly, or does the envelope need to flex?
 
 **Options:**
-- A: Plane data fits the existing envelope as-is. Map at the orchestrator wrapper.
+- **A (chosen):** Plane data fits the existing envelope as-is. Map at the orchestrator wrapper.
 - B: Envelope needs a new variant — coordinate with iOS/Android leads, possibly extend ADR-004.
 
-**Status:** Awaiting iOS + Android lead input. **Next action:** before WARP-513 starts, post a side-by-side of Plane's `Issue` + `Project` JSON vs. the existing mobile envelope in the WARP-513 ticket comment; request explicit A/B from both leads. If B, escalate per AC-drift rule (`07-jira-workflow/lifecycle.md`) and extend ADR-004 in a separate PR before WARP-513 begins.
+**Decision (2026-05-28):** **A — transform at the orchestrator.** The orchestrator already wraps Plane's `X-API-Key` calls; folding Plane's `work-item` shape into the existing mobile envelope is one mapper layer in `apps/orchestrator/src/routes/mobile/pm.ts` and avoids a contract expansion that would ripple through iOS/Android/Windows. If a future endpoint surfaces a Plane shape that doesn't fit (e.g. nested comments with attachment arrays), AC-drift rule (`07-jira-workflow/lifecycle.md`) kicks in and we file a follow-up to extend ADR-004 in a scoped PR. **WARP-513 unblocked.**
 
-**Phase impact:** does NOT block Phase 1, Phase 2, Phase 3, or Phase 5. Blocks only Phase 4's WARP-513 (mobile contract). Phase 4's WARP-512 (dashboard route) is unblocked by OQ2 resolution.
+### OQ6 — Plane SSO architecture — **RESOLVED (added 2026-05-28)**
+
+**Background:** During WARP-505 PR #307 implementation we hit the Plane upstream API and discovered (per https://developers.plane.so/api-reference + https://developers.plane.so/self-hosting/govern/oidc-sso) that:
+
+1. Plane has **no documented admin-mints-per-user-session-token endpoint**. The original SSO bridge plan (cache an admin-issued session token in Redis) is architecturally invalid against the real API.
+2. Plane's only documented self-hosted SSO path is **OIDC** — Plane is the relying party; an external IdP authenticates the user.
+3. Plane self-hosted exposes its own OIDC callback URLs: `https://<plane>/auth/oidc/`, `/auth/oidc/callback/`, `/auth/oidc/logout/`.
+
+**Question:** What SSO architecture does Droplet use for Plane?
+
+**Options:**
+- **A (chosen):** Orchestrator runs a minimal OIDC IdP. Plane is configured to point at it. The dashboard JWT becomes the "primary" auth; OIDC discovery/userinfo/token endpoints on the orchestrator project the JWT identity to Plane.
+- B: Operator stands up a separate OIDC provider (Keycloak, Authelia) alongside Plane. Both dashboard + Plane auth against it.
+- C: Disable Plane auth entirely; rely on Nginx-level auth_request module + a header (`X-Auth-User`) trusted by Plane (would require a Plane upstream patch — AGPL obligation triggers per ADR-007 PATCHES.md).
+
+**Decision (2026-05-28):** **A — orchestrator as mini-OIDC IdP.** Keeps the appliance self-contained (B violates on-prem self-hosted posture; C requires an AGPL patch we'd have to maintain). Implementation: 5 new orchestrator endpoints under `/api/pm/oidc/*` — `.well-known/openid-configuration`, `.well-known/jwks.json`, `authorize`, `token`, `userinfo`. ID-token signing uses a new dedicated RS256 keypair generated by `setup.sh` (HMAC won't work — Plane needs to verify via JWKS).
+
+**Phase impact:** WARP-505 PR #307 needs a redesign per OQ6 — current code (admin-token-mints-session-token) is invalid. The file structure (pm.client.ts, pm-session.service.ts, routes/pm.ts) is reusable scaffolding; the inner logic is replaced with the OIDC IdP endpoints. New env vars: `DROPLET_PM_OIDC_PRIVATE_KEY_PEM`, `DROPLET_PM_OIDC_KID`. New compose-time prep: an `setup.sh` keypair generator. **WARP-505 needs a follow-up commit before merge.**
 
 ### OQ5 — Workspace-owner downgrade behavior — **RESOLVED**
 
