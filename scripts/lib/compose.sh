@@ -16,6 +16,15 @@ REQUIRED_ENV_VARS=(
   NEXTCLOUD_ADMIN_PASSWORD
   DEVICE_SECRET
   DEVICE_SECRET_KEY
+  # WARP-501: embedded Plane PM stack. Fail-closed contract for the
+  # three Plane-required secrets enforced HERE (per Romain's PR #242
+  # prescription: keep compose `:-` so the file always parses, move
+  # secret validation to this layer). DROPLET_PM_WEB_URL is included
+  # because the Plane API container refuses to start without a valid
+  # public URL — empty is a misconfiguration, not a sensible default.
+  DROPLET_PM_DB_PASSWORD
+  DROPLET_PM_SECRET_KEY
+  DROPLET_PM_WEB_URL
 )
 
 _validate_env() {

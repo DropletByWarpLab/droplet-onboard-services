@@ -93,6 +93,19 @@ import emailSummarizeThread from "./handlers/email/summarize-thread.js";
 import emailDraftReply from "./handlers/email/draft-reply.js";
 import emailSend from "./handlers/email/send.js";
 
+// Embedded Plane PM stack (ADR-010, spec WARP-498)
+// WARP-509 — write tools
+import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
+import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
+import pmAddWorkItemComment from "./handlers/pm/add-work-item-comment.js";
+import pmTransitionWorkItem from "./handlers/pm/transition-work-item.js";
+// WARP-508 — read tools
+import pmListWorkspaces from "./handlers/pm/list-workspaces.js";
+import pmListProjects from "./handlers/pm/list-projects.js";
+import pmListWorkItems from "./handlers/pm/list-work-items.js";
+import pmGetWorkItem from "./handlers/pm/get-work-item.js";
+import pmSearchWorkItems from "./handlers/pm/search-work-items.js";
+
 const allTools: Tool[] = [
   // network
   listNetworkDevices,
@@ -177,6 +190,17 @@ const allTools: Tool[] = [
   // WARP-461: durable memory facts
   memoryRecall,
   memoryExtractFact,
+  // WARP-509: embedded Plane PM (write tools — requiresWrite + requiresConfirmation)
+  pmCreateWorkItem,
+  pmUpdateWorkItem,
+  pmAddWorkItemComment,
+  pmTransitionWorkItem,
+  // WARP-508: embedded Plane PM (read tools — list/get/search)
+  pmListWorkspaces,
+  pmListProjects,
+  pmListWorkItems,
+  pmGetWorkItem,
+  pmSearchWorkItems,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

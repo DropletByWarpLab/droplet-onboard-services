@@ -490,7 +490,7 @@ def aggregate_runs(
             "WARP-436 — RAGAS metric baselines, aggregated by ragas_runner.py "
             "aggregate. Per-run mean is the unit sample; floor = p50 − 1.5 × IQR."
         ),
-        "recorded_at": pd.Timestamp.utcnow().isoformat(),
+        "recorded_at": pd.Timestamp.now("UTC").isoformat(),
         "judge": judge,
         "n_queries": n_queries,
         "n_runs": n_runs,

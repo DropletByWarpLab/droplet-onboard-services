@@ -17,6 +17,9 @@ import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createMatterRouter } from "./routes/matter.js";
+import { createPmWebhookRouter } from "./routes/pm-webhook.js";
+import { createPmOnboardRouter } from "./routes/pm-onboard.js";
+import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -36,6 +39,7 @@ import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
 import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
+import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
@@ -85,6 +89,11 @@ export function createApp(prisma: PrismaClient) {
   // BEFORE auth middleware so forwarded links work without a Droplet account.
   app.use("/api", createCameraSharePublicRouter());
 
+  // WARP-511 — Plane → orchestrator webhook receiver. Plane has no
+  // dashboard session; HMAC-SHA256 signature over the timestamp + body is
+  // the only auth. Fail-CLOSED on any mismatch. Mounted BEFORE authMiddleware.
+  app.use(createPmWebhookRouter());
+
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
   // Lives under `/_/fips` (not `/api/...`) so it sits in the
@@ -114,6 +123,11 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-507 — Plane onboarding endpoint for the setup wizard.
+  app.use(createPmOnboardRouter());
+  // WARP-513 — read-only mobile wrappers around Plane upstream
+  // (workspaces, projects, work-items). iOS/Android/Windows consume.
+  app.use(createPmMobileRouter());
   // WARP-474 (G2): smart-home scenes CRUD + batch-run. Run dispatches
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.
@@ -165,6 +179,18 @@ export function createApp(prisma: PrismaClient) {
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma));
+  // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
+  // GET available to any authenticated user (drives chrome pill);
+  // POST is owner-only (flip the workspace type).
+  //
+  // MUST mount BEFORE `createSettingsRouter` (WARP-457). The settings
+  // router's `GET /settings/:section` matches `"workspace"` (it lives
+  // in SECTION_VALUES) and would shadow the GET here if registered
+  // first — Express is first-match on path-prefix routes. Consolidation
+  // of `/settings/workspace` into the broader WARP-457 settings tree
+  // is a follow-up; this ordering keeps both routers working until then.
+  app.use("/api", createSettingsWorkspaceRouter(prisma));
+
   // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
   // PATCH section with per-type validation). Mutations emit ActivityRow
   // rows via recordActivity (kind: system, severity: info — one row per
@@ -240,6 +266,7 @@ export function createApp(prisma: PrismaClient) {
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
   // Per-user Redis cache with 30s TTL.
   app.use("/api", createHomeRouter(prisma));
+
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.

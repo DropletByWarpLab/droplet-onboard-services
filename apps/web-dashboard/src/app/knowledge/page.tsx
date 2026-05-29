@@ -16,6 +16,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { BookOpen, Database, Search } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { RecentlyIndexedTab } from "./RecentlyIndexedTab";
 import { SearchTab } from "./SearchTab";
 import { BrainMemoryTab } from "./BrainMemoryTab";
@@ -54,9 +55,17 @@ export default function KnowledgePage() {
 
 function KnowledgePageSkeleton() {
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
-      <h1 className="type-large-title text-label-primary mb-2">Knowledge</h1>
-      <p className="type-footnote text-label-tertiary">Loading…</p>
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Knowledge" },
+        ]}
+        status={{ tone: "neutral", label: "Loading…" }}
+      />
+      <div className="p-6 lg:p-8 max-w-5xl">
+        <p className="type-footnote text-label-tertiary">Loading indexed content…</p>
+      </div>
     </div>
   );
 }
@@ -143,10 +152,17 @@ function KnowledgePageInner() {
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Knowledge" },
+        ]}
+      />
+
+      <div className="p-6 lg:p-8 max-w-5xl">
       <div className="mb-6">
-        <h1 className="type-large-title text-label-primary">Knowledge</h1>
-        <p className="type-footnote text-label-tertiary mt-1">
+        <p className="type-footnote text-label-tertiary">
           Everything your Droplet has indexed — recently added files, full-text
           search, and the brain memory you&apos;ve built up from chat.
         </p>
@@ -228,6 +244,7 @@ function KnowledgePageInner() {
         hidden={tab !== "brain"}
       >
         {tab === "brain" && <BrainMemoryTab />}
+      </div>
       </div>
     </div>
   );

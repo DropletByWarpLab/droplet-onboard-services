@@ -284,25 +284,37 @@ Each step row carries:
 
 ## Tickets
 
-JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.net`. The branch `feat/rag-techniques-adoption` is the work-tracking root.
+JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.net`.
+
+> **Living status:** [`docs/RAG_UPGRADE_STATUS.md`](RAG_UPGRADE_STATUS.md) is the
+> up-to-date handoff page — current state per phase, the eval-service follow-ups,
+> and the ordered "what to do next". This table is the design-time snapshot; the
+> status doc is the source of truth for *where the work is*.
 
 | Phase | Ticket | Status |
 |---|---|---|
 | Epic | [WARP-434](https://warp-lab.atlassian.net/browse/WARP-434) | In Progress |
-| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | In Progress — shipped batches A + B + D (sentence-aware chunker, per-extractor sectionPath, contextual-header prefix on every chunk, docs). Batch C (live re-index + eval gate) deferred to the integration-stack run. |
-| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | In Progress — batches A/B/C/E landed; batch D scaffolded (needs first Linux/CI run to populate baselines.json) |
-| Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | In Progress — design + plan landed on `feat/warp-437-query-enhancement`; Tasks 1–10 implemented (ClassifyQuery RPC, deberta singleton, HyDE / multi-query service, queryEnhancement mirror across orchestrator + mcp-server, search_content `enhance` input, adaptive routing via `_meta._enhancement`, `hybrid-enhanced` eval variant, per-class slicing). Per-class eval gates run in recording mode until `tests/retrieval-eval/ragas/baselines.json` is populated by a Linux CI run; production wiring of `EnhancementDeps` in `apps/orchestrator/src/server.ts` is the remaining follow-up. |
-| Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do (blocked by WARP-436, WARP-437) |
-| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-jetson-ai capacity) |
+| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | **Merged** — batches A + B + D (sentence-aware chunker, per-extractor sectionPath, contextual-header prefix, docs). Batch C (live re-index + eval gate) deferred to the integration-stack run. |
+| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | **Merged** — batches A/B/C/E landed; batch D (populate `baselines.json`) now done via the `services/rag-eval/` service's `bootstrap --runs 5` on the appliance, not CI. Until that runs, the integration test is in recording mode. |
+| Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | **Done** — merged in [#271](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/271). HyDE + multi-query + adaptive routing via `_meta._enhancement`. Shipping dark behind `WARP_437_ENHANCEMENT_ENABLED`; per-class gates in recording mode until baselines land. |
+| Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do — WARP-437 blocker cleared; remaining blocker is the WARP-436 baselines. |
+| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-jetson-ai `moondream` pre-pull, cross-repo). |
+| Eval service | (no phase ticket) | **Merged** in [#299](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/299) — `services/rag-eval/` runs the harness on the appliance (Compose profile `eval`). Follow-ups in review: [WARP-519](https://warp-lab.atlassian.net/browse/WARP-519) HTTP trigger ([#315](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/315)), [WARP-520](https://warp-lab.atlassian.net/browse/WARP-520) stream output ([#312](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/312)), [WARP-521](https://warp-lab.atlassian.net/browse/WARP-521) aggregator tests ([#313](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/313)). |
 
 All assigned to Romain. Labels: `origin-ai`, `size-{m\|l}`, `rag`, plus a per-phase topical tag (`ingest`, `eval`, `query`, `grading`, `multimodal`).
 
 Blocking relations wired in Jira:
-- WARP-436 blocks WARP-437
+- WARP-436 blocks WARP-437 (cleared — both progressed)
 - WARP-436 blocks WARP-438
-- WARP-437 blocks WARP-438
+- WARP-437 blocks WARP-438 (cleared — WARP-437 merged)
 
 WARP-439's blocker is cross-repo (droplet-jetson-ai sibling) and isn't represented as a Jira link.
+
+> **Note on the original "GitHub Actions nightly" plan (step 2.6):** the eval is
+> NOT run via GitHub Actions. Per repo convention GHA is for dev tasks (PR CI,
+> unit tests, image-build verification); on-machine functionality like running
+> RAGAS lives in the `services/rag-eval/` service. The earlier
+> `.github/workflows/rag-eval-nightly.yml` was removed accordingly.
 
 ---
 

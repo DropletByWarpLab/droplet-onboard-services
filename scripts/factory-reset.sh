@@ -167,6 +167,11 @@ VOLUMES=(
   "nvrdata"
   "matter-data"
   "frigate-config"
+  # WARP-501 — embedded Plane PM stack (ADR-010). Dedicated postgres + redis
+  # per spec OQ1; both volumes wiped on factory reset so a re-install starts
+  # with a clean Plane DB. Backup integration lands in WARP-514.
+  "postgres-pm-data"
+  "redis-pm-data"
   # single-box profile volumes (only present when COMPOSE_PROFILES=single-box
   # has been active at some point on this host). Listed unconditionally so a
   # reset works whether the profile is on or off — `docker volume rm` of a
