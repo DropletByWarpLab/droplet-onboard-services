@@ -960,7 +960,7 @@ run_check_stale_repo_names() {
 }
 
 run_check_pm_invariants() {
-  # WARP-504: invariants the embedded Plane PM stack (ADR-007, spec WARP-498)
+  # WARP-504: invariants the embedded Plane PM stack (ADR-010, spec WARP-498)
   # must hold on every PR that touches services/pm/, the Plane block in
   # docker/docker-compose.yml, the /pm/ block in docker/nginx.conf, or the
   # Plane secret section in scripts/lib/secrets.sh. Catches the four classes
