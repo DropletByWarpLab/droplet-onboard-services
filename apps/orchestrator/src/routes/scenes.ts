@@ -4,7 +4,7 @@
  * Routes owned by this file:
  *   GET    /api/scenes              — list with action counts (any role read)
  *   GET    /api/scenes/:id          — full scene + ordered actions
- *   POST   /api/scenes              — create (owner+admin+family)
+ *   POST   /api/scenes              — create (owner+admin per ADR-005 / schema)
  *   PATCH  /api/scenes/:id          — rename / change icon / replace actions
  *   DELETE /api/scenes/:id          — owner+admin
  *   POST   /api/scenes/:id/run      — batch-execute via Matter controller.
@@ -12,14 +12,10 @@
  *                                     in the run result; one ActivityRow per
  *                                     run (in addition to the per-command
  *                                     rows recorded by sendMatterCommand
- *                                     internally).
- *
- * The `confirm_action` card surfaced by the §2.7 dashboard before
- * pressing a scene is a client-side concern — the server-side
- * `requiresConfirmation` flag on the `run_scene` tool (tools-core)
- * triggers it. POST /scenes/:id/run itself does NOT gate on a
- * confirmation token; the caller (chat tool / dashboard button) is
- * expected to have confirmed before invoking.
+ *                                     internally). Requires `?confirm=true`
+ *                                     server-side — mirrors run_scene's
+ *                                     `requiresConfirmation: true` for any
+ *                                     caller that bypasses the dashboard.
  */
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -150,7 +146,11 @@ export function createScenesRouter(
 
   router.post(
     "/scenes",
-    requireRole("owner", "admin", "family"),
+    // Schema docstring (and ADR-005) say scenes are owner+admin write
+    // surfaces — family reads but does NOT author. The earlier guard
+    // included family by accident and contradicted the documented
+    // contract; tightening to match.
+    requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = createSceneSchema.safeParse(req.body);
@@ -223,11 +223,16 @@ export function createScenesRouter(
           });
         }
 
+        // icon: pass parsed.data.icon directly — Zod's `.nullable().optional()`
+        // surfaces `undefined` when the key is absent (Prisma skip) and
+        // `null` when the operator explicitly clears it (Prisma sets
+        // column to NULL). `?? undefined` would collapse the explicit
+        // clear into skip and make icon impossible to remove once set.
         const updated = (await prisma.scene.update({
           where: { id: req.params.id },
           data: {
             name: parsed.data.name,
-            icon: parsed.data.icon ?? undefined,
+            icon: parsed.data.icon,
             actions: parsed.data.actions
               ? {
                   create: parsed.data.actions.map((a, idx) => ({
@@ -282,6 +287,27 @@ export function createScenesRouter(
           | null;
         if (!scene) {
           res.status(404).json({ error: "Scene not found" });
+          return;
+        }
+
+        // Server-side mirror of the tool's `requiresConfirmation: true`.
+        // The dashboard already pops a confirm dialog before calling,
+        // but a non-dashboard caller (HTTP MCP client, CLI, voice
+        // bypassing lock-refusal) would otherwise fire actions on the
+        // first call. Require `?confirm=true` so the LLM agent must
+        // emit the confirmation flag — same posture as #294's run-now
+        // gate.
+        const confirmed =
+          String(req.query.confirm ?? "").toLowerCase() === "true";
+        if (!confirmed) {
+          res.status(409).json({
+            error: "confirmation_required",
+            detail:
+              "scene runs are confirm-required — re-POST with ?confirm=true",
+            sceneId: scene.id,
+            name: scene.name,
+            actionCount: scene.actions.length,
+          });
           return;
         }
 

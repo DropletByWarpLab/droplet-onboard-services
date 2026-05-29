@@ -90,8 +90,14 @@ async function handler(
     };
   }
 
+  // `?confirm=true` is the server-side mirror of `requiresConfirmation:
+  // true` on the tool definition. The agent loop has already shown the
+  // user a confirm card by the time we get here; flagging the request
+  // satisfies the orchestrator route's gate. Without this every
+  // run_scene call would 409 confirmation_required and the agent loop
+  // would think the scene failed to run.
   const res = await ctx.http.orchestrator.post(
-    `/api/scenes/${sceneId}/run`,
+    `/api/scenes/${sceneId}/run?confirm=true`,
     {},
     { headers: { Accept: "application/json" } },
   );
@@ -106,6 +112,28 @@ async function handler(
     };
   }
   const data = (await res.json()) as SceneRunResult;
+  // Partial failure (some actions threw) must not return ok: true —
+  // the LLM agent would otherwise report full success when only some
+  // bulbs answered. Surface SCENE_PARTIAL_FAILURE with the per-action
+  // breakdown in `details` so the agent communicates the actual state.
+  const allSucceeded = data.successCount === data.actionCount;
+  if (!allSucceeded) {
+    return {
+      ok: false,
+      status: "error",
+      error: {
+        code: "SCENE_PARTIAL_FAILURE",
+        message: `Ran ${data.successCount} of ${data.actionCount} action(s) — ${data.actionCount - data.successCount} failed.`,
+        details: {
+          type: "scene_run",
+          sceneId: data.sceneId,
+          successCount: data.successCount,
+          actionCount: data.actionCount,
+          results: data.results,
+        },
+      },
+    };
+  }
   return {
     ok: true,
     data: {
@@ -113,7 +141,7 @@ async function handler(
       sceneId: data.sceneId,
       successCount: data.successCount,
       actionCount: data.actionCount,
-      summary: `Ran ${data.successCount} of ${data.actionCount} action(s).`,
+      summary: `Ran all ${data.actionCount} action(s).`,
       results: data.results,
     },
   };
