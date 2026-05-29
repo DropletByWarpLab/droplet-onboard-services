@@ -105,7 +105,13 @@ const tool: Tool = {
   description:
     "Draft a reply to an email thread. Writes to EmailDraft with draftedByDroplet=true so the operator sees it in the Droplet drafts tab. Does NOT send — `email_send` (write + confirm) is required to dispatch.",
   inputSchema,
-  requiresWrite: false,
+  // Persists an EmailDraft row → WRITE. Without requiresWrite:true the
+  // orchestrator's WRITE_TOOLS set in routes/llm.ts excludes this tool
+  // and any family-role session can persist drafts without write-tier
+  // RBAC clearance. requiresConfirmation stays false because the *send*
+  // is the destructive surface — drafting is reversible (operator can
+  // delete the draft before send).
+  requiresWrite: true,
   requiresConfirmation: false,
   handler,
 };
