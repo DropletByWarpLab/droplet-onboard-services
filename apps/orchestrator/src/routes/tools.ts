@@ -355,6 +355,29 @@ export function createToolsRouter(
           return;
         }
 
+        // (writes && !reversible) is the destructive non-undoable class —
+        // the schema docstring explicitly assigns the gate to the route
+        // layer (+ C2 scheduler). Without a `confirm=true` query param
+        // we refuse with 409 + a confirmation token shape the dashboard
+        // can re-POST. This keeps imperative run-now in lockstep with
+        // the C2 scheduler's `safeRun` skip-and-warn posture.
+        if (spec.writes && !spec.reversible) {
+          const confirmed =
+            String(req.query.confirm ?? "").toLowerCase() === "true";
+          if (!confirmed) {
+            res.status(409).json({
+              error: "confirmation_required",
+              detail:
+                "this spec writes and is not reversible — re-POST with ?confirm=true",
+              specId: spec.id,
+              slug: spec.slug,
+              writes: spec.writes,
+              reversible: spec.reversible,
+            });
+            return;
+          }
+        }
+
         const triggeredBy = req.user?.username ?? null;
         const { runId, outcome } = await runToolSpec(prisma, dispatcher, {
           specId: spec.id,
