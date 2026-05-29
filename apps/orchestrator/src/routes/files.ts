@@ -127,6 +127,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   interface CitationRow {
     id: string;
     filePath: string;
+    userId: string;
     threadId: string;
     messageId: string;
     citedAt: Date;
@@ -149,8 +150,20 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           Math.min(50, Number.isFinite(rawLimit) ? rawLimit : 20),
         );
 
+        // IDOR boundary: FileCitation has no built-in per-row owner check
+        // — cross-user leak unless we filter on userId. Owner/admin see
+        // every household citation (consistent with /api/activity); other
+        // roles are scoped to their own sessions.
+        const role = (req as { user?: { role?: string; id?: string } }).user?.role;
+        const requesterId =
+          (req as { user?: { role?: string; id?: string } }).user?.id ?? "__none__";
+        const isPrivileged = role === "owner" || role === "admin";
+        const where = isPrivileged
+          ? { filePath }
+          : { filePath, userId: requesterId };
+
         const rows = (await prisma.fileCitation.findMany({
-          where: { filePath },
+          where,
           orderBy: { citedAt: "desc" },
           take: limit,
         })) as unknown as CitationRow[];

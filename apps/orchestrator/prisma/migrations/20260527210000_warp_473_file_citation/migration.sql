@@ -15,6 +15,7 @@
 CREATE TABLE IF NOT EXISTS "FileCitation" (
     "id"        TEXT         NOT NULL,
     "filePath"  TEXT         NOT NULL,
+    "userId"    TEXT         NOT NULL,
     "threadId"  TEXT         NOT NULL,
     "messageId" TEXT         NOT NULL,
     "citedAt"   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -22,11 +23,12 @@ CREATE TABLE IF NOT EXISTS "FileCitation" (
     CONSTRAINT "FileCitation_pkey" PRIMARY KEY ("id")
 );
 
--- Composite range-scan index for the related-chats query:
+-- Composite range-scan index for the IDOR-safe related-chats query:
 --   SELECT … FROM "FileCitation"
---   WHERE "filePath" = $1
+--   WHERE "filePath" = $1 AND "userId" = $2
 --   ORDER BY "citedAt" DESC
 --   LIMIT 20;
--- Without this the LIMIT degrades to a sequential scan as the table grows.
-CREATE INDEX IF NOT EXISTS "FileCitation_filePath_citedAt_idx"
-    ON "FileCitation"("filePath", "citedAt" DESC);
+-- Owner/admin queries strip the userId predicate but the leading column
+-- order still indexes them efficiently.
+CREATE INDEX IF NOT EXISTS "FileCitation_filePath_userId_citedAt_idx"
+    ON "FileCitation"("filePath", "userId", "citedAt" DESC);

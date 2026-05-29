@@ -99,7 +99,7 @@ describe("WARP-473 — createFileCitationService.enqueue", () => {
     const prisma = { fileCitation: { createMany } };
     const svc = createFileCitationService(prisma as any);
 
-    svc.enqueue(["/a.txt", "/b.txt"], { threadId: "t1", messageId: "m1" });
+    svc.enqueue(["/a.txt", "/b.txt"], { userId: "u-test", threadId: "t1", messageId: "m1" });
     // Synchronously: not yet called (setImmediate hasn't fired).
     expect(createMany).not.toHaveBeenCalled();
 
@@ -108,8 +108,8 @@ describe("WARP-473 — createFileCitationService.enqueue", () => {
     expect(createMany).toHaveBeenCalledTimes(1);
     expect(createMany.mock.calls[0][0]).toEqual({
       data: [
-        { filePath: "/a.txt", threadId: "t1", messageId: "m1" },
-        { filePath: "/b.txt", threadId: "t1", messageId: "m1" },
+        { filePath: "/a.txt", userId: "u-test", threadId: "t1", messageId: "m1" },
+        { filePath: "/b.txt", userId: "u-test", threadId: "t1", messageId: "m1" },
       ],
     });
   });
@@ -118,7 +118,7 @@ describe("WARP-473 — createFileCitationService.enqueue", () => {
     const createMany = vi.fn();
     const prisma = { fileCitation: { createMany } };
     const svc = createFileCitationService(prisma as any);
-    svc.enqueue([], { threadId: "t1", messageId: "m1" });
+    svc.enqueue([], { userId: "u-test", threadId: "t1", messageId: "m1" });
     await new Promise<void>((r) => setImmediate(r));
     expect(createMany).not.toHaveBeenCalled();
   });
@@ -129,7 +129,7 @@ describe("WARP-473 — createFileCitationService.enqueue", () => {
     const svc = createFileCitationService(prisma as any);
     // Should not throw — caller is sync; pino logs the warn internally.
     expect(() =>
-      svc.enqueue(["/a.txt"], { threadId: "t1", messageId: "m1" }),
+      svc.enqueue(["/a.txt"], { userId: "u-test", threadId: "t1", messageId: "m1" }),
     ).not.toThrow();
     await new Promise<void>((r) => setImmediate(r));
     expect(createMany).toHaveBeenCalledTimes(1);

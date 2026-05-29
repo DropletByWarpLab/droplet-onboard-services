@@ -17,6 +17,7 @@ import pino from "pino";
 const logger = pino({ name: "file-citation" });
 
 export interface FileCitationContext {
+  userId: string;
   threadId: string;
   messageId: string;
 }
@@ -35,6 +36,16 @@ export function createFileCitationService(
   return {
     enqueue(filePaths, context) {
       if (filePaths.length === 0) return;
+      // userId is the IDOR boundary downstream — refuse to enqueue
+      // anonymous rows, otherwise the related-chats route falls back
+      // to leaking sessions whose owner can't be confirmed.
+      if (!context.userId) {
+        logger.warn(
+          { filePaths: filePaths.length, ...context },
+          "file-citation enqueue refused: missing userId (no IDOR-safe owner)",
+        );
+        return;
+      }
       // setImmediate is the canonical Node "don't block, just queue
       // this for after the current event-loop tick" primitive.
       setImmediate(async () => {
@@ -42,6 +53,7 @@ export function createFileCitationService(
           await prisma.fileCitation.createMany({
             data: filePaths.map((filePath) => ({
               filePath,
+              userId: context.userId,
               threadId: context.threadId,
               messageId: context.messageId,
             })),

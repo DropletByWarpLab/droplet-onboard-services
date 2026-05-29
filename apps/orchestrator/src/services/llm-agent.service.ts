@@ -60,7 +60,10 @@ export interface CitationDeps {
    * Implementation runs the actual insert via `setImmediate` so a
    * slow DB doesn't propagate into the agent loop's latency.
    */
-  enqueue(filePaths: string[], context: { threadId: string; messageId: string }): void;
+  enqueue(
+    filePaths: string[],
+    context: { userId: string; threadId: string; messageId: string },
+  ): void;
 }
 
 export interface AgentDeps {
@@ -200,7 +203,7 @@ export interface AgentRequest {
    * persist chat messages (e.g. one-shot scripted invocations) —
    * those callers also leave `deps.citation` unset.
    */
-  citationContext?: { threadId: string; messageId: string };
+  citationContext?: { userId: string; threadId: string; messageId: string };
 }
 
 export interface AgentTraceEntry {

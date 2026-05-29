@@ -451,9 +451,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             ? createFileCitationService(prisma)
             : undefined,
       };
+      // Carry the authenticated user.id (UUID, not username) onto every
+      // citation insert so the related-chats route can scope by owner.
+      // userId is required by createFileCitationService's IDOR guard
+      // — without it the service skips the insert and logs warn.
+      const citationUserId =
+        (req as AuthedRequest).user?.id ??
+        (req as AuthedRequest).user?.username ??
+        null;
       const citationContext =
-        conversationId && assistantMessageId
-          ? { threadId: conversationId, messageId: assistantMessageId }
+        conversationId && assistantMessageId && citationUserId
+          ? {
+              userId: citationUserId,
+              threadId: conversationId,
+              messageId: assistantMessageId,
+            }
           : undefined;
 
       // Track tool calls observed during streaming so we can include
