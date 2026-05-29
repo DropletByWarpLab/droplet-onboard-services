@@ -226,7 +226,12 @@ export function createToolsRouter(
             .json({ error: "Invalid spec", details: parsed.error.flatten() });
           return;
         }
-        const actor = req.user?.username ?? null;
+        // WARP-485: ownerId is a UUID (User.id), not the Nextcloud
+        // username. Storing the username would break any
+        // `WHERE ownerId = <User.id>` join (returns zero rows) and
+        // diverge from cameras / network-firewall / reminders which
+        // all key on req.user.id.
+        const actor = req.user?.id ?? null;
         try {
           const created = (await prisma.toolSpec.create({
             data: {

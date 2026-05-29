@@ -216,11 +216,20 @@ export async function mineToolCallPatterns(
 }
 
 function slugFor(fingerprint: string): string {
-  // ToolSpec.slug is kebab + lowercase. Base64url already lowercase-
-  // safe but may carry `_` (underscore) and `-`. Map `_` → `-` so the
-  // slug regex on the route layer (SLUG_RE in routes/tools.ts) accepts.
-  const safe = fingerprint.toLowerCase().replace(/_/g, "-");
-  return `sug-${safe.slice(0, 32)}`;
+  // ToolSpec.slug is kebab + lowercase per SLUG_RE in routes/tools.ts:
+  //   /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+  // Base64url is already lowercase-safe but may carry `_` and `-`.
+  // Naive `_ → -` produces double hyphens (e.g. `_-` → `--`) and the
+  // 32-char slice can end on a `-`/`_`, both of which fail the regex
+  // and crash toolSpec.create on the hourly tick. Collapse runs of `-`
+  // and strip leading/trailing dashes BEFORE adding the `sug-` prefix.
+  const safe = fingerprint
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .slice(0, 32)
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `sug-${safe}`;
 }
 
 function humanNameFor(toolNames: readonly string[]): string {

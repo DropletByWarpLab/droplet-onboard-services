@@ -309,19 +309,18 @@ async function main() {
   // N-gram sequences (N=2..5, ≥3 occurrences), writes ToolSpec rows
   // with status=suggested. Dedupe is by SHA-256 fingerprint slug, so
   // re-running the same hour writes zero rows the second time.
+  //
+  // Let errors propagate naked to cron-runtime's `safeRun` — it logs +
+  // increments the per-handler consecutiveFailures counter that
+  // downstream alerting reads. Swallowing here would zero out the
+  // counter and silence the canary; every other cron handler in this
+  // file follows the same pattern.
   cronRuntime.scheduleCron(
     "0 * * * *",
     async () => {
-      try {
-        const result = await mineToolCallPatterns(prisma);
-        if (result.inserted > 0) {
-          logger.info(result, "pattern-miner produced suggestions");
-        }
-      } catch (err) {
-        logger.warn(
-          { err: (err as Error).message },
-          "pattern-miner failed (non-fatal)",
-        );
+      const result = await mineToolCallPatterns(prisma);
+      if (result.inserted > 0) {
+        logger.info(result, "pattern-miner produced suggestions");
       }
     },
     { lockKey: "droplet:pattern-miner-hourly" },
