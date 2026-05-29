@@ -502,8 +502,8 @@ describe("ChatMessage", () => {
     });
   });
 
-  describe("citation chips (WARP-295)", () => {
-    it("renders a row of <CitationChip> chips below assistant messages with citations", () => {
+  describe("citation chips (WARP-295/WARP-287)", () => {
+    it("renders a row of <CitationCard> chips below assistant messages with citations", () => {
       const { container } = render(
         <ChatMessage
           message={{
@@ -532,11 +532,14 @@ describe("ChatMessage", () => {
 
       const row = screen.getByTestId("chat-citations");
       expect(row).toBeInTheDocument();
-      // Both chips render through the shared component.
-      const chips = container.querySelectorAll("[data-citation-path]");
+      // WARP-287: chat citations carry no per-chunk anchor, so both project
+      // into CitationHit with anchor: null and render via <FileCitation>
+      // (data-testid="file-card") — the same chip the old <CitationChip>
+      // rendered. The card shows the filename (last path segment).
+      const chips = container.querySelectorAll('[data-testid="file-card"]');
       expect(chips).toHaveLength(2);
-      expect(chips[0].getAttribute("data-citation-source")).toBe("brain");
-      expect(chips[1].getAttribute("data-citation-source")).toBe("nextcloud");
+      expect(chips[0].textContent).toContain("wireguard-cheatsheet.md");
+      expect(chips[1].textContent).toContain("vpn-setup.md");
     });
 
     it("renders no citation row when the assistant message has no citations", () => {
