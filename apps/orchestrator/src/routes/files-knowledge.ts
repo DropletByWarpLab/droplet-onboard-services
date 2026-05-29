@@ -40,6 +40,8 @@ import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 
+import { AnchorSchema, type Anchor } from "@droplet/shared-types";
+
 const logger = pino({ name: "files-knowledge-route" });
 
 // Hard upper bounds — keep both routes from being used as a denial-of-
@@ -365,11 +367,37 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // wire so the dashboard's Breadcrumbs + SourceChannelBadge can render
       // without an extra fetch. `metadata` is null on legacy rows; the
       // dashboard treats null/undefined the same.
+      //
+      // WARP-287: surface a validated `anchor` field on each hit so the
+      // dashboard's <CitationCard> can render deep-link viewers. Malformed
+      // anchors fall back to `null` with a single warn-level log; the hit
+      // is never dropped (one bad chunk shouldn't suppress a result).
       res.json({
-        hits: (hits as Array<Record<string, unknown>>).map((h) => ({
-          ...h,
-          metadata: (h.metadata as unknown) ?? null,
-        })),
+        hits: (hits as Array<Record<string, unknown>>).map((h) => {
+          const metadata = (h.metadata as Record<string, unknown> | null) ?? null;
+          const rawAnchor = metadata?.anchor;
+          let anchor: Anchor | null = null;
+          if (rawAnchor !== undefined && rawAnchor !== null) {
+            const parsed = AnchorSchema.safeParse(rawAnchor);
+            if (parsed.success) {
+              anchor = parsed.data;
+            } else {
+              logger.warn(
+                {
+                  chunkId: `${(h as { path?: string }).path ?? ""}:${(h as { chunkIdx?: number }).chunkIdx ?? -1}`,
+                  rawAnchor,
+                  error: parsed.error.issues,
+                },
+                "anchor.validation.failed"
+              );
+            }
+          }
+          return {
+            ...h,
+            metadata,
+            anchor,
+          };
+        }),
       });
     } catch (err) {
       next(err);

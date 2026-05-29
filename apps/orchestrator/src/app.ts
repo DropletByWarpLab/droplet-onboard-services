@@ -38,6 +38,8 @@ import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
+import { adminFilesRouter } from "./routes/admin-files.js";
+import { setPrismaForReindex } from "./services/file-reindex.service.js";
 import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
@@ -181,6 +183,12 @@ export function createApp(prisma: PrismaClient) {
   // WARP-286: retrieval-eval endpoint — exposes vector/rrf/hybrid pipelines
   // to the offline NDCG@10 harness. 404 in production.
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
+  // WARP-287: admin re-index route — forces re-extraction of a single file
+  // to upgrade legacy chunks (no metadata.anchor) without a global backfill.
+  // Prisma is injected at module level so the router itself can be a
+  // pre-built constant (the spec mounts it as a value, not a factory).
+  setPrismaForReindex(prisma);
+  app.use("/api/admin", adminFilesRouter);
   // WARP-519: rag-eval HTTP trigger proxy — ad-hoc RAGAS runs + bootstrap
   // + run listing. Auth-gated (admin/owner); 503 when the `eval` Compose
   // profile is inactive (rag-eval service unreachable). NOT prod-gated.

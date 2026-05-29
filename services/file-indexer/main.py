@@ -167,6 +167,43 @@ def main():
     )
     sched_thread.start()
 
+    # WARP-287: admin re-index HTTP endpoint. file-indexer is otherwise
+    # MQTT-driven; the orchestrator's admin reindex route needs a
+    # request/response surface (so the orchestrator can return
+    # `chunksWritten` synchronously to the admin caller). Lives in a
+    # daemon thread alongside the watcher — uvicorn runs its own asyncio
+    # loop, independent of the apscheduler thread above.
+    def _http_server_thread():
+        try:
+            import uvicorn
+            from fastapi import FastAPI, HTTPException
+
+            api = FastAPI()
+
+            @api.post("/reindex/{file_id}")
+            def reindex_file_endpoint(file_id: str) -> dict:
+                """Re-extract a single file atomically. See brain_ingest.reindex_one."""
+                from brain_ingest import reindex_one
+
+                try:
+                    return reindex_one(file_id)
+                except ValueError as e:
+                    # not-found / file-missing / extractor-unavailable
+                    raise HTTPException(status_code=404, detail=str(e))
+                except RuntimeError as e:
+                    # empty extraction / chunker produced nothing
+                    raise HTTPException(status_code=422, detail=str(e))
+
+            port = int(os.environ.get("FILE_INDEXER_HTTP_PORT", "8090"))
+            uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
+        except Exception:
+            logger.exception("file-indexer HTTP server failed to start")
+
+    http_thread = threading.Thread(
+        target=_http_server_thread, name="warp287-http", daemon=True
+    )
+    http_thread.start()
+
     # Start watching
     from watcher import start_watcher
     observer = start_watcher()

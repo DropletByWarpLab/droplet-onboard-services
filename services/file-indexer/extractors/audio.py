@@ -21,6 +21,9 @@ import threading
 from pathlib import Path
 from typing import Optional, Union
 
+from anchor_schema import MediaTimestampAnchor
+from extractors.spans import Span
+
 from .types import ExtractedDoc
 
 logger = logging.getLogger(__name__)
@@ -67,7 +70,7 @@ def _reset_model_cache() -> None:
     _model_cache.clear()
 
 
-def _get_model(device: str):
+def _load_model(device: str):
     """Return a cached WhisperModel for the given device, instantiating if needed."""
     name = _model_name()
     key = f"{name}:{device}"
@@ -75,6 +78,10 @@ def _get_model(device: str):
         compute_type = "float16" if device == "cuda" else "int8"
         _model_cache[key] = WhisperModel(name, device=device, compute_type=compute_type)
     return _model_cache[key]
+
+
+# Backwards-compatibility alias — older callers may import `_get_model`.
+_get_model = _load_model
 
 
 def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
@@ -94,7 +101,7 @@ def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
     # file-indexer process.
     with _model_lock:
         try:
-            model = _get_model("cuda")
+            model = _load_model("cuda")
             segments_iter, info = model.transcribe(
                 str(path), beam_size=5, temperature=0.0
             )
@@ -109,34 +116,47 @@ def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
             # Drop the broken cuda entry so we don't keep retrying it.
             _model_cache.pop(f"{_model_name()}:cuda", None)
             warnings.append("gpu_unavailable")
-            model = _get_model("cpu")
+            model = _load_model("cpu")
             segments_iter, info = model.transcribe(
                 str(path), beam_size=5, temperature=0.0
             )
             segments = list(segments_iter)
 
-    # Merge segments into a single text body and remember segment-end offsets.
-    text_parts: list[str] = []
-    page_breaks: list[int] = []
-    cursor = 0
+    # One Span per non-empty Whisper segment, anchored to its time window.
+    # Audio has no in-file structural hierarchy; the document-level
+    # breadcrumb is the filename (WARP-435 fallback).
+    filename = os.path.basename(str(path)) or "audio"
+    spans: list[Span] = []
     for seg in segments:
-        line = seg.text.strip()
-        text_parts.append(line)
-        cursor += len(line) + 1  # +1 for the join newline
-        page_breaks.append(cursor)
-    text = "\n".join(text_parts)
+        seg_text = (seg.text or "").strip()
+        if not seg_text:
+            continue
+        start_ms = int(round(seg.start * 1000))
+        end_ms = int(round(seg.end * 1000))
+        # MediaTimestampAnchor strictly requires endMs > startMs. Whisper
+        # occasionally emits zero-length or inverted segments; skip them
+        # rather than crashing the whole transcription.
+        if end_ms <= start_ms:
+            warnings.append(f"degenerate_segment_skipped:start={start_ms}ms")
+            continue
+        spans.append(
+            Span(
+                text=seg_text,
+                anchor=MediaTimestampAnchor(startMs=start_ms, endMs=end_ms),
+                section_path=[filename],
+            )
+        )
 
-    metadata = {
-        "language": getattr(info, "language", None) if info else None,
-        "duration_sec": getattr(info, "duration", None) if info else None,
-        "extractor_name": "audio",
-        "extractor_version": "1.0.0",
-    }
+    language = getattr(info, "language", None) if info else None
+    duration = getattr(info, "duration", None) if info else None
 
     return ExtractedDoc(
-        text=text,
-        page_breaks=page_breaks,
-        language=metadata["language"],
-        metadata=metadata,
+        spans=spans,
+        language=language,
+        metadata={
+            "extractor_name": "audio",
+            "extractor_version": "2",
+            "duration_seconds": duration,
+        },
         warnings=warnings,
     )

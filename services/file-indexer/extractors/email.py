@@ -1,14 +1,24 @@
 """Email extractor — .eml (RFC 822) + .msg (Outlook MAPI).
 
 Spec: docs/superpowers/specs/2026-05-07-rag-phase-2-extractors-design.md §4.3
-WARP-199.
+WARP-199, WARP-287.
 
-Compose a structured text body (From/To/Cc/Subject/Date headers + body)
-and recurse through registry.dispatch() for each attachment whose MIME
-is supported. Recursion depth bounded by registry.MAX_RECURSION_DEPTH
-(default 2).
+Emits one `Span` per text-bearing MIME part with an `EmailPartAnchor`
+whose `partIndex` is the position of the emitted span (0-indexed,
+sequential) and whose `messageId` is the `Message-ID` header (with
+`<>` brackets preserved).
 
-Design notes:
+Layout (each becomes one span when non-empty):
+  - partIndex 0: combined From/To/Cc/Subject/Date headers block
+  - partIndex 1..n: one span per text-bearing MIME part (text/plain,
+    text/html stripped to text); html-only messages still emit a part.
+  - For each attachment we can dispatch, the attachment's *outer* doc
+    (its text content joined) becomes one further span. We do NOT
+    recursively wrap inner attachment anchors — partIndex is enough
+    for v1; archive-style anchor-nesting recursion is the archive
+    extractor's concern (WARP-287 Task 8).
+
+Design notes preserved from Phase 2:
   - The MIME of each attachment is sniffed from the bytes via
     python-magic — we don't trust the email's stated Content-Type alone
     because malicious or malformed messages routinely lie about it.
@@ -31,6 +41,8 @@ from typing import Optional
 
 import magic
 
+from anchor_schema import EmailPartAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 logger = logging.getLogger(__name__)
@@ -45,8 +57,6 @@ SUPPORTED_MIMES = frozenset(
     }
 )
 
-_ATTACHMENT_SEPARATOR = "\n--- Attachment: {name} ---\n"
-
 
 def _format_headers(msg: Message) -> str:
     """Compose the From/To/Cc/Subject/Date headers block."""
@@ -58,47 +68,26 @@ def _format_headers(msg: Message) -> str:
     return "\n".join(lines)
 
 
-def _extract_body(msg: Message) -> str:
-    """Pick the text/plain body if present; else strip HTML to text."""
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain" and not _is_attachment(part):
-                try:
-                    return part.get_content().strip()
-                except (LookupError, KeyError):
-                    payload = part.get_payload(decode=True) or b""
-                    return payload.decode(errors="replace").strip()
-        for part in msg.walk():
-            if part.get_content_type() == "text/html" and not _is_attachment(part):
-                try:
-                    html = part.get_content()
-                except (LookupError, KeyError):
-                    payload = part.get_payload(decode=True) or b""
-                    html = payload.decode(errors="replace")
-                # Crude HTML→text. readability-lxml is heavier than we need
-                # for an attachment-stripped email body; a regex is fine.
-                import re
-
-                return re.sub(r"<[^>]+>", "", html).strip()
-        return ""
-    if msg.get_content_type() == "text/plain":
+def _decode_part(part: Message) -> str:
+    """Best-effort decode of a single MIME part to a text string."""
+    try:
+        content = part.get_content()
+    except (LookupError, KeyError):
+        payload = part.get_payload(decode=True) or b""
+        content = payload.decode(errors="replace")
+    if not isinstance(content, str):
+        # bytes / message / etc. — coerce to repr-safe string
         try:
-            return msg.get_content().strip()
-        except (LookupError, KeyError):
-            payload = msg.get_payload(decode=True) or b""
-            return payload.decode(errors="replace").strip()
-    if msg.get_content_type() == "text/html":
-        try:
-            html = msg.get_content()
-        except (LookupError, KeyError):
-            payload = msg.get_payload(decode=True) or b""
-            html = payload.decode(errors="replace")
-        # Mirrors the multipart HTML→text fallback above; a regex strip
-        # is sufficient for body extraction (no full DOM needed).
-        import re
+            content = content.decode(errors="replace")  # type: ignore[union-attr]
+        except Exception:  # pragma: no cover — defensive
+            content = str(content)
+    return content
 
-        return re.sub(r"<[^>]+>", "", html).strip()
-    return ""
+
+def _strip_html(html: str) -> str:
+    import re
+
+    return re.sub(r"<[^>]+>", "", html).strip()
 
 
 def _is_attachment(part: Message) -> bool:
@@ -108,6 +97,25 @@ def _is_attachment(part: Message) -> bool:
     return bool(part.get_filename())
 
 
+def _message_id(msg: Message, path: str) -> tuple[str, list[str]]:
+    """Return (message_id_with_brackets, warnings).
+
+    Preserves angle brackets when the header already has them; wraps a
+    bare id; falls back to a stable synthetic id derived from the file
+    path when the header is missing and emits a warning.
+    """
+    raw = msg.get("Message-ID")
+    if raw:
+        raw = raw.strip()
+        if not raw.startswith("<"):
+            raw = f"<{raw}"
+        if not raw.endswith(">"):
+            raw = f"{raw}>"
+        return raw, []
+    synthetic = f"<no-id-{hash(path)}@local>"
+    return synthetic, ["missing_message_id"]
+
+
 def _dispatch_attachment(
     payload: bytes,
     filename: str,
@@ -115,19 +123,16 @@ def _dispatch_attachment(
     parent_email_id: Optional[str],
     parent_filename: str = "(email)",
     parent_mime: str = "message/rfc822",
-) -> tuple[list[str], list[str], Optional[list[dict]]]:
+) -> tuple[str, list[str], Optional[list[dict]]]:
     """Write payload to a temp file, sniff its MIME, recurse via dispatch.
 
-    Returns (text_parts, warnings, chain) — text_parts is empty and chain is
-    None if the attachment couldn't be handled. WARP-214: the returned chain
-    traces parent → (sub.metadata.chain, if any) → child so downstream
-    chunkers can stamp each chunk with its recursion lineage.
+    Returns (joined_text, warnings, chain) — joined_text is empty and
+    chain is None if the attachment couldn't be handled. Chain follows
+    the WARP-214 lineage convention.
     """
-    # Local import avoids a circular dep at module load time
-    # (registry imports extractors.email lazily inside _route + _cap_for_mime).
+    # Local import avoids a circular dep at module load time.
     from extractors import registry
 
-    text_parts: list[str] = []
     warnings: list[str] = []
 
     mime = magic.from_buffer(payload, mime=True) or "application/octet-stream"
@@ -140,23 +145,18 @@ def _dispatch_attachment(
         sub = registry.dispatch(tmp, mime, depth=depth + 1)
         if sub is None:
             warnings.append(f"unsupported_attachment:{filename}:{mime}")
-            return text_parts, warnings, None
-        text_parts.append(_ATTACHMENT_SEPARATOR.format(name=filename))
-        text_parts.append(sub.get("text", ""))
-        for w in sub.get("warnings") or []:
-            warnings.append(w)
-        # Tag attachment metadata with the parent email's id when known.
-        # We only thread the parent id through warnings/metadata at the
-        # caller — sub already carries its own metadata for downstream
-        # chunkers; the top-level email metadata captures parent linkage.
+            return "", warnings, None
+        # Join all sub-spans into a single text block, prefixed by an
+        # attachment marker. We do NOT recursively wrap anchors here —
+        # partIndex on the outer email span is sufficient (see module
+        # docstring). Archives handle inner-anchor recursion.
+        sub_spans = sub.get("spans") or []
+        sub_text = "\n\n".join(s.text for s in sub_spans if s.text)
+        sub_warnings = list(sub.get("warnings") or [])
+        warnings.extend(sub_warnings)
         if parent_email_id is not None:
             sub_meta = sub.get("metadata") or {}
             sub_meta["parent_email_id"] = parent_email_id
-        # WARP-214: build the chain lineage. Convention: a chain is
-        # [outermost, ..., innermost-leaf]. If the attachment was itself a
-        # recursive carrier (nested .eml/.zip) its sub_chain already starts
-        # with itself — we just prepend our parent. Otherwise produce a
-        # 2-segment parent → child chain.
         sub_chain = (sub.get("metadata") or {}).get("chain") or []
         if sub_chain:
             chain = [
@@ -168,29 +168,58 @@ def _dispatch_attachment(
                 {"filename": parent_filename, "mime": parent_mime},
                 {"filename": filename, "mime": mime},
             ]
+        body = f"--- Attachment: {filename} ---\n{sub_text}" if sub_text else f"--- Attachment: {filename} ---"
+        return body, warnings, chain
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-    return text_parts, warnings, chain
 
 
-def _walk_eml_attachments(
-    msg: Message,
-    depth: int,
-    parent_email_id: Optional[str],
-    parent_filename: str = "(email)",
-) -> tuple[str, list[str], list[list[dict]]]:
-    """Recursively dispatch each .eml attachment.
+def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> ExtractedDoc:
+    with open(path, "rb") as f:
+        msg = stdlib_email.message_from_binary_file(f, policy=email.policy.default)
 
-    Returns (text, warnings, chains) — chains is one chain[] per
-    successfully-dispatched attachment so downstream callers can attach
-    a parent-side chain to the ExtractedDoc metadata.
-    """
-    all_text: list[str] = []
-    all_warnings: list[str] = []
-    all_chains: list[list[dict]] = []
+    message_id, id_warnings = _message_id(msg, path)
+    parent_filename = os.path.basename(path) or "(email)"
+
+    spans: list[Span] = []
+    warnings: list[str] = list(id_warnings)
+    attachment_chains: list[list[dict]] = []
+
+    def _emit(text: str) -> None:
+        if not text or not text.strip():
+            return
+        anchor = EmailPartAnchor(messageId=message_id, partIndex=len(spans))
+        spans.append(
+            Span(text=text, anchor=anchor, section_path=[parent_filename])
+        )
+
+    # PartIndex 0: headers block.
+    headers = _format_headers(msg)
+    _emit(headers)
+
+    # Text-bearing body parts.
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            if _is_attachment(part):
+                continue
+            ctype = part.get_content_type()
+            if ctype == "text/plain":
+                _emit(_decode_part(part).strip())
+            elif ctype == "text/html":
+                _emit(_strip_html(_decode_part(part)))
+    else:
+        ctype = msg.get_content_type()
+        if ctype == "text/plain":
+            _emit(_decode_part(msg).strip())
+        elif ctype == "text/html":
+            _emit(_strip_html(_decode_part(msg)))
+
+    # Attachments — each becomes one further span.
     for part in msg.walk():
         if part.is_multipart():
             continue
@@ -200,7 +229,7 @@ def _walk_eml_attachments(
         payload = part.get_payload(decode=True) or b""
         if not payload:
             continue
-        parts, warnings, chain = _dispatch_attachment(
+        body, sub_warnings, chain = _dispatch_attachment(
             payload,
             filename,
             depth,
@@ -208,61 +237,33 @@ def _walk_eml_attachments(
             parent_filename=parent_filename,
             parent_mime="message/rfc822",
         )
-        all_text.extend(parts)
-        all_warnings.extend(warnings)
+        warnings.extend(sub_warnings)
         if chain:
-            all_chains.append(chain)
-    return "\n".join(all_text), all_warnings, all_chains
-
-
-def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> ExtractedDoc:
-    with open(path, "rb") as f:
-        # `policy.default` gives us EmailMessage with .get_content() / .iter_attachments().
-        msg = stdlib_email.message_from_binary_file(f, policy=email.policy.default)
-    headers = _format_headers(msg)
-    body = _extract_body(msg)
-    parent_filename = os.path.basename(path) or "(email)"
-    attachments_text, attachment_warnings, attachment_chains = _walk_eml_attachments(
-        msg, depth, parent_email_id, parent_filename=parent_filename
-    )
-
-    sections = [s for s in (headers, body, attachments_text) if s]
-    full_text = "\n\n".join(sections)
-
-    page_breaks: list[int] = []
-    if headers and body:
-        # Mark the boundary between the headers block and the body
-        # (offset of the first body char in the combined string).
-        page_breaks.append(len(headers) + 2)  # +2 for "\n\n"
+            attachment_chains.append(chain)
+        _emit(body)
 
     metadata: dict = {
         "extractor_name": "email",
-        "extractor_version": "1.1",
+        "extractor_version": "2",
+        "message_id": message_id,
         "from": msg.get("From"),
         "to": msg.get("To"),
         "subject": msg.get("Subject"),
         "date": msg.get("Date"),
-        # WARP-435 (ADR-003 Phase 1): emails have no in-body structural
-        # hierarchy comparable to PDF/DOCX/PPTX — the headers + body +
-        # attachments live in a single flat stream. Use the filename as
-        # the document-level section anchor. The chain[] breadcrumb in
-        # ``metadata.chain`` already carries the attachment lineage for
-        # nested .eml/.zip/etc. cases.
-        "section_paths": [(0, [parent_filename])],
+        # WARP-435: emails have no in-body structural hierarchy comparable
+        # to PDF/DOCX — the headers + body + attachments live in a flat
+        # stream. Each Span carries ``[filename]`` as its section path (set
+        # in ``_emit``); the chain[] breadcrumb in ``metadata.chain`` still
+        # carries the attachment lineage for nested .eml/.zip/etc. cases.
     }
-    # WARP-214: surface the first attachment's chain on the doc-level metadata
-    # so the chunker propagates it to FileContentChunk.metadata.chain. Multiple
-    # attachments produce multiple chains; chunk-level chain assignment is a
-    # follow-up — the dashboard's depth-2 cap is satisfied by the first chain.
     if attachment_chains:
         metadata["chain"] = attachment_chains[0]
 
     return ExtractedDoc(
-        text=full_text,
-        page_breaks=page_breaks,
+        spans=spans,
         language=None,
         metadata=metadata,
-        warnings=attachment_warnings,
+        warnings=warnings,
     )
 
 
@@ -271,6 +272,35 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
     import extract_msg  # local import — module is heavy
 
     m = extract_msg.Message(str(path))
+
+    # Build a synthetic Message-ID for .msg — MAPI rarely exposes a clean
+    # RFC822 Message-ID. Use the file path hash for stability.
+    raw_id = getattr(m, "messageId", None)
+    if raw_id:
+        raw_id = str(raw_id).strip()
+        if not raw_id.startswith("<"):
+            raw_id = f"<{raw_id}"
+        if not raw_id.endswith(">"):
+            raw_id = f"{raw_id}>"
+        message_id = raw_id
+        id_warnings: list[str] = []
+    else:
+        message_id = f"<no-id-{hash(str(path))}@local>"
+        id_warnings = ["missing_message_id"]
+
+    parent_filename = os.path.basename(str(path)) or "(email)"
+
+    spans: list[Span] = []
+    warnings: list[str] = list(id_warnings)
+    msg_chains: list[list[dict]] = []
+
+    def _emit(text: str) -> None:
+        if not text or not text.strip():
+            return
+        anchor = EmailPartAnchor(messageId=message_id, partIndex=len(spans))
+        spans.append(
+            Span(text=text, anchor=anchor, section_path=[parent_filename])
+        )
 
     headers_lines: list[str] = []
     if m.sender:
@@ -284,18 +314,17 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
     if m.date:
         headers_lines.append(f"Date: {m.date}")
     headers = "\n".join(headers_lines)
-    body = (m.body or "").strip()
+    _emit(headers)
 
-    attachments_text_parts: list[str] = []
-    warnings: list[str] = []
-    parent_filename = os.path.basename(str(path)) or "(email)"
-    msg_chains: list[list[dict]] = []
+    body = (m.body or "").strip()
+    _emit(body)
+
     for att in m.attachments:
         filename = att.longFilename or att.shortFilename or "unnamed"
         payload = att.data
         if not payload:
             continue
-        parts, sub_warnings, chain = _dispatch_attachment(
+        body_text, sub_warnings, chain = _dispatch_attachment(
             payload,
             filename,
             depth,
@@ -303,37 +332,27 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
             parent_filename=parent_filename,
             parent_mime="application/vnd.ms-outlook",
         )
-        attachments_text_parts.extend(parts)
         warnings.extend(sub_warnings)
         if chain:
             msg_chains.append(chain)
-
-    attachments_text = "\n".join(attachments_text_parts)
-    sections = [s for s in (headers, body, attachments_text) if s]
-    full_text = "\n\n".join(sections)
-
-    page_breaks: list[int] = []
-    if headers and body:
-        page_breaks.append(len(headers) + 2)
+        _emit(body_text)
 
     metadata: dict = {
         "extractor_name": "email",
-        "extractor_version": "1.1",
+        "extractor_version": "2",
+        "message_id": message_id,
         "from": m.sender,
         "to": m.to,
         "subject": m.subject,
         "date": str(m.date) if m.date else None,
-        # WARP-435 (ADR-003 Phase 1): see _extract_eml — filename serves
-        # as the section anchor for emails.
-        "section_paths": [(0, [parent_filename])],
+        # WARP-435: see _extract_eml — each Span carries ``[filename]`` as
+        # its section path (set in ``_emit``).
     }
-    # WARP-214: see _extract_eml — first chain wins for doc-level metadata.
     if msg_chains:
         metadata["chain"] = msg_chains[0]
 
     return ExtractedDoc(
-        text=full_text,
-        page_breaks=page_breaks,
+        spans=spans,
         language=None,
         metadata=metadata,
         warnings=warnings,
@@ -342,17 +361,22 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
 
 def extract(
     path: str,
-    mime: str,
+    mime: Optional[str] = None,
     depth: int = 0,
     parent_email_id: Optional[str] = None,
 ) -> Optional[ExtractedDoc]:
     """Top-level entry point.
 
+    `mime` defaults to None for direct callers (tests, ad-hoc use); in
+    that case we infer message/rfc822 unless the path ends in `.msg`.
     `depth` is forwarded by registry.dispatch through the recursion
     contract (see registry._call_handler). `parent_email_id`, when
     provided, threads through to attachment metadata so downstream
     chunkers can link attachment chunks back to their parent email.
     """
+    if mime is None:
+        ext = os.path.splitext(str(path))[1].lower()
+        mime = "application/vnd.ms-outlook" if ext == ".msg" else "message/rfc822"
     if mime not in SUPPORTED_MIMES:
         return None
     if mime in {"application/vnd.ms-outlook", "application/x-msmail"}:

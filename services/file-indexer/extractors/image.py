@@ -3,16 +3,20 @@
 Captures per-image mean confidence; attaches `low_confidence_ocr` warning
 when below threshold (default 50). Handles JPG, PNG, TIFF (and HEIC if
 the Pillow plugin is available).
+
+WARP-287: emits a single `Span` with `NoneAnchor` — image OCR yields
+one text blob per image, no positional structure to anchor against.
 """
 from __future__ import annotations
 
 import io
 import os
-from typing import cast
 
 import pytesseract
 from PIL import Image
 
+from anchor_schema import NoneAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 OCR_CONFIDENCE_THRESHOLD = int(os.environ.get("OCR_CONFIDENCE_THRESHOLD", 50))
@@ -47,8 +51,6 @@ def _ocr_image_bytes(jpeg_or_png_bytes: bytes) -> tuple[str, list[str]]:
     Shared by:
       - extract(path) — opens file from disk, calls this helper
       - WARP-208 frame_ocr — opens JPEG bytes from ffmpeg pipe
-
-    Honors OCR_CONFIDENCE_THRESHOLD (existing WARP-201 contract).
     """
     img = Image.open(io.BytesIO(jpeg_or_png_bytes))
     text, warnings, _mean_conf = _ocr_image(img)
@@ -59,18 +61,27 @@ def extract(path: str) -> ExtractedDoc:
     img = Image.open(path)
     text, warnings, mean_conf = _ocr_image(img)
 
-    return cast(
-        ExtractedDoc,
-        {
-            "text": text,
-            "page_breaks": [],
-            "language": None,
-            "metadata": {
-                "extractor_name": "image",
-                "extractor_version": "1.0",
-                "ocr_mean_confidence": mean_conf,
-                "word_count": len(text.split()),
-            },
-            "warnings": warnings,
-        },
+    metadata = {
+        "extractor_name": "image",
+        "extractor_version": "2",
+        "ocr_mean_confidence": mean_conf,
+        "word_count": len(text.split()),
+    }
+
+    if not text or not text.strip():
+        return ExtractedDoc(
+            spans=[],
+            language=None,
+            metadata=metadata,
+            warnings=warnings,
+        )
+
+    # Image OCR has no in-file structure; the document-level breadcrumb is
+    # the filename (WARP-435 fallback).
+    filename = os.path.basename(path) or "image"
+    return ExtractedDoc(
+        spans=[Span(text=text, anchor=NoneAnchor(), section_path=[filename])],
+        language=None,
+        metadata=metadata,
+        warnings=warnings,
     )

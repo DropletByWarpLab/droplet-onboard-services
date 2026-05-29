@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@droplet/shared-types": "0.1.0",
     "@zxing/browser": "^0.1.5",
     "@zxing/library": "^0.21.3",
     "framer-motion": "^11.18.2",
