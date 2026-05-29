@@ -9,6 +9,7 @@ import {
   Calendar as CalendarIcon,
   Cpu,
   Film,
+  FolderKanban,
   FolderOpen,
   Globe,
   HelpCircle,
@@ -73,6 +74,11 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
       { href: "/files", label: "Files", icon: FolderOpen },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon },
+      // WARP-512: embedded Plane PM stack — workspace surface, sits next
+      // to Calendar (both are time/workflow-oriented) and ahead of
+      // Knowledge (which is the read-only search index). Page at
+      // /projects iframes Plane behind the OIDC IdP from WARP-505.
+      { href: "/projects", label: "Projects", icon: FolderKanban },
       { href: "/knowledge", label: "Knowledge", icon: BookOpen },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,
