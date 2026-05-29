@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Wifi, X } from "lucide-react";
 
 interface DiscoveryBannerProps {
@@ -28,7 +29,14 @@ export function DiscoveryBanner({ count }: DiscoveryBannerProps) {
     <div className="flex items-center gap-3 bg-system-blue/10 border border-system-blue/20 rounded-lg p-3 mb-6">
       <Wifi size={18} className="text-system-blue flex-shrink-0" />
       <p className="type-subheadline text-label-primary flex-1">
-        {count} Matter device{count > 1 ? "s" : ""} found on the network. Commission them via chat or pairing code.
+        {count} Matter device{count > 1 ? "s" : ""} found on the network.{" "}
+        <Link
+          href="/devices/add-matter"
+          className="text-system-blue hover:underline font-medium"
+        >
+          Scan its QR code
+        </Link>{" "}
+        to add it.
       </p>
       <button
         onClick={() => setDismissed(true)}

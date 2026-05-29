@@ -35,6 +35,79 @@ function isValidNodeId(id: string): boolean {
   return /^\d{1,20}$/.test(id);
 }
 
+/**
+ * WARP-102: translate matter.js commissioning errors into customer-
+ * facing strings + an `internalReason` for operator debugging.
+ *
+ * matter.js raises errors with implementation-specific wording
+ * ("Invalid manual code: non-numeric character at position 3", "PASE
+ * handshake timed out", etc.) — surfacing those verbatim in the
+ * dashboard banner exposes internal details and confuses customers.
+ *
+ * We pattern-match on the raw message rather than relying on a stable
+ * error-code surface because matter.js doesn't export one yet
+ * (project-chip/matter.js#1438). Promote to a typed enum once that
+ * upstream issue ships.
+ */
+function translateCommissionError(err: unknown): {
+  status: number;
+  message: string;
+  internalReason: string;
+} {
+  const raw = err instanceof Error ? err.message : String(err);
+  // Order matters — more specific patterns first.
+  if (/invalid (manual|qr) code|pairing code|non-numeric|invalid checksum/i.test(raw)) {
+    return {
+      status: 400,
+      message: "That pairing code doesn't look right. Double-check the digits on the device or its packaging and try again.",
+      internalReason: raw,
+    };
+  }
+  if (/already.*commissioned|node.*exists/i.test(raw)) {
+    return {
+      status: 409,
+      // Factory-reset procedures are vendor-specific (Aqara holds a
+      // button 10s, Hue uses Hue app, Eve uses a paperclip). Don't
+      // promise a universal sequence — point the user at the device's
+      // own instructions.
+      message: "This device is already paired with the Droplet. Open it from the Devices page, or factory-reset it following the device's instructions if you want to re-pair.",
+      internalReason: raw,
+    };
+  }
+  if (/timed? ?out|timeout|deadline/i.test(raw)) {
+    return {
+      status: 504,
+      message: "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
+      internalReason: raw,
+    };
+  }
+  if (/PASE|SPAKE2|wrong (passcode|secret)/i.test(raw)) {
+    return {
+      status: 400,
+      // PASE / SPAKE2 failures are usually "right code, wrong moment"
+      // (the device dropped out of its 60-second pairing window or
+      // someone else commissioned it first), not "the code looks
+      // wrong" — that's covered by the "invalid pairing code" branch
+      // above. Surface the actionable next step rather than a generic
+      // "double-check" instruction.
+      message: "The device didn't accept the code — it may have left pairing mode. Put it back into pairing mode and try again.",
+      internalReason: raw,
+    };
+  }
+  if (/network|wifi|wi-?fi|ble|bluetooth|discovery/i.test(raw)) {
+    return {
+      status: 502,
+      message: "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
+      internalReason: raw,
+    };
+  }
+  return {
+    status: 500,
+    message: "Commissioning failed. Try again, and if it keeps failing, factory-reset the device and start over.",
+    internalReason: raw,
+  };
+}
+
 /** Map Matter command names to domain/service for safety tier classification. */
 function commandToDomainService(
   category: string,
@@ -171,7 +244,19 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       const result = await commissionDevice(pairing_code);
       res.json({ status: "commissioned", ...result });
     } catch (err) {
-      next(err);
+      // WARP-102: matter.js raises errors with implementation-specific
+      // wording ("Invalid manual code: non-numeric character at
+      // position 3", "PASE handshake timed out", etc.). Surface a
+      // customer-friendly message + an `internalReason` field for
+      // operator debugging in case support pulls logs from
+      // ops-console. Codes we recognize map to fixed phrasing; the
+      // rest fall through to a generic timeout/unreachable message
+      // so the dashboard banner never leaks raw matter.js internals.
+      const friendly = translateCommissionError(err);
+      return res.status(friendly.status).json({
+        error: friendly.message,
+        internalReason: friendly.internalReason,
+      });
     }
   });
 
