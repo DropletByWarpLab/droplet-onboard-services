@@ -243,7 +243,9 @@ def create_app() -> FastAPI:
             if rec is not None:
                 items[current] = _record_to_wire(rec)
 
-        ordered = sorted(items.values(), key=lambda r: r["runId"], reverse=True)
+        ordered = sorted(
+            items.values(), key=lambda r: r.get("runId", ""), reverse=True
+        )
         return {"runs": ordered[:_RUNS_LIST_CAP]}
 
     @app.get("/runs/{run_id}")
