@@ -36,7 +36,7 @@ generate_env() {
 
   # --- Generate all secrets ---
   local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url
-  # WARP-503 — embedded Plane PM stack secrets (ADR-007, spec WARP-498).
+  # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
@@ -94,7 +94,7 @@ generate_env() {
   # ${AI_GATEWAY_SAMPLER_TOKEN}.
   ai_gateway_sampler_token=$(openssl rand -hex 32)
 
-  # WARP-503 — Plane secrets (ADR-007, spec WARP-498 OQ1/OQ5).
+  # WARP-503 — Plane secrets (ADR-010, spec WARP-498 OQ1/OQ5).
   #   pm_db_password    — postgres-pm container password
   #   pm_secret_key     — Plane Django SECRET_KEY (session signing etc.)
   #   pm_admin_token    — orchestrator-only token for provisioning users via
@@ -226,7 +226,7 @@ ORCHESTRATOR_SAMPLER_TOKEN=$orchestrator_sampler_token
 # the gate fails closed (every cloud-LLM call 451s).
 AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
 
-# --- WARP-503: embedded Plane PM stack (ADR-007, spec WARP-498) ---
+# --- WARP-503: embedded Plane PM stack (ADR-010, spec WARP-498) ---
 # Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
 # pinned by SHA per spec OQ3) behind Nginx at /pm/.
 #
@@ -425,7 +425,7 @@ migrate_env() {
   # /api/matter/* will 401 when AUTH_ENABLED=true.
   _migrate_ensure_key SERVICE_TOKEN_MCP "$(openssl rand -hex 32)"
 
-  # WARP-503 backfill: embedded Plane PM stack (ADR-007). Existing installs
+  # WARP-503 backfill: embedded Plane PM stack (ADR-010). Existing installs
   # predate the PM stack; without these keys docker compose up will refuse
   # to start the pm-api / postgres-pm containers (compose-level :?MSG fail).
   # Each is generated independently so a partial backfill (e.g. operator
