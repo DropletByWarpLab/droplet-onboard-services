@@ -168,3 +168,12 @@ DO $$ BEGIN
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
+
+DO $$ BEGIN
+    ALTER TABLE "EmailDraft"
+        ADD CONSTRAINT "EmailDraft_threadId_fkey"
+        FOREIGN KEY ("threadId") REFERENCES "EmailThread"("id")
+        ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;

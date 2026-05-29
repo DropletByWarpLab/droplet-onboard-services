@@ -26,6 +26,33 @@ import { recordActivity } from "../services/activity.singleton.js";
 
 const logger = pino({ name: "email-route" });
 
+// Owner/admin see every household account; family-and-below are scoped to
+// the accounts they personally own (`EmailAccount.userId`). Matches the
+// vpn.ts ownership pattern.
+function isPrivilegedRole(req: Request): boolean {
+  return req.user?.role === "owner" || req.user?.role === "admin";
+}
+
+// IDOR guard: confirm the requester is allowed to touch the named account.
+// Returns the account row (id-only) on success, or null on 404/403 — the
+// caller writes the response. Owner/admin pass regardless of ownership;
+// family-and-below must own the account. Returns 404 (not 403) on a foreign
+// account to avoid leaking the existence of other households' rows.
+async function assertAccountAccessible(
+  prisma: PrismaClient,
+  req: Request,
+  accountId: string,
+): Promise<{ id: string; userId: string | null } | null> {
+  const account = (await prisma.emailAccount.findUnique({
+    where: { id: accountId },
+    select: { id: true, userId: true },
+  })) as { id: string; userId: string | null } | null;
+  if (!account) return null;
+  if (isPrivilegedRole(req)) return account;
+  if (account.userId && account.userId === req.user?.id) return account;
+  return null;
+}
+
 const FILTERS = ["inbox", "triaged", "archived", "droplet"] as const;
 type Filter = (typeof FILTERS)[number];
 
@@ -121,9 +148,14 @@ export function createEmailRouter(
   router.get(
     "/email/accounts",
     requireRole("owner", "admin", "family"),
-    async (_req: Request, res: Response, next: NextFunction) => {
+    async (req: Request, res: Response, next: NextFunction) => {
       try {
+        // family / guest see only their own accounts; owner/admin see all.
+        const where = isPrivilegedRole(req)
+          ? undefined
+          : { userId: req.user?.id ?? "__none__" };
         const rows = (await prisma.emailAccount.findMany({
+          where,
           orderBy: { address: "asc" },
           select: {
             id: true,
@@ -148,6 +180,15 @@ export function createEmailRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          req.params.accountId,
+        );
+        if (!account) {
+          res.status(404).json({ error: "Account not found" });
+          return;
+        }
         const filterRaw = String(req.query.filter ?? "inbox");
         if (!(FILTERS as readonly string[]).includes(filterRaw)) {
           res.status(400).json({ error: "Invalid filter", allowed: FILTERS });
@@ -187,6 +228,15 @@ export function createEmailRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          req.params.accountId,
+        );
+        if (!account) {
+          res.status(404).json({ error: "Thread not found" });
+          return;
+        }
         const thread = (await prisma.emailThread.findUnique({
           where: { id: req.params.threadId },
           include: {
@@ -218,13 +268,15 @@ export function createEmailRouter(
             .json({ error: "Invalid draft", details: parsed.error.flatten() });
           return;
         }
-        // Confirm account exists (returns 404 otherwise — the dashboard
-        // sometimes posts a draft against an account that was removed
-        // out-of-band).
-        const account = (await prisma.emailAccount.findUnique({
-          where: { id: req.params.accountId },
-          select: { id: true },
-        })) as { id: string } | null;
+        // Ownership + existence check: family-and-below must own the
+        // account; owner/admin pass regardless. 404 (not 403) on a
+        // foreign account so we don't leak the existence of another
+        // household's account.
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          req.params.accountId,
+        );
         if (!account) {
           res.status(404).json({ error: "Account not found" });
           return;
@@ -268,6 +320,16 @@ export function createEmailRouter(
           res.status(404).json({ error: "Draft not found" });
           return;
         }
+        // IDOR: family-and-below can only patch drafts against accounts they own.
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          existing.accountId,
+        );
+        if (!account) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
         if (existing.status !== "draft") {
           // Once queued / sent / failed the row is immutable — editing
           // a queued draft mid-flight would be a race with the indexer.
@@ -300,6 +362,18 @@ export function createEmailRouter(
           where: { id: req.params.id },
         })) as unknown as DraftRow | null;
         if (!draft) {
+          res.status(404).json({ error: "Draft not found" });
+          return;
+        }
+        // Belt-and-braces: send-tier is already gated to owner/admin
+        // (per route guard), but apply the same account-access check so
+        // a future role widening doesn't silently re-open IDOR.
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          draft.accountId,
+        );
+        if (!account) {
           res.status(404).json({ error: "Draft not found" });
           return;
         }
