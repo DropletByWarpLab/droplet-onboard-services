@@ -94,7 +94,7 @@ export default function RemoteAccessPage() {
   const activePeers = peers.filter((p) => p.status === "active");
   const endpointMissing = status && !status.endpointConfigured;
 
-  // Per ADR-005, VPN is the mandatory transport for off-LAN clients.
+  // Per ADR-009, VPN is the mandatory transport for off-LAN clients.
   // Status chip reflects whether WG endpoint is configured.
   const remoteStatus = endpointMissing
     ? { tone: "warn" as const, label: "Endpoint not configured" }

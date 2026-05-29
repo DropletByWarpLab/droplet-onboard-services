@@ -2,7 +2,7 @@
 
 **Status:** Living document (mirror of the orchestrator routes that mobile clients consume)
 **Date:** 2026-05-18
-**Companion to:** ADR-004 (Native Mobile — Design System + API Contract)
+**Companion to:** ADR-008 (Native Mobile — Design System + API Contract)
 
 This document is the source-of-truth contract that the iOS + Android
 apps build against. Both apps re-derive their model layer from this doc.
@@ -41,7 +41,7 @@ Refresh token is stored separately and only sent to `/api/auth/refresh`.
 
 **Note:** the existing browser flow uses `Set-Cookie` httpOnly. Mobile
 flow adds `?return=body` so the tokens come back in JSON. Backend
-change required (one-line) — see ADR-004 action item.
+change required (one-line) — see ADR-008 action item.
 
 ### Health (`/api/orchestrator/health`)
 

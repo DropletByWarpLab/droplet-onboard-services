@@ -1736,7 +1736,7 @@ model OffLanEgressSample {
   @@index([channel, ts(sort: Desc)])
 }
 
-/// ADR-003 + ADR-005: workspace type for this Droplet — Home (single
+/// ADR-007 + ADR-009: workspace type for this Droplet — Home (single
 /// person / household) vs Business (multi-role with Roles matrix,
 /// Groups, Sessions, full People, Plan/Billing).
 ///

@@ -232,7 +232,7 @@ Droplet.
   from the host catastrophically slow. Named volumes are stored in the
   WSL2 distribution's filesystem and ship at native speed.
 - **Why no AI:** chosen 2026-05-18 by Stefan — dev box has no GPU
-  worth running Ollama on. ADR-004 §6 explains the production AI path.
+  worth running Ollama on. ADR-008 §6 explains the production AI path.
 - **Why polling for file watchers:** inotify doesn't fire reliably across
   the Windows ⇄ Linux bind. Polling costs ~3% CPU but is predictable.
 - **Why same Postgres image as prod (`pgvector/pgvector:pg16`):** keeps

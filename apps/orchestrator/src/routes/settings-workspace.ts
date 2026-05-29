@@ -1,7 +1,7 @@
 /**
  * `/api/settings/workspace` — Home vs Business workspace selection.
  *
- * Per ADR-003 + ADR-005, every Droplet has a workspace type that
+ * Per ADR-007 + ADR-009, every Droplet has a workspace type that
  * gates which admin surfaces render in the dashboard (Roles matrix,
  * Groups, Sessions, full People, Plan/Billing — Business only).
  * The setting is a singleton row in `Workspace` (id = 1).
@@ -111,7 +111,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      // ADR-005 + ADR-002: only owner can flip workspace type. Admin
+      // ADR-009 + ADR-002: only owner can flip workspace type. Admin
       // can manage other settings but workspace type is a one-time
       // strategic call.
       if (user.role !== "owner") {

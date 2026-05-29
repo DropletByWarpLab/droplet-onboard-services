@@ -1,4 +1,4 @@
-# ADR-003: Dashboard Redesign — Violet Brand + Dual Workspace (Home/Business)
+# ADR-007: Dashboard Redesign — Violet Brand + Dual Workspace (Home/Business)
 
 **Status:** Accepted
 **Date:** 2026-05-18

@@ -102,7 +102,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const { user, isLoading: authLoading } = useAuth();
 
-  // Hydrate from the orchestrator once auth is settled. Per ADR-005
+  // Hydrate from the orchestrator once auth is settled. Per ADR-009
   // §workspace, GET /api/settings/workspace returns the singleton
   // Workspace row's type, or the HOME default if the wizard hasn't
   // run yet. 404 (Phase 4a not deployed) is a no-op — we keep the

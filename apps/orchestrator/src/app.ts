@@ -237,7 +237,7 @@ export function createApp(prisma: PrismaClient) {
   // Per-user Redis cache with 30s TTL.
   app.use("/api", createHomeRouter(prisma));
 
-  // ADR-003 + ADR-005: workspace-type (Home vs Business) singleton.
+  // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type). Sits alongside the
   // broader WARP-457 createSettingsRouter — flagged in the PR body

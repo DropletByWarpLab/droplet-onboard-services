@@ -1,9 +1,9 @@
-# ADR-004: Native Mobile — Design System + API Contract
+# ADR-008: Native Mobile — Design System + API Contract
 
 **Status:** Accepted
 **Date:** 2026-05-18
 **Deciders:** Stefan Cruceru
-**Builds on:** ADR-003 (violet brand + dual workspace)
+**Builds on:** ADR-007 (violet brand + dual workspace)
 **Supersedes (in part):** earlier ad-hoc native client work on
 `feat/native-mobile-clients` and `feat/android-app` — see "Predecessors"
 below.
@@ -26,7 +26,7 @@ The HARD RULE (`feedback_align_with_shared_brain.md`) requires me to
 align with shared_brain before writing native code. The shared_brain
 audit (this conversation, 2026-05-18) surfaced one ADR gap: there is
 **no spec for how dashboard design tokens (now violet `#6d28d9` per
-ADR-003) translate to SwiftUI + Compose, and no canonical API contract
+ADR-007) translate to SwiftUI + Compose, and no canonical API contract
 for non-browser clients.** This ADR fills both gaps.
 
 ## Decisions
@@ -202,7 +202,7 @@ app's `server` URL keeps working over LTE.
 ### 5. Workspace inheritance
 
 The dashboard's Home/Business workspace setting (`useWorkspace`,
-ADR-003) lives on the **Droplet**, not the client. Once Phase 4 of the
+ADR-007) lives on the **Droplet**, not the client. Once Phase 4 of the
 dashboard work promotes the localStorage flag to a Prisma column +
 `/api/setup/workspace` endpoint, the native client reads it on every
 launch and adapts:
@@ -272,11 +272,11 @@ ships with every Droplet).
 
 - `docs/mobile-api-contract.md` — endpoint catalog with request/response
   shapes (mirror of the route map from this session's recon)
-- ADR-003 — violet brand + dual workspace (the dashboard side)
+- ADR-007 — violet brand + dual workspace (the dashboard side)
 
 ## Action items
 
-1. [x] Approve violet `#6d28d9` for native (ADR-003 covers this)
+1. [x] Approve violet `#6d28d9` for native (ADR-007 covers this)
 2. [ ] Add `?return=body` to `POST /api/auth/login` so JWT lands in
        response body — dashboard ignores this query param; native uses it
 3. [ ] Create empty `stefan-cruceru/droplet-ios` repo via GitHub

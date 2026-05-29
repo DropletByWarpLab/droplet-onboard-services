@@ -1,4 +1,4 @@
--- ADR-003 + ADR-005: workspace_type — Home vs Business.
+-- ADR-007 + ADR-009: workspace_type — Home vs Business.
 --
 -- Singleton table (id = 1 always). Drives the dashboard's
 -- WorkspaceProvider + the setup wizard's "pick your workspace" step

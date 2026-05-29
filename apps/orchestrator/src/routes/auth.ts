@@ -389,7 +389,7 @@ export function createPublicAuthRouter(
         },
       });
 
-      // ADR-004 §3 + action item #2: native mobile clients can't read
+      // ADR-008 §3 + action item #2: native mobile clients can't read
       // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
       // them; Android's OkHttp can but it's ugly). When the caller
       // opts in with `?return=body=1`, return the JWTs in the JSON
@@ -515,7 +515,7 @@ export function createPublicAuthRouter(
   // ── Refresh: exchange refresh token for new access token ──
   router.post("/auth/refresh", async (req, res, next) => {
     try {
-      // ADR-004: native clients (iOS / Android / Tauri Win) POST the
+      // ADR-008: native clients (iOS / Android / Tauri Win) POST the
       // refresh token in the JSON body since they can't read httpOnly
       // cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
       // set by /auth/login. Body takes precedence if both are present

@@ -1,4 +1,4 @@
-# ADR-005: Canonical System Architecture
+# ADR-009: Canonical System Architecture
 
 **Status:** Accepted
 **Date:** 2026-05-18
@@ -139,7 +139,7 @@ Two auth boundaries (both red on the whiteboard):
      every call.
    - Refresh: 401 → `/api/auth/refresh` → new access token; failure →
      bounce to PairScreen.
-   - This is the existing model. ADR-004 §3 documents the mobile side;
+   - This is the existing model. ADR-008 §3 documents the mobile side;
      `apps/web-dashboard/src/lib/auth.tsx::authFetch` is the web side.
 2. **NxtCld → Orch** = `JWT OAuth` — orchestrator mints per-device
    Nextcloud app passwords, encrypts them, then issues JWTs to clients
@@ -175,7 +175,7 @@ to the Droplet — that's the wedge.
   this out and offer one-tap WG enable.
 - **5 client platforms now in scope** — Web + iOS + Android + macOS +
   Win. Design tokens and copy live in `apps/web-dashboard` (canonical
-  CSS) + ADR-004 (SwiftUI + Compose mirror) + this ADR's macOS +
+  CSS) + ADR-008 (SwiftUI + Compose mirror) + this ADR's macOS +
   Windows notes. Token drift is a real risk; a future ADR-006 may
   introduce token codegen.
 - **Apps Board on the architecture** elevates ops-console from a
