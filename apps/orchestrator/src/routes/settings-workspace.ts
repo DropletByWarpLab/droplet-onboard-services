@@ -141,7 +141,11 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         where: { id: 1 },
         update: {
           type: wantType,
-          displayName: parsed.data.displayName ?? undefined,
+          // `?? null` (not `?? undefined`) so an owner can clear the
+          // display name by POSTing without it. Prisma skips `undefined`
+          // fields on update, which would silently preserve the old
+          // value. `null` writes through. Mirrors the `create` branch.
+          displayName: parsed.data.displayName ?? null,
           setBy,
           setAt: new Date(),
         },

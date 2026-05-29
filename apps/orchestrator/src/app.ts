@@ -161,6 +161,18 @@ export function createApp(prisma: PrismaClient) {
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
   app.use("/api", createPeopleRouter(prisma));
+  // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
+  // GET available to any authenticated user (drives chrome pill);
+  // POST is owner-only (flip the workspace type).
+  //
+  // MUST mount BEFORE `createSettingsRouter` (WARP-457). The settings
+  // router's `GET /settings/:section` matches `"workspace"` (it lives
+  // in SECTION_VALUES) and would shadow the GET here if registered
+  // first — Express is first-match on path-prefix routes. Consolidation
+  // of `/settings/workspace` into the broader WARP-457 settings tree
+  // is a follow-up; this ordering keeps both routers working until then.
+  app.use("/api", createSettingsWorkspaceRouter(prisma));
+
   // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
   // PATCH section with per-type validation). Mutations emit ActivityRow
   // rows via recordActivity (kind: system, severity: info — one row per
@@ -237,12 +249,6 @@ export function createApp(prisma: PrismaClient) {
   // Per-user Redis cache with 30s TTL.
   app.use("/api", createHomeRouter(prisma));
 
-  // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
-  // GET available to any authenticated user (drives chrome pill);
-  // POST is owner-only (flip the workspace type). Sits alongside the
-  // broader WARP-457 createSettingsRouter — flagged in the PR body
-  // for potential consolidation in a follow-up.
-  app.use("/api", createSettingsWorkspaceRouter(prisma));
 
   // Reminders poller — wakes every REMINDER_POLL_INTERVAL_SEC (default 30s)
   // to dispatch due-time notifications and re-sync calendar sources.
