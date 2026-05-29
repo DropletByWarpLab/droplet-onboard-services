@@ -20,21 +20,199 @@ model Device {
   updatedAt   DateTime @updatedAt
 }
 
-model ChatSession {
-  id        String        @id @default(uuid())
-  model     String
-  provider  String
-  createdAt DateTime      @default(now())
-  messages  ChatMessage[]
+/// WARP-174: per-drive customer-chosen names + icons + notes.
+///
+/// The device-bridge inventories mounted drives by filesystem UUID; this
+/// model attaches a friendly `displayName` ("Wedding Photos") so the
+/// dashboard's Storage surface and the setup wizard's Storage step can
+/// show the human name instead of the FS-provided label or the mount
+/// path. Naming mirrors `NetworkDevice.displayName` from the ADR-002
+/// Phase 1 device-intelligence pattern — same shape, different domain.
+///
+/// The setup wizard upserts here via PATCH /api/storage/drives/:uuid.
+/// Survives reboots because the UUID is the filesystem UUID, stable as
+/// long as the drive itself is.
+model Drive {
+  uuid        String   @id
+  displayName String
+  icon        String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
-model ChatMessage {
-  id        String      @id @default(uuid())
+/// WARP-304: per-user persistent chat sessions for the /chat page.
+/// `userId` is the Nextcloud username from the auth middleware. The dashboard
+/// only ever lists / reads sessions for the requesting user — owner/admin do
+/// not get visibility into other users' chats (privacy boundary).
+///
+/// The pre-WARP-104 `model`/`provider` columns are kept (nullable now) for
+/// backwards compatibility with any existing rows; the new rows record them
+/// from the first turn's chat request.
+model ChatSession {
+  id        String        @id @default(uuid())
+  userId    String
+  title     String?
+  model     String?
+  provider  String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @default(now()) @updatedAt
+  messages  ChatMessage[]
+  pins      ContextPin[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+/// WARP-460 — Context pins per chat session. The dashboard's right-side
+/// "Context · N sources" panel (FEATURES.md §2.2.7) lists these; the
+/// agent loop reads them on every turn and prepends pin descriptions to
+/// the system prompt so retrieval/tool calls are scoped accordingly.
+///
+/// `kind` is an explicit enum (no string-soup per CLAUDE.md "no guessing").
+/// `ref` is kind-specific (path / id / external ref). `meta` carries
+/// kind-specific extras (e.g. `{from, to}` for camera_window).
+model ContextPin {
+  id        String         @id @default(uuid())
   sessionId String
-  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role      String
-  content   String
-  createdAt DateTime    @default(now())
+  session   ChatSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kind      ContextPinKind
+  ref       String
+  meta      Json?
+  addedAt   DateTime       @default(now())
+
+  @@index([sessionId, addedAt])
+}
+
+/// WARP-460 — kinds of context the user can pin to a chat thread.
+/// Maps 1:1 to the dashboard's side-panel pill types and to the
+/// `context_pins` request shape in FEATURES.md §4.1.
+enum ContextPinKind {
+  folder
+  file
+  email_thread
+  camera
+  camera_window
+}
+
+/// WARP-461 — Durable per-workspace memory facts the model can recall
+/// (FEATURES.md §5). Distinct from `BrainMemoryItem`, which is the
+/// chat-attachment file-bytes table — keep concerns separate per the
+/// WARP-461 architecture note.
+///
+/// `addedBy` is a free-form identifier (username today; will become a
+/// User.id UUID after the chat-user-id backfill lands). `evidenceChatId`
+/// optionally points at the conversation where the fact was extracted.
+/// `active` is a soft-disable flag so users can pause a fact without
+/// deleting the row (preserving evidence chain).
+model MemoryFact {
+  id              String              @id @default(uuid())
+  category        MemoryFactCategory
+  fact            String
+  addedBy         String
+  evidenceChatId  String?
+  active          Boolean             @default(true)
+  addedAt         DateTime            @default(now())
+  updatedAt       DateTime            @default(now()) @updatedAt
+
+  @@index([category, active])
+  @@index([active, addedAt(sort: Desc)])
+}
+
+/// WARP-461 — per FEATURES.md §5 fact taxonomy. Explicit enum, never
+/// derived (CLAUDE.md no-guessing rule). `Other` is the catch-all so the
+/// agent has somewhere to put a fact that doesn't fit the four named
+/// categories.
+enum MemoryFactCategory {
+  Tone
+  Workflow
+  Scope
+  Schedule
+  Other
+}
+
+/// WARP-470 — 24 h WAN throughput time-series for §2.6 Network page.
+///
+/// A 60 s apscheduler tick in `services/routing/scheduler.py` polls
+/// the WAN device counters via ubus, diffs against the previous
+/// sample to compute bps, and POSTs the derived row into the
+/// orchestrator via /api/network/throughput-sample.
+///
+/// `wanDownBps` / `wanUpBps` are BigInt because gigabit links can
+/// briefly burst > 2³¹. Retention: a nightly cron prunes rows
+/// older than 30 days alongside the existing daily-purge.
+model NetworkThroughputSample {
+  ts          DateTime @id @default(now())
+  wanDownBps  BigInt
+  wanUpBps    BigInt
+
+  @@index([ts(sort: Desc)])
+}
+
+/// WARP-304 / WARP-329: persisted message in a `ChatSession`. Stored in
+/// order of `createdAt`; for the same millisecond the `id` (uuid) breaks
+/// the tie.
+///
+/// `toolCalls` captures the assistant's tool-call requests on a turn so a
+/// rehydrated thread can render the same chips the user saw live;
+/// `toolCallId` ties a role=tool message back to the call it answered.
+/// `turnId` is a client-supplied UUID that lets us drop duplicate writes
+/// when a network retry resubmits the same turn — checked in code, not
+/// enforced at the DB level.
+///
+/// WARP-329: `status` + `completedAt` enable save-on-send. A user message
+/// is created with `status=completed` immediately on receipt; the matching
+/// assistant message is created with `status=streaming` BEFORE the LLM
+/// runs, then transitions to `completed` / `failed` / `aborted` when the
+/// agent loop ends. A mid-turn refresh sees the user message + the
+/// streaming-placeholder assistant row, and the WARP-329 MQTT signal
+/// fires when an in-flight turn finishes so other tabs / future mobile
+/// clients can update.
+///
+/// WARP-458: `reasoning` captures the per-turn deep-reasoning trace (the
+/// model's internal "thinking" wrapped in `<reasoning>…</reasoning>` in
+/// streamed output, or the native reasoning field on providers that
+/// surface it separately). Only present on `role=assistant` rows. Always
+/// persisted when the model emits one, regardless of the per-request
+/// `captureReasoning` flag — that flag gates EMISSION on the wire, not
+/// PERSISTENCE, so the dashboard can lazy-load reasoning on demand
+/// without re-running the turn. Nullable because the vast majority of
+/// turns do not carry reasoning content (small models, tool-only turns,
+/// system messages).
+model ChatMessage {
+  id          String      @id @default(uuid())
+  sessionId   String
+  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role        String
+  content     String
+  toolCalls   Json?
+  toolCallId  String?
+  turnId      String?
+  status      ChatMessageStatus @default(completed)
+  completedAt DateTime?
+  reasoning   String?
+  createdAt   DateTime    @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([sessionId, turnId])
+  @@index([sessionId, status])
+}
+
+/// WARP-329: lifecycle of a single ChatMessage row.
+///   - `pending`   — user message that hasn't been dispatched yet (reserved
+///                   for a future client-driven optimistic path; not used
+///                   by the orchestrator route today).
+///   - `streaming` — assistant message in-flight; `content` is being
+///                   appended as SSE deltas arrive.
+///   - `completed` — terminal: turn finished cleanly. `completedAt` set.
+///   - `failed`    — terminal: agent loop errored. `completedAt` set.
+///   - `aborted`   — terminal: client cancelled mid-stream. `completedAt`
+///                   set; partial content preserved.
+enum ChatMessageStatus {
+  pending
+  streaming
+  completed
+  failed
+  aborted
 }
 
 // Per-user client devices (laptops, phones) paired via QR code flow.
@@ -73,7 +251,15 @@ model UserInvite {
   username     String
   displayName  String?
   email        String?
-  role         String    @default("user") // "admin" | "user"
+  // WARP-171: persistent role state lives in an explicit enum column
+  // (CLAUDE.md no-guessing rule). The enum is the single source of truth
+  // shared with the TS `Role` union in src/services/jwt.service.ts;
+  // any drift between them is a schema bug. The invite-accept route
+  // (auth.ts) maps `admin` invitee → `owner` session role and
+  // `family` invitee → `family` session role for backwards-compat with
+  // the pre-WARP-171 two-value contract; widening that mapping is a
+  // separate ticket.
+  role         Role      @default(family)
   createdBy    String // username of issuing admin
   expiresAt    DateTime
   acceptedAt   DateTime?
@@ -83,6 +269,31 @@ model UserInvite {
 
   @@index([token])
   @@index([expiresAt])
+}
+
+/// WARP-171: canonical role enum for the orchestrator. Mirrors the
+/// `Role` TS union in `src/services/jwt.service.ts` one-to-one so a
+/// session role can be persisted without coercion. Replaces the legacy
+/// free-form `String @default("user")` column on `UserInvite` (the
+/// only persistent role column in the schema today — users themselves
+/// live in Nextcloud and are surfaced via OCS, not in a local table).
+///
+/// Values:
+///   - owner   — install-time first admin; full control including
+///               service-restart endpoints.
+///   - admin   — household admin; auth/user mgmt, network, VPN, DDNS.
+///   - family  — regular household member; cameras, matter, files.
+///   - guest   — read-only family-tier; can only act on their own LLM
+///               sessions.
+///   - service — internal service principal (voice-io, mcp-server);
+///               read-only on every guarded write route (see
+///               docs/ADR-004 §3 matrix).
+enum Role {
+  owner
+  admin
+  family
+  guest
+  service
 }
 
 // Short-lived codes generated by the dashboard, consumed by a native
@@ -620,4 +831,939 @@ model NotificationLog {
   createdAt   DateTime  @default(now())
 
   @@index([userId, createdAt])
+}
+
+// ── WARP-446: Coverage extender APs (auto-onboarded OpenWrt APs) ──
+//
+// Per ADR-005 (docs/ADR-005-ap-auto-onboarding.md). Each row tracks one
+// extender AP the household has installed (or that's announced itself
+// on `_droplet-ap._tcp` mDNS but hasn't been approved yet). The main
+// router (192.168.50.1) is NOT in this table — it's the single source
+// of routing truth, not an extender.
+//
+// `mac` is the canonical primary key (uppercase, colon-separated; see
+// `normalizeMac()` in src/lib/mac.ts). Same convention as
+// `NetworkDevice.mac` from WARP-80. Every boundary normalizes before
+// querying so the dashboard's URL params and the mDNS poller's
+// observed values can't drift.
+//
+// `status` is an explicit enum (ApDeviceStatus). The CLAUDE.md
+// no-guessing rule forbids deriving state from `approvedAt IS NULL`
+// or similar nullable-absence patterns. WARP-218's
+// `BrainMemoryItemStatus` is the canonical precedent.
+//
+// `lastIp` carries the discovered DHCP lease for the AP so the
+// orchestrator can address its rpcd over the LAN without re-resolving
+// mDNS on every push.
+//
+// `failureReason` is non-null only when `status = FAILED`. Same shape
+// the WARP-218 brain-memory pattern uses for transient failures.
+model ApDevice {
+  mac              String         @id
+  // Operator-friendly label set at approval time. Defaults to the
+  // model name + last-3-octets of the MAC if the operator doesn't
+  // override it (e.g. "Pi5 AP (12:34:56)"). Editable from the
+  // dashboard later (PATCH /api/aps/:mac).
+  displayName      String?
+  // mDNS-reported product info — useful for the dashboard's "what is
+  // this" rendering and for the audit log on approval.
+  model            String?
+  serial           String?
+  // Overlay version reported by the AP at announce time. Diverging
+  // versions across APs is a yellow flag the dashboard surfaces; the
+  // orchestrator does NOT auto-upgrade.
+  version          String?
+  // Last IPv4 observed for this AP (from the mDNS announce or the
+  // DHCP lease the discovery poller cross-references). The
+  // orchestrator addresses the AP at this IP over rpcd.
+  lastIp           String?
+  // Last DHCP-reported hostname.
+  hostname         String?
+  status           ApDeviceStatus @default(DISCOVERED)
+  // Non-null only when status = FAILED. Free text, surfaced verbatim
+  // in the dashboard's "what went wrong" tile.
+  failureReason    String?
+  // SSID + iface section the orchestrator pushed (or will push) when
+  // the AP transitions to PROVISIONING. Stored so re-provisioning +
+  // decommission have everything they need without re-querying the
+  // main router.
+  approvedSsid     String?
+  // First time the orchestrator saw this MAC announce on mDNS.
+  firstSeen        DateTime       @default(now())
+  // Updated on every fresh announce — drives the "stale extender"
+  // dashboard warning.
+  lastSeen         DateTime       @default(now())
+  // Timestamp the operator hit Approve. Null until the row leaves
+  // AWAITING_APPROVAL.
+  approvedAt       DateTime?
+  // Operator (Nextcloud username) who approved this AP. Audit trail.
+  approvedBy       String?
+  // Timestamp the AP transitioned to DECOMMISSIONED. Null otherwise.
+  decommissionedAt DateTime?
+  // Last Operation-Id the orchestrator received from the routing
+  // service for a write touching this AP — lets the dashboard
+  // resume polling after a refresh.
+  lastOperationId  String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([status])
+  @@index([lastSeen])
+}
+
+/// WARP-446: lifecycle of an extender AP (per ADR-005 §"State machine").
+///   - `DISCOVERED`         — mDNS poller has seen this MAC announce; the
+///                            operator has not yet been shown the card.
+///                            Today this state is short-lived (the
+///                            poller flips to AWAITING_APPROVAL on the
+///                            same tick) but it exists so re-runs that
+///                            haven't fired yet are distinguishable
+///                            from approved-and-online.
+///   - `AWAITING_APPROVAL`  — rendered in the Add Extender wizard.
+///   - `PROVISIONING`       — orchestrator is mid-push to the AP's
+///                            rpcd. Set right before the routing
+///                            service call; cleared by the result.
+///   - `ONLINE`             — terminal-active; AP is serving the
+///                            household SSID and answering the post-
+///                            apply health probe.
+///   - `FAILED`             — the apply failed (router unreachable,
+///                            ubus refused, post-apply probe timed
+///                            out). `failureReason` is populated.
+///                            Operator can retry by re-approving.
+///   - `DECOMMISSIONED`     — terminal-removed; the operator hit
+///                            "Remove" and the orchestrator deleted
+///                            the wireless config off the AP. Row
+///                            kept for audit.
+enum ApDeviceStatus {
+  DISCOVERED
+  AWAITING_APPROVAL
+  PROVISIONING
+  ONLINE
+  FAILED
+  DECOMMISSIONED
+}
+
+// ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
+//
+// `User` is the local household-directory record. ADDITIVE on top of the
+// Nextcloud-OCS auth fallback in middleware/auth.ts — it does not replace
+// OCS-validated sessions. A row here represents a person the household
+// has deliberately registered through the dashboard's People surface;
+// the Nextcloud fallback continues to populate `req.user` for legacy
+// sessions that haven't yet been mirrored locally.
+//
+// `role` references the WARP-171 `Role` enum (mirrors the TS `Role`
+// union in src/services/jwt.service.ts). No new role enum — that was
+// the contract from ADR-004 §1.
+//
+// `isLocal=true` marks records minted in this table. Nextcloud-mirrored
+// rows (future ticket) would set `isLocal=false` and the delete handler
+// refuses to mutate the OCS-owned identity. Today every row is local;
+// keeping the column lets the dashboard render the "Local" vs "OCS"
+// affordance without a schema migration when mirroring lands.
+model User {
+  id          String   @id @default(uuid())
+  // Login handle. Unique across the directory. For Nextcloud-mirror
+  // rows this matches the OCS user id so `req.user.username` from the
+  // auth middleware resolves directly to this row.
+  username    String   @unique
+  displayName String
+  email       String?
+  // WARP-485: stable mapping key from the Nextcloud OCS user id
+  // (`ocs.data.id`, e.g. `stefan-cruceru`) to this row's UUID. The auth
+  // middleware looks up `User` by `nextcloudUsername` on the OCS
+  // fallback path so `req.user.id` is always a local User.id UUID,
+  // regardless of whether the session originated from a JWT or an OCS
+  // token. Nullable because locally-minted rows that never authenticate
+  // via Nextcloud (service-only users, fresh invitees pre-first-login)
+  // don't have one. Unique because two local Users mapping to the same
+  // OCS identity would create an authentication ambiguity. Distinct
+  // from `username` to keep the local display handle decoupled from the
+  // OCS-mapping key — they often match today but the dashboard may
+  // edit `username` in the future without breaking OCS resolution.
+  nextcloudUsername String? @unique
+  role        Role     @default(family)
+  // Locally provisioned vs. mirrored from Nextcloud. Today every row
+  // is local — the dashboard's People surface is the only writer. The
+  // delete handler refuses when isLocal=false to keep OCS-owned
+  // identities off-limits.
+  isLocal     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Many-to-many to Group via GroupMembership (explicit join model
+  // so future per-membership metadata — joinedAt, addedBy — has a
+  // place to land).
+  memberships GroupMembership[]
+  // Per-user scope bindings — controls which scopes this user can
+  // act inside via requireScope() (see src/middleware/scope.ts).
+  scopeBindings ScopeBinding[]
+  // Optional guest time-box. Non-null when this user was minted as a
+  // guest with an expiry; the nightly `guest-expiry-sweep` cron walks
+  // GuestExpiry rows directly (no IS-NULL guessing — status is an
+  // explicit enum on GuestExpiry).
+  guestExpiry GuestExpiry?
+
+  @@index([role])
+}
+
+// User-curated grouping (households, family branches, work cohorts).
+// Many-to-many to User via GroupMembership.
+model Group {
+  id          String            @id @default(uuid())
+  name        String            @unique
+  description String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  memberships GroupMembership[]
+}
+
+// Explicit join table — `(userId, groupId)` unique so a user can't be
+// listed twice in the same group. `joinedAt` lets the dashboard show
+// "added X days ago" without a separate audit query.
+model GroupMembership {
+  id        String   @id @default(uuid())
+  userId    String
+  groupId   String
+  joinedAt  DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([userId])
+  @@index([groupId])
+}
+
+// ── WARP-455: Scope axis (second RBAC axis on top of WARP-171's Role) ──
+//
+// `Scope` is a pgEnum (not a separate Scope table) by design. The set is
+// small and fully known up front; the requireScope() middleware switches
+// on these values directly. Adding a new scope is a schema migration —
+// that's the desired velocity. A table would invert the cost: trivial to
+// add a row, expensive to keep code and data in sync.
+//
+// Values:
+//   - team        — household-wide default (every resource lands here
+//                   absent an explicit binding). Most files, devices,
+//                   chats sit at this scope.
+//   - exec_only   — leadership-tier (founders + COO peers). Private
+//                   docs, finance summaries, board prep.
+//   - finance     — bookkeeping, invoices, payroll.
+//   - engineering — code + technical-ops docs (mirror of the GH org).
+//   - ops         — runbooks, vendor records, day-to-day operations.
+//   - private     — user-owned, never shared. The dashboard hides
+//                   resources at this scope from anyone other than
+//                   the owner; service principals never see them.
+enum Scope {
+  team
+  exec_only
+  finance
+  engineering
+  ops
+  private
+}
+
+// User ↔ Scope many-to-many. A user can be bound to any subset of the
+// six scopes; the unique constraint stops the same scope from being
+// added twice for the same user.
+//
+// Owner / admin roles always pass requireScope() regardless of bindings
+// (they hold every scope by definition — see ADR-004 §3 for the
+// admin-tier-passes-every-write contract). Family / guest must have an
+// explicit binding for the resource's scope; family at `team` is the
+// default seed for new household members.
+model ScopeBinding {
+  id        String   @id @default(uuid())
+  userId    String
+  scope     Scope
+  // Who granted this binding. Audit-only; the dashboard renders
+  // "granted by Alice 3 days ago" from this pair.
+  grantedBy String?
+  grantedAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope])
+  @@index([userId])
+  @@index([scope])
+}
+
+// ── WARP-455: Guest time-box ──
+//
+// Guests are time-boxed: every guest User has at most one GuestExpiry
+// row carrying `expiresAt` and an explicit `status` enum. The nightly
+// cron (cron-runtime `guest-expiry-sweep`) walks rows where
+// `status = ACTIVE AND expiresAt < now()`, denylists their JWT via
+// jwt.service, flips them to EXPIRED, and emits an ActivityRow.
+//
+// Per the no-guessing rule (CLAUDE.md): `status` is an explicit Prisma
+// enum. Deriving "is this guest expired" from `expiresAt < now()` at
+// read time would (a) duplicate the derivation rule across every
+// reader and (b) leak the cron's tick cadence into UX (a guest is
+// only "expired" once the cron has actually denylisted their session).
+// WARP-218's BrainMemoryItemStatus is the canonical precedent.
+model GuestExpiry {
+  id        String              @id @default(uuid())
+  userId    String              @unique
+  // When the guest's session should be revoked. The cron sweep
+  // compares this against `now()` and flips status when it's past.
+  expiresAt DateTime
+  status    GuestExpiryStatus   @default(ACTIVE)
+  // When the cron actually flipped the row to EXPIRED. Non-null
+  // only when status = EXPIRED. Useful for the dashboard's
+  // "expired N hours ago" copy without re-querying ActivityRow.
+  expiredAt DateTime?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([status, expiresAt])
+}
+
+/// WARP-455: lifecycle of a guest's time-box.
+///   - ACTIVE   — session is live; the cron has not flipped this row yet.
+///   - EXPIRED  — terminal. The cron ran AFTER expiresAt, denylisted the
+///                guest's JWT, and emitted an `auth`-kind ActivityRow.
+enum GuestExpiryStatus {
+  ACTIVE
+  EXPIRED
+}
+
+// ── WARP-455: File scope registry ──
+//
+// The orchestrator does not own file bytes — Nextcloud does. This `File`
+// model is a thin scope-bearing registry keyed by Nextcloud's stable
+// `ncFileId`, the same identifier `FileContentChunk.ncFileId` already
+// uses. It exists so the dashboard's scope-filtered file surfaces can
+// JOIN one row per logical file instead of scanning per-chunk rows for
+// distinct ncFileIds.
+//
+// `scope` is an explicit Scope enum column, defaulting to `team` so a
+// new file (e.g. a Nextcloud upload caught by the file-indexer) lands
+// at the household-wide default without an explicit POST from the
+// dashboard. Operators tighten the scope from there via PATCH (in a
+// follow-up ticket — this ticket only ships the model + backfill).
+//
+// `ownerUserId` carries the file's owner (Nextcloud username; matches
+// the convention everywhere else — FileContentChunk.userId,
+// BrainMemoryItem.userId). The dashboard's per-user file lists join on
+// this column; the scope-filter pass narrows the join result by the
+// caller's ScopeBinding set.
+model File {
+  id          String   @id @default(uuid())
+  ncFileId    Int      @unique
+  ownerUserId String
+  scope       Scope    @default(team)
+  // Cached path for display. Refreshed from the file-indexer's MQTT
+  // bridge when Nextcloud renames or moves the file.
+  path        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([ownerUserId])
+  @@index([scope])
+}
+
+// ── WARP-456: signed append-only activity log ──
+//
+// Canonical audit trail of every observable event on the device — chat
+// turns, MCP tool calls, file indexing, camera writes, network ops,
+// smart-home commands, email sends, auth events, scheduled tool runs,
+// system events. Replaces the per-domain `CommandAuditLog` (which is
+// now a read view; new writes go through `activity.service.record`).
+//
+// Tamper-evidence: every row carries an HMAC-SHA256 `signature` computed
+// over the canonical JSON of its own content (`at`, `kind`, `severity`,
+// `sourceIcon`, `what`, `sub`, `refs`) plus the `prevSignatureHash` of
+// the row immediately before it. This is a strict hash-chain — mutating
+// or removing any historical row breaks the chain at that point, so the
+// `POST /api/activity/export` sealed bundle is verifiable offline by
+// anyone holding the public key (today: the HMAC key bytes; tomorrow:
+// a TPM-attested key per the spec's note about pluggable signing).
+//
+// `kind` and `severity` are explicit enums (no IS-NULL state per
+// CLAUDE.md — mirrors WARP-218's BrainMemoryItemStatus pattern).
+//
+// `refs` is opaque JSON of foreign keys / external identifiers (e.g.
+// `{conversationId, messageId}` for chat, `{nodeId, command}` for
+// Matter writes, `{toolName, callId}` for MCP tool calls). The
+// exporter preserves it verbatim; the signature covers it.
+model ActivityRow {
+  id                BigInt           @id @default(autoincrement())
+  at                DateTime         @default(now())
+  severity          ActivitySeverity
+  // Lucide-icon name (or other agreed token). String so the dashboard
+  // can render without joining another table; not enforced beyond
+  // what the recorder validates because emitters are trusted in-
+  // process code.
+  sourceIcon        String
+  what              String
+  sub               String?
+  kind              ActivityKind
+  // Optional structured references. Today: small object literals
+  // from the emitter call site. Kept Json so future emitters can
+  // grow new fields without a migration. Covered by the signature.
+  refs              Json?
+  // Canonical-JSON HMAC-SHA256 over the row content + prevSignatureHash.
+  // Base64-url (no padding) so the value is URL-safe in audit-trail
+  // exports and dashboard URLs.
+  signature         String
+  // Hash of the signature of the immediately-preceding row, base64-
+  // url (no padding). Empty string for the genesis row (the very
+  // first entry per device). The chain semantics live in
+  // `activity.service.record`.
+  prevSignatureHash String
+
+  // Composite index for the GET /api/activity range/filter query
+  // (sorted by `at` descending within an optional `kind` filter), and
+  // a separate `at` index for unfiltered time-range queries.
+  @@index([at, kind])
+  @@index([at])
+}
+
+/// WARP-456: domain bucket for ActivityRow. Adding a new value here
+/// is a schema change — keep the set stable. The recorder is the
+/// single place that validates incoming `kind`.
+enum ActivityKind {
+  chat
+  tool_call
+  file
+  camera
+  network
+  smart_home
+  email
+  auth
+  tool_run
+  system
+}
+
+/// WARP-456: severity of an ActivityRow. Display-only; the dashboard
+/// renders the colour from this enum directly. `info` is neutral
+/// "happened" — no good/bad connotation — used by passive observations
+/// (file indexed, device joined). `ok` is "succeeded" — used for write
+/// operations that completed cleanly. `warn` and `err` follow standard
+/// logging semantics.
+enum ActivitySeverity {
+  ok
+  warn
+  err
+  info
+}
+
+// ── WARP-457: workspace settings registry ──
+//
+// Persistent CRUD layer for the dashboard's Settings surface. Replaces
+// the .env-only knobs in apps/orchestrator/src/config.ts for surfaces
+// the household is expected to tune from the UI (workspace name,
+// memory/privacy defaults, off-LAN posture, hardware feature flags,
+// appearance theme). `.env` continues to own infra-level knobs
+// (DATABASE_URL, JWT_SECRET, OLLAMA_URL etc) — settings here are
+// additive, not a replacement.
+//
+// Per the no-guessing rule (CLAUDE.md):
+//   - `section` is the explicit `SettingSection` enum — never derived
+//     from a key prefix or path-style string.
+//   - `type` is the explicit `SettingType` enum — the route layer
+//     validates `valueJson` against this enum before write (string
+//     length, number range, enum membership, duration parsing, etc).
+//
+// `valueJson` is Json so the same column carries every type-erased
+// value; adding a new `SettingType` doesn't need a column migration.
+// The seeder in workspace-settings.service.ts populates rows from
+// existing .env-derived defaults on first run (insert-or-skip; never
+// overwrite user values).
+//
+// `@@index([section])` keeps GET /api/settings's grouped query plan
+// stable as the row count grows.
+model WorkspaceSetting {
+  id        String         @id @default(uuid())
+  key       String         @unique
+  section   SettingSection
+  type      SettingType
+  valueJson Json
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([section])
+}
+
+/// WARP-457: top-level grouping for the dashboard's Settings surface.
+/// Adding a new value here is a schema change — keep the set stable.
+/// The route layer (GET /api/settings/:section) trusts this enum for
+/// path-param validation.
+///   - `workspace`       — display name, locale, default scope, etc.
+///   - `memory_privacy`  — brain memory defaults, retention, scope.
+///   - `off_lan`         — VPN / remote-access posture (DDNS, peers).
+///   - `hardware`        — feature flags for cameras, switch, display.
+///   - `appearance`      — theme, density, dashboard layout.
+enum SettingSection {
+  workspace
+  memory_privacy
+  off_lan
+  hardware
+  appearance
+}
+
+/// WARP-457: type tag for `WorkspaceSetting.valueJson`. The route
+/// layer's PATCH handler dispatches per-type validation off this
+/// enum (string length, number range, enum membership, duration
+/// parsing, json validity). Adding a new type requires extending the
+/// validator switch in routes/settings.ts.
+///   - `string`            — UTF-8 text, length-bounded by the route.
+///   - `number`            — JSON number (integer or float).
+///   - `bool`              — true/false.
+///   - `duration_seconds`  — non-negative integer seconds.
+///   - `enum`              — value must be one of an allowed set; the
+///                           allowed set lives in the route definition,
+///                           not in the schema (so per-key allowed
+///                           values don't need a schema migration).
+///   - `json`              — opaque JSON blob; validated for parse-
+///                           ability and a depth cap, not shape.
+enum SettingType {
+  string
+  number
+  bool
+  duration_seconds
+  enum
+  json
+}
+
+/// WARP-465 — Phase D1. Operator-owned email account the email-indexer
+/// service connects to via IMAP IDLE. Credentials encrypted at rest
+/// with Fernet (key under /data/secrets/email.key, generated by
+/// setup.sh, mode 0600). The orchestrator never sees the plaintext
+/// password — it stores only the Fernet ciphertext and hands it to
+/// the email-indexer service which holds the key.
+///
+/// `imapStatus` is an explicit enum (`idle | reconnecting | error |
+/// paused`); the dashboard renders the badge from this directly. Per
+/// CLAUDE.md no-derived-state rule: connectivity state is a column,
+/// not an IS NULL.
+model EmailAccount {
+  id            String              @id @default(uuid())
+  userId        String?
+  displayName   String
+  address       String              @unique
+  imapHost      String
+  imapPort      Int                 @default(993)
+  imapTls       Boolean             @default(true)
+  smtpHost      String
+  smtpPort      Int                 @default(465)
+  smtpTls       Boolean             @default(true)
+  username      String
+  passwordEnc   String
+  imapStatus    EmailImapStatus     @default(paused)
+  lastIdleAt    DateTime?
+  lastErrorAt   DateTime?
+  lastError     String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  threads       EmailThread[]
+  messages      EmailMessage[]
+  drafts        EmailDraft[]
+
+  @@index([userId, address])
+}
+
+/// WARP-465 — RFC 5322 thread grouping. `threadKey` is derived from
+/// the root Message-ID (or Subject + first-seen hash when a thread
+/// arrives without References). The dashboard groups by this and
+/// renders one row per thread in the §2.4 inbox list.
+///
+/// `triageStatus` is the §2.4 surface state — explicit enum so the
+/// dashboard can render the right tab badge without joining the
+/// messages.
+model EmailThread {
+  id            String              @id @default(uuid())
+  accountId     String
+  account       EmailAccount        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadKey     String
+  subject       String
+  lastSender    String?
+  snippet       String?
+  messageCount  Int                 @default(0)
+  triageStatus  EmailTriageStatus   @default(inbox)
+  draftedByDroplet Boolean          @default(false)
+  lastMessageAt DateTime
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  messages      EmailMessage[]
+  drafts        EmailDraft[]
+
+  @@unique([accountId, threadKey])
+  @@index([accountId, triageStatus, lastMessageAt(sort: Desc)])
+  @@index([accountId, lastMessageAt(sort: Desc)])
+}
+
+/// WARP-465 — one persisted MIME message. `messageId` is the RFC 5322
+/// Message-ID header (unique per account; not globally — different
+/// mailboxes can replay the same forwarded ID). `bodyText` is the
+/// canonical text/plain body; `bodyHtml` is the rendered HTML when
+/// present. Both are nullable — multipart messages may carry one or
+/// the other.
+model EmailMessage {
+  id           String       @id @default(uuid())
+  accountId    String
+  account      EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId     String
+  thread       EmailThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  messageId    String
+  inReplyTo    String?
+  fromAddr     String
+  fromName     String?
+  toAddrs      Json
+  ccAddrs      Json?
+  subject      String
+  bodyText     String?
+  bodyHtml     String?
+  receivedAt   DateTime
+  createdAt    DateTime     @default(now())
+
+  @@unique([accountId, messageId])
+  @@index([threadId, receivedAt(sort: Desc)])
+}
+
+/// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
+/// is a first-class boolean (NOT IS-NULL) so the §2.4 surface can
+/// render the "drafted by Droplet" pill without inferring from `body`
+/// being non-empty.
+///
+/// `status` is the send lifecycle: `draft | queued | sent | failed`.
+/// `sentAt` is set on `sent`, `error` on `failed`.
+model EmailDraft {
+  id              String           @id @default(uuid())
+  accountId       String
+  account         EmailAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId        String?
+  thread          EmailThread?     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  toAddrs         Json
+  ccAddrs         Json?
+  bccAddrs        Json?
+  subject         String
+  body            String           @default("")
+  draftedByDroplet Boolean         @default(false)
+  status          EmailDraftStatus @default(draft)
+  sentAt          DateTime?
+  error           String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([accountId, status, updatedAt(sort: Desc)])
+}
+
+/// WARP-465 — IMAP connection state. `paused` is the initial state
+/// (no IDLE attempted yet); `idle` is healthy; `reconnecting` is
+/// the exponential-backoff window after a drop; `error` is the
+/// terminal state when reconnect attempts exhausted.
+enum EmailImapStatus {
+  idle
+  reconnecting
+  error
+  paused
+}
+
+/// WARP-465 — §2.4 inbox state machine. Adding a tab is a schema
+/// change so the dashboard's tab set can't drift from the data.
+enum EmailTriageStatus {
+  inbox
+  triaged
+  archived
+}
+
+/// WARP-465 — draft lifecycle. `queued` is the transient state after
+/// POST /drafts/:id/send while the SMTP request is in-flight; `sent`
+/// is terminal-success, `failed` is terminal-error.
+enum EmailDraftStatus {
+  draft
+  queued
+  sent
+  failed
+}
+
+/// WARP-462 — Phase C1. Productized workflow spec ("call carrier-delay
+/// recap every weekday morning"). Distinct from `packages/tools-core`
+/// (the capability registry) — a ToolSpec composes capabilities into
+/// an operator-shareable, scheduled, versioned routine.
+///
+/// `status` is an explicit enum (`live | draft | suggested`); the
+/// dashboard renders three tabs against it. `suggested` rows are
+/// written by the WARP-464 pattern-miner; `draft` is operator-authored
+/// and not yet executed; `live` is publishable + schedulable.
+///
+/// `safety` is the maximum safety tier across the spec's steps —
+/// computed at publish time so a "tier 3" spec never silently sneaks
+/// into the live tab. `writes` mirrors the step-aggregated
+/// requiresWrite. `reversible` is operator-declared: true if every
+/// action in the spec can be undone (e.g. flip a switch back); false
+/// otherwise. Together (writes && !reversible) gates a confirm_action
+/// card before run-now (handled in route layer + C2 scheduler).
+model ToolSpec {
+  id          String          @id @default(uuid())
+  slug        String          @unique
+  name        String
+  category    String?
+  description String?
+  version     Int             @default(1)
+  status      ToolSpecStatus  @default(draft)
+  ownerId     String?
+  share       String?
+  safety      Int             @default(1)
+  writes      Boolean         @default(false)
+  reversible  Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  steps       ToolStep[]
+  runs        ToolRun[]
+  schedules   ToolSchedule[]
+
+  @@index([status, updatedAt(sort: Desc)])
+}
+
+/// WARP-462 — one ordered step inside a ToolSpec. `kind` is the
+/// dispatch class ("call" for an MCP tool call; future kinds may
+/// include "branch", "wait"). `args` carries the per-kind payload —
+/// for `kind=call` it is `{ tool: "tool_name", args: { ... } }`.
+///
+/// idx is the explicit ordering column; the imperative walker
+/// (services/tool-spec-runner.service.ts) walks ascending.
+model ToolStep {
+  id      String   @id @default(uuid())
+  specId  String
+  spec    ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  idx     Int
+  kind    String   @default("call")
+  args    Json
+
+  @@index([specId, idx])
+}
+
+/// WARP-462 — one execution record of a ToolSpec.
+///
+/// `status` is explicit (`pending | running | ok | failed | cancelled`);
+/// the dashboard renders per-run chips against the enum. `pending` is
+/// the non-terminal initial state for pre-created rows (scheduler or
+/// any future op that materializes a row before dispatch). `running`
+/// is in-flight. `error` carries the last-step failure message for
+/// `failed` runs; null otherwise. `trace` captures per-step results so
+/// the dashboard's run-detail drawer can show "step 2 of 5 failed: ...".
+model ToolRun {
+  id        String        @id @default(uuid())
+  specId    String
+  spec      ToolSpec      @relation(fields: [specId], references: [id], onDelete: Cascade)
+  triggeredBy String?
+  startedAt DateTime      @default(now())
+  endedAt   DateTime?
+  status    ToolRunStatus @default(pending)
+  error     String?
+  trace     Json?
+
+  @@index([specId, startedAt(sort: Desc)])
+}
+
+/// WARP-462 — RRULE-driven schedule for a ToolSpec. `nextFireAt` is
+/// advanced by the WARP-463 tool-schedule-ticker after each
+/// successful (or failed) run. Multiple schedules per spec allowed —
+/// the §7 example carrier-delay spec has both a 09:00 weekday cron
+/// and an ad-hoc "high-priority client" trigger.
+model ToolSchedule {
+  id          String   @id @default(uuid())
+  specId      String
+  spec        ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  rrule       String
+  nextFireAt  DateTime
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([nextFireAt])
+  @@index([specId])
+}
+
+/// WARP-462 — ToolSpec lifecycle. `suggested` rows are written by the
+/// pattern miner (WARP-464); `draft` is operator-authored and not yet
+/// runnable; `live` is publishable + schedulable. Adding a new state
+/// is a schema change so the dashboard's three-tab UX can't drift.
+enum ToolSpecStatus {
+  live
+  draft
+  suggested
+}
+
+/// WARP-462 — ToolRun outcome. Non-terminal: `pending` (pre-created
+/// but not dispatched), `running` (in flight). Terminal: `ok`,
+/// `failed`, `cancelled`. Per CLAUDE.md "no guessing" rule (mirrors
+/// WARP-218's BrainMemoryItemStatus), the default is the non-terminal
+/// `pending` — a row that wasn't explicitly transitioned to a terminal
+/// state must NOT appear as a successful run.
+enum ToolRunStatus {
+  pending
+  running
+  ok
+  failed
+  cancelled
+}
+
+/// WARP-474 — Phase G2. Smart-home scene definition.
+///
+/// One row per operator-created scene ("Movie night", "Goodnight").
+/// Pressing a scene from §2.7 is a write op that emits a
+/// `confirm_action` card before applying — the dashboard surfaces
+/// every action that will fire. Per ADR-005 these are owner+admin
+/// write surfaces; family can read but not author.
+///
+/// `actions` is the ordered list of Matter commands the run-handler
+/// dispatches via `sendMatterCommand`. Failures are tolerated
+/// per-action (the run-handler captures and surfaces them) so a
+/// dead bulb mid-scene doesn't abort the lights that work.
+model Scene {
+  id        String        @id @default(uuid())
+  name      String
+  icon      String?
+  createdBy String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  actions   SceneAction[]
+
+  @@index([createdAt])
+}
+
+/// WARP-474 — one Matter command in a Scene. `idx` is the explicit
+/// ordering column (0-based); the run-handler walks them in
+/// ascending order. `args` is opaque JSON forwarded to
+/// `sendMatterCommand` — see matter.service.ts for the per-command
+/// shape (e.g. on/off has no args, levelControl wants `level`).
+model SceneAction {
+  id           String   @id @default(uuid())
+  sceneId      String
+  scene        Scene    @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  idx          Int
+  deviceNodeId String
+  command      String
+  args         Json?
+
+  @@index([sceneId, idx])
+}
+
+/// WARP-467 — Phase E1. Five off-LAN egress channels the operator can
+/// enable/disable. Lives in its own table (not WorkspaceSetting) so
+/// `requiresAdmin`, `lastChangedBy`, `lastChangedAt`, and `reason` can
+/// be modelled as first-class columns instead of opaque JSON. Defaults
+/// are seeded by `services/workspace-settings.service.ts` per
+/// FEATURES.md §8:
+///   - software_updates    enabled  (operator opts in by leasing a Droplet)
+///   - cloud_model_escape  disabled (sovereignty default — must opt-in)
+///   - outbound_email      enabled  (notifications + invites)
+///   - telemetry           enabled  (Warp Lab fleet ops; can be revoked)
+///   - web_fetch           disabled (must opt-in; LLM tool blocked by default)
+///
+/// `reason` is required on every PATCH so the audit feed answers
+/// "who turned cloud escape back on, and why" without a Slack archaeology
+/// expedition. Per ADR-005, off-LAN channels are sovereignty surface —
+/// changes are owner+admin only.
+model OffLanAllowlistChannel {
+  key             OffLanChannelKey @id
+  enabled         Boolean
+  requiresAdmin   Boolean          @default(true)
+  lastChangedBy   String?
+  lastChangedAt   DateTime         @default(now())
+  reason          String?
+}
+
+/// WARP-467 — closed set of off-LAN egress channels. Extending the
+/// vocabulary is a schema change so the dashboard and the egress
+/// metering pipeline (WARP-468 / E2) can't drift apart silently.
+enum OffLanChannelKey {
+  software_updates
+  cloud_model_escape
+  outbound_email
+  telemetry
+  web_fetch
+}
+
+/// WARP-473 — Phase G1. File ↔ ChatMessage citations.
+///
+/// One row every time the agent loop emits a `tool_result` whose card
+/// kind is `file_results` or `code_block` and that result references
+/// one or more files. The §2.3 file-detail drawer reads this table
+/// to populate its "Related chats" section.
+///
+/// Inserts are FIRE-AND-FORGET from the agent loop (setImmediate) so
+/// a slow DB write can never stall a turn. Duplicate inserts on the
+/// same (filePath, messageId) are tolerated — the dashboard de-dupes
+/// in render. We don't add a unique index here because the same file
+/// can legitimately be cited multiple times within one message (and
+/// the cost of an extra row is one ChatSession lookup).
+///
+/// `userId` is the privacy boundary — without it, the related-chats
+/// query leaks other users' chat session titles for any commonly-cited
+/// file path. Indexed `(filePath, userId, citedAt DESC)` for the IDOR-
+/// safe range-scan that powers the dashboard's "Related chats" panel.
+model FileCitation {
+  id        String   @id @default(uuid())
+  filePath  String
+  userId    String
+  threadId  String
+  messageId String
+  citedAt   DateTime @default(now())
+
+  @@index([filePath, userId, citedAt(sort: Desc)])
+}
+
+/// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
+///
+/// One row per (ts, channel). A 60 s apscheduler tick in
+/// `services/routing/egress_meter.py` reads OpenWrt nftables byte
+/// counters (chain per channel under the `droplet_offlan_*` prefix),
+/// diffs against the previous sample, and POSTs the derived delta
+/// into the orchestrator via /api/network/off-lan-sample-batch.
+///
+/// `bytes` is BigInt because cumulative monthly totals on a busy
+/// channel can exceed 2³¹ comfortably. The chart on the Network
+/// page sums these rows for the §2.6 "Off-LAN this month" chip;
+/// the Models page sums them filtered to `cloud_model_escape` for
+/// the "Cloud spend" chip.
+///
+/// Retention: a nightly cron prunes rows older than 90 days. Longer
+/// than throughput samples (30 d) because off-LAN totals roll up
+/// to monthly billing windows; 90 d covers a quarter-on-quarter
+/// review without bloating the table.
+model OffLanEgressSample {
+  ts        DateTime         @default(now())
+  channel   OffLanChannelKey
+  bytes     BigInt
+
+  @@id([ts, channel])
+  @@index([channel, ts(sort: Desc)])
+}
+
+/// ADR-007 + ADR-009: workspace type for this Droplet — Home (single
+/// person / household) vs Business (multi-role with Roles matrix,
+/// Groups, Sessions, full People, Plan/Billing).
+///
+/// Singleton row pinned to `id = 1`. The dashboard's WorkspaceProvider
+/// hydrates from `/api/settings/workspace`; only the setup wizard and
+/// owner-only POST to `/api/settings/workspace` can flip it.
+///
+/// Defaults to HOME if the row doesn't exist yet — matches the
+/// localStorage fallback already in
+/// `apps/web-dashboard/src/lib/workspace.tsx`.
+enum WorkspaceType {
+  HOME
+  BUSINESS
+}
+
+model Workspace {
+  // Singleton — exactly one row per Droplet. id = 1 lets every CRUD
+  // path use a fixed primary key + prisma upsert without inventing one.
+  id          Int            @id @default(1)
+  type        WorkspaceType  @default(HOME)
+  /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
+  /// Surfaced in the chrome workspace pill + setup wizard.
+  displayName String?
+  /// Whoever last flipped the type (Nextcloud username from the auth
+  /// middleware). Nullable: setup wizard runs before any user exists.
+  setBy       String?
+  setAt       DateTime       @default(now())
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
 }

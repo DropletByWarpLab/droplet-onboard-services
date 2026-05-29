@@ -20,6 +20,15 @@
 #   --no-down     Skip the teardown on exit (useful for triage).
 #   --only PAT    Only run test files matching PAT (passed to vitest).
 #                 Example: --only end-to-end
+#   --with-ragas  WARP-436: after the vitest run succeeds, install
+#                 tests/retrieval-eval/ragas/requirements.txt into a
+#                 .ragas-venv and run ragas_runner.py against the still-
+#                 running stack. Writes results to
+#                 tests/retrieval-eval/ragas/results.{json,md}.
+#                 Judge LLM is chosen by RAGAS_JUDGE (default: local
+#                 Ollama). For cloud judge, also set OPENAI_API_KEY.
+#                 This flag is the local equivalent of the
+#                 rag-eval-nightly GitHub Actions workflow.
 #
 # Prereqs:
 #   - Docker Desktop or Docker Engine running with at least 4GB RAM
@@ -39,6 +48,9 @@ set -euo pipefail
 DRY_RUN=0
 NO_DOWN=0
 ONLY=""
+WITH_RAGAS=0
+# RAGAS_JUDGE: "local" (Ollama, default) or "cloud" (OpenAI; needs OPENAI_API_KEY).
+RAGAS_JUDGE="${RAGAS_JUDGE:-local}"
 
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -46,10 +58,11 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --help|-h) usage; exit 0 ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    --no-down) NO_DOWN=1; shift ;;
-    --only)    ONLY="${2:-}"; shift 2 ;;
+    --help|-h)    usage; exit 0 ;;
+    --dry-run)    DRY_RUN=1; shift ;;
+    --no-down)    NO_DOWN=1; shift ;;
+    --only)       ONLY="${2:-}"; shift 2 ;;
+    --with-ragas) WITH_RAGAS=1; shift ;;
     *)
       echo "Unknown flag: $1" >&2
       echo "Use --help for usage." >&2
@@ -221,3 +234,37 @@ fi
 
 run env RUN_RAG_INTEGRATION=1 API_URL=http://localhost:3000 \
   npx vitest run --no-file-parallelism "${TESTS_TO_RUN[@]}"
+
+# ─── optional RAGAS eval (WARP-436) ──────────────────────────────────
+if [[ "${WITH_RAGAS}" == "1" ]]; then
+  log "WARP-436: running RAGAS eval (judge=${RAGAS_JUDGE}) ..."
+  if [[ "${RAGAS_JUDGE}" == "cloud" && -z "${OPENAI_API_KEY:-}" ]]; then
+    err "--with-ragas with RAGAS_JUDGE=cloud requires OPENAI_API_KEY in env."
+    exit 78  # EX_CONFIG
+  fi
+
+  RAGAS_DIR="${REPO_ROOT}/tests/retrieval-eval/ragas"
+  VENV="${RAGAS_DIR}/.ragas-venv"
+  if [[ ! -d "${VENV}" ]]; then
+    log "Creating RAGAS venv at ${VENV} (first run is slow)..."
+    run python3 -m venv "${VENV}"
+  fi
+  # shellcheck disable=SC1091
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    source "${VENV}/bin/activate"
+    pip install --quiet --upgrade pip
+    pip install --quiet -r "${RAGAS_DIR}/requirements.txt"
+  fi
+
+  run python "${RAGAS_DIR}/ragas_runner.py" \
+    --variant hybrid \
+    --limit 10 \
+    --judge "${RAGAS_JUDGE}" \
+    --out "${RAGAS_DIR}/results.json" \
+    --out-md "${RAGAS_DIR}/results.md"
+
+  if [[ "${DRY_RUN}" != "1" && -f "${RAGAS_DIR}/results.md" ]]; then
+    log "RAGAS results:"
+    cat "${RAGAS_DIR}/results.md"
+  fi
+fi

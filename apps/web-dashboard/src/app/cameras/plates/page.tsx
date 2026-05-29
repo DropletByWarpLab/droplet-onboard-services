@@ -19,6 +19,8 @@ import {
   nameKnownPlate,
 } from "@/lib/api";
 import type { KnownPlate } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 /**
  * License plate management (Phase 7.6).
@@ -39,6 +41,8 @@ export default function PlatesPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<KnownPlate | null>(null);
+  const { toast } = useToast();
 
   const refresh = async () => {
     setLoading(true);
@@ -71,25 +75,27 @@ export default function PlatesPage() {
       setEditing(null);
       await refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Save failed");
+      toast(e instanceof Error ? e.message : "Save failed", "error");
     } finally {
       setBusy(null);
     }
   };
 
-  const handleDelete = async (plate: KnownPlate) => {
-    if (
-      !confirm(
-        `Forget plate "${plate.plate}"${plate.name ? ` (${plate.name})` : ""}? Frigate will re-detect it next time it appears.`,
-      )
-    )
-      return;
+  const handleDelete = (plate: KnownPlate) => {
+    setDeleteTarget(plate);
+  };
+
+  const performDelete = async () => {
+    const plate = deleteTarget;
+    if (!plate) return;
     setBusy(plate.plate);
     try {
       await deleteKnownPlate(plate.plate);
+      setDeleteTarget(null);
       await refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Delete failed");
+      toast(e instanceof Error ? e.message : "Delete failed", "error");
+      throw e;
     } finally {
       setBusy(null);
     }
@@ -108,7 +114,7 @@ export default function PlatesPage() {
         <div className="flex-1 min-w-0">
           <h1 className="type-large-title text-label-primary">License plates</h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
-            Plates Frigate&apos;s LPR has read. Name them so notifications
+            License plates this Droplet has read. Name them so notifications
             show <span className="font-mono">&ldquo;Alice&apos;s Civic
             arrived&rdquo;</span> instead of a string of characters.
           </p>
@@ -143,7 +149,7 @@ export default function PlatesPage() {
             No plates read yet
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Either Frigate&apos;s LPR isn&apos;t enabled, or no vehicle has
+            License-plate recognition isn&apos;t enabled, or no vehicle has
             driven by yet. Plates appear here after the first event with a
             readable plate.
           </p>
@@ -233,6 +239,20 @@ export default function PlatesPage() {
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onConfirm={performDelete}
+        onCancel={() => setDeleteTarget(null)}
+        title={
+          deleteTarget
+            ? `Forget plate "${deleteTarget.plate}"${deleteTarget.name ? ` (${deleteTarget.name})` : ""}?`
+            : "Forget plate?"
+        }
+        description="The plate is re-detected next time it appears on camera, so you can re-tag it. The owner name is removed."
+        confirmLabel="Forget"
+        variant="destructive"
+      />
     </div>
   );
 }

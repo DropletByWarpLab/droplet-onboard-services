@@ -30,7 +30,7 @@ const logger = pino({ name: "claude-activity:github" });
 // Hard-coded for our own repo. If we ever multi-tenant the dashboard
 // these become env vars; until then a constant beats one more env knob.
 const OWNER = process.env.GITHUB_REPO_OWNER || "DropletByWarpLab";
-const REPO = process.env.GITHUB_REPO_NAME || "droplet-pi-platform";
+const REPO = process.env.GITHUB_REPO_NAME || "droplet-onboard-services";
 
 const CACHE_TTL_SECONDS = 60;
 const CACHE_PREFIX = "claude-activity:github:";

@@ -17,7 +17,8 @@
  * constant — not a sprinkle of `* 1.1` literals across the file.
  */
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -32,6 +33,15 @@ import {
   pollNcChunkCount,
   COMPOSE,
 } from "../helpers/rag-retrieval";
+
+/**
+ * WARP-436: when RAGAS_ENABLED=1 is set in the environment, the eval
+ * suite also runs ragas_runner.py against the same stack and asserts
+ * threshold envelopes derived from tests/retrieval-eval/ragas/baselines.json.
+ * Default OFF — RAGAS is offline-judge-driven and too slow for per-PR CI.
+ */
+const RAGAS_ENABLED = process.env.RAGAS_ENABLED === "1";
+const RAGAS_JUDGE = process.env.RAGAS_JUDGE ?? "local";
 
 /**
  * Acceptance criterion per WARP-286 spec: hybrid must beat vector-only
@@ -55,6 +65,12 @@ interface RelevantMatch {
 interface Query {
   id: string;
   query: string;
+  /**
+   * WARP-437: optional query class label used for per-class slicing in the
+   * enhanced-vs-baseline recording test. Pre-WARP-437 rows omit this and
+   * fall into the `unlabeled` bucket.
+   */
+  class?: "factual" | "analytical" | "conversational" | "navigational";
   relevant: RelevantMatch[];
   notes?: string;
 }
@@ -64,6 +80,11 @@ interface SearchResult {
   path: string;
   chunkIdx: number;
   score: number;
+  // WARP-436: snippet is added by the admin-retrieval-eval endpoint
+  // extension for the RAGAS runner. The NDCG@10 harness doesn't use it,
+  // but typing it here keeps the wire shape in sync between TS + Python
+  // consumers of the same endpoint.
+  snippet?: string;
 }
 
 function matchesRelevant(result: SearchResult, r: RelevantMatch): boolean {
@@ -98,7 +119,7 @@ function ndcgAtK(results: SearchResult[], query: Query, k: number = NDCG_K): num
 }
 
 async function callSearchEndpoint(
-  variant: "vector" | "rrf" | "hybrid",
+  variant: "vector" | "rrf" | "hybrid" | "hybrid-enhanced",
   query: string,
 ): Promise<SearchResult[]> {
   // Single endpoint with a variant query parameter. The orchestrator
@@ -109,6 +130,19 @@ async function callSearchEndpoint(
   if (!res.ok) throw new Error(`eval search ${variant} failed: ${res.status}`);
   const body = (await res.json()) as { results: SearchResult[] };
   return body.results;
+}
+
+/**
+ * WARP-437: group queries by their `class` label so per-class NDCG@10 means
+ * can be reported. Queries without a label fall into `unlabeled`.
+ */
+function groupByClass(queries: Query[]): Record<string, Query[]> {
+  const out: Record<string, Query[]> = {};
+  for (const q of queries) {
+    const c = q.class ?? "unlabeled";
+    (out[c] ??= []).push(q);
+  }
+  return out;
 }
 
 describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
@@ -209,4 +243,133 @@ describe.skipIf(!SHOULD_RUN)("retrieval eval — WARP-286", () => {
       vecMean * NDCG_IMPROVEMENT_THRESHOLD,
     );
   }, 600_000);
+
+  // WARP-437 — per-class NDCG@10, baseline vs enhanced. RECORDING MODE:
+  // logs deltas but does not enforce a gate until per-class envelopes are
+  // populated in tests/retrieval-eval/ragas/baselines.json. The 20-minute
+  // timeout accommodates 65 queries × 2 passes; the enhanced pass runs an
+  // LLM call per query on local Ollama.
+  it("per-class NDCG@10 — baseline vs enhanced (WARP-437 recording mode)", async () => {
+    const byClass = groupByClass(queries);
+    const classes = Object.keys(byClass);
+
+    const results: Record<
+      string,
+      { baseline: number; enhanced: number; delta: number }
+    > = {};
+
+    for (const c of classes) {
+      const baselineN: number[] = [];
+      const enhancedN: number[] = [];
+      for (const q of byClass[c]!) {
+        const [base, enh] = await Promise.all([
+          callSearchEndpoint("hybrid", q.query),
+          callSearchEndpoint("hybrid-enhanced", q.query),
+        ]);
+        baselineN.push(ndcgAtK(base, q));
+        enhancedN.push(ndcgAtK(enh, q));
+      }
+      const mean = (xs: number[]) =>
+        xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
+      const baseline = mean(baselineN);
+      const enhanced = mean(enhancedN);
+      results[c] = {
+        baseline,
+        enhanced,
+        delta: baseline === 0 ? 0 : (enhanced - baseline) / baseline,
+      };
+    }
+
+    // eslint-disable-next-line no-console
+    console.log("\n[WARP-437] Per-class NDCG@10 (baseline → enhanced):");
+    for (const c of classes) {
+      const r = results[c]!;
+      const pct = (r.delta * 100).toFixed(1);
+      // eslint-disable-next-line no-console
+      console.log(
+        `  ${c.padEnd(15)} baseline=${r.baseline.toFixed(4)}  enhanced=${r.enhanced.toFixed(4)}  delta=${pct}%`,
+      );
+    }
+
+    // RECORDING MODE: do not assert per-class deltas. Once
+    // tests/retrieval-eval/ragas/baselines.json carries populated per-class
+    // envelopes, switch this to enforce per WARP-437 spec:
+    //   - short        : enhanced ≥ baseline × 1.05
+    //   - analytical   : context_recall(enhanced) ≥ baseline × 1.10 (RAGAS)
+    //   - conversational: if regress, default-off the preset
+    //   - full corpus  : enhanced ≥ baseline × 1.03
+    // The always-true assertion keeps the test green in CI; the console.log
+    // is the artifact.
+    expect(Object.keys(results).length).toBeGreaterThan(0);
+  }, 1_200_000);
+
+  // WARP-436 — RAGAS metrics layered on top of NDCG@10. Gated by env so
+  // we don't pay the judge-LLM cost on every PR's vitest run.
+  it.skipIf(!RAGAS_ENABLED)(
+    "RAGAS metrics stay above baseline thresholds (WARP-436)",
+    async () => {
+      const ragasDir = resolve(REPO_ROOT, "tests/retrieval-eval/ragas");
+      const runner = resolve(ragasDir, "ragas_runner.py");
+      const resultsJson = resolve(ragasDir, "results.json");
+      const baselinesJson = resolve(ragasDir, "baselines.json");
+
+      // Spawn the runner against the still-running Compose stack. The
+      // venv is created/refreshed by scripts/test-rag.sh --with-ragas;
+      // when running through `npx vitest` directly the caller is
+      // expected to have provisioned it. We don't auto-create a venv
+      // here to keep this test's responsibility tight.
+      const pythonBin = process.env.RAGAS_PYTHON
+        ?? resolve(ragasDir, ".ragas-venv/bin/python");
+      const args = [
+        runner,
+        "--variant", "hybrid",
+        "--limit", "10",
+        "--judge", RAGAS_JUDGE,
+        "--api-url", API_URL,
+        "--out", resultsJson,
+        "--out-md", resolve(ragasDir, "results.md"),
+      ];
+
+      // eslint-disable-next-line no-console
+      console.log(`\n[RAGAS] ${pythonBin} ${args.join(" ")}`);
+      execSync(`${pythonBin} ${args.map((a) => JSON.stringify(a)).join(" ")}`,
+        { stdio: "inherit" });
+
+      expect(existsSync(resultsJson)).toBe(true);
+      const results = JSON.parse(readFileSync(resultsJson, "utf8")) as {
+        metrics: Record<string, { mean: number; p50: number; p95: number }>;
+      };
+
+      // If baselines.json exists, assert every metric's mean is within the
+      // p50 - 1.5*IQR envelope. If it doesn't (first-ever run on a new
+      // appliance), record-mode: print numbers, don't fail.
+      if (!existsSync(baselinesJson)) {
+        // eslint-disable-next-line no-console
+        console.log(
+          "\n[RAGAS] baselines.json not found — recording mode. " +
+          "Inspect tests/retrieval-eval/ragas/results.json and commit " +
+          "baselines.json with the 5-run aggregates per docs/RAG_TESTING.md.",
+        );
+        return;
+      }
+
+      const baselines = JSON.parse(
+        readFileSync(baselinesJson, "utf8"),
+      ) as {
+        envelopes: Record<string, { floor: number }>;
+      };
+
+      for (const [metric, stats] of Object.entries(results.metrics)) {
+        const floor = baselines.envelopes?.[metric]?.floor;
+        if (typeof floor !== "number") continue;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[RAGAS] ${metric}: mean=${stats.mean.toFixed(3)} floor=${floor.toFixed(3)}`,
+        );
+        expect(stats.mean).toBeGreaterThanOrEqual(floor);
+      }
+    },
+    // Judge LLM call per metric per query → can be slow on local mistral.
+    1_800_000,
+  );
 });

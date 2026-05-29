@@ -178,7 +178,7 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
           <button
             type="button"
             onClick={onEdit}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
           >
             Edit
           </button>
@@ -188,14 +188,14 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
               <button
                 type="button"
                 onClick={handleDelete}
-                className="dp-button-primary text-sm"
+                className="dp-btn-primary text-sm"
               >
                 Yes
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmDelete(false)}
-                className="dp-button-secondary text-sm"
+                className="dp-btn-secondary text-sm"
               >
                 No
               </button>
@@ -204,7 +204,7 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
             <button
               type="button"
               onClick={() => setConfirmDelete(true)}
-              className="dp-button-secondary text-sm"
+              className="dp-btn-secondary text-sm"
             >
               Delete
             </button>

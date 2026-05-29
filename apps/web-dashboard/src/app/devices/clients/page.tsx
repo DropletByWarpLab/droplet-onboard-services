@@ -15,6 +15,8 @@ import {
   revokeDeviceClient,
 } from "@/lib/api";
 import type { DeviceClientInfo } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 const PLATFORM_ICON = {
   android: Smartphone,
@@ -51,6 +53,8 @@ export default function DeviceClientsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<DeviceClientInfo | null>(null);
+  const { toast } = useToast();
 
   const refresh = async () => {
     setLoading(true);
@@ -69,14 +73,22 @@ export default function DeviceClientsPage() {
     void refresh();
   }, []);
 
-  const handleRevoke = async (client: DeviceClientInfo) => {
-    if (!confirm(`Revoke "${client.deviceName}"? It will need to pair again.`)) return;
+  const handleRevoke = (client: DeviceClientInfo) => {
+    setRevokeTarget(client);
+  };
+
+  const performRevoke = async () => {
+    const client = revokeTarget;
+    if (!client) return;
     setRevoking(client.id);
     try {
       await revokeDeviceClient(client.id);
+      setRevokeTarget(null);
+      toast(`Revoked "${client.deviceName}".`, "success");
       await refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Revoke failed");
+      toast(e instanceof Error ? e.message : "Revoke failed", "error");
+      throw e;
     } finally {
       setRevoking(null);
     }
@@ -113,9 +125,10 @@ export default function DeviceClientsPage() {
         <button
           onClick={() => void refresh()}
           disabled={loading}
+          aria-label="Refresh device list"
           className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
         >
-          <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+          <RefreshCw size={16} className={loading ? "animate-spin" : ""} aria-hidden="true" />
         </button>
       </div>
 
@@ -174,6 +187,20 @@ export default function DeviceClientsPage() {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        onConfirm={performRevoke}
+        onCancel={() => setRevokeTarget(null)}
+        title={
+          revokeTarget
+            ? `Revoke "${revokeTarget.deviceName}"?`
+            : "Revoke device?"
+        }
+        description="This device's session token stops working immediately. To use it again, sign in or scan a new pairing code."
+        confirmLabel="Revoke"
+        variant="destructive"
+      />
     </div>
   );
 }
@@ -223,8 +250,9 @@ function ClientList({
                   disabled={revoking === c.id}
                   className="p-2 rounded-lg text-label-tertiary hover:text-system-red hover:bg-system-red/10 disabled:opacity-50"
                   title="Revoke this device"
+                  aria-label={`Revoke ${c.deviceName}`}
                 >
-                  <Trash2 size={14} />
+                  <Trash2 size={14} aria-hidden="true" />
                 </button>
               )}
             </li>

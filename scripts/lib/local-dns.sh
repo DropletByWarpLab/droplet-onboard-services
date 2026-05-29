@@ -95,6 +95,7 @@ _install_avahi_linux() {
   log_info "Installing avahi-daemon + libnss-mdns..."
   # libnss-mdns lets local lookups (getent hosts droplet.local) succeed too,
   # not just tools that speak mDNS directly.
+  # shellcheck disable=SC2024  # $LOG_FILE is operator-owned (writable by the calling user); the redirect runs as caller by design — chowning the log to root just to silence shellcheck would defeat the point.
   if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
        avahi-daemon libnss-mdns >>"$LOG_FILE" 2>&1; then
     return 0
@@ -158,7 +159,9 @@ _set_avahi_host_name() {
 
 _restart_avahi() {
   if command -v systemctl >/dev/null 2>&1; then
+    # shellcheck disable=SC2024  # $LOG_FILE is operator-owned (writable by the calling user); redirect-as-caller is the intended behaviour, same rationale as _install_avahi_packages above.
     sudo systemctl enable avahi-daemon >>"$LOG_FILE" 2>&1 || true
+    # shellcheck disable=SC2024  # Same rationale: operator-owned log, caller-side redirect.
     if sudo systemctl restart avahi-daemon >>"$LOG_FILE" 2>&1; then
       return 0
     fi
@@ -167,6 +170,7 @@ _restart_avahi() {
   fi
 
   if command -v service >/dev/null 2>&1; then
+    # shellcheck disable=SC2024  # Same rationale: operator-owned log, caller-side redirect.
     sudo service avahi-daemon restart >>"$LOG_FILE" 2>&1 || true
     return 0
   fi
@@ -246,9 +250,17 @@ setup_router_dns() {
   # mktemp (not /tmp/$$.xxx) so the response file can't be a dangling symlink
   # pre-planted by another user on the host. `trap` guarantees cleanup even if
   # the script is interrupted mid-curl.
-  local resp_file
+  #
+  # RETURN-trap quirk: bash evaluates the trap body when the function
+  # returns; under `set -u` accessing `$resp_file` errors with "unbound
+  # variable" if the function returned before the mktemp assignment OR
+  # if the trap fires in the caller's scope (older bash versions). Use
+  # the `${var:-}` default-empty form so `rm -f ""` is a benign no-op
+  # in either case. Surfaced by setup.sh failing at phase 7/7 on
+  # droplet-sys after a factory-reset.
+  local resp_file=""
   resp_file="$(mktemp -t droplet-dns-resp.XXXXXX 2>/dev/null || mktemp)"
-  trap 'rm -f "$resp_file"' RETURN
+  trap 'rm -f "${resp_file:-}"' RETURN
 
   local http_code
   http_code="$(curl -sS --max-time 10 -o "$resp_file" -w "%{http_code}" \

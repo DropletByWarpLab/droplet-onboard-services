@@ -13,6 +13,30 @@ const inputSchema = {
       maximum: 50,
       description: "Max results to return (default 10).",
     },
+    enhance: {
+      type: "object",
+      description:
+        "WARP-437: optional query enhancement knobs. Omit for baseline behaviour. Adaptive routing in the orchestrator's agent loop typically sets these based on classified query intent; the LLM may also opt in directly.",
+      properties: {
+        hyde: {
+          type: "boolean",
+          description:
+            "Run HyDE rewrite + average the hypothetical-passage embedding with the raw query.",
+        },
+        multiQuery: {
+          type: "boolean",
+          description:
+            "Run multi-query expansion (n paraphrases) and RRF-fuse across vector arms.",
+        },
+        n: {
+          type: "integer",
+          minimum: 2,
+          maximum: 5,
+          description: "Paraphrase count when multiQuery=true (default 3).",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   required: ["query"],
   additionalProperties: false,
@@ -20,6 +44,21 @@ const inputSchema = {
 
 function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
+}
+
+function parseEnhance(
+  raw: unknown,
+): { hyde?: boolean; multiQuery?: boolean; n?: number } | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: { hyde?: boolean; multiQuery?: boolean; n?: number } = {};
+  if (typeof r.hyde === "boolean") out.hyde = r.hyde;
+  if (typeof r.multiQuery === "boolean") out.multiQuery = r.multiQuery;
+  if (typeof r.n === "number" && Number.isInteger(r.n) && r.n >= 2 && r.n <= 5) {
+    out.n = r.n;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 async function handler(
@@ -31,6 +70,8 @@ async function handler(
   if (query.length < 2)
     return err("INVALID_ARGS", "query must be at least 2 characters");
   const limit = Math.max(1, Math.min(50, Number(args.limit) || 10));
+  // WARP-437: parse enhance, allow undefined to flow through (default behaviour).
+  const enhance = parseEnhance(args.enhance);
 
   // WARP-286: delegate to the orchestrator-side searchHybrid shim. The
   // handler no longer assembles its own embedding + SQL; that knowledge
@@ -42,7 +83,16 @@ async function handler(
 
   let hits: Awaited<ReturnType<NonNullable<typeof ctx.searchHybrid>>>;
   try {
-    hits = await ctx.searchHybrid({ query, limit });
+    // WARP-437: forward the orchestrator-injected `_enhancement` bundle
+    // from the per-call context (delivered via MCP `_meta`, not args —
+    // it is NOT LLM-controllable). The shim threads it into
+    // `searchHybrid`'s `queryEnhancement` + `searchOverrides`.
+    hits = await ctx.searchHybrid({
+      query,
+      limit,
+      enhance,
+      _enhancement: ctx._enhancement,
+    });
   } catch {
     return err("SEARCH_FAILED", "search_failed");
   }

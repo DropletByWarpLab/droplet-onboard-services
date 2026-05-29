@@ -35,11 +35,9 @@ import type {
   ModelsResponse,
   NetworkCommandResult,
   NetworkOverview,
-  SessionChatRequest,
-  SessionDetail,
-  SessionInfo,
   StorageStats,
   DrivesResponse,
+  DriveLabel,
   WirelessScanResult,
   AuthUser,
   InviteCreateRequest,
@@ -327,6 +325,37 @@ export async function fetchStorage(): Promise<StorageStats> {
 export async function fetchDrives(): Promise<DrivesResponse> {
   const res = await authFetch(`${BASE}/api/storage/drives`);
   if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-174: upsert the customer's friendly name (+ optional icon + notes)
+ * for a drive. Used by the setup wizard's Storage step and the
+ * post-setup `/storage` page.
+ *
+ * First call for a given UUID requires `displayName`; later calls can
+ * be partial. Server returns the full Drive row.
+ */
+export async function updateDriveLabel(
+  uuid: string,
+  patch: {
+    displayName?: string;
+    icon?: string | null;
+    notes?: string | null;
+  },
+): Promise<DriveLabel> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update drive: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -1313,12 +1342,141 @@ export async function fetchModels(): Promise<ModelsResponse> {
   return res.json();
 }
 
-export async function sendChat(request: ChatRequest): Promise<Response> {
+export async function sendChat(
+  request: ChatRequest & {
+    signal?: AbortSignal;
+    /** WARP-304: continue an existing conversation. Omitted on the first turn. */
+    conversationId?: string;
+    /** WARP-304: client-supplied idempotency key. Required after WARP-304. */
+    turnId?: string;
+  },
+): Promise<Response> {
+  const { signal, ...body } = request;
   return authFetch(`${BASE}/api/llm/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
+    signal,
   });
+}
+
+/**
+ * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
+ * dashboard hydrates `useChat.messages` from this on page mount when the
+ * URL carries a `?c=<id>` hash.
+ */
+export interface PersistedConversation {
+  id: string;
+  title: string | null;
+  model: string | null;
+  provider: string | null;
+  createdAt: string;
+  updatedAt: string;
+  messages: Array<{
+    id: string;
+    role: string;
+    content: string;
+    toolCalls:
+      | Array<{
+          id: string;
+          name: string;
+          args: Record<string, unknown>;
+          ok?: boolean;
+          status?: string;
+          message?: string;
+          data?: unknown;
+        }>
+      | null;
+    toolCallId: string | null;
+    turnId: string | null;
+    /**
+     * Lifecycle status of the persisted row. The client uses
+     * it to drive failureKind on reloaded messages. Optional because
+     * older orchestrator builds didn't return it; treat missing as
+     * `completed` defensively.
+     */
+    status?: "pending" | "streaming" | "completed" | "failed" | "aborted";
+    createdAt: string;
+  }>;
+}
+
+export async function fetchConversation(
+  conversationId: string,
+): Promise<PersistedConversation | null> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`Failed to fetch conversation: ${res.status}`);
+  }
+  return res.json() as Promise<PersistedConversation>;
+}
+
+/**
+ * WARP-331 — list a user's conversations newest-first. Paginated.
+ * Powers the chat history sidebar on /chat.
+ */
+export interface ConversationSummary {
+  id: string;
+  title: string | null;
+  model: string | null;
+  provider: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listConversations(args: {
+  limit: number;
+  offset: number;
+}): Promise<ConversationSummary[]> {
+  const qs = new URLSearchParams({
+    limit: String(args.limit),
+    offset: String(args.offset),
+  });
+  const res = await authFetch(`${BASE}/api/llm/conversations?${qs}`);
+  if (!res.ok) throw new Error(`Failed to list conversations: ${res.status}`);
+  const body = (await res.json()) as { conversations: ConversationSummary[] };
+  return body.conversations;
+}
+
+/** WARP-331 — rename a conversation. Server trims + clamps to 64 chars.
+ *  Returns the canonical stored title. No `updatedAt` is returned because
+ *  the service intentionally does not bump the DB column on rename (rename
+ *  is metadata; see chat-persistence.service.ts). */
+export async function renameConversation(
+  conversationId: string,
+  title: string,
+): Promise<{ id: string; title: string }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+  if (!res.ok) {
+    let body: { error?: string } = {};
+    try {
+      body = await res.json();
+    } catch {
+      // ignore
+    }
+    throw new Error(body.error || `Failed to rename conversation: ${res.status}`);
+  }
+  return res.json() as Promise<{ id: string; title: string }>;
+}
+
+/** WARP-331 — delete a conversation. Returns true on 200, false on 404. */
+export async function deleteConversation(conversationId: string): Promise<boolean> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    { method: "DELETE" },
+  );
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`Failed to delete conversation: ${res.status}`);
+  return true;
 }
 
 // --- Brain memory (chat attachments) ---
@@ -1405,69 +1563,13 @@ export async function deleteProviderKey(provider: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete key: ${res.status}`);
 }
 
-// --- Sessions ---
-
-export async function createSession(body: {
-  model: string;
-  title?: string;
-  system_prompt?: string | null;
-}): Promise<SessionInfo> {
-  const res = await authFetch(`${BASE}/api/llm/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
-  return res.json();
-}
-
-export async function listSessions(
-  limit = 50,
-  offset = 0
-): Promise<{ sessions: SessionInfo[] }> {
-  const res = await authFetch(
-    `${BASE}/api/llm/sessions?limit=${limit}&offset=${offset}`
-  );
-  if (!res.ok) throw new Error(`Failed to list sessions: ${res.status}`);
-  return res.json();
-}
-
-export async function getSession(sessionId: string): Promise<SessionDetail> {
-  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`);
-  if (!res.ok) throw new Error(`Failed to get session: ${res.status}`);
-  return res.json();
-}
-
-export async function updateSessionTitle(
-  sessionId: string,
-  title: string
-): Promise<SessionInfo> {
-  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
-  });
-  if (!res.ok) throw new Error(`Failed to update session: ${res.status}`);
-  return res.json();
-}
-
-export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await authFetch(`${BASE}/api/llm/sessions/${sessionId}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) throw new Error(`Failed to delete session: ${res.status}`);
-}
-
-export async function sendSessionChat(
-  sessionId: string,
-  request: SessionChatRequest
-): Promise<Response> {
-  return authFetch(`${BASE}/api/llm/sessions/${sessionId}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-}
+// WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
+// listSessions, getSession, updateSessionTitle, deleteSession,
+// sendSessionChat) targeted the orchestrator's removed
+// `/api/llm/sessions/*` proxy routes. They were never imported by any
+// page after WARP-104; persistent conversation state now lives behind
+// `/api/llm/conversations/*` (WARP-304) — `fetchConversation` above is
+// the only consumer.
 
 // --- File operations ---
 
@@ -1817,6 +1919,37 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   return data.shares ?? [];
 }
 
+// --- WARP-307: Calendar place autocomplete ---
+
+export interface PlaceSuggestion {
+  displayName: string;
+  lat: string;
+  lon: string;
+  type: string | null;
+}
+
+/**
+ * Hit the orchestrator's Nominatim proxy for fuzzy location suggestions.
+ * Returns `[]` on any error so the combobox falls back to free-text.
+ */
+export async function fetchPlaces(
+  query: string,
+  limit = 5,
+  signal?: AbortSignal,
+): Promise<PlaceSuggestion[]> {
+  const q = query.trim();
+  if (q.length < 2) return [];
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  try {
+    const res = await authFetch(`${BASE}/api/calendar/places?${params}`, { signal });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.places) ? (data.places as PlaceSuggestion[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 // --- Phase 4: Semantic content search ---
 
 export interface SemanticSearchResult {
@@ -1838,6 +1971,38 @@ export async function searchFileContent(
   }
   const data = await res.json();
   return data.results ?? [];
+}
+
+/**
+ * WARP-310: readiness probe for the AI / semantic search toggle. The
+ * Files page's SearchBar polls this when the user flips the toggle so
+ * it can show a green / yellow / red status pill rather than letting
+ * the user type into a search box that returns nothing because the
+ * indexer never ran or pgvector isn't installed.
+ */
+export interface SearchReadinessStatus {
+  /** ready = gateway + pgvector + ≥1 indexed chunk; indexing = still empty; unavailable = something is down. */
+  state: "ready" | "indexing" | "unavailable";
+  gatewayHealthy: boolean;
+  pgvectorReady: boolean;
+  indexedCount: number;
+  lastIndexedAt: string | null;
+}
+
+export async function fetchSearchStatus(): Promise<SearchReadinessStatus> {
+  const res = await authFetch(`${BASE}/api/files/search/status`);
+  if (!res.ok) {
+    // Treat any non-200 as "unavailable" so a misconfigured deployment
+    // surfaces clearly in the UI rather than throwing an error toast.
+    return {
+      state: "unavailable",
+      gatewayHealthy: false,
+      pgvectorReady: false,
+      indexedCount: 0,
+      lastIndexedAt: null,
+    };
+  }
+  return (await res.json()) as SearchReadinessStatus;
 }
 
 // --- Phase 3: device clients + pairing + user admin ---
@@ -1918,6 +2083,83 @@ export async function setUserEnabled(username: string, enabled: boolean): Promis
 
 // --- Remote Access (WireGuard VPN) ---
 
+// ── WARP-446: Coverage extender APs ──
+
+export async function fetchApDevices(): Promise<{
+  aps: import("./types").ApDeviceInfo[];
+  // ADR-005 LRU cap on the discovered-list. Surfaces in the panel so
+  // the operator knows when an mDNS flood is filling the queue.
+  discoveredCap: number;
+  discoveredCapReached: boolean;
+}> {
+  const res = await authFetch(`${BASE}/api/aps`);
+  if (!res.ok) throw new Error(`Failed to fetch extender APs: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDiscoveredApDevices(): Promise<{
+  discovered: import("./types").ApDeviceInfo[];
+  cap: number;
+  capReached: boolean;
+}> {
+  const res = await authFetch(`${BASE}/api/aps/discovered`);
+  if (!res.ok) throw new Error(`Failed to fetch discovered extenders: ${res.status}`);
+  return res.json();
+}
+
+export async function approveApDevice(
+  mac: string,
+  body: {
+    ssid: string;
+    encryptionKey: string;
+    radio?: string;
+    encryption?: string;
+    network?: string;
+    displayName?: string;
+  },
+): Promise<{
+  ap: import("./types").ApDeviceInfo;
+  operationId: string | null;
+}> {
+  // Colons in MAC are allowed unencoded in path segments per RFC 3986 §3.3.
+  const res = await authFetch(`${BASE}/api/aps/${mac}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    // WARP-446 (blocker #7): the orchestrator surfaces a typed
+    // `code` on every ApOnboardError (PROVISIONING_TIMEOUT,
+    // ROUTER_UNREACHABLE, WIRELESS_CONFIG_REJECTED, UNKNOWN). Attach
+    // it to the thrown Error so the panel's AP_ONBOARD_ERROR_COPY
+    // table can key on the code rather than regex-matching the raw
+    // message.
+    const e = new Error(err.error || `Failed to approve extender: ${res.status}`);
+    if (err.code) (e as Error & { code?: string }).code = err.code;
+    throw e;
+  }
+  return res.json();
+}
+
+export async function decommissionApDevice(
+  mac: string,
+): Promise<{
+  ap: import("./types").ApDeviceInfo;
+  operationId: string | null;
+}> {
+  const res = await authFetch(`${BASE}/api/aps/${mac}/decommission`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const e = new Error(err.error || `Failed to decommission extender: ${res.status}`);
+    if (err.code) (e as Error & { code?: string }).code = err.code;
+    throw e;
+  }
+  return res.json();
+}
+
 export async function fetchVpnStatus(): Promise<VpnStatusInfo> {
   const res = await authFetch(`${BASE}/api/vpn/status`);
   if (!res.ok) throw new Error(`Failed to fetch Remote Access status: ${res.status}`);
@@ -1967,7 +2209,10 @@ export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
 
 export async function setDuckDnsConfig(opts: {
   subdomain: string;
-  token: string;
+  // Optional: omit entirely when the customer is keeping a previously
+  // stored token. The orchestrator + routing service preserve the
+  // existing password value in that case rather than rewriting cleartext.
+  token?: string;
   enabled?: boolean;
 }): Promise<DuckDnsStatus> {
   const res = await authFetch(`${BASE}/api/ddns/duckdns`, {

@@ -11,6 +11,7 @@ import type { ContextDeps } from "./context.js";
 import { EmbeddingClient } from "./embedding.client.js";
 import { RerankerClient } from "./reranker.client.js";
 import { searchHybrid } from "./file-search.service.js";
+import { createMatterController } from "./matter.controller.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -37,20 +38,38 @@ function parseTransport(argv: string[]): "stdio" | "http" {
   return "stdio";
 }
 
-type HttpTarget = "routing" | "cameras" | "switchSvc" | "fileIndexer" | "nextcloud";
+type HttpTarget =
+  | "routing"
+  | "cameras"
+  | "switchSvc"
+  | "fileIndexer"
+  | "nextcloud"
+  | "orchestrator";
 
 function baseUrlFor(target: HttpTarget): string {
   switch (target) {
     case "routing":
       return process.env.ROUTING_SERVICE_URL ?? "http://host.docker.internal:8080";
     case "cameras":
-      return process.env.CAMERA_DISCOVERY_URL ?? "http://camera-discovery:8000";
+      // camera-discovery runs network_mode: host (binds privileged
+      // sockets for ONVIF WS-Discovery + RTSP scan); other compose-net
+      // containers can't resolve it by service DNS. Same pattern as
+      // routing/switch — reach it through the host-gateway hostname
+      // the orchestrator's `extra_hosts` already wires up. Real port
+      // is 8085 per services/camera-discovery/Dockerfile.
+      return process.env.CAMERA_DISCOVERY_URL ?? "http://host.docker.internal:8085";
     case "switchSvc":
       return process.env.SWITCH_SERVICE_URL ?? "http://host.docker.internal:8081";
     case "fileIndexer":
       return process.env.FILE_INDEXER_URL ?? "http://file-indexer:8000";
     case "nextcloud":
       return process.env.NEXTCLOUD_URL ?? "http://nextcloud";
+    case "orchestrator":
+      // WARP-102: Matter tool calls + audit-log + safety-tier proxy
+      // back to the orchestrator's REST surface from here. Compose
+      // wires ORCHESTRATOR_URL explicitly; the fallback keeps
+      // off-compose dev runs working.
+      return process.env.ORCHESTRATOR_URL ?? "http://orchestrator:3000";
   }
 }
 
@@ -74,11 +93,46 @@ function joinUrl(base: string, path: string, params?: Record<string, unknown>): 
  */
 function createHttpClient(target: HttpTarget): HttpClient {
   const base = baseUrlFor(target);
+  // WARP-339: when the target is the orchestrator, attach the
+  // service-principal bearer the orchestrator's authMiddleware
+  // recognises (matchServiceToken → `_service:mcp` AuthUser). The
+  // shared-secret pattern mirrors what voice-io already does for
+  // /api/llm/chat — see scripts/lib/secrets.sh SERVICE_TOKEN_MCP +
+  // apps/orchestrator/src/middleware/auth.ts SERVICE_PRINCIPALS.
+  //
+  // The token is read once at client-construction time rather than
+  // per-request; rotation requires a container restart on both the
+  // orchestrator and the mcp-server (compose wires them to the same
+  // ${SERVICE_TOKEN_MCP} value). Other targets (routing, switch,
+  // file-indexer) carry their own service tokens that handlers pass
+  // via opts.headers, so this hook only fires for the orchestrator path.
+  const orchestratorToken =
+    target === "orchestrator"
+      ? (process.env.ORCHESTRATOR_TOKEN ?? "").trim() || null
+      : null;
+  if (target === "orchestrator" && !orchestratorToken) {
+    // Loud at construction so a misconfigured deployment surfaces
+    // before any handler tries to use the client. Matches the
+    // voice-io pattern (services/voice-io/voice/llm.py line ~441).
+    // Don't crash — local dev with AUTH_ENABLED=false still works,
+    // and a noisy log is more useful than a failed boot.
+    console.warn(
+      "[mcp-server] ORCHESTRATOR_TOKEN is empty — outbound calls to " +
+        "the orchestrator (/api/matter/*, /api/audit-log/*, ...) will " +
+        "401 when AUTH_ENABLED=true. Set ORCHESTRATOR_TOKEN to the " +
+        "orchestrator's SERVICE_TOKEN_MCP value before going live.",
+    );
+  }
+  const injectAuth = (h: Record<string, string> = {}): Record<string, string> => {
+    if (!orchestratorToken) return h;
+    if (h.Authorization || h.authorization) return h;
+    return { ...h, Authorization: `Bearer ${orchestratorToken}` };
+  };
   return {
     async get(path, opts) {
       return fetch(joinUrl(base, path, opts?.params), {
         method: "GET",
-        headers: opts?.headers,
+        headers: injectAuth(opts?.headers),
       });
     },
     async post(path, body, opts) {
@@ -86,7 +140,7 @@ function createHttpClient(target: HttpTarget): HttpClient {
       if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
       return fetch(joinUrl(base, path), {
         method: "POST",
-        headers,
+        headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     },
@@ -95,14 +149,14 @@ function createHttpClient(target: HttpTarget): HttpClient {
       if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
       return fetch(joinUrl(base, path), {
         method: "PATCH",
-        headers,
+        headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     },
     async delete(path, opts) {
       return fetch(joinUrl(base, path), {
         method: "DELETE",
-        headers: opts?.headers,
+        headers: injectAuth(opts?.headers),
       });
     },
   };
@@ -152,18 +206,13 @@ async function main(): Promise<void> {
   // first connection on demand.
   const deps: ContextDeps = {
     prisma,
-    // Matter stub stays minimal until WARP-102 decides whether the
-    // mcp-server hosts its own Matter controller or proxies HTTP back to
-    // the orchestrator. WARP-101 only exercises tools that don't touch
-    // Matter, so a no-op shim is the safest default.
-    matter: {
-      listDevices: async () => ({}),
-      getDevice: async () => ({}),
-      sendCommand: async () => ({}),
-      discover: async () => ({}),
-      commission: async () => ({}),
-      getAuditLog: async () => ({}),
-    },
+    // WARP-102 (resolved 2026-05-15): the Matter fabric lives inside
+    // the orchestrator process (matter.js + /data/matter-storage
+    // volume), so we DO NOT dual-host a controller here. The
+    // mcp-server proxies every Matter tool call back to
+    // `http://orchestrator:3000/matter/*` via the shared HttpClient
+    // factory. See `matter.controller.ts` for the route mapping.
+    matter: createMatterController(createHttpClient("orchestrator")),
     httpFactory: createHttpClient,
     embedText: (texts) => embeddingClient.embed(texts),
     // WARP-286: hybrid retrieval shim consumed by the `search_content`
@@ -171,17 +220,32 @@ async function main(): Promise<void> {
     // (vector, lexical, RRF, rerank) to `searchHybrid`. If Redis is
     // unconfigured we still serve hybrid results without the rerank
     // cache (every call hits ai-gateway).
-    searchHybrid: async ({ userId, query, limit }) => {
+    searchHybrid: async ({ userId, query, limit, _enhancement }) => {
       const vectors = await embeddingClient.embed([query]);
       const vector = vectors[0];
       if (!vector || vector.length === 0) {
         throw new Error("embedding_service_returned_no_vector");
       }
+      // WARP-437: thread orchestrator-injected enhancement into the
+      // searchHybrid pipeline. `queryEnhancement` carries the precomputed
+      // HyDE vector / paraphrase vectors / soft filename filter;
+      // `minSimilarity` / `perArmK` / `rerank.candidates` are per-call
+      // overrides for adaptive routing (factual, analytical, conversational,
+      // navigational presets — see llm-agent.service.ts:presetForClass).
       return searchHybrid(prisma, {
         userId,
         vector,
         query,
         limit,
+        minSimilarity: _enhancement?.searchOverrides?.minSimilarity,
+        perArmK: _enhancement?.searchOverrides?.perArmK,
+        queryEnhancement: _enhancement
+          ? {
+              hydeVector: _enhancement.hydeVector,
+              extraQueryVectors: _enhancement.extraQueryVectors,
+              metadataFilter: _enhancement.metadataFilter,
+            }
+          : undefined,
         rerank: redis
           ? {
               redis: redis as unknown as {
@@ -189,6 +253,7 @@ async function main(): Promise<void> {
                 setex(k: string, ttl: number, v: string): Promise<unknown>;
               },
               reranker: rerankerClient,
+              candidates: _enhancement?.searchOverrides?.rerankCandidates,
             }
           : undefined,
       });

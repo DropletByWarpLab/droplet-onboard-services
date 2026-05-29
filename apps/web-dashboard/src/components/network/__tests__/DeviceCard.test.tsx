@@ -124,7 +124,7 @@ describe("DeviceCard", () => {
   it("renders a Quick Schedule button in the hover action row", () => {
     render(<DeviceCard device={makeDevice()} onOpen={() => {}} />);
     expect(
-      screen.getByRole("button", { name: "Quick schedule" }),
+      screen.getByRole("button", { name: /quick schedule/i }),
     ).toBeInTheDocument();
   });
 
@@ -136,7 +136,33 @@ describe("DeviceCard", () => {
         <DeviceCard device={makeDevice()} onOpen={onOpen} />
       </SWRConfig>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Quick schedule" }));
+    fireEvent.click(screen.getByRole("button", { name: /quick schedule/i }));
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  // --- WARP-292: always-visible row actions ---
+
+  it("Quick Schedule + Block action row is not hidden behind opacity-0 hover", () => {
+    render(<DeviceCard device={makeDevice()} onOpen={() => {}} />);
+    const quick = screen.getByRole("button", { name: /quick schedule/i });
+    // The action-row container holds both buttons. After WARP-292 it must
+    // not start at opacity-0 — touch + keyboard users need to see them.
+    const actionRow = quick.closest("div")?.parentElement;
+    expect(actionRow?.className ?? "").not.toMatch(/opacity-0/);
+  });
+
+  it("Block button aria-label names the device (displayName ?? hostname ?? vendor)", () => {
+    render(
+      <DeviceCard
+        device={makeDevice({ displayName: "Romain's MacBook" })}
+        onOpen={() => {}}
+      />,
+    );
+    // Block button currently uses the generic "Block device" / "Unblock
+    // device". WARP-292 sharpens that to include the row identifier so
+    // SR users hear which device is being toggled.
+    expect(
+      screen.getByRole("button", { name: /block .*romain's macbook/i }),
+    ).toBeInTheDocument();
   });
 });

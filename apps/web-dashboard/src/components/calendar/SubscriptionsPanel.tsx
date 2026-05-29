@@ -10,6 +10,8 @@ import {
   getPublishUrl,
 } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function SubscriptionsPanel() {
   const { sources, refresh, isLoading } = useCalendarSources();
@@ -23,6 +25,9 @@ export function SubscriptionsPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [publishUrl, setPublishUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(
+    null,
+  );
 
   async function handleAdd() {
     if (!name.trim() || !url.trim()) {
@@ -50,7 +55,8 @@ export function SubscriptionsPanel() {
       setShowNew(false);
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to add", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     } finally {
       setBusy(null);
     }
@@ -60,25 +66,40 @@ export function SubscriptionsPanel() {
     setBusy(id);
     try {
       const r = await syncSource(id);
-      if (r.error) toast(`Sync error: ${r.error}`, "error");
-      else toast(`Synced — added ${r.added}, updated ${r.updated}`, "success");
+      if (r.error) {
+        // WARP-294: r.error is the server-side sync error string —
+        // route it through the helper so users see "We couldn't sync
+        // that calendar right now" instead of CalDAV / ICS internals.
+        toast(translateError({ message: r.error }, "subscription"), "error");
+      } else {
+        toast(`Synced — added ${r.added}, updated ${r.updated}`, "success");
+      }
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Sync failed", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     } finally {
       setBusy(null);
     }
   }
 
-  async function handleDelete(id: string, name: string) {
-    if (!confirm(`Remove subscription "${name}" and all its synced events?`)) return;
-    setBusy(id);
+  function handleDelete(id: string, name: string) {
+    setDeleteTarget({ id, name });
+  }
+
+  async function performDelete() {
+    const target = deleteTarget;
+    if (!target) return;
+    setBusy(target.id);
     try {
-      await deleteSource(id);
+      await deleteSource(target.id);
+      setDeleteTarget(null);
       toast("Subscription removed", "success");
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
+      throw err;
     } finally {
       setBusy(null);
     }
@@ -90,7 +111,8 @@ export function SubscriptionsPanel() {
       const fullUrl = `${window.location.origin}${url}`;
       setPublishUrl(fullUrl);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to load URL", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "subscription"), "error");
     }
   }
 
@@ -117,35 +139,61 @@ export function SubscriptionsPanel() {
       </div>
 
       {showNew && (
+        // WARP-308: the previous form conflated protocol with auth ("No
+        // auth (public ICS)" vs "Basic auth (CalDAV)"), which implied
+        // every CalDAV server needs auth and every ICS feed is public.
+        // Neither is true. The new form has ONE auth question — the
+        // backend's CalDAV client (caldav.client.ts) already auto-detects
+        // protocol via a PROPFIND fallback, so the user doesn't need to
+        // declare it. We just need to know: does this feed require
+        // sign-in?
         <div className="mb-3 flex flex-col gap-2 p-2 rounded bg-surface-secondary">
-          <input
-            type="text"
-            placeholder="Display name (e.g. Personal iCloud)"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="dp-input text-sm"
-            maxLength={200}
-          />
-          <input
-            type="url"
-            placeholder="https://… (CalDAV or ICS feed URL)"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            className="dp-input text-sm"
-            maxLength={2048}
-          />
-          <select
-            value={authMode}
-            onChange={(e) => setAuthMode(e.target.value as "none" | "basic")}
-            className="dp-input text-sm"
+          <label className="flex flex-col gap-1">
+            <span className="type-caption-1 text-label-secondary">
+              Display name
+            </span>
+            <input
+              type="text"
+              placeholder="e.g. Personal iCloud"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="dp-input text-sm"
+              maxLength={200}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="type-caption-1 text-label-secondary">
+              Calendar URL
+            </span>
+            <input
+              type="url"
+              placeholder="https://…"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              className="dp-input text-sm"
+              maxLength={2048}
+            />
+            <span className="type-caption-2 text-label-tertiary">
+              Paste an ICS / iCal share link or a CalDAV server URL — we&rsquo;ll
+              auto-detect.
+            </span>
+          </label>
+          <label
+            data-testid="auth-toggle"
+            className="flex items-center gap-2 type-caption-1 text-label-secondary mt-1"
           >
-            <option value="none">No auth (public ICS)</option>
-            <option value="basic">Basic auth (CalDAV)</option>
-          </select>
+            <input
+              type="checkbox"
+              checked={authMode === "basic"}
+              onChange={(e) => setAuthMode(e.target.checked ? "basic" : "none")}
+            />
+            Requires a username and password
+          </label>
           {authMode === "basic" && (
-            <>
+            <div className="flex flex-col gap-2 pl-6">
               <input
                 type="text"
+                aria-label="Username"
                 placeholder="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -153,23 +201,32 @@ export function SubscriptionsPanel() {
               />
               <input
                 type="password"
-                placeholder="Password / app password"
+                aria-label="Password"
+                placeholder="Password or app password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="dp-input text-sm"
               />
-            </>
+            </div>
           )}
-          <button onClick={handleAdd} disabled={busy === "add"} className="dp-btn-primary text-sm">
+          <p className="type-caption-2 text-label-tertiary mt-1">
+            Most share links from Google, iCloud, or Outlook don&rsquo;t need
+            sign-in. CalDAV servers and private feeds usually do.
+          </p>
+          <button
+            onClick={handleAdd}
+            disabled={busy === "add"}
+            className="dp-btn-primary text-sm"
+          >
             {busy === "add" ? "Adding…" : "Add subscription"}
           </button>
         </div>
       )}
 
       {isLoading ? (
-        <div className="type-caption text-label-tertiary">Loading…</div>
+        <div className="type-caption-1 text-label-tertiary">Loading…</div>
       ) : sources.length === 0 ? (
-        <div className="type-caption text-label-tertiary py-2">
+        <div className="type-caption-1 text-label-tertiary py-2">
           No external calendars subscribed yet.
         </div>
       ) : (
@@ -178,16 +235,21 @@ export function SubscriptionsPanel() {
             <li key={s.id} className="flex items-start gap-2 p-2 rounded bg-surface-secondary">
               <div className="flex-1 min-w-0">
                 <div className="type-subheadline text-label-primary truncate">{s.name}</div>
-                <div className="type-caption text-label-tertiary truncate">{s.url}</div>
-                <div className="type-caption text-label-tertiary mt-0.5">
+                <div className="type-caption-1 text-label-tertiary truncate">{s.url}</div>
+                <div className="type-caption-1 text-label-tertiary mt-0.5">
                   {s.lastSyncAt ? (
                     <>Last synced {new Date(s.lastSyncAt).toLocaleString()}</>
                   ) : (
                     <>Not yet synced</>
                   )}
                   {s.lastSyncError && (
+                    // WARP-294: the orchestrator stores a raw sync
+                    // error here (HTTP code, CalDAV parser message).
+                    // Translate before rendering so users see plain
+                    // copy instead of "401 Unauthorized" / "ETIMEDOUT".
                     <span className="text-system-red ml-1 inline-flex items-center gap-1">
-                      <AlertCircle size={10} /> {s.lastSyncError}
+                      <AlertCircle size={10} />{" "}
+                      {translateError({ message: s.lastSyncError }, "subscription")}
                     </span>
                   )}
                 </div>
@@ -211,13 +273,13 @@ export function SubscriptionsPanel() {
         </ul>
       )}
 
-      <div className="mt-4 pt-3 border-t border-separator-primary">
+      <div className="mt-4 pt-3 border-t border-separator">
         <h3 className="type-subheadline text-label-secondary mb-2">
           Subscribe phones / other calendar apps
         </h3>
         {publishUrl ? (
           <div className="flex items-center gap-2 p-2 rounded bg-surface-secondary">
-            <code className="type-caption flex-1 truncate text-label-secondary">{publishUrl}</code>
+            <code className="type-caption-1 flex-1 truncate text-label-secondary">{publishUrl}</code>
             <button
               onClick={copyPublish}
               className="text-label-secondary hover:text-label-primary"
@@ -231,11 +293,25 @@ export function SubscriptionsPanel() {
             Reveal publish URL
           </button>
         )}
-        <p className="type-caption text-label-tertiary mt-2">
+        <p className="type-caption-1 text-label-tertiary mt-2">
           Use this URL in your phone's "Subscribe to calendar" flow. Your local
           events will appear automatically.
         </p>
       </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onConfirm={performDelete}
+        onCancel={() => setDeleteTarget(null)}
+        title={
+          deleteTarget
+            ? `Remove subscription "${deleteTarget.name}"?`
+            : "Remove subscription?"
+        }
+        description="All synced events from this calendar are removed from your dashboard. You can re-add the subscription later."
+        confirmLabel="Remove"
+        variant="destructive"
+      />
     </div>
   );
 }

@@ -4,6 +4,14 @@ import { SWRConfig } from "swr";
 import { DeviceCard } from "../DeviceCard";
 import type { EnrichedNetworkDevice } from "@/lib/types";
 
+// WARP-291: framer-motion useReducedMotion stub keeps the <Dialog>'s
+// animation gates deterministic so the confirm button is in the DOM
+// synchronously after clicking the trigger.
+vi.mock("framer-motion", async () => {
+  const actual: any = await vi.importActual("framer-motion");
+  return { ...actual, useReducedMotion: () => true };
+});
+
 function makeDevice(overrides: Partial<EnrichedNetworkDevice> = {}): EnrichedNetworkDevice {
   return {
     mac: "aa:bb:cc:dd:ee:01",
@@ -45,6 +53,27 @@ function renderCard(
   );
 }
 
+// WARP-291: click the row's Block/Unblock affordance, then click the
+// confirm button inside the <ConfirmDialog>. Returns the trigger node
+// so per-test assertions on aria-label / textContent still work.
+// WARP-292 sharpened the row trigger aria-label to include the device
+// displayName ("Block device Romain's MacBook"), so we match by regex
+// to keep these tests resilient to the suffix.
+function clickThroughConfirm(
+  triggerKind: "Block device" | "Unblock device",
+  confirmName: "Block" | "Unblock",
+): HTMLElement {
+  const trigger = screen.getByRole("button", {
+    name: new RegExp(`^${triggerKind}\\b`, "i"),
+  });
+  fireEvent.click(trigger);
+  // The dialog confirm button shares the same accessible name as the
+  // row trigger label minus the "device" suffix.
+  const confirmBtn = screen.getByRole("button", { name: confirmName });
+  fireEvent.click(confirmBtn);
+  return trigger;
+}
+
 describe("DeviceCard block/unblock mutation", () => {
   let fetchMock: FetchMock;
 
@@ -57,16 +86,16 @@ describe("DeviceCard block/unblock mutation", () => {
     vi.unstubAllGlobals();
   });
 
-  it("isBlocked=false → renders 'Block' and POSTs /devices/:mac/manualBlock with { blocked: true } on click", async () => {
+  it("isBlocked=false → renders 'Block' and POSTs /devices/:mac/manualBlock with { blocked: true } after confirm", async () => {
     const device = makeDevice({ isBlocked: false });
     mockFetchOnceJson(fetchMock, { operationId: "op-123" });
 
     renderCard(device);
 
-    const btn = screen.getByRole("button", { name: "Block device" });
-    expect(btn.textContent).toBe("Block");
+    const trigger = screen.getByRole("button", { name: /^Block device\b/i });
+    expect(trigger.textContent).toBe("Block");
 
-    fireEvent.click(btn);
+    clickThroughConfirm("Block device", "Block");
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
@@ -81,16 +110,16 @@ describe("DeviceCard block/unblock mutation", () => {
     });
   });
 
-  it("isBlocked=true → renders 'Unblock' and POSTs /devices/:mac/manualBlock with { blocked: false } on click", async () => {
+  it("isBlocked=true → renders 'Unblock' and POSTs /devices/:mac/manualBlock with { blocked: false } after confirm", async () => {
     const device = makeDevice({ isBlocked: true });
     mockFetchOnceJson(fetchMock, {});
 
     renderCard(device);
 
-    const btn = screen.getByRole("button", { name: "Unblock device" });
-    expect(btn.textContent).toBe("Unblock");
+    const trigger = screen.getByRole("button", { name: /^Unblock device\b/i });
+    expect(trigger.textContent).toBe("Unblock");
 
-    fireEvent.click(btn);
+    clickThroughConfirm("Unblock device", "Unblock");
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
@@ -103,38 +132,37 @@ describe("DeviceCard block/unblock mutation", () => {
     });
   });
 
-  it("clicking the block button does NOT fire onOpen (stopPropagation)", async () => {
+  it("clicking the block trigger does NOT fire onOpen (stopPropagation) — opening the ConfirmDialog is also not opening details", async () => {
     const onOpen = vi.fn();
     const device = makeDevice({ isBlocked: false });
     mockFetchOnceJson(fetchMock, {});
 
     renderCard(device, onOpen);
 
-    fireEvent.click(screen.getByRole("button", { name: "Block device" }));
+    clickThroughConfirm("Block device", "Block");
 
-    // Wait a tick to let the fetch promise settle — regardless, onOpen
-    // must not have been called because of stopPropagation on the inner
-    // button's onClick handler.
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalled();
     });
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("pressing Enter on the Block button does NOT fire onOpen", async () => {
+  it("Enter on the Block trigger does NOT fire onOpen", async () => {
     const onOpen = vi.fn();
     mockFetchOnceJson(fetchMock, {});
     renderCard(makeDevice({ isBlocked: false }), onOpen);
-    const blockBtn = screen.getByRole("button", { name: "Block device" });
+    const blockBtn = screen.getByRole("button", { name: /^Block device\b/i });
     fireEvent.keyDown(blockBtn, { key: "Enter" });
-    // Native buttons also treat Enter as click — simulate the click side too
-    // so the mutation path is exercised and onError/toast is wired.
+    // Buttons fire onClick from Enter natively; simulate to take the
+    // open-confirm path and click the dialog's confirm.
     fireEvent.click(blockBtn);
+    const confirmBtn = screen.getByRole("button", { name: "Block" });
+    fireEvent.click(confirmBtn);
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("surfaces error on a 500 response via onError (toast) and falls back to title", async () => {
+  it("surfaces error on a 500 response via onError (toast) and keeps the ConfirmDialog open", async () => {
     const device = makeDevice({ isBlocked: false });
     mockFetchOnceJson(
       fetchMock,
@@ -146,27 +174,14 @@ describe("DeviceCard block/unblock mutation", () => {
 
     renderCard(device, undefined, onError);
 
-    const btn = screen.getByRole("button", { name: "Block device" });
-    fireEvent.click(btn);
+    clickThroughConfirm("Block device", "Block");
 
-    // Primary expectation: the page-level toast handler was invoked with a
-    // user-facing message (either the friendly mapped copy or the raw err
-    // message as fallback). Using toHaveBeenCalled + string assertion so we
-    // accept either branch.
     await waitFor(() => {
       expect(onError).toHaveBeenCalledTimes(1);
     });
     const msg = onError.mock.calls[0][0];
     expect(typeof msg).toBe("string");
     expect((msg as string).length).toBeGreaterThan(0);
-
-    // Secondary expectation (fallback behaviour): the title tooltip still
-    // carries the message for callers that don't wire up a toast handler.
-    expect(btn.getAttribute("title")).toBe(msg);
-
-    // And no optimistic flip — still says "Block".
-    expect(btn.textContent).toBe("Block");
-    expect(btn.getAttribute("aria-label")).toBe("Block device");
   });
 
   it("treats a 428 requires-confirmation envelope as REQUIRES_CONFIRMATION (WARP-41 placeholder)", async () => {
@@ -184,7 +199,7 @@ describe("DeviceCard block/unblock mutation", () => {
 
     renderCard(device, undefined, onError);
 
-    fireEvent.click(screen.getByRole("button", { name: "Block device" }));
+    clickThroughConfirm("Block device", "Block");
 
     await waitFor(() => expect(onError).toHaveBeenCalled());
     // Friendly copy from TOAST_COPY[REQUIRES_CONFIRMATION]

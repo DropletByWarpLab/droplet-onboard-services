@@ -11,6 +11,9 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { recordActivity } from "./activity.singleton.js";
+
+import type { PrivateEnhancement } from "@droplet/tools-core";
 
 export interface McpClientOptions {
   command: string;
@@ -107,12 +110,51 @@ export class McpClientService {
     if (context && Object.keys(context).length > 0) {
       params._meta = { ...context };
     }
-    const res = await this.client.callTool(params);
+    let res;
+    let threw: unknown = null;
+    try {
+      res = await this.client.callTool(params);
+    } catch (err) {
+      threw = err;
+      throw err;
+    } finally {
+      // WARP-456: signed audit row for the tool dispatch. Always
+      // emitted — success, tool-reported failure, and SDK throw.
+      // We omit the raw args because they may carry user secrets
+      // (Nextcloud tokens for file tools); only the tool name +
+      // outcome + caller identity make it into the chain.
+      const isError =
+        threw !== null || Boolean((res as { isError?: boolean } | undefined)?.isError);
+      void recordActivity({
+        kind: "tool_call",
+        severity: isError ? "err" : "ok",
+        sourceIcon: "wrench",
+        what: isError ? `Tool ${name} failed` : `Tool ${name}`,
+        sub: context?.userId ? `for ${context.userId}` : null,
+        refs: stripUndefined({
+          name,
+          userId: context?.userId,
+          ok: !isError,
+        }),
+      }).catch(() => {
+        // Recorder already swallows internally; defence-in-depth.
+      });
+    }
     return {
-      content: (res.content ?? []) as { type: string; text?: string }[],
-      isError: Boolean(res.isError),
+      content: (res!.content ?? []) as { type: string; text?: string }[],
+      isError: Boolean(res!.isError),
     };
   }
+}
+
+function stripUndefined(
+  o: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
 }
 
 /**
@@ -134,4 +176,14 @@ export interface McpCallContext {
    * the authoritative trust boundary there.
    */
   userId?: string;
+  /**
+   * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
+   * paraphrase vectors, filename filter, search overrides). Set by the
+   * agent loop right before dispatching `search_content`. Routed via
+   * MCP `_meta._enhancement` so it bypasses the tool's strict input
+   * schema (`additionalProperties: false`); only the trusted-stdio
+   * transport propagates it to handlers. Never set this from a user-
+   * facing route — the trust boundary is the agent loop itself.
+   */
+  _enhancement?: PrivateEnhancement;
 }

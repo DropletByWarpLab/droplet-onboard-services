@@ -82,11 +82,41 @@ describe("RecentlyIndexedTab", () => {
     expect(getRecentFilesMock.mock.calls[0][0]).toMatchObject({ source: "brain" });
   });
 
-  it("renders an error card when the api throws", async () => {
-    getRecentFilesMock.mockRejectedValue(new Error("boom"));
+  it("renders a friendly error card when the api throws — never echoes err.message (WARP-294)", async () => {
+    const SECRET = "boom-internal-error-503";
+    getRecentFilesMock.mockRejectedValue(new Error(SECRET));
     render(<RecentlyIndexedTab />);
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toMatch(/boom/);
+    // Friendly knowledge-domain fallback — non-empty, no SECRET.
+    expect(alert.textContent).toBeTruthy();
+    expect(alert.textContent).not.toMatch(new RegExp(SECRET));
+    expect(alert.textContent).not.toMatch(/503/);
+  });
+
+  it("never renders internal Nextcloud path prefixes (WARP-294)", async () => {
+    getRecentFilesMock.mockResolvedValue({
+      items: [
+        {
+          id: "1",
+          ncFileId: 1,
+          path: "/admin/files/private/Knowledge/notes.md",
+          chunkIdx: 0,
+          snippet: "x",
+          indexedAt: new Date().toISOString(),
+          source: "nextcloud",
+          brainItemId: null,
+          pageNumber: null,
+        },
+      ],
+      nextBefore: null,
+    });
+    render(<RecentlyIndexedTab />);
+    const items = await screen.findAllByTestId("knowledge-recent-item");
+    const text = items[0].textContent ?? "";
+    expect(text).not.toMatch(/admin\/files/);
+    expect(text).not.toMatch(/^\/private/);
+    // Trimmed display path still gives the user file context.
+    expect(text).toMatch(/Knowledge\/notes\.md|notes\.md/);
   });
 
   it("shows a Load more button when nextBefore is present", async () => {

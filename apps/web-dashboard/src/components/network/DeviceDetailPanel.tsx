@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import * as Icons from "lucide-react";
 import type {
@@ -20,6 +20,8 @@ import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { isWindowActive, nextTransitionFor } from "@/lib/scheduleEval";
 import { OverrideModal } from "./OverrideModal";
 import { ScheduleEditorModal } from "./ScheduleEditorModal";
+import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 const fetcher = async (url: string) => {
   const r = await fetch(url);
@@ -40,7 +42,8 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
   );
   const { patchDevice, forgetDevice, assignGroups, toastForError } = useDeviceMutations();
   const { toggleBlock } = useDeviceBlockMutation();
-  const [blockPending, setBlockPending] = useState(false);
+  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+  const blockTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const [displayName, setDisplayName] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
@@ -51,7 +54,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
   const [toast, setToast] = useState<string | null>(null);
   const nameDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notesDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const headingId = useId();
 
   // Seed local edit state whenever the device identity changes.
   useEffect(() => {
@@ -63,22 +66,8 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.device?.mac]);
 
-  // ESC to close.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  // Minimal focus management: pull focus into the dialog on mount.
-  useEffect(() => {
-    const first = dialogRef.current?.querySelector<HTMLElement>(
-      "input, textarea, button",
-    );
-    first?.focus();
-  }, []);
+  // ESC close + initial focus are handled by the shared <Dialog>
+  // primitive that wraps this panel — see WARP-289.
 
   async function save(field: "displayName" | "icon" | "notes", value: string | null) {
     // Snapshot server-truth (pre-edit) so rollback on error restores the
@@ -125,17 +114,14 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
     }
   }
 
-  async function handleBlockToggle() {
+  async function handleBlockConfirm() {
     if (!data?.device) return;
-    // TODO(WARP-41): run tier-2 token-bound confirm here before hitting the
-    // firewall endpoint. The hook doesn't exist on this branch yet.
-    setBlockPending(true);
     try {
       await toggleBlock(data.device);
     } catch (err) {
       setToast(toastForError(err));
-    } finally {
-      setBlockPending(false);
+      // Re-throw so ConfirmDialog stays open and the user can retry.
+      throw err;
     }
   }
 
@@ -152,12 +138,16 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
   const seenDays = (data?.presence ?? []).filter((p) => p.seenMinutes > 0).length;
 
   return (
-    <div
-      ref={dialogRef}
-      role="dialog"
-      aria-label="Device details"
-      className="fixed top-0 right-0 h-full w-[440px] bg-surface-primary border-l border-separator shadow-xl overflow-y-auto z-40"
-    >
+    <Dialog open onClose={onClose} labelledBy={headingId} placement="right">
+      {/*
+        Off-screen heading provides the aria-labelledby target. The
+        visible "title" is the editable display-name input, which
+        carries its own aria-label="Display name" and would conflict
+        with using it as the dialog name.
+      */}
+      <h2 id={headingId} className="sr-only">
+        Device details
+      </h2>
       <div className="p-4 flex items-center justify-between">
         <input
           className="type-headline text-label-primary bg-transparent border-0 focus:outline-none focus:ring-2 focus:ring-accent rounded px-1 flex-1 min-w-0"
@@ -183,7 +173,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="ml-2 p-1 text-label-secondary hover:text-label-primary"
+          className="ml-2 p-1 text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
         >
           <Icons.X className="w-5 h-5" />
         </button>
@@ -316,13 +306,34 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
       {/* Footer */}
       <div className="px-4 py-3 border-t border-separator flex gap-2">
         <button
+          ref={blockTriggerRef}
           type="button"
-          onClick={() => void handleBlockToggle()}
-          disabled={blockPending || !data?.device}
+          onClick={() => setBlockConfirmOpen(true)}
+          disabled={!data?.device}
           className={`type-footnote px-3 py-1.5 rounded ${data?.device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
         >
-          {blockPending ? "..." : data?.device.isBlocked ? "Unblock" : "Block"}
+          {data?.device.isBlocked ? "Unblock" : "Block"}
         </button>
+        {data?.device && blockConfirmOpen && (
+          <ConfirmDialog
+            open={blockConfirmOpen}
+            triggerRef={blockTriggerRef}
+            onConfirm={handleBlockConfirm}
+            onCancel={() => setBlockConfirmOpen(false)}
+            title={
+              data.device.isBlocked
+                ? `Unblock ${data.device.displayName ?? data.device.hostname ?? data.device.vendor ?? "this device"}?`
+                : `Block ${data.device.displayName ?? data.device.hostname ?? data.device.vendor ?? "this device"}?`
+            }
+            description={
+              data.device.isBlocked
+                ? "This device will regain internet access."
+                : "This device won't be able to reach the internet until you unblock it."
+            }
+            confirmLabel={data.device.isBlocked ? "Unblock" : "Block"}
+            variant={data.device.isBlocked ? "neutral" : "destructive"}
+          />
+        )}
         {!confirmForget ? (
           <button
             type="button"
@@ -371,7 +382,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
           </button>
         </div>
       )}
-    </div>
+    </Dialog>
   );
 }
 

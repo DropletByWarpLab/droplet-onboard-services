@@ -1,11 +1,12 @@
 "use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import * as Icons from "lucide-react";
 import type { EnrichedNetworkDevice } from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
 import { toastForError } from "@/lib/hooks/useDeviceMutations";
 import { QuickSchedulePopover } from "./QuickSchedulePopover";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface Props {
   device: EnrichedNetworkDevice;
@@ -101,7 +102,15 @@ export function DeviceCard({ device, onOpen, onError }: Props) {
       <div className="mt-2">
         <DeviceSparkline days={device.presenceDays ?? []} size="sm" />
       </div>
-      <div className="mt-3 flex justify-end gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+      {/*
+        WARP-292: action row is always visible so touch + keyboard users
+        can discover Quick Schedule / Block without hovering. The
+        previous opacity-0 group-hover gate made these unreachable on
+        mobile and required focus-within fallback to be keyboard-safe.
+        Keeping the row visible at rest matches the WARP-220 pattern
+        shipped on /users.
+      */}
+      <div className="mt-3 flex justify-end gap-2 transition">
         <QuickScheduleActionButton device={device} />
         <BlockActionButton device={device} onError={onError} />
       </div>
@@ -115,6 +124,8 @@ function QuickScheduleActionButton({
   device: EnrichedNetworkDevice;
 }) {
   const [open, setOpen] = useState(false);
+  const displayName =
+    device.displayName ?? device.hostname ?? device.vendor ?? "this device";
 
   return (
     <div className="relative" onClick={(e) => e.stopPropagation()}>
@@ -128,8 +139,8 @@ function QuickScheduleActionButton({
           setOpen((o) => !o);
         }}
         onKeyDown={(e) => e.stopPropagation()}
-        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1"
-        aria-label="Quick schedule"
+        className="type-caption-1 px-2 py-1 rounded bg-surface-secondary text-label-secondary hover:text-label-primary inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        aria-label={`Quick schedule for ${displayName}`}
       >
         <Icons.CalendarClock className="w-3.5 h-3.5" />
         Quick schedule
@@ -152,44 +163,72 @@ function BlockActionButton({
   onError?: (message: string) => void;
 }) {
   const { toggleBlock } = useDeviceBlockMutation();
-  const [pending, setPending] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   // Retained as a fallback for callers that don't wire up a toast handler —
   // primary error UX is the page-level toast via `onError`.
   const [error, setError] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
 
-  async function handle(e: React.MouseEvent) {
+  const displayName =
+    device.displayName ?? device.hostname ?? device.vendor ?? "this device";
+  const isUnblocking = device.isBlocked;
+
+  function openConfirm(e: React.MouseEvent) {
     // Prevent the wrapper div's onClick from firing (which would open the
-    // detail panel) — clicking Block should ONLY toggle the firewall.
+    // detail panel) — clicking Block should ONLY open the confirm.
     e.stopPropagation();
-    // TODO(WARP-41): run tier-2 token-bound confirm here before hitting the
-    // firewall endpoint. The hook doesn't exist on this branch yet.
-    setPending(true);
+    setError(null);
+    setConfirmOpen(true);
+  }
+
+  async function handleConfirm() {
     setError(null);
     try {
       await toggleBlock(device);
     } catch (err) {
-      const friendly = toastForError(err, err instanceof Error ? err.message : "Failed to update block state");
+      const friendly = toastForError(
+        err,
+        err instanceof Error ? err.message : "Failed to update block state",
+      );
       if (onError) onError(friendly);
       setError(friendly);
-    } finally {
-      setPending(false);
+      // Re-throw so the ConfirmDialog keeps itself open and the user can
+      // retry without re-clicking the card.
+      throw err;
     }
   }
 
-  // Intentional no optimistic flip: isBlocked reflects what the reconciler
-  // (WARP-81) last saw. The SWR revalidate inside toggleBlock() is enough —
-  // within ~10 s the card shows the new state.
   return (
-    <button
-      type="button"
-      onClick={handle}
-      onKeyDown={(e) => e.stopPropagation()}
-      disabled={pending}
-      className={`type-caption-1 px-2 py-1 rounded ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
-      aria-label={device.isBlocked ? "Unblock device" : "Block device"}
-      title={error ?? undefined}
-    >
-      {pending ? "..." : device.isBlocked ? "Unblock" : "Block"}
-    </button>
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={openConfirm}
+        onKeyDown={(e) => e.stopPropagation()}
+        className={`type-caption-1 px-2 py-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${device.isBlocked ? "bg-system-green/10 text-system-green" : "bg-system-red/10 text-system-red"}`}
+        aria-label={
+          isUnblocking
+            ? `Unblock device ${displayName}`
+            : `Block device ${displayName}`
+        }
+        title={error ?? undefined}
+      >
+        {isUnblocking ? "Unblock" : "Block"}
+      </button>
+      <ConfirmDialog
+        open={confirmOpen}
+        triggerRef={triggerRef}
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirmOpen(false)}
+        title={isUnblocking ? `Unblock ${displayName}?` : `Block ${displayName}?`}
+        description={
+          isUnblocking
+            ? "This device will regain internet access."
+            : "This device won't be able to reach the internet until you unblock it."
+        }
+        confirmLabel={isUnblocking ? "Unblock" : "Block"}
+        variant={isUnblocking ? "neutral" : "destructive"}
+      />
+    </>
   );
 }

@@ -93,7 +93,7 @@ export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
               {file.mimeType || "Unknown type"}
             </p>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             {/* WARP-287: admin-only re-index trigger. The orchestrator's
                 /api/admin/files/:id/reindex enforces RBAC + recent-MFA,
                 so non-admins get a 403/401 and the button surfaces the
@@ -101,15 +101,15 @@ export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
             <ReindexButton fileId={file.path} />
             <button
               onClick={onDownload}
-              className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
-              title="Download"
+              className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
+              aria-label="Download"
             >
               <Download size={16} />
             </button>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
-              title="Close (Esc)"
+              className="p-2.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+              aria-label="Close preview"
             >
               <X size={16} />
             </button>

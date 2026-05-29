@@ -80,14 +80,22 @@ export function ClientDeviceCard({
           </p>
         </div>
 
-        {/* Revoke button */}
+        {/*
+          WARP-300: revoke is always rendered (no opacity-0 hover gate)
+          so touch + keyboard users can discover the action. p-2.5 →
+          14 px icon + 20 px padding = 34 px hit-target, clearing the
+          32 px ui-ux floor. aria-label names the device the action
+          targets so screen-reader users hear which client they're
+          about to revoke (fallback to id when deviceName is empty).
+        */}
         {!isRevoked && (
           <button
             onClick={(e) => {
               e.stopPropagation();
               onRevoke(client);
             }}
-            className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 opacity-0 group-hover:opacity-100 transition-all"
+            className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+            aria-label={`Revoke ${client.deviceName || client.id}`}
             title="Revoke this device"
           >
             <Trash2 size={14} />

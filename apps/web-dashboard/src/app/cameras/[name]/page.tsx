@@ -23,6 +23,8 @@ import { fetchPtzCapabilities, getCameraLiveUrl, getCameraSnapshotUrl } from "@/
 import { authFetch } from "@/lib/auth";
 import { PtzOverlay } from "@/components/ptz/PtzOverlay";
 import type { CameraInfo, DetectionEvent, PtzCapabilities } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 const STATUS_COLORS: Record<CameraInfo["status"], string> = {
   recording: "text-system-green",
@@ -54,6 +56,8 @@ export default function CameraFullscreenPage() {
   );
 
   const { cameras, isLoading, enableCam, disableCam, removeCam } = useCameras();
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const { toast } = useToast();
   const camera = cameras.find((c) => c.name === name);
 
   // PTZ capabilities — fetched once per camera, cheap. Drives whether
@@ -79,9 +83,21 @@ export default function CameraFullscreenPage() {
     try {
       await togglePin(camera.name);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to toggle pin");
+      toast(e instanceof Error ? e.message : "Failed to update pin", "error");
     } finally {
       setPinBusy(false);
+    }
+  };
+
+  const performRemove = async () => {
+    if (!camera) return;
+    try {
+      await removeCam(camera.name);
+      setRemoveOpen(false);
+      router.replace("/cameras");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Failed to remove camera", "error");
+      throw e;
     }
   };
 
@@ -268,25 +284,30 @@ export default function CameraFullscreenPage() {
             }}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
             title="Toggle browser fullscreen"
+            aria-label="Toggle fullscreen"
           >
-            <Maximize2 size={16} />
+            <Maximize2 size={16} aria-hidden="true" />
           </button>
           <button
-            onClick={() => {
-              if (
-                confirm(`Remove camera "${camera.displayName}"? This cannot be undone.`)
-              ) {
-                removeCam(camera.name);
-                router.replace("/cameras");
-              }
-            }}
+            onClick={() => setRemoveOpen(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-system-red hover:bg-system-red/15 transition-colors"
             title="Remove camera"
+            aria-label={`Remove camera ${camera.displayName}`}
           >
             <Trash2 size={16} />
           </button>
         </div>
       </header>
+
+      <ConfirmDialog
+        open={removeOpen}
+        onConfirm={performRemove}
+        onCancel={() => setRemoveOpen(false)}
+        title={`Remove camera "${camera.displayName}"?`}
+        description="The camera stops recording and is removed from the dashboard. Existing clips and events are kept until they expire normally."
+        confirmLabel="Remove"
+        variant="destructive"
+      />
 
       {/* Main: feed + side rail */}
       <div className="flex-1 flex flex-col lg:flex-row min-h-0">

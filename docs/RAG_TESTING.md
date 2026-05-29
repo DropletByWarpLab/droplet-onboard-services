@@ -5,6 +5,14 @@ triaging a failed `rag-tests` CI run or about to ship a change to
 `services/file-indexer/`, `apps/orchestrator/src/routes/files-*`, or
 the embedding plumbing, start here.
 
+> **RAGAS metrics layered on top of NDCG@10:** see the [RAGAS metrics](#ragas-metrics-warp-436)
+> section below for faithfulness / context-precision / context-recall /
+> answer-relevancy / factual-correctness. Runs hourly during off-hours
+> on the appliance via the `services/rag-eval/` container (Compose
+> profile `eval`); can be run locally on Linux against an already-up
+> Compose stack with `python tests/retrieval-eval/ragas/ragas_runner.py
+> --variant hybrid --limit 10`.
+
 ## What gets tested
 
 Six vitest files live in `tests/`. They share one Compose stack so the
@@ -244,7 +252,7 @@ the failure manually.
 |---|---|
 | Extractor unit tests fail; chunks never land | `file-indexer` — Tesseract install, pypdf import, MIME dispatch. |
 | Brain-upload returns 500 / chunks never land for brain items | `orchestrator` (multer multipart, BrainMemoryItem write) → `file-indexer` (extractors.dispatch in the brain branch). |
-| `search_content` returns empty / `EMBEDDING_UNAVAILABLE` | `ai-gateway` — gRPC port, embed model loaded, JETSON_OLLAMA_URL reachable. |
+| `search_content` returns empty / `EMBEDDING_UNAVAILABLE` | `ai-gateway` — gRPC port, embed model loaded, OLLAMA_URL reachable. |
 | `/api/llm/chat` returns 200 but trace has no `search_content` call | `orchestrator` — agent loop iter limit, model not honoring tool prompt. The retrieval test loops 5x to surface this kind of flake. |
 | Nextcloud `occ files:scan` hangs forever | `nextcloud` — bootstrap not done yet (occ status fails), or admin user-files dir missing. |
 | `localhost:3000` connection refused | The test override wasn't loaded — re-run with `./scripts/test-rag.sh` instead of just `docker compose up`. |
@@ -286,7 +294,7 @@ manual verification before a major RAG change.
 
 **Run locally** with `./scripts/test-rag.sh` for the inner loop, or
 **kick the workflow off manually** from
-https://github.com/DropletByWarpLab/droplet-pi-platform/actions/workflows/rag-tests.yml
+https://github.com/DropletByWarpLab/droplet-onboard-services/actions/workflows/rag-tests.yml
 → "Run workflow" → pick a branch → "Run workflow".
 
 **Job timeout:** 35 min. Above that we'd start dropping legit slow runs
@@ -296,6 +304,136 @@ of the budget.
 **Failure artifacts:** `rag-tests-logs-<run_id>`. Retention 7 days.
 Contains one file per service plus a `ps.txt` snapshot. Download and
 grep for `ERROR` / `WARN` first.
+
+## RAGAS metrics (WARP-436)
+
+NDCG@10 measures whether retrieval returns relevant chunks. It does
+**not** measure whether the LLM's answer is faithful to those chunks,
+whether the answer is actually relevant to the question, or whether
+the answer is factually correct against a gold reference. The RAGAS
+harness adds those four metrics on top, judged by an LLM.
+
+ADR: [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md) — Phase 2.
+
+### Metrics
+
+| Metric | What it measures | RAGAS class |
+|---|---|---|
+| Faithfulness | Does every claim in the answer have support in the retrieved contexts? | `Faithfulness` |
+| LLMContextPrecision | Of the chunks retrieved, how many were actually relevant to the gold answer? | `LLMContextPrecision` |
+| LLMContextRecall | Of the chunks needed for the gold answer, how many did retrieval surface? | `LLMContextRecall` |
+| AnswerRelevancy | Is the answer on-topic for the question (independent of correctness)? | `AnswerRelevancy` |
+| FactualCorrectness | How well does the answer match the gold reference answer? | `FactualCorrectness` |
+
+All five are LLM-judged. There is no per-PR ground truth for
+"faithfulness", so every metric is a noisy estimate — that's why the
+acceptance gate uses an envelope (`p50 − 1.5 × IQR` floor over 5
+runs) rather than a single-shot threshold.
+
+### Judge-LLM policy
+
+| Judge | When | Cost | How to invoke |
+|---|---|---|---|
+| `local` (default) | scheduled appliance runs (hourly off-hours), dev sanity checks | free (local Ollama on the appliance) | `RAGAS_JUDGE=local` (default) |
+| `cloud` | release-candidate verification, goldens-recalibration | OpenAI tokens, see budget tracker | `RAGAS_JUDGE=cloud` + `OPENAI_API_KEY` |
+
+The cloud judge is reserved for release-candidate verification where
+the noise floor of the local judge would mask a real regression.
+
+### How to run
+
+The canonical scheduled path lives in `services/rag-eval/`. On a test
+or staging appliance, opt in via the `eval` Compose profile and the
+container fires hourly off-hours (see `services/rag-eval/README.md`
+for the cron expression and env-var knobs). Ad-hoc runs from inside
+that container:
+
+```bash
+# Single ad-hoc run on the appliance
+docker exec droplet-rag-eval-1 \
+    python /opt/rag-eval/main.py run-once
+
+# Bootstrap baselines (N sequential runs + aggregate)
+docker exec droplet-rag-eval-1 \
+    python /opt/rag-eval/main.py bootstrap --runs 5
+```
+
+For dev iteration against an already-running Compose stack on Linux,
+the canonical runner can also be invoked directly:
+
+```bash
+python tests/retrieval-eval/ragas/ragas_runner.py \
+    --variant hybrid --limit 10 --judge local \
+    --out tests/retrieval-eval/ragas/results.json
+```
+
+Scheduled runs write per-run JSON + Markdown under
+`/data/rag-eval/runs/` on the appliance's named volume; bootstrap
+mode writes a `baselines.candidate.json` at the volume root that you
+copy back into `tests/retrieval-eval/ragas/baselines.json` to
+promote.
+
+### Goldens
+
+Each of the 20 NDCG queries in `tests/retrieval-eval/queries.yaml` has
+a paired entry in `tests/retrieval-eval/ragas/goldens.yaml`, matched
+by `id`. The goldens add two fields the NDCG harness doesn't need:
+
+- `expected_answer` — the ground-truth answer string, used by
+  `FactualCorrectness` and `AnswerRelevancy`.
+- `reference_contexts` — short prose descriptions of the chunks that
+  should appear in the retrieved context, used by `LLMContextRecall`
+  and `LLMContextPrecision`.
+
+Each entry carries a sourcing tag in its comment:
+
+- `[WARP-TESTING]` — verified against the "Flows under test" sentinel
+  table in this doc.
+- `[INFERRED]` / `[INFERRED-CONFIRMED]` — derived from documented
+  fixture conventions; correct in spirit, may need a wording tweak.
+
+When adding a new query to `queries.yaml`, add the matching golden in
+the same PR. The runner skips queries without a golden and prints a
+warning to stderr.
+
+### Baselines + thresholds
+
+`tests/retrieval-eval/ragas/baselines.json` records p50 / p95 / IQR per
+metric over 5 runs, plus the derived floor (`p50 − 1.5 × IQR`). The
+WARP-436 integration test asserts every metric's mean is ≥ floor.
+
+**Today** that file is a placeholder (all-zero floors). Populate it
+with one bootstrap run on a deployed appliance with the `eval` Compose
+profile active:
+
+1. `docker exec droplet-rag-eval-1 python /opt/rag-eval/main.py bootstrap --runs 5`
+   — ~1 h on the appliance GPU. Writes `/data/rag-eval/baselines.candidate.json`
+   with p50 / p95 / IQR / floor per metric and per class.
+2. Copy out: `docker cp droplet-rag-eval-1:/data/rag-eval/baselines.candidate.json tests/retrieval-eval/ragas/baselines.json`.
+3. Commit `baselines.json` in a PR titled `chore(rag-eval): rebaseline
+   RAGAS — <reason>` so the rebaseline event is auditable.
+
+The same flow applies after any change to goldens, judge model, or
+retrieval pipeline that shifts metrics enough to warrant new floors.
+
+### Triaging a RAGAS failure
+
+| Symptom | First service to check | Likely cause |
+|---|---|---|
+| Every metric is zero | judge LLM | `RAGAS_JUDGE=local` but Ollama not running / model not pulled. Check `ollama list`. |
+| Faithfulness drops sharply, others stable | orchestrator agent loop or LLM | answer synthesis changed; check whether the chat model defaulted to a different family. |
+| Context precision drops sharply, recall stable | retrieval — chunker or embedder | chunks are bigger / noisier than baseline. Re-check Phase 1's chunker.py contract. |
+| Context recall drops, precision stable | retrieval — query side | embedding or query rewriting regressed; check ai-gateway gRPC EmbedText. |
+| All metrics drift down ~5% over a week | judge LLM | local Ollama model version bump. Re-pin the model tag and rebaseline. |
+| Metric variance > 0.15 IQR within a single nightly | corpus | 20 queries is too few for stable variance; extend goldens.yaml to ≥50 and rebaseline. |
+
+### See also
+
+- `tests/retrieval-eval/ragas/README.md` — per-batch landing status,
+  isolation contract, file inventory.
+- `tests/retrieval-eval/ragas/ragas_runner.py` — the runner itself.
+- `services/rag-eval/` — scheduled appliance service that drives the runner hourly off-hours.
+- [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md) — full Phase 2 design.
 
 ## LLM determinism caveat (e2e test)
 

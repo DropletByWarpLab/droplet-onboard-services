@@ -109,7 +109,16 @@ export function FileListSimple({
             <span className="type-caption-1 text-label-tertiary hidden md:inline-block w-28 text-right flex-shrink-0">
               {formatDate(file.modifiedAt)}
             </span>
-            <div className="flex items-center gap-0.5 w-16 justify-end flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+            {/*
+              WARP-300: row actions are always rendered (no opacity-0
+              hover gate) so touch + keyboard users can discover them.
+              p-2.5 → 34 px hit-target, clears the 32 px ui-ux floor.
+              aria-labels name the file the action targets so
+              screen-reader users hear which entry they're acting on
+              (Favorites, Recents, and Shared-with-me all share this
+              listing).
+            */}
+            <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
               {showStar && (
                 <div onClick={(e) => e.stopPropagation()}>
                   <StarButton
@@ -127,8 +136,8 @@ export function FileListSimple({
                     e.stopPropagation();
                     onDownload(file);
                   }}
-                  className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
-                  aria-label="Download"
+                  className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                  aria-label={`Download ${file.name}`}
                 >
                   <Download size={14} />
                 </button>
@@ -139,8 +148,8 @@ export function FileListSimple({
                     e.stopPropagation();
                     onRemove(file);
                   }}
-                  className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
-                  aria-label={removeTooltip || "Remove"}
+                  className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                  aria-label={`${removeTooltip || "Remove"} ${file.name}`}
                   title={removeTooltip}
                 >
                   <X size={14} />

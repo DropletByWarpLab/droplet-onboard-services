@@ -31,6 +31,47 @@ export interface ChatMessage {
    * drove this turn — clicking retry re-sends it.
    */
   error?: { message: string; retryPrompt: string };
+  /**
+   * Set on an assistant message when the user clicked the Stop button
+   * mid-stream (WARP-295). Distinct from `error`: stopping is intentional,
+   * the partial content is kept verbatim, and the UI tags the bubble with
+   * a plain "Stopped by you" marker rather than an error chrome.
+   */
+  stopped?: boolean;
+  /**
+   * Citations attached to this assistant turn — extracted from
+   * retrieval-tool results during the stream (WARP-295). Rendered as
+   * `<CitationChip>` chips below the message bubble.
+   */
+  citations?: ChatCitation[];
+  /**
+   * Set when an assistant message rehydrated from history did not finish
+   * cleanly. Drives the FailureChip variant in <ChatMessage>.
+   *   - "failed"       — server-side error (status=failed)
+   *   - "aborted"      — user-cancelled mid-stream (status=aborted)
+   *   - "interrupted"  — server died mid-stream (status=streaming on load)
+   *   - "missing"      — synthetic placeholder for a tail-orphan user turn
+   *                      whose assistant row was never persisted
+   * Live-streaming turns continue to use `error` / `stopped`; this field
+   * is populated exclusively by `loadConversation`.
+   */
+  failureKind?: "failed" | "aborted" | "interrupted" | "missing";
+}
+
+/**
+ * One retrieval source surfaced by an MCP retrieval tool (brain search,
+ * file search). Mirrors the shape `CitationChip` already consumes in
+ * `/knowledge/SearchTab`, so the same component is reused without
+ * adapter code on the chat surface.
+ */
+export interface ChatCitation {
+  source: "nextcloud" | "brain";
+  path: string;
+  pageNumber?: number | null;
+  score?: number;
+  brainItemId?: string | null;
+  snippet?: string;
+  mimeType?: string;
 }
 
 /**
@@ -58,6 +99,9 @@ export interface ChatRequest {
   temperature?: number;
   max_tokens?: number;
   provider?: string;
+  /** WARP-174: skip /chat history persistence for throwaway turns
+   * (setup wizard "Ask the AI" probe, health checks). Default false. */
+  ephemeral?: boolean;
 }
 
 export interface ModelInfo {
@@ -71,35 +115,9 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
-// --- Session types ---
-
-export interface SessionInfo {
-  id: string;
-  title: string;
-  model: string;
-  created_at: number;
-  updated_at: number;
-  message_count: number;
-  system_prompt: string | null;
-}
-
-export interface SessionDetail extends SessionInfo {
-  messages: SessionMessageInfo[];
-}
-
-export interface SessionMessageInfo {
-  role: string;
-  content: string;
-  timestamp: number;
-}
-
-export interface SessionChatRequest {
-  message: string;
-  stream?: boolean;
-  temperature?: number;
-  max_tokens?: number;
-  provider?: string;
-}
+// WARP-311: legacy session types removed alongside the orchestrator
+// proxy routes. New persistence shape is `PersistedConversation` in
+// `lib/api.ts` (WARP-304).
 
 export interface DeviceInfo {
   id: string;
@@ -212,6 +230,38 @@ export interface VpnPeerCreatedInfo {
   peer: VpnPeerInfo;
   /** Full WireGuard .conf text. Contains the peer's private key. */
   conf: string;
+}
+
+// ── WARP-446: Coverage extender APs ──
+
+/** State machine values mirrored from the Prisma `ApDeviceStatus` enum.
+ *  Kept as a string-literal union so the dashboard's renderers can do
+ *  exhaustive switch checks at the type-system level. */
+export type ApDeviceStatus =
+  | "DISCOVERED"
+  | "AWAITING_APPROVAL"
+  | "PROVISIONING"
+  | "ONLINE"
+  | "FAILED"
+  | "DECOMMISSIONED";
+
+export interface ApDeviceInfo {
+  mac: string;
+  displayName: string | null;
+  model: string | null;
+  serial: string | null;
+  version: string | null;
+  lastIp: string | null;
+  hostname: string | null;
+  status: ApDeviceStatus;
+  failureReason: string | null;
+  approvedSsid: string | null;
+  firstSeen: string;
+  lastSeen: string;
+  approvedAt: string | null;
+  approvedBy: string | null;
+  decommissionedAt: string | null;
+  lastOperationId: string | null;
 }
 
 /** DuckDNS status. `tokenSet` is the only signal about the token —
@@ -331,12 +381,30 @@ export interface StorageStats {
 export interface DriveInfo {
   device: string;
   mount: string;
+  /** FS-provided label from the bridge (e.g. "TOSHIBA EXT") — different
+   *  from the customer-chosen displayName below. */
   label: string;
   uuid: string;
   size_bytes: number;
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-174: customer's friendly name from the setup wizard's Storage
+   *  step. `null` until a Drive row is upserted via
+   *  PATCH /api/storage/drives/:uuid. */
+  displayName?: string | null;
+  icon?: string | null;
+  notes?: string | null;
+}
+
+/** WARP-174: response shape for PATCH /api/storage/drives/:uuid. */
+export interface DriveLabel {
+  uuid: string;
+  displayName: string;
+  icon: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DrivesResponse {
@@ -359,6 +427,11 @@ export interface HealthResponse {
     matter: boolean;
     router: boolean;
     frigate: boolean;
+    switch: boolean;
+    // PyPortal Titano screen (services/oled-display). `true` when the
+    // service is up — stays true in simulated mode too (no physical
+    // device); /display/status surfaces the backend if needed.
+    display: boolean;
   };
 }
 
@@ -744,11 +817,28 @@ export interface CameraPinInfo {
 }
 
 export interface CameraSSEEvent {
-  type: "connected" | "detection" | "camera_discovered" | "camera_online" | "camera_offline";
+  /**
+   * `detection`        — a NEW event accepted by the per-camera gate;
+   *                      toast + SWR revalidation.
+   * `detection_update` — live confidence update for the active event;
+   *                      cameras page only, toast MUST ignore.
+   * `detection_end`    — recording window closed; refresh events list,
+   *                      no toast.
+   * Mirrors `apps/orchestrator/src/types/camera.ts`.
+   */
+  type:
+    | "connected"
+    | "detection"
+    | "detection_update"
+    | "detection_end"
+    | "camera_discovered"
+    | "camera_online"
+    | "camera_offline";
   camera?: string;
   label?: string;
   score?: number;
   thumbnail?: string;
+  eventId?: string;
   timestamp?: number;
 }
 

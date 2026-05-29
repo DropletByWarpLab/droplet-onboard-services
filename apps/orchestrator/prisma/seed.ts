@@ -1,6 +1,10 @@
 import os from "os";
 import fs from "fs";
 import { PrismaClient } from "@prisma/client";
+// WARP-457: workspace settings seeder. Idempotent — re-running is a
+// no-op once the canonical defaults are in place, and operator-edited
+// values are never overwritten.
+import { seedWorkspaceSettings } from "../src/services/workspace-settings.service.js";
 
 const prisma = new PrismaClient();
 
@@ -44,6 +48,16 @@ async function main() {
     hostname,
     ip ?? "none",
     hardwareRev
+  );
+
+  // WARP-457: populate the WorkspaceSetting table from canonical
+  // defaults on first run. Idempotent — a re-run inserts zero rows
+  // and the row count stays stable; operator-edited values are
+  // never overwritten.
+  const settingsResult = await seedWorkspaceSettings(prisma);
+  console.log(
+    "Workspace settings: %d inserted (steady-state = 0 after first boot)",
+    settingsResult.inserted,
   );
 }
 

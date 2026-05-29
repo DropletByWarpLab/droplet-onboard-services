@@ -14,6 +14,7 @@ import {
   Archive,
 } from "lucide-react";
 import type { TrashItemInfo } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface TrashViewProps {
   items: TrashItemInfo[];
@@ -69,6 +70,7 @@ export function TrashView({
 }: TrashViewProps) {
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<TrashItemInfo | null>(null);
 
   const handleRestore = async (item: TrashItemInfo) => {
     setBusy(item.name);
@@ -79,20 +81,25 @@ export function TrashView({
     }
   };
 
-  const handleDelete = async (item: TrashItemInfo) => {
-    if (!confirm(`Permanently delete "${item.originalName}"? This cannot be undone.`)) {
-      return;
-    }
+  const handleDelete = (item: TrashItemInfo) => {
+    setPendingDelete(item);
+  };
+
+  const performDelete = async () => {
+    const item = pendingDelete;
+    if (!item) return;
     setBusy(item.name);
     try {
       await onDeleteForever(item.name);
+      setPendingDelete(null);
+    } catch (err) {
+      throw err;
     } finally {
       setBusy(null);
     }
   };
 
-  const handleEmpty = async () => {
-    setConfirmEmpty(false);
+  const performEmpty = async () => {
     await onEmpty();
   };
 
@@ -116,31 +123,14 @@ export function TrashView({
           <p className="type-footnote text-label-tertiary">
             {items.length} {items.length === 1 ? "item" : "items"} in trash
           </p>
-          {!confirmEmpty ? (
-            <button
-              onClick={() => setConfirmEmpty(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 type-footnote text-system-red hover:bg-system-red/10 rounded-sm transition-colors"
-            >
-              <AlertTriangle size={14} />
-              Empty trash
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="type-caption-1 text-system-red">Permanently delete all?</span>
-              <button
-                onClick={handleEmpty}
-                className="dp-btn-primary !bg-system-red type-caption-1 !py-1 !px-3 !min-h-[28px]"
-              >
-                Yes, empty
-              </button>
-              <button
-                onClick={() => setConfirmEmpty(false)}
-                className="type-caption-1 text-label-tertiary hover:text-label-primary px-2"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
+          <button
+            onClick={() => setConfirmEmpty(true)}
+            disabled={items.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 type-footnote text-system-red hover:bg-system-red/10 rounded-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <AlertTriangle size={14} />
+            Empty trash
+          </button>
         </div>
       )}
 
@@ -189,11 +179,20 @@ export function TrashView({
                 {formatDate(item.deletedAt)}
               </span>
 
-              <div className="flex items-center gap-0.5 w-20 justify-end flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+              {/*
+                WARP-300: row actions are always rendered (no opacity-0
+                hover gate) so touch + keyboard users can discover the
+                actions. p-2.5 → 34 px hit-target, clears the 32 px
+                ui-ux floor. aria-labels name the file so screen-reader
+                users hear which entry they're about to restore or
+                permanently delete.
+              */}
+              <div className="flex items-center gap-0.5 justify-end flex-shrink-0">
                 <button
                   onClick={() => handleRestore(item)}
                   disabled={busy === item.name}
-                  className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors disabled:opacity-50"
+                  className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-50"
+                  aria-label={`Restore ${item.originalName}`}
                   title="Restore"
                 >
                   <RotateCcw size={14} />
@@ -201,7 +200,8 @@ export function TrashView({
                 <button
                   onClick={() => handleDelete(item)}
                   disabled={busy === item.name}
-                  className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors disabled:opacity-50"
+                  className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors disabled:opacity-50"
+                  aria-label={`Delete forever ${item.originalName}`}
                   title="Delete forever"
                 >
                   <Trash2 size={14} />
@@ -211,6 +211,34 @@ export function TrashView({
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onConfirm={performDelete}
+        onCancel={() => setPendingDelete(null)}
+        title={
+          pendingDelete
+            ? `Permanently delete "${pendingDelete.originalName}"?`
+            : "Permanently delete?"
+        }
+        description="This bypasses Trash. The file cannot be restored after this."
+        confirmLabel="Delete forever"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={confirmEmpty}
+        onConfirm={performEmpty}
+        onCancel={() => setConfirmEmpty(false)}
+        title={
+          items.length > 0
+            ? `Permanently delete ${items.length} ${items.length === 1 ? "item" : "items"} in trash?`
+            : "Empty trash?"
+        }
+        description="Every file in Trash is gone for good. This cannot be undone."
+        confirmLabel="Empty trash"
+        variant="destructive"
+      />
     </div>
   );
 }

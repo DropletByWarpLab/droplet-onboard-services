@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
+import type { PrivateEnhancement } from "./private-enhancement.js";
 
-export type Role = "owner" | "admin" | "family" | "guest";
+export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
 export interface HttpClient {
   get(path: string, opts?: { params?: Record<string, unknown>; headers?: Record<string, string> }): Promise<Response>;
@@ -26,6 +27,15 @@ export interface ToolContext {
     switchSvc: HttpClient;
     fileIndexer: HttpClient;
     nextcloud: HttpClient;
+    /**
+     * The orchestrator's own REST surface (`http://orchestrator:3000`).
+     * Use for handlers that need data the orchestrator already
+     * aggregates (e.g. `/api/cameras` wraps camera-discovery + Frigate
+     * state into a single canonical shape; `/api/matter/*` exposes the
+     * Matter fabric). The mcp-server's `createHttpClient` auto-injects
+     * a service-principal Bearer JWT on every call to this target.
+     */
+    orchestrator: HttpClient;
   };
   matter: MatterController;
   /** Embed one or more texts. Used by `search_content` to vectorize the
@@ -35,16 +45,25 @@ export interface ToolContext {
    *  handlers should fall through to a clean error in that case. */
   embedText?: (texts: string[]) => Promise<number[][]>;
   /**
-   * WARP-286 — hybrid retrieval shim. Orchestrator binds this to
-   * `file-search.service.ts`'s `searchHybrid` so the MCP tool handler
-   * doesn't reach into Prisma + pgvector directly. Returns results
-   * already filtered by the calling user's RBAC boundary. When absent
-   * (e.g. embedder unavailable at context-build time) the handler
-   * returns `SEARCH_UNAVAILABLE`.
+   * WARP-286 / WARP-437 — hybrid retrieval shim. Orchestrator binds this
+   * to `file-search.service.ts`'s `searchHybrid`. The optional `enhance`
+   * block is the LLM-facing knob for HyDE / multi-query; the orchestrator
+   * may also inject pre-computed enhancement data via a private field
+   * (see Task 8). Returns results already filtered by RBAC. When absent
+   * (embedder unavailable at context-build time) the handler returns
+   * `SEARCH_UNAVAILABLE`.
    */
   searchHybrid?: (args: {
     query: string;
     limit: number;
+    enhance?: { hyde?: boolean; multiQuery?: boolean; n?: number };
+    /**
+     * WARP-437 — orchestrator-injected enhancement bundle. NOT settable by
+     * the LLM (the tool's JSON schema rejects unknown args via
+     * `additionalProperties: false`). Routed via MCP `_meta._enhancement`
+     * and stashed on `ctx._enhancement`; the handler forwards it here.
+     */
+    _enhancement?: PrivateEnhancement;
   }) => Promise<
     Array<{
       source: "nextcloud" | "brain";
@@ -60,6 +79,13 @@ export interface ToolContext {
   userId?: string;
   role?: Role;
   ncToken?: string;
+  /**
+   * WARP-437 — orchestrator-injected enhancement bundle plumbed through
+   * MCP `_meta._enhancement`. Trusted-stdio-only; the HTTP transport
+   * does not propagate this field. Handlers (currently only
+   * `search_content`) forward it to `ctx.searchHybrid({ ..., _enhancement })`.
+   */
+  _enhancement?: PrivateEnhancement;
   signal: AbortSignal;
 }
 

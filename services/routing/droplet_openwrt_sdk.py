@@ -956,6 +956,226 @@ class VPNApi:
 
 
 # ---------------------------------------------------------------------------
+# High-level API: AP onboarding (WARP-446)
+# ---------------------------------------------------------------------------
+class ApApi:
+    """Coverage-extender AP wireless config management.
+
+    Each approved extender gets one `wifi-iface` UCI section keyed on
+    its MAC. The section is the standard hostapd-compatible shape with
+    802.11k/v/r flags baked in so band-steering (dawn) works without
+    per-AP tuning. See `docs/ADR-005-ap-auto-onboarding.md` for the
+    decision record.
+
+    Following the WireGuard / camera-subnet pattern: callers wrap these
+    helpers in `safe_apply` so a bad push that partitions connectivity
+    is auto-rolled back. The helpers themselves don't commit — they
+    stage uci changes and the caller's `safe_apply` does the
+    commit + reload atomically.
+    """
+
+    # Standard 802.11r FT flags. Same shape used by OpenWrt's wiki
+    # examples for cross-AP fast handoff over WPA2-PSK. ft_over_ds=0
+    # means the handoff goes through the AIR (over-the-air) rather
+    # than over the wired backhaul — the latter requires a working
+    # IP routing between APs that we don't reliably have at install
+    # time (a fresh extender may not have a static lease yet).
+    _FT_FLAGS = {
+        "ieee80211r": "1",
+        "ft_over_ds": "0",
+        "ft_psk_generate_local": "1",
+    }
+
+    # 802.11k (neighbor reports) + 802.11v (BSS Transition Management).
+    # Dawn needs these set on every AP to negotiate roaming — without
+    # them dawn falls back to deauth-based steering which is what
+    # caused the usteer/Apple problems documented in ADR-005.
+    _KV_FLAGS = {
+        "ieee80211k": "1",
+        "bss_transition": "1",
+    }
+
+    def __init__(self, router: "DropletRouter"):
+        self._r = router
+
+    @staticmethod
+    def iface_section_for_mac(mac: str) -> str:
+        """Deterministic uci section name from a MAC.
+
+        `B8:27:EB:12:34:56` → `ap_extender_b827eb123456`. Lowercase,
+        no separators — matches the OpenWrt section-name grammar
+        (`^[a-z][a-z0-9_]*$`). Idempotent re-push relies on this
+        being stable across input variants ("AA:BB", "aa-bb", "AABB").
+
+        Raises ValueError when the input doesn't look like a MAC.
+        """
+        if not isinstance(mac, str):
+            raise ValueError(f"mac must be a string, got {type(mac).__name__}")
+        cleaned = mac.replace(":", "").replace("-", "").replace(".", "").strip().lower()
+        if len(cleaned) != 12 or not all(c in "0123456789abcdef" for c in cleaned):
+            raise ValueError(
+                f"invalid MAC: {mac!r} (expected 6 hex bytes separated by : or -)"
+            )
+        return f"ap_extender_{cleaned}"
+
+    def push_wireless_config(
+        self,
+        iface_section: str,
+        radio: str,
+        ssid: str,
+        encryption: str,
+        key: str,
+        network: str = "lan",
+    ) -> None:
+        """Stage a `wifi-iface` section for the extender's wireless config.
+
+        DOES NOT commit. Caller wraps this in `safe_apply` so commit +
+        reload happen as a single ucitrack pass — same convention
+        `create_interface` / `add_peer` in VPNApi use. Pre-committing
+        here would leave nothing pending for `apply`, which then
+        returns NO_DATA.
+
+        802.11k/v/r flags are baked in unconditionally (see ADR-005);
+        the dashboard does NOT expose toggles for them because the
+        whole point of automatic onboarding is consistent steering
+        across every AP.
+        """
+        values = {
+            "device": radio,
+            "mode": "ap",
+            "network": network,
+            "ssid": ssid,
+            "encryption": encryption,
+            "key": key,
+            **self._FT_FLAGS,
+            **self._KV_FLAGS,
+        }
+        # uci.set requires the section to exist; uci.add(name=...) is
+        # the create-or-set idiom. We always use `add` because re-runs
+        # need to be safe — if the section already exists, uci.add
+        # with the same name will fail on real OpenWrt; the caller's
+        # idempotency layer (remove + push) handles that.
+        try:
+            self._r.uci.set("wireless", iface_section, values)
+        except UbusError as exc:
+            # NOT_FOUND / NO_DATA — section doesn't exist yet; create.
+            if exc.code in (4, 5):
+                self._r.uci.add("wireless", "wifi-iface", values=values, name=iface_section)
+            else:
+                raise
+
+    def remove_wireless_config(self, iface_section: str) -> None:
+        """Stage deletion of the wifi-iface section.
+
+        DOES NOT commit. Caller wraps this in `safe_apply`. No-op when
+        the section doesn't exist — matches the orchestrator's
+        decommission contract (idempotent).
+        """
+        try:
+            self._r.uci.delete("wireless", iface_section)
+        except UbusError as exc:
+            if exc.code in (4, 5):
+                # Already gone — caller's decommission flow treats this
+                # as success-equivalent.
+                return
+            raise
+
+    def browse_discovered(self) -> list[dict[str, Any]]:
+        """Query umdns for `_droplet-ap._tcp` announcements on br-lan.
+
+        Returns one dict per extender currently visible on the LAN,
+        shaped like:
+            {
+                "mac": "B8:27:EB:12:34:56",
+                "model": "raspberrypi,5-model-b",
+                "serial": "RPi5-00000000a1b2c3d4",
+                "version": "1.0",
+                "last_ip": "192.168.50.42",
+                "hostname": "droplet-extender-b827eb123456",
+            }
+
+        Per ADR-005 §1, the extender's `99-droplet-setup` script writes
+        `/etc/umdns/droplet-ap.json` advertising `_droplet-ap._tcp` with
+        TXT records `mac=…`, `model=…`, `serial=…`, `version=…`,
+        `role=…`. The orchestrator's poller calls this every
+        DROPLET_AP_DISCOVERY_INTERVAL seconds; the droplet-ai rpcd ACL
+        already grants `umdns: ["browse", "update"]`
+        (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json) so no extra
+        privileges are needed.
+
+        Returns [] when umdns isn't installed, has no peers, or the
+        ubus call shape changes. This is read-only — never raises on
+        empty data; only network / auth failures bubble.
+        """
+        try:
+            raw = self._r._call("umdns", "browse")
+        except UbusError as exc:
+            # NOT_FOUND on the umdns object = service isn't running.
+            # Treat as "nothing to discover this tick"; the orchestrator
+            # poller swallows empty results silently.
+            if exc.code in (4, 5):
+                return []
+            raise
+
+        # umdns returns either {service-name: {host-name: {...}}} or a
+        # flat dict of records depending on the build. Tolerate both.
+        records: list[dict[str, Any]] = []
+        services = raw if isinstance(raw, dict) else {}
+        droplet_services = services.get("_droplet-ap._tcp", {})
+        if not isinstance(droplet_services, dict):
+            return []
+        for host_key, entry in droplet_services.items():
+            if not isinstance(entry, dict):
+                continue
+            parsed = self._parse_droplet_ap_txt(entry)
+            if parsed is None:
+                continue
+            # `ipv4` shape on umdns is just the address string; older
+            # builds sometimes nest it under `ipv4` -> "address". Tolerate.
+            ipv4 = entry.get("ipv4")
+            if isinstance(ipv4, dict):
+                ipv4 = ipv4.get("address") or ipv4.get("ip")
+            if isinstance(ipv4, str) and "last_ip" not in parsed:
+                parsed["last_ip"] = ipv4
+            # Use the host key as hostname when the TXT didn't carry one.
+            parsed.setdefault("hostname", host_key)
+            records.append(parsed)
+        return records
+
+    @staticmethod
+    def _parse_droplet_ap_txt(entry: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Pull TXT records out of a single umdns entry into our shape.
+
+        TXT records arrive as a list of "key=value" strings (umdns) or
+        sometimes as a dict (build-dependent). Tolerate both; drop any
+        entry that doesn't carry the mandatory `mac=` key, since that's
+        the orchestrator's primary key.
+        """
+        txt = entry.get("txt")
+        kv: dict[str, str] = {}
+        if isinstance(txt, list):
+            for item in txt:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, _, value = item.partition("=")
+                if key:
+                    kv[key.strip()] = value.strip()
+        elif isinstance(txt, dict):
+            kv = {str(k): str(v) for k, v in txt.items()}
+        else:
+            return None
+
+        mac = kv.get("mac")
+        if not mac:
+            return None
+        record: dict[str, Any] = {"mac": mac}
+        for k in ("model", "serial", "version"):
+            if v := kv.get(k):
+                record[k] = v
+        return record
+
+
+# ---------------------------------------------------------------------------
 # High-level API: File operations
 # ---------------------------------------------------------------------------
 class FileApi:
@@ -1016,6 +1236,7 @@ class DropletRouter:
         self.firewall = FirewallApi(self)
         self.system = SystemApi(self)
         self.vpn = VPNApi(self)
+        self.ap = ApApi(self)  # WARP-446: coverage extender onboarding
         self.file = FileApi(self)
 
         if auto_login:

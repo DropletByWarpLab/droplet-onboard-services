@@ -26,7 +26,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from chunker import Chunk, chunk_spans
+from chunker import Chunk, chunk_spans, format_chunk_with_header
 from db import (
     delete_chunks_for_brain_item,
     mark_brain_item_indexed,
@@ -148,6 +148,15 @@ def handle_brain_uploaded(payload: dict) -> None:
 
     if not os.path.exists(path):
         logger.warning("brain_ingest: file missing on disk: %s", path)
+        # WARP-330: the MQTT publish alone is not enough — the dashboard's
+        # pipeline-health query reads BrainMemoryItem.status. Persist the
+        # failure so the row stops looking like it's still indexing.
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="file_missing"
+            )
+        except Exception:
+            logger.exception("brain_ingest: failed to mark item file_missing")
         _publish_status(user_id, item_id, "failed", reason="file_missing")
         return
 
@@ -176,6 +185,57 @@ def handle_brain_uploaded(payload: dict) -> None:
         "brain_ingest: indexing item=%s user=%s mime=%s", item_id, user_id, mime
     )
 
+    # WARP-305: image-only attachments. There's no text to extract from a
+    # bare PNG/JPEG/HEIC, so running the extractor → "< 10 chars" check
+    # used to mark the chip as `failed` with reason=`empty_extraction`.
+    # That bubbled up as the "Something went wrong on this turn" toast in
+    # the chat surface because `empty_extraction` had no friendly mapping.
+    #
+    # The image IS successfully stored (the bytes live under the item dir
+    # for future retrieval and the row is in BrainMemoryItem) — it just
+    # isn't searchable by text content. Mark it `ready` with an
+    # `image_only` warning so the dashboard chip renders ✓ Ready with a
+    # softer subtitle instead of ⚠ Failed. Multimodal chat (sending
+    # images straight to the model as content_parts) is a separate
+    # follow-up; this fix is about not lying to the user.
+    if isinstance(mime, str) and mime.startswith("image/"):
+        logger.info(
+            "brain_ingest: image-only attachment, skipping text extraction for %s",
+            path,
+        )
+        try:
+            mark_brain_item_indexed(
+                item_id, status="ready", warnings=["image_only"]
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark image-only item ready"
+            )
+        _publish_status(user_id, item_id, "ready", reason="image_only")
+        # Persist a tiny manifest so the export route can still surface
+        # the attachment metadata — no extracted.txt because there's no
+        # text to write.
+        try:
+            manifest_p = _manifest_path(path)
+            manifest = {
+                "itemId": item_id,
+                "userId": user_id,
+                "filename": payload.get("filename"),
+                "mimeType": mime,
+                "originatingChatId": payload.get("originatingChatId"),
+                "storagePath": path,
+                "chunks": 0,
+                "extractorWarnings": ["image_only"],
+            }
+            manifest_p.write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            logger.warning(
+                "brain_ingest: failed to write image-only manifest: %s", e
+            )
+        return
+
     # Extract.
     doc = dispatch(path, mime)
     if doc is None:
@@ -185,9 +245,15 @@ def handle_brain_uploaded(payload: dict) -> None:
         )
         _publish_status(user_id, item_id, "failed", reason="extractor_unavailable")
         # Mark indexed=NOW with no chunks so the chip doesn't spin
-        # forever; the failed status flips the chip to ⚠.
+        # forever; status='failed' flips the chip to ⚠ AND keeps the
+        # dashboard's failed-count aggregate honest (WARP-330).
         try:
-            mark_brain_item_indexed(item_id, warnings=["extractor_unavailable"])
+            mark_brain_item_indexed(
+                item_id,
+                status="failed",
+                failure_reason="extractor_unavailable",
+                warnings=["extractor_unavailable"],
+            )
         except Exception:
             logger.exception("brain_ingest: failed to mark item failed")
         return
@@ -203,39 +269,80 @@ def handle_brain_uploaded(payload: dict) -> None:
         warnings.append("empty_extraction")
         _publish_status(user_id, item_id, "failed", reason="empty_extraction")
         try:
-            mark_brain_item_indexed(item_id, warnings=warnings)
+            mark_brain_item_indexed(
+                item_id,
+                status="failed",
+                failure_reason="empty_extraction",
+                warnings=warnings,
+            )
         except Exception:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    # Chunk + embed. Chunks are `Chunk(text, anchor)` — anchor flows into
-    # per-chunk metadata so the dashboard can cite "Page N of foo.pdf"
-    # rather than a bare chunk index.
+    # Chunk + embed. Chunks are `Chunk(text, anchor, section_path)`:
+    #  * WARP-287 — the anchor flows into per-chunk metadata so the
+    #    dashboard can cite "Page N of foo.pdf" rather than a bare index.
+    #  * WARP-435 — the section_path (sentence-aware splitter runs per
+    #    span, so each chunk keeps its span's breadcrumb) drives the
+    #    contextual header prepended before embedding.
     chunks = _chunk_spans_from_doc(doc)
     if not chunks:
         logger.info("brain_ingest: chunker produced 0 chunks for %s", path)
         warnings.append("no_chunks")
         _publish_status(user_id, item_id, "failed", reason="no_chunks")
         try:
-            mark_brain_item_indexed(item_id, warnings=warnings)
+            mark_brain_item_indexed(
+                item_id,
+                status="failed",
+                failure_reason="no_chunks",
+                warnings=warnings,
+            )
         except Exception:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    chunk_texts = [c.text for c in chunks]
+    # WARP-435: build prefixed chunk texts. Filename resolution priority:
+    # MQTT payload's `filename` field (user-friendly), falling back to
+    # the storage-path basename. The section_path rides on each Chunk
+    # (set by its source span) — empty → header is just "Document: name".
+    display_filename = payload.get("filename") or os.path.basename(path) or "document"
+    prefixed_chunks: list[str] = [
+        format_chunk_with_header(chunk.text, display_filename, chunk.section_path)
+        for chunk in chunks
+    ]
+
     try:
-        vectors = embed_texts(chunk_texts)
+        vectors = embed_texts(prefixed_chunks)
     except Exception as e:
         logger.warning("brain_ingest: embedding failed for %s: %s", path, e)
+        # WARP-330: persist the failure on the row so the dashboard's
+        # status-derived aggregates (pipeline-health, failed-count) stay
+        # in sync with what we just emitted over MQTT.
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="embed_failed"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item embed_failed"
+            )
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
-    if len(vectors) != len(chunks):
+    if len(vectors) != len(prefixed_chunks):
         logger.warning(
             "brain_ingest: embedding count mismatch for %s (%d vs %d)",
             path,
             len(vectors),
-            len(chunks),
+            len(prefixed_chunks),
         )
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="embed_failed"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item embed_failed (count mismatch)"
+            )
         _publish_status(user_id, item_id, "failed", reason="embed_failed")
         return
 
@@ -249,11 +356,32 @@ def handle_brain_uploaded(payload: dict) -> None:
 
     # Upsert (delete-then-insert to keep brain rows independent of the
     # ncFileId-based unique constraint that the watcher relies on).
+    # WARP-435: persist the prefixed text — the exact string the
+    # embedder saw — so searchHybrid's lexical arm and the LLM's
+    # citation surface both reflect the contextual header.
     try:
         delete_chunks_for_brain_item(item_id)
-        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        for idx, (chunk, prefixed_text, vec) in enumerate(
+            zip(chunks, prefixed_chunks, vectors)
+        ):
             chunk_metadata = dict(doc_metadata or {})
-            chunk_metadata["anchor"] = chunk.anchor.model_dump()
+            # WARP-287: serialize the chunk's anchor for citation surfaces.
+            # A malformed anchor must not abort the whole file — fall back
+            # to null + warn so the chunk still lands (searchable, just
+            # without a deep-link target).
+            try:
+                chunk_metadata["anchor"] = chunk.anchor.model_dump()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "brain_ingest: anchor serialize failed for %s chunk %d: %s",
+                    item_id,
+                    idx,
+                    e,
+                )
+                chunk_metadata["anchor"] = None
+                warnings.append("malformed_anchor")
+            # WARP-435: persist the section breadcrumb alongside the anchor.
+            chunk_metadata["sectionPath"] = list(chunk.section_path)
             upsert_chunk(
                 user_id=user_id,
                 # Use a deterministic synthetic ncFileId so the existing
@@ -265,16 +393,30 @@ def handle_brain_uploaded(payload: dict) -> None:
                 nc_file_id=_synthetic_nc_file_id(item_id),
                 path=path,
                 chunk_idx=idx,
-                text=chunk.text,
+                # WARP-435: persist the prefixed text — the exact string
+                # the embedder saw — so searchHybrid's lexical arm and the
+                # citation surface both reflect the contextual header.
+                text=prefixed_text,
                 embedding=vec,
                 source="brain",
                 brain_item_id=item_id,
                 warnings=warnings,
                 metadata=chunk_metadata,
             )
-        mark_brain_item_indexed(item_id, warnings=warnings)
+        mark_brain_item_indexed(item_id, status="ready", warnings=warnings)
     except Exception as e:
         logger.exception("brain_ingest: db write failed for %s: %s", item_id, e)
+        # Best-effort persist of the failure status. If this second write
+        # also fails the row stays at status='indexing' — the daily
+        # reconciler (`reconcile_stuck_items`) will eventually surface it.
+        try:
+            mark_brain_item_indexed(
+                item_id, status="failed", failure_reason="db_failed"
+            )
+        except Exception:
+            logger.exception(
+                "brain_ingest: failed to mark item db_failed after upsert error"
+            )
         _publish_status(user_id, item_id, "failed", reason="db_failed")
         return
 

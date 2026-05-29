@@ -8,7 +8,7 @@ make the anchor ambiguous.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from anchor_schema import Anchor
 
@@ -17,6 +17,7 @@ from anchor_schema import Anchor
 class Span:
     text: str
     anchor: Anchor  # type: ignore[valid-type]  # discriminated union, see anchor_schema
+    section_path: list[str] = field(default_factory=list)  # WARP-435 breadcrumb
 
     def __post_init__(self) -> None:
         if not self.text or not self.text.strip():

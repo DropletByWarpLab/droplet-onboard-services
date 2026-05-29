@@ -29,6 +29,7 @@ This means **the timeline anchors below shift**: compliance milestones are no lo
 | SOC 2 Type II attestation | 🔵 not started | Type I + 6-12 month observation; ~18-24 months in |
 | HIPAA-ready (architecture + BAA + processes) | 🔵 not started | Achieved by end of WARP-274 |
 | FIPS 140-3 cryptographic modules | 🟡 in progress | WARP-229 closed: provider activation apparatus + boot self-tests + PR-blocking lint shipped. Pending: operator sourcing of validated `fips.so` (Ubuntu Pro / Red Hat UBI / source-built) — tracked separately. |
+| TPM-sealed device identity | ✅ done | WARP-230 closed: ECC P-256 sealed to PCRs [0,2,4,7] via `services/device-identity-svc/` sidecar (gRPC over Unix socket), pure-Python mock backend for dev/CI, `tpm2-pytss` real backend gated by `RUN_TPM_INTEGRATION=1`. Reseal requires MFA re-auth within 60s via new `require-recent-mfa` middleware. |
 | NIST 800-53 Rev 5 Moderate baseline mapping | 🔵 not started | Documentation exercise, runs alongside other tickets |
 | STIG-hardened OS profile | 🔵 not started | Configuration; produced as part of WARP-231 |
 | Common Criteria EAL2 | ⏸ deferred | Year 2+, gated on a federal customer |
@@ -42,7 +43,7 @@ Legend: ✅ done · 🟡 in progress · 🔵 not started · ❌ blocked or N/A �
 
 | Workstream | Tickets | Done | In progress | Not started |
 |---|---|---|---|---|
-| Cryptographic foundations | 8 | 1 | 0 | 7 |
+| Cryptographic foundations | 8 | 2 | 0 | 6 |
 | Audit & monitoring | 5 | 0 | 0 | 5 |
 | Identity & access | 5 | 0 | 0 | 5 |
 | Data protection | 8 | 0 | 0 | 8 |
@@ -51,7 +52,7 @@ Legend: ✅ done · 🟡 in progress · 🔵 not started · ❌ blocked or N/A �
 | Privacy + telemetry | 3 | 0 | 0 | 3 |
 | Governance UI + Trust Center | 3 | 0 | 0 | 3 |
 | GRC operations | 6 | 0 | 0 | 6 |
-| **Total** | **50** | **1** | **0** | **49** |
+| **Total** | **50** | **2** | **0** | **48** |
 
 ---
 
@@ -62,8 +63,8 @@ The chain is non-negotiable — each ticket blocks the next.
 | # | Ticket | Title | Workstream | Status |
 |---|---|---|---|---|
 | 1 | [WARP-229](https://warp-lab.atlassian.net/browse/WARP-229) | FIPS 140-3 cryptographic provider + CI lint | Crypto | ✅ |
-| 2 | [WARP-230](https://warp-lab.atlassian.net/browse/WARP-230) | TPM 2.0-sealed device identity | Crypto | 🔵 |
-| 3 | [WARP-231](https://warp-lab.atlassian.net/browse/WARP-231) | UEFI Secure Boot + signed kernel + dm-verity rootfs + IMA | Crypto | 🔵 |
+| 2 | [WARP-230](https://warp-lab.atlassian.net/browse/WARP-230) | TPM 2.0-sealed device identity | Crypto | ✅ |
+| 3 | [WARP-231](https://warp-lab.atlassian.net/browse/WARP-231) | UEFI Secure Boot + signed kernel + dm-verity rootfs + IMA | Crypto | 🔵 ← **next up** |
 | 4 | [WARP-232](https://warp-lab.atlassian.net/browse/WARP-232) | LUKS2 disk encryption with TPM-sealed keys | Crypto | 🔵 |
 | 5 | [WARP-233](https://warp-lab.atlassian.net/browse/WARP-233) | Postgres TLS 1.3 + SCRAM-SHA-256 + pg_tde for PHI/PII | Crypto | 🔵 |
 | 6 | [WARP-234](https://warp-lab.atlassian.net/browse/WARP-234) | Redis 7 TLS + per-service ACLs | Crypto | 🔵 |
@@ -157,9 +158,25 @@ Don't update audit dates here without an actual auditor commitment in writing.
 
 ## Recent closes
 
+- **2026-05-11** — **WARP-230 ✅ done** (PR #190). TPM 2.0-sealed device identity. Sidecar topology at `services/device-identity-svc/` (Python, gRPC over Unix socket) with two backends: pure-Python mock for dev/CI + `tpm2-pytss` real backend gated by `RUN_TPM_INTEGRATION=1`. ECC P-256 keys sealed to PCRs [0,2,4,7] (firmware + kernel + initramfs + secure-boot state). First-boot enrollment ceremony wired into `scripts/setup.sh` Phase 4 via `scripts/provision-device-identity.sh`. Reseal flow gated by new `require-recent-mfa` middleware (60s window) — surfaces in dashboard at `/admin/device-identity` and via `droplet-admin device-identity {status,reseal}` CLI. FIPS-clean. Compose `!reset []` (2.20+) clears inherited devices for the test lane so `/dev/tpm0` isn't required on CI runners.
 - **2026-05-10** — **WARP-229 ✅ done.** FIPS 140-3 cryptographic provider activation apparatus shipped across all 8 application service containers (orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway, camera-discovery, routing, switch, oled-display). New `@droplet/fips-selftest` TS package + `services/_shared/fips_selftest.py` Python helper. PR-blocking static lint at `scripts/test-fips.sh` + `.github/workflows/test-fips.yml`. Documented allowed algorithms (`docs/security/fips-allowed-algorithms.md`) and 3-entry exceptions registry (`docs/security/fips-exceptions.md`): RTSP digest MD5, WireGuard X25519, FIPS-selftest negative-probe. file-indexer's MD5 item-id fingerprint replaced with SHA-256. Operator note: validated `fips.so` sourcing tracked separately.
 - **2026-05-10** — WARP-229 spec written + reviewed. (Implementation followed in the same day, on the WARP-229 branch.) Spec at `docs/superpowers/specs/2026-05-10-warp-229-fips-provider-design.md`.
 
 ---
 
-*Living document. Last updated 2026-05-10 with WARP-229 close.*
+## Parallel product lane (E→C alternation)
+
+Per the 2026-05-10 strategy update, the product lane runs in parallel with the compliance lane. Tracked here for visibility; not part of the WARP-228 epic accounting.
+
+| Ticket | Title | Status | Notes |
+|---|---|---|---|
+| WARP-286 | Hybrid retrieval — BM25 + RRF + reranker | ✅ done | Postgres native FTS (pg_search swap path documented). BGE-reranker-base int8. Eval lane asserts ≥10% NDCG@10 improvement vs vector-only. |
+| WARP-287 | Section anchors + citation deep-linking | 🟡 in review (PR #200) | Anchor union threaded extractor → chunker → DB → orchestrator → dashboard. `<CitationCard>` deep-links per kind. Admin re-index route reuses WARP-230's `require-recent-mfa`. |
+| WARP-225 | Dashboard context-meter | ✅ done | Investor-grade polish surface. |
+| WARP-279 | Meta-observability dashboard | ✅ done | LAN-only "watch Claude work" surface. |
+| WARP-224 | Chat-retrieval validation | ✅ done | Includes frame-OCR (now anchor-aware via WARP-287). |
+| WARP-227 | rag-tests live-stack triage | 🟡 partial | R1+R2+R3 fixed; R4 ("fixtures don't index") deferred as WARP-282. |
+
+---
+
+*Living document. Last updated 2026-05-11 with WARP-230 close + WARP-287 PR #200 in review.*

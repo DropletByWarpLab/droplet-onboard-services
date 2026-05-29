@@ -123,6 +123,9 @@ def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
             segments = list(segments_iter)
 
     # One Span per non-empty Whisper segment, anchored to its time window.
+    # Audio has no in-file structural hierarchy; the document-level
+    # breadcrumb is the filename (WARP-435 fallback).
+    filename = os.path.basename(str(path)) or "audio"
     spans: list[Span] = []
     for seg in segments:
         seg_text = (seg.text or "").strip()
@@ -140,6 +143,7 @@ def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
             Span(
                 text=seg_text,
                 anchor=MediaTimestampAnchor(startMs=start_ms, endMs=end_ms),
+                section_path=[filename],
             )
         )
 

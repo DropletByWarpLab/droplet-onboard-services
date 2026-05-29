@@ -2,6 +2,7 @@
 
 import { Loader2, FileText, AlertTriangle, Check, X } from "lucide-react";
 import type { ChatAttachment } from "@/lib/types";
+import { translateError } from "@/lib/friendly-errors";
 
 interface AttachmentChipProps {
   attachment: ChatAttachment;
@@ -48,9 +49,9 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
       data-status={status}
       role="status"
       aria-label={`${filename} — ${statusText}`}
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 type-caption
+      className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 type-caption-1
         max-w-full bg-surface-secondary border
-        ${isFailed ? "border-warning/60" : "border-separator"}
+        ${isFailed ? "border-system-orange/60" : "border-separator"}
       `}
     >
       <FileText
@@ -75,20 +76,29 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
       ) : isReady ? (
         <Check
           size={14}
-          className="text-positive flex-shrink-0"
+          className="text-system-green flex-shrink-0"
           aria-hidden
         />
       ) : (
         <AlertTriangle
           size={14}
-          className="text-warning flex-shrink-0"
+          className="text-system-orange flex-shrink-0"
           aria-hidden
         />
       )}
       <span className="text-label-tertiary flex-shrink-0">{statusText}</span>
       {isFailed && error ? (
-        <span className="text-label-tertiary truncate" title={error}>
-          — {error}
+        // WARP-294: never surface the raw `error` payload anywhere in
+        // the DOM (text or title) — the backend may emit terse strings
+        // (HTTP codes, indexer enums, ECONNREFUSED). The full raw cause
+        // goes via the helper's console.error for QA / operator triage.
+        // The `title` carries the same friendly translation so the full
+        // string is reachable on small screens where `truncate` clips.
+        <span
+          className="text-label-tertiary truncate"
+          title={translateError({ message: error }, "chat")}
+        >
+          — {translateError({ message: error }, "chat")}
         </span>
       ) : null}
       {onRemove ? (

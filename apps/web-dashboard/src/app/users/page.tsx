@@ -22,7 +22,7 @@ import {
   setUserEnabled,
   createInvite,
   listInvites,
-  revokeInvite,
+  revokeInvite as apiRevokeInvite,
 } from "@/lib/api";
 import type {
   AuthUser,
@@ -30,6 +30,8 @@ import type {
   InviteRole,
   InviteCreateResponse,
 } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 const RESERVED_USERNAMES = ["admin", "root"];
 
@@ -78,6 +80,16 @@ export default function UsersPage() {
   const [editing, setEditing] = useState<AuthUser | null>(null);
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editPassword, setEditPassword] = useState("");
+
+  // WARP-291: ConfirmDialog targets for the three destructive flows that
+  // used to hit `window.confirm()`. Storing the target object (not just a
+  // boolean) lets the dialog body render the username/displayName.
+  const [revokeInvite, setRevokeInvite] = useState<InviteListItem | null>(null);
+  const [deleteUserTarget, setDeleteUserTarget] = useState<AuthUser | null>(null);
+  const [disableUserTarget, setDisableUserTarget] = useState<AuthUser | null>(
+    null,
+  );
+  const { toast } = useToast();
 
   // Stable id for the Edit dialog headline (mirrors invite dialog pattern).
   const editHeadingId = useId();
@@ -197,17 +209,12 @@ export default function UsersPage() {
     }
   };
 
-  const handleRevokeInvite = async (invite: InviteListItem) => {
-    // Tier-2 destructive confirm — same idiom as handleDelete above.
-    if (
-      !confirm(
-        `Revoke invite for "${invite.username}"? They won't be able to use this link anymore.`,
-      )
-    ) {
-      return;
-    }
+  const performRevokeInvite = async () => {
+    const invite = revokeInvite;
+    if (!invite) return;
     setError(null);
-    // Optimistic: mark revoked locally; rollback on failure.
+    // Optimistic: mark revoked locally; rollback on failure. Mirrors
+    // the WARP-291 pattern (snapshot-and-rollback for destructives).
     const before = invites;
     setInvites((prev) =>
       prev.map((i) =>
@@ -215,33 +222,69 @@ export default function UsersPage() {
       ),
     );
     try {
-      await revokeInvite(invite.token);
+      await apiRevokeInvite(invite.token);
+      setRevokeInvite(null);
+      toast(`Invite for ${invite.username} revoked.`, "success");
     } catch (err: any) {
       setInvites(before);
       setError(err?.message || "Failed to revoke invite");
+      throw err;
     }
   };
 
-  const handleDelete = async (u: AuthUser) => {
+  const handleDelete = (u: AuthUser) => {
     if (u.id === currentUser?.username) {
       setError("You can't delete your own account.");
       return;
     }
-    if (!confirm(`Delete user "${u.id}"? This cannot be undone.`)) return;
+    setDeleteUserTarget(u);
+  };
+
+  const performDeleteUser = async () => {
+    const u = deleteUserTarget;
+    if (!u) return;
     try {
       await apiDeleteUser(u.id);
+      setDeleteUserTarget(null);
+      toast(`Deleted ${u.id}.`, "success");
       await reload();
     } catch (err: any) {
       setError(err?.message || "Failed to delete user");
+      throw err;
     }
   };
 
-  const handleToggleEnabled = async (u: AuthUser, enabled: boolean) => {
+  // Enabling a user is recoverable and the audit doesn't ask for a confirm;
+  // disabling is also recoverable but cuts a real user off, so we surface
+  // the consequence first.
+  const handleSetEnabled = (u: AuthUser, enabled: boolean) => {
+    if (!enabled) {
+      setDisableUserTarget(u);
+      return;
+    }
+    void performEnable(u);
+  };
+
+  const performEnable = async (u: AuthUser) => {
     try {
-      await setUserEnabled(u.id, enabled);
+      await setUserEnabled(u.id, true);
       await reload();
     } catch (err: any) {
-      setError(err?.message || `Failed to ${enabled ? "enable" : "disable"} user`);
+      setError(err?.message || "Failed to enable user");
+    }
+  };
+
+  const performDisable = async () => {
+    const u = disableUserTarget;
+    if (!u) return;
+    try {
+      await setUserEnabled(u.id, false);
+      setDisableUserTarget(null);
+      toast(`${u.id} disabled.`, "success");
+      await reload();
+    } catch (err: any) {
+      setError(err?.message || "Failed to disable user");
+      throw err;
     }
   };
 
@@ -403,7 +446,7 @@ export default function UsersPage() {
                 {u.id !== currentUser?.username && (
                   <>
                     <button
-                      onClick={() => handleToggleEnabled(u, false)}
+                      onClick={() => handleSetEnabled(u, false)}
                       aria-label={`Disable user ${label}`}
                       className="p-2.5 rounded-sm text-label-tertiary hover:text-system-orange hover:bg-system-orange/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
                       title="Disable"
@@ -462,7 +505,7 @@ export default function UsersPage() {
                   {canRevoke && (
                     <div className="flex items-center gap-0.5">
                       <button
-                        onClick={() => handleRevokeInvite(i)}
+                        onClick={() => setRevokeInvite(i)}
                         aria-label={`Revoke invite for ${inviteLabel}`}
                         className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors type-caption-1 px-2"
                         title="Revoke invite"
@@ -705,6 +748,48 @@ export default function UsersPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={revokeInvite !== null}
+        onConfirm={performRevokeInvite}
+        onCancel={() => setRevokeInvite(null)}
+        title={
+          revokeInvite
+            ? `Revoke invite for "${revokeInvite.username}"?`
+            : "Revoke invite?"
+        }
+        description="They won't be able to use this link anymore. If you change your mind, send them a fresh invite."
+        confirmLabel="Revoke"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={deleteUserTarget !== null}
+        onConfirm={performDeleteUser}
+        onCancel={() => setDeleteUserTarget(null)}
+        title={
+          deleteUserTarget
+            ? `Delete user "${deleteUserTarget.id}"?`
+            : "Delete user?"
+        }
+        description="The account, sessions, and all per-user state are removed. This cannot be undone."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={disableUserTarget !== null}
+        onConfirm={performDisable}
+        onCancel={() => setDisableUserTarget(null)}
+        title={
+          disableUserTarget
+            ? `Disable "${disableUserTarget.id}"?`
+            : "Disable user?"
+        }
+        description="They won't be able to sign in or use paired devices until you re-enable them."
+        confirmLabel="Disable"
+        variant="destructive"
+      />
     </div>
   );
 }

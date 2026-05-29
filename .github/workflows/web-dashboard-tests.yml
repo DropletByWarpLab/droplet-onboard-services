@@ -4,19 +4,9 @@ name: web-dashboard-tests
 # changes trigger a run.
 
 on:
-  pull_request:
-    paths:
-      - "apps/web-dashboard/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/web-dashboard-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "apps/web-dashboard/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/web-dashboard-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: web-dashboard-tests-${{ github.ref }}
@@ -37,6 +27,12 @@ jobs:
 
       - name: Install dependencies (npm workspaces, root install)
         run: npm ci
+
+      # WARP-288: catch silently-dropped Tailwind utility classes before
+      # they reach the unit suite. Runs before vitest so a regression
+      # fails fast with a clear per-class summary.
+      - name: Lint dashboard class names
+        run: bash scripts/check-dashboard-classes.sh
 
       - name: Run vitest
         run: npm run -w @droplet/web-dashboard test

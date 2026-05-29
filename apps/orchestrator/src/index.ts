@@ -24,11 +24,14 @@ import {
   stopHealthMonitor,
 } from "./services/health-monitor.service.js";
 import { ensureMcpStarted, stopMcp } from "./services/mcp-client.singleton.js";
+import { stopScreenQRPoller } from "./services/screen-qr.service.js";
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
+import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
+import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -37,7 +40,16 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
+import { mcpClient } from "./services/mcp-client.singleton.js";
+import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
+import { purgeNetworkThroughputSamples } from "./routes/network-throughput.js";
+import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
+import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
+import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
+import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -78,6 +90,21 @@ async function main() {
   await prisma.$connect();
   logger.info("Connected to PostgreSQL");
 
+  // WARP-456: initialize the signed activity recorder. Boot-fatal —
+  // an orchestrator that can't sign audit rows must NOT start.
+  initActivityRecorder(prisma);
+  // Genesis-or-restart event so the first row of every container's
+  // lifetime is always a `system` start-up. Makes the chain easier to
+  // segment in the dashboard's activity feed.
+  await recordActivity({
+    kind: "system",
+    severity: "info",
+    sourceIcon: "power",
+    what: "Orchestrator started",
+    sub: `pid ${process.pid}`,
+  });
+  logger.info("Activity recorder initialized");
+
   // Initialize services
   initDeviceService(prisma);
 
@@ -104,6 +131,12 @@ async function main() {
   // caches drop within the next round-trip on a write. Best-effort —
   // if MQTT is down we still bound staleness via the cache TTL.
   startContextStatsInvalidator();
+
+  // WARP-456: bridge file-indexer MQTT events into ActivityRow so the
+  // sealed audit log captures filesystem activity. Subscribes to
+  // `droplet/index/+/indexed` and `droplet/index/+/deleted`. Best-
+  // effort like the bridge above — if MQTT is down we miss the rows.
+  attachFileIndexerActivityBridge();
 
   // Initialize Matter controller (non-fatal if unavailable)
   try {
@@ -142,6 +175,20 @@ async function main() {
     logger.info("MCP stdio child started");
   } catch (err) {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
+  }
+
+  // First-boot model readiness: if LLM_MODEL is set and Ollama doesn't
+  // have it yet, fire a background pull so the user lands on a working
+  // dashboard ~20 min after first boot without any manual `ollama pull`.
+  // Non-blocking — the orchestrator is fully serving requests while the
+  // model downloads in the background. See model-readiness.service.ts.
+  try {
+    await ensureDefaultModelPulled();
+  } catch (err) {
+    logger.warn(
+      "Model readiness check failed: %s (orchestrator continues serving requests)",
+      (err as Error).message,
+    );
   }
 
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
@@ -199,22 +246,111 @@ async function main() {
   );
   logger.info({ reconcileMs }, "device reconcile poller started");
 
+  // WARP-463 (C2): tool-schedule-ticker. Every 60s scans due
+  // ToolSchedule rows, dispatches via the imperative walker shared
+  // with run-now. Multi-instance deploys lock on `droplet:tool-
+  // schedule-ticker` so only one replica fires each due schedule.
+  const toolSchedulerDispatcher: StepDispatcher = {
+    async call(tool, args) {
+      const result = await mcpClient.callTool(tool, args);
+      if (result.isError) {
+        const detail = result.content?.[0]?.text ?? "tool reported error";
+        throw new Error(typeof detail === "string" ? detail : String(detail));
+      }
+      const text = result.content?.[0]?.text;
+      if (typeof text === "string" && text.length > 0) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { raw: text };
+        }
+      }
+      return null;
+    },
+  };
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      await tickToolSchedules(prisma, toolSchedulerDispatcher);
+    },
+    { lockKey: "droplet:tool-schedule-ticker" },
+  );
+
+  // WARP-446 (AC #1): mDNS coverage-extender discovery. Every
+  // DROPLET_AP_DISCOVERY_INTERVAL seconds (default 10 s) the poller
+  // queries the routing service's /aps/discovered endpoint and
+  // upserts each observed MAC into ApDevice via reconcileDiscovered.
+  // New extenders surface as AWAITING_APPROVAL within one tick — well
+  // inside the 30 s AC #1 budget. Same advisory-lock pattern as the
+  // schedule ticker / reconcile poller above so multi-instance
+  // deploys don't double-fire.
+  const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
+  startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+
   cronRuntime.scheduleCron(
     "0 3 * * *",
     async () => {
       const eventsDeleted = await purgeScheduleEvents(prisma, 7);
       const overridesDeleted = await purgeExpiredOverrides(prisma, 24);
       const presenceDeleted = await deviceRegistry.purgePresenceRows(30);
+      // WARP-470: NetworkThroughputSample retention. 30 days keeps the
+      // 24 h area chart's range comfortably within scope while bounding
+      // table growth at ~43k rows (60 s sampler × 30 d).
+      const throughputDeleted = await purgeNetworkThroughputSamples(prisma, 30);
+      // WARP-468: 90-day retention on off-LAN egress samples. Longer
+      // than throughput (30 d) because totals roll up to monthly
+      // billing windows; 90 d covers QoQ review without bloat.
+      const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
       logger.info(
         {
           eventsDeleted,
           overridesDeleted,
           presenceDeleted: presenceDeleted.count,
+          throughputDeleted,
+          offLanDeleted,
         },
         "daily purges complete",
       );
     },
     { lockKey: "droplet:daily-purge" },
+  );
+
+  // WARP-455: nightly guest-expiry sweep. Fires 15 minutes after the
+  // daily purge so the two cron jobs don't contend on the advisory
+  // lock pool. Flips any ACTIVE GuestExpiry row past its expiresAt to
+  // EXPIRED, emitting one auth-kind ActivityRow per flip. Idempotent
+  // by construction (re-runs on the same minute walk zero rows).
+  cronRuntime.scheduleCron(
+    "15 3 * * *",
+    async () => {
+      const { expired } = await sweepExpiredGuests(prisma, new Date());
+      if (expired > 0) {
+        logger.info({ expired }, "guest-expiry-sweep flipped rows");
+      }
+    },
+    { lockKey: "droplet:guest-expiry-sweep" },
+  );
+
+  // WARP-464 (C3): hourly tool-call pattern miner. Reads the last
+  // 7 days of kind=tool_call ActivityRow rows, detects repeating
+  // N-gram sequences (N=2..5, ≥3 occurrences), writes ToolSpec rows
+  // with status=suggested. Dedupe is by SHA-256 fingerprint slug, so
+  // re-running the same hour writes zero rows the second time.
+  //
+  // Let errors propagate naked to cron-runtime's `safeRun` — it logs +
+  // increments the per-handler consecutiveFailures counter that
+  // downstream alerting reads. Swallowing here would zero out the
+  // counter and silence the canary; every other cron handler in this
+  // file follows the same pattern.
+  cronRuntime.scheduleCron(
+    "0 * * * *",
+    async () => {
+      const result = await mineToolCallPatterns(prisma);
+      if (result.inserted > 0) {
+        logger.info(result, "pattern-miner produced suggestions");
+      }
+    },
+    { lockKey: "droplet:pattern-miner-hourly" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the
@@ -231,6 +367,11 @@ async function main() {
     logger.info("Shutting down...");
     cronRuntime.stop();
     stopHealthMonitor();
+    // WARP-165: stop the screen-QR poller's setInterval so integration
+    // test suites that drive `createApp()` end-to-end don't leak the
+    // timer (the handle is unref'd so it doesn't block process exit in
+    // production, but explicit stop keeps shutdown ordering predictable).
+    stopScreenQRPoller();
     shutdownDeviceRegistration();
     await shutdownMatterService();
     await shutdownCameraService();

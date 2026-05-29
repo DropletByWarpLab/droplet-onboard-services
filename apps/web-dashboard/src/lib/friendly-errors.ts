@@ -1,0 +1,277 @@
+/**
+ * Typed-error → friendly-copy translator (WARP-294).
+ *
+ * Single source of truth for converting an unknown error (anything
+ * thrown by a fetch wrapper, a streaming reader, a hls.js callback,
+ * etc.) into copy a non-engineering home user can actually act on.
+ *
+ * Design rules:
+ *   - **Never** return `err.message` verbatim. Even friendly-looking
+ *     orchestrator strings ("OCS 401", "ECONNREFUSED", "VAPID not
+ *     configured") can leak terminology that doesn't belong on a
+ *     home user's screen.
+ *   - Each domain has a per-code mapping table plus a **fixed-string
+ *     fallback**. Unknown codes get the fallback — they do NOT get
+ *     the raw message.
+ *   - Domains are intentionally narrow ("auth", "provider-key",
+ *     "media", …) so the same translator can ship different copy for
+ *     a 401 from `/login` vs a 401 from `/calendar/sources`.
+ *   - The raw error is `console.error`'d so operators / QA still see
+ *     the underlying cause in DevTools — only the user-facing string
+ *     gets sanitised.
+ *
+ * Patterns this generalises:
+ *   - `apps/web-dashboard/src/lib/hooks/useChat.ts` —
+ *     `friendlyErrorMessage`
+ *   - `apps/web-dashboard/src/app/invite/[token]/page.tsx` —
+ *     `err.code`-driven dispatch with a fixed fallback
+ */
+
+export type FriendlyError = {
+  code?: string;
+  status?: number;
+  message?: string;
+};
+
+export type ErrorDomain =
+  | "auth"
+  | "files"
+  | "chat"
+  | "invite"
+  | "calendar"
+  | "subscription"
+  | "provider-key"
+  | "push"
+  | "knowledge"
+  | "media"
+  | "generic";
+
+/** Domain-fallback copy. NEVER `err.message`. */
+const FALLBACK: Record<ErrorDomain, string> = {
+  auth: "We couldn't sign you in. Check your username and password, then try again.",
+  files: "We couldn't load those files right now. Try again in a moment.",
+  chat:
+    "Something went wrong on this turn. Try again, or simplify the request.",
+  invite:
+    "We couldn't accept that invite. Please ask the admin who invited you for a fresh link.",
+  calendar:
+    "We couldn't update that reminder right now. Try again in a moment.",
+  subscription:
+    "We couldn't reach that calendar subscription right now. Try again in a moment.",
+  "provider-key":
+    "We couldn't save that API key right now. Try again in a moment.",
+  push:
+    "We couldn't update push notifications right now. Try again in a moment.",
+  knowledge:
+    "We couldn't load your recently indexed files right now. Try again in a moment.",
+  media:
+    "We couldn't play that recording. Try a different segment, or reload the page.",
+  generic:
+    "We couldn't reach this Droplet right now. Try again in a moment.",
+};
+
+/** Per-domain code → friendly copy. Extend incrementally as needed. */
+const CODES: Record<ErrorDomain, Record<string, string>> = {
+  auth: {
+    INVALID_CREDENTIALS:
+      "That username or password didn't match. Try again.",
+    "401":
+      "That username or password didn't match. Try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+  },
+  files: {
+    UPLOAD_TOO_LARGE: "That file is too large to upload here.",
+    UNSUPPORTED_TYPE: "That file type isn't supported yet.",
+    NOT_FOUND: "We couldn't find that file. It may have been moved or deleted.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+  },
+  chat: {
+    UPLOAD_TOO_LARGE:
+      "That attachment is too large. Try something smaller and send again.",
+    UNSUPPORTED_TYPE: "That attachment type isn't supported in chat yet.",
+    INDEX_FAILED:
+      "We couldn't index that attachment. The chat will keep working without it.",
+    // WARP-305: brain-ingest emits these on image-only or text-extraction-empty
+    // files. The chat itself is fine; only the search-inside-the-file path
+    // doesn't have anything to index. Copy reflects reality — the chip is
+    // soft-warning, not red — and tells the user the attachment is still
+    // attached.
+    IMAGE_ONLY:
+      "Image stored — we can't search inside an image yet, but it's still attached to this chat.",
+    EMPTY_EXTRACTION:
+      "We couldn't pull text out of that file. It's still attached to this chat, but the AI can't search inside it.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again, or simplify the request.",
+    ABORT: "The request was cancelled.",
+  },
+  invite: {
+    USED: "This invite has already been used. Please ask for a fresh link.",
+    EXPIRED: "This invite has expired. Please ask for a fresh link.",
+    INVALID_PASSWORD:
+      "That password didn't meet the requirements. It must be at least 8 characters.",
+    NOT_FOUND:
+      "We couldn't find this invite. It may have been revoked or the link copied incorrectly.",
+  },
+  calendar: {
+    NOT_FOUND: "We couldn't find that reminder anymore.",
+    TITLE_REQUIRED: "Reminders need a title and a due time.",
+    PAST_DUE: "Pick a due time in the future.",
+  },
+  subscription: {
+    INVALID_URL:
+      "That URL doesn't look like a calendar feed. Check the address and try again.",
+    AUTH_REQUIRED:
+      "That calendar needs a username and password. Check the credentials and try again.",
+    SYNC_FAILED:
+      "We couldn't sync that calendar right now. Try again in a moment.",
+    NOT_FOUND: "That subscription is no longer available.",
+  },
+  "provider-key": {
+    INVALID_KEY: "That API key didn't look right. Double-check it and try again.",
+    SAVE_FAILED:
+      "We couldn't save that API key right now. Try again in a moment.",
+    DELETE_FAILED:
+      "We couldn't remove that API key right now. Try again in a moment.",
+  },
+  push: {
+    PERMISSION_DENIED:
+      "Notifications are blocked in your browser. Re-enable them in your browser's site settings to receive push alerts.",
+    UNSUPPORTED:
+      "This browser doesn't support push notifications. Open the dashboard in a recent Chrome, Firefox, Edge, or Safari (16.4+).",
+    NOT_CONFIGURED:
+      "Push notifications aren't set up on this Droplet yet. Ask the admin to finish configuration.",
+    SUBSCRIBE_FAILED:
+      "We couldn't enable push notifications right now. Try again in a moment.",
+    UNSUBSCRIBE_FAILED:
+      "We couldn't disable push notifications right now. Try again in a moment.",
+    TEST_FAILED:
+      "We couldn't send the test notification right now. Try again in a moment.",
+  },
+  knowledge: {
+    NOT_FOUND: "We couldn't find any recently indexed files yet.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+  },
+  // hls.js Hls.ErrorDetails enum values — the ones we see most often.
+  // The full list is large; unmapped values fall through to the
+  // domain fallback (which is what we want — the user never sees
+  // "bufferStalledError" or "manifestLoadError").
+  media: {
+    bufferStalledError:
+      "Playback stalled. Check the connection and try again.",
+    bufferAppendError:
+      "We had trouble playing that recording. Try a different segment, or reload the page.",
+    bufferNudgeOnStall:
+      "Playback stalled. Check the connection and try again.",
+    manifestLoadError:
+      "We couldn't load that recording. Try a different segment, or reload the page.",
+    manifestLoadTimeOut:
+      "Loading that recording took too long. Try again in a moment.",
+    manifestParsingError:
+      "That recording is unavailable right now. Try a different segment.",
+    levelLoadError:
+      "We couldn't load that recording. Try a different segment, or reload the page.",
+    levelLoadTimeOut:
+      "Loading that recording took too long. Try again in a moment.",
+    fragLoadError:
+      "We had trouble loading part of that recording. Try a different segment.",
+    fragLoadTimeOut:
+      "Loading that recording took too long. Try again in a moment.",
+    fragParsingError:
+      "Part of that recording is corrupt. Try a different segment.",
+    internalException:
+      "The video player ran into a problem. Reload the page and try again.",
+    mediaError:
+      "The video player ran into a problem. Reload the page and try again.",
+    networkError:
+      "We had trouble streaming that recording. Check the connection and try again.",
+    UNSUPPORTED:
+      "This browser doesn't support HLS playback. Try Safari or a recent Chrome / Edge / Firefox.",
+  },
+  generic: {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+};
+
+/**
+ * Best-effort substring matcher over an `err.message` for cases where
+ * a backend doesn't (yet) emit a typed `err.code`. Maps the message
+ * to a domain code; the caller then renders the friendly copy for
+ * that code. Never returns the message itself.
+ */
+function inferCodeFromMessage(
+  message: string,
+  domain: ErrorDomain,
+): string | undefined {
+  const m = message.toLowerCase();
+  if (/network|fetch|econnrefused|enotfound|failed to fetch/.test(m)) {
+    return "NETWORK";
+  }
+  if (/timeout|timed out/.test(m)) return "TIMEOUT";
+  if (/abort/.test(m)) return "ABORT";
+  // WARP-305: brain-ingest reasons come through as raw lowercase strings
+  // (`empty_extraction`, `image_only`) on the AttachmentChip's `error`
+  // field. Match them here so the chat-domain copy fires instead of
+  // falling through to the generic "Something went wrong on this turn"
+  // toast.
+  if (domain === "chat") {
+    if (/image[_ ]only/.test(m)) return "IMAGE_ONLY";
+    if (/empty[_ ]extraction|no[_ ]text/.test(m)) return "EMPTY_EXTRACTION";
+  }
+  if (domain === "push") {
+    if (/not configured/.test(m)) return "NOT_CONFIGURED";
+    if (/denied|permission/.test(m)) return "PERMISSION_DENIED";
+    if (/unsupport/.test(m)) return "UNSUPPORTED";
+  }
+  if (domain === "auth" && /401|unauthor|invalid credentials/.test(m)) {
+    return "INVALID_CREDENTIALS";
+  }
+  if (domain === "media" && /unsupport/.test(m)) return "UNSUPPORTED";
+  return undefined;
+}
+
+/**
+ * Translate an unknown error into plain home-user copy.
+ *
+ * Dispatch order:
+ *   1. `err.code` (when present) → per-domain mapping.
+ *   2. `err.status` (number) → string-coerced for the same mapping.
+ *   3. `err.message` → infer a code via substring match; map that.
+ *   4. Otherwise → domain fallback (never `err.message`).
+ *
+ * The raw error is logged to `console.error` so operators still have
+ * the underlying cause when reviewing DevTools.
+ */
+export function translateError(err: unknown, domain: ErrorDomain): string {
+  // Operator / debug breadcrumb — full raw cause, never on screen.
+  // eslint-disable-next-line no-console
+  console.error(`[friendly-errors:${domain}]`, err);
+
+  let code: string | undefined;
+  let status: number | undefined;
+  let message: string | undefined;
+
+  if (err && typeof err === "object") {
+    const e = err as FriendlyError;
+    if (typeof e.code === "string") code = e.code;
+    if (typeof e.status === "number") status = e.status;
+    if (typeof e.message === "string") message = e.message;
+  }
+
+  const domainCodes = CODES[domain];
+
+  if (code && domainCodes[code]) return domainCodes[code];
+  if (status !== undefined && domainCodes[String(status)]) {
+    return domainCodes[String(status)];
+  }
+  if (message) {
+    const inferred = inferCodeFromMessage(message, domain);
+    if (inferred && domainCodes[inferred]) return domainCodes[inferred];
+  }
+  return FALLBACK[domain];
+}

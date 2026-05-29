@@ -136,7 +136,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
                 onClick={() => removeAt(idx)}
                 disabled={value.length <= 1}
                 aria-label={`Remove window ${idx + 1}`}
-                className="dp-button-secondary text-sm disabled:opacity-40"
+                className="dp-btn-secondary text-sm disabled:opacity-40"
               >
                 Remove
               </button>
@@ -158,7 +158,7 @@ export function WeeklyWindowsEditor({ value, onChange }: Props) {
         type="button"
         onClick={addWindow}
         disabled={value.length >= MAX_WINDOWS}
-        className="dp-button-secondary text-sm disabled:opacity-40"
+        className="dp-btn-secondary text-sm disabled:opacity-40"
       >
         + Add window
       </button>

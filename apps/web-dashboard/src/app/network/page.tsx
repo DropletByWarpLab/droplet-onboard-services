@@ -15,6 +15,7 @@ import {
   WifiOff,
   XCircle,
 } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
@@ -22,6 +23,7 @@ import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
+import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -134,17 +136,29 @@ export default function NetworkPage() {
     };
   }, [opStatus, refresh]);
 
+  // Shared Topbar for loading + error states. Keeps the chrome in place
+  // while the body swaps so the user doesn't see a flash of bare title.
+  const networkChrome = (status: { tone: "ok" | "warn" | "error" | "neutral"; label: string }) => (
+    <Topbar
+      crumbs={[
+        { label: "Workspace", href: "/" },
+        { label: "Operations" },
+        { label: "Network" },
+      ]}
+      status={status}
+    />
+  );
+
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-48 bg-surface-secondary rounded animate-pulse" />
-          <div className="h-4 w-32 bg-surface-secondary rounded animate-pulse" />
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card h-28 animate-pulse bg-surface-secondary" />
-          ))}
+      <div>
+        {networkChrome({ tone: "neutral", label: "Loading network state…" })}
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="dp-card h-28 animate-pulse bg-surface-secondary" />
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -159,30 +173,36 @@ export default function NetworkPage() {
     // Don't use role="alert" or a retry button in that state.
     const isDisabled = routerErrorCode === "DISABLED";
     return (
-      <div className="p-6">
-        <div
-          className="dp-card text-center py-12"
-          role={isDisabled ? "status" : "alert"}
-        >
-          <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            {copy.body}
-          </p>
-          {routerErrorMessage && !isDisabled && (
-            <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
-              {routerErrorMessage}
+      <div>
+        {networkChrome({
+          tone: isDisabled ? "neutral" : "warn",
+          label: isDisabled ? "Networking disabled" : "Router unreachable",
+        })}
+        <div className="p-6">
+          <div
+            className="dp-card text-center py-12"
+            role={isDisabled ? "status" : "alert"}
+          >
+            <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
+            <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
+            <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+              {copy.body}
             </p>
-          )}
-          {!isDisabled && (
-            <button
-              onClick={refresh}
-              className="dp-button-secondary text-sm mt-4"
-              disabled={isRefreshing}
-            >
-              {isRefreshing ? "Retrying…" : "Retry now"}
-            </button>
-          )}
+            {routerErrorMessage && !isDisabled && (
+              <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
+                {routerErrorMessage}
+              </p>
+            )}
+            {!isDisabled && (
+              <button
+                onClick={refresh}
+                className="dp-btn-secondary text-sm mt-4"
+                disabled={isRefreshing}
+              >
+                {isRefreshing ? "Retrying…" : "Retry now"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -197,20 +217,25 @@ export default function NetworkPage() {
     { id: "system", label: "System", icon: Router },
   ];
 
+  const deviceCount = overview?.connectedDeviceCount ?? 0;
+  const networkStatus =
+    deviceCount === 0
+      ? { tone: "neutral" as const, label: "No devices seen yet" }
+      : { tone: "ok" as const, label: `${deviceCount} device${deviceCount === 1 ? "" : "s"} on network` };
+
   return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Network</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {overview?.connectedDeviceCount ?? 0} device{(overview?.connectedDeviceCount ?? 0) !== 1 ? "s" : ""} on network
-          </p>
-        </div>
+    <div>
+      {networkChrome(networkStatus)}
+
+      <div className="p-6">
+      {/* Refresh action — moved out of the Topbar so it sits next to the
+          tab strip where the operator's eye lands. Keeps the Topbar
+          chrome single-row at 360px. */}
+      <div className="flex justify-end mb-4">
         <button
           onClick={refresh}
           disabled={isRefreshing}
-          className="dp-button-secondary flex items-center gap-2"
+          className="dp-btn-secondary flex items-center gap-2"
         >
           <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
           Refresh
@@ -231,7 +256,7 @@ export default function NetworkPage() {
           <div className="flex gap-2">
             <button
               onClick={() => setPendingConfirm(null)}
-              className="dp-button-secondary text-sm"
+              className="dp-btn-secondary text-sm"
             >
               Cancel
             </button>
@@ -251,7 +276,7 @@ export default function NetworkPage() {
                   }
                 }
               }}
-              className="dp-button-primary text-sm"
+              className="dp-btn-primary text-sm"
             >
               Confirm
             </button>
@@ -285,7 +310,7 @@ export default function NetworkPage() {
           <p className="type-subheadline text-label-primary flex-1">Change applied.</p>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
             aria-label="Dismiss"
           >
             Dismiss
@@ -308,7 +333,7 @@ export default function NetworkPage() {
           </div>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
             aria-label="Dismiss"
           >
             Dismiss
@@ -316,15 +341,55 @@ export default function NetworkPage() {
         </div>
       )}
 
-      {/* Tabs */}
-      <div className="flex gap-1 mb-6 border-b border-separator">
+      {/* Tabs — WAI-ARIA tabs pattern (WARP-298). Arrow keys + Home/End
+          move + activate; only the active tab is in the tab sequence. */}
+      <div
+        role="tablist"
+        aria-label="Network view tabs"
+        className="flex gap-1 mb-6 border-b border-separator"
+      >
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.id;
           return (
             <button
               key={tab.id}
+              type="button"
+              role="tab"
+              id={`network-tab-${tab.id}`}
+              aria-selected={active}
+              aria-controls={`network-panel-${tab.id}`}
+              tabIndex={active ? 0 : -1}
               onClick={() => setActiveTab(tab.id)}
+              onKeyDown={(e) => {
+                const i = tabs.findIndex((t) => t.id === activeTab);
+                if (i === -1) return;
+                const n = tabs.length;
+                let next: number | null = null;
+                switch (e.key) {
+                  case "ArrowRight":
+                  case "ArrowDown":
+                    next = (i + 1) % n;
+                    break;
+                  case "ArrowLeft":
+                  case "ArrowUp":
+                    next = (i - 1 + n) % n;
+                    break;
+                  case "Home":
+                    next = 0;
+                    break;
+                  case "End":
+                    next = n - 1;
+                    break;
+                }
+                if (next !== null) {
+                  e.preventDefault();
+                  setActiveTab(tabs[next].id);
+                  document
+                    .getElementById(`network-tab-${tabs[next].id}`)
+                    ?.focus();
+                }
+              }}
               className={`
                 flex items-center gap-2 px-4 py-2.5 type-subheadline transition-colors
                 border-b-2 -mb-px
@@ -334,20 +399,71 @@ export default function NetworkPage() {
                 }
               `}
             >
-              <Icon size={16} />
+              <Icon size={16} aria-hidden="true" />
               {tab.label}
             </button>
           );
         })}
       </div>
 
-      {/* Tab Content */}
-      {activeTab === "overview" && <OverviewTab overview={overview} />}
-      {activeTab === "devices" && <DevicesTab />}
-      {activeTab === "schedules" && <SchedulesTab />}
-      {activeTab === "wifi" && <WifiTab />}
-      {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
-      {activeTab === "system" && <SystemTab overview={overview} />}
+      {/* Tab Content — one tabpanel per tab, contents lazily mounted when
+          the tab is active. `hidden` removes inactive panels from the
+          accessibility tree + layout flow. */}
+      <div
+        role="tabpanel"
+        id="network-panel-overview"
+        aria-labelledby="network-tab-overview"
+        tabIndex={0}
+        hidden={activeTab !== "overview"}
+      >
+        {activeTab === "overview" && <OverviewTab overview={overview} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-devices"
+        aria-labelledby="network-tab-devices"
+        tabIndex={0}
+        hidden={activeTab !== "devices"}
+      >
+        {activeTab === "devices" && <DevicesTab />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-schedules"
+        aria-labelledby="network-tab-schedules"
+        tabIndex={0}
+        hidden={activeTab !== "schedules"}
+      >
+        {activeTab === "schedules" && <SchedulesTab />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-wifi"
+        aria-labelledby="network-tab-wifi"
+        tabIndex={0}
+        hidden={activeTab !== "wifi"}
+      >
+        {activeTab === "wifi" && <WifiTab />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-firewall"
+        aria-labelledby="network-tab-firewall"
+        tabIndex={0}
+        hidden={activeTab !== "firewall"}
+      >
+        {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="network-panel-system"
+        aria-labelledby="network-tab-system"
+        tabIndex={0}
+        hidden={activeTab !== "system"}
+      >
+        {activeTab === "system" && <SystemTab overview={overview} />}
+      </div>
+      </div>
     </div>
   );
 }
@@ -499,6 +615,13 @@ function DevicesTab() {
 
   return (
     <div>
+      {/* WARP-446: coverage extenders panel — auto-discovered + approved
+          AP listing. Renders above the devices grid so the operator sees
+          AWAITING_APPROVAL action-items before scanning the device list. */}
+      <div className="mb-6">
+        <CoverageExtendersPanel />
+      </div>
+
       {/* Header controls */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <input
@@ -534,7 +657,7 @@ function DevicesTab() {
         <button
           type="button"
           onClick={() => setGroupManagerOpen(true)}
-          className="dp-button-secondary text-sm"
+          className="dp-btn-secondary text-sm"
         >
           Manage groups
         </button>
@@ -559,7 +682,7 @@ function DevicesTab() {
           <button
             type="button"
             onClick={() => devicesSwr.mutate()}
-            className="dp-button-secondary text-sm"
+            className="dp-btn-secondary text-sm"
           >
             Retry
           </button>
@@ -650,7 +773,7 @@ function WifiTab() {
           <button
             onClick={handleScan}
             disabled={scanning}
-            className="dp-button-secondary flex items-center gap-2 text-sm"
+            className="dp-btn-secondary flex items-center gap-2 text-sm"
           >
             <Signal size={14} className={scanning ? "animate-pulse" : ""} />
             {scanning ? "Scanning..." : "Scan"}

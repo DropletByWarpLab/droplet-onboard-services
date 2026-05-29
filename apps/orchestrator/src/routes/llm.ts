@@ -1,23 +1,116 @@
 import { Router } from "express";
-import { Readable } from "node:stream";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
+import { createEnhancementDeps } from "../services/query-enhancement.service.js";
+import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
-import type { ModelsResponse, SessionChatRequest } from "../types/index.js";
+import type { ChatMessage, ModelsResponse } from "../types/index.js";
+import {
+  ChatPersistenceService,
+  type PersistedToolCall,
+} from "../services/chat-persistence.service.js";
+import { publish as mqttPublish } from "../services/mqtt.service.js";
+import { requireRole } from "../middleware/auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+/** WARP-456: severity bucket the dashboard renders for the activity feed. */
+function activitySeverityForTurnStatus(
+  status: "completed" | "failed" | "aborted",
+): "ok" | "err" | "warn" {
+  if (status === "completed") return "ok";
+  if (status === "failed") return "err";
+  return "warn"; // aborted — neutral-bad
+}
+
+/** WARP-456: drop `undefined` keys so the signed `refs` JSON is dense
+ *  (matches the canonical-JSON shape the signer hashes). */
+function stripUndefined(
+  o: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
 
 const MODELS_CACHE_KEY = "llm:models";
 const MODELS_CACHE_TTL = 30;
 
+/**
+ * WARP-329: per-stream debounce for flushing assistant content to Postgres.
+ * Trade-off: too short = thrashing the DB on every SSE delta; too long =
+ * mid-turn refresh shows stale content. 500 ms is the same cadence
+ * `services/file-indexer` uses for chunk persistence.
+ */
+const STREAM_FLUSH_INTERVAL_MS = 500;
+
+/**
+ * WARP-329 — MQTT contract documented for downstream consumers.
+ *
+ * Topic:   `droplet/chat/<userId>/turn-completed`
+ * QoS:     0 (best-effort; dashboard reconnects refresh state on its own)
+ * Payload:
+ *   {
+ *     conversationId:    string  // ChatSession.id
+ *     messageId:         string  // ChatMessage.id (the assistant row)
+ *     status:            "completed" | "failed" | "aborted"
+ *     snippet:           string  // first ~140 chars of assistant content
+ *     completedAt:       string  // ISO 8601
+ *   }
+ *
+ * Today the dashboard's WS bridge forwards this to the chat surface so
+ * background tabs can fire a Notification when an in-flight turn finishes.
+ * A future push-dispatcher service (mobile push, web-push for closed tabs)
+ * MUST subscribe to the same topic — the payload contract above is the
+ * stable wire.
+ */
+const CHAT_TURN_COMPLETED_TOPIC = (userId: string): string =>
+  `droplet/chat/${userId}/turn-completed`;
+
+interface TurnCompletedPayload {
+  conversationId: string;
+  messageId: string;
+  status: "completed" | "failed" | "aborted";
+  snippet: string;
+  completedAt: string;
+}
+
+function publishTurnCompleted(
+  userId: string | undefined,
+  payload: TurnCompletedPayload,
+): void {
+  if (!userId) return;
+  try {
+    // `publish` takes Record<string, unknown>; the typed payload above
+    // satisfies the shape at runtime, just not at the interface level.
+    mqttPublish(
+      CHAT_TURN_COMPLETED_TOPIC(userId),
+      payload as unknown as Record<string, unknown>,
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[llm/chat] MQTT publish failed (non-fatal):", err);
+  }
+}
+
 // /llm/chat accepts tool-role messages on replay so a client can resume a
 // session that already went through the agent loop. tool_call_id / tool_calls
 // are optional so plain chat callers don't have to care.
+//
+// WARP-304: `conversationId` lets the caller continue an existing thread.
+// When absent, the server mints a new one and returns it via the
+// `X-Conversation-Id` response header (set for both streaming and
+// non-streaming paths so the dashboard can read it identically). `turnId`
+// is a client-supplied idempotency key — re-submitting the same turn is a
+// no-op on the persisted side.
 const chatRequestSchema = z.object({
   model: z.string(),
   messages: z.array(
@@ -33,7 +126,38 @@ const chatRequestSchema = z.object({
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
+  // Per-turn override for the agent loop's tool advertisement. "none"
+  // sends ZERO tools to the model so it can't wander into a speculative
+  // tool call — voice-io's intent gate sets this for greetings,
+  // time-of-day, and who-are-you utterances that the system prompt
+  // already answers. "auto" matches the default behaviour. When the
+  // field is absent the loop applies "auto" so existing callers (chat,
+  // legacy clients) keep working unchanged.
+  tool_choice: z.enum(["auto", "none"]).optional(),
+  conversationId: z.string().uuid().optional(),
+  turnId: z.string().min(1).max(128).optional(),
+  // WARP-174: setup wizard's "Ask the AI" sample prompt and similar
+  // throwaway flows (system pings, health probes) set this to true
+  // so the call skips ensureConversation + createTurnRows. Without
+  // the flag every wizard tap creates a real ChatSession that
+  // shows up in the customer's /chat history sidebar — confusing
+  // first-run UX (their oldest conversation is the wizard's probe).
+  ephemeral: z.boolean().optional().default(false),
+  // WARP-458 — emit `{type:"reasoning_step", text}` blocks on the
+  // SSE wire BEFORE any content_delta on the same turn. Defaults to
+  // `false` so existing clients (legacy dashboard, voice-io) see no
+  // wire-shape change. The orchestrator ALWAYS parses + persists the
+  // trace to `ChatMessage.reasoning` regardless of this flag — the
+  // flag gates EMISSION, not PERSISTENCE — so the dashboard can
+  // lazy-load reasoning on demand without re-running the turn.
+  captureReasoning: z.boolean().optional().default(false),
 });
+
+const CONVERSATION_ID_HEADER = "X-Conversation-Id";
+/** WARP-329: assistant row id, set alongside X-Conversation-Id on the same
+ *  response. The client uses it to update the matching `streaming` row when
+ *  the MQTT `turn-completed` event lands. */
+const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
 
 // Which tool names require the caller to have owner/admin role. Read-only
 // tools (list_*, get_*, search_*) are fine for any authenticated user; write
@@ -57,7 +181,12 @@ const WRITE_TOOLS = new Set(
 // RBAC helpers for /api/llm/chat. Threat model: the LLM is steered by
 // user-controlled prompt text; only owner/admin sessions are allowed to
 // touch write tools.
-type AuthedRequest = { user?: { username?: string; role?: string } };
+// WARP-485: `id` is the canonical User.id UUID set by authMiddleware
+// when the OCS or invite paths resolve a Nextcloud username to the
+// local User row. `username` is kept for back-compat (pre-WARP-485 rows
+// where ChatSession.userId is still the Nextcloud username). Both
+// fields populate the `candidates` array in `loadOwnedSession`.
+type AuthedRequest = { user?: { id?: string; username?: string; role?: string } };
 
 function isPrivilegedRole(role: string | undefined): boolean {
   return role === "owner" || role === "admin";
@@ -107,8 +236,13 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
     });
 }
 
-export function createLlmRouter(_prisma: PrismaClient): Router {
+// WARP-329 replaced the post-stream `persistTurn` helper with
+// save-on-send: see `persistence.createTurnRows` (pre-agent) +
+// `persistence.finalizeAssistantMessage` (post-agent) inline below.
+
+export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
+  const persistence = new ChatPersistenceService(prisma);
 
   // List available models
   router.get("/llm/models", async (_req, res, next) => {
@@ -128,11 +262,38 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
   });
 
   // Chat completion — drives the orchestrator agent loop end-to-end.
-  // When stream=true the client receives the four SSE event types
-  // defined in spec §8.2 (content_delta, tool_call, tool_result, done).
-  // Non-streaming returns the AgentResult shape (assistant message +
-  // trace + iterations + stop_reason).
-  router.post("/llm/chat", async (req, res, next) => {
+  // When stream=true the client receives the SSE event types defined
+  // in spec §8.2 (content_delta, tool_call, tool_result, done) plus
+  // WARP-458's `reasoning_step` (when the per-request
+  // `captureReasoning` flag is true). Non-streaming returns the
+  // AgentResult shape (assistant message + trace + iterations +
+  // stop_reason). The persisted assistant `ChatMessage.reasoning`
+  // column is written REGARDLESS of `captureReasoning` so the
+  // dashboard can lazy-load reasoning on demand without re-running
+  // inference.
+  //
+  // WARP-304: every turn is persisted to `ChatSession` / `ChatMessage`.
+  // On the very first turn (no `conversationId` in the body) the server
+  // creates a new session keyed to the authenticated user and returns
+  // its id via the `X-Conversation-Id` response header (header is set
+  // for both streaming and non-streaming so the dashboard reads it
+  // identically). Subsequent turns send the id back. `turnId` is a
+  // client-supplied idempotency key — re-submits skip the duplicate
+  // persist.
+  // WARP-171: per-route guard. owner + admin + family + guest +
+  // service — any human-tier role can drive their own chat session,
+  // AND voice-io's service principal MUST also be able to drive the
+  // agent loop (it POSTs here with SERVICE_TOKEN_VOICE; see
+  // `services/voice-io/voice/llm.py`). This is a deviation from
+  // ADR-004 §3 which states "service principals are read-only" — the
+  // existing voice flow is the read-only-tool-surface side of that
+  // contract, but the route itself must remain reachable for
+  // service. Tool-level RBAC (WRITE_TOOLS narrowing in `narrowAllowedToolsForRole`)
+  // is what keeps voice from issuing destructive operations.
+  router.post(
+    "/llm/chat",
+    requireRole("owner", "admin", "family", "guest", "service"),
+    async (req, res, next) => {
     try {
       const parsed = chatRequestSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -183,11 +344,272 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
         ? { ...(ncToken ? { ncToken } : {}), ...(userId ? { userId } : {}) }
         : undefined;
 
+      // WARP-329: save-on-send.
+      // The user message that drove this turn is the LAST role="user" in
+      // the replay history. Older user turns were persisted by their own
+      // requests. We seed the title from this first prompt when the
+      // session is brand new.
+      const lastUserMessage = [...chatReq.messages]
+        .reverse()
+        .find((m) => m.role === "user");
+      const persistedUserContent = lastUserMessage?.content ?? null;
+
+      let conversationId: string | null = null;
+      let assistantMessageId: string | null = null;
+
+      // WARP-174: ephemeral chats (setup wizard sample prompt, health
+      // probes) skip the entire persistence path so they don't clutter
+      // the user's /chat history sidebar. The reply still goes back to
+      // the caller — we just don't write any rows.
+      if (chatReq.ephemeral) {
+        // Intentionally leave conversationId/assistantMessageId null;
+        // downstream just won't set the X-Conversation-Id header.
+      } else if (userId && persistedUserContent) {
+        // ensureConversation: find-or-create the ChatSession row.
+        const convo = await persistence
+          .ensureConversation({
+            conversationId: chatReq.conversationId,
+            userId,
+            model: chatReq.model,
+            provider: chatReq.provider,
+            firstUserContent: persistedUserContent,
+          })
+          .catch((err: unknown) => {
+            // Persistence failure must NOT block chat — the user can
+            // still talk to the model; we just lose history for this
+            // turn. Log and continue.
+            // eslint-disable-next-line no-console
+            console.error("[llm/chat] failed to ensure conversation:", err);
+            return null;
+          });
+        if (convo?.id) {
+          conversationId = convo.id;
+
+          // WARP-329: persist user + assistant placeholder BEFORE running
+          // the agent. A mid-turn refresh now sees the user prompt + a
+          // "streaming" assistant row, instead of nothing at all.
+          const turn = await persistence
+            .createTurnRows({
+              conversationId,
+              userContent: persistedUserContent,
+              turnId: chatReq.turnId ?? null,
+            })
+            .catch((err: unknown) => {
+              // eslint-disable-next-line no-console
+              console.error("[llm/chat] failed to create turn rows:", err);
+              return null;
+            });
+          if (turn?.assistantMessageId) {
+            assistantMessageId = turn.assistantMessageId;
+            res.setHeader(CONVERSATION_ID_HEADER, conversationId);
+            res.setHeader(ASSISTANT_MESSAGE_ID_HEADER, assistantMessageId);
+            // If the client re-submitted a turn whose assistant message is
+            // already in a terminal state (completed/failed/aborted), short-
+            // circuit. The model has already replied; the cached row IS the
+            // answer. Replaying would charge another inference and confuse
+            // the user.
+            if (turn.assistantAlreadyFinal) {
+              res.status(409).json({
+                error: "turn_already_completed",
+                conversationId,
+                assistantMessageId,
+              });
+              return;
+            }
+          } else if (conversationId) {
+            // Couldn't create rows but conversation exists — still expose
+            // the id so the client can rehydrate later.
+            res.setHeader(CONVERSATION_ID_HEADER, conversationId);
+          }
+        }
+      }
+
+      // WARP-437 follow-up — production-wire EnhancementDeps behind a
+      // feature flag. `createEnhancementDeps` returns `undefined` unless
+      // `WARP_437_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
+      // default no-enhancement path runs (byte-for-byte WARP-286).
+      // `DEFAULT_MODEL` matches `routes/admin-retrieval-eval.ts` which
+      // already canonicalised the env var name for the eval harness.
+      const aiGatewayGrpcUrl =
+        process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      const defaultChatModel =
+        process.env.DEFAULT_MODEL ?? "mistral:7b-instruct";
+
       const deps: AgentDeps = {
         mcp: mcpClient,
         aiGateway: { chat: aiGateway.chat },
+        enhancement: createEnhancementDeps({
+          aiGatewayGrpcUrl,
+          defaultModel: defaultChatModel,
+        }),
+        // WARP-473 — fire-and-forget file citation enqueue. Only
+        // wired when the turn is persisted (conversationId +
+        // assistantMessageId present); a service-token caller
+        // without a chat thread has no thread/message to attach to.
+        citation:
+          conversationId && assistantMessageId
+            ? createFileCitationService(prisma)
+            : undefined,
+      };
+      // Carry the authenticated user.id (UUID, not username) onto every
+      // citation insert so the related-chats route can scope by owner.
+      // userId is required by createFileCitationService's IDOR guard
+      // — without it the service skips the insert and logs warn.
+      const citationUserId =
+        (req as AuthedRequest).user?.id ??
+        (req as AuthedRequest).user?.username ??
+        null;
+      const citationContext =
+        conversationId && assistantMessageId && citationUserId
+          ? {
+              userId: citationUserId,
+              threadId: conversationId,
+              messageId: assistantMessageId,
+            }
+          : undefined;
+
+      // Track tool calls observed during streaming so we can include
+      // them in the persisted assistant message at the end of the turn.
+      const liveToolCalls: PersistedToolCall[] = [];
+      let liveAssistantContent = "";
+      let lastFlushedContent = "";
+      // WARP-458 — captured reasoning trace for the assistant message.
+      // Populated from `AgentResult.message.reasoning` (set by the
+      // agent loop's parser regardless of `captureReasoning`). The
+      // route persists this to `ChatMessage.reasoning` so a refresh /
+      // rehydrate can re-render the trace without re-running inference.
+      // `null` is the explicit "no reasoning on this turn" value, which
+      // clears any previously-persisted reasoning if the same row is
+      // overwritten (retried turn). `undefined` would skip the write.
+      let liveReasoning: string | null = null;
+
+      // WARP-329: debounced flush of streaming content to Postgres so
+      // refreshes mid-turn see progress. setInterval keeps the flush
+      // cadence steady regardless of token speed.
+      const flushTimer: NodeJS.Timeout | null = assistantMessageId
+        ? setInterval(() => {
+            if (
+              !assistantMessageId ||
+              liveAssistantContent === lastFlushedContent
+            ) {
+              return;
+            }
+            lastFlushedContent = liveAssistantContent;
+            persistence
+              .updateAssistantStreaming(assistantMessageId, liveAssistantContent)
+              .catch((err: unknown) => {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[llm/chat] streaming flush failed (non-fatal):",
+                  err,
+                );
+              });
+          }, STREAM_FLUSH_INTERVAL_MS)
+        : null;
+
+      const finalizeAndNotify = async (
+        status: "completed" | "failed" | "aborted",
+      ): Promise<void> => {
+        if (flushTimer) clearInterval(flushTimer);
+        const completedAt = new Date();
+
+        // WARP-456: emit a signed audit row for the chat turn. Runs
+        // even when there's no persisted conversation (service-token
+        // callers, ephemeral wizard prompts) so the activity feed has
+        // a complete record of inference activity. `refs` only carries
+        // identifiers we actually have.
+        await recordActivity({
+          kind: "chat",
+          severity: activitySeverityForTurnStatus(status),
+          sourceIcon: "message-square",
+          what:
+            status === "completed"
+              ? "Chat turn completed"
+              : status === "failed"
+                ? "Chat turn failed"
+                : "Chat turn aborted",
+          sub: userId
+            ? `${userId} • ${chatReq.model}`
+            : `service • ${chatReq.model}`,
+          refs: stripUndefined({
+            userId,
+            model: chatReq.model,
+            conversationId: conversationId ?? undefined,
+            messageId: assistantMessageId ?? undefined,
+            iterations: liveToolCalls.length,
+            status,
+          }),
+        });
+
+        if (!conversationId || !assistantMessageId) return;
+        try {
+          await persistence.finalizeAssistantMessage({
+            conversationId,
+            messageId: assistantMessageId,
+            content: liveAssistantContent,
+            toolCalls: liveToolCalls,
+            status,
+            reasoning: liveReasoning,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[llm/chat] failed to finalize assistant turn:", err);
+        }
+        publishTurnCompleted(userId, {
+          conversationId,
+          messageId: assistantMessageId,
+          status,
+          snippet: liveAssistantContent.slice(0, 140),
+          completedAt: completedAt.toISOString(),
+        });
       };
 
+      // ── WARP-460 Phase B3 — Context-pin injection ─────────────────
+      //
+      // If the user has pinned folders/files/email-threads/cameras to
+      // this session, prepend a system message describing the pinned
+      // working set. The model uses this to scope retrieval (e.g.
+      // search_content gets a `folder:` hint) per FEATURES.md §2.2.7.
+      //
+      // Pins are PER-SESSION; we only fetch when we have a known
+      // conversationId. New (just-created) sessions on the first turn
+      // skip cleanly — no pins yet.
+      //
+      // Injection is additive: we splice a new system message at index
+      // 0 rather than mutating an existing system message. Safer if
+      // the caller already provided their own system message (voice-io
+      // does this).
+      if (conversationId) {
+        try {
+          const pins = await prisma.contextPin.findMany({
+            where: { sessionId: conversationId },
+            orderBy: { addedAt: "asc" },
+          });
+          if (pins.length > 0) {
+            const lines = pins.map((p: { kind: string; ref: string; meta: unknown }) => {
+              const metaSuffix =
+                p.meta && typeof p.meta === "object"
+                  ? ` ${JSON.stringify(p.meta)}`
+                  : "";
+              return `- ${p.kind}: ${p.ref}${metaSuffix}`;
+            });
+            const pinSystemMessage: ChatMessage = {
+              role: "system",
+              content:
+                "Context pins for this conversation — prefer these as " +
+                "scope hints when calling retrieval tools:\n" +
+                lines.join("\n"),
+            };
+            chatReq.messages = [pinSystemMessage, ...chatReq.messages];
+          }
+        } catch (err) {
+          // Pin-load failure must NOT block chat — degrade gracefully.
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] context-pin load failed:", err);
+        }
+      }
+
+      // ── Streaming path ──
       if (chatReq.stream) {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
@@ -196,39 +618,214 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
           "X-Accel-Buffering": "no",
         });
         const onEvent = (e: SSEEvent) => {
-          // Best-effort write — if the client disconnected mid-stream
-          // res.write throws ECONNRESET; swallow because the abort path
-          // (req.on("close")) handles the rest.
           try {
             res.write(encodeSSE(e));
           } catch {
             /* client gone */
           }
+          if (e.type === "content_delta") {
+            liveAssistantContent += e.text;
+          } else if (e.type === "tool_call") {
+            liveToolCalls.push({ id: e.id, name: e.name, args: e.args });
+          } else if (e.type === "tool_result") {
+            const existing = liveToolCalls.find((c) => c.id === e.id);
+            if (existing) {
+              existing.ok = e.ok;
+              existing.status = e.status;
+              existing.message = e.message;
+              existing.data = e.data;
+            }
+          }
         };
+        let terminal: "completed" | "failed" | "aborted" = "completed";
+        // WARP-329: detect client-side abort. req.on("close") fires when
+        // the client disconnects mid-stream; we still finalize but flag
+        // the turn as aborted so the row reflects reality.
+        let clientAborted = false;
+        req.on("close", () => {
+          if (!res.writableEnded) clientAborted = true;
+        });
         try {
-          await runAgent({ ...deps, onEvent }, {
+          const streamResult = await runAgent({ ...deps, onEvent }, {
             model: chatReq.model,
             messages: chatReq.messages,
             temperature: chatReq.temperature,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
+            tool_choice: chatReq.tool_choice,
             toolCallContext,
+            captureReasoning: chatReq.captureReasoning,
+            citationContext,
           });
+          // WARP-458 — the agent loop populates message.reasoning
+          // REGARDLESS of captureReasoning (only the wire-emit is
+          // gated by the flag). Capture it here so finalizeAndNotify
+          // persists, enabling lazy-load reasoning on rehydrate
+          // without re-running inference.
+          liveReasoning = streamResult.message.reasoning ?? null;
+        } catch (err) {
+          terminal = "failed";
+          // eslint-disable-next-line no-console
+          console.error("[llm/chat] agent loop failed:", err);
         } finally {
           res.end();
         }
+        if (clientAborted) terminal = "aborted";
+        await finalizeAndNotify(terminal);
         return;
       }
 
-      const result = await runAgent(deps, {
-        model: chatReq.model,
-        messages: chatReq.messages,
-        temperature: chatReq.temperature,
-        max_iter: chatReq.max_iter,
-        allowed_tools: allowedForUser,
-        toolCallContext,
+      // ── Non-streaming path ──
+      let result;
+      try {
+        result = await runAgent(deps, {
+          model: chatReq.model,
+          messages: chatReq.messages,
+          temperature: chatReq.temperature,
+          max_iter: chatReq.max_iter,
+          allowed_tools: allowedForUser,
+          tool_choice: chatReq.tool_choice,
+          toolCallContext,
+          captureReasoning: chatReq.captureReasoning,
+          citationContext,
+        });
+        liveAssistantContent = result.message.content;
+        // WARP-458 — agent loop populates message.reasoning regardless
+        // of captureReasoning; persist whenever present so the
+        // dashboard can lazy-load the trace later.
+        liveReasoning = result.message.reasoning ?? null;
+        for (const t of result.trace) {
+          liveToolCalls.push({
+            id: t.tool_call_id,
+            name: t.tool,
+            args: t.args,
+            ok: true,
+            data: t.result,
+          });
+        }
+        await finalizeAndNotify("completed");
+      } catch (err) {
+        await finalizeAndNotify("failed");
+        throw err;
+      }
+      res.json({ ...result, conversationId, assistantMessageId });
+    } catch (err) {
+      next(err);
+    }
+    },
+  );
+
+  // ── WARP-304: per-user conversation history ──
+  // The dashboard reads `/api/llm/conversations/:id` on mount when a
+  // `?c=<id>` URL hash is present, to rehydrate the thread. Listing is
+  // exposed for the future sidebar; deletion lets the user clear a
+  // thread they no longer want kept.
+  //
+  // All three endpoints scope by `req.user.username` — owner/admin do
+  // NOT get visibility into other users' chats (privacy boundary).
+  router.get("/llm/conversations", async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const limit = Number.parseInt(String(req.query.limit ?? "20"), 10) || 20;
+      const offset = Number.parseInt(String(req.query.offset ?? "0"), 10) || 0;
+      const conversations = await persistence.listConversationsForUser(
+        userId,
+        limit,
+        offset,
+      );
+      res.json({ conversations });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/llm/conversations/:id", async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const detail = await persistence.getConversationForUser(
+        req.params.id,
+        userId,
+      );
+      if (!detail) {
+        res.status(404).json({ error: "conversation_not_found" });
+        return;
+      }
+      res.json(detail);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-171: per-route guard. Conversation rows are owned by the
+  // requesting user; service principals should never delete on behalf
+  // of a user. Human-tier roles only.
+  router.delete("/llm/conversations/:id", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const deleted = await persistence.deleteConversationForUser(
+        req.params.id,
+        userId,
+      );
+      if (!deleted) {
+        res.status(404).json({ error: "conversation_not_found" });
+        return;
+      }
+      res.json({ deleted: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-331: rename. Mirrors the GET/DELETE handlers above — scoped by
+  // req.user.username, service maps "no such row owned by this user"
+  // to a null return, and we surface that as 404.
+  // WARP-171: per-route guard. Same posture as the delete above.
+  router.patch("/llm/conversations/:id", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      const body = req.body as { title?: unknown };
+      if (typeof body?.title !== "string") {
+        res.status(400).json({ error: "title_required" });
+        return;
+      }
+      let finalTitle: string | null;
+      try {
+        finalTitle = await persistence.renameConversationForUser(
+          req.params.id,
+          userId,
+          body.title,
+        );
+      } catch (err) {
+        if (err instanceof Error && err.message === "title_required") {
+          res.status(400).json({ error: "title_required" });
+          return;
+        }
+        throw err;
+      }
+      if (finalTitle === null) {
+        res.status(404).json({ error: "conversation_not_found" });
+        return;
+      }
+      res.json({
+        id: req.params.id,
+        title: finalTitle,
       });
-      res.json(result);
     } catch (err) {
       next(err);
     }
@@ -270,7 +867,10 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
   });
 
   // Key management (proxy to ai-gateway)
-  router.post("/llm/keys/:provider", async (req, res, next) => {
+  // WARP-171: per-route guard. Provider API keys are household-tier
+  // credentials (per-user OpenAI key etc.) — owner/admin/family scope.
+  // No `guest` (read-only family-tier) and no `service`.
+  router.post("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const { provider } = req.params;
       const { api_key } = req.body;
@@ -294,7 +894,8 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/llm/keys/:provider", async (req, res, next) => {
+  // WARP-171: same posture as POST /llm/keys/:provider.
+  router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       await aiGateway.deleteKey(req.params.provider);
       res.json({ status: "deleted" });
@@ -303,116 +904,136 @@ export function createLlmRouter(_prisma: PrismaClient): Router {
     }
   });
 
-  // --- Sessions ---
-  // Session routes still proxy to ai-gateway-owned persistent
-  // conversation state. WARP-104 switched the dashboard's /chat page
-  // to /api/llm/chat (the MCP-backed orchestrator agent loop) — these
-  // session routes are no longer hit by the in-tree dashboard. They
-  // remain available for direct API callers that want server-side
-  // history; deletion is a separate decision once any out-of-tree
-  // consumers have migrated.
+  // WARP-311: the legacy `/llm/sessions/*` routes that proxied to
+  // ai-gateway-owned session state have been removed. The dashboard
+  // moved off them in WARP-104; nothing in the orchestrator, the
+  // dashboard, or any other tree consumer reaches them anymore, and
+  // persistent conversation state now lives in the orchestrator's own
+  // Postgres via WARP-304 (`/llm/conversations/*` above). The
+  // ai-gateway's session endpoints stay available for direct callers
+  // of the gateway, but the orchestrator no longer fronts them.
 
-  router.post("/llm/sessions", async (req, res, next) => {
-    try {
-      const { model, title, system_prompt } = req.body;
-      if (!model) {
-        res.status(400).json({ error: "model is required" });
-        return;
-      }
-      const session = await aiGateway.createSession({ model, title, system_prompt });
-      res.status(201).json(session);
-    } catch (err) {
-      next(err);
-    }
+  // ── WARP-460 Phase B3 — Context pins ───────────────────────────────
+  //
+  // Per-thread bindings (folder / file / email_thread / camera /
+  // camera_window) listed in the dashboard's side-panel "Context · N
+  // sources" section (FEATURES.md §2.2.7). The agent loop reads pins on
+  // every turn and prepends pin descriptions to the system prompt so
+  // retrieval tools are scoped accordingly.
+  //
+  // Ownership check matches the chat-persistence pattern: the session's
+  // `userId` column carries whatever the orchestrator wrote at session
+  // creation (today: `req.user.username`; per WARP-485+WARP-488 the
+  // backfill to UUID lands separately on ChatSession in a follow-up).
+  // Read both shapes so the gate works through the transition.
+  const pinCreateSchema = z.object({
+    kind: z.enum(["folder", "file", "email_thread", "camera", "camera_window"]),
+    ref: z.string().min(1).max(512),
+    meta: z.record(z.unknown()).optional(),
   });
 
-  router.get("/llm/sessions", async (req, res, next) => {
-    try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
-      const sessions = await aiGateway.listSessions(limit, offset);
-      res.json(sessions);
-    } catch (err) {
-      next(err);
+  async function loadOwnedSession(
+    sessionId: string,
+    req: import("express").Request,
+  ): Promise<{ ok: true; userId: string } | { ok: false; status: number; error: string }> {
+    const u = (req as AuthedRequest).user ?? {};
+    const candidates: string[] = [];
+    if (typeof u.id === "string") candidates.push(u.id);
+    if (typeof u.username === "string") candidates.push(u.username);
+    if (candidates.length === 0) {
+      return { ok: false, status: 401, error: "Authentication required" };
     }
-  });
-
-  router.get("/llm/sessions/:sessionId", async (req, res, next) => {
-    try {
-      const session = await aiGateway.getSession(req.params.sessionId);
-      res.json(session);
-    } catch (err) {
-      next(err);
+    const session = await prisma.chatSession.findFirst({
+      where: { id: sessionId, userId: { in: candidates } },
+      select: { userId: true },
+    });
+    if (!session) {
+      return { ok: false, status: 404, error: "session not found" };
     }
-  });
+    return { ok: true, userId: session.userId };
+  }
 
-  router.patch("/llm/sessions/:sessionId", async (req, res, next) => {
-    try {
-      const { title } = req.body;
-      if (!title) {
-        res.status(400).json({ error: "title is required" });
-        return;
-      }
-      const session = await aiGateway.updateSession(req.params.sessionId, title);
-      res.json(session);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.delete("/llm/sessions/:sessionId", async (req, res, next) => {
-    try {
-      await aiGateway.deleteSession(req.params.sessionId);
-      res.json({ status: "deleted" });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.post("/llm/sessions/:sessionId/chat", async (req, res, next) => {
-    try {
-      const { message, stream, temperature, max_tokens, provider } = req.body;
-      if (!message) {
-        res.status(400).json({ error: "message is required" });
-        return;
-      }
-
-      const chatReq: SessionChatRequest = {
-        message,
-        stream: stream ?? false,
-        temperature,
-        max_tokens,
-        provider,
-      };
-
-      const gatewayRes = await aiGateway.sessionChat(
-        req.params.sessionId,
-        chatReq
-      );
-
-      if (chatReq.stream && gatewayRes.body) {
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-          "X-Accel-Buffering": "no",
+  router.get(
+    "/llm/:sessionId/pins",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const owned = await loadOwnedSession(req.params.sessionId!, req);
+        if (!owned.ok) {
+          res.status(owned.status).json({ error: owned.error });
+          return;
+        }
+        const pins = await prisma.contextPin.findMany({
+          where: { sessionId: req.params.sessionId },
+          orderBy: { addedAt: "asc" },
         });
-
-        const reader = gatewayRes.body as ReadableStream<Uint8Array>;
-        const nodeStream = Readable.fromWeb(reader as never);
-        nodeStream.pipe(res);
-
-        req.on("close", () => {
-          nodeStream.destroy();
-        });
-      } else {
-        const data = await gatewayRes.json();
-        res.json(data);
+        res.json({ pins });
+      } catch (err) {
+        next(err);
       }
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
+
+  router.post(
+    "/llm/:sessionId/pins",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const owned = await loadOwnedSession(req.params.sessionId!, req);
+        if (!owned.ok) {
+          res.status(owned.status).json({ error: owned.error });
+          return;
+        }
+        const parsed = pinCreateSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid pin",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const pin = await prisma.contextPin.create({
+          data: {
+            sessionId: req.params.sessionId!,
+            kind: parsed.data.kind,
+            ref: parsed.data.ref,
+            meta: parsed.data.meta as object | undefined,
+          },
+        });
+        res.status(201).json({ pin });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.delete(
+    "/llm/:sessionId/pins/:pinId",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const owned = await loadOwnedSession(req.params.sessionId!, req);
+        if (!owned.ok) {
+          res.status(owned.status).json({ error: owned.error });
+          return;
+        }
+        // Atomic ownership-scoped delete — if the pin doesn't exist or
+        // belongs to a different session, count===0 and we 404. No
+        // separate findUnique pre-check (avoids the TOCTOU pattern
+        // captured in droplet-pr-review-patterns P1).
+        const r = await prisma.contextPin.deleteMany({
+          where: { id: req.params.pinId, sessionId: req.params.sessionId },
+        });
+        if (r.count === 0) {
+          res.status(404).json({ error: "pin not found" });
+          return;
+        }
+        res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   return router;
 }

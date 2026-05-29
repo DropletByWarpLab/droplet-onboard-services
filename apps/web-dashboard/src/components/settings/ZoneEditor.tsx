@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -10,6 +11,7 @@ import {
 import { Pencil, Plus, Trash2, X, Check } from "lucide-react";
 import { getCameraSnapshotUrl } from "@/lib/api";
 import type { CameraZone } from "@/lib/types";
+import { Dialog } from "@/components/Dialog";
 
 interface Props {
   cameraName: string;
@@ -68,6 +70,7 @@ export function ZoneEditor({
   const [mode, setMode] = useState<Mode>({ kind: "idle" });
   const [namePromptOpen, setNamePromptOpen] = useState(false);
   const [pendingName, setPendingName] = useState("");
+  const namePromptHeadingId = useId();
 
   // ---------- SVG → normalised coordinate mapping ----------
 
@@ -493,57 +496,60 @@ export function ZoneEditor({
         </div>
       </div>
 
-      {/* Name prompt for the new zone */}
-      {namePromptOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-          onClick={() => setNamePromptOpen(false)}
-        >
-          <div
-            className="dp-card p-4 w-full max-w-sm m-4"
-            onClick={(e) => e.stopPropagation()}
+      {/* Name prompt for the new zone — WARP-289: ARIA via shared Dialog. */}
+      <Dialog
+        open={namePromptOpen}
+        onClose={() => setNamePromptOpen(false)}
+        labelledBy={namePromptHeadingId}
+        maxWidth="sm"
+      >
+        <div className="p-4">
+          <h3
+            id={namePromptHeadingId}
+            className="type-title-3 text-label-primary mb-2"
           >
-            <h3 className="type-headline text-label-primary mb-2">Name this zone</h3>
-            <p className="type-caption-1 text-label-tertiary mb-3">
-              Letters, numbers, hyphens, underscores. Up to 40 characters.
-            </p>
-            <input
-              type="text"
-              value={pendingName}
-              onChange={(e) => setPendingName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commitNewZone();
-                if (e.key === "Escape") setNamePromptOpen(false);
-              }}
-              autoFocus
-              maxLength={40}
-              placeholder="front_yard"
-              className="w-full h-10 px-3 rounded-lg border border-separator bg-surface-secondary type-subheadline text-label-primary focus:border-accent focus:outline-none"
-            />
-            <div className="flex justify-end gap-2 mt-3">
-              <button
-                type="button"
-                onClick={() => setNamePromptOpen(false)}
-                className="dp-btn-secondary px-3 py-2 rounded-lg type-subheadline"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={commitNewZone}
-                disabled={
-                  !pendingName.trim() ||
-                  !/^[a-zA-Z0-9_-]{1,40}$/.test(pendingName.trim()) ||
-                  zones.some((z) => z.name === pendingName.trim())
-                }
-                className="dp-btn-primary px-3 py-2 rounded-lg type-subheadline disabled:opacity-50"
-              >
-                Create
-              </button>
-            </div>
+            Name this zone
+          </h3>
+          <p className="type-caption-1 text-label-tertiary mb-3">
+            Letters, numbers, hyphens, underscores. Up to 40 characters.
+          </p>
+          <input
+            type="text"
+            value={pendingName}
+            onChange={(e) => setPendingName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitNewZone();
+              // Escape is handled by Dialog itself; no need to dupe here.
+            }}
+            autoFocus
+            maxLength={40}
+            placeholder="front_yard"
+            aria-label="Zone name"
+            className="w-full h-10 px-3 rounded-lg border border-separator bg-surface-secondary type-subheadline text-label-primary focus:border-accent focus:outline-none"
+          />
+          <div className="flex justify-end gap-2 mt-3">
+            <button
+              type="button"
+              onClick={() => setNamePromptOpen(false)}
+              className="dp-btn-secondary px-3 py-2 rounded-lg type-subheadline"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={commitNewZone}
+              disabled={
+                !pendingName.trim() ||
+                !/^[a-zA-Z0-9_-]{1,40}$/.test(pendingName.trim()) ||
+                zones.some((z) => z.name === pendingName.trim())
+              }
+              className="dp-btn-primary px-3 py-2 rounded-lg type-subheadline disabled:opacity-50"
+            >
+              Create
+            </button>
           </div>
         </div>
-      )}
+      </Dialog>
     </div>
   );
 }

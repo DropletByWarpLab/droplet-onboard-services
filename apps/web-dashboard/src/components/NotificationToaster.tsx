@@ -22,6 +22,24 @@ interface IncomingNotification {
   at?: string;
 }
 
+// When the server didn't ship a title, prefer a kind-derived Title Case
+// label over the generic word "Notification". Falls back to
+// "New notification" when there's no kind either. WARP-297.
+function kindFallbackTitle(kind?: IncomingNotification["kind"]): string {
+  switch (kind) {
+    case "reminder":
+      return "Reminder";
+    case "event":
+      return "Event";
+    case "system":
+      return "System notification";
+    case "ai":
+      return "AI";
+    default:
+      return "New notification";
+  }
+}
+
 export function NotificationToaster() {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -59,9 +77,17 @@ export function NotificationToaster() {
         }
         if (!data.topic || !data.topic.startsWith("droplet/notifications/")) return;
         const payload = data.payload ?? {};
-        const title = payload.title ?? "Notification";
-        const body = payload.body ? `${title} — ${payload.body}` : title;
-        toastRef.current(body, payload.kind === "ai" ? "info" : "success");
+        const title = payload.title ?? kindFallbackTitle(payload.kind);
+        // The old shape did `${title} — ${body}` even when title was the
+        // generic word "Notification", which shipped "Notification —
+        // Notification — ${body}" to screen readers. We only prefix the
+        // body with the title when the title is genuinely informative, and
+        // otherwise just render the body alone (or the title alone when
+        // there is no body).
+        const message = payload.body
+          ? `${title} — ${payload.body}`
+          : title;
+        toastRef.current(message, payload.kind === "ai" ? "info" : "success");
       };
       ws.onclose = () => scheduleReconnect();
       ws.onerror = () => {

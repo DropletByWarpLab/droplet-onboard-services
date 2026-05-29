@@ -13,7 +13,8 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "db:seed:dev": "tsx prisma/seed.dev.ts"
   },
   "dependencies": {
     "@droplet/fips-selftest": "0.1.0",
@@ -38,6 +39,8 @@
     "node-cron": "^4.2.1",
     "pino": "^9.1.0",
     "pino-http": "^10.1.0",
+    "pngjs": "^5.0.0",
+    "qrcode": "^1.5.4",
     "web-push": "^3.6.7",
     "ws": "^8.17.0",
     "zod": "^3.23.8"
@@ -51,6 +54,8 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^20.12.12",
     "@types/node-cron": "^3.0.11",
+    "@types/pngjs": "^6.0.5",
+    "@types/qrcode": "^1.5.5",
     "@types/supertest": "^6.0.2",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.10",

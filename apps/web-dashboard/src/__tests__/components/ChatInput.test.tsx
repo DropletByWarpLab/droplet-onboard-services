@@ -71,6 +71,110 @@ describe("ChatInput", () => {
   });
 });
 
+// ── WARP-295: Stop button while streaming + IME guard ──
+
+describe("ChatInput stop button (WARP-295)", () => {
+  it("renders the Stop button (not Send) while isStreaming is true", () => {
+    render(
+      <ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />,
+    );
+    const stop = screen.getByLabelText("Stop generating");
+    expect(stop).toBeInTheDocument();
+    // Send button is no longer the visible primary action.
+    expect(screen.queryByLabelText("Send message")).not.toBeInTheDocument();
+  });
+
+  it("calls onStop when the Stop button is clicked", () => {
+    const onStop = vi.fn();
+    render(
+      <ChatInput onSend={vi.fn()} onStop={onStop} isStreaming />,
+    );
+    fireEvent.click(screen.getByLabelText("Stop generating"));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the Send button when isStreaming is false (or unset)", () => {
+    render(<ChatInput onSend={vi.fn()} onStop={vi.fn()} />);
+    expect(screen.getByLabelText("Send message")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Stop generating")).not.toBeInTheDocument();
+  });
+
+  it("uses text-system-red on the Stop icon so it reads as a destructive primary", () => {
+    render(
+      <ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />,
+    );
+    const stop = screen.getByLabelText("Stop generating");
+    // The stop icon (or its wrapper) carries text-system-red — sniffing
+    // for either the button or any descendant with the token.
+    const hasRedToken =
+      stop.className.includes("text-system-red") ||
+      stop.querySelector('[class*="text-system-red"]') !== null;
+    expect(hasRedToken).toBe(true);
+  });
+});
+
+// ── WARP-301: hit-target audit (WCAG 2.5.5 AA → 44 px) ──
+
+describe("ChatInput hit-targets (WARP-301)", () => {
+  it("Send button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    const send = screen.getByLabelText("Send message");
+    // Tailwind's w-11/h-11 = 2.75rem = 44 px. The audit floor.
+    expect(send.className).toMatch(/(^|\s)w-11(\s|$)/);
+    expect(send.className).toMatch(/(^|\s)h-11(\s|$)/);
+  });
+
+  it("Stop button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+    render(<ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />);
+    const stop = screen.getByLabelText("Stop generating");
+    expect(stop.className).toMatch(/(^|\s)w-11(\s|$)/);
+    expect(stop.className).toMatch(/(^|\s)h-11(\s|$)/);
+  });
+
+  it("Paperclip / attach button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+    render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
+    const attach = screen.getByLabelText("Attach a file");
+    expect(attach.className).toMatch(/(^|\s)w-11(\s|$)/);
+    expect(attach.className).toMatch(/(^|\s)h-11(\s|$)/);
+  });
+
+  // WARP-301 fold-in: the paperclip icon was `size={16}` inside a 44 px
+  // button while Send used `size={18}`. Bump to 18 for icon-weight
+  // parity. lucide-react renders `size={N}` as width/height="N" on the
+  // underlying SVG, so we sniff the SVG attributes.
+  it("Paperclip icon renders at size 18 for parity with Send (WARP-301)", () => {
+    render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
+    const attach = screen.getByLabelText("Attach a file");
+    const svg = attach.querySelector("svg");
+    expect(svg).not.toBeNull();
+    expect(svg!.getAttribute("width")).toBe("18");
+    expect(svg!.getAttribute("height")).toBe("18");
+  });
+});
+
+describe("ChatInput IME composition guard (WARP-295)", () => {
+  it("does NOT send on Enter while the user is composing a CJK character", () => {
+    const onSend = vi.fn();
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByPlaceholderText("Send a message...");
+
+    fireEvent.change(textarea, { target: { value: "你好" } });
+    // jsdom's KeyboardEvent doesn't surface `isComposing` through the
+    // synthetic event; ChatInput reads it off `e.nativeEvent.isComposing`,
+    // so we set it on the underlying KeyboardEvent.
+    const evt = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(evt, "isComposing", { value: true });
+    textarea.dispatchEvent(evt);
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
 // ── WARP-203: chat-attached files ──
 
 describe("ChatInput attachments", () => {
@@ -143,7 +247,9 @@ describe("ChatInput attachments", () => {
     expect(chips[0].getAttribute("data-status")).toBe("indexing");
     expect(chips[1].getAttribute("data-status")).toBe("failed");
     expect(screen.getByText("notes.md")).toBeInTheDocument();
-    expect(screen.getByText(/extractor_unavailable/)).toBeInTheDocument();
+    // WARP-294: failed chips render the friendly chat-domain
+    // translation of `error`, never the raw orchestrator token.
+    expect(screen.queryByText(/extractor_unavailable/)).not.toBeInTheDocument();
   });
 
   it("calls onRemoveAttachment when the chip's X button is clicked", () => {

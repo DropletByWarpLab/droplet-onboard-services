@@ -29,6 +29,7 @@ import {
 } from "./frigate.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { dispatchDetectionEvent } from "./push-dispatch.service.js";
+import { processCameraEvent } from "./camera-event-gate.js";
 import { config } from "../config.js";
 import type {
   CameraInfo,
@@ -142,39 +143,103 @@ function handleMqttMessage(
     const before = data.before as Record<string, unknown> | undefined;
 
     // Validate thumbnail ID is safe before constructing URL
-    const eventId = String(after?.id || "");
-    const thumbnailUrl = /^[a-zA-Z0-9._-]+$/.test(eventId)
-      ? `/api/cameras/events/${eventId}/thumbnail`
-      : undefined;
+    const eventId = String(after?.id || before?.id || "");
+    if (!/^[a-zA-Z0-9._-]+$/.test(eventId)) {
+      return;
+    }
+    const thumbnailUrl = `/api/cameras/events/${eventId}/thumbnail`;
+    const cameraName = String(after?.camera || before?.camera || "");
+    const label = String(after?.label || before?.label || "");
+    const score = Number(after?.top_score || before?.top_score || 0);
 
-    const event: CameraSSEEvent = {
-      type: "detection",
-      camera: String(after?.camera || before?.camera || ""),
-      label: String(after?.label || before?.label || ""),
-      score: Number(after?.top_score || before?.top_score || 0),
-      thumbnail: thumbnailUrl,
-      timestamp: Date.now(),
-    };
-    broadcastSSE(event);
-    cacheDel(CACHE_KEY_EVENTS);
+    // Frigate publishes "new" | "update" | "end". Unknown types are
+    // ignored by the gate (drop_stale) — no broadcast, no push.
+    const rawType = String(data.type ?? "new");
+    const frigateType: "new" | "update" | "end" =
+      rawType === "new" || rawType === "update" || rawType === "end"
+        ? rawType
+        : "new";
 
-    // Web Push fan-out (Phase 7.3). Frigate's `type` field on an
-    // event update is one of "new" | "update" | "end"; we only push
-    // on "new" so the operator gets one notification per event, not
-    // a stream of updates as the tracker refines its score. Failure
-    // is silent — push is best-effort and shouldn't block the SSE
-    // broadcast above.
-    const evType = String(data.type ?? "new");
-    if (evType === "new" && eventId && event.camera && event.label) {
-      void dispatchDetectionEvent(prisma, {
-        eventId,
-        cameraName: event.camera,
-        label: event.label,
-        score: event.score ?? 0,
-        thumbnailUrl,
-      }).catch((err) =>
-        logger.warn({ err, eventId }, "push dispatch failed"),
-      );
+    const decision = processCameraEvent({
+      cameraName,
+      eventId,
+      frigateType,
+      now: Date.now(),
+    });
+
+    switch (decision.kind) {
+      case "accept_new": {
+        // Notify on detection: SSE toast + push fan-out.
+        broadcastSSE({
+          type: "detection",
+          camera: cameraName,
+          label,
+          score,
+          thumbnail: thumbnailUrl,
+          eventId,
+          timestamp: Date.now(),
+        });
+        cacheDel(CACHE_KEY_EVENTS);
+
+        if (label) {
+          void dispatchDetectionEvent(prisma, {
+            eventId,
+            cameraName,
+            label,
+            score,
+            thumbnailUrl,
+          }).catch((err) =>
+            logger.warn({ err, eventId }, "push dispatch failed"),
+          );
+        }
+        break;
+      }
+      case "accept_update": {
+        // Live confidence updates flow through SSE as a distinct type
+        // so the cameras page can render them. Toast / notification
+        // center filter on `type === "detection"` and naturally ignore
+        // these. No push, no cache bust.
+        broadcastSSE({
+          type: "detection_update",
+          camera: cameraName,
+          label,
+          score,
+          thumbnail: thumbnailUrl,
+          eventId,
+          timestamp: Date.now(),
+        });
+        break;
+      }
+      case "accept_end": {
+        // Recording window closed for the active event — let the UI
+        // flip to "clip available" and bust the recent-events cache
+        // so the new clip shows up. Toast / notification center
+        // ignores this type.
+        broadcastSSE({
+          type: "detection_end",
+          camera: cameraName,
+          label,
+          score,
+          thumbnail: thumbnailUrl,
+          eventId,
+          timestamp: Date.now(),
+        });
+        cacheDel(CACHE_KEY_EVENTS);
+        break;
+      }
+      case "drop_active":
+      case "drop_cooldown":
+        // Saturation guard: silently suppress. Log at debug so the
+        // suppression is observable but doesn't spam production logs.
+        logger.debug(
+          { camera: cameraName, eventId, reason: decision.kind },
+          "camera event suppressed by gate",
+        );
+        break;
+      case "drop_stale":
+        // Tracker noise (update/end without a matching active event).
+        // Not an error — just out of scope for the real-time surface.
+        break;
     }
   } else if (topic === "droplet/cameras/discovered") {
     const camData = data.camera as Record<string, unknown> | undefined;

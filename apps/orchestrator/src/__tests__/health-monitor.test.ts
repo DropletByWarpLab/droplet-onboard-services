@@ -46,6 +46,14 @@ vi.mock("../services/nextcloud.client.js", async () => {
   };
 });
 
+vi.mock("../services/display.client.js", async () => {
+  const actual: any = await vi.importActual("../services/display.client.js");
+  return {
+    ...actual,
+    healthCheck: vi.fn().mockResolvedValue(true),
+  };
+});
+
 import {
   classifyAggregate,
   runAllProbes,
@@ -137,7 +145,10 @@ describe("runAllProbes (WARP-43)", () => {
     const results = await runAllProbes(prisma);
 
     const names = results.map((r) => r.name).sort();
-    expect(names).toEqual(["ai-gateway", "nextcloud", "postgres", "redis", "routing"]);
+    // WARP-165 added `display` to the probe set (PyPortal sidecar);
+    // it's degraded-class only (auto-falls back to a sim backend when
+    // /dev/ttyACM* is absent) and never trips the aggregate to down.
+    expect(names).toEqual(["ai-gateway", "display", "nextcloud", "postgres", "redis", "routing"]);
     expect(results.every((r) => r.status === "ok")).toBe(true);
   });
 
@@ -225,7 +236,7 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
-    expect(res.body.components.length).toBe(5);
+    expect(res.body.components.length).toBe(6);
     expect(res.body.version).toBe("0.1.0");
     expect(typeof res.body.uptime).toBe("number");
   });

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as Icons from "lucide-react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { useScheduleMutations } from "@/lib/hooks/useScheduleMutations";
@@ -9,6 +9,7 @@ import type { Schedule } from "@/lib/types";
 import { WeeklyWindowsEditor, type WindowDraft } from "./WeeklyWindowsEditor";
 import { ScheduleHeatmap } from "./ScheduleHeatmap";
 import { presetById } from "./schedule-presets";
+import { Dialog } from "@/components/Dialog";
 
 /**
  * Full-viewport modal for creating and editing a schedule.
@@ -155,6 +156,7 @@ export function ScheduleEditorModal({
   const [toast, setToast] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
+  const headingId = useId();
   const hydratedFor = useRef<string | null>(null);
 
   // Hydrate once the schedule arrives from SWR (the modal may open before
@@ -224,26 +226,23 @@ export function ScheduleEditorModal({
   }
 
   return (
-    <div
-      data-testid="schedule-editor-backdrop"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-      onClick={onClose}
-    >
+    <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="xl">
       <div
-        role="dialog"
-        aria-label="Edit schedule"
-        onClick={(e) => e.stopPropagation()}
-        className="bg-surface-primary border border-separator rounded-lg w-full max-w-[600px] max-h-[90vh] overflow-y-auto shadow-xl"
+        data-testid="schedule-editor-backdrop"
+        className="max-h-[90vh] overflow-y-auto"
       >
         <div className="p-4 border-b border-separator flex items-center justify-between">
-          <h2 className="type-title-3 text-label-primary">
+          <h2
+            id={headingId}
+            className="type-title-3 text-label-primary"
+          >
             {isEditing ? "Edit schedule" : "New schedule"}
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-label-secondary hover:text-label-primary"
+            className="text-label-secondary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
           >
             <Icons.X className="w-5 h-5" />
           </button>
@@ -377,7 +376,7 @@ export function ScheduleEditorModal({
           <button
             type="button"
             onClick={onClose}
-            className="dp-button-secondary"
+            className="dp-btn-secondary"
           >
             Cancel
           </button>
@@ -385,7 +384,7 @@ export function ScheduleEditorModal({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="dp-button-primary disabled:opacity-50"
+            className="dp-btn-primary disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save"}
           </button>
@@ -408,6 +407,6 @@ export function ScheduleEditorModal({
           </div>
         )}
       </div>
-    </div>
+    </Dialog>
   );
 }

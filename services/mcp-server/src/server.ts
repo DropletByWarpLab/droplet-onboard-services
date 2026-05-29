@@ -3,7 +3,12 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLS, type Tool, type ToolResult } from "@droplet/tools-core";
+import {
+  TOOLS,
+  type PrivateEnhancement,
+  type Tool,
+  type ToolResult,
+} from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
 import { canCallTool, filterToolsForRole } from "./rbac.js";
 
@@ -93,7 +98,28 @@ export function createServer(deps: ContextDeps, claims?: Claims) {
       meta && typeof meta.userId === "string" && meta.userId.length > 0
         ? meta.userId
         : undefined;
-    const ctx = buildContext(deps, claims, extra.signal, ncToken, metaUserId);
+    // WARP-437: orchestrator-injected query-enhancement bundle (HyDE
+    // vector, paraphrase vectors, soft filename filter, search overrides)
+    // arrives via `_meta._enhancement`. Trusted-stdio-only by design —
+    // the HTTP transport ignores it (an attacker on HTTP could otherwise
+    // smuggle precomputed vectors past the schema validator). We gate on
+    // `trustedPrincipal` to make the trust boundary explicit.
+    const metaEnhancement =
+      trustedPrincipal &&
+      meta &&
+      typeof meta._enhancement === "object" &&
+      meta._enhancement !== null &&
+      !Array.isArray(meta._enhancement)
+        ? (meta._enhancement as PrivateEnhancement)
+        : undefined;
+    const ctx = buildContext(
+      deps,
+      claims,
+      extra.signal,
+      ncToken,
+      metaUserId,
+      metaEnhancement,
+    );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     let result: ToolResult;
     try {

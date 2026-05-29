@@ -106,6 +106,21 @@ describe("DeviceDetailPanel", () => {
     await waitFor(() => expect(input.value).toBe("Romain's MacBook"));
   });
 
+  // WARP-289: full modal ARIA via the shared <Dialog> primitive.
+  it("renders as a role=dialog with aria-modal and aria-labelledby", async () => {
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    // The panel renders the dialog synchronously; SWR fills body after.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    const heading = document.getElementById(labelledBy!);
+    expect(heading).not.toBeNull();
+    // Heading is the device-detail label ("Device details").
+    expect(heading!.textContent).toMatch(/Device details/i);
+  });
+
   it("debounces displayName edits and PATCHes after 500ms", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
@@ -197,7 +212,7 @@ describe("DeviceDetailPanel", () => {
     });
   });
 
-  it("footer Block button toggles firewall state on click", async () => {
+  it("footer Block button opens a ConfirmDialog and POSTs to firewall endpoint on confirm (WARP-291)", async () => {
     mockFetchOnceJson(fetchMock, {
       device: makeDevice({ isBlocked: false }),
       presence: makePresence(),
@@ -212,7 +227,14 @@ describe("DeviceDetailPanel", () => {
     // POST to the firewall endpoint resolves OK.
     mockFetchOnceJson(fetchMock, { operationId: "op-42" });
 
+    // WARP-291: clicking the trigger opens a ConfirmDialog instead of
+    // firing the POST. We need to confirm.
     fireEvent.click(blockBtn);
+    // The dialog renders a second "Block" button — find it inside the
+    // dialog so we don't ambiguously click the trigger again.
+    const dialog = await screen.findByRole("dialog", { name: /Block .*?/i });
+    const confirmInDialog = within(dialog).getByRole("button", { name: "Block" });
+    fireEvent.click(confirmInDialog);
 
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(

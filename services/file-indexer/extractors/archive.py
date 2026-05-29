@@ -218,7 +218,11 @@ def _process_member_bytes(
             placeholder_anchor = ArchiveMemberAnchor(
                 member=member_name, innerAnchor=NoneAnchor()
             )
-            placeholder = Span(text=member_name, anchor=placeholder_anchor)
+            placeholder = Span(
+                text=member_name,
+                anchor=placeholder_anchor,
+                section_path=[member_name],
+            )
             return [placeholder], [_CAP_WARNING], _build_chain(
                 parent_filename, parent_mime, member_name, mime, None
             )
@@ -243,7 +247,13 @@ def _process_member_bytes(
                 member=member_name,
                 innerAnchor=inner_anchor if inner_anchor is not None else None,
             )
-            wrapped.append(Span(text=inner.text, anchor=anchor))
+            # Preserve the inner extractor's section_path (already the
+            # member filename or a richer breadcrumb for structured
+            # members); fall back to the member name if it's empty.
+            inner_section = list(inner.section_path) or [member_name]
+            wrapped.append(
+                Span(text=inner.text, anchor=anchor, section_path=inner_section)
+            )
 
         if capped_any and _CAP_WARNING not in tagged:
             tagged.append(_CAP_WARNING)

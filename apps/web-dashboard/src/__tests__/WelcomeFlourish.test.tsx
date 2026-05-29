@@ -41,8 +41,12 @@ describe("WelcomeFlourish", () => {
   });
 
   it("renders fallback headline when displayName is absent", () => {
+    // WARP-298: previously "Welcome to Droplet", which duplicated the
+    // <h1> on the setup welcome step. Use "You're all set" instead.
     render(<WelcomeFlourish />);
-    expect(screen.getByText(/Welcome to Droplet/i)).toBeInTheDocument();
+    expect(screen.getByText(/You're all set/i)).toBeInTheDocument();
+    // Negative: must NOT contain the duplicated phrase.
+    expect(screen.queryByText(/Welcome to Droplet/i)).not.toBeInTheDocument();
   });
 
   it("renders the provided subtitle", () => {

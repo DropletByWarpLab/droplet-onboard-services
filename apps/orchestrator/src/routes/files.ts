@@ -38,6 +38,7 @@ import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
+import { requireRole } from "../middleware/auth.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -112,8 +113,111 @@ function handleFileError(
   next(err);
 }
 
-export function createFilesRouter(_prisma: PrismaClient): Router {
+export function createFilesRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // ── WARP-473 — file citations (related chats for §2.3 file drawer)
+  // GET /api/files/:path(*)/citations?limit=20 — returns recent
+  // ChatMessage→ChatSession rows that referenced this filePath.
+  //
+  // The `:path(*)` wildcard captures arbitrary slashes in the file
+  // path (Nextcloud paths look like `/Documents/foo.pdf`). The route
+  // is mounted at top-level so this matches `/api/files/Documents/foo.pdf/citations`.
+  // Read access is owner+admin+family — guests don't see chat history.
+  interface CitationRow {
+    id: string;
+    filePath: string;
+    userId: string;
+    threadId: string;
+    messageId: string;
+    citedAt: Date;
+  }
+  router.get(
+    "/files/:filePath(*)/citations",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const filePath = req.params.filePath
+          ? `/${req.params.filePath}`.replace(/\/+/g, "/")
+          : "";
+        if (filePath === "" || filePath === "/") {
+          res.status(400).json({ error: "filePath path-param is required" });
+          return;
+        }
+        const rawLimit = Number.parseInt(String(req.query.limit ?? "20"), 10);
+        const limit = Math.max(
+          1,
+          Math.min(50, Number.isFinite(rawLimit) ? rawLimit : 20),
+        );
+
+        // IDOR boundary: FileCitation has no built-in per-row owner check
+        // — cross-user leak unless we filter on userId. Owner/admin see
+        // every household citation (consistent with /api/activity); other
+        // roles are scoped to their own sessions.
+        const role = (req as { user?: { role?: string; id?: string } }).user?.role;
+        const requesterId =
+          (req as { user?: { role?: string; id?: string } }).user?.id ?? "__none__";
+        const isPrivileged = role === "owner" || role === "admin";
+        const where = isPrivileged
+          ? { filePath }
+          : { filePath, userId: requesterId };
+
+        const rows = (await prisma.fileCitation.findMany({
+          where,
+          orderBy: { citedAt: "desc" },
+          take: limit,
+        })) as unknown as CitationRow[];
+
+        if (rows.length === 0) {
+          res.json({ filePath, citations: [] });
+          return;
+        }
+
+        // Resolve session metadata (title + updatedAt) so the dashboard
+        // can render the related-chats list without N round-trips. We
+        // de-dup by threadId because one message can fire-and-forget
+        // many file paths per turn — the dashboard wants one row per
+        // *chat*, not per citation.
+        const threadIds = Array.from(new Set(rows.map((r) => r.threadId)));
+        const sessions = (await prisma.chatSession.findMany({
+          where: { id: { in: threadIds } },
+          select: { id: true, title: true, updatedAt: true, userId: true },
+        })) as Array<{
+          id: string;
+          title: string | null;
+          updatedAt: Date;
+          userId: string;
+        }>;
+        const sessionById = new Map(sessions.map((s) => [s.id, s]));
+
+        // One row per thread, latest citation wins.
+        const seen = new Set<string>();
+        const citations: Array<{
+          threadId: string;
+          messageId: string;
+          title: string | null;
+          citedAt: Date;
+          updatedAt: Date | null;
+        }> = [];
+        for (const r of rows) {
+          if (seen.has(r.threadId)) continue;
+          seen.add(r.threadId);
+          const session = sessionById.get(r.threadId);
+          citations.push({
+            threadId: r.threadId,
+            messageId: r.messageId,
+            title: session?.title ?? null,
+            citedAt: r.citedAt,
+            updatedAt: session?.updatedAt ?? null,
+          });
+        }
+
+        res.json({ filePath, citations });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ── Multer error handler ──
   function handleUpload(req: Request, res: Response, next: NextFunction) {
@@ -190,7 +294,10 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Upload file(s) ──
-  router.post("/files/upload", handleUpload, async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin + family — household
+  // file writes. service principals never upload (the file-indexer
+  // talks to Nextcloud's WebDAV directly, not through this API).
+  router.post("/files/upload", requireRole("owner", "admin", "family"), handleUpload, async (req, res, next) => {
     try {
       const targetPath = (req.query.path as string) || "/";
 
@@ -230,7 +337,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Delete a file or directory ──
-  router.delete("/files", async (req, res, next) => {
+  router.delete("/files", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const filePath = req.query.path as string;
       if (!filePath) {
@@ -252,7 +359,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Create a directory ──
-  router.post("/files/mkdir", async (req, res, next) => {
+  router.post("/files/mkdir", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ path: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -280,7 +387,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
   // expireDate / password / note / shareWith). Callers that pass only `path`
   // get a public read-only link from the defaults.
-  router.post("/files/share", async (req, res, next) => {
+  router.post("/files/share", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -375,7 +482,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   }
 
   // ── Rename (POST /api/files/rename) ──
-  router.post("/files/rename", async (req, res, next) => {
+  router.post("/files/rename", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -409,7 +516,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Move (POST /api/files/move) ──
-  router.post("/files/move", async (req, res, next) => {
+  router.post("/files/move", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
@@ -435,7 +542,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Copy (POST /api/files/copy) ──
-  router.post("/files/copy", async (req, res, next) => {
+  router.post("/files/copy", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
@@ -461,7 +568,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Bulk delete (POST /api/files/bulk-delete) ──
-  router.post("/files/bulk-delete", async (req, res, next) => {
+  router.post("/files/bulk-delete", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ paths: z.array(z.string().min(1)).min(1).max(200) });
       const parsed = schema.safeParse(req.body);
@@ -497,7 +604,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Bulk move (POST /api/files/bulk-move) ──
-  router.post("/files/bulk-move", async (req, res, next) => {
+  router.post("/files/bulk-move", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         paths: z.array(z.string().min(1)).min(1).max(200),
@@ -541,7 +648,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Bulk copy (POST /api/files/bulk-copy) ──
-  router.post("/files/bulk-copy", async (req, res, next) => {
+  router.post("/files/bulk-copy", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         paths: z.array(z.string().min(1)).min(1).max(200),
@@ -595,7 +702,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Trash: restore (POST /api/files/trash/restore) ──
-  router.post("/files/trash/restore", async (req, res, next) => {
+  router.post("/files/trash/restore", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ name: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -613,7 +720,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Trash: delete single item permanently (DELETE /api/files/trash/item) ──
-  router.delete("/files/trash/item", async (req, res, next) => {
+  router.delete("/files/trash/item", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const name = req.query.name as string;
       if (!name) {
@@ -630,7 +737,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Trash: empty (DELETE /api/files/trash) ──
-  router.delete("/files/trash", async (_req, res, next) => {
+  router.delete("/files/trash", requireRole("owner", "admin", "family"), async (_req, res, next) => {
     try {
       const user = getUser(_req);
       await ncEmptyTrash(await getToken(_req), user);
@@ -664,7 +771,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Versions: restore (POST /api/files/versions/restore) ──
-  router.post("/files/versions/restore", async (req, res, next) => {
+  router.post("/files/versions/restore", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -707,7 +814,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   const SEARCH_TTL = 5;
 
   // ── Favorite toggle (POST /api/files/favorite) ──
-  router.post("/files/favorite", async (req, res, next) => {
+  router.post("/files/favorite", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         path: z.string().min(1),
@@ -843,7 +950,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Update existing share (PUT /api/files/share/:id) ──
-  router.put("/files/share/:id", async (req, res, next) => {
+  router.put("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -895,7 +1002,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
   });
 
   // ── Revoke a share (DELETE /api/files/share/:id) ──
-  router.delete("/files/share/:id", async (req, res, next) => {
+  router.delete("/files/share/:id", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const shareId = parseInt(req.params.id, 10);
       if (Number.isNaN(shareId)) {
@@ -985,7 +1092,7 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
       // best chunk), outer query sorts by score and applies the limit.
       const vecLiteral = `[${embedVec.join(",")}]`;
       const rows: Array<{ path: string; score: number; text: string }> =
-        await _prisma.$queryRawUnsafe(
+        await prisma.$queryRawUnsafe(
           `
           SELECT path, score, text FROM (
             SELECT DISTINCT ON ("ncFileId")
@@ -1021,6 +1128,84 @@ export function createFilesRouter(_prisma: PrismaClient): Router {
         return;
       }
       handleFileError(err, res, next);
+    }
+  });
+
+  // ── GET /api/files/search/status ── (WARP-310)
+  //
+  // Lightweight health probe for the AI-toggle in the Files page search
+  // bar. The dashboard polls this when the toggle is enabled so the
+  // user knows whether semantic search is actually wired up end-to-end:
+  //
+  //   - gRPC reachable?                  → `gatewayHealthy`
+  //   - pgvector extension installed?    → `pgvectorReady`
+  //   - any chunks for this user?        → `indexedCount`
+  //
+  // The composite `state` collapses the three into a single traffic
+  // light the UI can render directly:
+  //   "ready"      — gateway up + pgvector up + user has chunks
+  //   "indexing"   — gateway up + pgvector up + zero chunks (yet)
+  //   "unavailable"— gateway or pgvector down
+  //
+  // Per-user scope is intentional: it tells the *current* user whether
+  // their files are searchable. Owner/admin don't get visibility into
+  // other users' counts here.
+  router.get("/files/search/status", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+
+      // Probe gRPC. The grpc-client module exposes `isGrpcAvailable()`
+      // which reflects the latest init attempt; a hot reload from "down"
+      // to "up" lands on the next probe without restart.
+      let gatewayHealthy = false;
+      try {
+        const { isGrpcAvailable } = await import(
+          "../services/ai-gateway.grpc-client.js"
+        );
+        gatewayHealthy = isGrpcAvailable();
+      } catch {
+        gatewayHealthy = false;
+      }
+
+      // Probe pgvector + indexed count in a single round trip. If the
+      // extension isn't installed, the query throws and we treat it as
+      // pgvectorReady=false.
+      let pgvectorReady = false;
+      let indexedCount = 0;
+      let lastIndexedAt: string | null = null;
+      try {
+        const rows: Array<{ count: bigint; last: Date | null }> =
+          await prisma.$queryRawUnsafe(
+            'SELECT COUNT(*)::bigint AS count, MAX("createdAt") AS last ' +
+              'FROM "FileContentChunk" WHERE "userId" = $1',
+            user,
+          );
+        pgvectorReady = true;
+        if (rows[0]) {
+          indexedCount = Number(rows[0].count);
+          lastIndexedAt = rows[0].last ? rows[0].last.toISOString() : null;
+        }
+      } catch (err) {
+        logger.warn({ err }, "search/status: pgvector probe failed");
+        pgvectorReady = false;
+      }
+
+      const state: "ready" | "indexing" | "unavailable" =
+        !gatewayHealthy || !pgvectorReady
+          ? "unavailable"
+          : indexedCount > 0
+            ? "ready"
+            : "indexing";
+
+      res.json({
+        state,
+        gatewayHealthy,
+        pgvectorReady,
+        indexedCount,
+        lastIndexedAt,
+      });
+    } catch (err) {
+      next(err);
     }
   });
 

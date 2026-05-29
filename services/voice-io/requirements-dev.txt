@@ -1,0 +1,6 @@
+# Pytest + dev-only deps. Matches the file-indexer / camera-discovery
+# split: `requirements.txt` is everything the running service needs;
+# `requirements-dev.txt` adds the test suite's harness on top.
+-r requirements.txt
+pytest==8.3.3
+pytest-asyncio==0.24.0

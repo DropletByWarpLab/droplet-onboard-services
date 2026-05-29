@@ -19,6 +19,7 @@ import {
 import { fetchCameraSystemStatus, restartFrigate } from "@/lib/api";
 import { confirmNetworkCommand } from "@/lib/api";
 import type { CameraSystemStatus } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 /**
  * /cameras/system — Frigate-wide health surface (Phase 5).
@@ -43,6 +44,13 @@ export default function CameraSystemPage() {
 
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
+  // WARP-291: holds the tier-2 confirmation token + reason between the
+  // first restartFrigate() call (which returns confirmation_required)
+  // and the user's click on the <ConfirmDialog>. Null while no confirm
+  // is pending.
+  const [pendingRestart, setPendingRestart] = useState<
+    { confirmationToken: string; reason: string } | null
+  >(null);
 
   const handleRestart = async () => {
     setRestarting(true);
@@ -50,36 +58,56 @@ export default function CameraSystemPage() {
     try {
       const first = await restartFrigate();
       if (first.status === "confirmation_required" && first.confirmationToken) {
-        // Tier-2 confirm dance — surface the reason and require a click.
-        if (
-          !confirm(
-            `${first.reason ?? "This will drop every camera for ~10 seconds."}\n\nProceed with restart?`,
-          )
-        ) {
-          setRestartMsg("Cancelled.");
-          setRestarting(false);
-          return;
-        }
-        await confirmNetworkCommand(
-          first.confirmationToken,
-          "restart_frigate",
-          "frigate.system",
-        );
-        const second = await restartFrigate();
-        if (second.status === "restarting") {
-          setRestartMsg("Restarting Frigate — cameras back in ~15 seconds.");
-        } else {
-          setRestartMsg(`Unexpected response: ${second.status}`);
-        }
+        // Surface the reason and require a click. The ConfirmDialog flow
+        // continues in performRestartConfirm().
+        setPendingRestart({
+          confirmationToken: first.confirmationToken,
+          reason:
+            first.reason ?? "This will drop every camera for ~10 seconds.",
+        });
+        // Hold the spinner open while the user decides — they may be
+        // reading the consequence copy.
+        return;
       } else if (first.status === "restarting") {
-        setRestartMsg("Restarting Frigate — cameras back in ~15 seconds.");
+        setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
       }
+      void mutate();
+      setRestarting(false);
+    } catch (e) {
+      setRestartMsg(e instanceof Error ? e.message : "Restart failed");
+      setRestarting(false);
+    }
+  };
+
+  const performRestartConfirm = async () => {
+    const ctx = pendingRestart;
+    if (!ctx) return;
+    try {
+      await confirmNetworkCommand(
+        ctx.confirmationToken,
+        "restart_frigate",
+        "frigate.system",
+      );
+      const second = await restartFrigate();
+      if (second.status === "restarting") {
+        setRestartMsg("Restarting camera service — cameras back in ~15 seconds.");
+      } else {
+        setRestartMsg(`Unexpected response: ${second.status}`);
+      }
+      setPendingRestart(null);
+      setRestarting(false);
       void mutate();
     } catch (e) {
       setRestartMsg(e instanceof Error ? e.message : "Restart failed");
-    } finally {
       setRestarting(false);
+      throw e;
     }
+  };
+
+  const cancelRestart = () => {
+    setPendingRestart(null);
+    setRestartMsg("Cancelled.");
+    setRestarting(false);
   };
 
   const totalStorage = useMemo(() => {
@@ -104,7 +132,7 @@ export default function CameraSystemPage() {
           <ArrowLeft size={20} />
         </button>
         <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary">Frigate system</h1>
+          <h1 className="type-large-title text-label-primary">Camera system</h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
             Live health for the camera engine. Refreshes every 5 seconds.
           </p>
@@ -123,7 +151,7 @@ export default function CameraSystemPage() {
         <div className="dp-card p-4 mb-4 text-system-red flex items-center gap-2">
           <AlertTriangle size={16} />
           <p className="type-subheadline">
-            Couldn&apos;t reach Frigate:{" "}
+            Couldn&apos;t reach the camera service:{" "}
             {error instanceof Error ? error.message : String(error)}
           </p>
         </div>
@@ -141,7 +169,7 @@ export default function CameraSystemPage() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
             <StatCard
               icon={Server}
-              label="Frigate"
+              label="Engine"
               value={data.version}
               hint={`Uptime ${fmtUptime(data.uptimeSec)}`}
             />
@@ -166,7 +194,7 @@ export default function CameraSystemPage() {
               icon={Cpu}
               label="CPU"
               value={`${data.cpuPct.toFixed(0)}%`}
-              hint="Across Frigate processes"
+              hint="Across camera service processes"
               tone={data.cpuPct > 200 ? "warn" : "ok"}
             />
             <StatCard
@@ -232,8 +260,8 @@ export default function CameraSystemPage() {
               </div>
               {data.gpus.length === 0 ? (
                 <p className="type-caption-1 text-label-tertiary">
-                  No GPU stats reported. (CPU detector? Frigate without nvidia
-                  runtime?)
+                  No GPU stats reported. (CPU detector? Camera service
+                  without nvidia runtime?)
                 </p>
               ) : (
                 <ul className="space-y-2">
@@ -379,7 +407,7 @@ export default function CameraSystemPage() {
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="type-headline text-label-primary mb-1">
-                  Restart Frigate
+                  Restart camera service
                 </h2>
                 <p className="type-caption-1 text-label-tertiary">
                   Drops every camera stream while the engine reloads. Roughly
@@ -416,6 +444,19 @@ export default function CameraSystemPage() {
           </div>
         </>
       )}
+
+      <ConfirmDialog
+        open={pendingRestart !== null}
+        onConfirm={performRestartConfirm}
+        onCancel={cancelRestart}
+        title="Restart the camera service?"
+        description={
+          pendingRestart?.reason ??
+          "Every camera will drop for about 10 seconds. Live feeds and recordings resume automatically."
+        }
+        confirmLabel="Restart"
+        variant="destructive"
+      />
     </div>
   );
 }

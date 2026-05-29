@@ -6,11 +6,14 @@ import { TOOLS } from "../src/index.js";
 const EXPECTED_TOOL_NAMES = [
   // network
   "add_port_forward",
+  "approve_ap",            // WARP-446
   "block_network_device",
+  "decommission_ap",       // WARP-446
   "get_firewall_rules",
   "get_network_status",
   "get_router_system_info",
   "get_wifi_settings",
+  "list_ap_devices",       // WARP-446
   "list_dhcp_leases",
   "list_network_devices",
   "scan_wifi_networks",
@@ -64,6 +67,30 @@ const EXPECTED_TOOL_NAMES = [
   "share_clip",
   "complete_reminder",
   "update_event",
+  // WARP-461 — memory facts (Phase B4)
+  "memory_extract_fact",
+  "memory_recall",
+  // WARP-466 — email tools (Phase D2)
+  "email_draft_reply",
+  "email_read",
+  "email_search",
+  "email_send",
+  "email_summarize_thread",
+  // WARP-470 — network summary (Phase F2)
+  "network_summary",
+  // WARP-474 — smart-home scenes (Phase G2)
+  "run_scene",
+  // WARP-509 — Plane PM write tools
+  "pm_add_work_item_comment",
+  "pm_create_work_item",
+  "pm_transition_work_item",
+  "pm_update_work_item",
+  // WARP-508 — Plane PM read tools
+  "pm_get_work_item",
+  "pm_list_projects",
+  "pm_list_work_items",
+  "pm_list_workspaces",
+  "pm_search_work_items",
 ];
 
 describe("TOOLS registry", () => {
@@ -83,5 +110,15 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("write_file")?.requiresWrite).toBe(true);
     expect(TOOLS.get("write_file")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("set_wifi_ssid")?.requiresConfirmation).toBe(true);
+    // WARP-508/509 — embedded Plane PM. Read tools are read-only; write
+    // tools (create / update / comment / transition) are
+    // requiresWrite=true AND requiresConfirmation=true because every
+    // Plane write hits a customer's tracked project state.
+    expect(TOOLS.get("pm_list_workspaces")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("pm_get_work_item")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("pm_create_work_item")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
+    expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("pm_transition_work_item")?.requiresConfirmation).toBe(true);
   });
 });

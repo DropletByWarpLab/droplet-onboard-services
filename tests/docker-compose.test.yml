@@ -31,7 +31,7 @@ services:
       context: ../services/ai-gateway
       dockerfile: Dockerfile
     environment:
-      - JETSON_OLLAMA_URL=http://ollama-mock:11434
+      - OLLAMA_URL=http://ollama-mock:11434
       - DEVICE_SECRET=test-integration-secret
       - KEYS_DIR=/tmp/test-keys
     depends_on:

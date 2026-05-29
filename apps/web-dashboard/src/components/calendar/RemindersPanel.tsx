@@ -4,6 +4,8 @@ import { useState } from "react";
 import { Bell, Check, Plus, Trash2, X } from "lucide-react";
 import { useReminders, createReminder, patchReminder, deleteReminder } from "@/lib/hooks/useReminders";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 function formatRel(iso: string): string {
   const now = Date.now();
@@ -27,6 +29,14 @@ export function RemindersPanel() {
   const [showNew, setShowNew] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDueAt, setNewDueAt] = useState("");
+  // WARP-291: confirm deletion. The audit flagged the bare click-to-
+  // delete on a `group-hover` icon as too easy to fire by accident.
+  // WARP-292: hold the full reminder so the ConfirmDialog can identify
+  // it by title, not just by id.
+  const [removeTarget, setRemoveTarget] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
 
   async function handleCreate() {
     if (!newTitle.trim() || !newDueAt) return;
@@ -37,7 +47,8 @@ export function RemindersPanel() {
       setShowNew(false);
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to create reminder", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "calendar"), "error");
     }
   }
 
@@ -46,16 +57,22 @@ export function RemindersPanel() {
       await patchReminder(id, { completed });
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to update", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "calendar"), "error");
     }
   }
 
-  async function remove(id: string) {
+async function performRemove() {
+    const target = removeTarget;
+    if (!target) return;
     try {
-      await deleteReminder(id);
+      await deleteReminder(target.id);
+      setRemoveTarget(null);
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to delete", "error");
+      // WARP-294: friendly translation; never raw err.message.
+      toast(translateError(err, "calendar"), "error");
+      throw err;
     }
   }
 
@@ -98,42 +115,88 @@ export function RemindersPanel() {
       )}
 
       {isLoading ? (
-        <div className="type-caption text-label-tertiary">Loading…</div>
+        <div className="type-caption-1 text-label-tertiary">Loading…</div>
       ) : reminders.length === 0 ? (
-        <div className="type-caption text-label-tertiary py-2">No active reminders.</div>
+        <div className="type-caption-1 text-label-tertiary py-2">No active reminders.</div>
       ) : (
         <ul className="flex flex-col gap-1">
           {reminders.map((r) => {
             const completed = r.completedAt !== null;
+            // aria-label mirrors the visible title; fall back to the
+            // stable id when the title is empty so the action is still
+            // discoverable to screen readers (WARP-292).
+            const label = r.title?.trim() ? r.title : r.id;
             return (
               <li key={r.id} className="flex items-start gap-2 group">
+                {/*
+                  WARP-301: bumped to a p-2.5 hit-target wrapper (≥ 32 px)
+                  so the checkbox is reliably tappable on touch. The
+                  rendered 16 px (w-4 h-4) check itself stays the same
+                  visual size — only the surrounding tap area grew.
+                */}
                 <button
                   onClick={() => toggle(r.id, !completed)}
-                  className={`mt-0.5 w-4 h-4 rounded border flex items-center justify-center ${
-                    completed
-                      ? "bg-system-green border-system-green text-white"
-                      : "border-label-tertiary"
-                  }`}
+                  className="p-2.5 -m-1.5 rounded-sm hover:bg-surface-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  aria-label={completed ? `Mark ${label} as not done` : `Mark ${label} as done`}
                 >
-                  {completed && <Check size={10} />}
+                  <span
+                    className={`block w-4 h-4 rounded border flex items-center justify-center ${
+                      completed
+                        ? "bg-system-green border-system-green text-white"
+                        : "border-label-tertiary"
+                    }`}
+                  >
+                    {completed && <Check size={10} />}
+                  </span>
                 </button>
                 <div className="flex-1 min-w-0">
                   <div className={`type-subheadline truncate ${completed ? "line-through text-label-tertiary" : "text-label-primary"}`}>
                     {r.title}
                   </div>
-                  <div className="type-caption text-label-tertiary">{formatRel(r.dueAt)}</div>
+                  <div className="type-caption-1 text-label-tertiary">{formatRel(r.dueAt)}</div>
                 </div>
+                {/*
+                  Always rendered (no opacity-gate) so touch + keyboard
+                  users can discover the action. p-2.5 → 12 px icon +
+                  20 px padding = 32 px hit-target, meeting the ui-ux
+                  floor. WARP-292 site-wide migration of the WARP-220
+                  pattern.
+                */}
                 <button
-                  onClick={() => remove(r.id)}
-                  className="opacity-0 group-hover:opacity-100 text-label-tertiary hover:text-system-red transition"
+                  onClick={() => setRemoveTarget({ id: r.id, title: r.title ?? "" })}
+                  aria-label={`Delete reminder ${label}`}
+                  className="p-2.5 rounded-sm text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                  title="Delete"
                 >
-                  <Trash2 size={12} />
+                  <Trash2 size={14} />
                 </button>
               </li>
             );
           })}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={removeTarget !== null}
+        onConfirm={performRemove}
+        onCancel={() => setRemoveTarget(null)}
+        title="Delete reminder?"
+        // WARP-292 fold-in: route the reminder identifier through the
+        // ConfirmDialog `confirmedIdentifier` prop instead of
+        // interpolating it into the title. This (a) dodges escape
+        // hazards for titles containing `"`, and (b) renders the
+        // identifier in the consistent monospace-token style every
+        // other migrated confirm uses. Fall back to the id when the
+        // title is empty so the user still has a verification handle.
+        confirmedIdentifier={
+          removeTarget
+            ? removeTarget.title.trim() || removeTarget.id
+            : undefined
+        }
+        description="The reminder is removed from your list. If a notification was queued, it won't fire."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
     </div>
   );
 }

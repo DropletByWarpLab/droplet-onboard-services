@@ -81,7 +81,7 @@ export function AgendaView({ events, onSelect }: Props) {
                       )}
                     </div>
                     {ev.location && (
-                      <div className="flex items-center gap-1 mt-0.5 type-caption text-label-tertiary truncate">
+                      <div className="flex items-center gap-1 mt-0.5 type-caption-1 text-label-tertiary truncate">
                         <MapPin size={10} />
                         {ev.location}
                       </div>

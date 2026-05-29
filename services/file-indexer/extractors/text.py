@@ -72,8 +72,13 @@ def extract(path: str) -> ExtractedDoc:
             warnings=[],
         )
 
+    # WARP-435: flat-text formats have no in-file structure, so the
+    # "section" is just the filename. Every chunk derived from this span
+    # inherits ``[filename]`` as its contextual-header section path.
+    filename = os.path.basename(path) or "document"
+
     return ExtractedDoc(
-        spans=[Span(text=text, anchor=NoneAnchor())],
+        spans=[Span(text=text, anchor=NoneAnchor(), section_path=[filename])],
         language=None,
         metadata=metadata,
         warnings=[],

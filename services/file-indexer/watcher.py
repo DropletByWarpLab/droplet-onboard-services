@@ -22,7 +22,7 @@ from watchdog.observers.polling import PollingObserver
 
 from config import NEXTCLOUD_DATA_ROOT
 from extractors.registry import dispatch
-from chunker import chunk_spans
+from chunker import chunk_spans, format_chunk_with_header
 from embedder import embed_texts
 from db import upsert_chunk, delete_chunks_for_file, prune_excess_chunks
 from mqtt_client import publish
@@ -207,46 +207,69 @@ class IndexHandler(FileSystemEventHandler):
             logger.debug("No fileId for %s/%s — skipping", user, relpath)
             return
 
-        # Chunk
+        # Chunk — span-scoped + sentence-aware. Each Chunk carries its
+        # anchor (WARP-287) and section_path (WARP-435).
         chunks = chunk_spans(spans or [])
         if not chunks:
             return
 
-        # Embed
-        chunk_texts = [c.text for c in chunks]
-        vectors = embed_texts(chunk_texts)
-        if len(vectors) != len(chunks):
+        # WARP-435: section-aware contextual header per chunk. The
+        # section_path rides on the Chunk (from its source span), so no
+        # global-offset lookup is needed.
+        display_filename = os.path.basename(relpath) or relpath
+        prefixed_chunks: list[str] = [
+            format_chunk_with_header(c.text, display_filename, c.section_path)
+            for c in chunks
+        ]
+
+        # Embed (prefixed text — the exact string also persisted on
+        # FileContentChunk.text so search hits show the section context).
+        vectors = embed_texts(prefixed_chunks)
+        if len(vectors) != len(prefixed_chunks):
             logger.warning("Embedding count mismatch for %s/%s", user, relpath)
             return
 
-        # Upsert
         # WARP-214: forward ExtractedDoc.metadata (chain[], subtitle_source) to
         # the chunk row so the dashboard can render breadcrumbs + source-channel
         # badges from /api/files/knowledge/{recent,search}.
-        # WARP-287: also overlay each chunk's anchor under metadata.anchor.
+        # WARP-287: overlay each chunk's anchor under metadata.anchor.
+        # WARP-435: overlay each chunk's sectionPath alongside it.
         doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
-        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        for idx, (chunk, prefixed_text, vec) in enumerate(
+            zip(chunks, prefixed_chunks, vectors)
+        ):
             chunk_metadata = dict(doc_metadata or {})
-            chunk_metadata["anchor"] = chunk.anchor.model_dump()
+            try:
+                chunk_metadata["anchor"] = chunk.anchor.model_dump()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "watcher: anchor serialize failed for %s/%s chunk %d: %s",
+                    user,
+                    relpath,
+                    idx,
+                    e,
+                )
+                chunk_metadata["anchor"] = None
+            chunk_metadata["sectionPath"] = list(chunk.section_path)
             upsert_chunk(
                 user,
                 file_id,
                 f"/{relpath}",
                 idx,
-                chunk.text,
+                prefixed_text,
                 vec,
                 metadata=chunk_metadata,
             )
 
         # Prune excess chunks if the file shrunk
-        prune_excess_chunks(file_id, len(chunks) - 1)
+        prune_excess_chunks(file_id, len(prefixed_chunks) - 1)
 
         publish(f"droplet/index/{user}/indexed", {
             "path": relpath,
             "ncFileId": file_id,
-            "chunks": len(chunks),
+            "chunks": len(prefixed_chunks),
         })
-        logger.info("Indexed %s/%s -> %d chunks", user, relpath, len(chunks))
+        logger.info("Indexed %s/%s -> %d chunks", user, relpath, len(prefixed_chunks))
 
 
 def start_watcher() -> Observer:

@@ -101,6 +101,22 @@ export interface RerankResponse {
   scores: number[];
 }
 
+export interface ClassifyQueryRequest {
+  query: string;
+  /** Optional model override. Default: "MoritzLaurer/deberta-v3-base-zeroshot-v2.0". */
+  model?: string | undefined;
+}
+
+export interface ClassifyQueryResponse {
+  /** One of: "factual" | "analytical" | "conversational" | "navigational" | "unknown". */
+  class: string;
+  /**
+   * Top-1 confidence in [0, 1]. Server-side floor is applied via
+   * CLASSIFIER_CONFIDENCE_FLOOR; below the floor the class is "unknown".
+   */
+  confidence: number;
+}
+
 function createBaseChatRequest(): ChatRequest {
   return { model: "", messages: [], temperature: 0, maxTokens: undefined, provider: undefined, priority: 0 };
 }
@@ -1198,6 +1214,158 @@ export const RerankResponse: MessageFns<RerankResponse> = {
   },
 };
 
+function createBaseClassifyQueryRequest(): ClassifyQueryRequest {
+  return { query: "", model: undefined };
+}
+
+export const ClassifyQueryRequest: MessageFns<ClassifyQueryRequest> = {
+  encode(message: ClassifyQueryRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.query !== "") {
+      writer.uint32(10).string(message.query);
+    }
+    if (message.model !== undefined) {
+      writer.uint32(18).string(message.model);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ClassifyQueryRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseClassifyQueryRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.query = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.model = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ClassifyQueryRequest {
+    return {
+      query: isSet(object.query) ? globalThis.String(object.query) : "",
+      model: isSet(object.model) ? globalThis.String(object.model) : undefined,
+    };
+  },
+
+  toJSON(message: ClassifyQueryRequest): unknown {
+    const obj: any = {};
+    if (message.query !== "") {
+      obj.query = message.query;
+    }
+    if (message.model !== undefined) {
+      obj.model = message.model;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<ClassifyQueryRequest>): ClassifyQueryRequest {
+    return ClassifyQueryRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<ClassifyQueryRequest>): ClassifyQueryRequest {
+    const message = createBaseClassifyQueryRequest();
+    message.query = object.query ?? "";
+    message.model = object.model ?? undefined;
+    return message;
+  },
+};
+
+function createBaseClassifyQueryResponse(): ClassifyQueryResponse {
+  return { class: "", confidence: 0 };
+}
+
+export const ClassifyQueryResponse: MessageFns<ClassifyQueryResponse> = {
+  encode(message: ClassifyQueryResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.class !== "") {
+      writer.uint32(10).string(message.class);
+    }
+    if (message.confidence !== 0) {
+      writer.uint32(21).float(message.confidence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ClassifyQueryResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseClassifyQueryResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.class = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 21) {
+            break;
+          }
+
+          message.confidence = reader.float();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ClassifyQueryResponse {
+    return {
+      class: isSet(object.class) ? globalThis.String(object.class) : "",
+      confidence: isSet(object.confidence) ? globalThis.Number(object.confidence) : 0,
+    };
+  },
+
+  toJSON(message: ClassifyQueryResponse): unknown {
+    const obj: any = {};
+    if (message.class !== "") {
+      obj.class = message.class;
+    }
+    if (message.confidence !== 0) {
+      obj.confidence = message.confidence;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<ClassifyQueryResponse>): ClassifyQueryResponse {
+    return ClassifyQueryResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<ClassifyQueryResponse>): ClassifyQueryResponse {
+    const message = createBaseClassifyQueryResponse();
+    message.class = object.class ?? "";
+    message.confidence = object.confidence ?? 0;
+    return message;
+  },
+};
+
 export type InferenceServiceService = typeof InferenceServiceService;
 export const InferenceServiceService = {
   /** Unary chat completion */
@@ -1253,6 +1421,21 @@ export const InferenceServiceService = {
     responseSerialize: (value: RerankResponse): Buffer => Buffer.from(RerankResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): RerankResponse => RerankResponse.decode(value),
   },
+  /**
+   * Zero-shot query classifier — used by the orchestrator's adaptive
+   * retrieval router (WARP-437). Returns one of {factual, analytical,
+   * conversational, navigational, unknown}.
+   */
+  classifyQuery: {
+    path: "/droplet.inference.InferenceService/ClassifyQuery" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ClassifyQueryRequest): Buffer => Buffer.from(ClassifyQueryRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ClassifyQueryRequest => ClassifyQueryRequest.decode(value),
+    responseSerialize: (value: ClassifyQueryResponse): Buffer =>
+      Buffer.from(ClassifyQueryResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ClassifyQueryResponse => ClassifyQueryResponse.decode(value),
+  },
 } as const;
 
 export interface InferenceServiceServer extends UntypedServiceImplementation {
@@ -1269,6 +1452,12 @@ export interface InferenceServiceServer extends UntypedServiceImplementation {
    * Scores each passage against the query using a cross-encoder.
    */
   rerank: handleUnaryCall<RerankRequest, RerankResponse>;
+  /**
+   * Zero-shot query classifier — used by the orchestrator's adaptive
+   * retrieval router (WARP-437). Returns one of {factual, analytical,
+   * conversational, navigational, unknown}.
+   */
+  classifyQuery: handleUnaryCall<ClassifyQueryRequest, ClassifyQueryResponse>;
 }
 
 export interface InferenceServiceClient extends Client {
@@ -1339,6 +1528,26 @@ export interface InferenceServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: RerankResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * Zero-shot query classifier — used by the orchestrator's adaptive
+   * retrieval router (WARP-437). Returns one of {factual, analytical,
+   * conversational, navigational, unknown}.
+   */
+  classifyQuery(
+    request: ClassifyQueryRequest,
+    callback: (error: ServiceError | null, response: ClassifyQueryResponse) => void,
+  ): ClientUnaryCall;
+  classifyQuery(
+    request: ClassifyQueryRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ClassifyQueryResponse) => void,
+  ): ClientUnaryCall;
+  classifyQuery(
+    request: ClassifyQueryRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ClassifyQueryResponse) => void,
   ): ClientUnaryCall;
 }
 

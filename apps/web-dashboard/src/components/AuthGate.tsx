@@ -49,7 +49,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <div className="min-h-screen bg-surface-primary flex items-center justify-center">
         <div className="text-center">
           <div className="flex items-center justify-center mx-auto mb-3 animate-pulse">
-            <DropletMark size={32} className="text-accent" />
+            <DropletMark size={32} className="text-accent" aria-label="Droplet" />
           </div>
           <p className="type-subheadline text-label-tertiary">Loading...</p>
         </div>
@@ -71,7 +71,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return (
     <>
       <Sidebar />
-      <main className="lg:ml-[260px] pb-[calc(56px_+_env(safe-area-inset-bottom))] lg:pb-0 min-h-dvh">
+      <main
+        id="main"
+        tabIndex={-1}
+        className="lg:ml-[260px] pb-[calc(56px_+_env(safe-area-inset-bottom))] lg:pb-0 min-h-dvh"
+      >
         {children}
       </main>
     </>

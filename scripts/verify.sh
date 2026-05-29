@@ -150,6 +150,34 @@ check "Nginx → Web Dashboard" \
 check "Nginx → AI Gateway" \
   curl -sf --max-time 10 http://localhost/ai/health || true
 
+# --- Voice orchestrator (WARP-154) ---
+# Internal-only (port 8086 not host-exposed) so the check runs via
+# docker exec. Skipped when the linux compose profile isn't active
+# (e.g. macOS Docker Desktop has no /dev/snd, the service isn't up).
+# `check_warn` rather than `check` because a missing mic is operator-
+# configurable (plug one in later), not a verify.sh failure.
+if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'voice-io-1$'; then
+  check_warn "Voice orchestrator /health" \
+    _docker exec droplet-pi-platform-voice-io-1 \
+      curl -sf -o /dev/null --max-time 5 http://localhost:8086/health
+  check_warn "Voice orchestrator /audio/devices" \
+    _docker exec droplet-pi-platform-voice-io-1 \
+      curl -sf -o /dev/null --max-time 5 http://localhost:8086/audio/devices
+fi
+
+# --- PyPortal screen service (oled-display) ---
+# Runs with `network_mode: host` listening on :8082. Service auto-falls
+# back to "simulated" backend (PNG file) when no /dev/ttyACM* device is
+# found, so /health stays green even with the PyPortal unplugged — the
+# operator distinguishes by hitting /display/status for the backend
+# (pyportal | simulated). `check_warn` rather than `check` because the
+# screen is opt-in hardware: the appliance ships without one on installs
+# that don't need a local display.
+if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'oled-display-1$'; then
+  check_warn "PyPortal screen /health" \
+    curl -sf -o /dev/null --max-time 5 http://localhost:8082/health
+fi
+
 # --- .env file ---
 check ".env exists (chmod 600)" \
   bash -c '

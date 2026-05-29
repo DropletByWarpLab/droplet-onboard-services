@@ -7,11 +7,14 @@
     "build": "next build",
     "start": "next start -p 3001",
     "lint": "next lint",
+    "lint:dashboard-classes": "bash ../../scripts/check-dashboard-classes.sh",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@droplet/shared-types": "0.1.0",
+    "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
     "framer-motion": "^11.18.2",
     "hls.js": "^1.5.13",
     "lucide-react": "^0.378.0",

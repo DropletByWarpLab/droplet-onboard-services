@@ -22,7 +22,7 @@ The mock provides:
 
 ```bash
 # In a separate terminal
-JETSON_OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload --port 8000
+OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload --port 8000
 ```
 
 ### 3. Test with curl
@@ -68,7 +68,7 @@ Tests use an in-memory session store and don't require Redis or Ollama.
 ```bash
 cd edge-platform/docker
 # Set mock Ollama URL
-export JETSON_OLLAMA_URL=http://host.docker.internal:11434
+export OLLAMA_URL=http://host.docker.internal:11434
 docker compose up
 ```
 
@@ -85,20 +85,35 @@ When you have access to a Jetson device (physical or remote):
 1. Deploy Ollama on the Jetson:
    ```bash
    # On the Jetson
-   cd inference-engine/docker && docker compose up -d
+   cd droplet-local-LLM/docker && docker compose up -d
    ```
 
 2. Point the ai-gateway to the Jetson:
    ```bash
    # On your dev machine
-   JETSON_OLLAMA_URL=http://<jetson-ip>:11434 python -m uvicorn main:app --reload
+   OLLAMA_URL=http://<jetson-ip>:11434 python -m uvicorn main:app --reload
    ```
 
-3. Pull models:
+3. Ensure the model is provisioned on the appliance. Model lifecycle is
+   owned by the `ollama-manager` sidecar (`:8002`) in the
+   [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM)
+   repo, not a manual `pull` script in this repo. The canonical path is:
+
    ```bash
-   cd inference-engine
-   ./scripts/pull-models.sh http://<jetson-ip>:11434
+   # On the Jetson — idempotent sync against models/model-manifest.json
+   curl -X POST http://<jetson-ip>:8002/models/sync
    ```
+
+   See `droplet-local-LLM/services/ollama-manager/` for the full
+   `/models/*` API. To add a new model the appliance can serve, edit
+   `droplet-local-LLM/models/model-manifest.json` and re-run
+   `/models/sync` — no code changes in either repo.
+
+   > **One Model Rule.** Do NOT `ollama pull` a different model from
+   > the host or change `LLM_MODEL` to swap models at runtime — voice +
+   > dashboard + every agent loop runs on the single configured model.
+   > See [CLAUDE.md](../../CLAUDE.md) and
+   > `docs/agentic-workflows.md` for the rationale.
 
 ### Option B: SSH tunnel to remote Jetson
 
@@ -109,17 +124,17 @@ If the Jetson is behind a firewall or on a different network:
 ssh -L 11434:localhost:11434 user@jetson-host
 
 # In another terminal, run ai-gateway
-JETSON_OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload
+OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload
 ```
 
 ### Option C: Docker Compose with real Jetson
 
-Edit `edge-platform/docker/docker-compose.yml` and change `JETSON_OLLAMA_URL`:
+Edit `edge-platform/docker/docker-compose.yml` and change `OLLAMA_URL`:
 
 ```yaml
 ai-gateway:
   environment:
-    - JETSON_OLLAMA_URL=http://<jetson-ip>:11434
+    - OLLAMA_URL=http://<jetson-ip>:11434
 ```
 
 ---

@@ -30,6 +30,7 @@ import {
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
+import { requireRole } from "../middleware/auth.js";
 
 export interface StatusDeps {
   prisma: PrismaClient;
@@ -124,28 +125,34 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     }
   });
 
-  router.post("/network/dhcp/static-lease", async (req, res, next) => {
-    try {
-      const { name, mac, ip } = req.body;
-      if (!name || !mac || !ip) {
-        return res.status(400).json({ error: "Missing 'name', 'mac', or 'ip'" });
+  // WARP-171: per-route guard. owner + admin only — DHCP static
+  // leases shape the LAN's address map.
+  router.post(
+    "/network/dhcp/static-lease",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { name, mac, ip } = req.body;
+        if (!name || !mac || !ip) {
+          return res.status(400).json({ error: "Missing 'name', 'mac', or 'ip'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.static_lease", "add_static_lease", { name, mac, ip }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await addStaticDhcpLease(name, mac, ip);
+        res.json({ status: "ok", name, mac, ip, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
       }
-
-      const userId = req.user?.id;
-      const result = await evaluateNetworkCommand(
-        prisma, "dhcp.static_lease", "add_static_lease", { name, mac, ip }, userId
-      );
-
-      if ("blocked" in result && result.blocked) {
-        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
-      }
-
-      const op = await addStaticDhcpLease(name, mac, ip);
-      res.json({ status: "ok", name, mac, ip, tier: result.tier, operationId: op.operationId });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   // --- System ---
   router.get("/network/system", async (_req, res, next) => {
@@ -157,7 +164,13 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     }
   });
 
-  router.post("/network/system/reboot", async (req, res, next) => {
+  // WARP-171: per-route guard. owner ONLY — rebooting the router is
+  // a destructive operation that drops every connected device. The
+  // matrix carves this out as owner-only ("the household admin can't
+  // do this without confirmation from the install-time owner"). For
+  // the moment we encode that as a single-role allow; if a future
+  // ticket adds an MFA gate (WARP-230/238) it layers on top of this.
+  router.post("/network/system/reboot", requireRole("owner"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(

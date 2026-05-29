@@ -57,6 +57,8 @@ from schemas import (
     VpnPeerCreateRequest,
     VpnPeerDeleteRequest,
     DuckDnsConfigRequest,
+    ApApproveRequest,
+    ApTestSeedRequest,
 )
 import re
 
@@ -176,6 +178,7 @@ def handle_router_error(exc: Exception):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global router_instance
+    throughput_scheduler = None
     if ROUTING_MODE == "mock":
         # WARP-44: fixture-driven router — dev laptops, CI, demos.
         from mock_router import MockRouter
@@ -198,7 +201,44 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to OpenWrt router: %s", exc)
         router_instance = None
 
+    # WARP-470: start the 60 s WAN throughput sampler once we have a
+    # real router connection. Skipped in mock mode (the mock doesn't
+    # carry traffic counters worth sampling). Failure to start is
+    # non-fatal — the routing service must keep serving even if the
+    # sampler can't reach the orchestrator.
+    if router_instance is not None:
+        try:
+            from scheduler import start_throughput_scheduler
+
+            throughput_scheduler = start_throughput_scheduler(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("throughput scheduler failed to start: %s", exc)
+
+    # WARP-468: start the 60 s off-LAN egress counter. Non-fatal —
+    # if the openwrt overlay hasn't dropped the nftables chains yet,
+    # the meter logs once and emits zero samples until they appear.
+    egress_meter_scheduler = None
+    if router_instance is not None:
+        try:
+            from egress_meter import start_egress_meter
+
+            egress_meter_scheduler = start_egress_meter(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("off-LAN egress meter failed to start: %s", exc)
+
     yield
+
+    if throughput_scheduler is not None:
+        try:
+            throughput_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("throughput scheduler shutdown failed: %s", exc)
+
+    if egress_meter_scheduler is not None:
+        try:
+            egress_meter_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("off-LAN egress meter shutdown failed: %s", exc)
 
     if router_instance:
         router_instance.disconnect()
@@ -1097,10 +1137,14 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             else:
                 raise
 
-        values = {
+        # When the caller omits the token, keep the value already on disk
+        # (the wizard's "keep stored token" path so returning customers
+        # don't have to re-type it). Only seed `password` when we have a
+        # new token to write; otherwise uci.set merges the remaining
+        # fields and leaves the existing password untouched.
+        values: dict[str, str] = {
             "service_name": "duckdns.org",
             "domain": req.subdomain,
-            "password": req.token,
             "enabled": "1" if req.enabled else "0",
             # Watch WAN for IP changes; DuckDNS is for IPv4 by default.
             "interface": "wan",
@@ -1122,6 +1166,21 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "force_interval": "72",
             "force_unit": "hours",
         }
+
+        if req.token is not None:
+            values["password"] = req.token
+        elif not section_exists:
+            # First-time setup with no token in the request body is a
+            # programming error: there's nothing on disk to keep, and
+            # ddns-scripts requires a non-empty password to do anything.
+            # Surface a clean 422 rather than write a half-formed section.
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "token is required on first DuckDNS setup; only re-saves "
+                    "of an already-configured DuckDNS section may omit it."
+                ),
+            )
 
         if section_exists:
             r.uci.set("ddns", DUCKDNS_SECTION, values)
@@ -1192,4 +1251,239 @@ def apply_config(req: ApplyConfigRequest):
             },
         )
     except UbusError as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Coverage extender APs (WARP-446)
+# ---------------------------------------------------------------------------
+#
+# Per ADR-005. The discovery list itself is owned by the orchestrator's
+# mDNS poller; the routing service only sees an already-discovered MAC
+# and pushes a wireless config to it. In mock mode the in-memory
+# `_MockAp` mirrors the contract — production wires the same shape
+# against the real router.
+#
+# Auth: same Bearer-token + safe_apply discipline as the rest of the
+# service. RBAC (which session is allowed to call) lives one layer up
+# in the orchestrator's `/api/aps/*` routes.
+
+
+# Canonical MAC for path-param validation. Lowercase + uppercase
+# hex are both accepted; the SDK normalises to uppercase at the boundary.
+_MAC_PATH_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def _validate_mac(mac: str) -> str:
+    if not _MAC_PATH_RE.fullmatch(mac):
+        raise HTTPException(status_code=404, detail="Invalid MAC")
+    return mac.upper()
+
+
+def _get_ap_namespace(router):
+    """Return the AP namespace from a router, supporting both real and mock.
+
+    The real `DropletRouter.ap` is an `ApApi` instance whose contract is
+    "push/remove wireless config + iface_section helpers". The mock's
+    `_MockAp` adds the in-memory discovery list on top. Endpoints below
+    branch on `hasattr(.., "discovered")` because the real production
+    discovery story is orchestrator-side (mDNS poller), not router-side.
+    """
+    return router.ap
+
+
+@app.get("/aps/discovered")
+def aps_discovered():
+    """Return the live mDNS discovery snapshot.
+
+    Two layers:
+      - Mock mode (`ROUTING_MODE=mock`): the in-memory `_MockAp`
+        exposes a `discovered()` method seeded by `/aps/_test_seed`
+        so dev + integration tests can drive the full state machine
+        without a real OpenWrt box.
+      - Real mode: the SDK's `ApApi.browse_discovered()` issues a
+        `ubus call umdns browse` and parses `_droplet-ap._tcp` TXT
+        records (mac/model/serial/version) into the orchestrator-
+        friendly shape. The droplet-ai rpcd ACL already grants
+        `umdns: ["browse", "update"]`
+        (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json), so the
+        orchestrator's poller can drive this on a 10s cadence
+        without extra privileges (ADR-005 §1).
+    """
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+        # Prefer the mock's seeded list when present — `_test_seed`
+        # populates it deterministically and we don't want a real umdns
+        # call leaking into mock-mode tests.
+        if hasattr(ap, "discovered"):
+            return {"discovered": ap.discovered()}
+        if hasattr(ap, "browse_discovered"):
+            return {"discovered": ap.browse_discovered()}
+        return {"discovered": []}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}")
+def aps_get(mac: str):
+    """Return the current state of a discovered AP.
+
+    States: `discovered` (mDNS seen, no approval), `online` (config
+    pushed), `decommissioned` (config removed). Returns 404 when the
+    MAC was never announced.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+        if not hasattr(ap, "get"):
+            raise HTTPException(status_code=404, detail="AP not found")
+        info = ap.get(canonical)
+        if info is None:
+            raise HTTPException(status_code=404, detail="AP not found")
+        return info
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/aps/_test_seed")
+def aps_test_seed(req: ApTestSeedRequest):
+    """Inject a discovered AP into the mock router. Test-only.
+
+    Production discovery is mDNS-driven from the orchestrator; this
+    endpoint is the test seam that lets pytest + dev exercise the
+    state machine without simulating multicast. Returns 404 when the
+    router isn't a MockRouter — there's nothing to seed in real mode.
+    """
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+        if not hasattr(ap, "seed"):
+            raise HTTPException(
+                status_code=404,
+                detail="_test_seed only available in ROUTING_MODE=mock",
+            )
+        ap.seed(
+            req.mac,
+            model=req.model,
+            serial=req.serial,
+            version=req.version,
+            last_ip=req.last_ip,
+            hostname=req.hostname,
+        )
+        return {"status": "ok", "mac": req.mac.upper()}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/aps/{mac}/approve")
+def aps_approve(mac: str, req: ApApproveRequest, request: Request):
+    """Approve a discovered AP and push wireless config.
+
+    The push is wrapped in `safe_apply` so a misconfigured wireless
+    change can't lock the orchestrator out of the main router — same
+    discipline `/vpn/setup` and `/network/subnets/cameras/setup` use.
+    The Operation-Id surfaces via the middleware-attached
+    `X-Operation-Id` header AND in the response body so the
+    dashboard's wizard can poll the operation tracker until the
+    transition is terminal. The body-mirrored value matters when the
+    dashboard reaches us through the orchestrator's HTTP proxy — some
+    proxies strip non-standard response headers.
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        # Mock mode tracks discovered state; real mode trusts the
+        # orchestrator to only call this with an MAC the orchestrator
+        # itself surfaced as discovered.
+        if hasattr(ap, "get"):
+            existing = ap.get(canonical)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="AP not found in discovery list")
+
+        from droplet_openwrt_sdk import ApApi
+        iface_section = ApApi.iface_section_for_mac(canonical)
+
+        with r.safe_apply(timeout=60):
+            # Mock router's `push_wireless_config` takes the MAC so it
+            # can track per-AP state; the real SDK's signature doesn't
+            # take MAC because the iface_section already encodes it.
+            # Detect via the mock's `discovered` attribute.
+            if hasattr(ap, "discovered"):
+                ap.push_wireless_config(
+                    mac=canonical,
+                    iface_section=iface_section,
+                    radio=req.radio,
+                    ssid=req.ssid,
+                    encryption=req.encryption,
+                    key=req.encryption_key,
+                    network=req.network,
+                )
+            else:
+                ap.push_wireless_config(
+                    iface_section=iface_section,
+                    radio=req.radio,
+                    ssid=req.ssid,
+                    encryption=req.encryption,
+                    key=req.encryption_key,
+                    network=req.network,
+                )
+
+        return {
+            "status": "ok",
+            "mac": canonical,
+            "iface_section": iface_section,
+            "ssid": req.ssid,
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost during AP approval — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except UbusError as exc:
+        handle_router_error(exc)
+
+
+@app.delete("/aps/{mac}")
+def aps_decommission(mac: str, request: Request):
+    """Remove the wireless config off the AP and transition state.
+
+    Idempotent on previously-decommissioned MACs (re-DELETE is a
+    success no-op). Returns 404 only when the MAC was never announced
+    at all (matches discovery's contract — can't decommission what
+    we've never seen).
+    """
+    canonical = _validate_mac(mac)
+    try:
+        r = get_router()
+        ap = _get_ap_namespace(r)
+
+        if hasattr(ap, "get"):
+            existing = ap.get(canonical)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="AP not found")
+
+        from droplet_openwrt_sdk import ApApi
+        iface_section = ApApi.iface_section_for_mac(canonical)
+
+        with r.safe_apply(timeout=60):
+            if hasattr(ap, "discovered"):
+                ap.remove_wireless_config(canonical)
+            else:
+                ap.remove_wireless_config(iface_section=iface_section)
+
+        return {
+            "status": "ok",
+            "mac": canonical,
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

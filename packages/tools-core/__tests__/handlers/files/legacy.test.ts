@@ -468,6 +468,7 @@ describe("search_content", () => {
     expect(searchHybrid).toHaveBeenCalledWith({
       query: "voltage regulator",
       limit: 5,
+      enhance: undefined,
     });
   });
 
@@ -482,6 +483,7 @@ describe("search_content", () => {
     expect(searchHybrid).toHaveBeenCalledWith({
       query: "voltage regulator",
       limit: 50,
+      enhance: undefined,
     });
   });
 

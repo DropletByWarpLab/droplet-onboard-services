@@ -37,7 +37,11 @@ import {
   REFRESH_TOKEN_TTL_SECONDS,
   type Role,
 } from "../services/jwt.service.js";
-import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
+import {
+  SESSION_COOKIE_NAME,
+  REFRESH_COOKIE_NAME,
+  requireRole,
+} from "../middleware/auth.js";
 import {
   storeNcToken,
   getNcToken,
@@ -47,6 +51,17 @@ import {
 } from "../services/nextcloud-session.service.js";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
+
+/** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
+ *  (set by the nginx gateway in production), falls back to req.ip. */
+function callerIpFromReq(req: Request): string | undefined {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    return xff.split(",")[0]!.trim();
+  }
+  return req.ip;
+}
 
 const logger = pino({ name: "auth-route" });
 
@@ -80,13 +95,25 @@ const createUserSchema = z.object({
 });
 
 // ── WARP-217 invite schemas ──
-const inviteRoleField = z.enum(["user", "admin"]);
+// WARP-171: widened from the legacy ["user", "admin"] union to the full
+// Role enum so the DB column (now typed as `Role`) and the request body
+// share a vocabulary. Legacy "user" sent by older dashboard builds is
+// coerced to "family" via the preprocessor so existing clients keep
+// working through one rolling deploy window — the dashboard should be
+// updated to send the canonical names in a follow-up.
+//
+// `service` is excluded because a service principal is never minted by
+// an invite — those are env-var-only (SERVICE_TOKEN_*).
+const inviteRoleField = z.preprocess(
+  (v) => (v === "user" ? "family" : v),
+  z.enum(["owner", "admin", "family", "guest"]),
+);
 
 const createInviteSchema = z.object({
   username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
   email: z.string().email().max(200).optional(),
-  role: inviteRoleField.default("user"),
+  role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
 });
@@ -95,11 +122,10 @@ const acceptInviteSchema = z.object({
   password: z.string().min(8).max(128),
 });
 
-/** True if the caller is allowed to manage invites (issue / list / revoke). */
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
+// WARP-171: the legacy `isAdmin(req)` helper was inlined-and-removed
+// when every invite-management route was switched to
+// `requireRole("owner", "admin")`. The two-value contract is now
+// expressed at route registration where reviewers can see it.
 
 /** Best-effort source IP for the audit trail. Honours `trust proxy`. */
 function getRequestIp(req: Request): string | null {
@@ -157,6 +183,37 @@ function resolveToken(req: import("express").Request): string | null {
 // it. When called without prisma those routes simply 404 (the dashboard's
 // `getInvite` / `acceptInvite` calls will treat that as "invite not found"
 // which is the right default for an under-configured deployment).
+//
+// WARP-485 round 2 — JWT-path normalization callsites (this file owns
+// the only places where `id` enters the JWT subject claim or the NC
+// token cache key; the OCS auth path was already normalized in round 1
+// inside `src/middleware/auth.ts`):
+//
+//   1. POST /api/auth/login        — line ~275: signAccessToken({ id })
+//                                  — line ~267: storeNcToken(id, ...)
+//   2. POST /api/auth/refresh      — line ~447: signAccessToken({ id })
+//                                  — line ~452: touchNcToken(id, ...)
+//   3. POST /api/auth/invites/accept/:token
+//                                  — line ~674: signAccessToken({ id })
+//   4. POST /api/auth/logout       — line ~768: getNcToken(req.user.id)
+//                                  — line ~776: deleteNcToken(req.user.id)
+//
+// Contract: every `id` fed to signAccessToken / signRefreshToken / NC
+// token store helpers in this file is the **local `User.id` UUID**,
+// resolved by looking up the local `User` row whose `nextcloudUsername`
+// matches the Nextcloud user id returned by OCS. The pre-WARP-485 shape
+// fed the NC username string into `JWT.sub`, which bypassed WARP-480's
+// self-action guard at `/api/people/:id` under JWT auth (`req.user.id`
+// = NC username, `req.params.id` = UUID → string mismatch → guard
+// silently skipped).
+//
+// Fail-closed posture (matches the OCS path's WARP-485 round-1
+// behavior): when no local User row exists for the authenticated
+// Nextcloud user, the route returns 401 + `USER_NOT_PROVISIONED`
+// instead of minting a synthetic id. Silent auto-provision would be
+// a privilege-escalation vector — an attacker holding a valid OCS
+// credential for an unrelated NC user could otherwise mint a default-
+// `family`-role local row.
 // ────────────────────────────────────────────────────────────────
 export function createPublicAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
@@ -205,6 +262,21 @@ export function createPublicAuthRouter(
 
       const result = await ncLoginWithCredentials(parsed.data.username, parsed.data.password);
       if (!result) {
+        // WARP-456: failed login audit row. We intentionally include
+        // the attempted username so an audit reviewer can spot
+        // patterns; the password never reaches the recorder.
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Sign-in failed",
+          sub: `${parsed.data.username} • ${callerIpFromReq(req) ?? "unknown"}`,
+          refs: {
+            outcome: "invalid_credentials",
+            username: parsed.data.username,
+            ip: callerIpFromReq(req) ?? null,
+          },
+        });
         res.status(401).json({ error: "Invalid credentials" });
         return;
       }
@@ -212,16 +284,63 @@ export function createPublicAuthRouter(
       // Fetch user details (groups included) to determine role
       const ncUser = await ncGetCurrentUser(result.token);
 
-      const userId = ncUser?.id || result.loginName;
-      const username = ncUser?.id || result.loginName;
+      const ncUsername = ncUser?.id || result.loginName;
       const displayName = ncUser?.displayName || result.loginName;
       const role: Role = roleFromGroups(ncUser?.groups ?? []);
+
+      // WARP-485 round 2 — resolve the local User row by `nextcloudUsername`
+      // BEFORE signing the JWT, so `JWT.sub = localUser.id` (UUID) instead
+      // of the NC username string. Fail-closed when no local row matches:
+      // the operator must explicitly provision the user via /api/people
+      // before they can authenticate. Silent auto-provision would be a
+      // privilege-escalation vector — an attacker who somehow holds a
+      // valid OCS credential for an unrelated NC user could otherwise
+      // mint a default-`family`-role local row.
+      //
+      // The shim createAuthRouter() in legacy code paths calls
+      // createPublicAuthRouter() without prisma; we treat that the same
+      // as "no matching row" so a misconfigured deployment can't sneak
+      // past with an unnormalized id either.
+      if (!prisma) {
+        logger.warn(
+          { ncUsername },
+          "JWT login: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+        );
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+      const localUser = await prisma.user.findUnique({
+        where: { nextcloudUsername: ncUsername },
+      });
+      if (!localUser) {
+        logger.warn(
+          { ncUsername },
+          "JWT login: no local User row for Nextcloud user; operator must provision via /api/people (WARP-485 round 2)",
+        );
+        res.status(401).json({
+          error:
+            "User not provisioned. Ask an owner to add this account via /api/people.",
+          code: "USER_NOT_PROVISIONED",
+        });
+        return;
+      }
+
+      const userId = localUser.id; // local UUID — fed into JWT.sub + NC store key
+      const username = ncUsername; // human-readable handle (display + audit only)
 
       // Stash the Nextcloud app-password server-side so downstream routes
       // (files, storage, user admin) can impersonate the caller against
       // Nextcloud's WebDAV/OCS APIs — the browser only ever sees our JWT.
       // TTL matches the refresh-token lifetime; the entry is overwritten on
       // every successful login and deleted at logout.
+      //
+      // WARP-485 round 2 — keyed by the local User.id UUID so logout's
+      // getNcToken(req.user.id) hits the same key (req.user.id is the
+      // UUID across all consumers post-round-2).
       try {
         await storeNcToken(userId, result.token, REFRESH_TOKEN_TTL_SECONDS);
       } catch (err) {
@@ -254,8 +373,42 @@ export function createPublicAuthRouter(
         maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
       });
 
+      // WARP-456: successful sign-in audit row.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-in",
+        what: `${displayName} signed in`,
+        sub: `${role} • ${callerIpFromReq(req) ?? "unknown"}`,
+        refs: {
+          outcome: "success",
+          userId,
+          username,
+          role,
+          ip: callerIpFromReq(req) ?? null,
+        },
+      });
+
+      // ADR-008 §3 + action item #2: native mobile clients can't read
+      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
+      // them; Android's OkHttp can but it's ugly). When the caller
+      // opts in with `?return=body=1`, return the JWTs in the JSON
+      // body too. The cookies are STILL set so browsers behave
+      // unchanged. No behavior change for any existing caller — the
+      // body field is only added when the query param is present.
+      const wantBody = req.query.return === "body" || req.query.return === "body=1";
       res.json({
         user: { id: userId, username, displayName, role },
+        ...(wantBody
+          ? {
+              accessToken,
+              refreshToken,
+              accessTokenExpiresAt:
+                Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+              refreshTokenExpiresAt:
+                Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+            }
+          : {}),
       });
     } catch (err) {
       next(err);
@@ -362,20 +515,29 @@ export function createPublicAuthRouter(
   // ── Refresh: exchange refresh token for new access token ──
   router.post("/auth/refresh", async (req, res, next) => {
     try {
-      const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME];
-      if (!refreshTokenCookie) {
+      // ADR-008: native clients (iOS / Android / Tauri Win) POST the
+      // refresh token in the JSON body since they can't read httpOnly
+      // cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
+      // set by /auth/login. Body takes precedence if both are present
+      // so a mobile client deliberately rotating doesn't get blocked by
+      // a stale cookie.
+      const refreshTokenBody =
+        typeof req.body?.refreshToken === "string" ? req.body.refreshToken : null;
+      const refreshTokenCookie = req.cookies?.[REFRESH_COOKIE_NAME] ?? null;
+      const refreshTokenInput = refreshTokenBody ?? refreshTokenCookie;
+      if (!refreshTokenInput) {
         res.status(401).json({ error: "No refresh token available" });
         return;
       }
 
       // --- Try JWT refresh first ---
-      const refreshResult = await verifyRefreshToken(refreshTokenCookie);
+      const refreshResult = await verifyRefreshToken(refreshTokenInput);
       if (refreshResult) {
         // Claim exclusive rotation rights before issuing new tokens. If
         // another concurrent /auth/refresh call (e.g. a browser double-submit
         // on flaky networks) already claimed this token, reject to prevent
         // two valid token pairs from being issued for the same refresh token.
-        const claimed = await claimRefreshRotation(refreshTokenCookie);
+        const claimed = await claimRefreshRotation(refreshTokenInput);
         if (!claimed) {
           res.status(401).json({ error: "Refresh token is already being rotated" });
           return;
@@ -383,9 +545,56 @@ export function createPublicAuthRouter(
 
         const { sub, username, displayName, role } = refreshResult;
 
+        // WARP-485 round 2 — re-validate that the local User row backing
+        // this refresh token still exists before rotating. Three things
+        // this catches:
+        //   1. Owner removed the user via /api/people mid-session — the
+        //      stale cookie must not silently mint fresh credentials.
+        //   2. Legacy refresh tokens issued pre-WARP-485 carry the NC
+        //      username in `sub` (not a UUID); `findUnique({ id: sub })`
+        //      returns null on those, invalidating them so the holder
+        //      re-logs in and gets a properly-shaped token pair. This is
+        //      the deliberate cache-bump for the JWT layer.
+        //   3. Defense in depth against forged tokens that somehow
+        //      verify but reference no real user.
+        // Fail-closed with the same error code as the OCS path so the
+        // dashboard's auth-error handler can branch consistently.
+        if (!prisma) {
+          logger.warn(
+            { sub },
+            "JWT refresh: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+          );
+          await denyRefreshToken(refreshTokenCookie);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "User not provisioned. Please log in again.",
+            code: "USER_NOT_PROVISIONED",
+          });
+          return;
+        }
+        const localUser = await prisma.user.findUnique({ where: { id: sub } });
+        if (!localUser) {
+          logger.warn(
+            { sub },
+            "JWT refresh: no local User row for refresh-token subject; refusing rotation (WARP-485 round 2)",
+          );
+          // Burn the old refresh token so a retry can't re-enter this
+          // branch repeatedly — denylist entry auto-expires with the
+          // token's own TTL.
+          await denyRefreshToken(refreshTokenCookie);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "User not provisioned. Please log in again.",
+            code: "USER_NOT_PROVISIONED",
+          });
+          return;
+        }
+
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
-        await denyRefreshToken(refreshTokenCookie);
+        await denyRefreshToken(refreshTokenInput);
         const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role });
         const newAccessToken = signAccessToken({ id: sub, username, displayName, role });
 
@@ -410,14 +619,27 @@ export function createPublicAuthRouter(
           maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
         });
 
-        res.json({ status: "ok", expiresIn: ACCESS_TOKEN_TTL_SECONDS });
+        // Native clients want the new tokens in body since they can't
+        // read Set-Cookie. Always include them — browsers ignore the
+        // body's accessToken (they use the cookie that was just set
+        // above), so this is non-breaking.
+        res.json({
+          status: "ok",
+          expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
+          accessTokenExpiresAt:
+            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+          refreshTokenExpiresAt:
+            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+        });
         return;
       }
 
       // --- Fallback: OAuth2 refresh (legacy Nextcloud tokens) ---
       if (config.AUTH_MODE === "oauth2" && config.OAUTH2_CLIENT_ID) {
         const tokens = await ncOAuth2RefreshToken(
-          refreshTokenCookie,
+          refreshTokenInput,
           config.OAUTH2_CLIENT_ID,
           config.OAUTH2_CLIENT_SECRET
         );
@@ -545,11 +767,22 @@ export function createPublicAuthRouter(
         return;
       }
 
-      // Build the Nextcloud groups list from the invite's role. Admin
-      // invites land users in the "admin" group so `roleFromGroups` will
-      // map them to "owner" on first login. Non-admin invites pass an
-      // empty groups array — Nextcloud's default group assignment applies.
-      const groups: string[] = invite.role === "admin" ? ["admin"] : [];
+      // Build the Nextcloud groups list from the invite's role.
+      // WARP-171: the invite role is now the canonical Role enum (was
+      // a free-form String). The mapping below preserves the
+      // pre-WARP-171 wire contract — "admin" invitee still lands in
+      // the Nextcloud "admin" group, which roleFromGroups() turns
+      // back into the "owner" session role on first login. The new
+      // enum values get explicit mappings so future invites can ask
+      // for them without ambiguity. `family` (formerly "user") is
+      // the empty-groups default so a regular household member lands
+      // in Nextcloud's default group set.
+      const groups: string[] =
+        invite.role === "owner" || invite.role === "admin"
+          ? ["admin"]
+          : invite.role === "guest"
+            ? ["guest"]
+            : [];
 
       try {
         await ncCreateUser(
@@ -592,18 +825,64 @@ export function createPublicAuthRouter(
       });
 
       // Auto-login the invitee — same shape as /api/auth/login.
-      const role: Role = invite.role === "admin" ? "owner" : "family";
-      const userId = invite.username;
+      // WARP-171: preserve the pre-WARP-171 wire contract — "admin"
+      // invitee gets an "owner" session role (the original two-value
+      // semantics) — and add direct passthrough for the three new
+      // enum values an invite can now request explicitly.
+      const role: Role =
+        invite.role === "owner" || invite.role === "admin"
+          ? "owner"
+          : invite.role === "guest"
+            ? "guest"
+            : "family";
+
+      // WARP-485 round 2 — provision the local User row mapping this
+      // Nextcloud identity to a local UUID BEFORE signing the JWT, so
+      // `JWT.sub = localUser.id` (UUID) instead of the invite username
+      // string. Without this step, the invitee's first session would
+      // ship the bypassable shape we just fixed on /auth/login.
+      //
+      // Upsert (not create) so concurrent invite-accept POSTs that race
+      // through `await prisma.userInvite.update` don't trip
+      // P2002-unique on `nextcloudUsername` — the second caller still
+      // sees the existing row and gets a properly-shaped JWT.
+      //
+      // The User.role column uses the canonical Role enum value from
+      // the invite (so DB-level RBAC matches the operator's intent on
+      // the create endpoint); the JWT session `role` keeps the legacy
+      // mapping above (admin invite → owner session) which existing
+      // routes still depend on.
+      const userRow = await prisma.user.upsert({
+        where: { nextcloudUsername: invite.username },
+        update: {
+          // If a row already exists, keep its UUID — the invite-accept
+          // is essentially a re-acceptance of the same identity (rare
+          // but possible under retry). Refresh `displayName` from the
+          // invite in case the operator updated it.
+          displayName: invite.displayName || invite.username,
+        },
+        create: {
+          username: invite.username,
+          displayName: invite.displayName || invite.username,
+          email: invite.email ?? null,
+          nextcloudUsername: invite.username,
+          role: invite.role as any, // canonical Role enum from the invite
+          // `isLocal` defaults to true in the schema; mirror-from-NC
+          // would only flip false for setup-time admins.
+        },
+      });
+      const userId = userRow.id; // local UUID — fed into JWT.sub
+
       const accessToken = signAccessToken({
         id: userId,
-        username: userId,
-        displayName: invite.displayName || userId,
+        username: invite.username,
+        displayName: invite.displayName || invite.username,
         role,
       });
       const refreshToken = signRefreshToken({
         id: userId,
-        username: userId,
-        displayName: invite.displayName || userId,
+        username: invite.username,
+        displayName: invite.displayName || invite.username,
         role,
       });
 
@@ -631,8 +910,8 @@ export function createPublicAuthRouter(
       res.json({
         user: {
           id: userId,
-          username: userId,
-          displayName: invite.displayName || userId,
+          username: invite.username,
+          displayName: invite.displayName || invite.username,
           role,
         },
       });
@@ -708,6 +987,22 @@ export function createProtectedAuthRouter(
       res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
       res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
 
+      // WARP-456: audit row for the logout. `req.user` is set by the
+      // authMiddleware before this handler runs.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "log-out",
+        what: req.user?.displayName
+          ? `${req.user.displayName} signed out`
+          : "Sign-out",
+        sub: callerIpFromReq(req) ?? null,
+        refs: {
+          userId: req.user?.id ?? null,
+          ip: callerIpFromReq(req) ?? null,
+        },
+      });
+
       res.json({ status: "ok" });
     } catch (err) {
       next(err);
@@ -739,7 +1034,8 @@ export function createProtectedAuthRouter(
   });
 
   // ── Create user (admin only) ──
-  router.post("/auth/users", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.post("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -773,7 +1069,8 @@ export function createProtectedAuthRouter(
   // Accepts any combination of displayName / email / quota / password and
   // applies them one OCS PUT at a time. Each field is independent so a
   // partial failure leaves the previously-applied fields in place.
-  router.put("/auth/users/:username", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
@@ -813,41 +1110,51 @@ export function createProtectedAuthRouter(
   });
 
   // ── Disable / enable user (admin only) ──
-  router.post("/auth/users/:username/disable", async (req, res, next) => {
-    try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.post(
+    "/auth/users/:username/disable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const token = await resolveNcToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        await ncSetUserEnabled(token, req.params.username, false);
+        res.json({ status: "disabled", username: req.params.username });
+      } catch (err: any) {
+        if (err.message?.includes("403") || err.message?.includes("997")) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+        next(err);
       }
-      await ncSetUserEnabled(token, req.params.username, false);
-      res.json({ status: "disabled", username: req.params.username });
-    } catch (err: any) {
-      if (err.message?.includes("403") || err.message?.includes("997")) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
-      next(err);
-    }
-  });
+    },
+  );
 
-  router.post("/auth/users/:username/enable", async (req, res, next) => {
-    try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.post(
+    "/auth/users/:username/enable",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const token = await resolveNcToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        await ncSetUserEnabled(token, req.params.username, true);
+        res.json({ status: "enabled", username: req.params.username });
+      } catch (err: any) {
+        if (err.message?.includes("403") || err.message?.includes("997")) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+        next(err);
       }
-      await ncSetUserEnabled(token, req.params.username, true);
-      res.json({ status: "enabled", username: req.params.username });
-    } catch (err: any) {
-      if (err.message?.includes("403") || err.message?.includes("997")) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
-      next(err);
-    }
-  });
+    },
+  );
 
   // ── Delete user (admin only) ──
   // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
@@ -858,7 +1165,8 @@ export function createProtectedAuthRouter(
   // best-effort: if it throws we still return success, but log loud
   // — orphaned local rows are recoverable later via a janitor job;
   // returning 500 here would also fail to undo the upstream delete.
-  router.delete("/auth/users/:username", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const token = await resolveNcToken(req);
       if (!token) {
@@ -915,12 +1223,12 @@ export function createProtectedAuthRouter(
   // the existing ddns/vpn convention so the dashboard's "you're logged in,
   // just not allowed" path is consistent across pages.
   // ────────────────────────────────────────────────────────────
-  router.post("/auth/invites", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only. Replaces the
+  // pre-WARP-171 inline `isAdmin(req)` check; the guard runs as
+  // middleware ahead of the handler so the 403 short-circuits before
+  // any handler-local validation.
+  router.post("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
         return;
@@ -967,12 +1275,12 @@ export function createProtectedAuthRouter(
     }
   });
 
-  router.get("/auth/invites", async (req, res, next) => {
+  // WARP-171: GET listing of invites is also admin-only — exposing
+  // pending tokens to a family-tier user would be a credential leak
+  // even though the token's just-an-identifier. Same guard as the
+  // POST/DELETE invite endpoints.
+  router.get("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
-      }
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
         return;
@@ -998,33 +1306,34 @@ export function createProtectedAuthRouter(
     }
   });
 
-  router.delete("/auth/invites/:token", async (req, res, next) => {
-    try {
-      if (!isAdmin(req)) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
+  // WARP-171: per-route guard. owner + admin only.
+  router.delete(
+    "/auth/invites/:token",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        if (!prisma) {
+          res.status(500).json({ error: "Invite store unavailable" });
+          return;
+        }
+        const invite = await findInviteByToken(prisma, req.params.token);
+        if (!invite) {
+          res.status(404).json({ error: "Invite not found" });
+          return;
+        }
+        // Idempotent: revoking an already-revoked invite is a no-op success.
+        if (!invite.revokedAt) {
+          await prisma.userInvite.update({
+            where: { id: invite.id },
+            data: { revokedAt: new Date() },
+          });
+        }
+        res.json({ revoked: true });
+      } catch (err) {
+        next(err);
       }
-      if (!prisma) {
-        res.status(500).json({ error: "Invite store unavailable" });
-        return;
-      }
-      const invite = await findInviteByToken(prisma, req.params.token);
-      if (!invite) {
-        res.status(404).json({ error: "Invite not found" });
-        return;
-      }
-      // Idempotent: revoking an already-revoked invite is a no-op success.
-      if (!invite.revokedAt) {
-        await prisma.userInvite.update({
-          where: { id: invite.id },
-          data: { revokedAt: new Date() },
-        });
-      }
-      res.json({ revoked: true });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   return router;
 }

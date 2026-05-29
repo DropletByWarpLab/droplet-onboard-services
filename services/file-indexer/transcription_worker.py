@@ -74,8 +74,10 @@ def _dispatch_and_index(item: dict) -> None:
     (faster-whisper + grpcio are heavy; we don't want them imported at
     test collection time).
     """
+    import os
+
     from extractors.registry import dispatch
-    from chunker import chunk_spans
+    from chunker import chunk_spans, format_chunk_with_header
     from embedder import embed_texts
     from brain_ingest import _synthetic_nc_file_id
 
@@ -88,8 +90,10 @@ def _dispatch_and_index(item: dict) -> None:
     if doc is None:
         raise RuntimeError(f"extractor refused mime={mime}")
 
-    # WARP-287: extractors emit spans; chunker now consumes spans and
-    # attaches each chunk's anchor.
+    # WARP-287: extractors emit spans; the chunker consumes spans (span-
+    # scoped, sentence-aware) and each Chunk carries its anchor +
+    # section_path. Audio/video typically produce one Span per transcript
+    # segment, all with section_path=[filename].
     spans = doc.get("spans") if isinstance(doc, dict) else None
     chunks = chunk_spans(spans or [])
     if not chunks:
@@ -97,27 +101,51 @@ def _dispatch_and_index(item: dict) -> None:
         # Caller transitions to 'ready' so the chip stops spinning.
         return
 
-    chunk_texts = [c.text for c in chunks]
-    vectors = embed_texts(chunk_texts)
-    if len(vectors) != len(chunks):
+    # WARP-435: sentence-aware chunking + sectionPath contextual headers.
+    # The section_path rides on each Chunk; the contextual header helps the
+    # embedder anchor cross-document similarity (e.g. two recordings of the
+    # same meeting).
+    metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    display_filename = os.path.basename(storage_path) or storage_path
+    prefixed_chunks: list[str] = [
+        format_chunk_with_header(c.text, display_filename, c.section_path)
+        for c in chunks
+    ]
+
+    vectors = embed_texts(prefixed_chunks)
+    if len(vectors) != len(prefixed_chunks):
         raise RuntimeError(
-            f"embedding count mismatch: {len(vectors)} vs {len(chunks)}"
+            f"embedding count mismatch: {len(vectors)} vs {len(prefixed_chunks)}"
         )
 
     # Wipe any stale chunks for this item, then upsert fresh ones. Mirrors
-    # brain_ingest's idempotency pattern.
+    # brain_ingest's idempotency pattern. WARP-435: persist the prefixed
+    # text so the lexical arm + LLM citation surface see the section
+    # path string.
     db.delete_chunks_for_brain_item(item_id)
     warnings = list(doc.get("warnings", [])) if isinstance(doc, dict) else []
-    metadata = doc.get("metadata") if isinstance(doc, dict) else None
-    for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+    for idx, (chunk, prefixed_text, vec) in enumerate(
+        zip(chunks, prefixed_chunks, vectors)
+    ):
         chunk_metadata = dict(metadata or {})
-        chunk_metadata["anchor"] = chunk.anchor.model_dump()
+        try:
+            chunk_metadata["anchor"] = chunk.anchor.model_dump()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "transcription_worker: anchor serialize failed for %s chunk %d: %s",
+                item_id,
+                idx,
+                e,
+            )
+            chunk_metadata["anchor"] = None
+            warnings.append("malformed_anchor")
+        chunk_metadata["sectionPath"] = list(chunk.section_path)
         db.upsert_chunk(
             user_id=user_id,
             nc_file_id=_synthetic_nc_file_id(item_id),
             path=storage_path,
             chunk_idx=idx,
-            text=chunk.text,
+            text=prefixed_text,
             embedding=vec,
             source="brain",
             brain_item_id=item_id,

@@ -25,6 +25,8 @@ import {
 import { iconForMime, mimeFromPath } from "@/lib/mime-icons";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { SourceChannelBadge } from "@/components/SourceChannelBadge";
+import { translateError } from "@/lib/friendly-errors";
+import { trimDisplayPath } from "./displayPath";
 
 const PAGE_SIZE = 50;
 
@@ -74,9 +76,12 @@ export function RecentlyIndexedTab({ source }: Props) {
         setItems(data.items);
         setNextBefore(data.nextBefore);
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err.message);
+        // WARP-294: never surface err.message to the user — the
+        // orchestrator can emit terse strings like "Failed to fetch
+        // recent: 503".
+        setError(translateError(err, "knowledge"));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -98,7 +103,8 @@ export function RecentlyIndexedTab({ source }: Props) {
       setItems((prev) => [...prev, ...data.items]);
       setNextBefore(data.nextBefore);
     } catch (err) {
-      setError((err as Error).message);
+      // WARP-294: same translation idiom on the pagination path.
+      setError(translateError(err, "knowledge"));
     } finally {
       setLoadingMore(false);
     }
@@ -121,12 +127,15 @@ export function RecentlyIndexedTab({ source }: Props) {
   }, [items]);
 
   if (error) {
+    // WARP-294: `error` is already a translated string from
+    // translateError(., "knowledge"); render it directly. No more
+    // raw orchestrator strings get spliced in.
     return (
       <div
         role="alert"
-        className="dp-card p-4 type-footnote text-system-red"
+        className="dp-card p-4 type-footnote text-system-red bg-system-red/10"
       >
-        Couldn&apos;t load recent files: {error}
+        {error}
       </div>
     );
   }
@@ -191,8 +200,13 @@ export function RecentlyIndexedTab({ source }: Props) {
                         {item.source === "brain" ? "Brain" : "Nextcloud"}
                       </span>
                     </div>
-                    <p className="type-caption-1 text-label-tertiary truncate">
-                      {item.path}
+                    <p
+                      className="type-caption-1 text-label-tertiary truncate"
+                      // WARP-294: don't title-attribute the raw server
+                      // path either — keep internal Nextcloud layout
+                      // (`/admin/files/private/…`) entirely off-screen.
+                    >
+                      {trimDisplayPath(item.path)}
                     </p>
                     {/* WARP-214: chevron-joined recursion lineage. Renders
                         only when the chunk's metadata.chain is non-empty

@@ -192,7 +192,9 @@ def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
         if not text or not text.strip():
             return
         anchor = EmailPartAnchor(messageId=message_id, partIndex=len(spans))
-        spans.append(Span(text=text, anchor=anchor))
+        spans.append(
+            Span(text=text, anchor=anchor, section_path=[parent_filename])
+        )
 
     # PartIndex 0: headers block.
     headers = _format_headers(msg)
@@ -248,6 +250,11 @@ def _extract_eml(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
         "to": msg.get("To"),
         "subject": msg.get("Subject"),
         "date": msg.get("Date"),
+        # WARP-435: emails have no in-body structural hierarchy comparable
+        # to PDF/DOCX — the headers + body + attachments live in a flat
+        # stream. Each Span carries ``[filename]`` as its section path (set
+        # in ``_emit``); the chain[] breadcrumb in ``metadata.chain`` still
+        # carries the attachment lineage for nested .eml/.zip/etc. cases.
     }
     if attachment_chains:
         metadata["chain"] = attachment_chains[0]
@@ -291,7 +298,9 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
         if not text or not text.strip():
             return
         anchor = EmailPartAnchor(messageId=message_id, partIndex=len(spans))
-        spans.append(Span(text=text, anchor=anchor))
+        spans.append(
+            Span(text=text, anchor=anchor, section_path=[parent_filename])
+        )
 
     headers_lines: list[str] = []
     if m.sender:
@@ -336,6 +345,8 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
         "to": m.to,
         "subject": m.subject,
         "date": str(m.date) if m.date else None,
+        # WARP-435: see _extract_eml — each Span carries ``[filename]`` as
+        # its section path (set in ``_emit``).
     }
     if msg_chains:
         metadata["chain"] = msg_chains[0]

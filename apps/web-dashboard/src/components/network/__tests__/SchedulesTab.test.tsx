@@ -84,8 +84,11 @@ describe("SchedulesTab", () => {
     );
     const bedtimeCard = screen.getByTestId("preset-card-bedtime");
     fireEvent.click(bedtimeCard.querySelector("button")!);
+    // WARP-289: dialog is now named by its heading ("New schedule"
+    // when scheduleId === "new", "Edit schedule" otherwise) instead of
+    // a static aria-label.
     expect(
-      screen.getByRole("dialog", { name: /edit schedule/i }),
+      screen.getByRole("dialog", { name: /new schedule/i }),
     ).toBeInTheDocument();
   });
 
@@ -97,8 +100,10 @@ describe("SchedulesTab", () => {
     );
     const homeworkCard = screen.getByTestId("preset-card-homework");
     fireEvent.click(homeworkCard.querySelector("button")!);
+    // WARP-289: dialog is named by its heading "Override for <subject>"
+    // instead of the previous static "Create override" aria-label.
     expect(
-      screen.getByRole("dialog", { name: /create override/i }),
+      screen.getByRole("dialog", { name: /override for/i }),
     ).toBeInTheDocument();
   });
 
@@ -121,8 +126,10 @@ describe("SchedulesTab", () => {
       expect(screen.getByText("No schedules yet")).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /new schedule/i }));
+    // WARP-289: dialog is named by its heading "New schedule" (creation
+    // path) via aria-labelledby — not the previous static aria-label.
     expect(
-      screen.getByRole("dialog", { name: /edit schedule/i }),
+      screen.getByRole("dialog", { name: /new schedule/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: /new schedule/i }),
@@ -130,7 +137,7 @@ describe("SchedulesTab", () => {
     // Close via Cancel
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
     expect(
-      screen.queryByRole("dialog", { name: /edit schedule/i }),
+      screen.queryByRole("dialog", { name: /new schedule/i }),
     ).not.toBeInTheDocument();
   });
 });

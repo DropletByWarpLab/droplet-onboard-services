@@ -33,11 +33,11 @@ export interface StatusChipProps {
 }
 
 const PILL_BASE =
-  "inline-flex items-center rounded-full px-2 py-0.5 type-caption border";
+  "inline-flex items-center rounded-full px-2 py-0.5 type-caption-1 border";
 const STATUS_CLASSES: Record<string, string> = {
   queued: `${PILL_BASE} bg-surface-secondary border-separator text-label-secondary`,
   indexing: `${PILL_BASE} bg-accent/10 border-accent/40 text-accent`,
-  failed: `${PILL_BASE} bg-warning/10 border-warning/50 text-warning`,
+  failed: `${PILL_BASE} bg-system-orange/10 border-system-orange/50 text-system-orange`,
   unknown: `${PILL_BASE} bg-surface-secondary border-separator text-label-tertiary`,
 };
 
@@ -94,7 +94,7 @@ export function StatusChip({
             <div className="absolute right-0 top-6 z-10 min-w-[8rem] rounded-md border border-separator bg-surface-primary py-1 shadow-md">
               <button
                 type="button"
-                className="block w-full px-3 py-1.5 text-left type-caption text-label-primary hover:bg-surface-secondary"
+                className="block w-full px-3 py-1.5 text-left type-caption-1 text-label-primary hover:bg-surface-secondary"
                 onClick={() => {
                   setMenuOpen(false);
                   onTranscribeNow?.(itemId);

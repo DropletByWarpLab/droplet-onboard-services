@@ -22,3 +22,9 @@ torch --index-url https://download.pytorch.org/whl/cpu
 onnxruntime>=1.18,<2.0
 optimum>=1.21,<2.0
 huggingface_hub>=0.24,<1.0
+
+# WARP-437: zero-shot query classifier (deberta-v3-base-zeroshot-v2.0) used
+# by the orchestrator's adaptive retrieval router. transformers is already
+# pulled in transitively via sentence-transformers, but pinning it here
+# keeps the dependency intent explicit.
+transformers>=4.40,<5

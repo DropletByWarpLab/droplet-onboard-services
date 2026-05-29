@@ -6,17 +6,9 @@ name: device-identity-svc-tests
 # tests, which is what we cover on PR-time CI.
 
 on:
-  pull_request:
-    paths:
-      - "services/device-identity-svc/**"
-      - "proto/**"
-      - ".github/workflows/device-identity-svc-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "services/device-identity-svc/**"
-      - "proto/**"
-      - ".github/workflows/device-identity-svc-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: device-identity-svc-tests-${{ github.ref }}

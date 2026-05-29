@@ -240,7 +240,7 @@ def _run_frame_ocr(path: Union[str, Path]) -> list[dict]:
     return results
 
 
-def _span_from_transcript_segment(seg) -> Optional[Span]:
+def _span_from_transcript_segment(seg, section_path: list[str]) -> Optional[Span]:
     """Build a span from a Whisper-shaped segment. Returns None when the
     segment is empty or degenerate (endMs <= startMs after rounding)."""
     seg_text = (getattr(seg, "text", "") or "").strip()
@@ -253,10 +253,11 @@ def _span_from_transcript_segment(seg) -> Optional[Span]:
     return Span(
         text=seg_text,
         anchor=MediaTimestampAnchor(startMs=start_ms, endMs=end_ms),
+        section_path=list(section_path),
     )
 
 
-def _span_from_frame_ocr_result(result: dict) -> Optional[Span]:
+def _span_from_frame_ocr_result(result: dict, section_path: list[str]) -> Optional[Span]:
     """Build a span from a frame-OCR result. Anchor window is
     `_FRAME_OCR_WINDOW_MS` wide, centered (well, starting) at the
     sampled timestamp."""
@@ -269,6 +270,7 @@ def _span_from_frame_ocr_result(result: dict) -> Optional[Span]:
     return Span(
         text=text,
         anchor=MediaTimestampAnchor(startMs=start_ms, endMs=end_ms),
+        section_path=list(section_path),
     )
 
 
@@ -293,6 +295,10 @@ def extract(
     duration: Optional[float] = None
     subtitle_source: Optional[str] = None
 
+    # Video has no in-file structural hierarchy; the document-level
+    # breadcrumb is the filename (WARP-435 fallback).
+    section_path = [os.path.basename(str(path)) or "video"]
+
     # Transcript pass.
     try:
         segments_iter, info = _transcribe(path)
@@ -304,7 +310,7 @@ def extract(
         duration = info.duration
         subtitle_source = info.subtitle_source
         for seg in segments_iter:
-            span = _span_from_transcript_segment(seg)
+            span = _span_from_transcript_segment(seg, section_path)
             if span is None:
                 continue
             spans.append(span)
@@ -318,7 +324,7 @@ def extract(
             logger.warning("video frame OCR failed (%s)", exc)
             warnings.append(f"frame_ocr_failed:{exc}")
         for result in frame_results:
-            span = _span_from_frame_ocr_result(result)
+            span = _span_from_frame_ocr_result(result, section_path)
             if span is None:
                 continue
             spans.append(span)

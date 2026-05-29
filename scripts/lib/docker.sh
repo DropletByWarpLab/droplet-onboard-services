@@ -174,6 +174,7 @@ setup_docker_group() {
   # Add user to docker group
   log_info "Adding user '$USER' to the docker group..."
   if sudo usermod -aG docker "$USER"; then
+    # shellcheck disable=SC2034  # Read cross-file by scripts/setup.sh:396 to trigger the re-login warning at end-of-run; shellcheck can't see across the source boundary.
     DOCKER_GROUP_ADDED=true
     log_success "Added '$USER' to docker group"
     log_warn "Group change takes effect after re-login — using sudo for Docker in this session"

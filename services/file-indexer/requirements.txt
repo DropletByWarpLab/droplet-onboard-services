@@ -41,3 +41,19 @@ imagehash==4.3.1
 # stack as services/ai-gateway/ and services/routing/, kept in lockstep).
 fastapi>=0.110.0
 uvicorn>=0.27.0
+# WARP-435 (ADR-003 Phase 1) — sentence-aware chunking.
+# semantic-text-splitter is a Rust-backed Python wheel (~8 MB) that walks
+# Unicode sentence/word/character boundaries with an HF-tokenizer-aware
+# token budget. Pinned to 0.30.x; the 0.x API surface
+# (``TextSplitter.from_huggingface_tokenizer(tokenizer, capacity, overlap)``)
+# stabilised at 0.10 and we don't want a silent semantic-major bump.
+# ``tokenizers`` is its sibling — same HF Rust binding that loads the
+# all-MiniLM-L6-v2 tokenizer (the embedder's tokenizer) for capacity
+# accounting.
+semantic-text-splitter>=0.30,<0.31
+tokenizers>=0.20,<1.0
+# WARP-435 (ADR-003 Phase 1) — PPTX extraction with section-aware
+# hierarchical paths (section_name → slide_title). python-pptx is the
+# canonical pure-Python pptx parser; depends only on lxml + Pillow,
+# both of which are already pulled in transitively.
+python-pptx>=0.6.23,<1.0

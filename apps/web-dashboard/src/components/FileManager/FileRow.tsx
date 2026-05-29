@@ -72,7 +72,7 @@ function formatDate(iso: string): string {
  *  - multi-select (click / ctrl-click / shift-click handled by caller)
  *  - right-click context menu (caller positions it)
  *  - in-place rename (switches to an input when `isRenaming` is true)
- *  - hover row actions (download, delete)
+ *  - always-visible row actions (download, delete) — WARP-292
  */
 export function FileRow({
   file,
@@ -120,10 +120,84 @@ export function FileRow({
     void onRename(next);
   };
 
+  // WARP-298: full keyboard support. Each row is its own focus stop
+  // (role=button, tabIndex 0) and responds to:
+  //   - Enter / Space  → open (mirror onClick/onDoubleClick semantics)
+  //   - ArrowDown      → move focus to next row
+  //   - ArrowUp        → move focus to previous row
+  //   - Delete         → trigger delete (the parent passes a handler that
+  //                      routes through ConfirmDialog — we never bypass it)
+  //   - Shift+F10 / ContextMenu key → open context menu at the row's
+  //                      bounding rect (standard kb shortcut for right-click)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (isRenaming) return; // Defer all keys to the input while renaming.
+    switch (e.key) {
+      case "Enter":
+      case " ":
+        // Space scrolls the page by default; block before opening.
+        e.preventDefault();
+        onOpen();
+        return;
+      case "ArrowDown": {
+        e.preventDefault();
+        const next = (e.currentTarget.nextElementSibling as HTMLElement | null);
+        if (next && next.tagName === e.currentTarget.tagName) next.focus();
+        return;
+      }
+      case "ArrowUp": {
+        e.preventDefault();
+        const prev = (e.currentTarget.previousElementSibling as HTMLElement | null);
+        if (prev && prev.tagName === e.currentTarget.tagName) prev.focus();
+        return;
+      }
+      case "Delete": {
+        // Routes through the parent's ConfirmDialog (WARP-291); never
+        // bypasses confirmation. Backspace is NOT bound here — too easy
+        // to hit accidentally and the rename-input handler stops
+        // propagation but other transient focus states could let a
+        // stray Backspace through.
+        e.preventDefault();
+        onDelete();
+        return;
+      }
+      case "F10":
+        if (e.shiftKey) {
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          onContextMenu(rect.left + 16, rect.bottom);
+        }
+        return;
+      case "ContextMenu": {
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        onContextMenu(rect.left + 16, rect.bottom);
+        return;
+      }
+    }
+  };
+
   return (
     <div
+      role="button"
+      tabIndex={isRenaming ? -1 : 0}
+      aria-label={`${file.isDirectory ? "Folder" : "File"} ${file.name}`}
+      aria-selected={isSelected}
+      data-filerow="1"
       onClick={(e) => {
         if (isRenaming) return;
+        // WARP-309: a plain single-click on a folder navigates into it,
+        // matching Finder/File Explorer breadcrumb-style browsing (the
+        // double-click requirement was a Files-page quirk, not a global
+        // dashboard pattern). Modifier-clicks still go to selection so
+        // Cmd/Ctrl + click and Shift + range-select work on folders for
+        // bulk operations (move, delete, share). Files keep the previous
+        // single-click-selects / double-click-opens behavior because that
+        // preview sidebar is the primary affordance for them.
+        if (file.isDirectory && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+          e.stopPropagation();
+          onOpen();
+          return;
+        }
         onSelect(e);
       }}
       onDoubleClick={(e) => {
@@ -131,11 +205,13 @@ export function FileRow({
         e.stopPropagation();
         onOpen();
       }}
+      onKeyDown={handleKeyDown}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu(e.clientX, e.clientY);
       }}
       className={`dp-row group transition-colors duration-200 ease-smooth cursor-pointer
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
         ${isSelected ? "bg-accent-subtle" : "hover:bg-surface-secondary/60"}`}
     >
       {/* Selection indicator */}
@@ -207,15 +283,25 @@ export function FileRow({
         />
       </div>
 
-      <div className="flex items-center gap-0.5 w-16 justify-end flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+      {/*
+        WARP-292: row actions are always rendered (no opacity-gate) so
+        they're discoverable on touch and reachable for keyboard users.
+        WARP-298 owns the broader FileRow keyboard-nav story (Tab /
+        Arrow keys to focus a row, Enter to open) — this commit just
+        gets the action buttons into the DOM tab order. p-2.5 → 14 px
+        icon + 20 px padding = 34 px hit-target, clearing the 32 px
+        ui-ux floor. aria-labels name the file so screen-reader users
+        hear which entry they're acting on.
+      */}
+      <div className="flex items-center gap-0.5 justify-end flex-shrink-0 transition-opacity duration-200">
         {!file.isDirectory && (
           <button
             onClick={(e) => {
               e.stopPropagation();
               onDownload();
             }}
-            className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
-            aria-label="Download"
+            className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+            aria-label={`Download ${file.name}`}
           >
             <Download size={14} />
           </button>
@@ -225,8 +311,8 @@ export function FileRow({
             e.stopPropagation();
             onDelete();
           }}
-          className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
-          aria-label="Delete"
+          className="p-2.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+          aria-label={`Delete ${file.name}`}
         >
           <Trash2 size={14} />
         </button>

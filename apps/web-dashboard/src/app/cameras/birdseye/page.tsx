@@ -89,18 +89,16 @@ export default function BirdseyePage() {
             <VideoOff size={56} className="text-label-quaternary" />
             <h2 className="type-title-3 text-white">Birdseye not enabled</h2>
             <p className="type-subheadline text-label-tertiary">
-              Frigate&apos;s birdseye view is off. Enable it in{" "}
-              <span className="font-mono">config.yml</span> under{" "}
-              <span className="font-mono">birdseye.enabled: true</span>, save
-              from the System page, and refresh.
+              Birdseye view isn&apos;t set up on this Droplet. Ask your admin
+              to enable it in the camera service configuration.
             </p>
           </div>
         ) : imgError ? (
           <div className="flex flex-col items-center gap-3 p-6 text-center">
             <VideoOff size={56} className="text-label-quaternary" />
             <p className="type-subheadline text-label-tertiary">
-              Stream lost — Frigate may have restarted. Refreshing the page
-              usually picks it up.
+              Stream lost — the camera service may have restarted. Refreshing
+              the page usually picks it up.
             </p>
           </div>
         ) : (

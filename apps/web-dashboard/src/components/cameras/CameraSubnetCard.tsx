@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { Shield, ShieldCheck, ShieldOff, Loader2 } from "lucide-react";
 import { authFetch } from "@/lib/auth";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 interface SubnetConfig {
   enabled: boolean;
@@ -20,6 +22,8 @@ interface CameraSubnetCardProps {
 
 export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
   const [loading, setLoading] = useState(false);
+  const [teardownOpen, setTeardownOpen] = useState(false);
+  const { toast } = useToast();
 
   const isEnabled = config?.enabled ?? false;
 
@@ -33,30 +37,34 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        alert(data.error || "Failed to set up camera subnet");
+        toast(data.error || "Couldn't set up the camera subnet. Try again in a moment.", "error");
       }
       onRefresh();
     } catch {
-      alert("Failed to connect to routing service");
+      toast("Couldn't reach the routing service. Try again in a moment.", "error");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleTeardown() {
-    if (!confirm("Remove camera subnet isolation? Cameras will move to the main LAN.")) {
-      return;
-    }
+  async function performTeardown() {
     setLoading(true);
     try {
       const res = await authFetch("/api/cameras/subnet", { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        alert(data.error || "Failed to remove camera subnet");
+        toast(data.error || "Couldn't remove the camera subnet. Try again in a moment.", "error");
+        throw new Error(data.error || "Teardown failed");
       }
+      setTeardownOpen(false);
       onRefresh();
-    } catch {
-      alert("Failed to connect to routing service");
+    } catch (e) {
+      // If we already toasted above, this throw just keeps the dialog open
+      // so the user can retry. The catch is otherwise a network-error path.
+      if (e instanceof Error && e.message !== "Teardown failed") {
+        toast("Couldn't reach the routing service. Try again in a moment.", "error");
+      }
+      throw e;
     } finally {
       setLoading(false);
     }
@@ -95,7 +103,7 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
               </div>
             ) : isEnabled ? (
               <button
-                onClick={handleTeardown}
+                onClick={() => setTeardownOpen(true)}
                 className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg text-system-red hover:bg-system-red/10"
               >
                 <ShieldOff size={16} />
@@ -140,6 +148,16 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
           </p>
         )}
       </div>
+
+      <ConfirmDialog
+        open={teardownOpen}
+        onConfirm={performTeardown}
+        onCancel={() => setTeardownOpen(false)}
+        title="Remove camera subnet isolation?"
+        description="Cameras will move back to the main LAN. Anyone on your network will be able to reach the camera feeds directly until you re-enable isolation."
+        confirmLabel="Disable isolation"
+        variant="destructive"
+      />
     </div>
   );
 }

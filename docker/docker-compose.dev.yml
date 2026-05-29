@@ -1,0 +1,245 @@
+# ───────────────────────────────────────────────────────────────────
+# Droplet development stack — Windows / Docker Desktop friendly.
+#
+# Brings up the subset of the production compose that doesn't require
+# Linux hardware (no AMD GPU, no OpenWrt netns, no iGPU render node,
+# no kernel WireGuard). The bound services:
+#
+#   db          — pgvector/pgvector:pg16 (orchestrator + nextcloud)
+#   cache       — redis:7-alpine (no password in dev)
+#   broker      — eclipse-mosquitto:2 (anonymous allowed in dev)
+#   nextcloud   — nextcloud:29-apache (Files surface)
+#   orchestrator— bind-mounted, tsx watch on src/index.ts
+#   web-dashboard — bind-mounted, next dev -p 3001
+#
+# NOT in this stack (intentional — see docker/dev/README.md):
+#   ai-gateway, ai-stack, routing, switch, frigate, camera-discovery,
+#   voice-io, wyoming-*, oled-display, mcp-server (standalone),
+#   device-identity-svc, file-indexer, gateway (nginx)
+#
+# The orchestrator gracefully handles missing companion services
+# (logs a warning, returns degraded state) so the dashboard renders
+# from seed data without a perfect external surface.
+#
+# Quickstart:
+#   cp docker/dev/.env.example .env
+#   docker compose -f docker/docker-compose.dev.yml up
+#   open http://localhost:3001
+#
+# First boot: ~5 minutes (npm install in each container + Prisma
+# migrations + seed + Next.js compile). Subsequent boots: ~30 seconds.
+# ───────────────────────────────────────────────────────────────────
+
+services:
+
+  # ─── Postgres (with pgvector for the orchestrator's embeddings) ──
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: droplet-dev-db
+    restart: unless-stopped
+    environment:
+      # Dev-only defaults. Matches the .env.example values so the
+      # orchestrator's DATABASE_URL resolves out of the box.
+      POSTGRES_USER: ${POSTGRES_USER:-droplet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dropletdev}
+      # We seed TWO databases — droplet (orchestrator) and nextcloud.
+      # The init script below creates the second one.
+      POSTGRES_DB: droplet
+    volumes:
+      - dev-pgdata:/var/lib/postgresql/data
+      - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/10-init-nextcloud-db.sh:ro
+    ports:
+      # Expose to host so dev tools (TablePlus, DataGrip, psql) can attach.
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-droplet}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ─── Redis (sessions, BullMQ queues) ─────────────────────────────
+  cache:
+    image: redis:7-alpine
+    container_name: droplet-dev-cache
+    restart: unless-stopped
+    # No password in dev — production sets one via REDIS_PASSWORD.
+    # The orchestrator's redis client accepts an empty password as
+    # "no auth".
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── MQTT broker (camera events, smart-home state, chat signals) ─
+  broker:
+    image: eclipse-mosquitto:2
+    container_name: droplet-dev-broker
+    restart: unless-stopped
+    # Anonymous allowed for dev — production uses the password file
+    # at /mosquitto/config/mosquitto.passwd.
+    command:
+      - "sh"
+      - "-c"
+      - |
+        cat > /mosquitto/config/mosquitto.conf <<'CONF'
+        listener 1883
+        allow_anonymous true
+        persistence false
+        log_dest stdout
+        log_type warning
+        log_type error
+        CONF
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
+    ports:
+      - "1883:1883"
+
+  # ─── Nextcloud (Files surface — dashboard's /files tab) ──────────
+  nextcloud:
+    image: nextcloud:29-apache
+    container_name: droplet-dev-nextcloud
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: ${POSTGRES_USER:-droplet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dropletdev}
+      REDIS_HOST: cache
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-dropletdev}
+      NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud orchestrator"
+      OVERWRITEPROTOCOL: http
+    volumes:
+      - dev-nextcloud-data:/var/www/html
+    ports:
+      - "8082:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/status.php"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # ─── Orchestrator (Express API, port 3000) ───────────────────────
+  orchestrator:
+    container_name: droplet-dev-orchestrator
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile.orchestrator-dev
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      # ── Database / cache / broker ──
+      DATABASE_URL: postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-dropletdev}@db:5432/droplet
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      MQTT_BROKER: mqtt://broker:1883
+      # ── Auth ──
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-do-not-ship}
+      DEVICE_SECRET: ${DEVICE_SECRET:-dev-only-device-secret-do-not-ship}
+      # ── Companion services. URLs intentionally point at non-existent
+      #    hosts; the orchestrator should gracefully degrade. ──
+      NEXTCLOUD_URL: http://nextcloud:80
+      AI_GATEWAY_URL: http://ai-gateway-disabled:8000
+      AI_GATEWAY_GRPC_URL: ai-gateway-disabled:50051
+      ROUTING_SERVICE_URL: http://routing-disabled:8080
+      ROUTING_SERVICE_TOKEN: dev-routing-token-unused
+      ROUTING_MODE: mock
+      SWITCH_SERVICE_URL: http://switch-disabled:8081
+      DISPLAY_SERVICE_URL: http://display-disabled:8082
+      FRIGATE_URL: http://frigate-disabled:5000
+      # ── FIPS off in dev (no provider available on this base image) ──
+      DROPLET_FIPS_REQUIRED: "false"
+      # ── Seed dev data on first boot (idempotent) ──
+      DROPLET_DEV_SEED: "1"
+      # ── CORS for the dashboard reaching the API from the browser ──
+      CORS_ORIGINS: http://localhost:3001,http://localhost:3000
+      # ── File storage ──
+      BRAIN_MEMORY_ROOT: /workspace/.dev-data/brain-memory
+      MATTER_STORAGE_PATH: /workspace/.dev-data/matter-storage
+      NEXTCLOUD_DATA_ROOT: /workspace/.dev-data/nextcloud-data
+    volumes:
+      # Bind-mount the whole repo so workspace symlinks resolve + edits
+      # hot-reload. Named volumes shadow node_modules at each workspace
+      # level so the Windows host never has to serve those files.
+      - ..:/workspace
+      - dev-workspace-modules:/workspace/node_modules
+      - dev-orchestrator-modules:/workspace/apps/orchestrator/node_modules
+      - dev-tools-core-modules:/workspace/packages/tools-core/node_modules
+      - dev-fips-selftest-modules:/workspace/packages/fips-selftest/node_modules
+      - dev-mcp-server-modules:/workspace/services/mcp-server/node_modules
+      - dev-dashboard-modules:/workspace/apps/web-dashboard/node_modules
+      - dev-ai-gateway-modules:/workspace/services/ai-gateway/node_modules
+
+  # ─── Web dashboard (Next.js, port 3001) ──────────────────────────
+  web-dashboard:
+    container_name: droplet-dev-dashboard
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile.dashboard-dev
+    depends_on:
+      orchestrator:
+        condition: service_started
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      # Server-side rewrite target — used by next.config.js so /api/*
+      # from the browser proxies to the orchestrator container by
+      # service name (NOT localhost, which would be the dashboard
+      # container itself).
+      ORCHESTRATOR_INTERNAL_URL: http://orchestrator:3000
+      # File watcher polling — bind-mounts on Windows don't fire
+      # inotify events reliably. Polling costs CPU but is predictable.
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "500"
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ..:/workspace
+      - dev-workspace-modules:/workspace/node_modules
+      - dev-dashboard-modules:/workspace/apps/web-dashboard/node_modules
+      - dev-orchestrator-modules:/workspace/apps/orchestrator/node_modules
+      - dev-tools-core-modules:/workspace/packages/tools-core/node_modules
+      - dev-fips-selftest-modules:/workspace/packages/fips-selftest/node_modules
+      - dev-mcp-server-modules:/workspace/services/mcp-server/node_modules
+      - dev-ai-gateway-modules:/workspace/services/ai-gateway/node_modules
+      # Next.js writes .next/ during dev — keep it container-local
+      # (named volume) so the Windows host doesn't see thousands of
+      # invalidations per save.
+      - dev-dashboard-next:/workspace/apps/web-dashboard/.next
+
+# ─────────────────────────────────────────────────────────────────
+# Volumes
+#   pgdata + nextcloud-data: persistent state, survives `down`/`up`
+#   *-modules: per-workspace node_modules, shadow the Windows bind
+#     mount so npm install lands in the Linux filesystem (fast)
+#   dashboard-next: Next.js build cache, container-local for speed
+# ─────────────────────────────────────────────────────────────────
+volumes:
+  dev-pgdata:
+  dev-nextcloud-data:
+  dev-workspace-modules:
+  dev-orchestrator-modules:
+  dev-dashboard-modules:
+  dev-tools-core-modules:
+  dev-fips-selftest-modules:
+  dev-mcp-server-modules:
+  dev-ai-gateway-modules:
+  dev-dashboard-next:

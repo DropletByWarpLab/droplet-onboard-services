@@ -7,25 +7,9 @@ name: mcp-server-tests
 # process — the workspace must be built before tests run.
 
 on:
-  pull_request:
-    paths:
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "apps/orchestrator/prisma/schema.prisma"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/mcp-server-tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "packages/tools-core/**"
-      - "packages/fips-selftest/**"
-      - "services/mcp-server/**"
-      - "apps/orchestrator/prisma/schema.prisma"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/mcp-server-tests.yml"
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
 
 concurrency:
   group: mcp-server-tests-${{ github.ref }}

@@ -16,6 +16,15 @@ REQUIRED_ENV_VARS=(
   NEXTCLOUD_ADMIN_PASSWORD
   DEVICE_SECRET
   DEVICE_SECRET_KEY
+  # WARP-501: embedded Plane PM stack. Fail-closed contract for the
+  # three Plane-required secrets enforced HERE (per Romain's PR #242
+  # prescription: keep compose `:-` so the file always parses, move
+  # secret validation to this layer). DROPLET_PM_WEB_URL is included
+  # because the Plane API container refuses to start without a valid
+  # public URL — empty is a misconfiguration, not a sensible default.
+  DROPLET_PM_DB_PASSWORD
+  DROPLET_PM_SECRET_KEY
+  DROPLET_PM_WEB_URL
 )
 
 _validate_env() {
@@ -141,10 +150,19 @@ prepare_and_build() {
     file-indexer
     switch
     camera-discovery
+    oled-display
+    # linux profile (audio-facing services; the OS-specific gate keeps
+    # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
+    voice-io
   )
+  # Both profiles active so compose sees every profile-gated service.
+  # Without --profile linux, `build voice-io` errors out because
+  # the service is invisible to compose's view of the project. The default-
+  # profile services are visible regardless of --profile flags.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux \
+        -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix

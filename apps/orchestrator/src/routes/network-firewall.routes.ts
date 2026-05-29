@@ -13,6 +13,7 @@ import {
   addPortForward,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import { requireRole } from "../middleware/auth.js";
 
 export interface FirewallDeps {
   prisma: PrismaClient;
@@ -30,7 +31,11 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
     }
   });
 
-  router.post("/network/firewall/block", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only — blocking a device
+  // cuts a household member's connectivity, so this stays in the
+  // household-admin tier even though the network-safety evaluator
+  // also gates it via the tier system.
+  router.post("/network/firewall/block", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { mac, name } = req.body;
       if (!mac || typeof mac !== "string") {
@@ -65,7 +70,8 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
     }
   });
 
-  router.post("/network/firewall/unblock", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only.
+  router.post("/network/firewall/unblock", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { mac } = req.body;
       if (!mac || typeof mac !== "string") {
@@ -100,7 +106,10 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
     }
   });
 
-  router.post("/network/firewall/port-forward", async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only — port-forwarding
+  // exposes a LAN service to the public internet; never a family-tier
+  // operation.
+  router.post("/network/firewall/port-forward", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { name, src_port, dest_ip, dest_port, proto = "tcp" } = req.body;
       if (!name || !src_port || !dest_ip || !dest_port) {

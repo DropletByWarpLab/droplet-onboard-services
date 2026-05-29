@@ -33,6 +33,7 @@ import { authFetch } from "@/lib/auth";
 import { useBrainStatus } from "@/lib/hooks/useBrainStatus";
 import { iconForMime } from "@/lib/mime-icons";
 import { StatusChip } from "@/components/StatusChip";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function BrainMemoryTab() {
   // WARP-214: useBrainStatus replaces the manual GET + state — it seeds from
@@ -51,13 +52,23 @@ export function BrainMemoryTab() {
   // WARP-218 not yet merged: feature-detect transcribeNow availability so the
   // overflow menu hides itself once we observe the route returning 404.
   const [transcribeNowAvailable, setTranscribeNowAvailable] = useState(true);
+  // ConfirmDialog target — null when no delete is pending. Holds the
+  // BrainMemoryItemInfo so the dialog can render the filename.
+  const [confirmTarget, setConfirmTarget] = useState<BrainMemoryItemInfo | null>(
+    null,
+  );
 
   // The hook drives loading/error state; we keep `actionMessage` for inline
   // delete/export feedback and clear it whenever the items list refreshes.
   // (No-op effect — the WS bridge is the source of truth for re-render.)
 
-  async function handleDelete(item: BrainMemoryItemInfo) {
-    if (!confirm(`Delete "${item.filename}" from brain memory?`)) return;
+  function handleDelete(item: BrainMemoryItemInfo) {
+    setConfirmTarget(item);
+  }
+
+  async function performDelete() {
+    const item = confirmTarget;
+    if (!item) return;
     setPendingDelete(item.id);
     setActionMessage(null);
     try {
@@ -69,16 +80,19 @@ export function BrainMemoryTab() {
         setActionMessage(
           "Delete will be online once the brain memory service is fully set up."
         );
+        setConfirmTarget(null);
         return;
       }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `Delete failed: ${res.status}`);
       }
+      setConfirmTarget(null);
       // WS bridge will eventually reconcile, but optimistically the list
       // re-fetches on next /api/files/brain refresh. No local mutation.
     } catch (err) {
       setActionMessage(`Delete failed: ${(err as Error).message}`);
+      throw err;
     } finally {
       setPendingDelete(null);
     }
@@ -261,6 +275,20 @@ export function BrainMemoryTab() {
           );
         })}
       </ul>
+
+      <ConfirmDialog
+        open={confirmTarget !== null}
+        onConfirm={performDelete}
+        onCancel={() => setConfirmTarget(null)}
+        title={
+          confirmTarget
+            ? `Delete "${confirmTarget.filename}" from brain memory?`
+            : "Delete from brain memory?"
+        }
+        description="Your assistant will no longer recall this file's contents. The original on disk is unaffected."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
     </div>
   );
 }

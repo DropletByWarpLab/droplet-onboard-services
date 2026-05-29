@@ -215,14 +215,68 @@ class DuckDnsConfigRequest(BaseModel):
         ..., min_length=1, max_length=63, pattern=_DUCKDNS_SUBDOMAIN_PATTERN,
         description="DuckDNS subdomain, e.g. 'stefan-droplet' (no '.duckdns.org' suffix).",
     )
-    token: str = Field(
-        ..., min_length=10, max_length=128,
-        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read.",
+    # Optional: when omitted, the handler preserves the existing
+    # /etc/config/ddns password. The dashboard's wizard uses this for
+    # the "keep stored token" path so a returning customer doesn't have
+    # to re-paste the token every time they re-visit the Internet step.
+    token: Optional[str] = Field(
+        default=None, min_length=10, max_length=128,
+        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read. Omit to keep the currently-stored value.",
     )
     enabled: bool = Field(
         default=True,
         description="Whether ddns-scripts should run this service on the next start. False stages the config without enabling.",
     )
+
+
+# ---------------------------------------------------------------------------
+# AP onboarding (WARP-446)
+# ---------------------------------------------------------------------------
+#
+# MAC validation re-uses the canonical AA:BB:CC:DD:EE:FF shape used by
+# every other MAC field in this schema file. Case-insensitive on the
+# wire; the SDK normalises to uppercase at the boundary.
+#
+# SSID grammar matches `SetSsidRequest.ssid` (1..32 chars). Encryption
+# key min-length 8 matches the WPA2-PSK min-length so we don't push a
+# config the AP's hostapd will reject.
+
+_MAC_PATTERN = r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
+
+
+class ApApproveRequest(BaseModel):
+    """Approve a discovered extender AP and push wireless config.
+
+    `radio` defaults to `radio0` which is the MT7922 5 GHz AP on the
+    Pi 5 build (see `openwrt/build.sh` for the radio numbering); the
+    dashboard's wizard surfaces this as the primary household band.
+    `encryption` defaults to `psk2+ccmp` (WPA2-PSK, AES-only) — same
+    posture as the main router's default config.
+    """
+
+    radio: str = Field(default="radio0", min_length=1, max_length=16)
+    ssid: str = Field(..., min_length=1, max_length=32)
+    encryption: str = Field(default="psk2+ccmp", min_length=3, max_length=32)
+    # 8 chars = WPA2-PSK minimum; 63 chars = max passphrase length.
+    encryption_key: str = Field(..., min_length=8, max_length=63)
+    network: str = Field(default="lan", min_length=1, max_length=15)
+
+
+class ApTestSeedRequest(BaseModel):
+    """Test-only payload to inject a discovered AP into the mock router.
+
+    The production discovery path is the mDNS poller in the orchestrator;
+    the routing service only sees the result. This endpoint exists so
+    pytest can drive the full state machine without simulating
+    multicast. Reject 404 when `router_instance` isn't a MockRouter.
+    """
+
+    mac: str = Field(..., pattern=_MAC_PATTERN)
+    model: Optional[str] = None
+    serial: Optional[str] = None
+    version: Optional[str] = None
+    last_ip: Optional[str] = None
+    hostname: Optional[str] = None
 
 
 # --- Response models ---

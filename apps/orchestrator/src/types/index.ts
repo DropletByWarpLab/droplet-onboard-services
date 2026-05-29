@@ -19,6 +19,26 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
   // Set on tool-role messages to correlate the result with the request.
   tool_call_id?: string;
+  /**
+   * WARP-458 — concatenated deep-reasoning trace (`<reasoning>` segments
+   * joined by blank line; or the provider-native reasoning field, when
+   * surfaced separately). Only set on assistant messages where the model
+   * produced a reasoning trace; nullable everywhere else. The route layer
+   * persists this verbatim to `ChatMessage.reasoning` (regardless of the
+   * per-request `captureReasoning` flag — that flag gates EMISSION on the
+   * wire, not PERSISTENCE, so the dashboard can lazy-load reasoning on
+   * demand).
+   */
+  reasoning?: string;
+  /**
+   * WARP-458 — provider-native reasoning field, used by ai-gateway when
+   * the upstream provider surfaces reasoning separately (LiteLLM's
+   * `reasoning_content` for OpenAI o-series, Anthropic extended-thinking
+   * when exposed). The agent loop reads this off the response and folds
+   * it into the parsed trace alongside any inline `<reasoning>` segments
+   * in `content`. Not part of the request side — only the response.
+   */
+  reasoning_content?: string;
 }
 
 export interface ToolDefinition {
@@ -74,39 +94,11 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
-// --- Session types ---
-
-export interface SessionInfo {
-  id: string;
-  title: string;
-  model: string;
-  created_at: number;
-  updated_at: number;
-  message_count: number;
-  system_prompt: string | null;
-}
-
-export interface SessionDetail extends SessionInfo {
-  messages: SessionMessage[];
-}
-
-export interface SessionMessage {
-  role: string;
-  content: string;
-  timestamp: number;
-}
-
-export interface SessionListResponse {
-  sessions: SessionInfo[];
-}
-
-export interface SessionChatRequest {
-  message: string;
-  stream?: boolean;
-  temperature?: number;
-  max_tokens?: number;
-  provider?: string;
-}
+// WARP-311: legacy SessionInfo / SessionDetail / SessionListResponse /
+// SessionChatRequest types were removed alongside the
+// `/api/llm/sessions/*` proxy routes. Persistent conversation state
+// now lives in the orchestrator's own Postgres (see
+// `services/chat-persistence.service.ts`).
 
 // --- Device types ---
 
@@ -180,6 +172,10 @@ export interface HealthResponse {
     router: boolean;
     frigate: boolean;
     switch: boolean;
+    // PyPortal Titano screen (services/oled-display). `true` when the
+    // service is up — note this stays `true` even in "simulated" mode
+    // (no physical USB device); query /display/status for the backend.
+    display: boolean;
   };
 }
 

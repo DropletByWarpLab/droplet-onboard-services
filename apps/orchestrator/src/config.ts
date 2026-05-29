@@ -105,6 +105,27 @@ const envSchema = z.object({
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
 
+  // --- Coverage extender APs (WARP-446) ---
+  // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
+  // MATTER_* warning above for why — same risk).
+  //
+  // DISCOVERY_INTERVAL — mDNS scan cadence in seconds. The orchestrator's
+  //   discovery poller (cron-runtime.service.ts) queries
+  //   `_droplet-ap._tcp.local` and upserts each new MAC into ApDevice.
+  //   10s tracks new-AP-plugged-in within the 30s AC #1 budget.
+  // APPROVAL_TIMEOUT — safe_apply timeout passed to the routing service
+  //   on POST /aps/:mac/approve. 60s matches the rest of the codebase's
+  //   confirmation-token TTL convention (WARP-41).
+  // DAWN_ENABLED — master switch to disable dawn on every AP. Default on.
+  //   Off only as a debugging escape hatch when an operator suspects
+  //   dawn is the cause of an issue.
+  // DEFAULT_TXPOWER — dBm cap on extender radios. Keeps household-floor
+  //   cells small enough for clean roaming.
+  DROPLET_AP_DISCOVERY_INTERVAL: z.coerce.number().default(10),
+  DROPLET_AP_APPROVAL_TIMEOUT: z.coerce.number().default(60),
+  DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
+  DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
@@ -123,6 +144,92 @@ const envSchema = z.object({
 
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
+
+  // --- Service-principal bearer tokens (inbound) ---
+  // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that
+  // need LLM + MCP tool dispatch MUST call the orchestrator's `/api/llm/chat`
+  // route, not ai-gateway directly. The orchestrator is the only thing that
+  // owns the agent loop + tool routing.
+  //
+  // SERVICE_TOKEN_VOICE — recognised by authMiddleware for the
+  // voice-io / voice-assistant service. When the incoming Bearer matches,
+  // the request is treated as a `service` role principal (see jwt.service.ts
+  // Role union). Empty default means "no service token configured" — voice
+  // calls will 401 until an operator sets it (matches the safe default for
+  // SERVICE_SECRET above).
+  //
+  // To rotate: change the value here AND in voice-io's compose env in
+  // lockstep. Both must agree or voice → orchestrator handshake fails.
+  SERVICE_TOKEN_VOICE: z.string().default(""),
+
+  // SERVICE_TOKEN_MCP — WARP-339. Same shape as SERVICE_TOKEN_VOICE,
+  // for mcp-server's outbound calls back to the orchestrator's REST
+  // surface (matter, audit-log, safety-tier). The mcp-server runs as
+  // a sibling container and its `createHttpClient("orchestrator")`
+  // attaches this value as a Bearer on every request.
+  //
+  // The dual-token shape (one per service consumer) rather than a
+  // shared "internal" token gives us per-service rotation and a
+  // clean audit trail (matchServiceToken sets distinct AuthUser
+  // principals — `_service:voice` vs `_service:mcp` — so request
+  // logs attribute correctly even when both speak at the same time).
+  //
+  // To rotate: change the value here AND in mcp-server's compose
+  // env (ORCHESTRATOR_TOKEN) in lockstep.
+  SERVICE_TOKEN_MCP: z.string().default(""),
+
+  // SERVICE_TOKEN_EMAIL — WARP-465. Bearer the email-indexer service
+  // presents on POST /api/email/_ingest/* and PATCH
+  // /api/email/_ingest/drafts/:id. authMiddleware's matchServiceToken
+  // sets `_service:email`. To rotate: change here AND in the
+  // email-indexer's compose env (ORCHESTRATOR_SERVICE_TOKEN).
+  SERVICE_TOKEN_EMAIL: z.string().default(""),
+
+  // ORCHESTRATOR_SAMPLER_TOKEN — WARP-468 / WARP-470. Bearer presented
+  // by the routing service's egress_meter (off-LAN sample POST) and
+  // scheduler (throughput sample POST). Both run with network_mode: host
+  // so they reach the orchestrator on localhost:3000 rather than via
+  // compose service DNS. authMiddleware's matchServiceToken sets
+  // `_service:sampler` for either source. To rotate: change here AND in
+  // services/routing's compose env (ORCHESTRATOR_SAMPLER_TOKEN).
+  ORCHESTRATOR_SAMPLER_TOKEN: z.string().default(""),
+
+  // AI_GATEWAY_SAMPLER_TOKEN — WARP-468. Bearer presented by ai-gateway's
+  // off_lan_gating middleware on GET /api/network/off-lan and
+  // /api/settings/off-lan to read the cloud_model_escape posture. The
+  // gate fails closed (451) without a valid reading, so a missing or
+  // mis-registered token blocks every cloud-model call. authMiddleware's
+  // matchServiceToken sets `_service:ai-gateway`. To rotate: change here
+  // AND in services/ai-gateway's compose env (AI_GATEWAY_SAMPLER_TOKEN).
+  AI_GATEWAY_SAMPLER_TOKEN: z.string().default(""),
+
+  // --- Embedded Plane PM stack (ADR-010 / WARP-501) ---
+  // Service principals reach Plane via the orchestrator — never
+  // direct from the dashboard or external MCP. These three vars
+  // identify and authenticate that channel:
+  //
+  //   DROPLET_PM_API_URL — Plane API base URL on the compose network
+  //   (default `http://pm-api:8000`). Used by pm-rbac.service.ts +
+  //   pm-onboard route + pm.client.ts for all outbound calls. Missing
+  //   → URL constructor throws → fail-closed (per pm-rbac module
+  //   contract).
+  //
+  //   DROPLET_PM_ADMIN_TOKEN — Plane admin API key. Sent as
+  //   `X-API-Key` on every PATCH/POST. Rotation: change here AND in
+  //   the PM compose env (pm-api service).
+  //
+  //   DROPLET_PM_WEB_URL — Public-facing Plane URL (used by the
+  //   onboarding wizard's success card to deep-link the user to
+  //   their newly-provisioned workspace).
+  DROPLET_PM_API_URL: z.string().default(""),
+  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
+  DROPLET_PM_WEB_URL: z.string().default(""),
+
+  // DROPLET_PM_WEBHOOK_SECRET — HMAC signing key for Plane webhooks
+  // delivered to POST /api/pm/webhook (WARP-511). Empty default —
+  // the webhook handler fail-CLOSEs (503) when this is unset, per
+  // engineering-handbook 04-coding-standards/security-rules.md §1.
+  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
 
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push

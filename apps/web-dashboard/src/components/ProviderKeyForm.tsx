@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { Check, Key, Trash2 } from "lucide-react";
 import { saveProviderKey, deleteProviderKey } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface ProviderKeyFormProps {
   provider: string;
@@ -20,6 +22,11 @@ export function ProviderKeyForm({
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-291: confirm before deleting an API key. Deletion is
+  // recoverable (the user re-pastes the key) but cancelling all
+  // in-flight assistant turns + paying for a fresh API key call shape
+  // is a real cost, so a confirm step is warranted.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const handleSave = async () => {
     if (!apiKey.trim()) return;
@@ -30,18 +37,23 @@ export function ProviderKeyForm({
       setApiKey("");
       onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save key");
+      // WARP-294: keep raw err out of the DOM — orchestrator can
+      // return terse strings (HTTP statuses, validator codes).
+      setError(translateError(err, "provider-key"));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDelete = async () => {
+  const performDelete = async () => {
     try {
       await deleteProviderKey(provider);
+      setConfirmingDelete(false);
       onUpdate();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete key");
+      // WARP-294: same — translate before rendering.
+      setError(translateError(err, "provider-key"));
+      throw err;
     }
   };
 
@@ -58,7 +70,7 @@ export function ProviderKeyForm({
               <Check size={14} /> Configured
             </span>
             <button
-              onClick={handleDelete}
+              onClick={() => setConfirmingDelete(true)}
               className="p-1.5 rounded-full text-label-tertiary hover:text-system-red hover:bg-system-red/10 transition-colors"
               aria-label="Delete key"
             >
@@ -86,8 +98,20 @@ export function ProviderKeyForm({
       </div>
 
       {error && (
-        <p className="mt-2 type-footnote text-system-red">{error}</p>
+        <p className="mt-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+          {error}
+        </p>
       )}
+
+      <ConfirmDialog
+        open={confirmingDelete}
+        onConfirm={performDelete}
+        onCancel={() => setConfirmingDelete(false)}
+        title={`Remove ${label} API key?`}
+        description="The assistant will stop using this provider until you paste a new key. Your saved key cannot be recovered after this."
+        confirmLabel="Remove key"
+        variant="destructive"
+      />
     </div>
   );
 }

@@ -82,18 +82,20 @@ describe("BrainMemoryTab", () => {
       json: async () => ({}),
       blob: async () => new Blob(),
     });
-    // Suppress confirm() in jsdom
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<BrainMemoryTab />);
     const deleteBtn = await screen.findByTestId("brain-delete");
+    // WARP-291: clicking opens a ConfirmDialog; confirm to fire the DELETE.
     fireEvent.click(deleteBtn);
+    const dialog = await screen.findByRole("dialog", { name: /Delete .*?brain memory/i });
+    const confirmBtn = dialog.querySelector('button.bg-system-red') as HTMLButtonElement;
+    expect(confirmBtn).not.toBeNull();
+    fireEvent.click(confirmBtn);
     await waitFor(() => {
       expect(authFetchMock).toHaveBeenCalled();
     });
     expect(
       await screen.findByRole("status")
     ).toHaveTextContent(/Delete will be online once/);
-    confirmSpy.mockRestore();
   });
 
   it("surfaces a friendly 'coming soon' message when export returns 404", async () => {

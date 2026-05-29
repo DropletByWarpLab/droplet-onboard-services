@@ -1,10 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import { X } from "lucide-react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
+import { Dialog } from "@/components/Dialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
 
 interface Props {
   open: boolean;
@@ -37,6 +40,40 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
   const [endsAt, setEndsAt] = useState("");
   const [allDay, setAllDay] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  const headingId = useId();
+
+  /**
+   * WARP-306: when the user moves the start time, slide the end time by the
+   * same delta so the event's duration is preserved. The previous behavior
+   * left the end pinned, which meant a quick "push this meeting an hour
+   * later" became a two-field operation (and silently created start>end
+   * validation errors when the user forgot the second edit).
+   *
+   * Editing the end field directly is not overridden — `setEndsAt` is still
+   * the bare setter on that input, so a user explicitly stretching or
+   * shortening the duration keeps full control.
+   */
+  function handleStartChange(nextStart: string) {
+    const prevStartMs = new Date(startsAt).getTime();
+    const prevEndMs = new Date(endsAt).getTime();
+    const nextStartMs = new Date(nextStart).getTime();
+    // Only slide when every input parses cleanly AND the previous duration
+    // was non-negative; otherwise leave end alone so the validation toast
+    // at save time still fires for genuinely broken states.
+    if (
+      Number.isFinite(prevStartMs) &&
+      Number.isFinite(prevEndMs) &&
+      Number.isFinite(nextStartMs) &&
+      prevEndMs >= prevStartMs
+    ) {
+      const durationMs = prevEndMs - prevStartMs;
+      const nextEnd = new Date(nextStartMs + durationMs);
+      setEndsAt(isoToLocalInput(nextEnd.toISOString()));
+    }
+    setStartsAt(nextStart);
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -59,7 +96,8 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
     }
   }, [open, initial]);
 
-  if (!open) return null;
+  // No early return — pass `open` through to <Dialog>, which handles
+  // mount/unmount via its AnimatePresence wrapper.
 
   async function handleSave() {
     if (!title.trim()) {
@@ -103,40 +141,47 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
     }
   }
 
-  async function handleDelete() {
+  function handleDelete() {
     if (!editing || !initial) return;
-    if (!confirm(`Delete "${initial.title}"?`)) return;
+    setConfirmingDelete(true);
+  }
+
+  async function performDelete() {
+    if (!initial) return;
     setSaving(true);
     try {
       await deleteEvent(initial.id);
       toast("Event deleted", "success");
+      setConfirmingDelete(false);
       onSaved();
       onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Delete failed";
       toast(msg, "error");
+      throw err;
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div
-        className="dp-card w-full max-w-md mx-4 p-5 max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="md">
+      <div className="p-5 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="type-title text-label-primary">
+          <h2 id={headingId} className="type-title-3 text-label-primary">
             {editing ? "Edit event" : "New event"}
           </h2>
-          <button onClick={onClose} className="text-label-tertiary hover:text-label-primary">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm p-1"
+          >
             <X size={18} />
           </button>
         </div>
 
         {externallySynced && (
-          <div className="mb-3 p-2 rounded type-caption bg-system-orange/10 text-system-orange">
+          <div className="mb-3 p-2 rounded type-caption-1 bg-system-orange/10 text-system-orange">
             This event is synced from an external calendar and can't be edited
             here. Make changes in the source calendar and they'll sync back.
           </div>
@@ -144,7 +189,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
 
         <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1">
-            <span className="type-caption text-label-secondary">Title</span>
+            <span className="type-caption-1 text-label-secondary">Title</span>
             <input
               type="text"
               value={title}
@@ -167,17 +212,17 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
 
           <div className="grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1">
-              <span className="type-caption text-label-secondary">Starts</span>
+              <span className="type-caption-1 text-label-secondary">Starts</span>
               <input
                 type="datetime-local"
                 value={startsAt}
-                onChange={(e) => setStartsAt(e.target.value)}
+                onChange={(e) => handleStartChange(e.target.value)}
                 disabled={externallySynced}
                 className="dp-input"
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="type-caption text-label-secondary">Ends</span>
+              <span className="type-caption-1 text-label-secondary">Ends</span>
               <input
                 type="datetime-local"
                 value={endsAt}
@@ -189,19 +234,23 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
           </div>
 
           <label className="flex flex-col gap-1">
-            <span className="type-caption text-label-secondary">Location</span>
-            <input
-              type="text"
+            <span className="type-caption-1 text-label-secondary">Location</span>
+            {/* WARP-307: fuzzy autocomplete via the orchestrator's
+                Nominatim proxy. Falls back to plain free-text entry
+                whenever the proxy returns no suggestions (offline,
+                rate-limited, OSM down) — the field stays usable. */}
+            <PlaceCombobox
               value={location}
-              onChange={(e) => setLocation(e.target.value)}
+              onChange={setLocation}
               disabled={externallySynced}
               className="dp-input"
               maxLength={500}
+              placeholder="Location"
             />
           </label>
 
           <label className="flex flex-col gap-1">
-            <span className="type-caption text-label-secondary">Notes</span>
+            <span className="type-caption-1 text-label-secondary">Notes</span>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -238,6 +287,16 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
           </div>
         </div>
       </div>
-    </div>
+
+      <ConfirmDialog
+        open={confirmingDelete}
+        onConfirm={performDelete}
+        onCancel={() => setConfirmingDelete(false)}
+        title={initial ? `Delete "${initial.title}"?` : "Delete event?"}
+        description="This event is removed from your calendar. Anyone you invited won't see it anymore. This cannot be undone."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
+    </Dialog>
   );
 }

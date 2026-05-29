@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2, Users, X } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
 import {
@@ -26,6 +28,7 @@ export default function SettingsPage() {
   const [newDisplayName, setNewDisplayName] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [userError, setUserError] = useState<string | null>(null);
+  const [deleteUserTarget, setDeleteUserTarget] = useState<string | null>(null);
 
   const loadKeys = useCallback(async () => {
     try {
@@ -77,24 +80,46 @@ export default function SettingsPage() {
     }
   };
 
-  const handleDeleteUser = async (username: string) => {
+  const handleDeleteUser = (username: string) => {
     if (username === currentUser?.username) {
       setUserError("You cannot delete your own account");
       return;
     }
-    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    setDeleteUserTarget(username);
+  };
+
+  const performDeleteUser = async () => {
+    const username = deleteUserTarget;
+    if (!username) return;
     try {
       await apiDeleteUser(username);
+      setDeleteUserTarget(null);
       await loadUsers();
     } catch (err: any) {
       setUserError(err.message || "Failed to delete user");
+      throw err;
     }
   };
 
-  return (
-    <div className="p-6 lg:p-8 max-w-4xl">
-      <h1 className="type-large-title text-label-primary mb-8">Settings</h1>
+  // Status chip — surfaces the device's overall health so the operator
+  // always knows what posture they're configuring. Falls back to neutral
+  // before /api/orchestrator/health has resolved.
+  const settingsStatus = health
+    ? { tone: "ok" as const, label: `${health.version ?? "v0.1.0"} · ${device?.hostname ?? "droplet"}` }
+    : { tone: "neutral" as const, label: "Loading device info…" };
 
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Admin" },
+          { label: "Settings" },
+        ]}
+        status={settingsStatus}
+      />
+
+      <div className="p-6 lg:p-8 max-w-4xl">
       {/* Appearance */}
       <section className="mb-10">
         <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
@@ -179,7 +204,12 @@ export default function SettingsPage() {
               <span className="type-subheadline text-label-tertiary">No users found</span>
             </div>
           ) : (
-            users.map((u) => (
+            users.map((u) => {
+              // aria-label mirrors the row's primary visible identifier so
+              // screen-reader announcements match what sighted users see
+              // (WARP-220 pattern; applied site-wide in WARP-292).
+              const label = u.displayName || u.id;
+              return (
               <div key={u.id} className="dp-row group">
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <div className="w-8 h-8 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
@@ -193,9 +223,15 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 {u.id !== currentUser?.username && (
+                  // Always rendered (no opacity-gate on hover) so the
+                  // action is discoverable for touch + keyboard users.
+                  // p-2.5 → 14 px icon + 20 px padding = 34 px hit-target,
+                  // clearing the ≥ 32 px ui-ux floor.
                   <button
                     onClick={() => handleDeleteUser(u.id)}
-                    className="p-1.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 opacity-0 group-hover:opacity-100 transition-all"
+                    aria-label={`Delete user ${label}`}
+                    className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                    title="Delete"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -206,7 +242,8 @@ export default function SettingsPage() {
                   </span>
                 )}
               </div>
-            ))
+              );
+            })
           )}
         </div>
       </section>
@@ -225,7 +262,7 @@ export default function SettingsPage() {
             label="Services"
             value={
               health
-                ? `DB: ${health.services.db ? "OK" : "Down"} | Cache: ${health.services.redis ? "OK" : "Down"} | AI: ${health.services.aiGateway ? "OK" : "Down"}`
+                ? `DB: ${health.services.db ? "OK" : "Down"} | Cache: ${health.services.redis ? "OK" : "Down"} | AI: ${health.services.aiGateway ? "OK" : "Down"} | Screen: ${health.services.display ? "OK" : "Down"}`
                 : "Loading..."
             }
           />
@@ -243,9 +280,9 @@ export default function SettingsPage() {
         <div className="dp-group mb-3">
           <div className="dp-row">
             <div>
-              <p className="type-body text-label-primary">Ollama (Local — Jetson)</p>
+              <p className="type-body text-label-primary">Ollama (on-device)</p>
               <p className="type-caption-1 text-label-tertiary mt-0.5">
-                Runs on your Jetson device over LAN
+                Local LLM inference, never leaves your network
               </p>
             </div>
             <span
@@ -277,6 +314,20 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      <ConfirmDialog
+        open={deleteUserTarget !== null}
+        onConfirm={performDeleteUser}
+        onCancel={() => setDeleteUserTarget(null)}
+        title={
+          deleteUserTarget
+            ? `Delete user "${deleteUserTarget}"?`
+            : "Delete user?"
+        }
+        description="The account, sessions, and per-user state are removed. This cannot be undone."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
+      </div>
     </div>
   );
 }

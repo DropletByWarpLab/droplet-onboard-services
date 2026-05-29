@@ -101,6 +101,39 @@ Checks: container status, PostgreSQL, Nextcloud DB, Redis, MQTT, orchestrator AP
 
 ---
 
+## Local validation (ship-check)
+
+```bash
+./scripts/test/ship-check.sh           # seven static checks (~2 min)
+./scripts/test/ship-check.sh --full    # adds Ubuntu-container smoke (~5-15 min)
+./scripts/test/ship-check.sh tsc-full  # iterate on a single failure
+```
+
+The canonical local validation gate. Run **before every push** that touches a Dockerfile, compose file, `docker/frigate/*.yml`, `scripts/*.sh`, `scripts/lib/*.sh`, or any orchestrator TypeScript that ships in a container. Run with `--full` **before pushing to a real device** for the bash-layer end-to-end smoke that catches drift between local macOS and Ubuntu LTS.
+
+Each check exists because a specific bug class shipped to droplet-sys during the 2026-05-25 factory-reset (PRs #261, #263) and `npm test` / `npm run dev` didn't catch it:
+
+| Check | One-line | Bug class |
+|-------|----------|-----------|
+| `tsc-full` | `npx tsc --noEmit` in every workspace with a Dockerfile | WARP-329 — test-fixture type errors that `npm run dev` skips but `RUN npm run build` catches |
+| `compose-config` | `docker compose config --quiet` against `.env.example` | YAML breakage, missing env refs, malformed service defs |
+| `frigate-env-scan` | Parse `docker/frigate/config.yml` for `{VAR}` substitutions and assert every one resolves | WARP-446 — operator-specific env in committed config raises KeyError at Frigate boot, restart-loops the stack |
+| `shellcheck` | shellcheck warning-severity across `setup.sh`, `factory-reset.sh`, `lib/*.sh`, with **no global excludes** — every waiver is a per-line `# shellcheck disable=SCxxxx` directive with rationale (WARP-486) | bash bugs caught by static analysis (parse errors, quoting, declared-outside-function) |
+| `matter-env-allowlist` | Delegates to `scripts/test-security.sh` Test 7 | architecture-guard rule 11 — `MATTER_*` env outside the allowlist collides with matter.js's auto-imported `VariableService` and crashes controller init |
+| `exec-bits` | `git ls-files --stage` assert mode 100755 for every operator-facing script (setup, factory-reset, camera-drivers, install-device-bridge, ship-check, ship-check.test, openwrt/scripts/upgrade-router) | WARP-487 — index-100644 ships to main, so `./<path>/<name>.sh` invocations documented in the script's own `--help` are silent no-ops on filesystems that honour the index bit (WARP-489 extended the sweep to `openwrt/scripts/`) |
+| `stale-repo-names` | Walk curated user-facing surfaces (README, service READMEs/TESTING.md, top-level `scripts/*.sh`, `apps/orchestrator/src/**/*.ts`, `services/ai-gateway/**/*.py`, `services/voice-io/**/*.py`, `docker/docker-compose.yml`) and FAIL on any reference to the legacy repo names `inference-engine` / `droplet-jetson-ai`; canonical name is `droplet-local-LLM`. Allowlists the mDNS hostname `inference-engine.local` and the compose project-name + container-label call sites tied to it | WARP-494 — stale repo-name refs accumulating in user-facing surfaces after the canonical DropletByWarpLab remote rename; new refs reach for the old name out of habit |
+| `docker-build-smoke` (`--full` only) | `setup.sh --skip-docker --skip-build --skip-start --skip-drivers` inside a fresh `ubuntu:24.04` container | PR #263 set-u/RETURN-trap class + bash-version drift between macOS and the production target host |
+
+Each subcommand can be invoked individually (`./scripts/test/ship-check.sh shellcheck`) for fast iteration on a single failure. `--help` lists everything.
+
+**Regression test suite** for ship-check itself (every check has a synthetic mutation that proves the check would have FAILED the bug it exists to catch):
+
+```bash
+./scripts/test/ship-check.test.sh
+```
+
+---
+
 ## Docker group note
 
 After running `setup.sh`, if you were just added to the `docker` group, Docker commands require `sudo` until you re-login:

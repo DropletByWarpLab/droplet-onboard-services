@@ -77,16 +77,39 @@ set_env_if_blank() {
 }
 
 # Pull secrets from the repo's top-level .env if present. setup.sh writes
-# DEVICE_SECRET_KEY and OPENWRT_PASSWORD there; we mirror them into the
-# bridge env file so the bridge + timer both have the auth token and SSH
-# password without operators having to double-enter them.
+# SERVICE_TOKEN_DISPLAY, DEVICE_SECRET_KEY, and OPENWRT_PASSWORD there;
+# we mirror them into the bridge env file so the bridge + timer have the
+# auth token and SSH password without operators double-entering them.
 REPO_ENV="$REPO_ROOT/.env"
 if [[ -f "$REPO_ENV" ]]; then
   # shellcheck disable=SC1090
   set -a; . "$REPO_ENV"; set +a
-  if [[ -n "${DEVICE_SECRET_KEY:-}" ]]; then
+
+  # WARP-165: BRIDGE_AUTH_TOKEN moved from DEVICE_SECRET_KEY (the
+  # FIPS-sealed AES-256 master encryption key) to a dedicated
+  # SERVICE_TOKEN_DISPLAY. On a fresh install just write the new value;
+  # on an existing install where the bridge env still has the old
+  # DEVICE_SECRET_KEY value, rotate it in place so the orchestrator
+  # (which now sends SERVICE_TOKEN_DISPLAY) and the bridge agree.
+  if [[ -n "${SERVICE_TOKEN_DISPLAY:-}" ]]; then
+    current_bridge_token=$(grep -E '^BRIDGE_AUTH_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+    if [[ -z "$current_bridge_token" ]]; then
+      set_env_if_blank "BRIDGE_AUTH_TOKEN" "$SERVICE_TOKEN_DISPLAY"
+    elif [[ -n "${DEVICE_SECRET_KEY:-}" ]] && [[ "$current_bridge_token" = "$DEVICE_SECRET_KEY" ]]; then
+      # Stale: bridge still using the master key. Rotate to the new
+      # dedicated token; operator doesn't need to do anything manual.
+      sed -i -E "s|^BRIDGE_AUTH_TOKEN=.*|BRIDGE_AUTH_TOKEN=${SERVICE_TOKEN_DISPLAY}|" "$ENV_FILE"
+      log "rotated BRIDGE_AUTH_TOKEN from DEVICE_SECRET_KEY to SERVICE_TOKEN_DISPLAY (WARP-165)"
+    fi
+    # Else: operator set a custom value; leave it alone.
+  elif [[ -n "${DEVICE_SECRET_KEY:-}" ]]; then
+    # Repo .env predates SERVICE_TOKEN_DISPLAY (no setup.sh run yet
+    # against this build). Fall back to the old behavior so the bridge
+    # is never fail-open; setup.sh's next migrate_env will populate the
+    # new token and a subsequent install-device-bridge run will rotate.
     set_env_if_blank "BRIDGE_AUTH_TOKEN" "$DEVICE_SECRET_KEY"
   fi
+
   if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
     set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
   fi

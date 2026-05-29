@@ -16,6 +16,8 @@ import {
   fetchKnownFaces,
 } from "@/lib/api";
 import type { KnownFace } from "@/lib/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 /**
  * Known-faces management (Phase 7.5).
@@ -41,6 +43,11 @@ export default function PeoplePage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [deleteFaceTarget, setDeleteFaceTarget] = useState<KnownFace | null>(null);
+  const [deleteImageTarget, setDeleteImageTarget] = useState<
+    { face: KnownFace; imageName: string } | null
+  >(null);
+  const { toast } = useToast();
 
   const refresh = async () => {
     setLoading(true);
@@ -58,19 +65,21 @@ export default function PeoplePage() {
     void refresh();
   }, []);
 
-  const handleDeleteFace = async (face: KnownFace) => {
-    if (
-      !confirm(
-        `Remove "${face.name}" from face recognition? This drops all ${face.images.length} training image${face.images.length === 1 ? "" : "s"}.`,
-      )
-    )
-      return;
+  const handleDeleteFace = (face: KnownFace) => {
+    setDeleteFaceTarget(face);
+  };
+
+  const performDeleteFace = async () => {
+    const face = deleteFaceTarget;
+    if (!face) return;
     setBusy(face.name);
     try {
       await deleteKnownFace(face.name);
+      setDeleteFaceTarget(null);
       await refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Delete failed");
+      toast(e instanceof Error ? e.message : "Delete failed", "error");
+      throw e;
     } finally {
       setBusy(null);
     }
@@ -78,23 +87,34 @@ export default function PeoplePage() {
 
   const handleDeleteImage = async (face: KnownFace, imageName: string) => {
     if (face.images.length <= 1) {
-      if (
-        !confirm(
-          `That's the last training image for "${face.name}". Removing it will delete the person entirely.`,
-        )
-      )
-        return;
+      // Last training image — confirm via ConfirmDialog. Otherwise fire
+      // directly (per-image deletes don't need a separate confirm step;
+      // the operator is on a focused per-person panel).
+      setDeleteImageTarget({ face, imageName });
+      return;
     }
+    await performDeleteImageInternal(face, imageName);
+  };
+
+  const performDeleteImageInternal = async (face: KnownFace, imageName: string) => {
     const key = `${face.name}/${imageName}`;
     setBusy(key);
     try {
       await deleteFaceImage(face.name, imageName);
       await refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Delete failed");
+      toast(e instanceof Error ? e.message : "Delete failed", "error");
+      throw e;
     } finally {
       setBusy(null);
     }
+  };
+
+  const performDeleteImageConfirm = async () => {
+    const target = deleteImageTarget;
+    if (!target) return;
+    await performDeleteImageInternal(target.face, target.imageName);
+    setDeleteImageTarget(null);
   };
 
   return (
@@ -110,8 +130,9 @@ export default function PeoplePage() {
         <div className="flex-1 min-w-0">
           <h1 className="type-large-title text-label-primary">People</h1>
           <p className="type-subheadline text-label-tertiary mt-0.5">
-            Faces Frigate has been trained to recognise. Add new ones from the{" "}
-            <span className="font-mono">Events</span> page by tagging a person.
+            Faces this Droplet has been trained to recognise. Add new ones
+            from the <span className="font-mono">Events</span> page by tagging
+            a person.
           </p>
         </div>
         <button
@@ -144,9 +165,8 @@ export default function PeoplePage() {
             No known faces
           </h2>
           <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Either Frigate&apos;s <span className="font-mono">face_recognition</span> isn&apos;t
-            enabled in config, or no one has been tagged yet. Tag someone from
-            an event on the Events page to start.
+            Face recognition isn&apos;t enabled, or no one has been tagged
+            yet. Tag someone from an event on the Events page to start.
           </p>
         </div>
       ) : (
@@ -231,6 +251,38 @@ export default function PeoplePage() {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={deleteFaceTarget !== null}
+        onConfirm={performDeleteFace}
+        onCancel={() => setDeleteFaceTarget(null)}
+        title={
+          deleteFaceTarget
+            ? `Remove "${deleteFaceTarget.name}" from face recognition?`
+            : "Remove person?"
+        }
+        description={
+          deleteFaceTarget
+            ? `This drops all ${deleteFaceTarget.images.length} training image${deleteFaceTarget.images.length === 1 ? "" : "s"}. The system will stop recognising them.`
+            : "Drops all training images for this person."
+        }
+        confirmLabel="Remove"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={deleteImageTarget !== null}
+        onConfirm={performDeleteImageConfirm}
+        onCancel={() => setDeleteImageTarget(null)}
+        title={
+          deleteImageTarget
+            ? `Remove the last training image for "${deleteImageTarget.face.name}"?`
+            : "Remove last image?"
+        }
+        description="This is the last image — removing it deletes the person entirely from face recognition."
+        confirmLabel="Remove person"
+        variant="destructive"
+      />
     </div>
   );
 }

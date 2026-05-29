@@ -2,12 +2,12 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = { type: "object", properties: {}, additionalProperties: false } as const;
 
-// The orchestrator's aggregate-health endpoint lives at /api/health.
-// In tools-core we route this through the routing client (which talks to
-// the orchestrator) — when the MCP server runs in-proc it can be wired
-// to a local handler instead.
+// The orchestrator's rolled-up snapshot lives at GET /api/orchestrator/health
+// (apps/orchestrator/src/routes/health.ts) — same shape the dashboard's
+// health pill reads. mcp-server's createHttpClient auto-injects a service-
+// principal JWT on the `orchestrator` target.
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const res = await ctx.http.routing.get("/health/aggregate", { headers: { Accept: "application/json" } });
+  const res = await ctx.http.orchestrator.get("/api/orchestrator/health", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {
       ok: false,

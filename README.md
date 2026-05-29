@@ -11,7 +11,7 @@
   Orchestration, web dashboard, AI routing, file management, and file sync — all on-device.
 </p>
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-jetson-ai`](../droplet-jetson-ai). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
 
 ![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
@@ -176,7 +176,7 @@ edge-platform/
 
 ```
 Browser / Mobile App                     External MCP clients
-        │                                (inference-engine, Claude Desktop, …)
+        │                                (droplet-local-LLM, Claude Desktop, …)
         ▼                                          │
    ┌─────────┐                                     │
    │  Nginx   │  :80  — reverse proxy (nginx:alpine)
@@ -209,7 +209,7 @@ Browser / Mobile App                     External MCP clients
    └─────────────────────────────────────┘
         │
         ▼  (LAN or PCIe)
-   inference-engine   — Ollama :11434
+   droplet-local-LLM  — Ollama :11434
 ```
 
 LLM tool dispatch flows through `@droplet/mcp-server` — the orchestrator
@@ -419,7 +419,7 @@ npm run dev
 cd services/ai-gateway
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-JETSON_OLLAMA_URL=http://localhost:11434 uvicorn main:app --reload --port 8000
+OLLAMA_URL=http://localhost:11434 uvicorn main:app --reload --port 8000
 
 # Web Dashboard (Next.js 14.2 dev server, port 3001)
 cd apps/web-dashboard
@@ -436,7 +436,7 @@ npm run dev
 | `REDIS_URL` | `redis://cache:6379` | Redis 7 connection string |
 | `MQTT_BROKER` | `mqtt://broker:1883` | Mosquitto 2 broker URL |
 | `AI_GATEWAY_URL` | `http://ai-gateway:8000` | AI Gateway internal URL |
-| `JETSON_OLLAMA_URL` | `http://host.docker.internal:8002/proxy` | ollama-manager chat-proxy URL on the Jetson appliance. Provides tool-call observability + JSON repair + circuit breaker; ai-gateway reads `/health.limits` to size outbound concurrency. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. |
+| `OLLAMA_URL` | `http://host.docker.internal:11434` (multi-box) / `http://ollama:11434` (single-box) | Canonical chat path: direct to Ollama. ai-gateway resolves `host.docker.internal` via `extra_hosts: host-gateway` in compose. The legacy `:8002/proxy` URL (ollama-manager) still exists as an opt-in observability layer — tool-call JSON repair + circuit breaker + concurrency limits via `/health.limits` — point this var there only if you want those signals and can tolerate the 120 s upstream read timeout that bites heavy agent-loop prompts on CPU. |
 | `FILES_ROOT` | `/data/files` | File storage root |
 | `STORAGE_BACKEND` | `nextcloud` | `nextcloud` (WebDAV) or `legacy` (local filesystem) |
 | `NEXTCLOUD_URL` | `http://nextcloud:80` | Nextcloud 29 internal URL |
@@ -492,7 +492,7 @@ npm run test:integration       # Full stack integration (Docker Compose)
 
 | Repo | Description | Docs |
 |------|-------------|------|
-| [`inference-engine`](../inference-engine/) | GPU inference services: Ollama management, model lifecycle, GPU telemetry | [`CLAUDE.md`](../inference-engine/CLAUDE.md) |
+| [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM) | GPU inference services: Ollama management, model lifecycle, GPU telemetry | [`CLAUDE.md`](https://github.com/DropletByWarpLab/droplet-local-LLM/blob/main/CLAUDE.md) |
 | [`shared-api`](../shared-api/) | OpenAPI 3.0 specs for all services + generated TypeScript/Python clients | [`specs/`](../shared-api/specs/) |
 | [`mobile-app`](../mobile-app/) | React Native 0.74 + Expo 51 iOS/Android client | [`package.json`](../mobile-app/package.json) |
 | [`releases`](../releases/) | Version manifests, factory flash scripts, OTA update configs | [`manifests/`](../releases/manifests/) |

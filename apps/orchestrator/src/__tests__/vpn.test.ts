@@ -32,10 +32,15 @@ vi.mock("../services/openwrt.client.js", async () => {
     listVpnPeers: vi.fn(),
     createVpnPeer: vi.fn(),
     deleteVpnPeer: vi.fn(),
+    // WARP-174: resolveEndpointHost() in vpn.ts calls this when the env
+    // override is empty. Default each test to "not configured" so the
+    // env-override path stays in charge unless a test explicitly
+    // exercises the DuckDNS-fallback branch.
+    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
   };
 });
 
-import { createVpnRouter } from "../routes/vpn.js";
+import { createVpnRouter, _resetEndpointCacheForTests } from "../routes/vpn.js";
 import * as openwrt from "../services/openwrt.client.js";
 
 // In-memory Prisma stand-in for the VpnPeer table.
@@ -100,7 +105,13 @@ function createPrismaMock() {
   };
 }
 
-function buildApp(prismaMock: any, user = { username: "alice", role: "family" }) {
+// WARP-171: default test user is `owner` so all the VPN tests (which
+// historically didn't think about role) keep passing. The matrix
+// in `rbac.test.ts` is the canonical source for who-can-do-what;
+// these tests focus on the route's business logic, not the guard.
+// Tests that need a non-privileged caller pass `role: "family"`
+// explicitly.
+function buildApp(prismaMock: any, user = { username: "alice", role: "owner" }) {
   const app = express();
   app.use(express.json());
   // Inject a synthetic auth user so getUser() in the route picks it up.
@@ -118,6 +129,12 @@ function buildApp(prismaMock: any, user = { username: "alice", role: "family" })
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // WARP-174: the resolveEndpointHost() in-process cache (30s TTL) is
+  // shared across tests because it lives on a module-level let. Tests
+  // that flip WIREGUARD_ENDPOINT_HOST or fetchDuckDnsStatus expectations
+  // must drop the cache so the new state takes effect immediately;
+  // otherwise the second-of-two tests sees the first test's cached "".
+  _resetEndpointCacheForTests();
 });
 
 describe("GET /api/vpn/status", () => {
@@ -156,12 +173,17 @@ describe("GET /api/vpn/status", () => {
 
 describe("GET /api/vpn/peers", () => {
   it("scopes to the calling user's peers by default", async () => {
+    // WARP-171: explicit family-tier caller — the per-user scoping
+    // (`!isAdmin(req) ? { userId: user.username } : {}`) still
+    // applies for GETs; only write routes were tightened to
+    // owner+admin. Default test user changed to owner in WARP-171
+    // so non-WARP-171 tests don't hit the guard.
     const prisma = createPrismaMock();
     prisma.rows.push(
       { id: "p1", userId: "alice", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(1) },
       { id: "p2", userId: "bob", deviceLabel: "laptop", publicKey: "B=", assignedIp: "10.13.13.6", status: "active", createdAt: new Date(2) },
     );
-    const app = buildApp(prisma);
+    const app = buildApp(prisma, { username: "alice", role: "family" });
     const res = await request(app).get("/api/vpn/peers");
     expect(res.status).toBe(200);
     expect(res.body.peers.map((p: any) => p.id)).toEqual(["p1"]);
@@ -250,21 +272,84 @@ describe("POST /api/vpn/peers", () => {
     expect(res.body.peer.assignedIp).toBe("10.13.13.4");
   });
 
-  it("returns 503 if WIREGUARD_ENDPOINT_HOST is empty", async () => {
+  it("returns 503 if WIREGUARD_ENDPOINT_HOST is empty AND DuckDNS isn't configured", async () => {
     setupHappyPath();
     // Override config inside this test only.
     const { config } = await import("../config.js");
     const origHost = config.WIREGUARD_ENDPOINT_HOST;
     (config as any).WIREGUARD_ENDPOINT_HOST = "";
+    // DuckDNS also unconfigured — both fallback paths empty.
+    (openwrt.fetchDuckDnsStatus as any).mockResolvedValue({ configured: false });
     try {
       const app = buildApp(createPrismaMock());
       const res = await request(app)
         .post("/api/vpn/peers")
         .send({ deviceLabel: "iPhone" });
       expect(res.status).toBe(503);
+      // Error message points the customer at the wizard's Internet step
+      // (WARP-174) but still mentions WIREGUARD_ENDPOINT_HOST for the
+      // operator-override audience.
       expect(res.body.error).toMatch(/WIREGUARD_ENDPOINT_HOST/);
+      expect(res.body.error).toMatch(/DuckDNS/);
       // Routing service must NOT be called when endpoint is unset; we don't
       // want to leak a peer on the router that nobody can dial.
+      expect(openwrt.createVpnPeer).not.toHaveBeenCalled();
+    } finally {
+      (config as any).WIREGUARD_ENDPOINT_HOST = origHost;
+    }
+  });
+
+  // WARP-174: closes the "set WIREGUARD_ENDPOINT_HOST automatically when
+  // DuckDNS is configured" follow-up. When the env override is empty but
+  // the routing service reports a configured + enabled DuckDNS entry,
+  // resolveEndpointHost() derives `<subdomain>.duckdns.org` and the
+  // wizard's VPN step gets to mint peers without operator intervention.
+  it("auto-derives the endpoint from DuckDNS when env is empty (WARP-174)", async () => {
+    setupHappyPath();
+    const { config } = await import("../config.js");
+    const origHost = config.WIREGUARD_ENDPOINT_HOST;
+    (config as any).WIREGUARD_ENDPOINT_HOST = "";
+    (openwrt.fetchDuckDnsStatus as any).mockResolvedValue({
+      configured: true,
+      subdomain: "yourstudio",
+      fullDomain: "yourstudio.duckdns.org",
+      enabled: true,
+      tokenSet: true,
+    });
+    try {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app)
+        .post("/api/vpn/peers")
+        .send({ deviceLabel: "iPhone" });
+      expect(res.status).toBe(201);
+      // The minted peer's .conf must reference the DuckDNS-derived host.
+      expect(res.body.conf).toMatch(/yourstudio\.duckdns\.org/);
+    } finally {
+      (config as any).WIREGUARD_ENDPOINT_HOST = origHost;
+    }
+  });
+
+  // DuckDNS configured but the customer toggled off auto-update — treat
+  // as "not effectively configured" since the address won't track their
+  // home IP. Mirror behaviour of an empty env: 503.
+  it("treats DuckDNS-configured-but-disabled as no endpoint (WARP-174)", async () => {
+    setupHappyPath();
+    const { config } = await import("../config.js");
+    const origHost = config.WIREGUARD_ENDPOINT_HOST;
+    (config as any).WIREGUARD_ENDPOINT_HOST = "";
+    (openwrt.fetchDuckDnsStatus as any).mockResolvedValue({
+      configured: true,
+      subdomain: "yourstudio",
+      fullDomain: "yourstudio.duckdns.org",
+      enabled: false,
+      tokenSet: true,
+    });
+    try {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app)
+        .post("/api/vpn/peers")
+        .send({ deviceLabel: "iPhone" });
+      expect(res.status).toBe(503);
       expect(openwrt.createVpnPeer).not.toHaveBeenCalled();
     } finally {
       (config as any).WIREGUARD_ENDPOINT_HOST = origHost;
@@ -301,12 +386,17 @@ describe("DELETE /api/vpn/peers/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("403s when peer belongs to someone else (non-admin)", async () => {
+  it("403s a family-tier caller (WARP-171 — VPN write is owner+admin only)", async () => {
+    // Pre-WARP-171 this test exercised the per-resource ownership
+    // guard ("you can delete YOUR peer but not bob's"). After WARP-171
+    // the route-level guard rejects every family-tier caller at the
+    // door — they don't even reach the ownership check. The 403 still
+    // happens, just from `requireRole("owner", "admin")` instead.
     const prisma = createPrismaMock();
     prisma.rows.push({
       id: "p1", userId: "bob", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(),
     });
-    const app = buildApp(prisma); // alice
+    const app = buildApp(prisma, { username: "alice", role: "family" });
     const res = await request(app).delete("/api/vpn/peers/p1");
     expect(res.status).toBe(403);
   });

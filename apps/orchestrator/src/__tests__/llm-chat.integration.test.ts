@@ -8,6 +8,9 @@ import { PrismaClient } from "@prisma/client";
 // real middleware validates against Nextcloud OCS which we don't run in
 // unit tests. The mock honors `x-test-role` so RBAC tests can pretend
 // to be different roles without rebuilding the whole middleware chain.
+// WARP-171: also stub `requireRole` as a no-op so route files that now
+// import it (auth, devices, files, …) load cleanly. RBAC coverage for
+// these guards lives in `rbac.test.ts` which uses the real middleware.
 vi.mock("../middleware/auth.js", () => ({
   authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
     const role = req.headers["x-test-role"];
@@ -22,6 +25,11 @@ vi.mock("../middleware/auth.js", () => ({
     }
     next();
   },
+  requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  // WARP-485: app.ts wires the OCS-fallback Prisma reference via
+  // setAuthPrisma at boot. Stub the export so the mock isn't missing
+  // a symbol app.ts now imports.
+  setAuthPrisma: () => {},
 }));
 
 // Stub the MCP singleton so /api/llm/chat doesn't try to spawn the

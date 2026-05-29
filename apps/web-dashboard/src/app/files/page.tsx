@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
+import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
@@ -21,6 +22,7 @@ import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useFiles } from "@/lib/hooks/useFiles";
 import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
@@ -143,26 +145,38 @@ export default function FilesPage() {
   }, [fm.selectedPaths, files, handleDownload]);
 
   // ── Delete / bulk delete ──
-  const handleDelete = useCallback(
-    async (filePath: string) => {
-      if (!confirm(`Delete "${filePath.split("/").pop()}"?`)) return;
-      try {
-        await deleteFile(filePath);
-        if (selectedFile?.path === filePath) setSelectedFile(null);
-        fm.clearSelection();
-        await refresh();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : "Delete failed");
-      }
-    },
-    [selectedFile, refresh, toast, fm]
-  );
+  //
+  // Both flows route through <ConfirmDialog>. Single-file delete stores
+  // the path string in pendingDeletePath; bulk delete just stores `true`
+  // (the paths are already in `fm.selectedPaths`).
+  const [pendingDeletePath, setPendingDeletePath] = useState<string | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
-  const handleBulkDelete = useCallback(async () => {
-    if (fm.selectedCount === 0) return;
-    if (!confirm(`Move ${fm.selectedCount} item${fm.selectedCount > 1 ? "s" : ""} to trash?`)) {
-      return;
+  const handleDelete = useCallback((filePath: string) => {
+    setPendingDeletePath(filePath);
+  }, []);
+
+  const performDelete = useCallback(async () => {
+    const filePath = pendingDeletePath;
+    if (!filePath) return;
+    try {
+      await deleteFile(filePath);
+      if (selectedFile?.path === filePath) setSelectedFile(null);
+      fm.clearSelection();
+      setPendingDeletePath(null);
+      await refresh();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Delete failed");
+      throw err;
     }
+  }, [pendingDeletePath, selectedFile, refresh, toast, fm]);
+
+  const handleBulkDelete = useCallback(() => {
+    if (fm.selectedCount === 0) return;
+    setPendingBulkDelete(true);
+  }, [fm.selectedCount]);
+
+  const performBulkDelete = useCallback(async () => {
     try {
       const results = await bulkDeleteFiles(fm.selectedPaths);
       const failed = results.filter((r) => !r.ok);
@@ -171,9 +185,11 @@ export default function FilesPage() {
       }
       fm.clearSelection();
       setSelectedFile(null);
+      setPendingBulkDelete(false);
       await refresh();
     } catch (err) {
       toast(err instanceof Error ? err.message : "Bulk delete failed");
+      throw err;
     }
   }, [fm, refresh, toast]);
 
@@ -397,33 +413,44 @@ export default function FilesPage() {
     return moveDialog.paths.map((p) => p.split("/").pop() || p);
   }, [moveDialog]);
 
-  return (
-    <div className="p-6 lg:p-8 max-w-7xl">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4 gap-4">
-        <h1 className="type-large-title text-label-primary flex-shrink-0">Files</h1>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <button
-            onClick={() => setShowNewFolder(true)}
-            className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
-          >
-            <FolderPlus size={14} />
-            <span className="hidden sm:inline">New Folder</span>
-          </button>
-          <UploadButton onClick={() => fileInputRef.current?.click()} />
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files) handleUpload(e.target.files);
-              e.target.value = "";
-            }}
-          />
-        </div>
-      </div>
+  // Topbar action slot: New Folder + Upload. File-system breadcrumbs
+  // (the existing BreadcrumbNav) stay BELOW the Topbar — they're
+  // intra-page navigation (path within Files), distinct from the
+  // page-level breadcrumb (Workspace > Files).
+  const filesActions = (
+    <>
+      <button
+        onClick={() => setShowNewFolder(true)}
+        className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
+      >
+        <FolderPlus size={14} />
+        <span className="hidden sm:inline">New Folder</span>
+      </button>
+      <UploadButton onClick={() => fileInputRef.current?.click()} />
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) handleUpload(e.target.files);
+          e.target.value = "";
+        }}
+      />
+    </>
+  );
 
+  return (
+    <div>
+      <Topbar
+        crumbs={[
+          { label: "Workspace", href: "/" },
+          { label: "Files" },
+        ]}
+        actions={filesActions}
+      />
+
+      <div className="p-6 lg:p-8 max-w-7xl">
       {/* Search bar */}
       <div className="mb-4">
         <SearchBar
@@ -675,6 +702,31 @@ export default function FilesPage() {
           onConfirm={handleMoveCopyConfirm}
         />
       )}
+
+      <ConfirmDialog
+        open={pendingDeletePath !== null}
+        onConfirm={performDelete}
+        onCancel={() => setPendingDeletePath(null)}
+        title={
+          pendingDeletePath
+            ? `Delete "${pendingDeletePath.split("/").pop()}"?`
+            : "Delete file?"
+        }
+        description="The file moves to Trash. You can restore it from there until Trash is emptied."
+        confirmLabel="Delete"
+        variant="destructive"
+      />
+
+      <ConfirmDialog
+        open={pendingBulkDelete}
+        onConfirm={performBulkDelete}
+        onCancel={() => setPendingBulkDelete(false)}
+        title={`Move ${fm.selectedCount} item${fm.selectedCount > 1 ? "s" : ""} to Trash?`}
+        description="The items move to Trash. You can restore them from there until Trash is emptied."
+        confirmLabel="Move to Trash"
+        variant="destructive"
+      />
+      </div>
     </div>
   );
 }

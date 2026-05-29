@@ -29,7 +29,16 @@ def fake_io(monkeypatch, tmp_path):
     def _delete(_item_id: str) -> None:
         pass
 
-    def _mark(_item_id: str, warnings: list[str] | None = None) -> None:
+    def _mark(
+        _item_id: str,
+        *,
+        status: str = "ready",
+        failure_reason: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        # WARP-330: mark_brain_item_indexed writes status + failure_reason
+        # atomically; the stub must accept them (the unified ingest path
+        # always passes status=).
         pass
 
     def _publish(_topic: str, _payload: dict) -> None:

@@ -438,8 +438,8 @@ export default function CameraSettingsPage() {
               </span>
             </div>
             <p className="type-caption-1 text-label-tertiary">
-              Areas Frigate ignores for motion — masking out a tree branch
-              that triggers in wind, or a busy street corner.
+              Areas the camera service ignores for motion — masking out a
+              tree branch that triggers in wind, or a busy street corner.
             </p>
             <MotionMaskEditor
               cameraName={name}
@@ -473,7 +473,7 @@ export default function CameraSettingsPage() {
               </>
             ) : dirty ? (
               <span className="type-caption-1 text-label-tertiary">
-                Unsaved changes — Frigate will restart on save.
+                Unsaved changes — the camera service will restart on save.
               </span>
             ) : (
               <span className="type-caption-1 text-label-tertiary">

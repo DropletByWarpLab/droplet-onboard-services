@@ -78,10 +78,34 @@ Camera IP addresses and MAC addresses are stripped from LLM tool responses (`get
 
 ## Audit Trail
 
-All Tier 2 and Tier 3 operations are logged to `CommandAuditLog` in the database:
+As of WARP-456, **`ActivityRow`** is the canonical audit table for every observable event on the device — chat turns, MCP tool calls, file indexing, camera writes, network ops, smart-home commands, email sends, auth events, scheduled tool runs, and system events. Every row carries an HMAC-SHA256 `signature` over its canonical content + the `prevSignatureHash` of the row before it, forming a tamper-evident hash chain. The chain is verifiable offline via `POST /api/activity/export`, which streams a sealed JSON-Lines bundle plus the public verification bytes.
+
+`CommandAuditLog` is now a **read view** kept for the existing `GET /api/network/audit` query path; all new writes flow through `activity.service.ts::record({kind, severity, sourceIcon, what, sub?, refs?})`, which dual-writes the legacy `CommandAuditLog` row alongside the signed `ActivityRow`. Future audit consumers should read `ActivityRow` directly (filtered by `kind="network"` for the safety-tier-specific subset).
+
+Both tables capture the same per-command facts:
 - Who requested it (userId)
 - What was requested (operation, parameters)
 - Whether it was confirmed, blocked, or rate-limited
 - Timestamp
 
-Query the audit log: `GET /api/network/audit`
+Operator-facing query paths:
+- `GET /api/activity?kind=network&from=&to=&q=` — paginated, filterable, signed rows (owner/admin).
+- `POST /api/activity/export` — sealed JSONL bundle for offline verification.
+- `GET /api/network/audit` — legacy `CommandAuditLog` view (kept for backwards compatibility).
+
+### Factory-reset era boundary
+
+`scripts/factory-reset.sh` is treated as an explicit chain-era boundary, not a soft-reset of state under a preserved key. Specifically, `data/secrets/audit.key` is deleted alongside the ActivityRow table contents and the Postgres volume, so the next `setup.sh` run regenerates a fresh 32-byte key via `sync_audit_signing_key` (`scripts/lib/secrets.sh`). The first ActivityRow written after the reset is the new chain's genesis — `prevSignatureHash = ""` — signed by the new key.
+
+Why the boundary matters: preserving the old key against an empty ActivityRow table would silently fork the chain. Two distinct genesis rows would carry the same HMAC key, with no marker telling a verifier the rows belong to different histories. A signed export bundle from the new era would verify identically against the old era's archived bundle — meaningfully the same chain to any consumer, semantically two different ones.
+
+The old key can still be retained off-device by the operator (export the bundle before `factory-reset`, store the verification bytes alongside it) — the verifier accepts the union of (current, prior) keys, so historical bundles remain verifiable. The box itself only carries the current era's key.
+
+Era-boundary contract:
+
+| Event | `data/secrets/audit.key` | `ActivityRow` rows | First post-event row |
+|---|---|---|---|
+| `setup.sh` on a fresh device | generated | 0 | genesis |
+| `setup.sh` re-run on a provisioned device | preserved (existing chain continues) | N | next row in chain |
+| `factory-reset.sh` | deleted | 0 (table dropped) | (none yet) |
+| `setup.sh` after `factory-reset.sh` | regenerated (NEW key) | 0 | genesis of new era |

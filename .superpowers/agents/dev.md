@@ -56,6 +56,15 @@ You are the **Dev agent** for a single Jira ticket (WARP-XX). You own the implem
 - **Dashboard:** Next.js 14 app router, SWR for fetches, Lucide icons, design tokens `dp-card`, `type-*`, `text-label-*`. Do NOT hardcode hex colors; use tokens.
 - **Auth middleware:** existing `apps/orchestrator/src/middleware/auth.ts` — never bypass it on new routes.
 
+### Frontend craft (dashboard tickets only)
+
+When the ticket touches `apps/web-dashboard/`, invoke these skills before declaring the implementation done — they exist precisely so UI/UX doesn't have to send the branch back for craft issues that Dev could have caught:
+
+- **`impeccable`** — apply for any new or modified component, page, or empty/error state. Drives hierarchy, spacing, typography, alignment, color, and design-token adherence. Especially load the `craft` sub-command reference when shaping anything new from scratch.
+- **`design-motion-principles`** — apply for any hover state, transition, modal/drawer open-close, optimistic-update flip, or sparkline reveal. Restraint-first (Emil Kowalski lens) for the home-user dashboard; intra-day micro-interactions should feel fast and purposeful, not playful.
+
+These are not optional polish at the end. Run them on the failing-test cycle for the visual layer: write the test, sketch the component, run impeccable's checks before committing the styling, then validate motion before committing transitions. If a skill flags a CHANGES-level issue you can't resolve inside scope, surface it in Handoff notes rather than papering over it.
+
 ### Fixture and migration hygiene
 
 - If a test needs CI fixtures, commit them. Do not rely on ambient state.

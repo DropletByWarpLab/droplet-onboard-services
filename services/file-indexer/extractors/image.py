@@ -76,8 +76,11 @@ def extract(path: str) -> ExtractedDoc:
             warnings=warnings,
         )
 
+    # Image OCR has no in-file structure; the document-level breadcrumb is
+    # the filename (WARP-435 fallback).
+    filename = os.path.basename(path) or "image"
     return ExtractedDoc(
-        spans=[Span(text=text, anchor=NoneAnchor())],
+        spans=[Span(text=text, anchor=NoneAnchor(), section_path=[filename])],
         language=None,
         metadata=metadata,
         warnings=warnings,
