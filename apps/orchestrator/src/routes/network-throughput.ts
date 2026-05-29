@@ -59,9 +59,16 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin", "family", "guest"),
     async (_req, res, next) => {
       try {
+        // Match the canonical ONLINE_WINDOW_MS = 2min from
+        // network-device.service.ts. Without this filter the count
+        // returns every device ever registered (blocked, long-inactive),
+        // diverging from the network page's "active" label.
+        const onlineSince = new Date(Date.now() - 2 * 60_000);
         const [latest, clientCount] = await Promise.all([
           prisma.networkThroughputSample.findFirst({ orderBy: { ts: "desc" } }),
-          prisma.networkDevice.count().catch(() => 0),
+          prisma.networkDevice
+            .count({ where: { lastSeen: { gte: onlineSince } } })
+            .catch(() => 0),
         ]);
         res.json({
           wanDownBps: latest ? fromBigInt(latest.wanDownBps) : 0,
@@ -90,10 +97,21 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
           return;
         }
         const since = new Date(Date.now() - windowMs(q.data.window));
+        // `take` is window-derived: 1 sample per minute (the routing
+        // scheduler tick rate). Hardcoding 24 * 60 truncated `7d` to
+        // the first 24 h of the window — caller would ask for 7 days
+        // and silently get the oldest day. Cap at 7d worth (10 080)
+        // so a runaway window can't drown the response.
+        const samplesPerHour = 60;
+        const hours = windowMs(q.data.window) / (60 * 60 * 1000);
+        const take = Math.min(
+          Math.max(60, Math.ceil(hours * samplesPerHour)),
+          7 * 24 * samplesPerHour,
+        );
         const rows = await prisma.networkThroughputSample.findMany({
           where: { ts: { gte: since } },
           orderBy: { ts: "asc" },
-          take: 24 * 60,
+          take,
         });
         res.json({
           window: q.data.window,

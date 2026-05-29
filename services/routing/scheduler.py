@@ -39,7 +39,13 @@ from droplet_openwrt_sdk import DropletRouter, ConnectionLost, UbusError
 logger = logging.getLogger(__name__)
 
 SAMPLE_INTERVAL_SECONDS = int(os.environ.get("NETWORK_THROUGHPUT_SAMPLE_SEC", "60"))
-ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://orchestrator:3000").rstrip("/")
+# `routing` runs with network_mode: host in docker-compose, so Docker
+# compose service DNS names ("orchestrator") DON'T resolve here. The
+# orchestrator is reachable on the loopback interface via its host port
+# mapping. This is the inverse of the pattern documented in CLAUDE.md
+# for routing-from-orchestrator (ROUTING_SERVICE_URL uses
+# host.docker.internal because routing is host-network).
+ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:3000").rstrip("/")
 ORCHESTRATOR_SAMPLER_TOKEN = (os.environ.get("ORCHESTRATOR_SAMPLER_TOKEN") or "").strip()
 WAN_DEVICE_NAME = os.environ.get("WAN_DEVICE_NAME", "")
 

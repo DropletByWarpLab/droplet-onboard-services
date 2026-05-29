@@ -63,7 +63,6 @@ model ChatSession {
   @@index([userId, updatedAt(sort: Desc)])
 }
 
-<<<<<<< HEAD
 /// WARP-460 — Context pins per chat session. The dashboard's right-side
 /// "Context · N sources" panel (FEATURES.md §2.2.7) lists these; the
 /// agent loop reads them on every turn and prepends pin descriptions to
