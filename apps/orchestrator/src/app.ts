@@ -18,6 +18,7 @@ import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
+import { createPmOnboardRouter } from "./routes/pm-onboard.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -120,6 +121,8 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-507 — Plane onboarding endpoint for the setup wizard.
+  app.use(createPmOnboardRouter());
   // WARP-474 (G2): smart-home scenes CRUD + batch-run. Run dispatches
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.
