@@ -40,6 +40,13 @@ const logger = pino({ name: "settings-route" });
 // router compiles standalone without pulling the Prisma client into the
 // path-param validator. Any drift between these and the Prisma enum is
 // a schema bug; workspace-settings.schema.test.ts locks the contract.
+// IMPORTANT: `off_lan` (underscore) is the legacy WorkspaceSetting
+// section for VPN/DDNS config (off_lan.vpn_enabled etc.). The new
+// sovereignty channels (cloud_model_escape, outbound_email, etc.)
+// live under `/api/settings/off-lan` (hyphen) which is mounted as
+// a separate router below — NOT through this enum. Do NOT add
+// "off-lan" here; that would re-route the hyphen path through the
+// parameterized handler and return the wrong data shape.
 const SECTION_VALUES = [
   "workspace",
   "memory_privacy",
@@ -292,7 +299,13 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
 
   router.patch(
     "/settings/off-lan/:key",
-    requireRole("owner", "admin"),
+    // Gate widened to family+ so the per-row `requiresAdmin` flag can
+    // actually fire. If row.requiresAdmin is true the handler 403s
+    // family-and-below; if false, family can toggle. Without this
+    // dynamic check the requiresAdmin column was display-only and a
+    // future toggle to `false` wouldn't relax the static middleware
+    // gate.
+    requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const key = req.params.key;
@@ -329,6 +342,23 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
         })) as unknown as OffLanRow | null;
         if (!row) {
           return res.status(404).json({ error: "Channel not provisioned" });
+        }
+
+        // Per-row admin gate: if the channel requires admin, refuse
+        // anyone below admin. All seeded channels currently have
+        // requiresAdmin=true so this is the universal gate today; the
+        // dynamic check exists so future channels can drop it without
+        // touching the route.
+        const role = req.user?.role;
+        if (
+          row.requiresAdmin &&
+          role !== "owner" &&
+          role !== "admin"
+        ) {
+          return res.status(403).json({
+            error: "this channel requires admin role to toggle",
+            channel: key,
+          });
         }
 
         const actor = req.user?.username ?? null;
