@@ -36,6 +36,8 @@ generate_env() {
 
   # --- Generate all secrets ---
   local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url
+  # WARP-503 — embedded Plane PM stack secrets (ADR-007, spec WARP-498).
+  local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -91,6 +93,25 @@ generate_env() {
   # (every cloud-LLM call 451s). Compose wires it to
   # ${AI_GATEWAY_SAMPLER_TOKEN}.
   ai_gateway_sampler_token=$(openssl rand -hex 32)
+
+  # WARP-503 — Plane secrets (ADR-007, spec WARP-498 OQ1/OQ5).
+  #   pm_db_password    — postgres-pm container password
+  #   pm_secret_key     — Plane Django SECRET_KEY (session signing etc.)
+  #   pm_admin_token    — orchestrator-only token for provisioning users via
+  #                       Plane API. NEVER exposed to dashboard or LLM agent.
+  #   pm_webhook_secret — HMAC key Plane signs outgoing webhooks with;
+  #                       orchestrator validates via /api/pm/webhook (WARP-511).
+  #                       Fail-CLOSED on signature mismatch per security-rules.md.
+  pm_db_password=$(_gen_password 24)
+  pm_secret_key=$(openssl rand -hex 50)
+  pm_admin_token=$(openssl rand -hex 32)
+  pm_webhook_secret=$(openssl rand -hex 32)
+  # pm_web_url — LAN-facing URL Plane bakes into generated emails / share
+  # links. Default uses the canonical mDNS hostname covered by the TLS cert
+  # SANs; override BEFORE running setup.sh if the customer uses a different
+  # LAN name (e.g. `DROPLET_PM_WEB_URL=https://pm.acme.lan ./scripts/setup.sh`).
+  # No host-specific IP defaults (rule 14) — DNS name only.
+  pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box PoC). Override before running setup.sh for a multi-box
@@ -205,6 +226,47 @@ ORCHESTRATOR_SAMPLER_TOKEN=$orchestrator_sampler_token
 # the gate fails closed (every cloud-LLM call 451s).
 AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
 
+# --- WARP-503: embedded Plane PM stack (ADR-007, spec WARP-498) ---
+# Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
+# pinned by SHA per spec OQ3) behind Nginx at /pm/.
+#
+# OQ1 resolution: dedicated postgres-pm + redis-pm. OQ5: workspace-owner
+# downgrades surface as manual reconciliation alerts.
+#
+# All vars are DROPLET_PM_* prefixed (architecture-guard rule 11 — never
+# MATTER_*). Required secrets fail-CLOSED via compose ":?MSG" — no host-
+# specific defaults (rule 14).
+DROPLET_PM_DB_NAME=plane
+DROPLET_PM_DB_USER=plane
+DROPLET_PM_DB_PASSWORD=$pm_db_password
+DROPLET_PM_DB_HOST=postgres-pm
+DROPLET_PM_DB_PORT=5432
+
+DROPLET_PM_REDIS_HOST=redis-pm
+DROPLET_PM_REDIS_PORT=6379
+
+DROPLET_PM_SECRET_KEY=$pm_secret_key
+
+# Orchestrator-only — used to create/manage Plane users via Plane API.
+# NEVER exposed to dashboard or LLM agent. Rotates independently of other
+# tokens so a compromise can be contained without re-provisioning every
+# user identity.
+DROPLET_PM_ADMIN_TOKEN=$pm_admin_token
+
+# Plane signs outgoing webhook payloads with this; orchestrator's
+# /api/pm/webhook receiver (WARP-511) validates HMAC + replay window.
+# Fail-CLOSED on mismatch per security-rules.md.
+DROPLET_PM_WEBHOOK_SECRET=$pm_webhook_secret
+
+# Plane internal API URL — compose-network DNS so a container restart with
+# a fresh internal IP doesn't strand callers (same pattern as the gateway's
+# nginx resolver).
+DROPLET_PM_API_URL=http://pm-api:8000
+
+# LAN-facing URL — Plane bakes into generated emails / share links / OG
+# tags. Override BEFORE running setup.sh for non-default LAN hostnames.
+DROPLET_PM_WEB_URL=$pm_web_url
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -251,6 +313,11 @@ EOF
   log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
   log_info "  MCP_TOKEN         : ${service_token_mcp:0:8}****"
+  log_info "  PM_DB_PASSWORD    : ${pm_db_password:0:4}****"
+  log_info "  PM_SECRET_KEY     : ${pm_secret_key:0:8}****"
+  log_info "  PM_ADMIN_TOKEN    : ${pm_admin_token:0:8}****"
+  log_info "  PM_WEBHOOK_SECRET : ${pm_webhook_secret:0:8}****"
+  log_info "  PM_WEB_URL        : $pm_web_url"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -357,6 +424,24 @@ migrate_env() {
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
   _migrate_ensure_key SERVICE_TOKEN_MCP "$(openssl rand -hex 32)"
+
+  # WARP-503 backfill: embedded Plane PM stack (ADR-007). Existing installs
+  # predate the PM stack; without these keys docker compose up will refuse
+  # to start the pm-api / postgres-pm containers (compose-level :?MSG fail).
+  # Each is generated independently so a partial backfill (e.g. operator
+  # set DROPLET_PM_WEB_URL manually but no secrets yet) still works.
+  _migrate_ensure_key DROPLET_PM_DB_NAME "plane"
+  _migrate_ensure_key DROPLET_PM_DB_USER "plane"
+  _migrate_ensure_key DROPLET_PM_DB_PASSWORD "$(_gen_password 24)"
+  _migrate_ensure_key DROPLET_PM_DB_HOST "postgres-pm"
+  _migrate_ensure_key DROPLET_PM_DB_PORT "5432"
+  _migrate_ensure_key DROPLET_PM_REDIS_HOST "redis-pm"
+  _migrate_ensure_key DROPLET_PM_REDIS_PORT "6379"
+  _migrate_ensure_key DROPLET_PM_SECRET_KEY "$(openssl rand -hex 50)"
+  _migrate_ensure_key DROPLET_PM_ADMIN_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key DROPLET_PM_WEBHOOK_SECRET "$(openssl rand -hex 32)"
+  _migrate_ensure_key DROPLET_PM_API_URL "http://pm-api:8000"
+  _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — hosts with a TPM hit 'real', everything else hits
