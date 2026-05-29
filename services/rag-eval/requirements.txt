@@ -23,3 +23,9 @@ tzlocal>=5.2
 # Already a stdlib option (urllib) but explicit requests is friendlier
 # for timeout + retry semantics if we expand later.
 requests>=2.31
+
+# WARP-519: HTTP trigger server. FastAPI + uvicorn host the ad-hoc /run,
+# /bootstrap, and run-listing endpoints the orchestrator proxies to. The
+# scheduler (AsyncIOScheduler) and uvicorn share one asyncio event loop.
+fastapi>=0.110
+uvicorn[standard]>=0.27

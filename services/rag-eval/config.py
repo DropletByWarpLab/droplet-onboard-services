@@ -52,4 +52,20 @@ SEARCH_TIMEOUT_SEC = float(
 
 # Skip the scheduler entirely and run nothing — useful for the test
 # Compose lane where we just want the image present but inert.
+# WARP-519: when DISABLED, the scheduler does NOT register its cron job,
+# but the HTTP trigger server STILL starts so operators can fire ad-hoc
+# runs from the dashboard. "Disabled" means "no automatic schedule", not
+# "no service" — the HTTP surface is the whole point of WARP-519.
 DISABLED = os.environ.get("RAG_EVAL_DISABLED", "0") == "1"
+
+# WARP-519: HTTP trigger server. Binds on the internal Docker network so
+# the orchestrator can proxy ad-hoc /run, /bootstrap, and run-listing
+# calls. No host publish — the orchestrator is the auth wall; this server
+# has no auth of its own.
+HTTP_HOST = os.environ.get("RAG_EVAL_HTTP_HOST", "0.0.0.0")
+HTTP_PORT = int(os.environ.get("RAG_EVAL_HTTP_PORT", "8090"))
+
+# Path to the rolling baselines candidate written by `bootstrap`. Read by
+# the HTTP GET /baselines endpoint. Mirrors main.py cmd_bootstrap's
+# out_path so the two stay in lockstep.
+BASELINES_CANDIDATE = RESULTS_DIR / "baselines.candidate.json"

@@ -1,9 +1,13 @@
-"""WARP-RAG-EVAL — rag-eval service entry point.
+"""WARP-RAG-EVAL / WARP-519 — rag-eval service entry point.
 
 CLI:
-  python main.py                     → schedule mode: blocks forever,
-                                       firing the RAGAS run hourly during
-                                       the off-hours window from config.
+  python main.py                     → service mode: starts the
+                                       AsyncIOScheduler (hourly off-hours
+                                       run) AND the FastAPI HTTP trigger
+                                       server (server.py) in one shared
+                                       asyncio event loop. Blocks until
+                                       SIGINT/SIGTERM. This is the default
+                                       container CMD.
   python main.py run-once            → single RAGAS run, then exit.
                                        Useful for ad-hoc sanity checks.
   python main.py bootstrap [--runs N]
@@ -15,20 +19,24 @@ CLI:
                                        schema convention recommends for
                                        IQR-derived floors.
 
-The scheduler is BlockingScheduler — once `.start()` is called the
-process is "waiting on the next cron tick" until SIGINT/SIGTERM. We
-register a clean shutdown handler so the running job (if any) finishes
-before exit (apscheduler `wait=True`).
+WARP-519: service mode now runs uvicorn (FastAPI) and the AsyncIOScheduler
+in the SAME event loop so an HTTP-triggered `/run` and a scheduled run
+share one in-process busy flag (run_state.STORE) and never overlap. The
+scheduled job hands the blocking RAGAS subprocess to a thread executor so
+it never freezes the HTTP server. When RAG_EVAL_DISABLED=1 the scheduler's
+cron job is NOT registered, but the HTTP server STILL serves — "disabled"
+means "no automatic schedule", not "no service" (the HTTP trigger surface
+is the whole point of WARP-519). The `run-once` / `bootstrap` CLI
+subcommands are unchanged for shell-based ops.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
-import signal
 import sys
-from pathlib import Path
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -39,44 +47,59 @@ logger = logging.getLogger("rag-eval")
 
 import runner
 import scheduler_service
-from config import DISABLED, RESULTS_DIR
+from config import DISABLED, HTTP_HOST, HTTP_PORT, RESULTS_DIR
+
+
+async def _serve() -> None:
+    """Run the AsyncIOScheduler + uvicorn HTTP server in one event loop.
+
+    The scheduler binds to the running loop on `.start()`; uvicorn's
+    `Server.serve()` runs on the same loop and blocks (awaits) until it
+    receives SIGINT/SIGTERM — uvicorn installs its own signal handlers,
+    so we don't register any here. On shutdown we stop the scheduler so
+    any in-flight executor job is allowed to finish naturally (the busy
+    flag clears when run_once returns).
+    """
+    import uvicorn  # local import — only needed in service mode
+
+    import server
+
+    sched = None
+    if DISABLED:
+        logger.info(
+            "RAG_EVAL_DISABLED=1 — scheduler cron NOT registered; "
+            "HTTP trigger server still serving on %s:%d",
+            HTTP_HOST,
+            HTTP_PORT,
+        )
+    else:
+        sched = scheduler_service.build_scheduler()
+
+    app = server.create_app()
+    config = uvicorn.Config(
+        app,
+        host=HTTP_HOST,
+        port=HTTP_PORT,
+        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+        # uvicorn manages SIGINT/SIGTERM; it returns from serve() cleanly.
+        access_log=False,
+    )
+    uv_server = uvicorn.Server(config)
+    logger.info("rag-eval HTTP trigger server listening on %s:%d", HTTP_HOST, HTTP_PORT)
+    try:
+        await uv_server.serve()
+    finally:
+        if sched is not None:
+            # wait=False: uvicorn already returned, the loop is closing;
+            # an in-flight executor job finishes on its own thread.
+            sched.shutdown(wait=False)
 
 
 def cmd_schedule() -> int:
-    if DISABLED:
-        logger.info("RAG_EVAL_DISABLED=1 — exiting without starting scheduler")
-        # Sleep instead of exit so the container stays alive (compose
-        # restart-on-exit policies would loop us otherwise). The scheduler
-        # is intentionally inert; ops can `docker exec` for ad-hoc runs.
-        signal.pause()
-        return 0
-
-    sched = scheduler_service.build_scheduler()
-    # Apscheduler raises SchedulerNotRunningError if `shutdown()` is
-    # called when the scheduler isn't running. Both the signal handler
-    # and the KeyboardInterrupt branch below would otherwise call it
-    # back-to-back on Ctrl-C; guard with a small flag.
-    shutdown_done = False
-
-    def _safe_shutdown() -> None:
-        nonlocal shutdown_done
-        if shutdown_done:
-            return
-        shutdown_done = True
-        sched.shutdown(wait=True)
-
-    def _on_signal(signum: int, _frame: object) -> None:
-        logger.info("received signal %d — shutting scheduler down", signum)
-        _safe_shutdown()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
-
-    logger.info("starting BlockingScheduler — Ctrl-C or SIGTERM to exit")
     try:
-        sched.start()  # blocks until shutdown
+        asyncio.run(_serve())
     except (KeyboardInterrupt, SystemExit):
-        _safe_shutdown()
+        pass
     return 0
 
 

@@ -37,6 +37,7 @@ import { createDdnsRouter } from "./routes/ddns.js";
 import { createAdminClaudeActivityRouter } from "./routes/admin-claude-activity.js";
 import { createAdminDeviceIdentityRouter } from "./routes/admin-device-identity.js";
 import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js";
+import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
@@ -166,6 +167,10 @@ export function createApp(prisma: PrismaClient) {
   // WARP-286: retrieval-eval endpoint — exposes vector/rrf/hybrid pipelines
   // to the offline NDCG@10 harness. 404 in production.
   app.use("/api", createAdminRetrievalEvalRouter(prisma));
+  // WARP-519: rag-eval HTTP trigger proxy — ad-hoc RAGAS runs + bootstrap
+  // + run listing. Auth-gated (admin/owner); 503 when the `eval` Compose
+  // profile is inactive (rag-eval service unreachable). NOT prod-gated.
+  app.use("/api", createAdminRagEvalRouter());
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.

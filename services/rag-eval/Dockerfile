@@ -43,8 +43,16 @@ COPY services/rag-eval/*.py /opt/rag-eval/
 # scheduler writes per-run JSON + a rolling baselines.candidate.json here.
 RUN mkdir -p /data/rag-eval/runs
 
-# Default cmd: run the scheduler forever. The container is restart=always
-# in compose, so a crash + restart picks up the next cron tick instead of
-# trying to backfill missed slots (coalesce=True on the apscheduler job
-# absorbs short outages).
+# WARP-519: the HTTP trigger server (FastAPI/uvicorn) binds 8090 on the
+# internal Docker network. No host publish in compose — the orchestrator
+# reaches it by service name and is the auth wall. Keep this in sync with
+# RAG_EVAL_HTTP_PORT in config.py.
+EXPOSE 8090
+
+# Default cmd: service mode — starts the AsyncIOScheduler (hourly cron) AND
+# the FastAPI HTTP trigger server in one event loop. The container is
+# restart=always in compose, so a crash + restart picks up the next cron
+# tick instead of backfilling missed slots (coalesce=True on the apscheduler
+# job absorbs short outages); in-flight HTTP-triggered runs are forgotten on
+# restart (the filesystem is the source of truth for completed runs).
 CMD ["python", "main.py"]

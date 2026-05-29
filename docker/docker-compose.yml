@@ -126,6 +126,14 @@ services:
       # a separate effort (split migration into init container without
       # FIPS, or get Postgres to use FIPS-approved ciphers server-side).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      # WARP-519: rag-eval HTTP trigger server. The orchestrator's
+      # /api/admin/rag-eval/* route proxies ad-hoc RAGAS runs here. rag-eval
+      # is in the `eval` Compose profile — when that profile is inactive the
+      # service name doesn't resolve and the proxy route returns 503
+      # (rag_eval_unavailable), which the dashboard renders as a "enable the
+      # eval profile" banner. Setting the URL unconditionally is correct;
+      # the route detects the connection failure at request time.
+      - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
     volumes:
       - matter-data:/data/matter-storage
       # WARP-203: chat-attached "brain memory" files. Per-user dirs at
@@ -483,6 +491,16 @@ services:
       - RAG_EVAL_DISABLED=${RAG_EVAL_DISABLED:-0}
       # OPENAI_API_KEY only consumed when RAGAS_JUDGE=cloud.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # WARP-519: HTTP trigger server bind port. The orchestrator proxies
+      # ad-hoc /run, /bootstrap, and run-listing here via RAG_EVAL_URL
+      # (set on the orchestrator service). Keep in sync with the expose
+      # below and EXPOSE in services/rag-eval/Dockerfile.
+      - RAG_EVAL_HTTP_PORT=${RAG_EVAL_HTTP_PORT:-8090}
+    # WARP-519: internal-network only — no host publish. The orchestrator
+    # reaches this by service name (rag-eval:8090) and is the auth wall;
+    # the HTTP server itself has no auth.
+    expose:
+      - "8090"
     volumes:
       - rag-eval-data:/data/rag-eval
     extra_hosts:

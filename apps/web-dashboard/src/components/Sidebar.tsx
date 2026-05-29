@@ -9,6 +9,7 @@ import {
   Calendar as CalendarIcon,
   Cpu,
   Film,
+  FlaskConical,
   FolderOpen,
   Globe,
   HelpCircle,
@@ -113,6 +114,13 @@ const NAV_GROUPS: NavGroup[] = [
         href: "/admin/claude-activity",
         label: "Activity",
         icon: Activity,
+        roles: ["owner", "admin"],
+      },
+      // WARP-519: ad-hoc RAGAS run + baseline bootstrap trigger surface.
+      {
+        href: "/admin/rag-eval",
+        label: "RAG eval",
+        icon: FlaskConical,
         roles: ["owner", "admin"],
       },
     ],
