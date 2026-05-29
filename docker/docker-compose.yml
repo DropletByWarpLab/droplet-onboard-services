@@ -378,6 +378,17 @@ services:
     env_file:
       - path: ../.env
         required: false
+    # Mirrors orchestrator + mcp-server: the chat path's default
+    # OLLAMA_URL is `http://host.docker.internal:11434` (host-installed
+    # Ollama for local Docker Desktop dev). Without this mapping, ai-gateway
+    # cannot resolve the name and chat throws "Temporary failure in name
+    # resolution". On the single-box deployment shape
+    # (COMPOSE_PROFILES=single-box) the bundled `ollama` service below
+    # resolves via compose DNS and this mapping is unused — but it's
+    # harmless and keeps the local-dev story intact. See .env.example
+    # "AI Gateway" block for the deployment matrix.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
@@ -512,7 +523,14 @@ services:
       - "127.0.0.1:5000:5000"
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
-      - /dev/dri/renderD128:/dev/dri/renderD128  # GPU render node
+      # GPU render node. Default `/dev/dri/renderD128` matches every host
+      # with a single render node (Jetson Orin's nvgpu, x86 single-GPU
+      # boxes). Override via `FRIGATE_RENDER_NODE` in .env when the dGPU
+      # is reserved for another container — on the single-box deployment
+      # shape the AMD dGPU (renderD128) hosts Ollama, so Frigate detects
+      # on the iGPU at renderD129. Setup wizard / `setup.sh --single-box`
+      # writes this.
+      - ${FRIGATE_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128  # GPU render node
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
@@ -595,8 +613,9 @@ services:
   # §"Hardware compatibility" for the supported configurations.
   #
   # Profile-gated to "linux" because /dev/snd doesn't exist on Docker
-  # Desktop for macOS; dev installs there skip it. POC + production both
-  # run Linux so the profile is on by default via setup.sh.
+  # Desktop for macOS; dev installs there skip it. Single-box and
+  # multi-box deployments both run Linux so the profile is on by
+  # default via setup.sh.
   voice-io:
     build:
       context: ..
@@ -606,7 +625,7 @@ services:
     # specific devices — sounddevice picks them up via PortAudio.
     devices:
       - "/dev/snd:/dev/snd"
-    # The host's audio group GID. On Ubuntu/Debian (POC + Jetson) it's 29;
+    # The host's audio group GID. On Ubuntu/Debian (single-box + Jetson) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
     # match for /dev/snd's owner.
@@ -861,6 +880,104 @@ services:
     profiles: ["ops"]
     restart: unless-stopped
 
+  # ==========================================================================
+  # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
+  # deployment shape services.
+  # ==========================================================================
+  # The multi-box deployment runs Ollama on a separate Jetson (the dGPU
+  # host) and a real OpenWrt router (the Pi 5). The single-box shape
+  # collapses both into containers on the same x86 host. Services below
+  # ONLY start when the `single-box` profile is active; on every other
+  # deployment shape they're invisible.
+  #
+  # Activation: `COMPOSE_PROFILES=single-box` in .env (setup.sh writes this
+  # when it detects single-box hardware: dGPU + iGPU + no separate Jetson
+  # on LAN). Operators can also force it with
+  # `COMPOSE_PROFILES=single-box,linux docker compose up -d` for testing.
+  #
+  # Captured 2026-05-24 from /home/droplet/edge-platform/docker/docker-compose.override.yml
+  # on the box at 192.168.1.87 — Phase 1 of the "box = repo" cleanup.
+  # See scripts/host/_box-snapshot-2026-05-24.md for the full inventory.
+
+  # --- Ollama (ROCm) ---------------------------------------------------------
+  # Local LLM inference on the AMD dGPU. Image is the upstream rocm variant
+  # which natively supports gfx1200 (RDNA4) — do NOT set HSA_OVERRIDE_GFX_VERSION,
+  # it would force gfx1100 emulation and break things.
+  #
+  # Bound to host loopback so the ollama-manager sidecar (Phase 3) can reach
+  # it without exposing :11434 off-box. The chat path from ai-gateway uses
+  # the compose service name `ollama` (resolved via the default bridge
+  # network), not the host loopback.
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: droplet-ollama
+    profiles: ["single-box"]
+    restart: unless-stopped
+    expose:
+      - "11434"
+    ports:
+      # Host loopback for ollama-manager + host-side `ollama` CLI. Public
+      # access goes through ai-gateway, not direct.
+      - "127.0.0.1:11434:11434"
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "${OLLAMA_RENDER_NODE:-/dev/dri/renderD128}:/dev/dri/renderD128"
+    group_add:
+      - "993"  # render
+      - "44"   # video
+    environment:
+      ROCR_VISIBLE_DEVICES: "0"
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      # `ollama --version` only confirms the binary executes; the
+      # container can be healthy while the HTTP server on :11434 is
+      # still starting (or has died). `ollama list` makes a real call
+      # to the daemon at the default OLLAMA_HOST (loopback), so a
+      # non-zero exit signals the server isn't listening. No extra
+      # tools required — `ollama` is already in the image.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- OpenWrt (router-in-container) ---------------------------------------
+  # Hosts the Wi-Fi AP (after `droplet-openwrt-attach` moves the host's
+  # MT7922 PHY into this container's netns) plus the WireGuard VPN
+  # endpoint. The routing service (above) talks to this via 127.0.0.1:8181
+  # over host networking — see scripts/host/usr-local-sbin/droplet-openwrt-attach
+  # for the full bootstrap sequence.
+  #
+  # Privileged + NET_ADMIN/SYS_ADMIN because OpenWrt's procd does a lot of
+  # network interface manipulation that requires real capabilities. tmpfs
+  # for /tmp and /run because OpenWrt expects writable scratch space at
+  # init time and these are runtime-state-only.
+  openwrt:
+    image: openwrt/rootfs:x86_64-24.10.2
+    container_name: droplet-openwrt
+    hostname: openwrt
+    profiles: ["single-box"]
+    command: /sbin/init
+    privileged: true
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    ports:
+      - "${WIREGUARD_PORT:-51820}:51820/udp"  # WireGuard listen (customer-facing)
+      - "127.0.0.1:8181:80"                   # uhttpd / ubus, host-only —
+                                              # routing service reaches it
+                                              # via 127.0.0.1:8181 (Phase L).
+    tmpfs:
+      - /tmp
+      - /run
+    volumes:
+      - openwrt-config:/etc/config
+      - openwrt-overlay:/overlay
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
@@ -885,3 +1002,11 @@ volumes:
   whisper-models:
   # WARP-154 — Piper voice cache (~70 MB per voice).
   piper-voices:
+  # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
+  # ollama + openwrt services are active. Declared unconditionally so
+  # `docker volume ls` shows the names whether the profile is on or off;
+  # the volumes themselves are only materialized when the services start.
+  # factory-reset.sh includes these in its wipe list.
+  ollama-data:
+  openwrt-config:
+  openwrt-overlay:

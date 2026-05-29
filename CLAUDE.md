@@ -92,7 +92,7 @@ host: **Ollama** (`:11434`, the inference engine) and **ollama-manager**
 (`:8002`, a lifecycle + opt-in observability sidecar). They are NOT
 interchangeable proxy layers — each owns separate concerns:
 
-- **Chat path is direct to Ollama** (`JETSON_OLLAMA_URL=http://...:11434`).
+- **Chat path is direct to Ollama** (`OLLAMA_URL=http://...:11434`).
   ai-gateway's `OllamaLocalProvider` posts straight to Ollama's
   OpenAI-compat `/v1/chat/completions`. Production's `.env` and the
   `OllamaLocalProvider` code default both point here. Going direct
@@ -109,14 +109,14 @@ interchangeable proxy layers — each owns separate concerns:
   they're called directly by setup scripts and observability tooling.
 - **ollama-manager's `/proxy/v1/chat/completions` is opt-in observability**
   (tool-call counter, JSON repair, circuit breaker). Point
-  `JETSON_OLLAMA_URL` at `http://...:8002/proxy` ONLY when you want those
+  `OLLAMA_URL` at `http://...:8002/proxy` ONLY when you want those
   signals and your prompts fit inside the 120 s read budget — typical
   for production on the Orin Nano with warm models, NOT for CPU dev or
   heavy first-call cold loads.
 
 If you're debugging an "AI not reachable" issue, the first thing to
-check is `JETSON_OLLAMA_URL` inside the running ai-gateway container
-(`docker exec droplet-pi-platform-ai-gateway-1 env | grep JETSON`).
+check is `OLLAMA_URL` inside the running ai-gateway container
+(`docker exec droplet-pi-platform-ai-gateway-1 env | grep OLLAMA`).
 A trailing `/proxy` is the smoking gun for "manager timed out my agent
 loop"; a stale `inference-engine.local` is the smoking gun for "mDNS
 doesn't resolve from inside Docker on macOS" (use

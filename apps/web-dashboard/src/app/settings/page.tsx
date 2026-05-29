@@ -264,9 +264,9 @@ export default function SettingsPage() {
         <div className="dp-group mb-3">
           <div className="dp-row">
             <div>
-              <p className="type-body text-label-primary">Ollama (Local — Jetson)</p>
+              <p className="type-body text-label-primary">Ollama (on-device)</p>
               <p className="type-caption-1 text-label-tertiary mt-0.5">
-                Runs on your Jetson device over LAN
+                Local LLM inference, never leaves your network
               </p>
             </div>
             <span

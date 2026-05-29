@@ -71,12 +71,13 @@ DEFAULT_LLM_URL = "http://orchestrator:3000"
 DEFAULT_LLM_CHAT_PATH = "/api/llm/chat"
 DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
 # Model the orchestrator's agent loop will ask ai-gateway for. ai-gateway
-# routes `llama*`/`qwen*`/`mistral*`/`phi*` to the Jetson ollama-manager;
-# the model must already be installed on the appliance (see
+# routes `llama*`/`qwen*`/`mistral*`/`phi*` to the local Ollama instance
+# (or its ollama-manager sidecar when deployed); the model must already
+# be installed on the inference host (see
 # `shared_brain/projects/droplet-local-LLM/docs/model-management.md` for
 # `/models/sync`). `qwen2.5:3b-instruct` is the agent docs' default —
-# tool-calling-capable, fits Orin Nano 7 GB RAM budget. Override via
-# LLM_MODEL env if the appliance has a larger / different model loaded.
+# tool-calling-capable, fits a 7 GB RAM budget. Override via LLM_MODEL
+# env if the deployment has a larger / different model loaded.
 DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # Agent loop can take noticeably longer than a single LLM call because
 # every tool_call adds an MCP round-trip + a re-prompt iteration.

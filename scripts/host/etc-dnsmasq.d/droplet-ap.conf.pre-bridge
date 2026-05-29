@@ -1,0 +1,14 @@
+# DHCP service for the Droplet AP (wlp14s0). Listens only on the AP
+# interface so we do not interfere with anything else (the box is
+# also running an OpenWrt container on 192.168.10.0/24, which has
+# its own DHCP). Lease pool deliberately tiny — handful of devices
+# is the expected load.
+interface=wlp14s0
+bind-interfaces
+listen-address=192.168.20.1
+dhcp-range=192.168.20.10,192.168.20.100,12h
+dhcp-option=option:router,192.168.20.1
+dhcp-option=option:dns-server,1.1.1.1,8.8.8.8
+# No upstream DNS forwarding — just hand out 1.1.1.1 / 8.8.8.8 to
+# clients. Keeps dnsmasq out of the host's DNS resolver path.
+no-resolv

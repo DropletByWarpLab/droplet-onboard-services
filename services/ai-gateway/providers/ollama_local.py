@@ -1,4 +1,11 @@
-"""Ollama provider — routes to Jetson over LAN."""
+"""Ollama provider — routes to the local Ollama instance.
+
+Deployment-shape-aware: targets the bundled `ollama` container (single-box),
+a separate Ollama host over LAN (multi-box), or a host-installed Ollama
+(local dev) — driven entirely by OLLAMA_URL. The provider has no
+opinion about the underlying hardware (discrete GPU, integrated GPU,
+NPU, CPU fallback, etc.) — it just talks HTTP.
+"""
 
 from __future__ import annotations
 
@@ -26,18 +33,31 @@ logger = logging.getLogger(__name__)
 # local Docker Desktop dev — note ai-gateway does not currently have the
 # `extra_hosts: host.docker.internal:host-gateway` mapping, so this only
 # resolves on Docker Desktop, not stock Linux. On the single-box PoC the
-# orchestrator runs with JETSON_OLLAMA_URL=http://droplet-ollama:11434
-# (the bundled Ollama container on the compose default network); on a
-# multi-box deployment with a separate Jetson, point at its static IP.
-# Override via JETSON_OLLAMA_URL to opt into the /proxy if you want the
-# tool-call repair + circuit-breaker for a specific deploy.
+# orchestrator runs with OLLAMA_URL=http://droplet-ollama:11434 (the
+# bundled Ollama container on the compose default network); on a
+# multi-box deployment with a separate inference host, point at its
+# static IP. Override via OLLAMA_URL to opt into the /proxy if you want
+# the tool-call repair + circuit-breaker for a specific deploy.
 # See ADR-004 in the droplet-local-LLM repo for the original rationale.
-JETSON_OLLAMA_URL = os.getenv("JETSON_OLLAMA_URL", "http://host.docker.internal:11434")
+#
+# Backward compatibility: the legacy `JETSON_OLLAMA_URL` env var is
+# still read as a fallback for .env files that pre-date the rename.
+# Setup.sh's migrate_env renames it in-place on next run.
+OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv(
+    "JETSON_OLLAMA_URL", "http://host.docker.internal:11434"
+)
+if os.getenv("JETSON_OLLAMA_URL") and not os.getenv("OLLAMA_URL"):
+    logger.warning(
+        "JETSON_OLLAMA_URL is deprecated — rename to OLLAMA_URL "
+        "(legacy hardware-specific naming; the variable is hardware-agnostic). "
+        "Setup.sh migrate_env will rename it on next run."
+    )
 
-# Cold-loading a model on the Jetson can take 30-90s (8B Q4 with partial GPU offload),
-# and long completions can stream for minutes. The previous flat 60s timeout aborted
-# the request mid-load, returning HTTP 499 to the user and an apparent "slow" chat.
-# Override via OLLAMA_READ_TIMEOUT for slower hardware or larger models.
+# Cold-loading a large model can take 30-90s (e.g. 8B Q4 with partial GPU
+# offload), and long completions can stream for minutes. The previous flat
+# 60s timeout aborted the request mid-load, returning HTTP 499 to the user
+# and an apparent "slow" chat. Override via OLLAMA_READ_TIMEOUT for slower
+# hardware or larger models.
 _READ_TIMEOUT_S = float(os.getenv("OLLAMA_READ_TIMEOUT", "300"))
 _OLLAMA_TIMEOUT = httpx.Timeout(
     connect=10.0,
@@ -50,7 +70,7 @@ _OLLAMA_TIMEOUT = httpx.Timeout(
 class _LimitsCache:
     """Tiny cache of the appliance's /health.limits — refreshed on 503 or on init.
 
-    The Jetson appliance exposes its Ollama queue limits via /health so the
+    The inference layer exposes its Ollama queue limits via /health so the
     orchestrator can size outbound concurrency. We debounce refreshes so a
     burst of 503s doesn't hammer /health.
 
@@ -149,7 +169,7 @@ class _LimitsCache:
         logger.warning(
             "appliance_schema_version_older_than_known: "
             "appliance=%d orchestrator=%d. The appliance is on stale "
-            "code; pull and re-run setup.sh on the Jetson.",
+            "code; pull and re-run setup.sh on the inference host.",
             observed,
             self._KNOWN_SCHEMA_VERSION,
         )
@@ -203,10 +223,15 @@ def prettify_ollama_name(raw: str) -> str:
 
 
 class OllamaLocalProvider(BaseProvider):
-    """Provider for local Ollama models running on the Jetson."""
+    """Provider for the local Ollama instance.
+
+    Endpoint is configured via OLLAMA_URL; works against the bundled
+    `ollama` compose service (single-box), a separate inference host
+    over LAN (multi-box), or a host-installed Ollama (local dev).
+    """
 
     def __init__(self, base_url: str | None = None):
-        self.base_url = (base_url or JETSON_OLLAMA_URL).rstrip("/")
+        self.base_url = (base_url or OLLAMA_URL).rstrip("/")
         self._limits = _LimitsCache(self.base_url)
         self._sema: asyncio.Semaphore | None = None
         # Track the size used to construct the current `_sema`. asyncio.Semaphore
@@ -274,7 +299,7 @@ class OllamaLocalProvider(BaseProvider):
                 for m in data.get("models", [])
             ]
         except httpx.ConnectError:
-            logger.warning("Jetson Ollama unreachable at %s", self.base_url)
+            logger.warning("Ollama unreachable at %s", self.base_url)
             return []
         except Exception as e:
             logger.error("Error listing Ollama models: %s", e)

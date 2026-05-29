@@ -41,6 +41,8 @@ REGENERATE_ENV=false
 SYNC_SECRETS_ONLY=false
 VERBOSE=false
 DRY_RUN=false
+# Single-box deployment shape — tri-state. "" = auto-detect; "true" = force on; "false" = force off.
+SINGLE_BOX_MODE=""
 export VERBOSE REGENERATE_ENV
 
 usage() {
@@ -53,6 +55,14 @@ Options:
   --skip-drivers     Skip camera-driver / kernel-module setup
   --skip-start       Skip starting the Docker Compose stack
   --systemd          Install systemd service for auto-start on boot
+                     (auto-enabled when single-box mode is detected)
+  --single-box       Force single-box deployment shape (installs captured
+                     host scripts, writes single-box knobs to .env,
+                     activates the `single-box` compose profile).
+                     Auto-detected on Linux hosts with dGPU + iGPU and
+                     no separate Jetson on the LAN; use this to force or
+                     skip auto-detect.
+  --no-single-box    Force single-box off (multi-box / v2-6 deployment).
   --regenerate-env   Force-regenerate .env (backs up existing)
   --sync-secrets     Only rewrite Docker secret files from .env, then exit
   --verbose          Show full command output
@@ -60,6 +70,7 @@ Options:
   -h, --help         Show this help message
 
 Idempotent — safe to re-run. Skips steps that are already complete.
+See docs/SINGLE_BOX.md for the single-box deployment matrix.
 USAGE
   exit 0
 }
@@ -71,6 +82,8 @@ while [ $# -gt 0 ]; do
     --skip-drivers)     SKIP_DRIVERS=true; shift ;;
     --skip-start)       SKIP_START=true; shift ;;
     --systemd)          INSTALL_SYSTEMD=true; shift ;;
+    --single-box)       SINGLE_BOX_MODE=true; shift ;;
+    --no-single-box)    SINGLE_BOX_MODE=false; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
     --sync-secrets)     SYNC_SECRETS_ONLY=true; shift ;;
     --verbose)          VERBOSE=true; shift ;;
@@ -97,6 +110,35 @@ source "$SCRIPT_DIR/lib/systemd.sh"
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
 # shellcheck source=lib/local-dns.sh
 source "$SCRIPT_DIR/lib/local-dns.sh"
+# shellcheck source=lib/single-box.sh
+source "$SCRIPT_DIR/lib/single-box.sh"
+
+# --- Single-box mode resolution ---
+# Either the user forced it via --single-box/--no-single-box, or we auto-detect.
+# The resolved value drives: (a) install_single_box_host_integration,
+# (b) configure_single_box_env, (c) auto-enabling --systemd, (d) the .env
+# activation of COMPOSE_PROFILES=single-box.
+if [ -z "$SINGLE_BOX_MODE" ]; then
+  if detect_single_box_mode; then
+    SINGLE_BOX_MODE=true
+    log_info "single-box mode auto-detected: $SINGLE_BOX_DETECTION_REASON"
+  else
+    SINGLE_BOX_MODE=false
+    log_info "single-box mode skipped: $SINGLE_BOX_DETECTION_REASON"
+  fi
+elif [ "$SINGLE_BOX_MODE" = "true" ]; then
+  log_info "single-box mode forced on (--single-box)"
+else
+  log_info "single-box mode forced off (--no-single-box)"
+fi
+
+# Auto-enable systemd auto-start in single-box mode — the user vision is
+# "plug WAN, everything just works", and without systemd the stack doesn't
+# survive a reboot.
+if [ "$SINGLE_BOX_MODE" = "true" ] && [ "$INSTALL_SYSTEMD" = "false" ]; then
+  INSTALL_SYSTEMD=true
+  log_info "single-box mode: auto-enabling --systemd for boot-time stack start"
+fi
 
 # --- Sync-secrets short-circuit ---
 # Runs the secret-file materializer without touching .env, Docker, or any
@@ -180,6 +222,15 @@ if [ "$DRY_RUN" = "true" ]; then
   fi
   log_info "  Would materialize artifacts (idempotent): MQTT password file,"
   log_info "                  mosquitto.conf, TLS cert, docker/secrets/openwrt_password"
+  if [ "$SINGLE_BOX_MODE" = "true" ]; then
+    log_info "  single-box: would append COMPOSE_PROFILES=linux,single-box + knobs to .env"
+    log_info "                  (FRIGATE_RENDER_NODE, OLLAMA_URL, OPENSSL_CONF=,"
+    log_info "                  DROPLET_FIPS_REQUIRED=false, DROPLET_TPM_BACKEND=mock,"
+    log_info "                  LLM_MODEL=gpt-oss:20b, OPENWRT_HOST/PORT/USERNAME)"
+    log_info "  single-box: would install /usr/local/sbin/droplet-openwrt-attach +"
+    log_info "                  droplet-poc-host-net + 2 systemd units + /etc/default/"
+    log_info "                  configs + /etc/avahi/services/droplet.service"
+  fi
 
   log_step 5 $TOTAL_STEPS "Build container images"
   if [ "$SKIP_BUILD" = "true" ]; then
@@ -187,6 +238,9 @@ if [ "$DRY_RUN" = "true" ]; then
   else
     log_info "  Would pull 7 base images and build 7 app images (orchestrator, web-dashboard,"
     log_info "                  ai-gateway, routing, file-indexer, switch, camera-discovery)"
+    if [ "$SINGLE_BOX_MODE" = "true" ]; then
+      log_info "                  + pull ollama/ollama:rocm + openwrt/rootfs:x86_64-24.10.2 (single-box profile)"
+    fi
   fi
 
   log_step 6 $TOTAL_STEPS "Start stack"
@@ -199,6 +253,9 @@ if [ "$DRY_RUN" = "true" ]; then
       log_info "               + frigate (linux profile)"
     else
       log_info "               (frigate skipped — macOS, no GPU device node)"
+    fi
+    if [ "$SINGLE_BOX_MODE" = "true" ]; then
+      log_info "               + ollama, openwrt (single-box profile)"
     fi
     log_info "  Would wait for health checks"
   fi
@@ -270,6 +327,14 @@ main() {
   # No-ops on a fresh install; recovers stale installs without --regenerate-env.
   migrate_env
   materialize_artifacts
+  # Single-box mode: append single-box .env knobs so the `single-box`
+  # compose profile activates and the patched services find the right
+  # values. Idempotent — re-appends the same block; docker-compose
+  # env_file uses the LAST occurrence of each key.
+  # See scripts/lib/single-box.sh.
+  if [ "$SINGLE_BOX_MODE" = "true" ]; then
+    configure_single_box_env
+  fi
   # WARP-230 device-identity first-boot enrollment. Idempotent —
   # exits 0 when /var/lib/droplet/tpm/provisioned.json already exists
   # or when running in dev with no TPM (mock backend, sidecar handles
@@ -277,6 +342,13 @@ main() {
   if [ -x "$SCRIPT_DIR/provision-device-identity.sh" ]; then
     bash "$SCRIPT_DIR/provision-device-identity.sh" \
       || log_warn "device-identity provisioning script exited non-zero (continuing)"
+  fi
+  # Single-box mode: install captured host scripts + systemd units for the
+  # in-container OpenWrt AP attach + br-lan DHCP. Idempotent. Skipped
+  # silently on non-Linux hosts. See scripts/lib/single-box.sh +
+  # scripts/host/.
+  if [ "$SINGLE_BOX_MODE" = "true" ]; then
+    install_single_box_host_integration
   fi
 
   # --- Phase 5: Build ---
