@@ -180,7 +180,12 @@ const WRITE_TOOLS = new Set(
 // RBAC helpers for /api/llm/chat. Threat model: the LLM is steered by
 // user-controlled prompt text; only owner/admin sessions are allowed to
 // touch write tools.
-type AuthedRequest = { user?: { username?: string; role?: string } };
+// WARP-485: `id` is the canonical User.id UUID set by authMiddleware
+// when the OCS or invite paths resolve a Nextcloud username to the
+// local User row. `username` is kept for back-compat (pre-WARP-485 rows
+// where ChatSession.userId is still the Nextcloud username). Both
+// fields populate the `candidates` array in `loadOwnedSession`.
+type AuthedRequest = { user?: { id?: string; username?: string; role?: string } };
 
 function isPrivilegedRole(role: string | undefined): boolean {
   return role === "owner" || role === "admin";
@@ -906,7 +911,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   ): Promise<{ ok: true; userId: string } | { ok: false; status: number; error: string }> {
     const u = (req as AuthedRequest).user ?? {};
     const candidates: string[] = [];
-    if (typeof (u as { id?: string }).id === "string") candidates.push((u as { id: string }).id);
+    if (typeof u.id === "string") candidates.push(u.id);
     if (typeof u.username === "string") candidates.push(u.username);
     if (candidates.length === 0) {
       return { ok: false, status: 401, error: "Authentication required" };
@@ -922,7 +927,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   }
 
   router.get(
-    "/chat/:sessionId/pins",
+    "/llm/:sessionId/pins",
     requireRole("owner", "admin", "family", "guest"),
     async (req, res, next) => {
       try {
@@ -943,7 +948,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   );
 
   router.post(
-    "/chat/:sessionId/pins",
+    "/llm/:sessionId/pins",
     requireRole("owner", "admin", "family", "guest"),
     async (req, res, next) => {
       try {
@@ -976,7 +981,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   );
 
   router.delete(
-    "/chat/:sessionId/pins/:pinId",
+    "/llm/:sessionId/pins/:pinId",
     requireRole("owner", "admin", "family", "guest"),
     async (req, res, next) => {
       try {

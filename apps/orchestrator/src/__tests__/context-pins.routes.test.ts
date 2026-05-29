@@ -1,5 +1,5 @@
 /**
- * WARP-460 — context-pin CRUD on /api/chat/:sessionId/pins.
+ * WARP-460 — context-pin CRUD on /api/llm/:sessionId/pins.
  *
  * Pattern mirrors settings.routes.test.ts: mock heavy dependencies, mount
  * createLlmRouter with a synthetic auth middleware, drive endpoints via
@@ -133,7 +133,7 @@ function buildApp(prismaMock: ReturnType<typeof createPrismaMock>, asUser: { id?
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { user?: typeof asUser }).user = asUser;
+    (req as unknown as { user?: typeof asUser }).user = asUser;
     next();
   });
   app.use("/api", createLlmRouter(prismaMock as unknown as import("@prisma/client").PrismaClient));
@@ -145,10 +145,10 @@ beforeEach(() => {
 });
 
 describe("WARP-460 — context-pin CRUD", () => {
-  it("GET /api/chat/:sessionId/pins returns pins for owner", async () => {
+  it("GET /api/llm/:sessionId/pins returns pins for owner", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role: "owner" });
-    const res = await request(app).get(`/api/chat/${OWNED_SESSION}/pins`);
+    const res = await request(app).get(`/api/llm/${OWNED_SESSION}/pins`);
     expect(res.status).toBe(200);
     expect(res.body.pins).toHaveLength(1);
     expect(res.body.pins[0].kind).toBe("folder");
@@ -157,7 +157,7 @@ describe("WARP-460 — context-pin CRUD", () => {
   it("GET pins on a session you don't own → 404", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma, { id: OTHER_ID, username: "nobody", role: "family" });
-    const res = await request(app).get(`/api/chat/${OWNED_SESSION}/pins`);
+    const res = await request(app).get(`/api/llm/${OWNED_SESSION}/pins`);
     expect(res.status).toBe(404);
   });
 
@@ -165,7 +165,7 @@ describe("WARP-460 — context-pin CRUD", () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role: "owner" });
     const res = await request(app)
-      .post(`/api/chat/${OWNED_SESSION}/pins`)
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
       .send({ kind: "camera_window", ref: "dock-3", meta: { from: "06:00", to: "09:00" } });
     expect(res.status).toBe(201);
     expect(res.body.pin.kind).toBe("camera_window");
@@ -176,7 +176,7 @@ describe("WARP-460 — context-pin CRUD", () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role: "owner" });
     const res = await request(app)
-      .post(`/api/chat/${OWNED_SESSION}/pins`)
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
       .send({ kind: "made_up", ref: "x" });
     expect(res.status).toBe(400);
   });
@@ -184,7 +184,7 @@ describe("WARP-460 — context-pin CRUD", () => {
   it("DELETE removes the pin for the owner (atomic deleteMany)", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role: "owner" });
-    const res = await request(app).delete(`/api/chat/${OWNED_SESSION}/pins/pin-existing`);
+    const res = await request(app).delete(`/api/llm/${OWNED_SESSION}/pins/pin-existing`);
     expect(res.status).toBe(204);
     expect(prisma.pins.find((p) => p.id === "pin-existing")).toBeUndefined();
   });
@@ -196,7 +196,7 @@ describe("WARP-460 — context-pin CRUD", () => {
     // session id that the owner *also* technically passes ownership for.
     // Ownership check loads the OTHER_SESSION which the owner does NOT own
     // (different userId) → 404 from the ownership guard.
-    const res = await request(app).delete(`/api/chat/${OTHER_SESSION}/pins/pin-existing`);
+    const res = await request(app).delete(`/api/llm/${OTHER_SESSION}/pins/pin-existing`);
     expect(res.status).toBe(404);
     // Pin still present.
     expect(prisma.pins.find((p) => p.id === "pin-existing")).toBeDefined();
