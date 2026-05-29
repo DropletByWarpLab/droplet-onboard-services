@@ -26,8 +26,10 @@ import {
   listWorkItems,
   listWorkspaces,
   PlaneApiError,
+  type PlaneWorkItem,
 } from "../../services/pm.client.js";
 import { config } from "../../config.js";
+import { requireRole } from "../../middleware/auth.js";
 
 const logger = pino({ name: "pm-mobile-route" });
 
@@ -41,12 +43,60 @@ function capPerPage(raw: unknown): number {
   return Math.min(Math.max(Math.floor(n), 1), 100);
 }
 
-function mapPmError(err: unknown, res: Response): Response | null {
+/**
+ * Romain PR #321 review §4: the /work-items list handler was forwarding
+ * raw Plane objects (description_html etc.) rather than projecting to
+ * the strict mobile-api-contract shape. Mirror the per-item projection
+ * the contract specifies so mobile clients see a stable shape across
+ * Plane upstream bumps.
+ */
+function projectWorkItem(w: PlaneWorkItem): {
+  id: string;
+  name: string;
+  state: string | undefined;
+  assignees: string[];
+  labels: string[];
+  created_at: string;
+  updated_at: string;
+} {
+  return {
+    id: w.id,
+    name: w.name,
+    state: w.state,
+    assignees: w.assignees ?? [],
+    labels: w.labels ?? [],
+    created_at: w.created_at,
+    updated_at: w.updated_at,
+  };
+}
+
+/**
+ * Romain PR #321 review §5: mapPmError hardcoded "work item not found"
+ * for every upstream 404. A bad workspace slug on /projects would
+ * incorrectly return PM_WORK_ITEM_NOT_FOUND, confusing mobile clients.
+ * Caller passes the resource family ("workspace" | "project" |
+ * "work_item") so the 404 message names the actual missing thing.
+ */
+function mapPmError(
+  err: unknown,
+  res: Response,
+  resource: "workspace" | "project" | "work_item",
+): Response | null {
   if (!(err instanceof PlaneApiError)) return null;
   if (err.status === 404) {
-    return res
-      .status(404)
-      .json({ error: "work item not found", code: "PM_WORK_ITEM_NOT_FOUND" });
+    const code =
+      resource === "workspace"
+        ? "PM_WORKSPACE_NOT_FOUND"
+        : resource === "project"
+          ? "PM_PROJECT_NOT_FOUND"
+          : "PM_WORK_ITEM_NOT_FOUND";
+    const message =
+      resource === "workspace"
+        ? "workspace not found"
+        : resource === "project"
+          ? "project not found"
+          : "work item not found";
+    return res.status(404).json({ error: message, code });
   }
   logger.warn({ status: err.status, detail: err.detail }, "Plane upstream error");
   return res
@@ -57,8 +107,17 @@ function mapPmError(err: unknown, res: Response): Response | null {
 export function createPmMobileRouter(): Router {
   const router = Router();
 
+  // Romain PR #321 review §3: per ADR-004 §3, all GETs accept the
+  // `service` role by default — but PM data is private workspace
+  // content, so the human-facing roles (owner / admin / family /
+  // guest) are explicit. `service` excluded so mcp-server / voice-io
+  // / sampler can't enumerate Plane workspaces over the mobile
+  // surface.
+  const HUMAN_GET = requireRole("owner", "admin", "family", "guest");
+
   router.get(
     "/api/mobile/pm/workspaces",
+    HUMAN_GET,
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
         const workspaces = await listWorkspaces(adminKey());
@@ -70,7 +129,7 @@ export function createPmMobileRouter(): Router {
           })),
         });
       } catch (err) {
-        const handled = mapPmError(err, res);
+        const handled = mapPmError(err, res, "workspace");
         if (handled) return handled;
         next(err);
       }
@@ -79,6 +138,7 @@ export function createPmMobileRouter(): Router {
 
   router.get(
     "/api/mobile/pm/projects",
+    HUMAN_GET,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const workspace = req.query.workspace as string | undefined;
@@ -100,7 +160,7 @@ export function createPmMobileRouter(): Router {
           })),
         });
       } catch (err) {
-        const handled = mapPmError(err, res);
+        const handled = mapPmError(err, res, "project");
         if (handled) return handled;
         next(err);
       }
@@ -109,6 +169,7 @@ export function createPmMobileRouter(): Router {
 
   router.get(
     "/api/mobile/pm/work-items",
+    HUMAN_GET,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const workspace = req.query.workspace as string | undefined;
@@ -128,9 +189,12 @@ export function createPmMobileRouter(): Router {
             assignee: req.query.assignee as string | undefined,
           },
         );
-        return res.json({ work_items });
+        // Romain PR #321 review §4: project each Plane work-item into
+        // the mobile-api-contract shape rather than forwarding raw
+        // Plane internals.
+        return res.json({ work_items: work_items.map(projectWorkItem) });
       } catch (err) {
-        const handled = mapPmError(err, res);
+        const handled = mapPmError(err, res, "work_item");
         if (handled) return handled;
         next(err);
       }
@@ -139,6 +203,7 @@ export function createPmMobileRouter(): Router {
 
   router.get(
     "/api/mobile/pm/work-items/:id",
+    HUMAN_GET,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const workspace = req.query.workspace as string | undefined;
@@ -155,9 +220,9 @@ export function createPmMobileRouter(): Router {
           projectId,
           workItemId,
         );
-        return res.json({ work_item });
+        return res.json({ work_item: projectWorkItem(work_item) });
       } catch (err) {
-        const handled = mapPmError(err, res);
+        const handled = mapPmError(err, res, "work_item");
         if (handled) return handled;
         next(err);
       }
