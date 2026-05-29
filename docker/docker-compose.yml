@@ -977,7 +977,7 @@ services:
     restart: unless-stopped
 
   # ==========================================================================
-  # WARP-501 — embedded Plane PM stack (ADR-007, spec WARP-498)
+  # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498)
   # ==========================================================================
   # Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
   # pinned by SHA per spec OQ3) plus a Droplet-side health sidecar.
@@ -985,7 +985,7 @@ services:
   # No profile attribute — Plane is a core customer service like Nextcloud,
   # runs on the orchestrator host regardless of deployment shape (single-box
   # OR multi-box). The `services/pm/PATCHES.md` ledger tracks any local
-  # modifications per ADR-007 AGPL §13 posture.
+  # modifications per ADR-010 AGPL §13 posture.
   #
   # OQ1 resolution: dedicated postgres-pm + redis-pm — backup/restore
   # granularity + Plane schema-migration quarantine outweigh ~200MB RAM cost.
@@ -1020,7 +1020,7 @@ services:
       retries: 5
 
   pm-api:
-    # Plane upstream pinned per ADR-007 OQ3. SHA refresh is a deliberate
+    # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
     # per-Droplet-release decision; do not bump without spec update.
     image: makeplane/plane-backend:v0.24.1
     container_name: droplet-pm-api
@@ -1207,7 +1207,7 @@ volumes:
   # dir. Retention is unbounded today; the rag-eval container's runner
   # leaves cleanup to the operator. Add a sweep if it grows.
   rag-eval-data:
-  # WARP-501 — embedded Plane PM stack (ADR-007, spec WARP-498 OQ1).
+  # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498 OQ1).
   # Dedicated postgres/redis volumes so backup/restore (WARP-514) and
   # factory-reset granularity are per-volume.
   postgres-pm-data:
