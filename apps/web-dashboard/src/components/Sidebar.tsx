@@ -9,6 +9,7 @@ import {
   Calendar as CalendarIcon,
   Cpu,
   Film,
+  FlaskConical,
   FolderOpen,
   Globe,
   HelpCircle,
@@ -79,6 +80,8 @@ const secondaryNav: NavItem[] = [
 // rest of the file stays type-stable.
 const adminNav: NavItem[] = [
   { href: "/admin/claude-activity", label: "Activity", icon: Activity },
+  // WARP-519: ad-hoc RAGAS run + baseline bootstrap trigger surface.
+  { href: "/admin/rag-eval", label: "RAG eval", icon: FlaskConical },
 ];
 
 // WARP-290: the mobile bottom tab bar is capped at 5 surfaces (iOS

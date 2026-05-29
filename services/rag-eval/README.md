@@ -25,9 +25,12 @@ GPU-bound and adds nothing for end users.)
 
 ## What the container does
 
-1. On startup: registers a single apscheduler `BlockingScheduler` job
-   with cron `hour=$RAG_EVAL_CRON_HOUR minute=$RAG_EVAL_CRON_MINUTE` in
-   the container's local timezone.
+1. On startup: starts an apscheduler `AsyncIOScheduler` job with cron
+   `hour=$RAG_EVAL_CRON_HOUR minute=$RAG_EVAL_CRON_MINUTE` in the
+   container's local timezone, AND a FastAPI HTTP trigger server (uvicorn)
+   on `$RAG_EVAL_HTTP_PORT` (default 8090) — both in one asyncio event
+   loop. The scheduled job hands the ~12-minute RAGAS subprocess to a
+   thread executor so it never freezes the HTTP server.
 2. Each tick: spawns a subprocess for `ragas_runner.py` baked into the
    image at `/opt/rag-eval/tests/retrieval-eval/ragas/ragas_runner.py`.
    The runner sits at this exact repo-tree-shaped path so its own
@@ -64,14 +67,72 @@ WARP-437 per-class assertions in
 `tests/retrieval-eval/run.integration.test.ts:252-304` from recording
 mode to enforced gates.
 
-## Ad-hoc single run
+## Ad-hoc single run (shell)
 
 ```bash
 docker exec -it droplet-rag-eval-1 python /opt/rag-eval/main.py run-once
 ```
 
 Useful right after merging a retrieval change to confirm the next
-hourly tick will see the new code path.
+hourly tick will see the new code path. The `run-once` and `bootstrap`
+CLI subcommands still work unchanged — they're independent of the HTTP
+server below.
+
+## HTTP trigger surface (WARP-519)
+
+The container also serves a small FastAPI app on `$RAG_EVAL_HTTP_PORT`
+(default `8090`) so operators can fire ad-hoc runs from the dashboard
+without `docker exec`. It binds on the internal Docker network only —
+**no host publish, no auth of its own.** The orchestrator's
+`/api/admin/rag-eval/*` route (admin/owner-gated) is the auth wall and
+proxies to it by service name (`rag-eval:8090`).
+
+A single in-process busy flag (`run_state.STORE`) is shared between the
+scheduler's cron job and these HTTP triggers, so a manual `/run` can
+never overlap a scheduled run (and vice-versa) — the HTTP-side equivalent
+of apscheduler's `max_instances=1`.
+
+| Method + path        | Behavior |
+|----------------------|----------|
+| `POST /run`          | Start one RAGAS pass as a background task. `202 {runId, startedAt}`. `409 {error:"run_in_progress", runId}` if a run/bootstrap is already in flight. |
+| `POST /bootstrap`    | Body `{runs:int}` (default 5, clamped 1..10). Start N sequential runs + aggregate into `baselines.candidate.json` as a background task. `202 {runId, startedAt, runs}`. Same `409` semantics. |
+| `GET /runs`          | Recent runs (newest first, cap ~20). Completed runs from the filesystem (`results-*.json` + top-level `metrics`); in-flight overlaid from memory. |
+| `GET /runs/{runId}`  | Status of one run: `running \| succeeded \| failed \| unknown` (explicit enum — `unknown` when there's neither an in-memory record nor a results file), plus `resultsPath` + `metrics` if the file exists. |
+| `GET /baselines`     | `baselines.candidate.json` if present, else `404 {error:"no_baselines"}`. |
+| `GET /health`        | `200 {status:"ok"}`. |
+
+In-flight state lives in an in-memory dict — a rag-eval restart forgets
+in-flight runs (the filesystem is the source of truth for completed
+runs). That's acceptable and intentional.
+
+`RAG_EVAL_DISABLED=1` skips registering the scheduler's cron job but the
+HTTP server **still serves** — "disabled" means "no automatic schedule",
+not "no service". The trigger surface is the whole point of WARP-519.
+
+### Orchestrator proxy paths (auth-gated)
+
+The dashboard never talks to rag-eval directly. It calls the
+orchestrator, which proxies:
+
+| Dashboard → orchestrator | → rag-eval |
+|--------------------------|------------|
+| `POST /api/admin/rag-eval/run`        | `POST /run` |
+| `POST /api/admin/rag-eval/bootstrap`  | `POST /bootstrap` |
+| `GET  /api/admin/rag-eval/runs`       | `GET /runs` |
+| `GET  /api/admin/rag-eval/runs/:id`   | `GET /runs/{id}` |
+| `GET  /api/admin/rag-eval/baselines`  | `GET /baselines` |
+
+When the `eval` Compose profile is inactive, `rag-eval` isn't running and
+its service name doesn't resolve — the orchestrator route returns
+`503 {error:"rag_eval_unavailable"}`. (This route is NOT production-gated,
+unlike `admin-retrieval-eval`.)
+
+### Dashboard page
+
+`/admin/rag-eval` (admin/owner only) gives operators a "Run RAG eval now"
+button, a "Bootstrap baselines" button with a confirm dialog, and a list
+of recent runs with their top-level metric means. On a `503` it renders a
+banner explaining how to enable the `eval` Compose profile.
 
 ## Env vars
 
@@ -85,8 +146,12 @@ hourly tick will see the new code path.
 | `RAGAS_LIMIT` | `10` | Top-K per query (matches NDCG@10 convention). |
 | `RAG_EVAL_CRON_HOUR` | `22-23,0-5` | Local-time hour window for the scheduled run. Default = 22:00–05:00 (8 slots/night). |
 | `RAG_EVAL_CRON_MINUTE` | `0` | Local-time minute. |
-| `RAG_EVAL_DISABLED` | `0` | Set to `1` to skip the scheduler entirely (container stays alive for `docker exec` ad-hoc runs but doesn't fire on schedule). |
+| `RAG_EVAL_DISABLED` | `0` | Set to `1` to skip registering the scheduler's cron job. The HTTP trigger server STILL serves so dashboard/`docker exec` ad-hoc runs work — "disabled" = "no automatic schedule", not "no service". |
+| `RAG_EVAL_HTTP_PORT` | `8090` | Port the FastAPI HTTP trigger server binds on the internal Docker network. The orchestrator proxies here via `RAG_EVAL_URL`. |
 | `OPENAI_API_KEY` | `""` | Only required when `RAGAS_JUDGE=cloud`. |
+
+On the **orchestrator** service, `RAG_EVAL_URL` (default
+`http://rag-eval:8090`) points the proxy route at this server.
 
 ## Updating goldens
 
