@@ -1302,6 +1302,7 @@ model EmailThread {
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
   messages      EmailMessage[]
+  drafts        EmailDraft[]
 
   @@unique([accountId, threadKey])
   @@index([accountId, triageStatus, lastMessageAt(sort: Desc)])
@@ -1348,6 +1349,7 @@ model EmailDraft {
   accountId       String
   account         EmailAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
   threadId        String?
+  thread          EmailThread?     @relation(fields: [threadId], references: [id], onDelete: Cascade)
   toAddrs         Json
   ccAddrs         Json?
   bccAddrs        Json?
