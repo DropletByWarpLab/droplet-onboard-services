@@ -67,7 +67,7 @@ function buildApp(
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { user?: typeof asUser }).user = asUser;
+    (req as unknown as { user?: typeof asUser }).user = asUser;
     next();
   });
   app.use("/api", createHomeRouter(prismaMock as unknown as import("@prisma/client").PrismaClient));
