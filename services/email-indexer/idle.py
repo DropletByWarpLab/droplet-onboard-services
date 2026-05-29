@@ -94,7 +94,10 @@ async def _fetch_and_ingest(
         raw = resp.lines[1]
         if not isinstance(raw, (bytes, bytearray)):
             continue
-        parsed = parse_message(bytes(raw))
+        # Pass the account's own address so BCC-only deliveries (To:
+        # missing) don't fail the orchestrator's `toAddrs.min(1)` schema
+        # and get permanently lost.
+        parsed = parse_message(bytes(raw), account_address=account.address)
         if parsed is None:
             logger.debug("uid %s parse returned None — skipping", uid)
             continue

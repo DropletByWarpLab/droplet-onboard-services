@@ -178,6 +178,13 @@ const envSchema = z.object({
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
 
+  // SERVICE_TOKEN_EMAIL — WARP-465. Bearer the email-indexer service
+  // presents on POST /api/email/_ingest/* and PATCH
+  // /api/email/_ingest/drafts/:id. authMiddleware's matchServiceToken
+  // sets `_service:email`. To rotate: change here AND in the
+  // email-indexer's compose env (ORCHESTRATOR_SERVICE_TOKEN).
+  SERVICE_TOKEN_EMAIL: z.string().default(""),
+
   // ORCHESTRATOR_SAMPLER_TOKEN — WARP-468 / WARP-470. Bearer presented
   // by the routing service's egress_meter (off-LAN sample POST) and
   // scheduler (throughput sample POST). Both run with network_mode: host

@@ -144,10 +144,21 @@ def derive_thread_key(
     return message_id
 
 
-def parse_message(raw: bytes) -> Optional[ParsedMessage]:
+def parse_message(
+    raw: bytes,
+    *,
+    account_address: Optional[str] = None,
+) -> Optional[ParsedMessage]:
     """Parse a raw RFC 5322 byte string. Returns None when the
     message lacks the minimum we need (Message-ID + From + a Date we
-    can read)."""
+    can read).
+
+    `account_address` is the IMAP account's own address — passed by
+    the caller so we can fall back to it when To: is missing (BCC-only
+    delivery, list mail). The orchestrator's ingest schema enforces
+    toAddrs.min(1), so without this fallback every BCC-only message
+    would 400 and be permanently lost.
+    """
     msg = email.message_from_bytes(raw)
     message_id = _normalize_msgid(msg.get("Message-ID"))
     if not message_id:
@@ -161,10 +172,15 @@ def parse_message(raw: bytes) -> Optional[ParsedMessage]:
     to_addrs = _split_address_list(_decode_header(msg.get("To")))
     if not to_addrs:
         # RFC 5322 allows To to be missing (bcc-only delivery, list
-        # mail) but for our surface we need at least one recipient.
-        # The original delivery envelope is lost by IDLE so fall back
-        # to the account's own address — the caller has it.
-        to_addrs = []
+        # mail) but the orchestrator's ingest schema requires
+        # toAddrs.min(1). Fall back to the account's own address so
+        # BCC-only mail doesn't 400 and get permanently lost. When no
+        # account_address is wired (unit tests, dev), drop the message
+        # rather than synthesize a placeholder.
+        if account_address:
+            to_addrs = [account_address]
+        else:
+            return None
     cc_addrs = _split_address_list(_decode_header(msg.get("Cc")))
     subject = _decode_header(msg.get("Subject"))
     date_header = msg.get("Date")

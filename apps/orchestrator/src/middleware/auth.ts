@@ -392,6 +392,20 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
     },
   },
   {
+    // WARP-465: email-indexer presents this Bearer on ingest POSTs to
+    // /api/email/_ingest/* and PATCH /api/email/_ingest/drafts/:id.
+    // The Python client sends it as `ORCHESTRATOR_SERVICE_TOKEN`; the
+    // orchestrator stores it as SERVICE_TOKEN_EMAIL — compose wires
+    // both ends to the same `secrets.sh`-generated value.
+    token: config.SERVICE_TOKEN_EMAIL,
+    principal: {
+      id: "_service:email",
+      username: "_service:email",
+      displayName: "Email Indexer",
+      role: "service",
+    },
+  },
+  {
     // WARP-468: routing service's egress_meter.py presents this Bearer
     // on POST /api/network/off-lan-sample-batch. WARP-470: routing's
     // scheduler.py presents the same shared token on POST

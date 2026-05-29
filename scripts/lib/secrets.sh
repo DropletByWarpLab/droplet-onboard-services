@@ -35,7 +35,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp ollama_url
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -75,6 +75,22 @@ generate_env() {
   # attribute correctly (`_service:mcp` vs `_service:voice`). Compose
   # wires mcp-server's ORCHESTRATOR_TOKEN to ${SERVICE_TOKEN_MCP}.
   service_token_mcp=$(openssl rand -hex 32)
+  # WARP-465: bearer the email-indexer service presents on POST to
+  # /api/email/_ingest/* and PATCH /api/email/_ingest/drafts/:id. Same
+  # authMiddleware path as voice/mcp — distinct token so the principal
+  # logs attribute correctly (`_service:email`). Compose wires the
+  # email-indexer's ORCHESTRATOR_SERVICE_TOKEN to ${SERVICE_TOKEN_EMAIL}.
+  service_token_email=$(openssl rand -hex 32)
+  # WARP-468 + WARP-470: bearer the routing service's egress_meter and
+  # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
+  # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
+  orchestrator_sampler_token=$(openssl rand -hex 32)
+  # WARP-468: bearer ai-gateway's off_lan_gating middleware presents on
+  # GET /api/network/off-lan + /api/settings/off-lan to read the
+  # cloud_model_escape posture. Without this the gate fails closed
+  # (every cloud-LLM call 451s). Compose wires it to
+  # ${AI_GATEWAY_SAMPLER_TOKEN}.
+  ai_gateway_sampler_token=$(openssl rand -hex 32)
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box PoC). Override before running setup.sh for a multi-box
@@ -171,6 +187,23 @@ OPS_TOKEN=$ops_token
 # so the two service consumers rotate independently. Compose wires
 # mcp-server's ORCHESTRATOR_TOKEN to \${SERVICE_TOKEN_MCP}.
 SERVICE_TOKEN_MCP=$service_token_mcp
+
+# --- Email indexer service bearer (email-indexer → orchestrator REST) ---
+# WARP-465. Bearer the email-indexer presents on ingest POSTs.
+# Compose wires email-indexer's ORCHESTRATOR_SERVICE_TOKEN to this value.
+SERVICE_TOKEN_EMAIL=$service_token_email
+
+# --- Routing sampler bearers ---
+# WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
+# service's apscheduler jobs present this token on POSTs to
+# /api/network/{off-lan,throughput}-sample-*. authMiddleware sets
+# req.user = _service:sampler.
+ORCHESTRATOR_SAMPLER_TOKEN=$orchestrator_sampler_token
+
+# WARP-468: ai-gateway's off_lan_gating middleware presents this token
+# on GETs to /api/network/off-lan + /api/settings/off-lan. Without it
+# the gate fails closed (every cloud-LLM call 451s).
+AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
 
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
