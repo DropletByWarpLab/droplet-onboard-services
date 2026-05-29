@@ -8,7 +8,6 @@
  * via a runtime API).
  */
 import { Router } from "express";
-import { requireRole } from "../middleware/auth.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import {
   getModelsPagePayload,
@@ -21,9 +20,12 @@ const MODELS_PAGE_CACHE_TTL = 30;
 export function createModelsRouter(): Router {
   const router = Router();
 
+  // No requireRole — per ADR-004 §3, GET endpoints stay open to any
+  // authenticated principal (incl. the `service` role used by mcp-server
+  // and voice-io). authMiddleware has already rejected unauthenticated
+  // requests by the time this handler runs.
   router.get(
     "/models",
-    requireRole("owner", "admin", "family", "guest"),
     async (_req, res, next) => {
       try {
         const cached = await cacheGet<ModelsPagePayload>(MODELS_PAGE_CACHE_KEY);
