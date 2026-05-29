@@ -1708,3 +1708,30 @@ model FileCitation {
 
   @@index([filePath, userId, citedAt(sort: Desc)])
 }
+
+/// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
+///
+/// One row per (ts, channel). A 60 s apscheduler tick in
+/// `services/routing/egress_meter.py` reads OpenWrt nftables byte
+/// counters (chain per channel under the `droplet_offlan_*` prefix),
+/// diffs against the previous sample, and POSTs the derived delta
+/// into the orchestrator via /api/network/off-lan-sample-batch.
+///
+/// `bytes` is BigInt because cumulative monthly totals on a busy
+/// channel can exceed 2³¹ comfortably. The chart on the Network
+/// page sums these rows for the §2.6 "Off-LAN this month" chip;
+/// the Models page sums them filtered to `cloud_model_escape` for
+/// the "Cloud spend" chip.
+///
+/// Retention: a nightly cron prunes rows older than 90 days. Longer
+/// than throughput samples (30 d) because off-LAN totals roll up
+/// to monthly billing windows; 90 d covers a quarter-on-quarter
+/// review without bloating the table.
+model OffLanEgressSample {
+  ts        DateTime         @default(now())
+  channel   OffLanChannelKey
+  bytes     BigInt
+
+  @@id([ts, channel])
+  @@index([channel, ts(sort: Desc)])
+}

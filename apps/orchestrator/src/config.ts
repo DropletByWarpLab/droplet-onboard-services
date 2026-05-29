@@ -178,6 +178,24 @@ const envSchema = z.object({
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
 
+  // ORCHESTRATOR_SAMPLER_TOKEN — WARP-468 / WARP-470. Bearer presented
+  // by the routing service's egress_meter (off-LAN sample POST) and
+  // scheduler (throughput sample POST). Both run with network_mode: host
+  // so they reach the orchestrator on localhost:3000 rather than via
+  // compose service DNS. authMiddleware's matchServiceToken sets
+  // `_service:sampler` for either source. To rotate: change here AND in
+  // services/routing's compose env (ORCHESTRATOR_SAMPLER_TOKEN).
+  ORCHESTRATOR_SAMPLER_TOKEN: z.string().default(""),
+
+  // AI_GATEWAY_SAMPLER_TOKEN — WARP-468. Bearer presented by ai-gateway's
+  // off_lan_gating middleware on GET /api/network/off-lan and
+  // /api/settings/off-lan to read the cloud_model_escape posture. The
+  // gate fails closed (451) without a valid reading, so a missing or
+  // mis-registered token blocks every cloud-model call. authMiddleware's
+  // matchServiceToken sets `_service:ai-gateway`. To rotate: change here
+  // AND in services/ai-gateway's compose env (AI_GATEWAY_SAMPLER_TOKEN).
+  AI_GATEWAY_SAMPLER_TOKEN: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if

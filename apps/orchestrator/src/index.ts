@@ -45,6 +45,7 @@ import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { purgeNetworkThroughputSamples } from "./routes/network-throughput.js";
+import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
@@ -296,12 +297,17 @@ async function main() {
       // 24 h area chart's range comfortably within scope while bounding
       // table growth at ~43k rows (60 s sampler × 30 d).
       const throughputDeleted = await purgeNetworkThroughputSamples(prisma, 30);
+      // WARP-468: 90-day retention on off-LAN egress samples. Longer
+      // than throughput (30 d) because totals roll up to monthly
+      // billing windows; 90 d covers QoQ review without bloat.
+      const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
       logger.info(
         {
           eventsDeleted,
           overridesDeleted,
           presenceDeleted: presenceDeleted.count,
           throughputDeleted,
+          offLanDeleted,
         },
         "daily purges complete",
       );
