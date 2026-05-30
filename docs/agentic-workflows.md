@@ -6,14 +6,14 @@
 
 - **`droplet-onboard-services`** (this repo) — runs **intelligence**. The orchestrator's ReAct agent loop, the MCP server with the tool registry, the AI gateway that proxies model requests to Ollama.
 - **`droplet-jetson-ai`** (sibling repo) — runs **inference**. Ollama + a small Python sidecar that does manifest pulls and exposes `/models/eligible`. **No agent runtime there.**
-- The two repos are deployed side-by-side on the same Jetson (single device).
+- The two repos are deployed side-by-side on the same inference host (single device).
 
 If you're looking for "where is Ollama" or "how do I add a new model" — **the answer is the other repo, not this one**. There is intentionally zero inference-server code in `droplet-onboard-services`.
 
 ## Architecture
 
 ```
-              ┌─────────────── single Jetson Orin Nano 8 GB ───────────────┐
+              ┌──────────────────── single inference host ──────────────────┐
               │                                                            │
               │   droplet-onboard-services (orchestrator)                       │
               │   ─ apps/orchestrator/      ReAct agent loop, owns chat    │
@@ -43,7 +43,7 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
               └────────────────────────────────────────────────────────────┘
 ```
 
-The orchestrator's ai-gateway calls the Jetson side through `ollama-manager`'s
+The orchestrator's ai-gateway calls the inference host side through `ollama-manager`'s
 `/proxy/{path:path}` router rather than Ollama directly. The proxy observes
 tool-call emissions, repairs malformed argument JSON (best-effort), and
 surfaces a circuit breaker that trips on transport-level failures.
@@ -80,12 +80,12 @@ bump both sides in lockstep when the contract changes.
 1. **Web dashboard or API client** → `POST /ai/chat` on the orchestrator (port 3000) or directly on ai-gateway (port 8000).
 2. **Orchestrator's agent loop** (`llm-agent.service.ts`) starts: get tools from MCP, send first turn to ai-gateway.
 3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `OLLAMA_URL` (`http://host.docker.internal:8002/proxy`). The request enters `ollama-manager`'s chat proxy, which pre-flights model-loading + circuit-open state and forwards to Ollama.
-4. **Jetson Ollama** (this repo's `ollama` container) generates a response, possibly with `tool_calls`.
+4. **Ollama on the inference host** (the `ollama` container in `droplet-jetson-ai`) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
 6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).
 7. **Response streams back** via SSE through ai-gateway → orchestrator → caller.
 
-The Jetson side (this repo) is involved only in step 3-4. We see one HTTP call per loop iteration. We do not see tool calls, conversation history, or session state — those live in the orchestrator.
+The inference host side (`droplet-jetson-ai`) is involved only in step 3-4. We see one HTTP call per loop iteration. We do not see tool calls, conversation history, or session state — those live in the orchestrator.
 
 ## Adding a new agent capability
 
@@ -93,9 +93,9 @@ The Jetson side (this repo) is involved only in step 3-4. We see one HTTP call p
 
 **Add a new model the appliance can serve:** edit `droplet-jetson-ai/models/model-manifest.json` to add an entry, then run `POST /models/sync` on the appliance. The manifest entry needs a `min_vram_gb` so the appliance knows whether to actually pull it. No code changes in either repo.
 
-**Change the agent's system prompt:** edit the orchestrator-side prompt in `droplet-onboard-services/apps/orchestrator/src/services/llm-agent.service.ts`. There is no system prompt on the Jetson side; the appliance is stateless w.r.t. agent identity.
+**Change the agent's system prompt:** edit the orchestrator-side prompt in `droplet-onboard-services/apps/orchestrator/src/services/llm-agent.service.ts`. There is no system prompt on the inference host side; the appliance is stateless w.r.t. agent identity.
 
-**Change which provider a model name routes to:** edit `droplet-onboard-services/services/ai-gateway/router.py`. The Jetson is unaware of which model the orchestrator chose; it just receives a `model` field in the API request and serves it.
+**Change which provider a model name routes to:** edit `droplet-onboard-services/services/ai-gateway/router.py`. The inference host is unaware of which model the orchestrator chose; it just receives a `model` field in the API request and serves it.
 
 ## What is NOT in this repo
 
