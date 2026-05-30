@@ -4,7 +4,7 @@
 # even without .env. The setup script validates secrets before starting.
 
 # Explicit project name so containers don't collide with the sibling
-# `droplet-jetson-ai` repo, whose compose file is also under a `docker/`
+# `droplet-local-LLM` repo, whose compose file is also under a `docker/`
 # directory and would otherwise auto-derive the same project name from
 # its parent dir. Caught locally during the WARP-187 verification.
 name: droplet-pi-platform

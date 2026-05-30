@@ -102,7 +102,7 @@ smallest reference), and the `_meta._enhancement` private-metadata channel
 ### 5. Multimodal — WARP-439 — To Do
 
 VLM caption-first image indexing (`moondream` via Ollama). **Blocker is
-cross-repo:** the `droplet-jetson-ai` sibling must pre-pull the `moondream`
+cross-repo:** the `droplet-local-LLM` sibling must pre-pull the `moondream`
 model. Independent of phases 1–4 — can start whenever the sibling lands its
 model pre-pull.
 
@@ -160,7 +160,7 @@ The whole program is currently gated on **one artifact: a populated
    `WARP_437_ENHANCEMENT_ENABLED=1` on the target environment + recreate the
    orchestrator. Watch the next eval runs for per-class deltas.
 5. **Start WARP-438 CRAG-lite** — now fully unblocked.
-6. **WARP-439 multimodal** — independent; start whenever `droplet-jetson-ai`
+6. **WARP-439 multimodal** — independent; start whenever `droplet-local-LLM`
    lands the `moondream` pre-pull.
 
 A separate, low-priority cleanup: WARP-435 batch C (live re-index + NDCG gate)

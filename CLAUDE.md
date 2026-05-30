@@ -1,6 +1,6 @@
 # edge-platform
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-jetson-ai`](../droplet-jetson-ai). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](../droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
 
 Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file indexer service, and all supporting Docker infrastructure.
 
@@ -88,7 +88,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 
 ## Ollama call path (chat vs lifecycle)
 
-The sibling repo `droplet-jetson-ai` ships two services on the inference
+The sibling repo `droplet-local-LLM` ships two services on the inference
 host: **Ollama** (`:11434`, the inference engine) and **ollama-manager**
 (`:8002`, a lifecycle + opt-in observability sidecar). They are NOT
 interchangeable proxy layers — each owns separate concerns:
@@ -98,10 +98,10 @@ interchangeable proxy layers — each owns separate concerns:
   OpenAI-compat `/v1/chat/completions`. Production's `.env` and the
   `OllamaLocalProvider` code default both point here. Going direct
   matters because ollama-manager's `TIMEOUT_PROXY` read leg is 120 s
-  (see `droplet-jetson-ai/services/ollama-manager/timeouts.py`), which
+  (see `droplet-local-LLM/services/ollama-manager/timeouts.py`), which
   the orchestrator's agent loop blows past on CPU inference and on
   cold-loads of larger models — surfacing as 502 from the manager and
-  500 from the orchestrator. ADR-004 in `droplet-jetson-ai` records the
+  500 from the orchestrator. ADR-004 in `droplet-local-LLM` records the
   original rationale for the sidecar's `/proxy` endpoint, but the chat
   path in production deliberately does not use it.
 - **ollama-manager owns model lifecycle**: `GET/POST /models/*`,
