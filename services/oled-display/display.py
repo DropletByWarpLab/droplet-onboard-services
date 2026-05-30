@@ -1,20 +1,21 @@
 """
 Droplet TFT Display Driver
 ===========================
-Drives the front-panel 480x320 TFT via an Adafruit PyPortal Titano connected
-over USB-serial. The PyPortal's own SAMD51 + ILI9341 handles rendering; this
-module streams JSON commands over /dev/ttyACM* and mirrors every frame to a
-preview PNG so the dashboard can show what's on the panel.
+Drives the front-panel 480x320 TFT via an Adafruit PyPortal Titano (the status
+display) connected over USB-serial. The display's own SAMD51 + ILI9341 handles
+rendering; this module streams JSON commands over /dev/ttyACM* and mirrors every
+frame to a preview PNG so the dashboard can show what's on the panel.
 
 Backends:
-  1. pyportal   - USB-serial to an Adafruit PyPortal Titano (primary)
+  1. pyportal   - USB-serial to an Adafruit PyPortal Titano / status display (primary)
   2. simulated  - writes a PNG to SIM_OUTPUT (dev/CI fallback, auto-used
-                  when no PyPortal is present)
+                  when no status display is present)
 
 The direct-SPI / luma.lcd / fbtft-framebuffer paths were removed after the
-pivot to PyPortal (Tegra's GPIO/SPI driver stack is incompatible with the
-Pi-shield TFTs we originally targeted; see WARP-127). gpio_shim,
-Jetson.GPIO, RPi.GPIO, luma, spidev, and the XPT2046 touch code are gone.
+pivot to the status display (the inference host's GPIO/SPI driver stack is
+incompatible with the Pi-shield TFTs we originally targeted; see WARP-127).
+gpio_shim, the old GPIO library, luma, spidev, and the XPT2046 touch code
+are gone.
 
 The visual system mirrors the web dashboard (`apps/web-dashboard/`) so the
 on-device screen looks like a compact version of the admin UI: same Droplet
@@ -40,7 +41,7 @@ try:
 except ImportError:  # py<3.9
     ZoneInfo = None  # type: ignore
 
-# Timezone for the wall-clock we push to the PyPortal. The container
+# Timezone for the wall-clock we push to the status display. The container
 # itself runs UTC (standard for Docker images), so we compute local
 # time explicitly here. Override via DISPLAY_TIMEZONE if needed.
 _TZ_NAME = os.environ.get("DISPLAY_TIMEZONE", "America/Los_Angeles")
@@ -60,11 +61,11 @@ HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 # ---------------------------------------------------------------------------
 # Backend selection
 # ---------------------------------------------------------------------------
-# "auto" (default) probes the PyPortal on USB-serial and falls back to "sim".
+# "auto" (default) probes the status display on USB-serial and falls back to "sim".
 # "pyportal" / "sim" force a specific backend (primarily for CI / dev).
 BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
 
-# PyPortal backend (USB-serial-connected Adafruit PyPortal Titano).
+# Status display backend (USB-serial-connected Adafruit PyPortal Titano).
 PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
 PYPORTAL_BAUD = int(os.environ.get("PYPORTAL_BAUD", "115200"))
 
@@ -200,7 +201,7 @@ class TouchRegion:
 
 
 class TFTDisplay:
-    """PyPortal-backed 480x320 TFT controller with touch-driven screens."""
+    """Status-display-backed 480x320 TFT controller with touch-driven screens."""
 
     # Screen ids — mirror the dashboard's top-level routes where it makes
     # sense: home tile grid, chat-prep, stats/health, device summary,
@@ -261,10 +262,10 @@ class TFTDisplay:
     # ----- Backend init -------------------------------------------------
 
     def _init_device(self):
-        # PyPortal takes several seconds to finish USB enumeration after a
-        # Jetson reboot, so retry a few times before falling through to sim.
-        # Otherwise a cold boot leaves the user with a blank screen until
-        # the container is restarted.
+        # The status display takes several seconds to finish USB enumeration
+        # after the host reboots, so retry a few times before falling through
+        # to sim. Otherwise a cold boot leaves the user with a blank screen
+        # until the container is restarted.
         if BACKEND in ("auto", "pyportal"):
             attempts = 6 if BACKEND == "auto" else 1
             for attempt in range(attempts):
@@ -273,15 +274,15 @@ class TFTDisplay:
                 if attempt < attempts - 1:
                     time.sleep(2)
         self._backend = "sim"
-        logger.warning("Using simulated display (no PyPortal detected on USB)")
+        logger.warning("Using simulated display (no status display detected on USB)")
 
     def _try_pyportal(self) -> bool:
         try:
             import serial
         except ImportError:
             return False
-        # PyPortal can re-enumerate as ttyACM0/1/2 depending on which
-        # USB interface ends up as "data" vs "console" at boot. Try each
+        # The status display can re-enumerate as ttyACM0/1/2 depending on
+        # which USB interface ends up as "data" vs "console" at boot. Try each
         # candidate and pick the first that responds.
         candidates = []
         if Path(PYPORTAL_TTY).exists():
@@ -312,7 +313,7 @@ class TFTDisplay:
             s.write(b'{"mode":"ping"}\n')
             s.flush()
             # Expect an OK or READY within 800ms; otherwise treat as a
-            # different serial device (e.g. PyPortal's REPL console).
+            # different serial device (e.g. the display's REPL console).
             deadline = time.time() + 0.8
             saw_ok = False
             while time.time() < deadline:
@@ -335,11 +336,11 @@ class TFTDisplay:
             # explicit resync, the firmware would render empty fields
             # until the slowest periodic push tick (30s).
             self._needs_resync = True
-            logger.info("TFT initialised via PyPortal on %s @ %d baud",
+            logger.info("TFT initialised via status display on %s @ %d baud",
                         path, PYPORTAL_BAUD)
             return True
         except Exception as e:
-            logger.debug("PyPortal probe %s failed: %s", path, e)
+            logger.debug("status display probe %s failed: %s", path, e)
             return False
 
     def _pyportal_send(self, mode: str, data: Optional[dict] = None):
@@ -353,11 +354,11 @@ class TFTDisplay:
                 self._pyportal.write(json.dumps(payload).encode("utf-8") + b"\n")
                 self._pyportal.flush()
         except Exception as e:
-            # I/O error usually means the PyPortal re-enumerated on USB
-            # (e.g. firmware reloaded) and our file handle is stale.
+            # I/O error usually means the status display re-enumerated on
+            # USB (e.g. firmware reloaded) and our file handle is stale.
             # Drop the handle, try to re-probe; subsequent calls will
-            # either reconnect or stay quiet until the PyPortal is back.
-            logger.warning("PyPortal write failed (mode=%s): %s — reconnecting", mode, e)
+            # either reconnect or stay quiet until the display is back.
+            logger.warning("status display write failed (mode=%s): %s — reconnecting", mode, e)
             try:
                 with self._pyportal_lock:
                     try:
@@ -437,9 +438,9 @@ class TFTDisplay:
     # ----- Push to display ---------------------------------------------
 
     def _push(self, image: Image.Image):
-        # Both backends write the preview PNG: PyPortal renders the frame
-        # itself from the data commands we stream over serial, and the sim
-        # backend has nothing else to do with the image.
+        # Both backends write the preview PNG: the status display renders the
+        # frame itself from the data commands we stream over serial, and the
+        # sim backend has nothing else to do with the image.
         self._current_image = image
         SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1069,10 +1070,11 @@ class TFTDisplay:
 
     @staticmethod
     def _get_cpu_temp() -> float:
-        # psutil.sensors_temperatures() blows up on Jetson because some
-        # thermal zones (soc0-thermal, BCPU-therm, PLL-therm) return
-        # blank strings from /sys — psutil can't parse them. Read the
-        # thermal zones directly instead and pick the hottest valid one.
+        # psutil.sensors_temperatures() can fail on some inference hosts
+        # because certain thermal zones (soc0-thermal, BCPU-therm,
+        # PLL-therm) return blank strings from /sys — psutil can't parse
+        # them. Read the thermal zones directly instead and pick the
+        # hottest valid one.
         best = 0.0
         try:
             for zone in sorted(os.listdir("/sys/class/thermal")):
@@ -1162,7 +1164,7 @@ class TFTDisplay:
                         )
                         self._pyportal.flush()
             except Exception as e:
-                logger.warning("PyPortal brightness write failed: %s", e)
+                logger.warning("status display brightness write failed: %s", e)
         # Re-render settings page if that's where we are so the number
         # and bar update instantly.
         with self._lock:
@@ -1221,7 +1223,7 @@ class TFTDisplay:
             img = self.render_home()
         self._push(img)
 
-    # ----- Structured-data helpers (used by PyPortal backend) ----------
+    # ----- Structured-data helpers (used by status display backend) ----------
 
     def _gather_stats(self) -> dict:
         try:
@@ -1253,8 +1255,8 @@ class TFTDisplay:
             "ip": self._get_ip(),
             "hostname": socket.gethostname(),
             "uptime": uptime,
-            # Wall-clock for the PyPortal header. The PyPortal has no RTC
-            # and time.localtime() there counts from boot, so we push
+            # Wall-clock for the status display header. The display has no
+            # RTC and time.localtime() there counts from boot, so we push
             # local time on every stats update. Container runs UTC so
             # we compute the zoned time explicitly.
             "now": (datetime.now(_TZ) if _TZ else datetime.now()).strftime("%H:%M"),
@@ -1310,9 +1312,9 @@ class TFTDisplay:
 
     def rotate_wifi_key(self, timeout: float = 30.0) -> Optional[dict]:
         """Ask device-bridge to roll the Droplet-AI WPA key. Used by the
-        PyPortal's "Rotate now" button on the QR screen — the board sends
-        `ROTATE_KEY` over serial, we POST here, then re-push /openwrt/qr
-        so the display shows the new QR immediately.
+        status display's "Rotate now" button on the QR screen — the board
+        sends `ROTATE_KEY` over serial, we POST here, then re-push
+        /openwrt/qr so the display shows the new QR immediately.
 
         Sends the bridge auth token as `X-Droplet-Auth` so the bridge's
         rate-limited rotate endpoint accepts it. Token comes from
@@ -1436,8 +1438,8 @@ class TFTDisplay:
           1. Checks for a new touch press->release and dispatches it.
           2. Re-renders live screens (stats/home/settings) so metrics
              and tap highlights stay fresh.
-          3. Pushes stats + wifi scan snapshots to the PyPortal so its
-             screens stay current.
+          3. Pushes stats + wifi scan snapshots to the status display so
+             its screens stay current.
           4. Optionally auto-advances if AUTO_CYCLE=1 and we're idle.
         """
         last_press = 0
@@ -1451,20 +1453,20 @@ class TFTDisplay:
         last_liveness_check = 0.0
         serial_buf = b""
         while self._cycle_running:
-            # Liveness check: detect a stale PyPortal serial fd left behind
-            # by a USB re-enumeration. The kernel renumbers ttyACM* on
-            # firmware reset / replug / hub reset, but our open fd to the
-            # old node doesn't fail — writes silently succeed-with-no-effect
-            # and reads return zero bytes, so the existing reconnect-on-
-            # IOError path in `_pyportal_send` never triggers. If our path
-            # has vanished from /dev, drop the fd and let the promotion
-            # block below re-probe whatever ttyACM* is now live.
+            # Liveness check: detect a stale status display serial fd left
+            # behind by a USB re-enumeration. The kernel renumbers ttyACM*
+            # on firmware reset / replug / hub reset, but our open fd to
+            # the old node doesn't fail — writes silently succeed-with-
+            # no-effect and reads return zero bytes, so the existing
+            # reconnect-on-IOError path in `_pyportal_send` never triggers.
+            # If our path has vanished from /dev, drop the fd and let the
+            # promotion block below re-probe whatever ttyACM* is now live.
             if (self._backend == "pyportal" and self._pyportal_path
                     and time.time() - last_liveness_check > 2.0):
                 last_liveness_check = time.time()
                 if not os.path.exists(self._pyportal_path):
                     logger.warning(
-                        "PyPortal device %s vanished (USB re-enumeration?) "
+                        "status display %s vanished (USB re-enumeration?) "
                         "— dropping fd and re-probing",
                         self._pyportal_path)
                     try:
@@ -1485,8 +1487,8 @@ class TFTDisplay:
 
             # If we started on sim because USB enumeration hadn't finished
             # yet, keep probing every 5s and promote to pyportal once it
-            # appears. Covers the cold-boot race where the Jetson starts
-            # the container before /dev/ttyACM* is ready.
+            # appears. Covers the cold-boot race where the inference host
+            # starts the container before /dev/ttyACM* is ready.
             if self._backend != "pyportal":
                 if time.time() - last_backend_retry > 5.0:
                     last_backend_retry = time.time()
@@ -1541,9 +1543,9 @@ class TFTDisplay:
                     self._render_current_locked()
                 last_full_render = now
 
-            # Keep the PyPortal's local data snapshot fresh. The PyPortal
-            # renders locally; we push data every few seconds so every
-            # screen has live numbers when the user navigates to it.
+            # Keep the status display's local data snapshot fresh. The
+            # display renders locally; we push data every few seconds so
+            # every screen has live numbers when the user navigates to it.
             # A longer cadence (8s) keeps perceived flicker low — the
             # firmware re-renders the active screen on each push.
             if self._backend == "pyportal" and (now - last_stats_push) > 8.0:
@@ -1574,7 +1576,7 @@ class TFTDisplay:
                         self._pyportal_send("drives", drv)
                     self._last_drives_push = now
 
-            # Handle async requests from the PyPortal firmware. The
+            # Handle async requests from the status display firmware. The
             # firmware emits plain TEXT:arg lines on its side channel —
             # we drain them here and trigger a one-shot refresh.
             if self._backend == "pyportal" and self._pyportal is not None:
@@ -1602,9 +1604,9 @@ class TFTDisplay:
                         # Full-snapshot resync: fired when the firmware boots
                         # (READY) or explicitly asks for state (REQUEST_STATE,
                         # which our firmware sends right after READY). Without
-                        # this, a code.py auto-reload would leave the PyPortal
-                        # rendering empty screens until each periodic push
-                        # cycle ticks over (up to 30s worst-case). The
+                        # this, a code.py auto-reload would leave the status
+                        # display rendering empty screens until each periodic
+                        # push cycle ticks over (up to 30s worst-case). The
                         # post-probe resync block above also calls
                         # `_push_full_state` for the host-side path (fresh
                         # probe / re-probe after USB re-enumeration); both
@@ -1623,9 +1625,9 @@ class TFTDisplay:
                         if qr is not None:
                             self._pyportal_send("qr", qr)
                     elif txt == "ROTATE_KEY":
-                        # PyPortal asked us to roll the Wi-Fi key. Ask the
-                        # bridge to do the UCI change on OpenWrt, then push
-                        # the fresh QR so the user can scan it right away.
+                        # The status display asked us to roll the Wi-Fi key.
+                        # Ask the bridge to do the UCI change on OpenWrt,
+                        # then push the fresh QR so the user can scan it.
                         resp = self.rotate_wifi_key()
                         logger.info("pyportal: rotate -> %s", resp)
                         qr = self.fetch_qr()

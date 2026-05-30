@@ -133,7 +133,7 @@ fi
 # Test 4b: FRIGATE_CAMERA_*_PASSWORD must NOT be URL-encoded
 # =============================================================================
 # Frigate substitutes env vars into the RTSP URL via Python str.format —
-# the value lands in the URL VERBATIM. The bundled jetson ffmpeg does NOT
+# the value lands in the URL VERBATIM. The bundled appliance ffmpeg does NOT
 # URL-decode userinfo before authenticating, so a `%21` goes on the wire as
 # three literal characters (`%`, `2`, `1`), the camera returns 401, and after
 # ~5 retries the firmware locks the admin account (HTTP 490 Account Blocked)

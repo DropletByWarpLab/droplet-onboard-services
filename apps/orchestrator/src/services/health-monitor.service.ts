@@ -102,8 +102,8 @@ function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: 
     { name: "ai-gateway", probe: aiGatewayHealth },
     { name: "nextcloud", probe: ncPing },
     // WARP-165: display is degraded-class only — the service auto-falls
-    // back to a `simulated` PNG backend when no PyPortal is plugged in,
-    // and the appliance is still usable without a screen, so a down
+    // back to a `simulated` PNG backend when no status display is plugged
+    // in, and the appliance is still usable without a screen, so a down
     // display never trips the aggregate to `down`.
     { name: "display", probe: displayHealth },
   ];

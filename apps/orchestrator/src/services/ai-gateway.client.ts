@@ -4,8 +4,8 @@ import type { ChatRequest, ModelsResponse } from "../types/index.js";
 const BASE_URL = config.AI_GATEWAY_URL;
 
 /**
- * Default timeout for non-streaming gateway calls. The Ollama Orin Nano can
- * stall briefly under inference load, but anything over 10 seconds for a
+ * Default timeout for non-streaming gateway calls. The local Ollama instance
+ * can stall briefly under inference load, but anything over 10 seconds for a
  * model-list or key CRUD is broken upstream — failing fast lets the dashboard
  * keep its 30 s SWR poll loop healthy instead of stacking hung requests
  * (WARP-303).

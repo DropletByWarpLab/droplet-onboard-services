@@ -294,9 +294,9 @@ export function createApp(prisma: PrismaClient) {
   // to dispatch due-time notifications and re-sync calendar sources.
   startRemindersPoller(prisma);
 
-  // PyPortal screen QR — context-switched display (setup URL on first boot,
-  // last-generated WireGuard peer for ~60 s after creation, WiFi-hotspot QR
-  // otherwise). 30 s poller; calls into Nextcloud + device-bridge.
+  // Status display screen QR — context-switched display (setup URL on first
+  // boot, last-generated WireGuard peer for ~60 s after creation, WiFi-hotspot
+  // QR otherwise). 30 s poller; calls into Nextcloud + device-bridge.
   // Failures in any leg leave the screen alone rather than blanking it.
   startScreenQRPoller();
 

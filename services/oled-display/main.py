@@ -1,7 +1,7 @@
 """
 Droplet TFT Display Service
 =============================
-FastAPI wrapper for the 480x320 PyPortal Titano (ILI9341) TFT display.
+FastAPI wrapper for the 480x320 status display (ILI9341) TFT.
 Exposes REST endpoints for the orchestrator and AI gateway to control
 what's shown on the physical display and to read / simulate touch input.
 
@@ -285,7 +285,7 @@ async def wifi_scan():
     snap = display.fetch_wifi()
     if snap is None:
         raise HTTPException(502, "Wi-Fi helper unreachable")
-    # Also push to PyPortal so the on-screen list refreshes immediately
+    # Also push to the status display so the on-screen list refreshes immediately
     display._pyportal_send("wifi", snap)
     return snap
 

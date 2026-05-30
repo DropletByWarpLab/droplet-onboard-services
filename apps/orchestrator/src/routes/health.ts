@@ -30,7 +30,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
     // (refreshed every 15s) instead of a live probe per request. A hung
     // display service was taxing the eager `/api/health` latency on every
     // dashboard pill refresh; the background monitor handles it now.
-    // PyPortal Titano stays `true` in simulated-mode too — the FastAPI app
+    // The status display stays `true` in simulated-mode too — the FastAPI app
     // is up regardless of whether USB-serial probe found a physical device.
     // /display/status surfaces the backend (pyportal | simulated) if the
     // dashboard wants to distinguish.

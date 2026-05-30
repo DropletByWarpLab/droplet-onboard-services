@@ -292,7 +292,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         vpnSubnet: config.WIREGUARD_VPN_SUBNET,
       });
 
-      // PyPortal screen QR — surface this peer for ~60 s so a phone
+      // Status display screen QR — surface this peer for ~60 s so a phone
       // next to the box can scan it directly without the dashboard
       // browser. Best-effort: notePeerCreated() never throws (catches
       // any push failure internally), so the API response stays clean.

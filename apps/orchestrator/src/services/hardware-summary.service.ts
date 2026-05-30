@@ -143,12 +143,12 @@ function getCompute(): HardwareCompute {
 function getDisplay(): HardwareDisplay {
   // display-service has its own /health surface; calling it from the
   // hardware composer adds a sync coupling we don't want on every
-  // hardware-page render. Static "PyPortal" tag matches the v2.6 HW
-  // contract; `online: null` says "unknown" until the service-health
-  // rollup (WARP-43) is wired. Hardcoding `true` would falsely claim
-  // the display is up on every host, including those with no display
+  // hardware-page render. Static tag matches the v2.6 HW contract;
+  // `online: null` says "unknown" until the service-health rollup
+  // (WARP-43) is wired. Hardcoding `true` would falsely claim the
+  // display is up on every host, including those with no display
   // hardware. Matches every other unresolved field in this service.
-  return { kind: "Adafruit PyPortal", online: null };
+  return { kind: "status display", online: null };
 }
 
 function getNetwork(): HardwareNetwork {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Droplet Router Monitor — Jetson ↔ OpenWrt connectivity
+Description=Droplet Router Monitor — inference host ↔ OpenWrt connectivity
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -9,7 +9,7 @@ StartLimitBurst=5
 Type=simple
 User=root
 WorkingDirectory=/opt/droplet
-ExecStart=/usr/bin/python3 /opt/droplet/jetson-router-connect.py --daemon --interval 30
+ExecStart=/usr/bin/python3 /opt/droplet/router-connect.py --daemon --interval 30
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1

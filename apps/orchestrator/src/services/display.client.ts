@@ -3,8 +3,8 @@
  */
 
 // Match the schema default in config.ts. The display service runs with
-// `network_mode: host` on the Jetson, so `localhost` from inside the
-// orchestrator container would never resolve to it — the host gateway
+// `network_mode: host` on the inference host, so `localhost` from inside
+// the orchestrator container would never resolve to it — the host gateway
 // alias must be used. Compose sets DISPLAY_SERVICE_URL explicitly; this
 // fallback only trips in local/unit-test contexts where the env isn't set.
 const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://host.docker.internal:8082";
@@ -84,7 +84,7 @@ export async function showMessage(title: string, lines: string[]): Promise<boole
 }
 
 /**
- * Push a PNG buffer to the PyPortal screen via the display service's
+ * Push a PNG buffer to the status display via the display service's
  * `POST /display/custom` multipart endpoint.
  *
  * `png` is the raw bytes (Buffer or Uint8Array) — already a valid PNG.
@@ -124,7 +124,7 @@ export async function pushCustomImage(
       headers["Authorization"] = `Bearer ${SERVICE_SECRET}`;
     }
     // 5s ceiling so a stalled display service can't pin the orchestrator's
-    // event loop on this multipart upload. The PyPortal write path is
+    // event loop on this multipart upload. The status display write path is
     // serial USB-serial; under normal load a push completes in ~200 ms.
     // 5s is a generous upper bound that still lets the screen-qr
     // single-flight guard reset and try again next tick.

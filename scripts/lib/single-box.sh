@@ -19,7 +19,7 @@
 #      dGPU hosts Ollama)
 #   3. Host integration: systemd units + scripts that wire the
 #      in-container OpenWrt to a real Wi-Fi AP via netns + a host-side
-#      dnsmasq on br-lan so the Lantronix switch downstream gets DHCP
+#      dnsmasq on br-lan so the managed switch downstream gets DHCP
 #
 # This module handles all three. Sourced from setup.sh.
 
@@ -35,10 +35,10 @@
 # Signals checked:
 #   * Multiple DRM render nodes (`/dev/dri/renderD*` count > 1) — single-box
 #     hosts have BOTH a dGPU (Ollama) and an iGPU (Frigate); a multi-box
-#     Jetson host typically has just `renderD128`. Strongest signal we have.
-#   * No reachable separate Jetson on the LAN — if `192.168.50.197:11434`
-#     answers `/api/version`, this host is the intelligence layer in a
-#     multi-box deploy, not a single-box.
+#     inference host typically has just `renderD128`. Strongest signal we have.
+#   * No reachable separate inference host on the LAN — if
+#     `192.168.50.197:11434` answers `/api/version`, this host is the
+#     intelligence layer in a multi-box deploy, not a single-box.
 #   * Has dGPU silicon — lspci shows AMD/NVIDIA VGA controller (not just
 #     integrated graphics). Belt-and-suspenders confirmation.
 #
@@ -58,13 +58,13 @@ detect_single_box_mode() {
     render_count=$(find /dev/dri -maxdepth 1 -name 'renderD*' 2>/dev/null | wc -l)
   fi
 
-  # Signal 2: separate Jetson reachable?
+  # Signal 2: separate inference host reachable?
   # We need a REACHABLE Ollama, not just a resolvable hostname. The single-box
   # host has avahi advertising itself, and stale /etc/hosts entries can have
   # `inference-engine.local` pointing at something dead — both make getent
-  # succeed without there being a real Jetson on the LAN. The curl below is
-  # the authoritative check: an Ollama instance answering /api/version means
-  # we're multi-box, anything else means we're not.
+  # succeed without there being a real inference host on the LAN. The curl
+  # below is the authoritative check: an Ollama instance answering /api/version
+  # means we're multi-box, anything else means we're not.
   #
   # The body grep for `"version":` defends against something unrelated
   # squatting on 192.168.50.197:11434 with a 200 response (rare but not
@@ -101,12 +101,12 @@ detect_single_box_mode() {
 
   # Decision matrix
   if [ "$jetson_reachable" = 1 ]; then
-    SINGLE_BOX_DETECTION_REASON="separate Jetson reachable on LAN — multi-box deployment shape"
+    SINGLE_BOX_DETECTION_REASON="separate inference host reachable on LAN — multi-box deployment shape"
     return 1
   fi
 
   if [ "$render_count" -ge 2 ] && [ "$has_dgpu" = 1 ]; then
-    SINGLE_BOX_DETECTION_REASON="dGPU + iGPU detected (${render_count} render nodes), no Jetson on LAN"
+    SINGLE_BOX_DETECTION_REASON="dGPU + iGPU detected (${render_count} render nodes), no inference host on LAN"
     return 0
   fi
 
@@ -115,7 +115,7 @@ detect_single_box_mode() {
     return 1
   fi
 
-  SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, jetson=${jetson_reachable}) — declining to auto-enable"
+  SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, inference_host=${jetson_reachable}) — declining to auto-enable"
   return 1
 }
 
@@ -188,7 +188,7 @@ install_single_box_host_integration() {
 DROPLET_AP_SSID=Droplet
 DROPLET_AP_PSK=$ap_psk
 
-# Hardware specifics for x86 + MT7922: phy0 surfaces as wlp14s0 inside
+# Hardware specifics for the Wi-Fi radio: phy0 surfaces as wlp14s0 inside
 # the openwrt container. Override here if your hardware enumerates
 # differently.
 DROPLET_AP_PHY=${DROPLET_AP_PHY:-phy0}

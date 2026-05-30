@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Droplet Jetson -> OpenWrt Router Connection Script
-===================================================
-Runs on the Jetson to discover and verify connectivity to the OpenWrt router.
+Droplet inference host -> OpenWrt router connection script
+==========================================================
+Runs on the inference host (the appliance) to discover and verify
+connectivity to the router host.
 Can be used standalone or as a systemd service for persistent connection.
 
 Uses the same env vars as the routing service and SDK:
@@ -11,9 +12,9 @@ Uses the same env vars as the routing service and SDK:
   OPENWRT_PASSWORD  RPC password (required)
 
 Usage:
-    python3 jetson-router-connect.py              # One-shot test
-    python3 jetson-router-connect.py --daemon      # Persistent monitor
-    python3 jetson-router-connect.py --discover    # mDNS discovery only
+    python3 router-connect.py              # One-shot test
+    python3 router-connect.py --daemon      # Persistent monitor
+    python3 router-connect.py --discover    # mDNS discovery only
 """
 
 import argparse
@@ -31,7 +32,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("droplet.jetson")
+log = logging.getLogger("droplet.router-connect")
 
 # Use the same env vars as the routing service (services/routing/main.py)
 DEFAULT_ROUTER_IP = os.environ.get("OPENWRT_HOST", "192.168.50.1")
@@ -213,7 +214,7 @@ def daemon_loop(router_ip: str, username: str, password: str, interval: int = 30
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Droplet Jetson <-> Router connector")
+    parser = argparse.ArgumentParser(description="Droplet appliance <-> router connector")
     parser.add_argument("--router", default=DEFAULT_ROUTER_IP, help="Router IP address")
     parser.add_argument("--user", default=DEFAULT_USER, help="RPC username")
     parser.add_argument("--password", default=DEFAULT_PASS, help="RPC password")
@@ -265,7 +266,7 @@ def main():
                 print(f"\n  {len(failed)} check(s) failed")
                 sys.exit(1)
             else:
-                print("\n  All systems nominal -- Jetson <-> Router link healthy")
+                print("\n  All systems nominal -- appliance <-> router link healthy")
 
         except Exception as e:
             log.error(f"Connection failed: {e}")
