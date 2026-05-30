@@ -29,7 +29,7 @@ RERANKER_CACHE_DIR = Path("/var/cache/droplet/models/bge-reranker-base")
 #     Anything longer gets truncated.
 #   - RERANKER_BATCH_SIZE: forward-pass batch size. 8 keeps memory
 #     bounded on CPU while still saturating int8 throughput on x86_64
-#     / Jetson Orin.
+#     / the inference host.
 RERANKER_MAX_LENGTH = 512
 RERANKER_BATCH_SIZE = 8
 

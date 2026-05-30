@@ -5,7 +5,8 @@ FastAPI wrapper around the abstract SwitchDriver, exposing managed switch
 control as a REST API for the orchestrator and AI gateway to consume.
 
 The driver implementation is selected at startup via SWITCH_DRIVER env var.
-Lantronix SM8TAT2SA is the prototype driver. When the custom PCB ASIC is
+The managed switch driver is selected at startup via SWITCH_DRIVER env var.
+Lantronix SM8TAT2SA is the prototype backend. When the custom PCB ASIC is
 ready, set SWITCH_DRIVER=asic and nothing else changes.
 """
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# droplet-automount.sh — auto-mount USB drives on Jetson and register them
+# droplet-automount.sh — auto-mount USB drives on the inference host and register them
 # with Nextcloud + the device-bridge. Invoked by a systemd template unit
 # triggered from a udev rule on add/remove.
 #
@@ -42,9 +42,10 @@ if [ -z "$ACTION" ] || [ -z "$DEVICE" ]; then
   exit 1
 fi
 
-# Never touch the boot medium. The Jetson boots from eMMC (/dev/mmcblk*)
-# so that's an absolute skip. NVMe is user-modular storage — DO include
-# it, but re-check at runtime that it doesn't hold the root fs.
+# Never touch the boot medium. The inference host boots from eMMC
+# (/dev/mmcblk*) so that's an absolute skip. NVMe is user-modular
+# storage — DO include it, but re-check at runtime that it doesn't
+# hold the root fs.
 case "$DEVICE" in
   /dev/mmcblk*|/dev/loop*|/dev/ram*|/dev/zram*|/dev/dm-*)
     log "skip $DEVICE (boot / virtual device)"; exit 0 ;;
@@ -62,10 +63,10 @@ if [ "$DEVICE" = "$boot_src" ] || [ "$dev_base" = "$boot_parent" ] \
   exit 0
 fi
 
-# Reject the PyPortal screen's firmware flash regardless of how it shows
+# Reject the status display's firmware flash regardless of how it shows
 # up — it's a display, not storage.
 if [ -n "${ID_VENDOR_ID:-}" ] && [ "$ID_VENDOR_ID" = "239a" ]; then
-  log "skip $DEVICE (Adafruit vendor — PyPortal screen)"; exit 0
+  log "skip $DEVICE (Adafruit vendor — status display)"; exit 0
 fi
 
 # Size guard — anything < 100 MiB is almost certainly firmware or an

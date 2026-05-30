@@ -37,7 +37,7 @@ def create_driver() -> SwitchDriver:
             logger.warning("SWITCH_PASSWORD not set — switch auth may fail")
 
         logger.info(
-            "Creating Lantronix driver for %s:%d (user: %s)", host, port, username
+            "Creating managed switch driver for %s:%d (user: %s)", host, port, username
         )
         return LantronixDriver(
             host=host,

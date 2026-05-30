@@ -1,5 +1,5 @@
 """
-code.py — Droplet PyPortal Titano firmware (swipe dashboard)
+code.py — Droplet status display firmware (swipe dashboard)
 =============================================================
 Three-screen swipe carousel: Stats ← Idle (logo) → QR.
 
@@ -22,7 +22,7 @@ Navigation
                the idle screen any tap = wake to stats
   30 s idle    auto-drop back to idle + dim brightness to ~38 %
 
-Host → PyPortal (one JSON per line, unchanged for back-compat)
+Host → display (one JSON per line, unchanged for back-compat)
   {"mode":"idle"|"stats"|"qr"|"logo"|"home"}    # logo/home map to idle/stats
   {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now}}
   {"mode":"wifi",   "data":{networks, connected_to, adapter, state, ssid,
@@ -37,7 +37,7 @@ Host → PyPortal (one JSON per line, unchanged for back-compat)
   {"mode":"brightness","value":0..255}
   {"mode":"ping"}
 
-PyPortal → Host
+Display → Host
   READY / OK / ERR:<reason>
   TOUCH:<x>,<y>,<p> / TOUCH:release
   TAP:<screen>:<region>

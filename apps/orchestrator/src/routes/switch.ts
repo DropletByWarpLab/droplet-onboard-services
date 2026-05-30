@@ -8,8 +8,8 @@
  * - Tier 3: Disabling the protected port (Jetson's port) is blocked for AI
  *
  * Proxies requests to the switch service (default :8081) which talks
- * to the hardware via the active driver (Lantronix for prototype,
- * custom ASIC for production).
+ * to the hardware via the active driver (pluggable backend; prototype
+ * uses the managed switch driver, production may use a custom ASIC).
  */
 
 import { Router } from "express";
@@ -24,7 +24,7 @@ import {
 const logger = pino({ name: "switch-routes" });
 
 /**
- * Protected port: the port the Jetson/Droplet appliance is connected to.
+ * Protected port: the port the appliance is connected to.
  * Disabling this port or moving it to a non-management VLAN would sever
  * all connectivity. This is configurable via SWITCH_PROTECTED_PORT env var.
  * Default: 0 (no protection, auto-detect if possible).

@@ -1,7 +1,7 @@
 /**
  * Screen-QR state machine + poller.
  *
- * Owns "what QR should currently be on the PyPortal screen". Three
+ * Owns "what QR should currently be on the status display screen". Three
  * states, in priority order:
  *
  *   1. setup-URL  — when no admin user exists yet (first boot).
@@ -49,7 +49,7 @@ const PEER_DISPLAY_WINDOW_MS = 60_000;
  *
  * Off by default. When a WireGuard peer is created, this service can
  * render the peer's full WireGuard `.conf` (which includes the client
- * `PrivateKey`) as a QR on the PyPortal for 60 s so the operator's
+ * `PrivateKey`) as a QR on the status display for 60 s so the operator's
  * phone can scan + import directly via the WireGuard mobile app's
  * built-in QR scanner. That's slick UX in a trusted physical space
  * (private home, locked office) — but in a shared-space deployment
@@ -109,7 +109,7 @@ let pollerInterval: NodeJS.Timeout | null = null;
  * even if a previous tick is still in `pushCustomImage` (multipart
  * upload over the host bridge). Without this guard, a slow display
  * push can stack concurrent ticks that all race on `activeSignature`,
- * double-push the same image to the PyPortal, and burn the display
+ * double-push the same image to the status display, and burn the display
  * service's small worker pool. Single-flight is the right shape: if
  * a refresh is already running, skip this tick.
  */

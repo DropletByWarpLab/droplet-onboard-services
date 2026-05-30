@@ -247,9 +247,9 @@ _MAC_PATTERN = r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
 class ApApproveRequest(BaseModel):
     """Approve a discovered extender AP and push wireless config.
 
-    `radio` defaults to `radio0` which is the MT7922 5 GHz AP on the
-    Pi 5 build (see `openwrt/build.sh` for the radio numbering); the
-    dashboard's wizard surfaces this as the primary household band.
+    `radio` defaults to `radio0` which is the Wi-Fi radio's primary 5 GHz AP
+    on the router host build (see `openwrt/build.sh` for the radio numbering);
+    the dashboard's wizard surfaces this as the primary household band.
     `encryption` defaults to `psk2+ccmp` (WPA2-PSK, AES-only) — same
     posture as the main router's default config.
     """

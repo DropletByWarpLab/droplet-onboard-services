@@ -122,7 +122,7 @@ class LantronixDriver(SwitchDriver):
         self._keepalive_task = asyncio.create_task(
             self._keepalive_loop(), name="lantronix-keepalive"
         )
-        logger.info("Connected to Lantronix switch at %s:%d", self._host, self._port)
+        logger.info("Connected to managed switch at %s:%d", self._host, self._port)
 
     async def disconnect(self) -> None:
         if self._keepalive_task:

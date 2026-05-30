@@ -288,8 +288,8 @@ DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 # Linux defaults to "linux,display":
 #   linux   → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd),
 #             wyoming-faster-whisper, wyoming-piper
-#   display → oled-display (PyPortal — safe default, auto-falls back to a
-#             simulated PNG backend when no /dev/ttyACM* is present)
+#   display → oled-display (status display — safe default, auto-falls back
+#             to a simulated PNG backend when no /dev/ttyACM* is present)
 #   full    → switch driver, camera-discovery (both require real hardware
 #             and operator-supplied credentials; not default-on so a fresh
 #             install doesn't scan the LAN or hit a missing switch on boot)
@@ -393,8 +393,8 @@ migrate_env() {
   # COMPOSE_PROFILES on Linux defaults to "linux,display":
   #   linux   → Frigate, voice-io, wyoming-faster-whisper, wyoming-piper
   #             (need /dev/dri or /dev/snd, gated on Linux only)
-  #   display → oled-display PyPortal (safe default via sim fallback when
-  #             /dev/ttyACM* is absent)
+  #   display → oled-display status display (safe default via sim fallback
+  #             when /dev/ttyACM* is absent)
   # `full` (switch, camera-discovery) is intentionally not in the default —
   # both need real hardware + credentials. Operator opts in via .env.
   #

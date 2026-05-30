@@ -5,9 +5,9 @@ Runs on the Jetson host (outside the oled-display container). Exposes a
 stable read-only API the display service polls, with each endpoint
 sourcing live data from the appropriate upstream:
 
-  GET  /wifi           -> OpenWrt iwinfo scan (SSH), fallback to Jetson nmcli
+  GET  /wifi           -> OpenWrt iwinfo scan (SSH), fallback to host nmcli
   GET  /openwrt/qr     -> OpenWrt's LAN SSID + PSK encoded as a WiFi QR
-                          matrix + payload (PyPortal renders the grid)
+                          matrix + payload (status display renders the grid)
   GET  /files          -> file-indexer / orchestrator storage snapshot
   GET  /cameras        -> Frigate recent events + online camera count
   POST /wifi/connect   -> join an SSID (nmcli fallback path)
@@ -88,7 +88,7 @@ if not os.access(os.path.dirname(STATE_FILE) or "/", os.W_OK):
 # run rotates the bridge env to SERVICE_TOKEN_DISPLAY.
 #
 # Even with the bridge bound to loopback, any unprivileged process on
-# the Jetson could currently POST to /openwrt/wifi/rotate or
+# the inference host could currently POST to /openwrt/wifi/rotate or
 # /wifi/connect — requiring the token moves that capability from
 # "anyone with a shell" to "anyone with the secret".
 BRIDGE_AUTH_TOKEN = (
@@ -220,9 +220,9 @@ def openwrt_wifi_credentials():
     """Read the active AP's SSID + WPA key from UCI.
 
     "Active" = wifi-iface with mode=ap AND iface-level disabled!=1 AND
-    its parent radio also not disabled. This matters on the Pi 5 router
-    where the first 4 radios (radio0..3) are `disabled '1'` because only
-    the onboard BCM4345/6 on radio4 actually works as an AP — without
+    its parent radio also not disabled. This matters on the router host
+    where the first 4 radios (radio0..3) may be `disabled '1'` because
+    only the Wi-Fi radio on radio4 actually works as an AP — without
     the radio-level check we'd hand the dashboard the stale default
     'Droplet/ChangeMe!2024' creds from default_radio0 that are never on
     the air.
@@ -266,10 +266,10 @@ def _openwrt_connected_ssid():
     """Return the SSID the router is currently broadcasting (active AP).
 
     Uses the same _FIND_AP_SH helper as openwrt_wifi_credentials so we
-    can't return the stale default_radio0 "Droplet" name on this Pi 5
-    where only radio4 actually runs as an AP. STA-mode lookup (client
-    mode) stays first for the rare deployment where OpenWrt is an
-    upstream client.
+    can't return the stale default_radio0 "Droplet" name on the router
+    host where only one radio actually runs as an AP. STA-mode lookup
+    (client mode) stays first for the rare deployment where OpenWrt is
+    an upstream client.
     """
     script = (
         "sta=$(uci -q get wireless.sta.ssid 2>/dev/null || true); "
@@ -350,7 +350,7 @@ def wifi_snapshot():
     nets, meta = scan_via_nmcli()
     if nets is not None and meta:
         out["networks"] = nets[:20]
-        out["source"] = "jetson-nmcli"
+        out["source"] = "host-nmcli"
         out["adapter"] = meta.get("adapter")
         out["state"] = meta.get("state") or "unknown"
         out["connected_to"] = meta.get("connected_to")
@@ -432,9 +432,9 @@ def qr_snapshot():
         "disabled": creds["disabled"], "payload": payload,
         # Cleartext key is already inside `payload` (the phone QR scanner
         # reads it from there), so exposing it as a dedicated field costs
-        # nothing extra but lets the PyPortal render it legibly under the
-        # QR without parsing the payload. Endpoint is loopback-only and
-        # auth-gated for mutating routes.
+        # nothing extra but lets the status display render it legibly
+        # under the QR without parsing the payload. Endpoint is
+        # loopback-only and auth-gated for mutating routes.
         "key": creds["key"],
         "matrix": matrix, "version": ver,
     })
@@ -566,7 +566,7 @@ def rotate_wifi_key():
     try:
         # Rate-limit: reject if we just rotated. The min interval defends
         # against both stuck clients (retrying every frame) and fat-finger
-        # double-clicks from the PyPortal.
+        # double-clicks from the status display.
         st = _load_state()
         last = st.get("wifi_key_rotated_at") or 0
         elapsed = time.time() - float(last)
@@ -710,8 +710,8 @@ _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
 _EXCLUDED_MOUNT_POINTS = {"/mnt/droplet"}
 
 # Ignore trivially small filesystems (< 100 MB) like CIRCUITPY flash
-# drives on microcontrollers (PyPortal, etc.) that technically mount
-# but aren't user storage.
+# drives on microcontrollers (the status display, etc.) that technically
+# mount but aren't user storage.
 _MIN_DRIVE_BYTES = 100 * 1024 * 1024
 
 
@@ -803,7 +803,7 @@ def drives_snapshot(invalidate=False):
                 # Zombie mounts: /proc/mounts keeps the entry even after a
                 # USB drive is yanked without a clean unmount, and statvfs
                 # on such a path falls through to the parent filesystem
-                # (so a pulled PyPortal reports 113 GB of the eMMC root).
+                # (so a pulled USB device reports eMMC root size instead).
                 # Skip if the backing block device is gone.
                 if dev.startswith("/dev/") and not os.path.exists(dev):
                     continue
@@ -953,9 +953,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(401, {"ok": False, "error": "unauthorized"})
             if not ROTATION_ENABLED:
                 # 410 Gone signals "this route exists in code but is not
-                # operational in this deployment" — callers (PyPortal UI,
-                # scheduled timer) can look at this and gracefully no-op
-                # instead of retrying or surfacing an error.
+                # operational in this deployment" — callers (the status
+                # display UI, scheduled timer) can look at this and
+                # gracefully no-op instead of retrying or surfacing an error.
                 return self._send(410, {
                     "ok": False, "error": "rotation_disabled",
                     "hint": ("Set WIFI_KEY_ROTATION_ENABLED=true in "

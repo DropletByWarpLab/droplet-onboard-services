@@ -80,7 +80,7 @@ export OPENWRT_USERNAME=droplet-ai
 export OPENWRT_PASSWORD=DropletAI2024!
 
 # Run connectivity test
-python3 openwrt/scripts/jetson-router-connect.py
+python3 openwrt/scripts/router-connect.py
 
 # Or install as persistent monitor
 sudo cp openwrt/scripts/droplet-router-monitor.service /etc/systemd/system/
@@ -92,9 +92,9 @@ sudo systemctl enable --now droplet-router-monitor
 | Account | Username | Password | Purpose |
 |---------|----------|----------|---------|
 | Root (SSH/LuCI) | `root` | *Generated at first boot* | Full system access |
-| AI Agent (ubus) | `droplet-ai` | *Generated at first boot* | Jetson -> OpenWrt control |
+| AI Agent (ubus) | `droplet-ai` | *Generated at first boot* | Inference host -> OpenWrt control |
 
-Credentials are **unique per device** — generated randomly during first boot and stored in `/etc/droplet/`. Retrieve the AI agent password during Jetson provisioning:
+Credentials are **unique per device** — generated randomly during first boot and stored in `/etc/droplet/`. Retrieve the AI agent password during appliance provisioning:
 ```bash
 ssh root@192.168.50.1 cat /etc/droplet/droplet-ai-password
 ```
@@ -173,8 +173,8 @@ openwrt/
 ├── scripts/
 │   ├── setup-camera-subnet.sh          # Standalone camera VLAN setup for existing routers
 │   ├── upgrade-router.sh               # Remote firmware upgrade (sysupgrade)
-│   ├── jetson-router-connect.py        # Connection test & monitor
-│   └── droplet-router-monitor.service  # systemd unit for Jetson
+│   ├── router-connect.py               # Connection test & monitor
+│   └── droplet-router-monitor.service  # systemd unit for the inference host
 └── output/                             # Built images (gitignored)
 ```
 
