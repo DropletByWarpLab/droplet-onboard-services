@@ -152,6 +152,7 @@ docker exec -i \
   # sees a plugged-in AP.
   /etc/init.d/umdns enable >/dev/null 2>&1
   /etc/init.d/umdns restart >/dev/null 2>&1
+  echo "droplet-openwrt-attach: umdns enabled + started (_droplet-ap._tcp discovery)"
 
   # Fresh-provision fix: unbridge_eth0 (above) pulls eth0 out of br-lan,
   # which also drops it out of the lan firewall zone, so fw4 DROPs input on
@@ -162,11 +163,18 @@ docker exec -i \
   # a host-only docker veth (172.18.0.0/16), never the LAN or WAN.
   trust_eth0_fw() {
     lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
-    [ -n "$lansec" ] || return 0
+    [ -n "$lansec" ] || { echo "droplet-openwrt-attach: WARN: no lan firewall zone found; eth0 left untrusted (router may be unreachable)"; return 0; }
     uci -q get "firewall.$lansec.device" 2>/dev/null | grep -qw eth0 || \
       uci add_list "firewall.$lansec.device=eth0"
-    uci -q commit firewall
-    /etc/init.d/firewall reload >/dev/null 2>&1
+    # A read-only overlay right after a docker restart (see the session-cache
+    # note below) makes commit/reload fail silently, leaving the router
+    # unreachable with no breadcrumb — warn so the attach log shows why ubus
+    # input is refused, matching the OPENWRT_ROOT_PW warn above.
+    if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
+      echo "droplet-openwrt-attach: eth0 trusted on lan zone '$lansec' (ubus input accepted)"
+    else
+      echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; eth0 may stay DROPped (router unreachable)"
+    fi
   }
   trust_eth0_fw
 
