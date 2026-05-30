@@ -117,11 +117,18 @@ docker exec -i \
   command -v hostapd >/dev/null || NEED_INSTALL=1
   command -v wg >/dev/null      || NEED_INSTALL=1
   [ -f /lib/netifd/proto/wireguard.sh ] || NEED_INSTALL=1
+  # Fresh-provision fix: umdns is the mDNS daemon the routing service
+  # browses for _droplet-ap._tcp (AP auto-discovery, ADR-005). Stock
+  # openwrt/rootfs ships without it, so a fresh container / post-factory-
+  # reset box loses AP discovery entirely until it is installed. Trigger a
+  # (re)install when the binary is absent.
+  [ -x /usr/sbin/umdns ] || NEED_INSTALL=1
   if [ "$NEED_INSTALL" = 1 ]; then
     opkg update >/dev/null 2>&1
     opkg install \
       hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
       uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
+      umdns \
       wireguard-tools kmod-wireguard luci-proto-wireguard \
       >/dev/null 2>&1
     # netifd was started before luci-proto-wireguard arrived, so it didnt
@@ -138,6 +145,30 @@ docker exec -i \
     # uhttpd binds to eth0 too; nudge it so docker-proxy can talk to ubus.
     /etc/init.d/uhttpd restart >/dev/null 2>&1
   fi
+
+  # Fresh-provision fix: enable + start umdns every attach (idempotent). The
+  # routing service browses it for _droplet-ap._tcp; without it the
+  # /aps/discovered call returns a ubus error and AP auto-discovery never
+  # sees a plugged-in AP.
+  /etc/init.d/umdns enable >/dev/null 2>&1
+  /etc/init.d/umdns restart >/dev/null 2>&1
+
+  # Fresh-provision fix: unbridge_eth0 (above) pulls eth0 out of br-lan,
+  # which also drops it out of the lan firewall zone, so fw4 DROPs input on
+  # eth0 and the host docker-proxy:8181 -> uhttpd ubus path is refused. The
+  # routing service then crash-loops at startup (Connection reset by peer).
+  # Re-add eth0 as a device on the lan zone so management input (ubus on
+  # :80) is accepted on the host-only docker interface. Idempotent; eth0 is
+  # a host-only docker veth (172.18.0.0/16), never the LAN or WAN.
+  trust_eth0_fw() {
+    lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
+    [ -n "$lansec" ] || return 0
+    uci -q get "firewall.$lansec.device" 2>/dev/null | grep -qw eth0 || \
+      uci add_list "firewall.$lansec.device=eth0"
+    uci -q commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1
+  }
+  trust_eth0_fw
 
   # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
   # rpcd login works. Idempotent: only re-set if the current password fails.
@@ -409,6 +440,19 @@ DNSMASQ
 '
 
 echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"
+
+# Fresh-provision fix: install the droplet rpcd ACL so the routing service
+# session (root) is granted `umdns: [browse, update]` plus dhcp/iwinfo
+# reads. Without it ubus returns "Access denied" on umdns browse and
+# /aps/discovered 500s — AP auto-discovery cannot work. /usr/share is not a
+# persisted volume (lost on container recreate), so (re)copy it every attach.
+DROPLET_RPCD_ACL="${DROPLET_RPCD_ACL:-/home/droplet/edge-platform/openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json}"
+if [ -r "$DROPLET_RPCD_ACL" ]; then
+  if docker cp "$DROPLET_RPCD_ACL" droplet-openwrt:/usr/share/rpcd/acl.d/droplet-ai.json >/dev/null 2>&1; then
+    docker exec droplet-openwrt /etc/init.d/rpcd restart >/dev/null 2>&1
+    echo "droplet-openwrt-attach: installed rpcd ACL (umdns browse/update)"
+  fi
+fi
 
 # Routing service caches its OpenWrt session at startup and does not
 # reconnect on RPC failure (the python-uci SDK holds the session token
