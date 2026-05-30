@@ -526,7 +526,12 @@ sync_pm_oidc_keypair() {
 
   {
     printf '\n# --- WARP-505 PM OIDC IdP (spec WARP-498 OQ6) ---\n'
-    printf 'DROPLET_PM_OIDC_PRIVATE_KEY_PEM=%s\n' "$escaped_pem"
+    # Single-quote the PEM. The \n-escaped value still contains spaces
+    # (-----BEGIN PRIVATE KEY-----), so an UNQUOTED assignment word-splits
+    # when .env is `source`d (setup.sh, verify.sh, compose.sh all do), failing
+    # with "line N: PRIVATE: command not found" and aborting the stack Start.
+    # Safe: the value is base64 + literal \n and never contains a single quote.
+    printf "DROPLET_PM_OIDC_PRIVATE_KEY_PEM='%s'\n" "$escaped_pem"
     printf 'DROPLET_PM_OIDC_KID=%s\n' "$kid"
     printf 'DROPLET_PM_OIDC_CLIENT_SECRET=%s\n' "$client_secret"
   } >> "$env_file"
