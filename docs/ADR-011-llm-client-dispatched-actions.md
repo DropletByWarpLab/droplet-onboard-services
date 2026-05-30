@@ -4,7 +4,7 @@
 - **Date:** 2026-05-29 (accepted 2026-05-30)
 - **Authors:** Stefan Cruceru (CEO) — draft
 - **Sign-off:** Romain Jouffret (CPO) — review, tier + consent decisions (WARP-351)
-- **Related tickets:** [WARP-350](https://warp-lab.atlassian.net/browse/WARP-350) (Epic), [WARP-351](https://warp-lab.atlassian.net/browse/WARP-351) (this ADR — review & sign-off), WARP-352…WARP-359 (phases)
+- **Related tickets:** [WARP-350](https://warp-lab.atlassian.net/browse/WARP-350) (Epic), [WARP-351](https://warp-lab.atlassian.net/browse/WARP-351) (this ADR — review & sign-off), WARP-352…WARP-359 (phases), [WARP-549](https://warp-lab.atlassian.net/browse/WARP-549) (deep-assist ADR) + [WARP-550](https://warp-lab.atlassian.net/browse/WARP-550) (deep-assist enrollment — clipboard/screenshot follow-ups)
 - **Related ADRs:** ADR-004 (RBAC per-route guards — role taxonomy), ADR-008 (native mobile design system + API contract — same wire protocol), ADR-009 (canonical system architecture)
 - **Related docs:** [`docs/llm-safety-tiers.md`](llm-safety-tiers.md) (Tier 1/2/3 model this ADR extends), `apps/orchestrator/src/services/safety-tier.service.ts`
 
@@ -53,7 +53,7 @@ target: 'self' | { kind: 'client', deviceId: string }
 | `download_to_path` | 2 | client | Confirm modal shows filename + size + destination. |
 | `show_overlay` | 2 | client | On-screen overlay; confirm shows overlay text. |
 
-**② `get_clipboard` and `screenshot` — DEFERRED. Tier-3 (blocked for AI) in V1.** These two are *excluded from V1* and reclassified from the draft's Tier-2 to **Tier 3** until a separate **"deep assist" ADR** defines stronger, explicit enrollment (hardware-token / Yubikey-grade opt-in, distinct from ordinary pairing). Rationale: clipboard and screen capture are ambient-surveillance-shaped — they can exfiltrate content the user never deliberately handed to the assistant — and do not meet the per-action-intent bar that the rest of the V1 catalog clears. WARP-357 is re-scoped to "blocked in V1; design the deep-assist enrollment" and no longer blocks V1 GA.
+**② `get_clipboard` and `screenshot` — DEFERRED. Tier-3 (blocked for AI) in V1.** These two are *excluded from V1* and reclassified from the draft's Tier-2 to **Tier 3** until a separate **"deep assist" ADR** defines stronger, explicit enrollment (hardware-token / Yubikey-grade opt-in, distinct from ordinary pairing). Rationale: clipboard and screen capture are ambient-surveillance-shaped — they can exfiltrate content the user never deliberately handed to the assistant — and do not meet the per-action-intent bar that the rest of the V1 catalog clears. WARP-357 is re-scoped to "blocked in V1; design the deep-assist enrollment" and no longer blocks V1 GA. The deep-assist work is tracked as **WARP-549** (ADR / decision) → **WARP-550** (enrollment gate) → WARP-357 (clipboard/screenshot implementation).
 
 **③ Default state — DEFAULT-OFF, opt-in per tool.** After pairing, *every* client tool is `block` in `DeviceClient.tool_consent`. Nothing on the desktop is reachable by the LLM until the user explicitly enables each tool (`allow always` or `confirm each time`) from the menu-bar **AI permissions** settings. Pairing grants presence + identity, never capability. This is the sovereign-by-default posture; the smoother "default-on after pairing" alternative was rejected.
 
@@ -111,11 +111,11 @@ Design intent for the copy: name the **device**, name the **data/target**, make 
 
 - Tier classification for new client tools follows `docs/llm-safety-tiers.md`. Client tools are `requiresWrite`/`requiresConfirmation` per the same registry conventions as on-appliance tools.
 - New client tools beyond the V1 catalog require an ADR amendment (catalog is a closed whitelist for V1).
-- `get_clipboard` / `screenshot` (and any keystroke / screen-recording / arbitrary-exec capability) are **blocked** until the deep-assist ADR is Accepted.
+- `get_clipboard` / `screenshot` (and any keystroke / screen-recording / arbitrary-exec capability) are **blocked** until the deep-assist ADR (**WARP-549**) is Accepted.
 - All client dispatch audit-logs through `activity.service.ts::record({ kind: "client", … , refs: { targetDeviceId, requestId } })`.
 
 ## Open questions (non-blocking — tracked as follow-ups)
 
 - Offline-target fallback: when a dispatch target is offline, fall back to dashboard confirm using the same `confirmationToken`? Drafted as an optional Phase 7 item (WARP-358); decide when first needed.
-- Deep-assist enrollment shape (hardware token vs. OS-level biometric + re-auth) — owned by the future deep-assist ADR.
+- Deep-assist enrollment shape (hardware token vs. OS-level biometric + re-auth) — owned by the deep-assist ADR (**WARP-549**) and its enrollment story (**WARP-550**).
 - Cross-device confirmation when a user has 2+ paired desktops connected simultaneously — covered by name disambiguation today; revisit if it confuses users.

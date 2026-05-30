@@ -10,6 +10,10 @@ The Droplet platform prevents the AI assistant (and any API client) from perform
 | **Tier 2** | Requires user confirmation token | Delete camera, disable PoE, create/delete VLAN, change SSID, firewall rules |
 | **Tier 3** | Blocked for AI entirely | Reboot, factory reset, VPN config, disable Jetson's switch port |
 
+### Desktop-client tools (the *target axis*)
+
+[ADR-011](ADR-011-llm-client-dispatched-actions.md) extends this same model with a **target axis** — a tool call targets either `self` (the appliance, the default everything above assumes) or `client:{device_id}` (a paired desktop). Tier-2 client-target confirmations prompt on the **target device's native modal**, not the dashboard. Desktop tools are **default-off** (every tool is `block` until the user opts in per tool). `get_clipboard` and `screenshot` are **Tier-3 (blocked) on clients** in V1, pending the deep-assist ADR (WARP-549) + enrollment gate (WARP-550).
+
 ## How Confirmation Works
 
 1. LLM calls a Tier 2 tool (e.g., `set_port_poe`)
