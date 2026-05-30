@@ -1,6 +1,6 @@
 # edge-platform
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-jetson-ai`](../droplet-jetson-ai). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-jetson-ai`](../droplet-jetson-ai). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
 
 Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file indexer service, and all supporting Docker infrastructure.
 
@@ -15,9 +15,9 @@ services/ai-gateway/    FastAPI provider router — LiteLLM for cloud (OpenAI, A
 services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-indexer/  Python watchdog — filesystem indexer + embedder (formerly `file-sync`)
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
-services/switch/        FastAPI — Managed switch control (Lantronix/ASIC driver)
+services/switch/        FastAPI — Managed switch control (pluggable driver: managed-switch / future ASIC)
 services/pm/            Python FastAPI sidecar wrapping upstream Plane (AGPL-3) — embedded PM stack per ADR-010
-openwrt/                OpenWrt image builder + config overlay for Pi 5 router
+openwrt/                OpenWrt image builder + config overlay for the router host
 docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Frigate NVR, Plane (pm-web/api/worker + dedicated postgres-pm/redis-pm)
 ```
 
@@ -31,7 +31,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 - **Routing service:** Python, FastAPI, OpenWrt ubus JSON-RPC SDK
 - **File indexer:** Python, watchdog (was `file-sync`; renamed to reflect its indexer+embedder role)
 - **Camera discovery:** Python, FastAPI, ONVIF, WS-Discovery
-- **Switch service:** Python, FastAPI, abstract driver interface (Lantronix SM8TAT2SA / future ASIC)
+- **Switch service:** Python, FastAPI, abstract driver interface (managed-switch driver / future ASIC)
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Frigate
 - **Smart home:** Native Matter controller in the orchestrator (`matter.service.ts`). The dashboard talks to Matter directly via `/api/matter/*`.
@@ -112,7 +112,7 @@ interchangeable proxy layers — each owns separate concerns:
   (tool-call counter, JSON repair, circuit breaker). Point
   `OLLAMA_URL` at `http://...:8002/proxy` ONLY when you want those
   signals and your prompts fit inside the 120 s read budget — typical
-  for production on the Orin Nano with warm models, NOT for CPU dev or
+  for production on the inference host with warm models, NOT for CPU dev or
   heavy first-call cold loads.
 
 If you're debugging an "AI not reachable" issue, the first thing to
@@ -213,8 +213,8 @@ percent-escapes; store raw `Droplet123!`, not `Droplet123%21`).
 | `CAMERA_CREDENTIALS_JSON` | JSON array of `[user, pw]` pairs probed before factory defaults |
 | `ONVIF_WS_DISCOVERY_ENABLED` | `1` to enable WS-Discovery multicast scan (default `0`; `python-ws-discovery` leaks FDs on Python 3.12+) |
 | `CAMERA_AUTO_INITIALIZE` | `1` to auto-run the vendor first-run admin-password flow (Hanwha `/init-cgi/pw_init.cgi`) using `CAMERA_DEFAULT_PASSWORD` when an uninitialized camera is seen (default `0`) |
-| `FRIGATE_IMAGE`      | Frigate container image (default `stable` CPU; set `stable-tensorrt-jp6` on JetPack 6 Orin hardware) |
-| `FRIGATE_RUNTIME`    | Docker runtime for the Frigate container (`runc` default; set `nvidia` on Jetson / x86+NVIDIA hosts) |
+| `FRIGATE_IMAGE`      | Frigate container image (default `stable` CPU; set `stable-tensorrt-jp6` on the inference host with JetPack 6 / NVIDIA GPU) |
+| `FRIGATE_RUNTIME`    | Docker runtime for the Frigate container (`runc` default; set `nvidia` on inference hosts / x86+NVIDIA hosts) |
 | `YOLO_MODELS`        | JP6-image model preparator trigger; leave empty until the s6 prepare script stops expecting legacy `.cfg` inputs |
 | `SWITCH_HOST`        | Managed switch IP (default `192.168.1.77`)             |
 | `SWITCH_PORT`        | Managed switch HTTPS port (default `443`)              |
@@ -222,7 +222,7 @@ percent-escapes; store raw `Droplet123!`, not `Droplet123%21`).
 | `SWITCH_PASSWORD`    | Switch admin password                                  |
 | `SWITCH_DRIVER`      | Switch driver: `lantronix` (default) or `asic` (future) |
 | `SWITCH_SERVICE_URL` | Switch service endpoint (default `http://host.docker.internal:8081` — same host-mode rationale as `ROUTING_SERVICE_URL`) |
-| `DISPLAY_SERVICE_URL`| OLED/TFT display service endpoint (default `http://host.docker.internal:8082` — display runs host-mode on the Jetson) |
+| `DISPLAY_SERVICE_URL`| OLED/TFT display service endpoint (default `http://host.docker.internal:8082` — display runs host-mode on the inference host) |
 | `DROPLET_PM_API_URL` | Plane backend API URL on the compose network (default `http://pm-api:8000`) — embedded PM stack per ADR-010 |
 | `DROPLET_PM_WEB_URL` | LAN-facing URL Plane bakes into emails / share links (default `https://droplet-ai.local/pm`) — covered by the existing TLS cert SANs |
 | `DROPLET_PM_ADMIN_TOKEN` | Orchestrator-only token for provisioning Plane users via admin API. **NEVER** exposed to the dashboard or LLM agent. Empty default makes the SSO bridge 503 until `setup.sh` populates `.env` |

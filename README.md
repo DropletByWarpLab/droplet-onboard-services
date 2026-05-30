@@ -11,7 +11,7 @@
   Orchestration, web dashboard, AI routing, file management, and file sync — all on-device.
 </p>
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
 
 ![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
@@ -508,7 +508,7 @@ Everything Droplet runs on-device is open-source and free. No paid subscriptions
 | Frigate NVR | MIT | OSS models only — no Frigate Plus / paid model subscription |
 | Nextcloud | AGPLv3 | Self-hosted; no Nextcloud paid hub or remote cloud |
 | Matter (matter.js) | Apache 2.0 | Native controller in the orchestrator — no Home Assistant, no Nabu Casa |
-| OpenWrt | GPLv2 | Routes the cameras VLAN; runs on the user's own Pi |
+| OpenWrt | GPLv2 | Routes the cameras VLAN; runs on the router host |
 | FastAPI / Express / Next.js / Prisma / SWR / lucide-react / hls.js / web-push | MIT or Apache 2.0 | All OSS, all free |
 | LiteLLM | MIT | Multi-provider LLM proxy. The operator brings their own LLM API keys (BYOK) — no Droplet-side subscription |
 | PostgreSQL / Redis / Mosquitto | OSS (PostgreSQL / BSD / EPL) | Self-hosted infra |
