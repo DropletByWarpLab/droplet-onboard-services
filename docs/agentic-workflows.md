@@ -20,10 +20,10 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
               │   ─ services/mcp-server/    stdio child, ~50 tools         │
               │   ─ services/ai-gateway/    pure model proxy: routing      │
               │             │                                              │
-              │             │  OpenAI-compat / Ollama-native, via proxy    │
+              │             │  chat: OpenAI-compat, DIRECT to Ollama        │
               │             │  (/v1/chat/completions, /api/chat, etc.)     │
               │             ▼                                              │
-              │   http://host.docker.internal:8002/proxy/{path:path}       │
+              │   http://host.docker.internal:11434   (OLLAMA_URL, chat)   │
               │             ▲                                              │
               │             │                                              │
               │   droplet-local-LLM (this repo — LLM appliance)            │
@@ -43,13 +43,17 @@ If you're looking for "where is Ollama" or "how do I add a new model" — **the 
               └────────────────────────────────────────────────────────────┘
 ```
 
-The orchestrator's ai-gateway calls the inference host side through `ollama-manager`'s
-`/proxy/{path:path}` router rather than Ollama directly. The proxy observes
-tool-call emissions, repairs malformed argument JSON (best-effort), and
-surfaces a circuit breaker that trips on transport-level failures.
-ai-gateway reads `/health.limits` at provider init to size its outbound
-concurrency to match `OLLAMA_NUM_PARALLEL` on the appliance, and refreshes
-those limits on a 503 from the proxy.
+For **chat**, the orchestrator's ai-gateway posts **directly to Ollama** at
+`OLLAMA_URL` (`http://...:11434`, the OpenAI-compat `/v1/chat/completions`) —
+NOT through `ollama-manager`'s `/proxy`, whose 120 s read leg the agent loop
+blows past on CPU inference and cold-loads of larger models (surfacing as 502
+from the manager, 500 from the orchestrator). `ollama-manager`'s `/proxy` is
+**opt-in observability** (tool-call counter, JSON repair, circuit breaker),
+used only when prompts fit the 120 s budget — point `OLLAMA_URL` at
+`:8002/proxy` deliberately, never by default.
+ai-gateway reads `/health.limits` (on `ollama-manager` `:8002`) at provider
+init to size its outbound concurrency to match `OLLAMA_NUM_PARALLEL` on the
+appliance, and refreshes those limits on a 503.
 
 The `/health` body is **versioned** via a top-level `schema_version` integer
 (WARP-284). The orchestrator's `_LimitsCache` carries
@@ -79,7 +83,7 @@ bump both sides in lockstep when the contract changes.
 
 1. **Web dashboard or API client** → `POST /ai/chat` on the orchestrator (port 3000) or directly on ai-gateway (port 8000).
 2. **Orchestrator's agent loop** (`llm-agent.service.ts`) starts: get tools from MCP, send first turn to ai-gateway.
-3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `OLLAMA_URL` (`http://host.docker.internal:8002/proxy`). The request enters `ollama-manager`'s chat proxy, which pre-flights model-loading + circuit-open state and forwards to Ollama.
+3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, etc., route to `OLLAMA_URL` — **direct to Ollama** at `http://host.docker.internal:11434`'s OpenAI-compat `/v1/chat/completions`. (Model lifecycle — `/models/*`, `/health`, `/metrics` — goes to `ollama-manager` on `:8002`; the chat path does not.)
 4. **Ollama on the inference host** (the `ollama` container in `droplet-local-LLM`) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
 6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).
