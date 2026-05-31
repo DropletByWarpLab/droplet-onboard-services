@@ -76,6 +76,18 @@ export function createApp(prisma: PrismaClient) {
   app.use(helmet());
   app.use(cookieParser());
   app.use(requestLogger);
+
+  // WARP-566 — Plane webhook HMAC must be verified over the EXACT bytes
+  // Plane signed, not a re-serialized JSON representation. Capture the raw
+  // body as a Buffer for the webhook path ONLY, mounted BEFORE the global
+  // express.json() so req.body stays a Buffer on that one route while every
+  // other route gets parsed JSON. `type: () => true` accepts any
+  // Content-Type (incl. charset suffixes) so the raw capture never misses.
+  app.use(
+    "/api/pm/webhook",
+    express.raw({ type: () => true, limit: "1mb" }),
+  );
+
   app.use(express.json());
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.

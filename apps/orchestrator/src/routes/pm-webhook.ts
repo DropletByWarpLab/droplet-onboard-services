@@ -60,12 +60,14 @@ export function createPmWebhookRouter(): Router {
 
   router.post(
     "/api/pm/webhook",
-    // Body parser is mounted upstream; we re-read raw bytes for HMAC
-    // verification via the express.json `verify` callback in app.ts.
-    // For V1 we compute HMAC over the parsed body's JSON representation
-    // — fine for Plane's outgoing format because Plane serializes the
-    // same way. Tighter conformance is a follow-up if HMAC fails in
-    // pilot.
+    // WARP-566 — `req.body` is the RAW request Buffer here: app.ts mounts
+    // `express.raw` scoped to this path BEFORE the global express.json().
+    // HMAC is defined over the exact octet string Plane signed, so we hash
+    // those raw bytes directly. Re-serializing the parsed JSON
+    // (JSON.stringify(req.body)) would diverge from Plane's serializer
+    // (key order, whitespace, unicode/float formatting) and both reject
+    // valid events and weaken integrity. JSON.parse happens only AFTER the
+    // signature verifies.
     (req: Request, res: Response) => {
       const signature = req.header(SIGNATURE_HEADER);
       const timestamp = req.header(TIMESTAMP_HEADER);
@@ -85,6 +87,15 @@ export function createPmWebhookRouter(): Router {
         return res.status(401).json({ error: "missing timestamp" });
       }
 
+      // Defensive: the raw parser must have produced a Buffer. If it did
+      // not (mount misconfiguration), fail-CLOSED rather than hash a
+      // re-serialized value.
+      const rawBody = req.body;
+      if (!Buffer.isBuffer(rawBody)) {
+        logger.warn({ event_type: "webhook_auth_failure", reason: "body_not_raw" });
+        return res.status(400).json({ error: "raw body required" });
+      }
+
       // Replay window.
       const ts = Number(timestamp);
       if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > REPLAY_WINDOW_MS) {
@@ -92,10 +103,11 @@ export function createPmWebhookRouter(): Router {
         return res.status(401).json({ error: "timestamp outside replay window" });
       }
 
-      // HMAC verification. We sign timestamp + "." + body to bind both.
-      const bodyString = JSON.stringify(req.body ?? {});
+      // HMAC over the EXACT received bytes: `${timestamp}.` + raw payload.
+      // Binds the timestamp (replay guard) to the body without
+      // re-serializing the body.
       const expected = createHmac("sha256", secret)
-        .update(`${timestamp}.${bodyString}`)
+        .update(Buffer.concat([Buffer.from(`${timestamp}.`, "utf8"), rawBody]))
         .digest("hex");
 
       const sigBuf = Buffer.from(signature, "hex");
@@ -105,8 +117,17 @@ export function createPmWebhookRouter(): Router {
         return res.status(401).json({ error: "signature mismatch" });
       }
 
+      // Signature verified. Parse the raw bytes now; malformed JSON is a
+      // 400 (bad payload), never a 500.
+      let payload: PmWebhookPayload;
+      try {
+        payload = JSON.parse(rawBody.toString("utf8")) as PmWebhookPayload;
+      } catch {
+        logger.warn({ event_type: "webhook_bad_payload", reason: "malformed_json" });
+        return res.status(400).json({ error: "malformed JSON" });
+      }
+
       // Authenticated. Emit + 204.
-      const payload = req.body as PmWebhookPayload;
       logger.info(
         {
           event_type: "webhook_received",
