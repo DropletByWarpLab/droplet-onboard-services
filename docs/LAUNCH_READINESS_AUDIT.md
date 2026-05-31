@@ -58,7 +58,7 @@ Ordered roughly by severity. Each carries a full fix plan in [`LAUNCH_READINESS_
 
 ## 🟡 NICE-TO-HAVE (Medium / Low)
 
-Should-fix items that move the product toward "clean business application" quality but are not strict launch blockers. Live list: Jira label `launch-readiness` priority Medium/Low (created starting WARP-578).
+Should-fix items that move the product toward "clean business application" quality but are not strict launch blockers. Tracked as **WARP-579 → WARP-602** (24 tickets), Jira label `launch-readiness` priority Medium/Low. (WARP-578 is a separate, pre-existing OpenWrt-provisioning bug — unrelated to this audit.)
 
 - **security** — Rate-limit auth endpoints (login brute-force); reconsider fail-open limiter
 - **security** — Default `AUTH_ENABLED=true`; enforce JWT/secret strength in production
