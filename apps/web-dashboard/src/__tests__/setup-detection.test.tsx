@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 
 /**
  * WARP-577 — Setup-detection must fail CLOSED, not into the first-run wizard,
@@ -91,8 +90,12 @@ describe("checkSetupRequired() tri-state (WARP-577)", () => {
   });
 
   it("maps an aborted/timed-out request -> 'unknown'", async () => {
-    // Simulate the AbortController timeout firing: fetch rejects with an
-    // AbortError once its signal aborts.
+    // The fetch never resolves on its own; it only rejects with an AbortError
+    // once the internal AbortController timeout fires its signal. We drive that
+    // timeout deterministically with fake timers (no real 5s wall-clock wait,
+    // which flakes under full-suite parallelism).
+    const checkSetupRequired = await importCheck();
+    vi.useFakeTimers();
     global.fetch = vi.fn().mockImplementation(
       (_input: RequestInfo | URL, init?: RequestInit) =>
         new Promise((_resolve, reject) => {
@@ -104,10 +107,12 @@ describe("checkSetupRequired() tri-state (WARP-577)", () => {
           }
         }),
     );
-    const checkSetupRequired = await importCheck();
-    // Real timers: the internal ~5s timeout should abort and resolve 'unknown'.
-    await expect(checkSetupRequired()).resolves.toBe("unknown");
-  }, 10000);
+    const pending = checkSetupRequired();
+    // Fast-forward past the ~5s probe timeout so the controller aborts.
+    await vi.advanceTimersByTimeAsync(6000);
+    await expect(pending).resolves.toBe("unknown");
+    vi.useRealTimers();
+  });
 });
 
 // --- 2. AuthGate gating on tri-state ---
@@ -196,7 +201,7 @@ describe("AuthGate tri-state gating (WARP-577)", () => {
       </AuthGate>,
     );
     const btn = await screen.findByRole("button", { name: /retry/i });
-    await userEvent.click(btn);
+    fireEvent.click(btn);
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
