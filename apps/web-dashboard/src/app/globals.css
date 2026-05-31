@@ -15,7 +15,10 @@
 
   /* Labels */
   --color-label-primary: #000000;
-  --color-label-secondary: rgba(60, 60, 67, 0.6);
+  /* 0.8 alpha (= #3c3c43cc, the design handoff value). At the drifted 0.6,
+     secondary text on a white card measured 3.44:1 — under WCAG AA 4.5:1 for
+     13px body text. Restoring 0.8 → 5.97:1. WARP-611. */
+  --color-label-secondary: rgba(60, 60, 67, 0.8);
   --color-label-tertiary: rgba(60, 60, 67, 0.3);
   --color-label-quaternary: rgba(60, 60, 67, 0.18);
 
@@ -97,7 +100,8 @@
 
   /* Labels */
   --color-label-primary: #ffffff;
-  --color-label-secondary: rgba(235, 235, 245, 0.6);
+  /* Match the light-mode 0.8 alpha bump (WARP-611) — secondary text AA. */
+  --color-label-secondary: rgba(235, 235, 245, 0.8);
   --color-label-tertiary: rgba(235, 235, 245, 0.3);
   --color-label-quaternary: rgba(235, 235, 245, 0.18);
 
