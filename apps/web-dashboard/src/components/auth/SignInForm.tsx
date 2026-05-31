@@ -144,13 +144,14 @@ export function SignInForm({
             Password
           </label>
           {!ONB_AUTH_FLAGS.forgotPassword && (
-            <span
+            <button
+              type="button"
+              disabled
               title="Coming soon"
-              aria-disabled="true"
               className="type-caption-1 font-semibold text-label-tertiary cursor-not-allowed select-none"
             >
               Forgot?
-            </span>
+            </button>
           )}
         </div>
         <div className="relative">

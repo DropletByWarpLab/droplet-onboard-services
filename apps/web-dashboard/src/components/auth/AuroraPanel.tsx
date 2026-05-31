@@ -47,7 +47,7 @@ export function AuroraPanel({ className = "" }: { className?: string }) {
         </ul>
       </div>
 
-      <div className="flex items-center gap-2 text-[12.5px] text-white/70">
+      <div className="flex items-center gap-2 text-[12.5px] text-white/80">
         <span
           aria-hidden="true"
           className="w-[7px] h-[7px] rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.25)]"

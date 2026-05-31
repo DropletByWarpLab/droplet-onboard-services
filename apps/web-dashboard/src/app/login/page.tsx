@@ -59,7 +59,7 @@ export default function LoginPage() {
         <div className="w-full max-w-[380px]">
           {/* Compact wordmark — stands in for the brand panel on small screens */}
           <div className="lg:hidden flex items-center gap-2 mb-8">
-            <DropletMark size={24} className="text-accent" aria-label="Droplet" />
+            <DropletMark size={24} className="text-accent" />
             <span className="type-headline text-label-primary">Droplet</span>
           </div>
 
