@@ -341,7 +341,12 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
       <h3 className="type-subheadline text-label-primary font-medium">
         {humanizeToolName(tool.name)}
       </h3>
-      <p className="type-footnote text-label-secondary flex-1">
+      {/* label-primary (not secondary): the home description is the card's
+          primary content, and the shipped --color-label-secondary token sits
+          at 3.44:1 on a white card — under WCAG AA for 13px text. Title still
+          reads as the heading via weight (font-medium) + size. Token drift
+          tracked separately. */}
+      <p className="type-footnote text-label-primary flex-1">
         {tool.homeDescription}
       </p>
 
