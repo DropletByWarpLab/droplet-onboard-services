@@ -1,5 +1,15 @@
 # Implementation status — edge-platform
 
+> ⚠️ **STALE (as of 2026-05-30).** This file (last updated 2026-04-15) predates the
+> JWT/RBAC work, the embedded PM stack, the dashboard rebrand, and the CI build-out,
+> and the 2026-05-30 launch-readiness audit found it contradicting the actual code on
+> several points (it claims dashboard tokens live in `localStorage` — they're in
+> HTTP-only cookies; that the setup wizard is "stubbed" — it's a complete 9-step flow;
+> that `.github/` has no workflows — there are 20, just disabled). **Do not rely on it
+> for decisions.** For the current, code-verified picture see
+> [`LAUNCH_READINESS_AUDIT.md`](LAUNCH_READINESS_AUDIT.md). A full regeneration of this
+> file is tracked in Jira (launch-readiness docs-reconciliation ticket).
+
 Last updated: 2026-04-15
 Source context: `droplet-gtm-strategy.docx` (April 2026) and `git ls-files` at the branch point.
 
