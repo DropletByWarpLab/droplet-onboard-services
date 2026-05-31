@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { PrismaClient } from "@prisma/client";
+import { config } from "./config.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { authMiddleware, setAuthPrisma } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
@@ -72,7 +73,24 @@ export function createApp(prisma: PrismaClient) {
   app.set("trust proxy", 1);
 
   // Middleware
-  app.use(cors({ credentials: true, origin: true }));
+  // WARP-562 — credentialed CORS restricted to an explicit allowlist. Never
+  // `origin: true` (which reflects any Origin and, with credentials, lets any
+  // site the owner visits read the cookie-authenticated API cross-origin).
+  // A request with no Origin (same-origin behind nginx, curl, native clients)
+  // is allowed; a disallowed Origin gets `cb(null, false)` → no
+  // Access-Control-Allow-Origin header (the browser blocks the read) WITHOUT
+  // raising an Error (which would 500 and route through the error handler).
+  app.use(
+    cors({
+      credentials: true,
+      origin: (origin, cb) => {
+        if (!origin || config.corsAllowedOrigins.includes(origin)) {
+          return cb(null, true);
+        }
+        return cb(null, false);
+      },
+    }),
+  );
   app.use(helmet());
   app.use(cookieParser());
   app.use(requestLogger);

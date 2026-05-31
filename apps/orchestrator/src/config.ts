@@ -15,6 +15,22 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
 
+  // --- CORS (WARP-562) ---
+  // Comma-separated allowlist of browser Origins permitted to make
+  // credentialed cross-origin requests against the orchestrator API. We keep
+  // `credentials: true` (cookie-based `droplet_session` auth), so the allowlist
+  // MUST be exact-match — never `origin: true`, which reflects any Origin and
+  // hands `Access-Control-Allow-Origin: <attacker>` +
+  // `Access-Control-Allow-Credentials: true` to any site the owner visits.
+  //
+  // Parsed into `config.corsAllowedOrigins` below. When unset it defaults to
+  // the appliance's LAN dashboard origin (https://droplet-ai.local — already
+  // covered by the TLS cert SANs, see DROPLET_PM_WEB_URL and
+  // scripts/lib/secrets.sh) plus http://localhost:3000 in non-production for
+  // the Next.js dev server. A `*` value is rejected at startup (see the
+  // wildcard guard after parse), mirroring services/ai-gateway/main.py.
+  CORS_ALLOWED_ORIGINS: z.string().default(""),
+
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
   AUTH_ENABLED: z.coerce.boolean().default(false),
@@ -257,5 +273,47 @@ const envSchema = z.object({
   JIRA_API_TOKEN: z.string().default(""),
 });
 
-export const config = envSchema.parse(process.env);
-export type Config = z.infer<typeof envSchema>;
+const parsed = envSchema.parse(process.env);
+
+// --- WARP-562: resolve the CORS origin allowlist ---
+// Comma-separated → trimmed, empties dropped. When the operator hasn't set
+// CORS_ALLOWED_ORIGINS, fall back to the appliance's own LAN dashboard origin
+// (covered by the TLS cert SANs) plus the dev dashboard origin outside prod.
+function resolveCorsAllowedOrigins(raw: string, nodeEnv: string): string[] {
+  const explicit = raw
+    .split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+
+  const origins =
+    explicit.length > 0
+      ? explicit
+      : [
+          "https://droplet-ai.local",
+          ...(nodeEnv !== "production" ? ["http://localhost:3000"] : []),
+        ];
+
+  // Fail-fast on wildcard + credentials, mirroring ai-gateway's guard
+  // (services/ai-gateway/main.py:125-129). `credentials: true` is always on
+  // for the orchestrator, so a `*` allowlist is never acceptable: the browser
+  // would receive `Access-Control-Allow-Origin: *` with credentials, or — with
+  // the `cors` package — silently reflect every origin. Die loud instead.
+  if (origins.includes("*")) {
+    throw new Error(
+      "CORS_ALLOWED_ORIGINS contains a wildcard ('*'), which is not allowed " +
+        "with credentialed CORS. Set an explicit, comma-separated origin list " +
+        "(e.g. https://droplet-ai.local).",
+    );
+  }
+
+  return origins;
+}
+
+export const config = {
+  ...parsed,
+  corsAllowedOrigins: resolveCorsAllowedOrigins(
+    parsed.CORS_ALLOWED_ORIGINS,
+    parsed.NODE_ENV,
+  ),
+};
+export type Config = typeof config;
