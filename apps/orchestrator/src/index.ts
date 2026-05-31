@@ -1,6 +1,5 @@
 import { createServer } from "node:http";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
@@ -468,13 +467,13 @@ export function registerProcessSafetyNet(
 
 // Only boot the stack when this module is the process entrypoint. Importing
 // it from a test (vitest) must not run main() — the runner is the entrypoint
-// then, so this guard is false. Works under `tsx src/index.ts` (dev) and
-// `node dist/index.js` (prod), where argv[1] resolves to this module.
-const isEntrypoint =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
-
-if (isEntrypoint) {
+// then, so this guard is false. The orchestrator package has no
+// `"type": "module"`, so even with tsconfig `module: NodeNext` this file
+// emits CommonJS — hence the `require.main`/`module` idiom rather than
+// `import.meta` (which tsc rejects with TS1470 in CJS output). Works under
+// `tsx src/index.ts` (dev) and `node dist/index.js` (prod); under vitest
+// `require.main` is the runner, so the guard stays false.
+if (require.main === module) {
   main().catch((err) => {
     logger.fatal({ err }, "Failed to start API server");
     process.exit(1);
