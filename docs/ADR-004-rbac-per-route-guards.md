@@ -282,7 +282,7 @@ Rejected for v1: introduces a dependency the team would need to audit, and the a
 - [`apps/orchestrator/src/middleware/auth.ts`](../apps/orchestrator/src/middleware/auth.ts) — service-principal registry (lines 240–262); `requireRole` lands here.
 - [`apps/orchestrator/prisma/schema.prisma`](../apps/orchestrator/prisma/schema.prisma) — `User.role String @default("user")` at line 156 (the drift).
 - [`docs/ROADMAP.md`](ROADMAP.md) §M2.2 — GTM source of the four-role requirement.
-- `shared_brain/projects/droplet-pi-platform/CLAUDE.md` — "No guessing, ever" rule (the explicit-column constraint).
+- `shared_brain/projects/droplet-onboard-services/CLAUDE.md` — "No guessing, ever" rule (the explicit-column constraint).
 - [WARP-171](https://warp-lab.atlassian.net/browse/WARP-171) — this ticket.
 - [WARP-248](https://warp-lab.atlassian.net/browse/WARP-248) — ABAC follow-up, deferred.
 - [WARP-327](https://warp-lab.atlassian.net/browse/WARP-327) — parent epic, Auth/RBAC/Identity.

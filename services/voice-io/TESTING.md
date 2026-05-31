@@ -168,6 +168,6 @@ Container is internal-only (port 8086 not host-exposed), so curl
 from inside the container or via `docker exec`:
 
 ```
-sudo docker exec droplet-pi-platform-voice-io-1 \
+sudo docker exec droplet-voice-io-1 \
   curl -s http://localhost:8086/audio/devices | python3 -m json.tool
 ```

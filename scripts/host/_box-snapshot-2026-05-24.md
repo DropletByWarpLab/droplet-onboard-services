@@ -21,7 +21,7 @@ the time of Phase 0 capture. This is the baseline Phase 1 designs against.
 ## Repo state on box
 
 - Path: `/home/droplet/edge-platform`
-- Remote: `https://github.com/DropletByWarpLab/droplet-pi-platform.git`
+- Remote: `https://github.com/DropletByWarpLab/droplet-onboard-services.git`
   (redirects to `droplet-onboard-services`)
 - Branch: `feat/poc-single-box-rebuild`
 - HEAD: `acf4479` (`feat(ops-console): autonomous-proposals inbox UI + orchestrator service principal (WARP-399)`)
@@ -32,31 +32,31 @@ the time of Phase 0 capture. This is the baseline Phase 1 designs against.
 
 ## Containers running (22 total)
 
-Compose project: `droplet-pi-platform`. Config files loaded:
+Compose project: `droplet`. Config files loaded:
 `docker-compose.yml` + `docker-compose.override.yml` (auto-loaded when
 `docker compose` runs without `-f`).
 
 | Name | Image | Notes |
 |---|---|---|
-| `droplet-pi-platform-gateway-1` | (built) | nginx, 80/443 on host |
-| `droplet-pi-platform-web-dashboard-1` | (built) | Next.js, internal 3001 |
-| `droplet-pi-platform-orchestrator-1` | (built) | Express + Prisma, internal 3000 |
-| `droplet-pi-platform-db-1` | `pgvector/pgvector:pg16` | Postgres 16 |
-| `droplet-pi-platform-cache-1` | `redis:7-alpine` | Redis 7 |
-| `droplet-pi-platform-broker-1` | (mosquitto) | MQTT |
-| `droplet-pi-platform-ai-gateway-1` | (built) | FastAPI + LiteLLM + gRPC |
-| `droplet-pi-platform-mcp-server` ← `droplet-mcp-server` | (built) | MCP, internal 9090 |
-| `droplet-pi-platform-file-indexer-1` | (built) | Python watchdog + embedder |
-| `droplet-pi-platform-camera-discovery-1` | (built) | ONVIF/RTSP discovery |
-| `droplet-pi-platform-switch-1` | (built) | Lantronix driver, internal 8081 |
-| `droplet-pi-platform-routing-1` | (built) | Talks to OpenWrt @ 127.0.0.1:8181 |
-| `droplet-pi-platform-frigate-1` | `ghcr.io/blakeblackshear/frigate:stable` | NVR, iGPU detect, 0 cameras |
-| `droplet-pi-platform-voice-io-1` | (built) | STT/TTS Wyoming client + LLM proxy |
-| `droplet-pi-platform-wyoming-faster-whisper-1` | `rhasspy/wyoming-whisper` | STT |
-| `droplet-pi-platform-wyoming-piper-1` | `rhasspy/wyoming-piper` | TTS |
-| `droplet-pi-platform-oled-display-1` | (built) | OLED/PyPortal driver |
-| `droplet-pi-platform-nextcloud-1` | `nextcloud:29-apache` | Nextcloud, internal 80 |
-| `droplet-pi-platform-ops-console-1` | (built) | Warp Lab support port, loopback 8089 |
+| `droplet-gateway-1` | (built) | nginx, 80/443 on host |
+| `droplet-web-dashboard-1` | (built) | Next.js, internal 3001 |
+| `droplet-orchestrator-1` | (built) | Express + Prisma, internal 3000 |
+| `droplet-db-1` | `pgvector/pgvector:pg16` | Postgres 16 |
+| `droplet-cache-1` | `redis:7-alpine` | Redis 7 |
+| `droplet-broker-1` | (mosquitto) | MQTT |
+| `droplet-ai-gateway-1` | (built) | FastAPI + LiteLLM + gRPC |
+| `droplet-mcp-server` | (built) | MCP, internal 9090 |
+| `droplet-file-indexer-1` | (built) | Python watchdog + embedder |
+| `droplet-camera-discovery-1` | (built) | ONVIF/RTSP discovery |
+| `droplet-switch-1` | (built) | Lantronix driver, internal 8081 |
+| `droplet-routing-1` | (built) | Talks to OpenWrt @ 127.0.0.1:8181 |
+| `droplet-frigate-1` | `ghcr.io/blakeblackshear/frigate:stable` | NVR, iGPU detect, 0 cameras |
+| `droplet-voice-io-1` | (built) | STT/TTS Wyoming client + LLM proxy |
+| `droplet-wyoming-faster-whisper-1` | `rhasspy/wyoming-whisper` | STT |
+| `droplet-wyoming-piper-1` | `rhasspy/wyoming-piper` | TTS |
+| `droplet-oled-display-1` | (built) | OLED/PyPortal driver |
+| `droplet-nextcloud-1` | `nextcloud:29-apache` | Nextcloud, internal 80 |
+| `droplet-ops-console-1` | (built) | Warp Lab support port, loopback 8089 |
 | `droplet-device-identity-svc` | (built) | TPM=mock on this PoC |
 | **`droplet-ollama`** | **`ollama/ollama:rocm`** | **Declared in `docker-compose.override.yml` ONLY — not in repo's main compose** |
 | **`droplet-openwrt`** | **`openwrt/rootfs:x86_64-24.10.2`** | **Same — override file only. WireGuard port 51820 on host** |
