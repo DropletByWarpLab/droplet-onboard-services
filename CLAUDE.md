@@ -201,6 +201,7 @@ percent-escapes; store raw `Droplet123!`, not `Droplet123%21`).
 | `PORT`               | Server listen port                                   |
 | `DEVICE_SECRET`      | Device authentication secret                         |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit in MB                              |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist of browser Origins permitted to make credentialed cross-origin requests against the orchestrator (WARP-562). Exact-match; `credentials: true` is always on so the orchestrator never reflects an arbitrary Origin. Default when unset: `https://droplet-ai.local` (covered by the TLS cert SANs) plus `http://localhost:3000` outside production. A `*` value is **rejected at startup** (mirrors `services/ai-gateway/main.py`). |
 | `ROUTING_SERVICE_URL`| Routing service endpoint (default `http://host.docker.internal:8080` — routing uses `network_mode: host`, so orchestrator reaches it via the host gateway) |
 | `OPENWRT_HOST`       | OpenWrt router IP (default `192.168.50.1`)           |
 | `OPENWRT_USERNAME`   | OpenWrt rpcd user (default `droplet-ai`)             |
