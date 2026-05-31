@@ -50,7 +50,34 @@ UBUS_STATUS = {
     7: "TIMEOUT",
 }
 
+# Named ubus status codes (subset) used for shape-agnostic error handling —
+# a deployment may legitimately lack an interface/device the SDK asks about
+# (e.g. a single-box with no `wan`); see ADR-011.
+UBUS_STATUS_INVALID_ARGUMENT = 2
+UBUS_STATUS_NOT_FOUND = 4
+UBUS_STATUS_NO_DATA = 5
+
 NULL_SESSION = "00000000000000000000000000000000"
+
+# Status returned for an interface that isn't configured on this box. Mirrors
+# the `InterfaceStatus` wire shape (orchestrator `types/network.ts`) so the
+# Network overview renders a down/unconfigured interface instead of the whole
+# page 500-ing on a ubus NOT_FOUND.
+ABSENT_INTERFACE_STATUS: dict = {
+    "up": False,
+    "pending": False,
+    "available": False,
+    "autostart": False,
+    "device": "",
+    "proto": "",
+    "uptime": 0,
+    "l3_device": "",
+    "ipv4-address": [],
+    "ipv6-address": [],
+    "route": [],
+    "dns-server": [],
+    "data": {"absent": True},
+}
 
 
 class UbusError(Exception):
@@ -305,12 +332,24 @@ class NetworkApi:
         return self._r._call("network", "restart")
 
     def get_all_interface_statuses(self) -> dict[str, dict]:
-        """Batch-fetch status of lan, wan, and wan6 interfaces."""
-        results = self._r._batch_call([
-            (f"network.interface.lan", "status", {}),
-            (f"network.interface.wan", "status", {}),
-        ])
-        return {"lan": results[0], "wan": results[1]}
+        """Status of the standard `lan`/`wan` interfaces.
+
+        Queries each interface independently so a deployment that doesn't
+        configure one of them (e.g. a single-box where WAN is handled by the
+        host, not the containerised OpenWrt) degrades to an absent/down status
+        instead of failing the whole batch with a ubus NOT_FOUND — which would
+        500 the entire Network overview (ADR-011, shape-agnostic).
+        """
+        out: dict[str, dict] = {}
+        for name in ("lan", "wan"):
+            try:
+                out[name] = self.interface_status(name)
+            except UbusError as exc:
+                if exc.code == UBUS_STATUS_NOT_FOUND:
+                    out[name] = dict(ABSENT_INTERFACE_STATUS)
+                else:
+                    raise
+        return out
 
     def set_lan_ip(self, ipaddr: str, netmask: str = "255.255.255.0"):
         """Change the LAN IP address via UCI."""
@@ -368,8 +407,24 @@ class WirelessApi:
         return result.get("results", [])
 
     def connected_clients(self, device: str = "wlan0") -> list[dict]:
-        """Get list of connected wireless clients."""
-        result = self._r._call("iwinfo", "assoclist", {"device": device})
+        """Get list of connected wireless clients for `device`.
+
+        Returns an empty list when `device` doesn't exist on this box (e.g. the
+        default `wlan0` on a box whose radio is named `wlp14s0`) rather than
+        raising — a missing radio has no clients, and shouldn't 500 the page
+        (ADR-011, shape-agnostic). A follow-up should derive the real device
+        instead of defaulting to `wlan0`.
+        """
+        try:
+            result = self._r._call("iwinfo", "assoclist", {"device": device})
+        except UbusError as exc:
+            if exc.code in (
+                UBUS_STATUS_NOT_FOUND,
+                UBUS_STATUS_INVALID_ARGUMENT,
+                UBUS_STATUS_NO_DATA,
+            ):
+                return []
+            raise
         return result.get("results", [])
 
     def radio_info(self, device: str = "wlan0") -> dict:
