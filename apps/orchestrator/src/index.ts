@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
@@ -396,8 +397,10 @@ async function main() {
     logger.info("API server listening on port %d", config.PORT);
   });
 
-  // Graceful shutdown
-  const shutdown = async () => {
+  // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their
+  // clean-exit semantics; the uncaughtException path (WARP-572) passes 1 so
+  // Docker's restart policy brings a fresh instance back.
+  const shutdown = async (exitCode = 0) => {
     logger.info("Shutting down...");
     cronRuntime.stop();
     stopHealthMonitor();
@@ -412,19 +415,68 @@ async function main() {
     // Stop the MCP stdio child first so it doesn't keep its Prisma
     // connection pool alive past our $disconnect below. stopMcp() is
     // best-effort; even if the SDK close hangs we time out via
-    // process.exit(0) regardless.
+    // process.exit() regardless.
     await stopMcp().catch((err) => {
       logger.warn("MCP stdio child stop failed: %s", (err as Error).message);
     });
     await prisma.$disconnect();
-    process.exit(0);
+    process.exit(exitCode);
   };
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => void shutdown(0));
+  process.on("SIGINT", () => void shutdown(0));
+
+  // WARP-572: process-level safety net. The orchestrator is an always-on
+  // control plane that fires many background promises outside the request
+  // lifecycle (cron ticks, pollers, the streaming flush timer, best-effort
+  // MQTT / activity writes). On modern Node an unhandled rejection or
+  // uncaught exception terminates the process by default — so one stray
+  // background throw could take down the whole appliance with only Node's
+  // default stderr dump. Wire structured handlers so the failure is logged
+  // and recovery is deterministic. onFatal runs the graceful shutdown with a
+  // non-zero exit code.
+  registerProcessSafetyNet(logger, () => void shutdown(1));
 }
 
-main().catch((err) => {
-  logger.fatal({ err }, "Failed to start API server");
-  process.exit(1);
-});
+// WARP-572: extracted so the handler wiring is unit-testable without booting
+// the full stack (see src/__tests__/process-safety-net.test.ts). Kept in
+// index.ts so process lifecycle stays centralized.
+//
+// - unhandledRejection is logged-but-survivable: log at error with a stable,
+//   greppable `code` and DO NOT exit, so a single stray background throw
+//   degrades rather than kills the control plane. This mirrors the
+//   never-silently-swallow posture of cron-runtime's safeRun logging.
+// - uncaughtException is fatal-after-flush: log at fatal (matching the
+//   boot-failure handler below), then run the caller's onFatal (graceful
+//   shutdown + non-zero exit). Logged synchronously before onFatal so the
+//   diagnostic lands in container logs even if exit races a pino flush.
+export function registerProcessSafetyNet(
+  log: pino.Logger,
+  onFatal: () => void,
+): void {
+  process.on("unhandledRejection", (reason) => {
+    log.error(
+      { err: reason, code: "unhandledRejection" },
+      "Unhandled promise rejection (surviving)",
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    log.fatal({ err, code: "uncaughtException" }, "Uncaught exception, shutting down");
+    onFatal();
+  });
+}
+
+// Only boot the stack when this module is the process entrypoint. Importing
+// it from a test (vitest) must not run main() — the runner is the entrypoint
+// then, so this guard is false. Works under `tsx src/index.ts` (dev) and
+// `node dist/index.js` (prod), where argv[1] resolves to this module.
+const isEntrypoint =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  main().catch((err) => {
+    logger.fatal({ err }, "Failed to start API server");
+    process.exit(1);
+  });
+}
