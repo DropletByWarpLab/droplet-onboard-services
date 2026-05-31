@@ -42,6 +42,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     };
   }
 
+  // The declarative phone-home surface lives on the ORCHESTRATOR
+  // (`ctx.http.orchestrator` → :3000, with the service JWT auto-injected so the
+  // owner/admin route guard is satisfied), NOT the routing FastAPI service.
   let res: Response;
   if (scope === "group") {
     const groupId = typeof args.groupId === "string" ? args.groupId : null;
@@ -52,12 +55,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         error: { code: "INVALID_ARGS", message: "groupId is required when scope is 'group'" },
       };
     }
-    res = await ctx.http.routing.patch(`/groups/${encodeURIComponent(groupId)}`, {
+    res = await ctx.http.orchestrator.patch(`/api/network/groups/${encodeURIComponent(groupId)}`, {
       blockPhoneHome: enabled,
     });
   } else {
     const body = scope === "cameras" ? { cameras: enabled } : { enabled };
-    res = await ctx.http.routing.patch("/phone-home", body);
+    res = await ctx.http.orchestrator.patch("/api/network/phone-home", body);
   }
 
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);

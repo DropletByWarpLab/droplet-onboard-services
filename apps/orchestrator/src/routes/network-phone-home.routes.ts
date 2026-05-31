@@ -31,6 +31,8 @@ export interface PhoneHomeDeps {
 export function registerPhoneHomeRoutes(router: Router, deps: PhoneHomeDeps): void {
   const { prisma } = deps;
 
+  // Read is owner/admin/family (family sees the posture read-only, same as the
+  // settings tree); writes below stay owner/admin only.
   router.get(
     "/network/phone-home",
     requireRole("owner", "admin", "family"),

@@ -3,9 +3,15 @@ import setPhoneHomeBlocking from "../../../src/handlers/network/set-phone-home-b
 import type { ToolContext } from "../../../src/types.js";
 
 function ctxWithPatch(patch: ReturnType<typeof vi.fn>): ToolContext {
+  // The handler must use ctx.http.orchestrator (not routing) — give routing a
+  // throwing patch so a regression to the wrong client fails loudly.
+  const routingPatch = vi.fn(() => {
+    throw new Error("handler must use ctx.http.orchestrator, not routing");
+  });
   return {
     http: {
-      routing: { get: vi.fn(), post: vi.fn(), patch, delete: vi.fn() },
+      routing: { get: vi.fn(), post: vi.fn(), patch: routingPatch, delete: vi.fn() },
+      orchestrator: { get: vi.fn(), post: vi.fn(), patch, delete: vi.fn() },
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
@@ -30,13 +36,13 @@ describe("set_phone_home_blocking", () => {
     const patch = ok({ status: "ok", enabled: true, cameras: false });
     const r = await setPhoneHomeBlocking.handler({ scope: "master", enabled: true }, ctxWithPatch(patch));
     expect(r.ok).toBe(true);
-    expect(patch).toHaveBeenCalledWith("/phone-home", { enabled: true });
+    expect(patch).toHaveBeenCalledWith("/api/network/phone-home", { enabled: true });
   });
 
   it("cameras scope PATCHes /phone-home with { cameras }", async () => {
     const patch = ok({ status: "ok", enabled: false, cameras: true });
     await setPhoneHomeBlocking.handler({ scope: "cameras", enabled: true }, ctxWithPatch(patch));
-    expect(patch).toHaveBeenCalledWith("/phone-home", { cameras: true });
+    expect(patch).toHaveBeenCalledWith("/api/network/phone-home", { cameras: true });
   });
 
   it("group scope PATCHes /groups/:id with { blockPhoneHome }", async () => {
@@ -45,7 +51,7 @@ describe("set_phone_home_blocking", () => {
       { scope: "group", enabled: true, groupId: "grp1" },
       ctxWithPatch(patch),
     );
-    expect(patch).toHaveBeenCalledWith("/groups/grp1", { blockPhoneHome: true });
+    expect(patch).toHaveBeenCalledWith("/api/network/groups/grp1", { blockPhoneHome: true });
   });
 
   it("rejects group scope without groupId", async () => {

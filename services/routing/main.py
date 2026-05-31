@@ -666,23 +666,14 @@ def set_device_phone_home(req: PhoneHomeDeviceRequest):
 
 @app.post("/firewall/phone-home/cameras")
 def set_cameras_phone_home(req: PhoneHomeCamerasRequest):
+    # The camera zone toggle only affects the camera VLAN's WAN egress — it
+    # cannot sever the orchestrator's (LAN/mgmt-side) management path, so it
+    # commits+reloads directly like block_device rather than wrapping in
+    # safe_apply (which would conflict with the SDK method's own commit/reload).
     try:
-        r = get_router()
-        # Zone-level, multi-step write — wrap in safe_apply so a connectivity
-        # loss rolls back (same discipline as camera-subnet setup).
-        with r.safe_apply(timeout=60):
-            r.firewall.set_camera_phone_home(req.blocked)
+        get_router().firewall.set_camera_phone_home(req.blocked)
         return {"status": "ok", "scope": "cameras", "blocked": req.blocked}
-    except ConnectionLost as exc:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "Connectivity lost during camera phone-home change — rolling back",
-                "detail": str(exc),
-                "rollback_pending": True,
-            },
-        )
-    except UbusError as exc:
+    except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
 

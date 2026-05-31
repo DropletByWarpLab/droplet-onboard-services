@@ -17,6 +17,11 @@ import type { DeviceEgressState, PrismaClient } from "@prisma/client";
 
 export const MASTER_SETTING_KEY = "network.block_phone_home_enabled";
 export const CAMERAS_SETTING_KEY = "network.cameras_block_phone_home";
+// Internal, reconciler-owned APPLIED-state for the camera zone. Explicit +
+// persistent (handbook "state is explicit, never derive from absence") so it
+// survives the 7-day ScheduleEvent purge — the per-device path uses
+// NetworkDevice.lastAppliedEgress for the same reason.
+export const CAMERAS_APPLIED_KEY = "network.cameras_phone_home_applied";
 
 interface DeviceLike {
   groups: Array<{ blockPhoneHome: boolean }>;
@@ -80,10 +85,10 @@ export async function setPhoneHomeSetting(
 //
 // The dashboard card needs *applied* state, not just desired, so it can show
 // "Applying… → Blocked / Can phone home" + "enforced {ago}". Source of truth:
-//   - camera applied  → the latest cameras ScheduleEvent (transition)
+//   - camera applied  → explicit CAMERAS_APPLIED_KEY flag (purge-safe)
 //   - device applied  → NetworkDevice.lastAppliedEgress (vs computeDesiredEgress)
 //   - timestamps      → ScheduleEvent.occurredAt (reason="phone_home")
-// All read-only; no schema change.
+// Read-only; no schema change.
 
 export interface ScopeView {
   desired: boolean;
@@ -108,12 +113,13 @@ const MAX_EVENT_SCAN = 500;
 export async function getPhoneHomeView(prisma: PrismaClient): Promise<PhoneHomeView> {
   const { enabled: masterDesired, cameras: camerasDesired } = await getPhoneHomeSettings(prisma);
 
-  // Camera applied-state + timestamp from the latest camera egress event.
+  // Camera applied-state from the explicit persistent flag (purge-safe); the
+  // ScheduleEvent is kept only for the audit timestamp.
+  const camerasApplied = await readBoolSetting(prisma, CAMERAS_APPLIED_KEY);
   const camEvent = await prisma.scheduleEvent.findFirst({
     where: { subjectType: "cameras", reason: "phone_home" },
     orderBy: { occurredAt: "desc" },
   });
-  const camerasApplied = camEvent?.transition === "blocked";
   const camerasAppliedAt = camEvent?.occurredAt ?? null;
   // What the reconciler drives cameras to (master gates the camera scope).
   const camerasPending = (masterDesired && camerasDesired) !== camerasApplied;
@@ -137,6 +143,8 @@ export async function getPhoneHomeView(prisma: PrismaClient): Promise<PhoneHomeV
   }
 
   // Most-recent applied timestamp per device (bounded scan of recent events).
+  // The cap feeds the cosmetic `appliedAt` ONLY — convergence (`applied` /
+  // `pending`) is computed from `lastAppliedEgress` above, unaffected by it.
   const devEvents = await prisma.scheduleEvent.findMany({
     where: { subjectType: "device", reason: "phone_home" },
     orderBy: { occurredAt: "desc" },

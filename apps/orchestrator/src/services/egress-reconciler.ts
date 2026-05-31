@@ -19,9 +19,9 @@
  *
  * State: per-device applied egress persists in `lastAppliedEgress` (survives
  * restart cleanly, same rationale as the schedule ticker's
- * `lastAppliedBlocked`). The camera zone's applied-state is the latest
- * `ScheduleEvent` with `subjectType="cameras"` — persisted so it survives
- * restart and the dashboard can read it (WARP-613 option A).
+ * `lastAppliedBlocked`). The camera zone's applied-state is an explicit
+ * persistent flag (`CAMERAS_APPLIED_KEY`) — purge-safe and dashboard-readable;
+ * the `ScheduleEvent` row is audit/timestamp only (WARP-613 option A).
  *
  * Errors: a RouterError (router unreachable / auth / disabled) is logged at
  * `warn` and BOTH the audit event and the state update are skipped, so the
@@ -30,7 +30,12 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
-import { computeDesiredEgress, getPhoneHomeSettings } from "./egress.service.js";
+import {
+  computeDesiredEgress,
+  getPhoneHomeSettings,
+  readBoolSetting,
+  CAMERAS_APPLIED_KEY,
+} from "./egress.service.js";
 import { RouterError } from "../types/router-error.js";
 
 const log = pino({ name: "egress-reconciler" });
@@ -54,25 +59,34 @@ export function createEgressReconciler(
     const { enabled, cameras } = await getPhoneHomeSettings(prisma);
 
     // --- Camera-zone pass ---
-    // Applied-state is the latest cameras ScheduleEvent's transition — persisted
-    // so the dashboard can read it and it survives restart (no in-memory bit).
+    // Applied-state is an explicit persistent flag (CAMERAS_APPLIED_KEY) —
+    // purge-safe and dashboard-readable. On change: dispatch, then persist the
+    // flag + write an audit ScheduleEvent atomically (mirrors the device path).
     const desiredCamera = enabled && cameras;
-    const lastCamEvent = await prisma.scheduleEvent.findFirst({
-      where: { subjectType: "cameras", reason: "phone_home" },
-      orderBy: { occurredAt: "desc" },
-    });
-    const appliedCamera = lastCamEvent?.transition === "blocked";
+    const appliedCamera = await readBoolSetting(prisma, CAMERAS_APPLIED_KEY);
     if (desiredCamera !== appliedCamera) {
       try {
         await egress.setCameraPhoneHome(desiredCamera);
-        await prisma.scheduleEvent.create({
-          data: {
-            subjectType: "cameras",
-            transition: desiredCamera ? "blocked" : "unblocked",
-            reason: "phone_home",
-            occurredAt: now,
-          },
-        });
+        await prisma.$transaction([
+          prisma.scheduleEvent.create({
+            data: {
+              subjectType: "cameras",
+              transition: desiredCamera ? "blocked" : "unblocked",
+              reason: "phone_home",
+              occurredAt: now,
+            },
+          }),
+          prisma.workspaceSetting.upsert({
+            where: { key: CAMERAS_APPLIED_KEY },
+            update: { valueJson: desiredCamera },
+            create: {
+              key: CAMERAS_APPLIED_KEY,
+              section: "hardware",
+              type: "bool",
+              valueJson: desiredCamera,
+            },
+          }),
+        ]);
       } catch (err) {
         if (err instanceof RouterError) {
           log.warn({ code: err.code }, "camera egress dispatch failed; will retry next tick");

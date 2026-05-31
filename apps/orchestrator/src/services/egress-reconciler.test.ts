@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createEgressReconciler } from "./egress-reconciler.js";
 import { RouterError } from "../types/router-error.js";
-import { MASTER_SETTING_KEY, CAMERAS_SETTING_KEY } from "./egress.service.js";
+import { MASTER_SETTING_KEY, CAMERAS_SETTING_KEY, CAMERAS_APPLIED_KEY } from "./egress.service.js";
 
 // In-memory prisma mock mirroring schedule-ticker.test.ts. Devices carry
 // `lastAppliedEgress` (mutated via networkDevice.update inside a $transaction)
@@ -25,10 +25,16 @@ function makePrisma(settings: Record<string, boolean> = {}) {
       return row;
     }),
   };
+  const settingsStore: Record<string, boolean> = { ...settings };
   const workspaceSetting = {
     findUnique: vi.fn(async (q: any) => {
       const key = q.where.key;
-      return key in settings ? { key, valueJson: settings[key] } : null;
+      return key in settingsStore ? { key, valueJson: settingsStore[key] } : null;
+    }),
+    upsert: vi.fn(async (q: any) => {
+      const key = q.where.key;
+      settingsStore[key] = q.update?.valueJson ?? q.create?.valueJson;
+      return { key, valueJson: settingsStore[key] };
     }),
   };
   const scheduleEvent = {
@@ -93,14 +99,12 @@ describe("egress-reconciler — camera pass", () => {
   });
 
   it("unblocks cameras when master goes off after a prior applied-on", async () => {
-    const prisma = makePrisma({ [MASTER_SETTING_KEY]: false, [CAMERAS_SETTING_KEY]: true }) as any;
-    // Seed a prior 'blocked' camera event so applied = true.
-    prisma._stores.events.push({
-      subjectType: "cameras",
-      reason: "phone_home",
-      transition: "blocked",
-      occurredAt: new Date(Date.now() - 1000),
-    });
+    // Seed the explicit applied-flag = true (cameras currently blocked).
+    const prisma = makePrisma({
+      [MASTER_SETTING_KEY]: false,
+      [CAMERAS_SETTING_KEY]: true,
+      [CAMERAS_APPLIED_KEY]: true,
+    }) as any;
     const egress = makeEgress();
     await createEgressReconciler(prisma, egress).tickOnce();
     expect(egress.setCameraPhoneHome).toHaveBeenCalledWith(false);
