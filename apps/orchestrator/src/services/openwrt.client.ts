@@ -363,6 +363,35 @@ export async function unblockDevice(mac: string): Promise<WriteResult> {
   return opFrom(res);
 }
 
+// WARP-613: phone-home egress control (ADR-012). A softer block than
+// blockDevice — denies WAN egress but keeps NTP + local DNS.
+export async function blockPhoneHome(mac: string): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/phone-home/device",
+    { mac, blocked: true },
+    "Block phone-home",
+  );
+  return opFrom(res);
+}
+
+export async function unblockPhoneHome(mac: string): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/phone-home/device",
+    { mac, blocked: false },
+    "Unblock phone-home",
+  );
+  return opFrom(res);
+}
+
+export async function setCameraPhoneHome(blocked: boolean): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/phone-home/cameras",
+    { blocked },
+    "Set camera phone-home",
+  );
+  return opFrom(res);
+}
+
 export async function addPortForward(
   name: string,
   srcPort: string,
