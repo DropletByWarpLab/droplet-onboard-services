@@ -20,6 +20,7 @@ import {
   evaluateNetworkCommand,
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
+import { requireRole } from "../middleware/auth.js";
 
 const logger = pino({ name: "switch-routes" });
 
@@ -52,6 +53,28 @@ async function evalSwitchCommand(
 /** Helper: check if a port is the protected Jetson port. */
 function isProtectedPort(port: number): boolean {
   return PROTECTED_PORT > 0 && port === PROTECTED_PORT;
+}
+
+/**
+ * Resolve the authenticated user id on a mutating switch route.
+ *
+ * WARP-559: every mutating route below now sits behind
+ * `requireRole("owner", "admin")`, which runs after `authMiddleware`.
+ * Reaching a handler therefore guarantees an authenticated session with
+ * a populated `req.user.id` — the safety/confirmation/audit tier
+ * (`evalSwitchCommand`) is a complementary layer, not the authorization
+ * gate, so it should never see an undefined user id on the API path.
+ * Assert rather than silently passing `undefined` downstream.
+ */
+function requireUserId(userId: string | undefined): string {
+  if (typeof userId !== "string" || userId.length === 0) {
+    // Defense in depth — requireRole already returned 403 for a session
+    // without a role, and authMiddleware issued 401 for no session. A
+    // missing id here means a middleware-ordering bug, not a client
+    // condition; fail loud so it surfaces in the error handler as 500.
+    throw new Error("switch route reached without an authenticated user id");
+  }
+  return userId;
 }
 
 /** Helper: return safety tier response (202 for confirmation, 403/429 for blocked). */
@@ -157,13 +180,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
   });
 
   // Confirmation endpoint (shared for all switch Tier 2 operations)
-  router.post("/switch/command/confirm", async (req, res, next) => {
+  router.post("/switch/command/confirm", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const { confirmationToken } = req.body;
       if (!confirmationToken) {
         return res.status(400).json({ error: "Missing confirmationToken" });
       }
-      const result = await confirmNetworkCommand(prisma, confirmationToken, req.user?.id);
+      const result = await confirmNetworkCommand(prisma, confirmationToken, userId);
       if (!result.confirmed) {
         return res.status(400).json({ error: result.reason });
       }
@@ -218,13 +242,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- Port enable/disable ---
 
-  router.post("/switch/ports/:port/enable", async (req, res, next) => {
+  router.post("/switch/ports/:port/enable", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const port = parseInt(req.params.port);
       if (isNaN(port) || port < 1 || port > 10) {
         return res.status(400).json({ error: "Invalid port number" });
       }
-      const result = await evalSwitchCommand(prisma, "switch_port_enable", { port }, req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_port_enable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       await switchClient.enablePort(port);
       res.json({ status: "ok", port, enabled: true });
@@ -233,8 +258,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/switch/ports/:port/disable", async (req, res, next) => {
+  router.post("/switch/ports/:port/disable", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const port = parseInt(req.params.port);
       if (isNaN(port) || port < 1 || port > 10) {
         return res.status(400).json({ error: "Invalid port number" });
@@ -242,11 +268,11 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       // Protected port: block AI entirely, require confirmation for web UI
       if (isProtectedPort(port)) {
         const result = await evalSwitchCommand(
-          prisma, "switch_disable_protected_port", { port }, req.user?.id
+          prisma, "switch_disable_protected_port", { port }, userId
         );
         if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       } else {
-        const result = await evalSwitchCommand(prisma, "switch_port_disable", { port }, req.user?.id);
+        const result = await evalSwitchCommand(prisma, "switch_port_disable", { port }, userId);
         if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       }
       await switchClient.disablePort(port);
@@ -258,13 +284,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- VLAN create/delete/membership ---
 
-  router.post("/switch/vlans", async (req, res, next) => {
+  router.post("/switch/vlans", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const { vlan_id, name } = req.body;
       if (!vlan_id || vlan_id < 2 || vlan_id > 4094) {
         return res.status(400).json({ error: "VLAN ID must be 2-4094" });
       }
-      const result = await evalSwitchCommand(prisma, "switch_create_vlan", { vlan_id, name }, req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_create_vlan", { vlan_id, name }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       await switchClient.createVlan(vlan_id, name || "");
       res.json({ status: "ok", vlan_id });
@@ -273,8 +300,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/switch/vlans/:vlanId", async (req, res, next) => {
+  router.delete("/switch/vlans/:vlanId", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const vlanId = parseInt(req.params.vlanId);
       if (isNaN(vlanId) || vlanId < 2) {
         return res.status(400).json({ error: "Invalid VLAN ID" });
@@ -282,7 +310,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       if (vlanId === 1) {
         return res.status(403).json({ error: "Cannot delete default VLAN 1" });
       }
-      const result = await evalSwitchCommand(prisma, "switch_delete_vlan", { vlan_id: vlanId }, req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_delete_vlan", { vlan_id: vlanId }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       await switchClient.deleteVlan(vlanId);
       res.json({ status: "ok", vlan_id: vlanId, deleted: true });
@@ -291,15 +319,16 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/switch/vlans/:vlanId/membership", async (req, res, next) => {
+  router.post("/switch/vlans/:vlanId/membership", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const vlanId = parseInt(req.params.vlanId);
       const { ports } = req.body;
       if (!Array.isArray(ports)) {
         return res.status(400).json({ error: "ports must be an array" });
       }
       const result = await evalSwitchCommand(
-        prisma, "switch_set_vlan_membership", { vlan_id: vlanId, ports }, req.user?.id
+        prisma, "switch_set_vlan_membership", { vlan_id: vlanId, ports }, userId
       );
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       await switchClient.setVlanMembership(vlanId, ports);
@@ -311,13 +340,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- PoE enable/disable ---
 
-  router.post("/switch/poe/:port/enable", async (req, res, next) => {
+  router.post("/switch/poe/:port/enable", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const port = parseInt(req.params.port);
       if (isNaN(port) || port < 1 || port > 8) {
         return res.status(400).json({ error: "PoE port must be 1-8" });
       }
-      const result = await evalSwitchCommand(prisma, "switch_poe_enable", { port }, req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_poe_enable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       await switchClient.enablePortPoe(port);
       res.json({ status: "ok", port, poe_enabled: true });
@@ -326,13 +356,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/switch/poe/:port/disable", async (req, res, next) => {
+  router.post("/switch/poe/:port/disable", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const port = parseInt(req.params.port);
       if (isNaN(port) || port < 1 || port > 8) {
         return res.status(400).json({ error: "PoE port must be 1-8" });
       }
-      const result = await evalSwitchCommand(prisma, "switch_poe_disable", { port }, req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_poe_disable", { port }, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       await switchClient.disablePortPoe(port);
       res.json({ status: "ok", port, poe_enabled: false });
@@ -343,9 +374,10 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- WAN Detection ---
 
-  router.post("/switch/wan/detect", async (req, res, next) => {
+  router.post("/switch/wan/detect", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const result = await evalSwitchCommand(prisma, "switch_wan_detect", {}, req.user?.id);
+      const userId = requireUserId(req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_wan_detect", {}, userId);
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       const detection = await switchClient.detectWanPort();
       res.json(detection);
@@ -356,13 +388,14 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // --- Camera Setup ---
 
-  router.post("/switch/setup/cameras", async (req, res, next) => {
+  router.post("/switch/setup/cameras", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      const userId = requireUserId(req.user?.id);
       const { vlan_id, camera_ports, uplink_ports } = req.body || {};
       const result = await evalSwitchCommand(
         prisma, "switch_setup_cameras",
         { vlan_id: vlan_id || 100, camera_ports: camera_ports || [1,2,3,4,5,6,7,8], uplink_ports: uplink_ports || [9,10] },
-        req.user?.id
+        userId
       );
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       const setupResult = await switchClient.setupCameraPorts(vlan_id, camera_ports, uplink_ports);

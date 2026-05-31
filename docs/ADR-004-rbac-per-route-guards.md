@@ -92,6 +92,7 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 | `POST/PUT/DELETE /api/auth/users` (admin) | `owner`, `admin` |
 | `POST /api/auth/invites*` | `owner`, `admin` |
 | `POST/PUT/DELETE /api/network/*`, `/api/firewall/*`, `/api/vpn/*`, `/api/ddns/*` | `owner`, `admin` |
+| `POST/DELETE /api/switch/*` (port/PoE/VLAN/WAN/camera-setup writes + `command/confirm`) | `owner`, `admin` |
 | `POST /api/services/*/restart` | `owner` |
 | `POST/PUT/DELETE /api/cameras/*`, `/api/matter/*`, `/api/smart-home/*` | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/files/*` (write) | `owner`, `admin`, `family` |
@@ -262,6 +263,41 @@ household-tier guest.
 These rows are mirrored in `__tests__/rbac.test.ts`'s MATRIX so a
 guard regression on any of them trips a localized test failure.
 
+### Managed-switch control (WARP-559)
+
+The switch router (`routes/switch.ts`) was mounted in `app.ts` with **no**
+`requireRole` wrapper — unlike every sibling hardware router (cameras,
+matter, network-wifi, routing, vpn). The only gate was the safety-tier
+confirmation/audit layer (`evalSwitchCommand`, WARP-76), which is *not*
+authorization: it checks no role and tolerated an undefined user id. A
+`guest`/`family` session could therefore disable PoE, ports, or VLANs —
+a privilege escalation. WARP-503 hardened the rest of the network surface
+but missed the switch mount.
+
+Fix: per-route `requireRole("owner", "admin")` on every mutating route,
+matching the `/api/network/*` posture (managed-switch control is the same
+class of network-infrastructure write). Status `GET`s stay open to every
+authenticated role. After the guard, the handler asserts a populated
+`req.user.id` rather than passing `undefined` to the safety tier.
+
+| Endpoint | Allowed roles |
+|---|---|
+| `POST /api/switch/ports/:port/enable` | `owner`, `admin` |
+| `POST /api/switch/ports/:port/disable` | `owner`, `admin` |
+| `POST /api/switch/vlans` | `owner`, `admin` |
+| `DELETE /api/switch/vlans/:vlanId` | `owner`, `admin` |
+| `POST /api/switch/vlans/:vlanId/membership` | `owner`, `admin` |
+| `POST /api/switch/poe/:port/enable` | `owner`, `admin` |
+| `POST /api/switch/poe/:port/disable` | `owner`, `admin` |
+| `POST /api/switch/wan/detect` | `owner`, `admin` |
+| `POST /api/switch/setup/cameras` | `owner`, `admin` |
+| `POST /api/switch/command/confirm` | `owner`, `admin` |
+| `GET /api/switch/*` (port/VLAN/PoE/system status) | every authenticated role |
+
+These rows are mirrored in `__tests__/rbac.test.ts` — both in the synthetic
+MATRIX and in a dedicated `createSwitchRouter` integration block that mounts
+the real router to prove the guard is actually wired.
+
 ## Alternatives considered
 
 ### A. Decorator-style guards on route handlers
@@ -288,3 +324,4 @@ Rejected for v1: introduces a dependency the team would need to audit, and the a
 - [WARP-327](https://warp-lab.atlassian.net/browse/WARP-327) — parent epic, Auth/RBAC/Identity.
 - [WARP-480](https://warp-lab.atlassian.net/browse/WARP-480) — self-action + last-owner invariants on `/api/people` mutations (the consumer that surfaced the OCS-id-shape mismatch).
 - [WARP-485](https://warp-lab.atlassian.net/browse/WARP-485) — `req.user.id` normalization across JWT + OCS auth paths (the §6 amendment above).
+- [WARP-559](https://warp-lab.atlassian.net/browse/WARP-559) — managed-switch control routes were mounted unguarded; added `requireRole("owner", "admin")` (the Managed-switch control sub-section above).
