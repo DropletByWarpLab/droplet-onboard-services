@@ -401,6 +401,9 @@ export interface DriveInfo {
    *  the UI hides the chips when absent. */
   smart?: string | null;
   temp_c?: number | null;
+  /** WARP-612: hot-plug auto-mounted (ejectable) vs installed storage —
+   *  bus-agnostic (ADR-011). The Eject action is gated on this, not on bus. */
+  removable?: boolean;
   /** WARP-174: customer's friendly name from the setup wizard's Storage
    *  step. `null` until a Drive row is upserted via
    *  PATCH /api/storage/drives/:uuid. */

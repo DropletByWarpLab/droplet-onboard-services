@@ -698,13 +698,15 @@ def _bytes_for(path):
 def _bus_for(device):
     """Classify a block device by bus from its kernel name. Cheap, no I/O.
 
-    nvme*  -> internal NVMe (the modular primary store on Droplet)
-    mmcblk* -> eMMC / SD (the boot medium)
-    sd*    -> 'usb' (Droplet's hot-plug data drives are USB; bare SATA is
-              not a deployment shape we ship, so this is the safe label)
-    else   -> 'disk'
-    The dashboard uses this only to pick an icon + an Internal/USB chip;
-    it is never a security or mount decision.
+    nvme*   -> 'nvme'  (typically the internal primary store)
+    mmcblk* -> 'mmc'   (eMMC / SD — usually the boot medium)
+    sd*     -> 'usb'   (the common hot-plug bus; may also be SATA/SAS — a
+               presentation label for the card icon only)
+    else    -> 'disk'
+    Bus class only drives the icon + a connection chip. It is NEVER an
+    eject/mount/security gate — ejectability is decided by `removable`
+    (hot-plug auto-mount), not by bus, so the surface stays hardware-agnostic
+    (ADR-011).
     """
     base = os.path.basename(device or "")
     if base.startswith("nvme"):
@@ -886,6 +888,8 @@ def drives_snapshot(invalidate=False):
                 "readonly": readonly,
                 "smart": smart,
                 "temp_c": temp,
+                # Hot-plug auto-mounted → removable/ejectable regardless of bus.
+                "removable": True,
                 "source": "automount",
             }
     except Exception:
@@ -936,6 +940,8 @@ def drives_snapshot(invalidate=False):
                     "readonly": mount_meta.get(mp, (fs, True))[1],
                     "smart": smart,
                     "temp_c": temp,
+                    # Installed (fstab) storage — not hot-plug, not ejectable.
+                    "removable": False,
                     "source": "fstab",
                 }
     except Exception:
@@ -958,13 +964,15 @@ def drives_snapshot(invalidate=False):
 
 
 def eject_drive(uuid):
-    """Safely unmount + forget a hot-plug USB drive by FS UUID (WARP-612).
+    """Safely unmount + forget a hot-plug auto-mounted drive by FS UUID
+    (WARP-612). Bus-agnostic per ADR-011 — works for USB, external NVMe, SD,
+    SATA docks, anything the automounter mounted.
 
     Guarded hard — only ever acts on a drive that (a) is in the automount
-    state file, (b) is mounted under /mnt/droplet/<…>, and (c) sits on a USB
-    bus (sd*). Internal NVMe, the eMMC boot medium, and fstab-installed mounts
-    are NEVER ejectable. Does not use `umount -l`: a busy drive should fail
-    loudly so the user closes files and retries, not silently lazy-unmount.
+    state file and (b) is mounted under /mnt/droplet/<…>. Internal/boot disks
+    and fstab-installed mounts are never in that set, so they are never
+    ejectable. Does not use `umount -l`: a busy drive should fail loudly so the
+    user closes files and retries, not silently lazy-unmount.
     Returns (ok, message_or_dict). Never raises.
     """
     if not uuid:
@@ -980,11 +988,12 @@ def eject_drive(uuid):
     if not target:
         return False, "no hot-plug drive with that uuid"
     mp = (target.get("mount") or "").rstrip("/")
-    dev = target.get("device") or ""
     if not mp.startswith("/mnt/droplet/") or mp == "/mnt/droplet":
         return False, "refusing to eject a non-/mnt/droplet mount"
-    if _bus_for(dev) != "usb":
-        return False, "refusing to eject a non-USB device ({})".format(_bus_for(dev))
+    # Bus-agnostic (ADR-011): any hot-plug drive the automounter placed under
+    # /mnt/droplet/ is ejectable — USB, external NVMe, SD, SATA dock, etc.
+    # System/boot disks are never in the automount state, so membership + the
+    # /mnt/droplet/ prefix is the safe gate; bus is irrelevant.
     _run(["sync"], timeout=10)
     rc, _out, err = _run(["umount", mp], timeout=20)
     if rc != 0:

@@ -262,7 +262,7 @@ export function DrivesPanel() {
                 <p className="mt-2 type-caption-1 text-label-tertiary">{d.notes}</p>
               )}
 
-              {d.bus === "usb" && d.mounted && (
+              {d.removable && d.mounted && (
                 <div className="mt-3 pt-3 border-t border-separator flex justify-end">
                   <button
                     onClick={() => setEjectTarget(d)}

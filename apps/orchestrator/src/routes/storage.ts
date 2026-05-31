@@ -56,6 +56,10 @@ interface BridgeDrive {
    *  device; null/absent otherwise. The dashboard hides the chips when null. */
   smart?: string | null;
   temp_c?: number | null;
+  /** WARP-612: hot-plug auto-mounted (ejectable) vs installed/fstab — the
+   *  bus-agnostic ejectability signal (ADR-011). The UI shows Eject on this,
+   *  not on bus. */
+  removable?: boolean;
 }
 
 /** Mirror of the bridge's `_bus_for` so the dashboard always has a bus class
