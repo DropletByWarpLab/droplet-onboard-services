@@ -234,6 +234,38 @@ EOF
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-poc-host-net"
 }
 
+# Trigger the OpenWrt container bootstrap after start_stack (re)creates it.
+# droplet-openwrt-attach.service is a boot-time `oneshot` (RemainAfterExit),
+# so on a no-reboot re-provision — factory-reset wiped openwrt-config /
+# openwrt-overlay and start_stack made a FRESH openwrt container — the oneshot
+# does NOT re-run, leaving the new container unprovisioned (no umdns, no rpcd
+# ACL, eth0 not in the `lan` firewall zone). fw4 then DROPs ubus input and the
+# routing service crash-loops (WARP-578 — reproduces the reported "router
+# offline"). Restart the unit explicitly once openwrt is up; the attach script
+# is idempotent.
+provision_single_box_openwrt() {
+  if ! systemctl list-unit-files droplet-openwrt-attach.service >/dev/null 2>&1; then
+    return 0  # unit not installed (non-single-box / dev host) — nothing to do
+  fi
+  # Wait for the openwrt container to be Running before the attach docker-execs.
+  local tries=30
+  while [ "$tries" -gt 0 ]; do
+    [ "$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)" = "true" ] && break
+    tries=$((tries - 1))
+    sleep 2
+  done
+  if [ "$tries" -eq 0 ]; then
+    log_warn "openwrt container not Running after 60s — skipping attach; routing may be offline until next boot (WARP-578)"
+    return 0
+  fi
+  log_info "Provisioning the OpenWrt container (umdns + rpcd ACL + eth0 firewall trust)..."
+  if sudo systemctl restart droplet-openwrt-attach.service; then
+    log_success "droplet-openwrt-attach ran — routing can reach ubus (WARP-578)"
+  else
+    log_warn "droplet-openwrt-attach failed — check: sudo journalctl -u droplet-openwrt-attach"
+  fi
+}
+
 # ============================================================================
 # .env knobs
 # ============================================================================
