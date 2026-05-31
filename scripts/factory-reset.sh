@@ -9,10 +9,14 @@
 # Usage:
 #   ./scripts/factory-reset.sh [OPTIONS]
 #
+# Before wiping, it emits a final full-device backup (WARP-570) so a mis-run
+# reset stays recoverable. Pass --no-backup to skip that safety net.
+#
 # Options:
 #   --yes            Skip interactive confirmation (for automation)
 #   --reinstall      After wiping, automatically run setup.sh to re-provision
 #   --purge-images   Also remove built Docker images (slower rebuild)
+#   --no-backup      Skip the pre-reset safety backup (WARP-570)
 #   -h, --help       Show this help message
 #
 # =============================================================================
@@ -28,6 +32,7 @@ SKIP_CONFIRM=false
 REINSTALL=false
 PURGE_IMAGES=false
 FORCE_REMOVE=false
+NO_BACKUP=false
 
 usage() {
   cat << 'USAGE'
@@ -41,6 +46,7 @@ Options:
   --reinstall      After wiping, automatically run setup.sh to re-provision
   --purge-images   Also remove built Docker images (slower rebuild)
   --force          Restart Docker if volumes cannot be removed (stuck references)
+  --no-backup      Skip the pre-reset full-device safety backup (WARP-570)
   -h, --help       Show this help message
 
 What gets deleted:
@@ -64,6 +70,7 @@ while [ $# -gt 0 ]; do
     --reinstall)      REINSTALL=true; shift ;;
     --purge-images)   PURGE_IMAGES=true; shift ;;
     --force)          FORCE_REMOVE=true; shift ;;
+    --no-backup)      NO_BACKUP=true; shift ;;
     -h|--help)        usage ;;
     *)                echo "Unknown option: $1"; usage ;;
   esac
@@ -122,6 +129,34 @@ if [ "$SKIP_CONFIRM" != "true" ]; then
     log_info "Factory reset cancelled."
     exit 0
   fi
+fi
+
+# =============================================================================
+# Phase 0: Safety backup (WARP-570)
+# =============================================================================
+# Emit a final full-device backup BEFORE any destructive step. The `down -v`
+# in Phase 1 already removes volumes, so this gate MUST run before it — not
+# just before the explicit `docker volume rm` loop. Opt out with --no-backup.
+# If the backup fails we ABORT (fail-safe: never wipe data we couldn't
+# protect) unless the operator explicitly passed --no-backup.
+
+BACKUP_SCRIPT="$SCRIPT_DIR/host/device-backup.sh"
+if [ "$NO_BACKUP" = "true" ]; then
+  log_warn "--no-backup: skipping the pre-reset safety backup"
+elif [ ! -f "$BACKUP_SCRIPT" ]; then
+  log_warn "device-backup.sh not found — skipping safety backup"
+elif ! command -v docker >/dev/null 2>&1; then
+  log_warn "docker not available — skipping safety backup (nothing running to back up)"
+else
+  log_step 0 4 "Emitting a final safety backup before wipe"
+  if "$BACKUP_SCRIPT"; then
+    log_success "Safety backup complete (default dir: /var/lib/droplet/backups)"
+  else
+    log_error "Safety backup FAILED — aborting factory reset."
+    log_error "Re-run with --no-backup to reset anyway (DATA WILL BE LOST)."
+    exit 1
+  fi
+  log_divider
 fi
 
 # =============================================================================
