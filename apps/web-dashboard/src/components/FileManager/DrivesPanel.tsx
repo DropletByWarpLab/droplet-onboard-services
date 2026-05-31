@@ -124,7 +124,7 @@ export function DrivesPanel() {
         <p className="type-subheadline text-label-secondary mb-4">
           {bridgeError
             ? "The storage service isn't reachable right now."
-            : "Plug in a USB drive and it mounts automatically."}
+            : "Plug in a drive and it mounts automatically."}
         </p>
         <button
           onClick={onRescan}
