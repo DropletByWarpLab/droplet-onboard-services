@@ -22,6 +22,7 @@ import {
   createPublicWebAuthnRouter,
   createProtectedWebAuthnRouter,
 } from "./routes/webauthn.js";
+import { createSetupRouter } from "./routes/setup.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
@@ -127,6 +128,11 @@ export function createApp(prisma: PrismaClient) {
   // GETs a session, so they MUST mount BEFORE authMiddleware (same posture as
   // /auth/login above). Registration lives on the PROTECTED router below.
   app.use("/api", createPublicWebAuthnRouter(prisma));
+
+  // PR #372 — first-run setup state machine (GET/PATCH /api/setup/state).
+  // PUBLIC: first-run happens before any user exists, like POST /auth/setup.
+  // Mounted BEFORE the auth middleware and allow-listed in middleware/auth.ts.
+  app.use("/api", createSetupRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
   // without a session cookie. Token in the query string is the auth (HMAC

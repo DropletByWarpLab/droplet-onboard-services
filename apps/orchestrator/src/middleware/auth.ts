@@ -107,6 +107,10 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     "/api/health",
     "/api/orchestrator/health",
     "/api/auth/setup",
+    // PR #372: first-run setup state machine. GET/PATCH must be reachable
+    // before any user exists (resumable wizard), same posture as
+    // /api/auth/setup above.
+    "/api/setup/state",
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",

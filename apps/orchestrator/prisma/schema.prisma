@@ -2022,3 +2022,75 @@ model Workspace {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 }
+
+/// PR #372 — first-run setup is RESUMABLE and EXPLICIT.
+///
+/// Before this model, setup was stateless: the dashboard derived a
+/// boolean `setupRequired` from Nextcloud's `installed` flag
+/// (`GET /api/auth/setup`), so a refresh mid-wizard lost the customer's
+/// place and there was no `unclaimed → ready` lifecycle. `ApplianceSetup`
+/// makes the state a first-class, persisted, explicit column.
+///
+/// `setupStep` is the resumability anchor — the orchestrator persists it
+/// as the customer advances the wizard, so a refresh routes them back to
+/// the exact same step (the headline AC). It is the `SetupStep` enum, not
+/// a free-form string, per CLAUDE.md's no-guessing rule (canonical
+/// precedent: WARP-218 `BrainMemoryItemStatus`).
+///
+/// `state` is the appliance lifecycle: "unclaimed" (first-run not
+/// finished) vs "ready" (wizard complete). DELIBERATELY a column the
+/// finish-handler flips, NEVER derived from `setupStep == done` or from
+/// Nextcloud's `installed` flag — the same no-derived-state rule. Kept as
+/// a 2-value String (not an enum) to match the spec's data-model block in
+/// docs/ONBOARDING_STATE_MACHINE.md verbatim; the service is the single
+/// writer and validates the two legal values.
+///
+/// `userTourCompleted` gates the post-claim product tour: a ready
+/// appliance whose owner hasn't seen the tour routes to the tour, not the
+/// dashboard. Independent of `state` (claiming the box and finishing the
+/// tour are distinct events).
+///
+/// Singleton — exactly one row per appliance, pinned to a fixed `id` the
+/// same way `Workspace` pins `id = 1`, so every read/write is an upsert
+/// against a known primary key with no "which row?" ambiguity. Persisted
+/// on the encrypted NVMe (FEATURES.md §10) alongside the rest of the
+/// orchestrator's Postgres state.
+model ApplianceSetup {
+  // Fixed singleton key — there is only ever one appliance-setup row.
+  // Not a generated uuid: a uuid default would mint a new row on every
+  // upsert-create and break the singleton invariant.
+  id                String    @id @default("singleton")
+  // "unclaimed" | "ready". Explicit lifecycle column — never derived.
+  state             String    @default("unclaimed")
+  setupStep         SetupStep @default(welcome)
+  userTourCompleted Boolean   @default(false)
+  updatedAt         DateTime  @updatedAt
+  createdAt         DateTime  @default(now())
+}
+
+/// PR #372 — ordered first-run wizard steps. The set mirrors the
+/// dashboard wizard's `STEPS` array in
+/// `apps/web-dashboard/src/app/setup/page.tsx` 1:1, so the persisted
+/// resume-point can never reference a step the wizard can't render.
+///
+/// GATE (PR #372): only the 9 SHIPPED steps are listed. The
+/// claim / org / team steps from the broader onboarding spec are GATED
+/// pending a Claude Design round-trip and are NOT wired anywhere yet
+/// (no backend endpoint, no step component). They EXTEND this enum — and
+/// the wizard array, and the route validation — in one coherent change
+/// when they ship. Listing them here today would create a persistable
+/// `setupStep` value with no reachable wizard step (a dead resume
+/// target), which is exactly the unreachable-state the no-guessing rule
+/// is meant to prevent. Keep this enum congruent with what the appliance
+/// can actually walk a customer through.
+enum SetupStep {
+  welcome
+  account
+  internet
+  storage
+  discovery
+  cameras
+  vpn
+  ai
+  done
+}
