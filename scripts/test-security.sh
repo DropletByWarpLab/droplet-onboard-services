@@ -342,6 +342,57 @@ else
 fi
 
 # =============================================================================
+# Test 10: WARP-575 — makeplane/plane-worker must not appear anywhere
+# =============================================================================
+# makeplane/plane-worker:* does not exist on Docker Hub (404). Plane runs the
+# Celery worker from the backend image with an explicit command. This guard
+# prevents the 404 image name from re-entering compose files, docs, or scripts.
+
+plane_worker_hits=$(grep -rn 'makeplane/plane-worker' \
+  "$REPO_ROOT/docker/" "$REPO_ROOT/docs/" "$REPO_ROOT/scripts/" \
+  --exclude="test-security.sh" \
+  2>/dev/null || true)
+
+if [ -z "$plane_worker_hits" ]; then
+  pass "no makeplane/plane-worker references in docker/, docs/, scripts/"
+else
+  fail "makeplane/plane-worker found — image does not exist on Docker Hub (WARP-575)"
+  printf "${_RED}%s${_RESET}\n" "$plane_worker_hits" >&2
+  printf "    pm-worker must use makeplane/plane-backend with an explicit\n" >&2
+  printf "    command: [\"./bin/docker-entrypoint-worker.sh\"]\n\n" >&2
+fi
+
+# =============================================================================
+# Test 11: WARP-575 — pm-worker and pm-api must share the same plane-backend pin
+# =============================================================================
+# Both services must reference the same makeplane/plane-backend:<tag> so the
+# already-pulled pm-api image is reused; diverged pins introduce a hidden
+# second download and break the ADR-010 OQ3 'single upstream pin' posture.
+
+# Extract pin by finding the image: line in the pm-api service block (image: appears
+# before container_name in this compose file, so we look backwards from container_name).
+pm_api_pin=$(grep -B5 'container_name: droplet-pm-api' "$COMPOSE_FILE" \
+  | grep 'image: makeplane/plane-backend:' \
+  | grep -oE 'makeplane/plane-backend:[^[:space:]]+' | head -1 || true)
+
+pm_worker_pin=$(grep -B5 'container_name: droplet-pm-worker' "$COMPOSE_FILE" \
+  | grep 'image: makeplane/plane-backend:' \
+  | grep -oE 'makeplane/plane-backend:[^[:space:]]+' | head -1 || true)
+
+if [ -z "$pm_api_pin" ]; then
+  fail "pm-api image pin not found (expected makeplane/plane-backend:<tag>)"
+elif [ -z "$pm_worker_pin" ]; then
+  fail "pm-worker image pin not found (expected makeplane/plane-backend:<tag>)"
+elif [ "$pm_api_pin" = "$pm_worker_pin" ]; then
+  pass "pm-api and pm-worker share the same plane-backend pin ($pm_api_pin)"
+else
+  fail "pm-api ($pm_api_pin) and pm-worker ($pm_worker_pin) image pins diverged"
+  printf "${_RED}  pm-api:   %s${_RESET}\n" "$pm_api_pin" >&2
+  printf "${_RED}  pm-worker:%s${_RESET}\n" "$pm_worker_pin" >&2
+  printf "    Both must reference the same makeplane/plane-backend:<tag>.\n\n" >&2
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
