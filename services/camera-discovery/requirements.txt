@@ -4,5 +4,10 @@ httpx==0.28.1
 paho-mqtt==2.1.0
 onvif-zeep==0.2.12
 wsdiscovery==2.0.0
+# WARP-221: the periodic discovery sweep runs on an AsyncIOScheduler
+# interval job (main.py:build_scan_scheduler) instead of a hand-rolled
+# `while True` loop — the canonical scheduling pattern per CLAUDE.md.
+# Pinned to the same version services/routing/requirements.txt uses.
+APScheduler==3.10.4
 # RSA-OAEP/PKCS1v15 for vendor_init.py (Hanwha first-run password encryption)
 cryptography==44.0.0
