@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Router,
   Shield,
+  ShieldCheck,
   Signal,
   Wifi,
   WifiOff,
@@ -50,7 +51,7 @@ type OperationStatus =
   | { state: "applied"; id: string; finishedAt: number | null }
   | { state: "rolled_back"; id: string; reason: string | null };
 
-type Tab = "overview" | "devices" | "schedules" | "wifi" | "firewall" | "system";
+type Tab = "overview" | "privacy" | "devices" | "schedules" | "wifi" | "firewall" | "system";
 
 // WARP-39: user-facing strings keyed by the RouterError.code coming off the hook.
 const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
@@ -211,6 +212,7 @@ export default function NetworkPage() {
 
   const tabs: { id: Tab; label: string; icon: typeof Globe }[] = [
     { id: "overview", label: "Overview", icon: Globe },
+    { id: "privacy", label: "Privacy", icon: ShieldCheck },
     { id: "devices", label: "Devices", icon: Monitor },
     { id: "schedules", label: "Schedules", icon: CalendarClock },
     { id: "wifi", label: "WiFi", icon: Wifi },
@@ -421,6 +423,15 @@ export default function NetworkPage() {
       </div>
       <div
         role="tabpanel"
+        id="network-panel-privacy"
+        aria-labelledby="network-tab-privacy"
+        tabIndex={0}
+        hidden={activeTab !== "privacy"}
+      >
+        {activeTab === "privacy" && <PrivacyTab />}
+      </div>
+      <div
+        role="tabpanel"
         id="network-panel-devices"
         aria-labelledby="network-tab-devices"
         tabIndex={0}
@@ -465,6 +476,15 @@ export default function NetworkPage() {
         {activeTab === "system" && <SystemTab overview={overview} />}
       </div>
       </div>
+    </div>
+  );
+}
+
+// --- Privacy Tab (WARP-613) ---
+function PrivacyTab() {
+  return (
+    <div className="max-w-2xl">
+      <PhoneHomeCard />
     </div>
   );
 }
@@ -840,9 +860,6 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
 
   return (
     <div className="space-y-4">
-      {/* WARP-613: home-user phone-home egress toggle (ADR-012). */}
-      <PhoneHomeCard />
-
       <div className="dp-card">
         <h3 className="type-headline text-label-primary mb-4">
           Firewall Rules ({rules.length})
