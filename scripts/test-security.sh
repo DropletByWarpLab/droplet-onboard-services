@@ -342,6 +342,57 @@ else
 fi
 
 # =============================================================================
+# Test 10: WARP-569 — Every service must have mem_limit (top-level key)
+# =============================================================================
+# Containers without a mem_limit are uncapped — a single runaway process can
+# OOM-kill the whole appliance (7 GB shared RAM, 30 services). Use top-level
+# `mem_limit`, NOT `deploy.resources.limits`: deploy.* is silently IGNORED by
+# `docker compose up` outside Swarm and would appear to fix this while
+# enforcing nothing.
+
+_limits_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+compose_file = sys.argv[1]
+try:
+    with open(compose_file) as f:
+        data = yaml.safe_load(f)
+except Exception as e:
+    print(f"YAML parse error: {e}", file=sys.stderr)
+    sys.exit(2)
+
+services = data.get("services", {})
+missing_limit = [name for name, cfg in services.items() if "mem_limit" not in cfg]
+has_deploy_resources = [
+    name for name, cfg in services.items()
+    if "deploy" in cfg and isinstance(cfg["deploy"], dict) and "resources" in cfg["deploy"]
+]
+
+ok = True
+if missing_limit:
+    print("Services missing mem_limit: " + ", ".join(sorted(missing_limit)), file=sys.stderr)
+    ok = False
+if has_deploy_resources:
+    print("Services using deploy.resources (silently ignored outside Swarm): " + ", ".join(sorted(has_deploy_resources)), file=sys.stderr)
+    ok = False
+
+if ok:
+    print(f"All {len(services)} services have mem_limit; no deploy.resources usage")
+sys.exit(0 if ok else 1)
+PYEOF
+)
+_limits_exit=$?
+
+if [ "$_limits_exit" -eq 0 ]; then
+  pass "docker-compose.yml: all services have mem_limit (no deploy.resources)"
+else
+  fail "docker-compose.yml: resource-limit coverage gap (WARP-569)"
+  printf "${_RED}%s${_RESET}\n" "$_limits_output" >&2
+  printf "    Add top-level mem_limit + cpus + pids_limit to every service.\n" >&2
+  printf "    Do NOT use deploy.resources.limits — it is silently ignored outside Swarm.\n\n" >&2
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

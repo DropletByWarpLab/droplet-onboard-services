@@ -9,6 +9,54 @@
 # its parent dir. Caught locally during the WARP-187 verification.
 name: droplet-pi-platform
 
+# =============================================================================
+# WARP-569 — Per-container resource limits
+# =============================================================================
+# Target hardware: ~7 GB shared RAM (single-box; multi-box Jetson is similar).
+# Host/kernel reserve: ~1 GB → allocate up to ~6 GB to default-on services.
+#
+# IMPORTANT: use top-level keys (mem_limit / cpus / pids_limit), NOT
+# deploy.resources.limits.  deploy.* is silently IGNORED by `docker compose up`
+# outside Swarm and would pass review while enforcing nothing.
+#
+# Every limit is env-overridable so operators on bigger hardware can raise them
+# without editing tracked files.  The test-security.sh CI guard (Test 10) fails
+# if any service is missing mem_limit or accidentally uses deploy.resources.
+#
+# Default-profile RAM budget (always-on services):
+#   gateway           128 MB
+#   web-dashboard     384 MB
+#   orchestrator      768 MB   (reservation 512 MB)
+#   device-identity   128 MB
+#   mcp-server        256 MB
+#   nextcloud         768 MB
+#   db              1,024 MB   (reservation 512 MB)
+#   cache             256 MB   (reservation 128 MB)
+#   broker             64 MB
+#   ai-gateway        512 MB
+#   file-indexer      512 MB
+#   routing           256 MB
+#   ──────────────────────────
+#   Total            ~5.0 GB   (fits within the 6 GB target)
+#
+# Profile-gated services are sized for their provisioned hardware and are
+# NOT counted in the 6 GB default budget:
+#   linux:       frigate 1 GB, voice-io 512 MB, whisper 1 GB, piper 512 MB
+#   single-box:  ollama 4 GB, openwrt 512 MB
+#   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 768 MB,
+#                pm-worker 512 MB, pm-web 384 MB, pm-health 128 MB
+#   eval:        rag-eval 1 GB
+#   full:        email-indexer 256 MB, switch 128 MB, camera-discovery 256 MB
+#   ops:         ops-console 256 MB
+# =============================================================================
+
+# YAML extension for small, stateless API/proxy services.
+# Apply with: <<: *svc-small
+x-svc-small: &svc-small
+  mem_limit: ${SMALL_SVC_MEM_LIMIT:-256m}
+  cpus: ${SMALL_SVC_CPUS:-1.0}
+  pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
 services:
   # --- Ingress ---
   gateway:
@@ -25,6 +73,9 @@ services:
       web-dashboard:
         condition: service_started
     restart: always
+    mem_limit: ${GATEWAY_MEM_LIMIT:-128m}
+    cpus: ${GATEWAY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Apps ---
   # NOTE: No host ports exposed — Nginx routes all traffic internally.
@@ -39,6 +90,9 @@ services:
       - PORT=3001
       - NODE_ENV=production
     restart: always
+    mem_limit: ${WEB_DASHBOARD_MEM_LIMIT:-384m}
+    cpus: ${WEB_DASHBOARD_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   orchestrator:
     build:
@@ -171,6 +225,12 @@ services:
       start_period: 60s
       retries: 3
     restart: always
+    # Protected core: reservation ensures the OOM killer targets other
+    # containers before the orchestrator. mem_limit caps absolute ceiling.
+    mem_limit: ${ORCHESTRATOR_MEM_LIMIT:-768m}
+    mem_reservation: ${ORCHESTRATOR_MEM_RESERVATION:-512m}
+    cpus: ${ORCHESTRATOR_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Device identity sidecar (WARP-230) ---
   # Python gRPC service holding the device's non-extractable identity
@@ -215,6 +275,9 @@ services:
       # device-identity.sock.
       - /var/run/droplet:/var/run/droplet
     restart: always
+    mem_limit: ${DEVICE_IDENTITY_MEM_LIMIT:-128m}
+    cpus: ${DEVICE_IDENTITY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- MCP Server (HTTP transport) ---
   # WARP-103: streamable-HTTP MCP transport for off-process consumers
@@ -281,6 +344,9 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+    mem_limit: ${MCP_SERVER_MEM_LIMIT:-256m}
+    cpus: ${MCP_SERVER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Nextcloud (headless backend) ---
   # Not published to host — accessed only via nginx at /nextcloud/.
@@ -325,6 +391,9 @@ services:
           create_host_path: true
           propagation: rshared
     restart: always
+    mem_limit: ${NEXTCLOUD_MEM_LIMIT:-768m}
+    cpus: ${NEXTCLOUD_CPUS:-1.0}
+    pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
 
   # --- Infrastructure ---
   db:
@@ -355,6 +424,13 @@ services:
       retries: 10
       start_period: 30s
     restart: always
+    # db is the most critical protected core: mem_reservation ensures the OOM
+    # killer targets lighter containers before Postgres. A database OOM kills
+    # every dependent service simultaneously — protect it hardest.
+    mem_limit: ${DB_MEM_LIMIT:-1g}
+    mem_reservation: ${DB_MEM_RESERVATION:-512m}
+    cpus: ${DB_CPUS:-2.0}
+    pids_limit: ${DB_PIDS_LIMIT:-1024}
 
   cache:
     image: redis:7-alpine
@@ -363,6 +439,12 @@ services:
         required: false
     command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
     restart: always
+    # mem_reservation on cache: session + auth data — OOM kills here cascade
+    # to every authenticated request. Protect before db fills its budget.
+    mem_limit: ${CACHE_MEM_LIMIT:-256m}
+    mem_reservation: ${CACHE_MEM_RESERVATION:-128m}
+    cpus: ${CACHE_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   broker:
     image: eclipse-mosquitto:2
@@ -370,6 +452,9 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
     restart: always
+    mem_limit: ${BROKER_MEM_LIMIT:-64m}
+    cpus: ${BROKER_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- AI Services ---
   ai-gateway:
@@ -409,6 +494,9 @@ services:
       - broker
       - orchestrator
     restart: always
+    mem_limit: ${AI_GATEWAY_MEM_LIMIT:-512m}
+    cpus: ${AI_GATEWAY_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- File indexer (Phase 4: AI content search) ---
   # Watches the Nextcloud data volume for file changes, extracts text,
@@ -453,6 +541,9 @@ services:
     # directives for profile-gated services when the profile isn't
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
+    mem_limit: ${FILE_INDEXER_MEM_LIMIT:-512m}
+    cpus: ${FILE_INDEXER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
   # WARP-RAG-EVAL: opt-in via `eval` profile because running this on every
@@ -513,6 +604,9 @@ services:
         condition: service_started
     profiles: ["eval"]
     restart: always
+    mem_limit: ${RAG_EVAL_MEM_LIMIT:-1g}
+    cpus: ${RAG_EVAL_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Routing (OpenWrt control) ---
   # WARP-44: default dependency — starts on every `docker compose up`. Set
@@ -541,6 +635,9 @@ services:
     secrets:
       - openwrt_password
     restart: always
+    mem_limit: ${ROUTING_MEM_LIMIT:-256m}
+    cpus: ${ROUTING_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Email indexer (IMAP IDLE + MIME parser + outbound SMTP) ---
   # WARP-465 D1 follow-up. One async task per EmailAccount via
@@ -587,6 +684,9 @@ services:
       - orchestrator
     restart: always
     profiles: ["full"]
+    mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
+    cpus: ${EMAIL_INDEXER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Managed Switch (PoE + VLAN control) ---
   switch:
@@ -605,6 +705,9 @@ services:
       - PORT=8081
     profiles: ["full"]
     restart: always
+    mem_limit: ${SWITCH_MEM_LIMIT:-128m}
+    cpus: ${SWITCH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Frigate NVR (camera management + AI detection) ---
   # Linux-only: requires /dev/dri/renderD128 (Intel/AMD VAAPI) and /dev/bus/usb,
@@ -687,6 +790,11 @@ services:
     depends_on:
       - broker
     restart: always
+    # Frigate is the most memory-intensive linux-profile service: it runs
+    # the detector model + FFmpeg decode pipelines concurrently.
+    mem_limit: ${FRIGATE_MEM_LIMIT:-1g}
+    cpus: ${FRIGATE_CPUS:-2.0}
+    pids_limit: ${FRIGATE_PIDS_LIMIT:-1024}
 
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
   camera-discovery:
@@ -716,6 +824,9 @@ services:
       - broker
     profiles: ["full"]
     restart: always
+    mem_limit: ${CAMERA_DISCOVERY_MEM_LIMIT:-256m}
+    cpus: ${CAMERA_DISCOVERY_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Voice assistant (WARP-154) ---
   # Always-on voice loop: mic capture -> wake-word -> STT -> orchestrator
@@ -810,6 +921,9 @@ services:
     # Skip on macOS Docker Desktop (no /dev/snd).
     profiles: ["linux"]
     restart: always
+    mem_limit: ${VOICE_IO_MEM_LIMIT:-512m}
+    cpus: ${VOICE_IO_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Whisper STT sidecar (WARP-154) ---
   # Rhasspy's wyoming-faster-whisper — TCP-protocol Whisper server that
@@ -841,6 +955,10 @@ services:
       # the first-run download can land in the right place.
       - whisper-models:/data
     restart: always
+    # Whisper loads the full model into RAM at startup: small.en ~470 MB.
+    mem_limit: ${WHISPER_MEM_LIMIT:-1g}
+    cpus: ${WHISPER_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Piper TTS sidecar (WARP-154) ---
   # Rhasspy's wyoming-piper. Pairs with wyoming-faster-whisper to
@@ -863,6 +981,9 @@ services:
       # .env to switch.
       - piper-voices:/data
     restart: always
+    mem_limit: ${PIPER_MEM_LIMIT:-512m}
+    cpus: ${PIPER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- TFT Display (3.5" front-panel) ---
   # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
@@ -920,6 +1041,9 @@ services:
     # silently or scan the network on boot.
     profiles: ["display"]
     restart: always
+    mem_limit: ${OLED_DISPLAY_MEM_LIMIT:-128m}
+    cpus: ${OLED_DISPLAY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ---------------------------------------------------------------------------
   # ops-console — operator-side monitoring + control surface.
@@ -993,6 +1117,9 @@ services:
       - no-new-privileges:true
     profiles: ["ops"]
     restart: unless-stopped
+    mem_limit: ${OPS_CONSOLE_MEM_LIMIT:-256m}
+    cpus: ${OPS_CONSOLE_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ==========================================================================
   # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498)
@@ -1032,6 +1159,10 @@ services:
       timeout: 3s
       retries: 5
       start_period: 30s
+    mem_limit: ${POSTGRES_PM_MEM_LIMIT:-512m}
+    mem_reservation: ${POSTGRES_PM_MEM_RESERVATION:-256m}
+    cpus: ${POSTGRES_PM_CPUS:-1.0}
+    pids_limit: ${DB_PIDS_LIMIT:-1024}
 
   redis-pm:
     image: redis:7-alpine
@@ -1045,6 +1176,9 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    mem_limit: ${REDIS_PM_MEM_LIMIT:-256m}
+    cpus: ${REDIS_PM_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   pm-api:
     # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
@@ -1066,6 +1200,9 @@ services:
       REDIS_URL: redis://redis-pm:6379
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
       WEB_URL: ${DROPLET_PM_WEB_URL:-}
+    mem_limit: ${PM_API_MEM_LIMIT:-768m}
+    cpus: ${PM_API_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   pm-worker:
     # FIXME(WARP-496): makeplane/plane-worker:v0.24.1 does NOT exist on Docker
@@ -1088,6 +1225,9 @@ services:
       DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
       REDIS_URL: redis://redis-pm:6379
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY}
+    mem_limit: ${PM_WORKER_MEM_LIMIT:-512m}
+    cpus: ${PM_WORKER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   pm-web:
     image: makeplane/plane-frontend:v0.24.1
@@ -1102,6 +1242,9 @@ services:
     # No host-port exposure — Nginx reverse-proxies at /pm/ (WARP-502).
     expose:
       - "3000"
+    mem_limit: ${PM_WEB_MEM_LIMIT:-384m}
+    cpus: ${PM_WEB_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   pm-health:
     # Droplet-side standardized /health sidecar (WARP-500).
@@ -1121,6 +1264,9 @@ services:
     # Internal only — orchestrator + ship-check poll this.
     expose:
       - "8090"
+    mem_limit: ${PM_HEALTH_MEM_LIMIT:-128m}
+    cpus: ${PM_HEALTH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ==========================================================================
   # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
@@ -1185,6 +1331,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    # Ollama's ceiling is the dominant RAM consumer on single-box: the
+    # qwen2.5:3b model weights + KV cache sit at ~3-4 GB hot. 4 GB cap
+    # lets it finish loading without starving the rest of the default
+    # stack. Raise OLLAMA_MEM_LIMIT in .env for larger models.
+    mem_limit: ${OLLAMA_MEM_LIMIT:-4g}
+    cpus: ${OLLAMA_CPUS:-4.0}
+    pids_limit: ${OLLAMA_PIDS_LIMIT:-2048}
 
   # --- OpenWrt (router-in-container) ---------------------------------------
   # Hosts the Wi-Fi AP (after `droplet-openwrt-attach` moves the host's
@@ -1219,6 +1372,9 @@ services:
     volumes:
       - openwrt-config:/etc/config
       - openwrt-overlay:/overlay
+    mem_limit: ${OPENWRT_MEM_LIMIT:-512m}
+    cpus: ${OPENWRT_CPUS:-1.0}
+    pids_limit: ${OPENWRT_PIDS_LIMIT:-1024}
 
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
