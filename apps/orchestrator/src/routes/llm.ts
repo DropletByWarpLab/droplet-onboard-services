@@ -6,7 +6,7 @@ import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
-import { TOOLS } from "@droplet/tools-core";
+import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
@@ -864,6 +864,37 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     } catch (err) {
       next(err);
     }
+  });
+
+  // WARP-555: read-only capability catalog for the dashboard `/tools`
+  // surface. Distinct from `/api/tools` (the productized workflow shelf,
+  // WARP-462) — this lists the BUILT-IN tools the agent can call, grouped
+  // by domain, with the safety flags the JSON-RPC `tools/list` shape omits.
+  //
+  // Reads the in-process `TOOL_CATALOG` from `@droplet/tools-core` rather
+  // than the live MCP child, so it never 500s on a crashed stdio process —
+  // the surface that renders "what this Droplet can do" should always
+  // render. `TOOL_CATALOG`'s domain/flags are derived from the canonical
+  // registry, so this can't drift from per-tool intent.
+  //
+  // RBAC matches GET /llm/tools: owner/admin see every tool; everyone else
+  // (family, guest, unauthenticated) sees read-only tools only, closing
+  // the same information-disclosure gap on the destructive surface.
+  router.get("/llm/tools/catalog", (req, res) => {
+    const role = (req as AuthedRequest).user?.role;
+    const tools = isPrivilegedRole(role)
+      ? TOOL_CATALOG
+      : TOOL_CATALOG.filter((t) => !t.requiresWrite);
+    res.json({
+      tools: tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        domain: t.domain,
+        requiresWrite: t.requiresWrite,
+        requiresConfirmation: t.requiresConfirmation,
+      })),
+      domains: TOOL_DOMAINS,
+    });
   });
 
   // Key management (proxy to ai-gateway)
