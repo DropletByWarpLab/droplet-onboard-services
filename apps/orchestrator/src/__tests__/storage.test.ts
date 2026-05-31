@@ -260,7 +260,11 @@ describe("storage routes (WARP-174)", () => {
 });
 
 describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
-  it("derives a bus class for every drive when the bridge omits it", async () => {
+  it("falls back to a neutral bus class when the bridge omits it", async () => {
+    // The bridge sends the real transport (it reads lsblk on the host). When
+    // an older bridge omits it, the orchestrator name-guesses: nvme is
+    // unambiguous, but sd* stays neutral 'disk' — it could be SATA/SAS, not
+    // necessarily USB (ADR-011, no hardware assumption).
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -268,7 +272,7 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
         json: async () => ({
           drives: [
             { device: "/dev/nvme0n1p1", mount: "/mnt/droplet/vault", label: "Vault", uuid: "U-NVME", size_bytes: 4e12, used_bytes: 1e12, free_bytes: 3e12, mounted: true },
-            { device: "/dev/sda1", mount: "/mnt/droplet/usb", label: "USB", uuid: "U-USB", size_bytes: 2e12, used_bytes: 0, free_bytes: 2e12, mounted: true },
+            { device: "/dev/sda1", mount: "/mnt/droplet/data", label: "Data", uuid: "U-SD", size_bytes: 2e12, used_bytes: 0, free_bytes: 2e12, mounted: true },
           ],
           count: 2,
           snapshot_at: "2026-05-31T00:00:00Z",
@@ -280,7 +284,7 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
     expect(res.status).toBe(200);
     const byUuid = Object.fromEntries(res.body.drives.map((d: any) => [d.uuid, d]));
     expect(byUuid["U-NVME"].bus).toBe("nvme");
-    expect(byUuid["U-USB"].bus).toBe("usb");
+    expect(byUuid["U-SD"].bus).toBe("disk");
   });
 
   it("passes through the bridge's fs/bus/readonly when present", async () => {

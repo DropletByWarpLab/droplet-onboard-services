@@ -52,10 +52,22 @@ function BusIcon({ bus, className }: { bus?: string; className?: string }) {
 }
 
 function busLabel(bus?: string): string {
-  if (bus === "nvme") return "Internal NVMe";
-  if (bus === "usb") return "USB";
-  if (bus === "mmc") return "eMMC / SD";
-  return "Disk";
+  switch (bus) {
+    case "nvme":
+      return "NVMe";
+    case "usb":
+      return "USB";
+    case "sata":
+      return "SATA";
+    case "sas":
+      return "SAS";
+    case "scsi":
+      return "SCSI";
+    case "mmc":
+      return "SD / eMMC";
+    default:
+      return "Disk";
+  }
 }
 
 export function DrivesPanel() {

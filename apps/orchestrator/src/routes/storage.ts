@@ -62,14 +62,15 @@ interface BridgeDrive {
   removable?: boolean;
 }
 
-/** Mirror of the bridge's `_bus_for` so the dashboard always has a bus class
- *  to pick an icon + Internal/USB chip, even against a bridge that predates
- *  the enrichment. Presentation-only — never a mount/security decision. */
+/** Fallback bus class for the icon when the bridge omits `bus` (older bridge).
+ *  The bridge sends the *real* transport (it reads lsblk on the host); the
+ *  orchestrator runs in a container without the host's block devices, so it
+ *  can only name-guess. Stay neutral for sd* rather than guessing 'usb' — a
+ *  /dev/sd* drive is just as likely SATA/SAS (ADR-011). Presentation-only. */
 function deriveBus(device: string): string {
   const base = (device || "").split("/").pop() || "";
   if (base.startsWith("nvme")) return "nvme";
   if (base.startsWith("mmcblk")) return "mmc";
-  if (base.startsWith("sd")) return "usb";
   return "disk";
 }
 

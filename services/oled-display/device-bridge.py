@@ -696,25 +696,38 @@ def _bytes_for(path):
 
 
 def _bus_for(device):
-    """Classify a block device by bus from its kernel name. Cheap, no I/O.
+    """Real bus transport for a block device — read from the kernel via lsblk,
+    not guessed from the device name. A SATA disk is `/dev/sd*` too, so the old
+    name heuristic mislabeled SATA/SAS data drives as 'usb'; ADR-011 forbids
+    that kind of hardware assumption.
 
-    nvme*   -> 'nvme'  (typically the internal primary store)
-    mmcblk* -> 'mmc'   (eMMC / SD — usually the boot medium)
-    sd*     -> 'usb'   (the common hot-plug bus; may also be SATA/SAS — a
-               presentation label for the card icon only)
-    else    -> 'disk'
-    Bus class only drives the icon + a connection chip. It is NEVER an
-    eject/mount/security gate — ejectability is decided by `removable`
-    (hot-plug auto-mount), not by bus, so the surface stays hardware-agnostic
-    (ADR-011).
+    lsblk reports TRAN on the *whole disk*, not the partition, so resolve the
+    parent (PKNAME) first, then read its transport. Returns the kernel's own
+    label (sata/usb/nvme/sas/scsi/mmc/virtio); falls back to a name heuristic
+    only if lsblk is unavailable. Presentation only (card icon + connection
+    chip) — NEVER an eject/mount/security gate; that's `removable`.
     """
     base = os.path.basename(device or "")
+    if not base:
+        return "disk"
+    try:
+        _rc, pk, _e = _run(["lsblk", "-ndo", "PKNAME", device], timeout=4)
+        parent = (pk or "").strip().splitlines()
+        parent = parent[0].strip() if parent else ""
+        target = "/dev/" + parent if parent else device
+        _rc, tr, _e = _run(["lsblk", "-ndo", "TRAN", target], timeout=4)
+        rows = (tr or "").strip().splitlines()
+        tran = rows[0].strip().lower() if rows else ""
+        if tran in ("sata", "usb", "nvme", "sas", "scsi", "mmc", "virtio"):
+            return tran
+    except Exception:                                              # noqa: BLE001
+        pass
+    # Fallback — no lsblk / odd device. Stay neutral for sd* rather than
+    # guessing USB (it could be SATA/SAS).
     if base.startswith("nvme"):
         return "nvme"
     if base.startswith("mmcblk"):
         return "mmc"
-    if base.startswith("sd"):
-        return "usb"
     return "disk"
 
 
