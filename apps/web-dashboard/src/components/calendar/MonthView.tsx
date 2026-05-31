@@ -33,13 +33,33 @@ export function monthGridRange(cursor: Date): { from: Date; to: Date } {
   return { from, to };
 }
 
-function eventsByDay(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
+/** Buckets events by the local day they fall on. A multi-day event — or one
+ *  that started before the visible grid (the backend returns events by range
+ *  *overlap*, not just start-day) — is placed on EVERY calendar day it covers.
+ *  Bucketing by `startsAt` alone made multi-day events vanish from all but
+ *  their first day. `endsAt` is treated as exclusive (−1 ms) so an all-day
+ *  event ending at next-midnight doesn't bleed into the following day, and is
+ *  clamped ≥ start for missing/inverted data. */
+export function eventsByDay(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
   const m = new Map<string, CalendarEvent[]>();
-  for (const ev of events) {
-    const k = dayKey(new Date(ev.startsAt));
+  const add = (k: string, ev: CalendarEvent) => {
     const bucket = m.get(k);
     if (bucket) bucket.push(ev);
     else m.set(k, [ev]);
+  };
+  for (const ev of events) {
+    const start = new Date(ev.startsAt);
+    const endMs = ev.endsAt
+      ? Math.max(new Date(ev.endsAt).getTime() - 1, start.getTime())
+      : start.getTime();
+    const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const lastDate = new Date(endMs);
+    const lastDay = new Date(lastDate.getFullYear(), lastDate.getMonth(), lastDate.getDate());
+    // Guard against a pathological multi-year span spinning the loop.
+    for (let guard = 0; cursor <= lastDay && guard < 400; guard++) {
+      add(dayKey(cursor), ev);
+      cursor.setDate(cursor.getDate() + 1);
+    }
   }
   for (const evs of m.values()) {
     evs.sort((a, b) => (a.allDay === b.allDay ? a.startsAt.localeCompare(b.startsAt) : a.allDay ? -1 : 1));
@@ -136,8 +156,12 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay }: Props)
                     title={`${ev.title}${ev.allDay ? " · All day" : " · " + shortTime(ev.startsAt)}${ev.location ? " · " + ev.location : ""}`}
                     className={[
                       "block truncate rounded px-1 py-0.5 type-caption-2 cursor-pointer",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-inset",
+                      // External events get a bordered neutral chip: surface-tertiary
+                      // equals the card background in light mode, so without a distinct
+                      // fill + border the chip was invisible on the white card.
                       ev.source === "external"
-                        ? "bg-surface-tertiary text-label-secondary"
+                        ? "bg-surface-secondary text-label-secondary border border-separator"
                         : "bg-accent-subtle text-accent",
                     ].join(" ")}
                   >
