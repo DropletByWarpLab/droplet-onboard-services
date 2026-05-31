@@ -1,7 +1,5 @@
 """Tests for the provider router resolution logic."""
 
-import importlib
-
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -63,6 +61,26 @@ class TestProviderResolution:
         assert provider is router.ollama, "configured LLM_MODEL must route local"
         # A genuine cloud model is unaffected by the local-model guard.
         assert router.resolve_provider("claude-sonnet-4-20250514") is router.anthropic
+
+    @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
+    async def test_gpt_oss_clears_the_off_lan_gate(self, mock_key):
+        """End-to-end regression for the production chat failure (WARP-604):
+        the local model must resolve to a provider the off-LAN gate treats as
+        local, so it is never blocked with HTTP 451. Pins the full
+        resolve -> reverse-lookup -> is_local_provider chain that actually
+        broke, not just the resolve half."""
+        from middleware.off_lan_gating import is_local_provider
+
+        router = ProviderRouter()
+        provider = router.resolve_provider("gpt-oss:20b")
+        # Reverse-lookup the canonical provider key the gate sees — mirrors
+        # ProviderRouter.chat's lookup before check_off_lan_gate().
+        provider_name = next(
+            (n for n, p in router._providers.items() if p is provider),
+            "unknown",
+        )
+        assert provider_name == "ollama"
+        assert is_local_provider(provider_name) is True
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_explicit_provider_override(self, mock_key):
