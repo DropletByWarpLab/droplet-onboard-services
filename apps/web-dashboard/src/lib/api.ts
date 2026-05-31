@@ -330,6 +330,19 @@ export async function fetchDrives(): Promise<DrivesResponse> {
 }
 
 /**
+ * WARP-612: ask the device-bridge to refresh its drive snapshot (admin-only;
+ * proxies the bridge's /drives/changed cache hook — no mount side effects).
+ */
+export async function rescanDrives(): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`${BASE}/api/storage/drives/rescan`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to rescan drives: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * WARP-174: upsert the customer's friendly name (+ optional icon + notes)
  * for a drive. Used by the setup wizard's Storage step and the
  * post-setup `/storage` page.

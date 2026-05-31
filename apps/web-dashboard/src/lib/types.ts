@@ -389,6 +389,13 @@ export interface DriveInfo {
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-612: read-only enrichment from the device-bridge. `bus`
+   *  (nvme/usb/mmc/disk) is always present — the orchestrator derives it as a
+   *  fallback; `fs` + `readonly` are best-effort and may be absent on an
+   *  older bridge. */
+  bus?: string;
+  fs?: string;
+  readonly?: boolean;
   /** WARP-174: customer's friendly name from the setup wizard's Storage
    *  step. `null` until a Drive row is upserted via
    *  PATCH /api/storage/drives/:uuid. */
