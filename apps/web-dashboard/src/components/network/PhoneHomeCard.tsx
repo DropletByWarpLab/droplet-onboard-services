@@ -22,7 +22,7 @@ import {
   AlertTriangle,
   Plus,
 } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { useAuth, authFetch } from "@/lib/auth";
 
 interface ScopeView {
   desired: boolean;
@@ -44,8 +44,10 @@ interface PhoneHomeView {
 
 const KEY = "/api/network/phone-home";
 
+// authFetch attaches the session cookie + transparently refreshes on 401, so an
+// expired session doesn't silently drop writes (UX review note).
 const fetcher = async (url: string): Promise<PhoneHomeView> => {
-  const r = await fetch(url);
+  const r = await authFetch(url);
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 };
@@ -72,11 +74,13 @@ function useHeartbeat() {
 // ── switch (two sizes) ──────────────────────────────────────────
 function Switch({
   on,
+  label,
   size = "sm",
   disabled,
   onToggle,
 }: {
   on: boolean;
+  label: string;
   size?: "sm" | "lg";
   disabled?: boolean;
   onToggle: () => void;
@@ -87,6 +91,7 @@ function Switch({
       type="button"
       role="switch"
       aria-checked={on}
+      aria-label={label}
       disabled={disabled}
       onClick={(e) => {
         e.stopPropagation();
@@ -126,9 +131,11 @@ function ScopeStatus({ sc, active }: { sc: ScopeView; active: boolean }) {
     );
   }
   if (sc.desired !== sc.applied) {
+    // text-label-primary (not text-system-orange) for WCAG AA contrast on the
+    // faint amber tint; the orange spinner carries the colour cue (UX note).
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-system-orange/15 px-2 py-0.5 type-caption-1 text-system-orange">
-        <RefreshCw size={11} className="animate-spin motion-reduce:animate-none" />
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-system-orange/15 px-2 py-0.5 type-caption-1 font-medium text-label-primary">
+        <RefreshCw size={11} className="text-system-orange animate-spin motion-reduce:animate-none" />
         Applying…
       </span>
     );
@@ -189,7 +196,12 @@ function ScopeRow({
         </div>
       </div>
       <ScopeStatus sc={sc} active={active} />
-      <Switch on={sc.desired} disabled={disabled || !active} onToggle={onToggle} />
+      <Switch
+        on={sc.desired}
+        label={`Block phone-home for ${title}`}
+        disabled={disabled || !active}
+        onToggle={onToggle}
+      />
     </li>
   );
 }
@@ -208,7 +220,7 @@ function SkelRow() {
   );
 }
 
-export function PhoneHomeCard() {
+export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void }) {
   const { user } = useAuth();
   const canEdit = user?.role === "owner" || user?.role === "admin";
   useHeartbeat();
@@ -219,25 +231,27 @@ export function PhoneHomeCard() {
   const [mutErr, setMutErr] = useState<string | null>(null);
 
   // Optimistic write: flip desired locally (so the switch + "Applying…" show
-  // instantly), PATCH, then revalidate to the reconciler's truth.
+  // instantly), PATCH, then revalidate. On error, restore the pre-mutation
+  // snapshot rather than leave the failed desired state on screen (UX note).
   async function send(
     optimistic: (cur: PhoneHomeView) => PhoneHomeView,
     req: () => Promise<Response>,
   ) {
     setMutErr(null);
-    if (data) mutate(optimistic(data), { revalidate: false });
+    const snapshot = data;
+    if (snapshot) mutate(optimistic(snapshot), { revalidate: false });
     try {
       const r = await req();
       if (!r.ok) throw new Error(String(r.status));
+      mutate();
     } catch {
       setMutErr("Couldn't save that change — please try again.");
-    } finally {
-      mutate();
+      if (snapshot) mutate(snapshot, { revalidate: false });
     }
   }
 
   const patchRoot = (body: Record<string, boolean>) =>
-    fetch(KEY, {
+    authFetch(KEY, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -261,7 +275,7 @@ export function PhoneHomeCard() {
         pending: c.pending + 1,
       }),
       () =>
-        fetch(`/api/network/groups/${encodeURIComponent(g.id)}`, {
+        authFetch(`/api/network/groups/${encodeURIComponent(g.id)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ blockPhoneHome: !g.desired }),
@@ -317,10 +331,9 @@ export function PhoneHomeCard() {
             </div>
           ) : phase === "error" ? (
             <>
-              <h2 className="type-headline text-label-primary">Enforcement status unavailable</h2>
+              <h2 className="type-headline text-label-primary">Enforcement service unreachable</h2>
               <p className="type-caption-1 text-label-tertiary">
-                The dashboard couldn&apos;t reach the orchestrator. Your last saved rules are still
-                enforced on the router.
+                Your last saved rules are still in effect on the router.
               </p>
             </>
           ) : active ? (
@@ -344,6 +357,7 @@ export function PhoneHomeCard() {
         <div className="flex shrink-0 flex-col items-center gap-1">
           <Switch
             size="lg"
+            label="Block phone-home (master switch)"
             on={!!data && data.enabled.desired}
             disabled={phase !== "ready" || !canEdit}
             onToggle={toggleMaster}
@@ -387,10 +401,10 @@ export function PhoneHomeCard() {
           </span>
           <div className="flex-1">
             <div className="type-subheadline font-semibold text-label-primary">
-              Couldn&apos;t load phone-home status
+              Couldn&apos;t reach the reconciler
             </div>
             <div className="type-caption-1 text-label-tertiary">
-              Changes you make won&apos;t show until the orchestrator is reachable again.
+              The egress sync didn&apos;t respond. Changes you make won&apos;t apply until it&apos;s back.
             </div>
           </div>
           <button onClick={() => mutate()} className="dp-btn-secondary inline-flex items-center gap-2 text-sm">
@@ -428,10 +442,19 @@ export function PhoneHomeCard() {
                 <p className="max-w-[340px] type-caption-1 text-label-tertiary">
                   Group devices by team or room to block phone-home for some without affecting others.
                 </p>
-                <a href="/network" className="dp-btn-secondary mt-2 inline-flex items-center gap-1.5 text-sm">
-                  <Plus size={12} />
-                  Create a group
-                </a>
+                {onManageGroups ? (
+                  <button
+                    onClick={onManageGroups}
+                    className="dp-btn-secondary mt-2 inline-flex items-center gap-1.5 text-sm"
+                  >
+                    <Plus size={12} />
+                    Create a group
+                  </button>
+                ) : (
+                  <p className="mt-1 type-caption-2 text-label-quaternary">
+                    Add groups from the Devices tab.
+                  </p>
+                )}
               </li>
             ) : (
               data.groups.map((g) => (

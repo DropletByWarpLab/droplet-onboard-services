@@ -428,7 +428,7 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "privacy"}
       >
-        {activeTab === "privacy" && <PrivacyTab />}
+        {activeTab === "privacy" && <PrivacyTab onManageGroups={() => setActiveTab("devices")} />}
       </div>
       <div
         role="tabpanel"
@@ -481,10 +481,10 @@ export default function NetworkPage() {
 }
 
 // --- Privacy Tab (WARP-613) ---
-function PrivacyTab() {
+function PrivacyTab({ onManageGroups }: { onManageGroups: () => void }) {
   return (
     <div className="max-w-2xl">
-      <PhoneHomeCard />
+      <PhoneHomeCard onManageGroups={onManageGroups} />
     </div>
   );
 }
