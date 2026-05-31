@@ -8,6 +8,12 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
+// NOTE: api.ts imports `authFetch` from this module, so this is a module
+// cycle. It is safe: `patchSetupReady` is only INVOKED at runtime (inside the
+// `completeSetup` callback), never during module evaluation, so the live
+// binding is fully initialized by the time it's called. Same shape as the
+// many components that import from both ./auth and ./api.
+import { patchSetupReady } from "./api";
 
 export interface AuthUser {
   id: string;
@@ -53,7 +59,12 @@ interface AuthContextValue {
   // without a second network round-trip.
   setUserFromPasskey: (user: AuthUser) => void;
   logout: () => Promise<void>;
-  completeSetup: () => void;
+  // Wizard-finish transition. Optimistically flips the in-memory appliance
+  // to "ready" (no flash of the wizard) AND awaits the server PATCH that
+  // durably persists `ready` — the two must agree, or a hard refresh
+  // re-traps the owner in setup. Awaitable so callers can sequence the
+  // redirect after the write if they want; safe to fire-and-forget too.
+  completeSetup: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -234,16 +245,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
-  const completeSetup = useCallback(() => {
+  const completeSetup = useCallback(async () => {
     // Optimistically flip the appliance to ready so AuthGate routes to the
-    // dashboard immediately. The orchestrator is the source of truth (the
-    // wizard PATCHes `appliance=ready` on finish); this just avoids a
-    // flash of the wizard while the next `/api/setup/state` fetch lands.
+    // dashboard immediately — no flash of the wizard while the server write
+    // and the next `/api/setup/state` fetch land.
     setSetupState((prev) =>
       prev
         ? { ...prev, appliance: "ready" }
         : { appliance: "ready", setupStep: "done", userTourCompleted: false },
     );
+    // Durably persist the finish transition. THIS is the call the optimistic
+    // flip was always meant to mirror: the orchestrator's `markApplianceReady`
+    // flips the explicit `ApplianceSetup.state` column so a hard refresh reads
+    // `ready` instead of re-trapping the owner in the first-run wizard. Awaited
+    // (not fire-and-forget) so persisted and in-memory state agree before we
+    // settle; patchSetupReady swallows transient network errors internally and
+    // the next state GET re-syncs, so this never rejects.
+    await patchSetupReady();
   }, []);
 
   // Back-compat: derive the legacy boolean from the explicit state so any
