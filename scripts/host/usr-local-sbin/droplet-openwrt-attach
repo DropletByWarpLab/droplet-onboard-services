@@ -19,7 +19,7 @@ AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
 # the original AX210 path; the env file overrides for this customer.
 AP_PHY="${DROPLET_AP_PHY:-phy1}"
 AP_IFACE="${DROPLET_AP_IFACE:-wlp7s0}"
-GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-pi-platform-gateway-1}"
+GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-gateway-1}"
 # Phase L: root password for OpenWrt rpcd. Read from the docker secret
 # the routing service also reads, so both sides stay in lockstep.
 OPENWRT_PASSWORD_FILE="${OPENWRT_PASSWORD_FILE:-/home/droplet/edge-platform/docker/secrets/openwrt_password}"
@@ -479,8 +479,8 @@ fi
 # `docker restart` against an absent container is a hard error, so
 # guard on `docker ps`.
 if command -v docker >/dev/null 2>&1; then
-  if docker ps --format '{{.Names}}' | grep -qx droplet-pi-platform-routing-1; then
+  if docker ps --format '{{.Names}}' | grep -qx droplet-routing-1; then
     echo "droplet-openwrt-attach: restarting routing to drop any stale OpenWrt session"
-    docker restart droplet-pi-platform-routing-1 >/dev/null 2>&1 || true
+    docker restart droplet-routing-1 >/dev/null 2>&1 || true
   fi
 fi

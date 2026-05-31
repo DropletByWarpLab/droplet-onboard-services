@@ -99,7 +99,7 @@ gunzip -c "$WORK_DIR/postgres-pm/dump.sql.gz" | \
 log_success "postgres-pm restored"
 
 # --- Phase 4: Restore attachments volume ---------------------------------
-ATTACH_VOLUME="${PROJECT:-droplet-pi-platform}_pm-attachments-data"
+ATTACH_VOLUME="${PROJECT:-droplet}_pm-attachments-data"
 if [ -f "$WORK_DIR/attachments/EMPTY" ]; then
   log_info "Archive marks attachments as absent at backup time — skipping volume restore"
 elif [ -f "$WORK_DIR/attachments/data.tar" ]; then

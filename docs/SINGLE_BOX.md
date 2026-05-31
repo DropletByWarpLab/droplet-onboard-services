@@ -20,8 +20,8 @@ profile flag just picks which optional services bundle into the host.
 On a fresh Ubuntu 24.04 host with an AMD dGPU + iGPU + MT7922 Wi-Fi card:
 
 ```bash
-git clone git@github.com:DropletByWarpLab/droplet-pi-platform.git
-cd droplet-pi-platform
+git clone git@github.com:DropletByWarpLab/droplet-onboard-services.git
+cd droplet-onboard-services
 ./scripts/setup.sh
 ```
 

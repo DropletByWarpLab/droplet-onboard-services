@@ -8,3 +8,9 @@
 Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Extensionless host executables deployed to the box (e.g. /usr/local/sbin
+# systemd ExecStart targets). No file extension, so the *.sh rule above
+# doesn't catch them — pin explicitly so a Windows checkout never ships
+# CRLF and breaks the shebang (203/EXEC) on the appliance.
+scripts/host/usr-local-sbin/* text eol=lf

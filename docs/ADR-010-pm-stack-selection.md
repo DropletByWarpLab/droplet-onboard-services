@@ -20,7 +20,7 @@ The decision is now (not later) because (1) the dental discovery on 2026-05-19 e
 
 **Adopt Plane (AGPL-3.0) as the embedded PM tool shipped with every Droplet appliance.**
 
-Plane runs as a compose service in `droplet-pi-platform/docker/`, behind the existing Nginx reverse-proxy and TLS cert, with profiles `single-box` and `multi-box` (per architecture-guard rule 17, no `poc` framing). The orchestrator owns user provisioning and the SSO handoff; tools-core gets a new `pm` handler domain so the LLM agent can read and write Plane via MCP. A new dashboard route `/projects` lands the user in Plane authenticated.
+Plane runs as a compose service in `droplet-onboard-services/docker/`, behind the existing Nginx reverse-proxy and TLS cert, with profiles `single-box` and `multi-box` (per architecture-guard rule 17, no `poc` framing). The orchestrator owns user provisioning and the SSO handoff; tools-core gets a new `pm` handler domain so the LLM agent can read and write Plane via MCP. A new dashboard route `/projects` lands the user in Plane authenticated.
 
 We ship vanilla Plane — pinned to upstream releases, with any local patches surfaced in `services/pm/PATCHES.md`. AGPL-3 §13 obligations are honored by linking to upstream from the dashboard footer and offering source on request. This posture matches the existing Nextcloud precedent (also AGPL-3, already shipping).
 
@@ -83,7 +83,7 @@ If Droplet were to ship a self-hosted git platform, issues + project boards woul
 
 ### Code-level placement
 
-- **Compose service:** `droplet-pi-platform/services/pm/` (skeleton) + `droplet-pi-platform/docker/docker-compose.yml` (wiring). Profiles: `single-box`, `multi-box`.
+- **Compose service:** `droplet-onboard-services/services/pm/` (skeleton) + `droplet-onboard-services/docker/docker-compose.yml` (wiring). Profiles: `single-box`, `multi-box`.
 - **Env-var prefix:** `DROPLET_PM_*` for every Plane-related env var. NEVER `MATTER_*` (architecture-guard rule 11). NEVER bare `PLANE_*` (collides with Plane's own internal env conventions).
 - **Tools-core domain:** `packages/tools-core/src/handlers/pm/` — one file per tool, registered in `registry.ts` with explicit `requiresWrite` and `requiresConfirmation` flags.
 - **MCP exposure:** auto-discovered via `services/mcp-server` — no manual registration. The orchestrator's `WRITE_TOOLS` set is derived from `requiresWrite` (architecture-guard rule 3).
@@ -100,7 +100,7 @@ If Droplet were to ship a self-hosted git platform, issues + project boards woul
 
 ### Things to grep for
 
-- Existing AGPL service precedent: `grep -r "AGPL" droplet-pi-platform/services/`
+- Existing AGPL service precedent: `grep -r "AGPL" droplet-onboard-services/services/`
 - Existing webhook receiver patterns: `find apps/orchestrator/src/routes -name "*webhook*"`
 - Existing third-party compose services: `grep -A 20 "nextcloud:" docker/docker-compose.yml`
 - Existing tool-domain folder pattern: `ls packages/tools-core/src/handlers/`

@@ -1634,7 +1634,7 @@ Expected: all tests pass. Anything that called `chunk_text` directly is now brok
 - [ ] **Step 6: Grep for residual `chunk_text` / `extract_text` references**
 
 ```bash
-cd /Users/rjouffret/Projects/Droplet/droplet-pi-platform/.claude/worktrees/warp-287
+cd /Users/rjouffret/Projects/Droplet/droplet-onboard-services/.claude/worktrees/warp-287
 grep -rn "chunk_text\|page_breaks" services/file-indexer --include='*.py' | grep -v __pycache__ | grep -v test_
 ```
 
@@ -2438,7 +2438,7 @@ git commit -m "feat(WARP-287): CitationCard family with per-kind viewers"
 - [ ] **Step 1: Find all `CitationChip` call sites**
 
 ```bash
-cd /Users/rjouffret/Projects/Droplet/droplet-pi-platform/.claude/worktrees/warp-287
+cd /Users/rjouffret/Projects/Droplet/droplet-onboard-services/.claude/worktrees/warp-287
 grep -rn "CitationChip" apps/web-dashboard/src --include='*.tsx' --include='*.ts'
 ```
 
@@ -2535,7 +2535,7 @@ And render `<ReindexButton fileId={params.id} />` in the page's header actions.
 - [ ] **Step 4: Delete `CitationChip.tsx` and confirm no orphan references**
 
 ```bash
-cd /Users/rjouffret/Projects/Droplet/droplet-pi-platform/.claude/worktrees/warp-287
+cd /Users/rjouffret/Projects/Droplet/droplet-onboard-services/.claude/worktrees/warp-287
 rm apps/web-dashboard/src/components/CitationChip.tsx
 grep -rn "CitationChip" apps/web-dashboard/src --include='*.tsx' --include='*.ts'
 ```
@@ -2699,7 +2699,7 @@ git commit -m "test(WARP-287): end-to-end anchor surfacing in rag-tests lane"
 - [ ] **Step 1: Repo-wide grep for deleted symbols**
 
 ```bash
-cd /Users/rjouffret/Projects/Droplet/droplet-pi-platform/.claude/worktrees/warp-287
+cd /Users/rjouffret/Projects/Droplet/droplet-onboard-services/.claude/worktrees/warp-287
 echo "=== chunk_text ==="
 grep -rn "chunk_text" . \
   --include='*.py' --include='*.ts' --include='*.tsx' \
@@ -2765,7 +2765,7 @@ viewers (PDF at page N, audio/video at MM:SS, email modal, archive drawer).
 - [ ] **Step 5: Run the full test suite one more time**
 
 ```bash
-cd /Users/rjouffret/Projects/Droplet/droplet-pi-platform/.claude/worktrees/warp-287
+cd /Users/rjouffret/Projects/Droplet/droplet-onboard-services/.claude/worktrees/warp-287
 # Python file-indexer
 (cd services/file-indexer && PYTHONPATH=. pytest -v)
 # Orchestrator

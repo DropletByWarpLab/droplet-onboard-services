@@ -205,15 +205,14 @@ CHECKS
                         scripts/lib/secrets.sh — real DNS, not a repo
                         name), the docker-compose.yml project-name
                         explanation block (lines 6-10), the
-                        `droplet-pi-platform-*` compose container-name
+                        `droplet-*` compose container-name
                         labels referenced by `docker exec` in
                         scripts/verify.sh + services/voice-io/TESTING.md
                         and the
-                        `com.docker.compose.project=droplet-pi-platform`
+                        `com.docker.compose.project=droplet`
                         label in services/ops-console/README.md — all
                         of those are tied to the live compose project
-                        name and a coordinated rename is out of WARP-494
-                        scope. docs/ + ADRs + specs + plans + CLAUDE.md
+                        name (`droplet`). docs/ + ADRs + specs + plans + CLAUDE.md
                         are exempt by design (historical record /
                         intentional dual-name documentation).
                         Prevents: WARP-494 class — a developer adding a
@@ -816,20 +815,20 @@ run_check_stale_repo_names() {
   #   docker/docker-compose.yml:7,10
   #       The project-name explanation comment ("Explicit project name so
   #       containers don't collide with the sibling `droplet-jetson-ai`
-  #       repo...") AND the `name: droplet-pi-platform` directive. The
+  #       repo...") AND the `name: droplet` directive. The
   #       directive itself is load-bearing — every running container's
-  #       name is prefixed `droplet-pi-platform-*`, and changing it would
+  #       name is prefixed `droplet-*`, and changing it would
   #       orphan every existing operator's data volumes + restart
-  #       loops. Coordinated rename is a separate ticket.
+  #       loops.
   #   scripts/verify.sh:161,164
-  #       `docker exec droplet-pi-platform-voice-io-1 …` — container
+  #       `docker exec droplet-voice-io-1 …` — container
   #       name is compose-derived (project-name + service + replica), so
   #       tied to the docker-compose.yml `name:` directive above.
   #   services/voice-io/TESTING.md:171
-  #       Same `docker exec droplet-pi-platform-voice-io-1 …` pattern as
+  #       Same `docker exec droplet-voice-io-1 …` pattern as
   #       verify.sh.
   #   services/ops-console/README.md:58
-  #       `com.docker.compose.project=droplet-pi-platform` Docker label —
+  #       `com.docker.compose.project=droplet` Docker label —
   #       same compose-project-name tie.
   #
   # PATTERN: bare `inference-engine` (whole word) and bare
