@@ -89,4 +89,41 @@ import-light for the test and gives the regression guard a direct target.
 - `global-error` replaces the root layout, so providers/fonts from `layout.tsx`
   are absent on that last-resort screen — acceptable, noted in PR.
 
-## Status: planned
+## Status: approved
+
+### Harness outcome
+
+- **Dev:** branch `WARP-576/dashboard-error-boundary`. TDD: wrote
+  `health-copy.test.ts` (regression guard) + `error-boundaries.test.tsx`
+  (boundary render / retry / console.error) first.
+- **QA:** web-dashboard WARP-576 tests **10/10 pass**; full suite
+  **820 passed / 8 failed** where the 8 failures (add-matter.flow,
+  knowledge-page, two a11y) are pre-existing on `main` (verified by running
+  those files on a clean `main` checkout — identical `8 failed | 20 passed`).
+  `tsc --noEmit` clean; `next build` Compiled successfully (`/_not-found`
+  emitted); `check-dashboard-classes.sh` class-scan clean (the native-dialog
+  hit in `CoverageExtendersPanel.tsx:654` is pre-existing in an untouched
+  file). QA verdict: **PASS**.
+- **Code Reviewer:** confirmed the regression guard is real — a throwaway probe
+  proved the pre-fix unguarded `HEALTH_COPY["catastrophic"]` returns `undefined`
+  and reading `.dot` throws (the white-screen), which `resolveHealthCopy` now
+  prevents. Probe not committed. Verdict: **APPROVE** (posted as PR comment;
+  `gh pr review --approve` is blocked on one's own PR, so the human remains the
+  final merge gate).
+
+### Acceptance — all met
+
+- [x] `error.tsx`, `global-error.tsx`, `not-found.tsx` exist; the two error
+      files start with `'use client'`; `global-error.tsx` renders its own
+      `<html>`/`<body>`.
+- [x] Both error boundaries expose a working `reset()`/retry and log via
+      `console.error` (asserted in tests).
+- [x] A render throw surfaces the boundary heading, not a blank; "Try again"
+      invokes `reset` (test).
+- [x] `not-found.tsx` renders with a working link to `/` (test).
+- [x] `HEALTH_COPY` has an explicit `unknown` fallback; all three `page.tsx`
+      reads resolve through `resolveHealthCopy(...)`; the inline map is removed.
+- [x] CI test fails if the lookup regresses to an unguarded index (guard
+      verified to fire against pre-fix behavior).
+- [x] `next build` green, no new type errors, valid Client Components,
+      class-scan clean.
