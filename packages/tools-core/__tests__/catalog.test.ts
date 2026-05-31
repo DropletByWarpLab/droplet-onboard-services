@@ -16,7 +16,12 @@
 
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "../src/registry.js";
-import { TOOL_CATALOG, TOOL_DOMAINS, type ToolCatalogEntry } from "../src/catalog.js";
+import {
+  TOOL_CATALOG,
+  TOOL_DOMAINS,
+  HOME_DESCRIPTION_BY_NAME,
+  type ToolCatalogEntry,
+} from "../src/catalog.js";
 
 describe("TOOL_CATALOG (WARP-555)", () => {
   it("has exactly one catalog entry per registered tool", () => {
@@ -81,5 +86,26 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     const list = byName.get("list_network_devices");
     expect(list?.requiresWrite).toBe(false);
     expect(list?.requiresConfirmation).toBe(false);
+  });
+
+  it("gives every registered tool explicit home-user copy (no silent fallback)", () => {
+    // The dashboard renders `homeDescription`, not the agent-facing
+    // `description`. A tool with no HOME_DESCRIPTION_BY_NAME entry falls back
+    // to a humanized name — harmless at runtime, but it means a new tool
+    // shipped without home-user copy. Fail loudly here instead (ADR-002).
+    const missing = [...TOOLS.keys()].filter(
+      (name) => !(name in HOME_DESCRIPTION_BY_NAME),
+    );
+    expect(
+      missing,
+      `tools missing home-user copy in HOME_DESCRIPTION_BY_NAME: ${missing.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("never renders the agent description as home copy", () => {
+    for (const entry of TOOL_CATALOG) {
+      expect(entry.homeDescription, `${entry.name} needs home copy`).toBeTruthy();
+      expect(entry.homeDescription).not.toBe(entry.description);
+    }
   });
 });

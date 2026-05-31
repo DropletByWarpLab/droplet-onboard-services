@@ -79,7 +79,7 @@ export default function ToolsPage() {
       if (!q) return true;
       return (
         t.name.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q) ||
+        t.homeDescription.toLowerCase().includes(q) ||
         labelForDomain(t.domain).toLowerCase().includes(q)
       );
     });
@@ -341,8 +341,8 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
       <h3 className="type-subheadline text-label-primary font-medium">
         {humanizeToolName(tool.name)}
       </h3>
-      <p className="type-footnote text-label-tertiary flex-1">
-        {tool.description}
+      <p className="type-footnote text-label-secondary flex-1">
+        {tool.homeDescription}
       </p>
 
       {/* Safety badges — only render the ones that apply. Read-only tools
@@ -383,16 +383,19 @@ function Badge({
   label: string;
   title: string;
 }) {
-  const toneClass =
-    tone === "orange"
-      ? "bg-system-orange/10 text-system-orange"
-      : "bg-system-blue/10 text-system-blue";
+  // The colored icon + tint carry the meaning; the LABEL uses the
+  // high-contrast primary text token so it clears WCAG AA at caption size —
+  // the previous colored-text-on-tint badge measured ~2–3.5:1 (fails AA).
+  const tintClass =
+    tone === "orange" ? "bg-system-orange/15" : "bg-system-blue/15";
+  const iconClass =
+    tone === "orange" ? "text-system-orange" : "text-system-blue";
   return (
     <span
       title={title}
-      className={`inline-flex items-center gap-1 h-6 px-2 rounded-full type-caption-2 font-medium ${toneClass}`}
+      className={`inline-flex items-center gap-1 h-6 px-2 rounded-full type-caption-2 font-medium text-label-primary ${tintClass}`}
     >
-      {icon}
+      <span className={iconClass}>{icon}</span>
       {label}
     </span>
   );

@@ -49,6 +49,7 @@ describe("useToolCatalog", () => {
           name: "list_files",
           domain: "files",
           description: "Browse your files",
+          homeDescription: "Browse the files on your Droplet",
           requiresWrite: false,
           requiresConfirmation: false,
         },

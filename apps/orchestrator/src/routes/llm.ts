@@ -889,6 +889,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       tools: tools.map((t) => ({
         name: t.name,
         description: t.description,
+        homeDescription: t.homeDescription,
         domain: t.domain,
         requiresWrite: t.requiresWrite,
         requiresConfirmation: t.requiresConfirmation,

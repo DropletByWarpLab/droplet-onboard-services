@@ -1064,7 +1064,10 @@ export interface ScheduleEvent {
 // dashboard never has to stay in lockstep with the registry's union.
 export interface ToolCatalogEntry {
   name: string;
+  /** Agent-facing description from the registry (may contain jargon). */
   description: string;
+  /** Plain-language, home-user-facing copy — what `/tools` renders (ADR-002). */
+  homeDescription: string;
   domain: string;
   requiresWrite: boolean;
   requiresConfirmation: boolean;

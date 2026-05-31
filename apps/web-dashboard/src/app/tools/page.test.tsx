@@ -22,11 +22,21 @@ import ToolsPage from "./page";
 function entry(
   name: string,
   domain: string,
-  description: string,
+  homeDescription: string,
   requiresWrite = false,
   requiresConfirmation = false,
 ): ToolCatalogEntry {
-  return { name, domain, description, requiresWrite, requiresConfirmation };
+  // The page renders `homeDescription` (plain-language). `description` is the
+  // agent-facing string and is never shown, so the 3rd arg is the friendly
+  // copy the UI actually displays.
+  return {
+    name,
+    domain,
+    description: `[agent] ${name}`,
+    homeDescription,
+    requiresWrite,
+    requiresConfirmation,
+  };
 }
 
 const SAMPLE: ToolCatalogEntry[] = [
