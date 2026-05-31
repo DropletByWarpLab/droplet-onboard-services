@@ -36,6 +36,7 @@ const fetchDevicesMock = vi.fn(async () => ({
 
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
+  patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),

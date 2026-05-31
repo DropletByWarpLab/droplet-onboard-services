@@ -31,6 +31,7 @@ const setDuckDnsConfigMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
+  patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
   fetchDuckDnsStatus: () => fetchDuckDnsStatusMock(),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
