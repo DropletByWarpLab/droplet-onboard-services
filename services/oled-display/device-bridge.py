@@ -695,6 +695,27 @@ def _bytes_for(path):
         return 0, 0, 0
 
 
+def _bus_for(device):
+    """Classify a block device by bus from its kernel name. Cheap, no I/O.
+
+    nvme*  -> internal NVMe (the modular primary store on Droplet)
+    mmcblk* -> eMMC / SD (the boot medium)
+    sd*    -> 'usb' (Droplet's hot-plug data drives are USB; bare SATA is
+              not a deployment shape we ship, so this is the safe label)
+    else   -> 'disk'
+    The dashboard uses this only to pick an icon + an Internal/USB chip;
+    it is never a security or mount decision.
+    """
+    base = os.path.basename(device or "")
+    if base.startswith("nvme"):
+        return "nvme"
+    if base.startswith("mmcblk"):
+        return "mmc"
+    if base.startswith("sd"):
+        return "usb"
+    return "disk"
+
+
 # Filesystem types we consider "data storage" worth surfacing in the UI.
 # Excludes tmpfs, devtmpfs, cgroup, overlay, squashfs, procfs, sysfs, etc.
 _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
@@ -752,6 +773,20 @@ def drives_snapshot(invalidate=False):
 
     by_mount = {}  # mount-point -> entry, so state + /proc/mounts merge cleanly
 
+    # Filesystem type + read-only flag per mount, parsed once from
+    # /proc/mounts so both the automount and fstab branches below can
+    # annotate their entries (fs/readonly) without a second pass or a
+    # blkid subprocess. Read-only — never mutates anything.
+    mount_meta = {}  # mount-point -> (fstype, readonly)
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4:
+                    mount_meta[parts[1]] = (parts[2], "ro" in parts[3].split(","))
+    except Exception:
+        pass
+
     # 1) Hot-plug automount state (authoritative label/uuid for USB drives)
     state_path = "/var/lib/droplet-automount/mounts.json"
     try:
@@ -777,6 +812,9 @@ def drives_snapshot(invalidate=False):
                 "used_bytes": used,
                 "free_bytes": free,
                 "mounted": True,
+                "fs": mount_meta.get(mp, ("", False))[0],
+                "bus": _bus_for(m.get("device")),
+                "readonly": mount_meta.get(mp, ("", False))[1],
                 "source": "automount",
             }
     except Exception:
@@ -820,6 +858,9 @@ def drives_snapshot(invalidate=False):
                     "used_bytes": used,
                     "free_bytes": free,
                     "mounted": True,
+                    "fs": fs,
+                    "bus": _bus_for(dev),
+                    "readonly": mount_meta.get(mp, (fs, False))[1],
                     "source": "fstab",
                 }
     except Exception:

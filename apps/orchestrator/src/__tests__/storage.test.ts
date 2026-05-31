@@ -258,3 +258,84 @@ describe("storage routes (WARP-174)", () => {
     });
   });
 });
+
+describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
+  it("derives a bus class for every drive when the bridge omits it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/nvme0n1p1", mount: "/mnt/droplet/vault", label: "Vault", uuid: "U-NVME", size_bytes: 4e12, used_bytes: 1e12, free_bytes: 3e12, mounted: true },
+            { device: "/dev/sda1", mount: "/mnt/droplet/usb", label: "USB", uuid: "U-USB", size_bytes: 2e12, used_bytes: 0, free_bytes: 2e12, mounted: true },
+          ],
+          count: 2,
+          snapshot_at: "2026-05-31T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const byUuid = Object.fromEntries(res.body.drives.map((d: any) => [d.uuid, d]));
+    expect(byUuid["U-NVME"].bus).toBe("nvme");
+    expect(byUuid["U-USB"].bus).toBe("usb");
+  });
+
+  it("passes through the bridge's fs/bus/readonly when present", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sda1", mount: "/mnt/x", label: "X", uuid: "U1", size_bytes: 1e9, used_bytes: 0, free_bytes: 1e9, mounted: true, bus: "usb", fs: "exfat", readonly: true },
+          ],
+          count: 1,
+          snapshot_at: "2026-05-31T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.body.drives[0].bus).toBe("usb");
+    expect(res.body.drives[0].fs).toBe("exfat");
+    expect(res.body.drives[0].readonly).toBe(true);
+  });
+
+  describe("POST /api/storage/drives/rescan", () => {
+    it("returns ok when the bridge accepts the cache-invalidation", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })));
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+    });
+
+    it("502s when the bridge is unreachable", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) })));
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(502);
+      expect(res.body.ok).toBe(false);
+    });
+
+    it("forbids non-admins", async () => {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
+          id: "fam",
+          username: "fam",
+          displayName: "Fam",
+          role: "family",
+        };
+        next();
+      });
+      app.use("/api", createStorageRouter(createPrismaMock() as any));
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(403);
+    });
+  });
+});
