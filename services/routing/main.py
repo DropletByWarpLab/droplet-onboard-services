@@ -47,6 +47,8 @@ from schemas import (
     BlockDeviceRequest,
     UnblockDeviceRequest,
     PortForwardRequest,
+    PhoneHomeDeviceRequest,
+    PhoneHomeCamerasRequest,
     ApplyConfigRequest,
     CreateVlanRequest,
     CameraSubnetSetupRequest,
@@ -645,6 +647,42 @@ def add_port_forward(req: PortForwardRequest):
         )
         return {"status": "ok", "name": req.name}
     except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# WARP-613: phone-home egress control (see ADR-012).
+@app.post("/firewall/phone-home/device")
+def set_device_phone_home(req: PhoneHomeDeviceRequest):
+    try:
+        fw = get_router().firewall
+        if req.blocked:
+            fw.block_phone_home(req.mac)
+        else:
+            fw.unblock_phone_home(req.mac)
+        return {"status": "ok", "mac": req.mac, "blocked": req.blocked}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/firewall/phone-home/cameras")
+def set_cameras_phone_home(req: PhoneHomeCamerasRequest):
+    try:
+        r = get_router()
+        # Zone-level, multi-step write — wrap in safe_apply so a connectivity
+        # loss rolls back (same discipline as camera-subnet setup).
+        with r.safe_apply(timeout=60):
+            r.firewall.set_camera_phone_home(req.blocked)
+        return {"status": "ok", "scope": "cameras", "blocked": req.blocked}
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost during camera phone-home change — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except UbusError as exc:
         handle_router_error(exc)
 
 

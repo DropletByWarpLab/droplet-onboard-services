@@ -237,6 +237,15 @@ class _MockFirewall:
     def add_port_forward(self, name: str, src_port: str, dest_ip: str, dest_port: str, proto: str = "tcp") -> None:
         logger.info("mock: add_port_forward name=%s %s->%s:%s — no-op", name, src_port, dest_ip, dest_port)
 
+    def block_phone_home(self, mac: str) -> None:
+        logger.info("mock: block_phone_home mac=%s — no-op", mac)
+
+    def unblock_phone_home(self, mac: str) -> None:
+        logger.info("mock: unblock_phone_home mac=%s — no-op", mac)
+
+    def set_camera_phone_home(self, blocked: bool) -> None:
+        logger.info("mock: set_camera_phone_home blocked=%s — no-op", blocked)
+
     def reload(self) -> None:
         pass
 
