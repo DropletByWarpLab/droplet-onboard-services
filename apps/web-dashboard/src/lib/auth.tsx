@@ -5,11 +5,9 @@ import {
   useContext,
   useState,
   useEffect,
-  useRef,
   useCallback,
   type ReactNode,
 } from "react";
-import { checkSetupRequired, type SetupStatus } from "./api";
 
 export interface AuthUser {
   id: string;
@@ -22,23 +20,32 @@ export interface AuthUser {
   role?: "owner" | "admin" | "family" | "guest";
 }
 
+/**
+ * PR #372 — explicit, resumable first-run state from `/api/setup/state`.
+ * Replaces the boolean `setupRequired` (which was derived from Nextcloud's
+ * `installed` flag) as the source of truth AuthGate routes off.
+ *
+ *   appliance         — "unclaimed" (first-run unfinished) | "ready".
+ *   setupStep         — the wizard step to resume at (SetupStep enum value).
+ *   userTourCompleted — post-claim product tour seen? (tour route is a
+ *                       separate, gated workstream — surfaced here so it's
+ *                       ready to consume when that ships).
+ */
+export interface SetupStateInfo {
+  appliance: "unclaimed" | "ready";
+  setupStep: string;
+  userTourCompleted: boolean;
+}
+
 interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
-  /**
-   * WARP-577: back-compat boolean derived from {@link setupStatus} so that
-   * ONLY a confirmed `'required'` is `true`, `'complete'` is `false`, and an
-   * indeterminate `'unknown'` stays `null` (callers already treat `null` as
-   * not-yet-known). An unreachable orchestrator must never present as
-   * setup-required.
-   */
+  // Explicit setup state (PR #372). `null` until the first
+  // `/api/setup/state` fetch resolves (or if the endpoint is unreachable).
+  setupState: SetupStateInfo | null;
+  // Back-compat convenience: true when the appliance is unclaimed. Derived
+  // from `setupState`; prefer `setupState.appliance` in new code.
   setupRequired: boolean | null;
-  /** WARP-577: tri-state setup probe result. The connecting/retry
-   *  interstitial in AuthGate gates on `'unknown'`. */
-  setupStatus: SetupStatus;
-  /** WARP-577: manually re-run the setup probe (the interstitial's "Retry
-   *  now" affordance). Resets the bounded-backoff schedule. */
-  retrySetupCheck: () => void;
   login: (username: string, password: string) => Promise<void>;
   // PR #377: hydrate the context after a passwordless passkey sign-in. The
   // orchestrator's authenticate/verify already set the session cookie and
@@ -52,21 +59,6 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 const USER_KEY = "droplet-auth-user";
-
-/**
- * WARP-577: bounded exponential backoff for re-probing an indeterminate
- * ('unknown') setup check. Covers a realistic cold-boot window (orchestrator +
- * Prisma migrations) so a provisioned box that boots while the orchestrator is
- * briefly down self-recovers without ever bouncing the user into `/setup`.
- */
-const SETUP_RETRY_BACKOFFS_MS = [1000, 2000, 4000, 8000, 10000];
-
-/** Map a tri-state SetupStatus to the back-compat `setupRequired` flag. */
-function deriveSetupRequired(status: SetupStatus): boolean | null {
-  if (status === "required") return true;
-  if (status === "complete") return false;
-  return null; // 'unknown' — not yet known
-}
 
 /**
  * Credential-aware fetch wrapper.
@@ -134,90 +126,54 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [setupStatus, setSetupStatus] = useState<SetupStatus>("unknown");
+  const [setupState, setSetupState] = useState<SetupStateInfo | null>(null);
 
-  // WARP-577: track the scheduled retry timer + attempt count so we can clear
-  // on unmount and reset on a manual retry.
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryAttempt = useRef(0);
+  // On mount, check stored auth and setup status
+  useEffect(() => {
+    async function init() {
+      try {
+        // PR #372 — explicit, resumable setup state. The orchestrator
+        // returns snake_case; map it onto the camelCase context shape.
+        const setupRes = await fetch("/api/setup/state");
+        if (setupRes.ok) {
+          const data = await setupRes.json();
+          setSetupState({
+            appliance: data.appliance,
+            setupStep: data.setup_step,
+            userTourCompleted: data.user_tour_completed,
+          });
+        }
 
-  const clearRetry = useCallback(() => {
-    if (retryTimer.current) {
-      clearTimeout(retryTimer.current);
-      retryTimer.current = null;
-    }
-  }, []);
+        // Try to restore session — the HTTP-only cookie is sent automatically.
+        // We call /api/auth/me; if the cookie is valid the server returns user info.
+        const meRes = await authFetch("/api/auth/me");
 
-  // On mount, check setup status (tri-state) then restore the session.
-  const init = useCallback(async () => {
-    try {
-      // WARP-577: setup detection is a tri-state that fails CLOSED. A non-2xx,
-      // network error, or timeout yields 'unknown' — we do NOT touch user
-      // state and we do NOT let AuthGate redirect to /setup; instead we retry
-      // with bounded backoff until the orchestrator gives a definitive answer.
-      const status = await checkSetupRequired();
-      setSetupStatus(status);
-
-      if (status === "unknown") {
-        const idx = Math.min(
-          retryAttempt.current,
-          SETUP_RETRY_BACKOFFS_MS.length - 1,
-        );
-        const delay = SETUP_RETRY_BACKOFFS_MS[idx];
-        retryAttempt.current += 1;
-        clearRetry();
-        retryTimer.current = setTimeout(() => {
-          init();
-        }, delay);
-        // Stop the spinner so AuthGate can render the connecting interstitial.
-        setIsLoading(false);
-        return;
-      }
-
-      // Definitive answer — stop retrying.
-      retryAttempt.current = 0;
-      clearRetry();
-
-      // Try to restore session — the HTTP-only cookie is sent automatically.
-      // We call /api/auth/me; if the cookie is valid the server returns user info.
-      const meRes = await authFetch("/api/auth/me");
-
-      if (meRes.ok) {
-        const userData: AuthUser = await meRes.json();
-        setUser(userData);
-        // Cache user profile for fast hydration on next visit
-        localStorage.setItem(USER_KEY, JSON.stringify(userData));
-      } else {
-        // Cookie absent or expired — clear stale local cache
-        localStorage.removeItem(USER_KEY);
-      }
-    } catch {
-      // /api/auth/me unreachable — try local cache for optimistic display.
-      // (Setup detection itself never throws; it returns 'unknown'.)
-      const cached = localStorage.getItem(USER_KEY);
-      if (cached) {
-        try {
-          setUser(JSON.parse(cached));
-        } catch {
+        if (meRes.ok) {
+          const userData: AuthUser = await meRes.json();
+          setUser(userData);
+          // Cache user profile for fast hydration on next visit
+          localStorage.setItem(USER_KEY, JSON.stringify(userData));
+        } else {
+          // Cookie absent or expired — clear stale local cache
           localStorage.removeItem(USER_KEY);
         }
+      } catch {
+        // API unreachable — try local cache for optimistic display
+        const cached = localStorage.getItem(USER_KEY);
+        if (cached) {
+          try {
+            setUser(JSON.parse(cached));
+          } catch {
+            localStorage.removeItem(USER_KEY);
+          }
+        }
+      } finally {
+        setIsLoading(false);
       }
-    } finally {
-      setIsLoading(false);
     }
-  }, [clearRetry]);
 
-  useEffect(() => {
     init();
-    return () => clearRetry();
-  }, [init, clearRetry]);
-
-  const retrySetupCheck = useCallback(() => {
-    retryAttempt.current = 0;
-    clearRetry();
-    setIsLoading(true);
-    init();
-  }, [clearRetry, init]);
+  }, []);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await fetch("/api/auth/login", {
@@ -236,7 +192,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // The server sets the HTTP-only cookie — we only store the user profile
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
     setUser(data.user);
-    setSetupStatus("complete");
+    // A successful sign-in means setup is past the account step at minimum.
+    // The orchestrator owns the authoritative `appliance` state; reflect a
+    // ready appliance locally so AuthGate doesn't bounce the freshly
+    // authenticated user back into the wizard before the next state fetch.
+    setSetupState((prev) =>
+      prev
+        ? { ...prev, appliance: "ready" }
+        : { appliance: "ready", setupStep: "done", userTourCompleted: false },
+    );
   }, []);
 
   const setUserFromPasskey = useCallback((u: AuthUser) => {
@@ -248,9 +212,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       /* ignore — privacy mode, etc. */
     }
     setUser(u);
-    // WARP-577: a successful passkey sign-in means setup is complete, mirroring
-    // the password login() path (main renamed the flag to the tri-state status).
-    setSetupStatus("complete");
+    // A successful passkey sign-in means the appliance is past first-run.
+    // Mirror login(): flip the in-memory appliance to "ready" so AuthGate
+    // doesn't bounce the freshly authenticated user back into the wizard
+    // before the next `/api/setup/state` fetch lands. The orchestrator
+    // remains the authoritative source for the `appliance` state.
+    setSetupState((prev) =>
+      prev
+        ? { ...prev, appliance: "ready" }
+        : { appliance: "ready", setupStep: "done", userTourCompleted: false },
+    );
   }, []);
 
   const logout = useCallback(async () => {
@@ -264,18 +235,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const completeSetup = useCallback(() => {
-    setSetupStatus("complete");
+    // Optimistically flip the appliance to ready so AuthGate routes to the
+    // dashboard immediately. The orchestrator is the source of truth (the
+    // wizard PATCHes `appliance=ready` on finish); this just avoids a
+    // flash of the wizard while the next `/api/setup/state` fetch lands.
+    setSetupState((prev) =>
+      prev
+        ? { ...prev, appliance: "ready" }
+        : { appliance: "ready", setupStep: "done", userTourCompleted: false },
+    );
   }, []);
+
+  // Back-compat: derive the legacy boolean from the explicit state so any
+  // consumer still reading `setupRequired` keeps working during migration.
+  const setupRequired: boolean | null =
+    setupState === null ? null : setupState.appliance === "unclaimed";
 
   return (
     <AuthContext.Provider
       value={{
         user,
         isLoading,
-        // WARP-577: only a confirmed 'required' is truthy; 'unknown' is null.
-        setupRequired: deriveSetupRequired(setupStatus),
-        setupStatus,
-        retrySetupCheck,
+        setupState,
+        setupRequired,
         login,
         // PR #377: passwordless passkey sign-in hydrates the context here.
         setUserFromPasskey,

@@ -45,6 +45,8 @@ vi.mock("@/lib/api", () => ({
     setupAdminMock(...args),
   loginUser: (...args: Parameters<typeof loginUserMock>) =>
     loginUserMock(...args),
+  // PR #372: the wizard persists each step transition via patchSetupStep.
+  patchSetupStep: vi.fn(async () => undefined),
 
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
