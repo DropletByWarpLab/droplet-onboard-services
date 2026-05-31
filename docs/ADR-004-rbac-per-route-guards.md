@@ -91,7 +91,7 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 |---|---|
 | `POST/PUT/DELETE /api/auth/users` (admin) | `owner`, `admin` |
 | `POST /api/auth/invites*` | `owner`, `admin` |
-| `POST/PUT/DELETE /api/network/*`, `/api/firewall/*`, `/api/vpn/*`, `/api/ddns/*` | `owner`, `admin` |
+| `POST/PUT/DELETE /api/network/*`, `/api/firewall/*`, `/api/vpn/*`, `/api/ddns/*`, `/api/switch/*` (mutations) | `owner`, `admin` |
 | `POST /api/services/*/restart` | `owner` |
 | `POST/PUT/DELETE /api/cameras/*`, `/api/matter/*`, `/api/smart-home/*` | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/files/*` (write) | `owner`, `admin`, `family` |
@@ -99,6 +99,45 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 | All `GET` endpoints | unchanged (auth middleware still applies; no role gate) |
 
 Service principals (`service` role) are read-only by design — they hit `GET` endpoints and the MCP tool surface only. The matrix above does NOT include `service` on any write row.
+
+#### Managed-switch control surface (WARP-559)
+
+> **Status of this note:** added 2026-05-31 by WARP-559. The switch
+> router (`src/routes/switch.ts`) is part of the network-infrastructure
+> control surface and carries the same `owner`+`admin` posture as
+> `/api/network/*` and `/api/vpn/*`. It is called out explicitly here
+> because it shipped *unguarded* — the lone hardware-control router with
+> no `requireRole` wrapper, leaving every mutation reachable by any
+> authenticated session (a guest/family or stolen low-priv session could
+> disable PoE to cameras, disable ports, or rewrite VLAN membership).
+
+The router mounts bare at `/api` (like `vpn`/`network-wifi`) and applies
+`requireRole("owner", "admin")` **per mutating route** (WARP-171 idiom).
+The in-handler `evalSwitchCommand` is the WARP-76 safety/confirmation/
+audit tier — a complementary layer, NOT the authorization gate — and is
+left unchanged; a `requireUserId()` helper now asserts the (post-guard
+guaranteed) user id instead of forwarding `undefined` into that tier.
+
+| Endpoint | Allowed roles |
+|---|---|
+| `POST /api/switch/ports/:port/enable` | `owner`, `admin` |
+| `POST /api/switch/ports/:port/disable` | `owner`, `admin` |
+| `POST /api/switch/vlans` | `owner`, `admin` |
+| `DELETE /api/switch/vlans/:vlanId` | `owner`, `admin` |
+| `POST /api/switch/vlans/:vlanId/membership` | `owner`, `admin` |
+| `POST /api/switch/poe/:port/enable` | `owner`, `admin` |
+| `POST /api/switch/poe/:port/disable` | `owner`, `admin` |
+| `POST /api/switch/wan/detect` | `owner`, `admin` |
+| `POST /api/switch/setup/cameras` | `owner`, `admin` |
+| `POST /api/switch/command/confirm` | `owner`, `admin` |
+| `GET /api/switch/*` (status: ports, vlans, poe, system) | every authenticated role (no role gate) |
+
+`POST /api/switch/command/confirm` carries the guard too: confirming a
+queued token *executes* the mutation, so leaving it open would be an
+unguarded execution bypass even with the create-routes guarded. All ten
+mutations are mirrored in `__tests__/rbac.test.ts` (declarative MATRIX +
+a real-`createSwitchRouter` wiring block) so a future unguarded switch
+route trips a localized test failure.
 
 ### 4. Expand `roleFromGroups()`
 
