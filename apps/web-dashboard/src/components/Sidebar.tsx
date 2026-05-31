@@ -27,6 +27,7 @@ import {
   Share2,
   Users,
   Video,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
@@ -105,6 +106,11 @@ const NAV_GROUPS: NavGroup[] = [
       // updates and adds the full Roles / Groups / Sessions entries
       // with workspace:"business" set.
       { href: "/users", label: "Users", icon: Users },
+      // WARP-555: read-only catalog of the assistant's built-in tools.
+      // No role restriction — the /api/llm/tools/catalog route filters
+      // write tools out for non-privileged roles, so family/guest see a
+      // safe read-only subset. Visible in both workspaces.
+      { href: "/tools", label: "Tools", icon: Wrench },
       { href: "/settings", label: "Settings", icon: Settings },
       // WARP-174: customer-facing manual + "How Droplet works" replay
       // modal. Sits next to Settings — same "support / reference" zone.
