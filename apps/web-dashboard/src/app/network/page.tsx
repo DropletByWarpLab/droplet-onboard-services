@@ -24,6 +24,7 @@ import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
+import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -839,6 +840,9 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
 
   return (
     <div className="space-y-4">
+      {/* WARP-613: home-user phone-home egress toggle (ADR-012). */}
+      <PhoneHomeCard />
+
       <div className="dp-card">
         <h3 className="type-headline text-label-primary mb-4">
           Firewall Rules ({rules.length})
