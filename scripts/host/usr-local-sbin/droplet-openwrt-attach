@@ -8,8 +8,8 @@
 set +e
 
 # --- Customer-facing knobs (override via env) -----------------------------
-AP_SSID="${DROPLET_AP_SSID:-Droplet-POC}"
-AP_PSK="${DROPLET_AP_PSK:-droplet-poc-password}"
+AP_SSID="${DROPLET_AP_SSID:-Droplet}"
+AP_PSK="${DROPLET_AP_PSK:-droplet-default-wifi}"
 AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
 AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
 # Which wireless phy to move into the container netns, and what interface

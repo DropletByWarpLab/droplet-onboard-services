@@ -38,7 +38,7 @@ cp services/oled-display/pyportal/{boot.py,code.py} /media/$USER/CIRCUITPY/
 cp -r ~/Adafruit_CircuitPython_Bundle/lib/adafruit_display_text /media/$USER/CIRCUITPY/lib/
 cp ~/Adafruit_CircuitPython_Bundle/lib/adafruit_touchscreen.mpy /media/$USER/CIRCUITPY/lib/
 # 3. Reset the PyPortal, plug into any USB-A on the host.
-# 4. docker compose -p docker -f docker/docker-compose.yml --profile full up -d oled-display
+# 4. docker compose -f docker/docker-compose.yml --profile full up -d oled-display
 ```
 
 Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).

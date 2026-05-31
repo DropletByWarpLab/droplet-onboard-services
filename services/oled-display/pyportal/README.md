@@ -96,7 +96,7 @@ DISPLAY_BACKEND=pyportal
 PYPORTAL_TTY=/dev/ttyACM1
 ```
 
-Then `docker compose -p docker -f docker/docker-compose.yml up -d --force-recreate oled-display`.
+Then `docker compose -f docker/docker-compose.yml up -d --force-recreate oled-display`.
 
 ## Protocol (JSON over /dev/ttyACM1, newline-delimited)
 
