@@ -31,9 +31,11 @@ export default function CalendarPage() {
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<CalendarEvent | null>(null);
+  const [newEventDate, setNewEventDate] = useState<Date | undefined>(undefined);
 
-  function newEvent() {
+  function newEvent(date?: Date) {
     setEditing(null);
+    setNewEventDate(date);
     setShowForm(true);
   }
   function editEvent(ev: CalendarEvent) {
@@ -62,7 +64,7 @@ export default function CalendarPage() {
       >
         <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
       </button>
-      <button onClick={newEvent} className="dp-btn-primary flex items-center gap-1.5 px-3 h-9 rounded-md">
+      <button onClick={() => newEvent()} className="dp-btn-primary flex items-center gap-1.5 px-3 h-9 rounded-md">
         <Plus size={15} />
         <span className="type-subheadline">New event</span>
       </button>
@@ -146,7 +148,7 @@ export default function CalendarPage() {
                 events={events}
                 cursor={cursor}
                 onSelectEvent={editEvent}
-                onSelectDay={() => newEvent()}
+                onSelectDay={(day) => newEvent(day)}
               />
             ) : (
               <AgendaView events={events} onSelect={editEvent} />
@@ -162,6 +164,7 @@ export default function CalendarPage() {
         <EventForm
           open={showForm}
           initial={editing}
+          initialDate={newEventDate}
           onClose={() => setShowForm(false)}
           onSaved={() => refresh()}
         />

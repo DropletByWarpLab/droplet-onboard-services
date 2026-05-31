@@ -40,6 +40,7 @@ const config: Config = {
           DEFAULT: "var(--color-accent)",
           hover: "var(--color-accent-hover)",
           subtle: "var(--color-accent-subtle)",
+          foreground: "var(--color-on-accent)",
         },
         system: {
           red: "var(--color-system-red)",
