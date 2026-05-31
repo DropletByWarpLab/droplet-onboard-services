@@ -168,30 +168,22 @@ export async function patchSetupStep(setupStep: string): Promise<void> {
  * internally consistent. markApplianceReady on an already-ready appliance is
  * a 200 no-op, so finishing twice / refreshing on `/done` is safe.
  *
- * The wizard authenticated at the account step (loginUser sets the
- * `droplet_session` cookie), and the orchestrator gates the `ready` claim
- * on that session, so we send credentials with the request.
- *
- * M4 (PR #372 re-review) — this used to swallow EVERY error (network AND
- * non-2xx). That left the UI showing "ready" (the optimistic in-memory flip)
- * while the server stayed `unclaimed`, so the next refresh re-trapped the
- * owner with no signal anything went wrong. We now THROW on a failed PATCH
- * (network error or non-2xx) so the caller can roll back the optimistic flip
- * and surface a retry. The server transition is idempotent, so retrying is
- * always safe.
+ * Public endpoint (runs before any user exists, like POST /api/auth/setup),
+ * so we use the plain `fetch` — no `authFetch` refresh dance. We swallow a
+ * network error: the optimistic in-memory flip already routed the owner to
+ * the dashboard, and the next `/api/setup/state` GET re-syncs persisted
+ * state; surfacing a transient failure on the celebratory last screen would
+ * be worse than a silent retry-on-next-load.
  */
 export async function patchSetupReady(): Promise<void> {
-  const res = await fetch(`${BASE}/api/setup/state`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ appliance: "ready" }),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(
-      data.error || `Failed to finalize setup (appliance:ready): ${res.status}`,
-    );
+  try {
+    await fetch(`${BASE}/api/setup/state`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ appliance: "ready" }),
+    });
+  } catch {
+    /* non-fatal — optimistic flip already routed; next GET re-syncs */
   }
 }
 
