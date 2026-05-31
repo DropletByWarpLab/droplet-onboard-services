@@ -310,7 +310,7 @@ FastAPI service that unifies local and cloud AI inference behind a single API. T
 
 #### Routing logic
 
-- Model names are routed to providers by prefix/pattern (e.g. `llama*` → local Ollama on the inference engine, `claude*` → Anthropic via LiteLLM, `gpt*` → OpenAI via LiteLLM).
+- Model names are routed to providers by prefix/pattern (e.g. `llama*`/`gpt-oss*` → local Ollama, `claude*` → Anthropic via LiteLLM, `gpt*`/`o1`/`o3` → OpenAI via LiteLLM). **Two collision guards (WARP-604):** `gpt-oss` is OpenAI's *open-weights* model served **locally by Ollama**, so it is matched before the cloud `gpt` prefix; and the one configured `LLM_MODEL` always resolves to local Ollama regardless of name. Without these, the local model is misrouted to the cloud provider and blocked by the off-LAN gate (the live chat-failure root cause).
 - Provider keys are stored Fernet-encrypted on disk (cryptography 42.0); the key store is read at request time.
 
 #### Endpoints (internal, called by orchestrator)
