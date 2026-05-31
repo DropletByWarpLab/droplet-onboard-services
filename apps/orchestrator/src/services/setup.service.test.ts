@@ -20,11 +20,14 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// The global `@prisma/client` vi.mock in src/__tests__/setup.ts masks the
-// generated enum exports for unit-test isolation. The setup.service module
-// imports the REAL `SetupStep` enum at load time (SETUP_STEPS is built from
-// its values), so we unmock for this file and pull the generated module —
-// same pattern as activity-schema.test.ts.
+// The global `@prisma/client` vi.mock in src/__tests__/setup.ts stubs only
+// `PrismaClient` + `Prisma` — it does NOT export the generated enums. The
+// service deliberately imports `SetupStep` as a TYPE only (SETUP_STEPS is a
+// string-literal tuple checked against the enum at compile time), so the
+// service itself runs fine under the global mock. We unmock here purely so
+// the runtime cross-check below (`Object.values(SetupStep)` must contain
+// every shipped step) resolves the REAL generated enum object — same
+// unmock pattern as activity-schema.test.ts.
 vi.unmock("@prisma/client");
 
 import { SetupStep } from "@prisma/client";

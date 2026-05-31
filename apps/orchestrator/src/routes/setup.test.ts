@@ -11,8 +11,11 @@
  * dashboard's AuthGate can consume it directly.
  *
  * Strategy mirrors auth.invites.test.ts: a minimal Express app + supertest,
- * with an in-memory `applianceSetup` Prisma stand-in. We unmock
- * `@prisma/client` so the route's real `SetupStep` enum import resolves.
+ * with an in-memory `applianceSetup` Prisma stand-in. The route (and the
+ * service it calls) import `SetupStep` as a TYPE only, so they run fine
+ * under the global `@prisma/client` mock; we unmock here just to keep this
+ * file aligned with setup.service.test.ts and to leave the door open for a
+ * real-enum assertion without re-mocking.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import request from "supertest";

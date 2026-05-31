@@ -12,7 +12,7 @@
  * route layer; this service returns the camelCase domain object):
  *   { appliance: "unclaimed" | "ready", setupStep, userTourCompleted }
  */
-import { SetupStep, type PrismaClient } from "@prisma/client";
+import { type SetupStep, type PrismaClient } from "@prisma/client";
 
 /** The fixed primary key of the singleton row. Mirrors `Workspace.id = 1`. */
 export const APPLIANCE_SETUP_ID = "singleton";
@@ -23,21 +23,28 @@ export const APPLIANCE_SETUP_ID = "singleton";
  * claim / org / team OUT until they ship — they extend `SetupStep`, this
  * list, the wizard array, and the route validation together.
  *
- * Derived from the Prisma `SetupStep` enum so the two can't drift: if a
- * value is added to the schema enum it must be added here too, and the
- * `satisfies` check below fails the build until the orders match.
+ * Declared as a plain string-literal tuple (NOT `SetupStep.welcome` etc.)
+ * so this module has NO runtime dependency on the Prisma enum OBJECT at
+ * import time — that would crash every test importing the app graph under
+ * the global `@prisma/client` vi.mock (which only stubs the client, not
+ * the generated enums). The `satisfies readonly SetupStep[]` below is a
+ * COMPILE-TIME check: each literal must be a member of the Prisma enum, so
+ * any drift between the schema enum and this list fails `tsc --noEmit`.
  */
 export const SETUP_STEPS = [
-  SetupStep.welcome,
-  SetupStep.account,
-  SetupStep.internet,
-  SetupStep.storage,
-  SetupStep.discovery,
-  SetupStep.cameras,
-  SetupStep.vpn,
-  SetupStep.ai,
-  SetupStep.done,
+  "welcome",
+  "account",
+  "internet",
+  "storage",
+  "discovery",
+  "cameras",
+  "vpn",
+  "ai",
+  "done",
 ] as const satisfies readonly SetupStep[];
+
+/** The terminal wizard step (typed against the Prisma enum via the tuple). */
+const TERMINAL_STEP: SetupStep = "done";
 
 /** Appliance lifecycle — explicit, never derived. */
 export type ApplianceState = "unclaimed" | "ready";
@@ -139,8 +146,8 @@ export async function markApplianceReady(
 ): Promise<SetupState> {
   const row = await prisma.applianceSetup.upsert({
     where: { id: APPLIANCE_SETUP_ID },
-    create: { id: APPLIANCE_SETUP_ID, state: "ready", setupStep: SetupStep.done },
-    update: { state: "ready", setupStep: SetupStep.done },
+    create: { id: APPLIANCE_SETUP_ID, state: "ready", setupStep: TERMINAL_STEP },
+    update: { state: "ready", setupStep: TERMINAL_STEP },
   });
   return toSetupState(row);
 }
