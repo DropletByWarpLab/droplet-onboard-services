@@ -75,3 +75,117 @@ export async function setPhoneHomeSetting(
     create: { key, section: "hardware", type: "bool", valueJson: value },
   });
 }
+
+// --- Applied-state view (WARP-613 option A) ---
+//
+// The dashboard card needs *applied* state, not just desired, so it can show
+// "Applying… → Blocked / Can phone home" + "enforced {ago}". Source of truth:
+//   - camera applied  → the latest cameras ScheduleEvent (transition)
+//   - device applied  → NetworkDevice.lastAppliedEgress (vs computeDesiredEgress)
+//   - timestamps      → ScheduleEvent.occurredAt (reason="phone_home")
+// All read-only; no schema change.
+
+export interface ScopeView {
+  desired: boolean;
+  applied: boolean;
+  appliedAt: string | null;
+}
+export interface PhoneHomeGroupView extends ScopeView {
+  id: string;
+  name: string;
+  deviceCount: number;
+}
+export interface PhoneHomeView {
+  enabled: ScopeView;
+  cameras: ScopeView & { count: number | null };
+  groups: PhoneHomeGroupView[];
+  lastSync: string | null;
+  pending: number;
+}
+
+const MAX_EVENT_SCAN = 500;
+
+export async function getPhoneHomeView(prisma: PrismaClient): Promise<PhoneHomeView> {
+  const { enabled: masterDesired, cameras: camerasDesired } = await getPhoneHomeSettings(prisma);
+
+  // Camera applied-state + timestamp from the latest camera egress event.
+  const camEvent = await prisma.scheduleEvent.findFirst({
+    where: { subjectType: "cameras", reason: "phone_home" },
+    orderBy: { occurredAt: "desc" },
+  });
+  const camerasApplied = camEvent?.transition === "blocked";
+  const camerasAppliedAt = camEvent?.occurredAt ?? null;
+  // What the reconciler drives cameras to (master gates the camera scope).
+  const camerasPending = (masterDesired && camerasDesired) !== camerasApplied;
+
+  const devices = await prisma.networkDevice.findMany({ include: { groups: true } });
+  const groups = await prisma.deviceGroup.findMany({
+    orderBy: { name: "asc" },
+    include: { _count: { select: { devices: true } } },
+  });
+
+  // Per-device convergence: desired egress (given the master + group flags)
+  // vs what the reconciler last applied.
+  const pendingMacs = new Set<string>();
+  for (const d of devices) {
+    const desired = computeDesiredEgress({
+      masterEnabled: masterDesired,
+      device: d,
+      fullBlocked: d.lastAppliedBlocked === true,
+    });
+    if (desired !== d.lastAppliedEgress) pendingMacs.add(d.mac);
+  }
+
+  // Most-recent applied timestamp per device (bounded scan of recent events).
+  const devEvents = await prisma.scheduleEvent.findMany({
+    where: { subjectType: "device", reason: "phone_home" },
+    orderBy: { occurredAt: "desc" },
+    take: MAX_EVENT_SCAN,
+  });
+  const appliedAtByMac = new Map<string, Date>();
+  for (const e of devEvents) {
+    if (e.deviceMac && !appliedAtByMac.has(e.deviceMac)) {
+      appliedAtByMac.set(e.deviceMac, e.occurredAt);
+    }
+  }
+
+  const groupViews: PhoneHomeGroupView[] = groups.map((g) => {
+    const members = devices.filter((d) => d.groups.some((gg) => gg.id === g.id));
+    const memberPending = members.some((m) => pendingMacs.has(m.mac));
+    const times = members
+      .map((m) => appliedAtByMac.get(m.mac))
+      .filter((x): x is Date => x != null)
+      .map((t) => t.getTime());
+    const appliedAt = times.length ? new Date(Math.max(...times)).toISOString() : null;
+    return {
+      id: g.id,
+      name: g.name,
+      desired: g.blockPhoneHome,
+      applied: !memberPending,
+      appliedAt,
+      deviceCount: g._count.devices,
+    };
+  });
+
+  const groupPending = groupViews.filter((g) => !g.applied).length;
+  const pending = (camerasPending ? 1 : 0) + groupPending;
+
+  const allTimes = [
+    ...(camerasAppliedAt ? [camerasAppliedAt.getTime()] : []),
+    ...Array.from(appliedAtByMac.values()).map((t) => t.getTime()),
+  ];
+  const lastSync = allTimes.length ? new Date(Math.max(...allTimes)).toISOString() : null;
+
+  return {
+    enabled: { desired: masterDesired, applied: pending === 0, appliedAt: lastSync },
+    cameras: {
+      desired: camerasDesired,
+      applied: camerasApplied,
+      appliedAt: camerasAppliedAt ? camerasAppliedAt.toISOString() : null,
+      count: null,
+    },
+    groups: groupViews,
+    lastSync,
+    pending,
+  };
+}

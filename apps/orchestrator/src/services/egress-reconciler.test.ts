@@ -36,6 +36,17 @@ function makePrisma(settings: Record<string, boolean> = {}) {
       events.push(q.data);
       return q.data;
     }),
+    findFirst: vi.fn(async (q: any) => {
+      const w = q?.where ?? {};
+      const matches = events
+        .filter(
+          (e) =>
+            (w.subjectType === undefined || e.subjectType === w.subjectType) &&
+            (w.reason === undefined || e.reason === w.reason),
+        )
+        .sort((a, b) => (b.occurredAt?.getTime?.() ?? 0) - (a.occurredAt?.getTime?.() ?? 0));
+      return matches[0] ?? null;
+    }),
   };
   const $transaction = vi.fn(async (ops: any[]) => {
     const out: any[] = [];
@@ -57,23 +68,41 @@ function makeEgress() {
 const MAC = "AA:BB:CC:DD:EE:FF";
 
 describe("egress-reconciler — camera pass", () => {
-  it("blocks the camera VLAN when master AND cameras are on, once", async () => {
+  it("blocks the camera VLAN when master AND cameras are on, once, and records an event", async () => {
     const prisma = makePrisma({ [MASTER_SETTING_KEY]: true, [CAMERAS_SETTING_KEY]: true }) as any;
     const egress = makeEgress();
     const r = createEgressReconciler(prisma, egress);
 
     await r.tickOnce();
     expect(egress.setCameraPhoneHome).toHaveBeenCalledWith(true);
-    // Second tick: cached, no re-dispatch.
+    expect(prisma.scheduleEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ subjectType: "cameras", transition: "blocked", reason: "phone_home" }),
+      }),
+    );
+    // Second tick: applied (from the persisted event) now matches desired — no re-dispatch.
     await r.tickOnce();
     expect(egress.setCameraPhoneHome).toHaveBeenCalledTimes(1);
   });
 
-  it("does not block cameras when master is off even if cameras=true", async () => {
+  it("does NOT dispatch when desired already matches applied (master off, no prior event)", async () => {
     const prisma = makePrisma({ [MASTER_SETTING_KEY]: false, [CAMERAS_SETTING_KEY]: true }) as any;
     const egress = makeEgress();
     await createEgressReconciler(prisma, egress).tickOnce();
-    // Bootstrap dispatch asserts the OFF state once.
+    expect(egress.setCameraPhoneHome).not.toHaveBeenCalled();
+  });
+
+  it("unblocks cameras when master goes off after a prior applied-on", async () => {
+    const prisma = makePrisma({ [MASTER_SETTING_KEY]: false, [CAMERAS_SETTING_KEY]: true }) as any;
+    // Seed a prior 'blocked' camera event so applied = true.
+    prisma._stores.events.push({
+      subjectType: "cameras",
+      reason: "phone_home",
+      transition: "blocked",
+      occurredAt: new Date(Date.now() - 1000),
+    });
+    const egress = makeEgress();
+    await createEgressReconciler(prisma, egress).tickOnce();
     expect(egress.setCameraPhoneHome).toHaveBeenCalledWith(false);
   });
 });

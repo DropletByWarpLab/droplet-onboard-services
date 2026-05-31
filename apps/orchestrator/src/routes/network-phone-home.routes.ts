@@ -18,6 +18,7 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import {
   getPhoneHomeSettings,
+  getPhoneHomeView,
   setPhoneHomeSetting,
   MASTER_SETTING_KEY,
   CAMERAS_SETTING_KEY,
@@ -35,12 +36,9 @@ export function registerPhoneHomeRoutes(router: Router, deps: PhoneHomeDeps): vo
     requireRole("owner", "admin", "family"),
     async (_req, res, next) => {
       try {
-        const settings = await getPhoneHomeSettings(prisma);
-        const groups = await prisma.deviceGroup.findMany({
-          orderBy: { name: "asc" },
-          select: { id: true, name: true, blockPhoneHome: true },
-        });
-        res.json({ enabled: settings.enabled, cameras: settings.cameras, groups });
+        // WARP-613 option A: returns per-scope desired + applied + appliedAt so
+        // the dashboard can show "Applying… → Blocked" and "enforced {ago}".
+        res.json(await getPhoneHomeView(prisma));
       } catch (err) {
         next(err);
       }

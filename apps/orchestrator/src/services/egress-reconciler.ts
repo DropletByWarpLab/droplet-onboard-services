@@ -19,8 +19,9 @@
  *
  * State: per-device applied egress persists in `lastAppliedEgress` (survives
  * restart cleanly, same rationale as the schedule ticker's
- * `lastAppliedBlocked`). The single global camera bit is kept in memory — one
- * idempotent re-assert of the zone on restart is harmless.
+ * `lastAppliedBlocked`). The camera zone's applied-state is the latest
+ * `ScheduleEvent` with `subjectType="cameras"` — persisted so it survives
+ * restart and the dashboard can read it (WARP-613 option A).
  *
  * Errors: a RouterError (router unreachable / auth / disabled) is logged at
  * `warn` and BOTH the audit event and the state update are skipped, so the
@@ -48,19 +49,30 @@ export function createEgressReconciler(
   prisma: PrismaClient,
   egress: EgressClient,
 ): EgressReconciler {
-  // null = "never dispatched this process" → dispatch once on the first tick.
-  let lastCameraApplied: boolean | null = null;
-
   async function tickOnce() {
     const now = new Date();
     const { enabled, cameras } = await getPhoneHomeSettings(prisma);
 
     // --- Camera-zone pass ---
+    // Applied-state is the latest cameras ScheduleEvent's transition — persisted
+    // so the dashboard can read it and it survives restart (no in-memory bit).
     const desiredCamera = enabled && cameras;
-    if (desiredCamera !== lastCameraApplied) {
+    const lastCamEvent = await prisma.scheduleEvent.findFirst({
+      where: { subjectType: "cameras", reason: "phone_home" },
+      orderBy: { occurredAt: "desc" },
+    });
+    const appliedCamera = lastCamEvent?.transition === "blocked";
+    if (desiredCamera !== appliedCamera) {
       try {
         await egress.setCameraPhoneHome(desiredCamera);
-        lastCameraApplied = desiredCamera;
+        await prisma.scheduleEvent.create({
+          data: {
+            subjectType: "cameras",
+            transition: desiredCamera ? "blocked" : "unblocked",
+            reason: "phone_home",
+            occurredAt: now,
+          },
+        });
       } catch (err) {
         if (err instanceof RouterError) {
           log.warn({ code: err.code }, "camera egress dispatch failed; will retry next tick");
