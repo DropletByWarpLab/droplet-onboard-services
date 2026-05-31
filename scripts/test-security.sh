@@ -342,6 +342,34 @@ else
 fi
 
 # =============================================================================
+# Test 10: WARP-573 — orchestrator migration-on-boot is guarded
+# =============================================================================
+# The orchestrator container must NOT boot via the old unguarded
+# `prisma migrate deploy && node` CMD (no advisory lock, no snapshot, silent
+# power-cut restart loop). It must invoke the guarded entrypoint instead, and
+# the entrypoint's own unit test must pass.
+
+MIGRATE_DOCKERFILE="$REPO_ROOT/apps/orchestrator/Dockerfile"
+if grep -qE 'migrate deploy[[:space:]]*&&' "$MIGRATE_DOCKERFILE"; then
+  fail "orchestrator Dockerfile still uses unguarded 'migrate deploy &&' CMD (WARP-573)"
+elif ! grep -q "migrate-and-start.sh" "$MIGRATE_DOCKERFILE"; then
+  fail "orchestrator Dockerfile does not invoke the guarded migrate-and-start.sh (WARP-573)"
+else
+  pass "orchestrator boots through the guarded migration entrypoint (WARP-573)"
+fi
+
+MIGRATE_TEST="$REPO_ROOT/apps/orchestrator/scripts/migrate-and-start.test.sh"
+if [ -f "$MIGRATE_TEST" ]; then
+  if bash "$MIGRATE_TEST" >/dev/null 2>&1; then
+    pass "migrate-and-start.sh unit test (lock/snapshot/recovery/loud-failure) passes (WARP-573)"
+  else
+    fail "migrate-and-start.sh unit test failed (WARP-573)"
+  fi
+else
+  fail "migrate-and-start.test.sh is missing (WARP-573)"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

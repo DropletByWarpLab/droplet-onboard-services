@@ -166,6 +166,9 @@ VOLUMES=(
   "aikeys"
   "nvrdata"
   "matter-data"
+  # WARP-573: pre-migration DB snapshots from the orchestrator's guarded boot
+  # entrypoint. Wiped on reset so factory-reset truly returns to out-of-box.
+  "migration-snapshots"
   "frigate-config"
   # WARP-501 — embedded Plane PM stack (ADR-010). Dedicated postgres + redis
   # per spec OQ1; both volumes wiped on factory reset so a re-install starts
