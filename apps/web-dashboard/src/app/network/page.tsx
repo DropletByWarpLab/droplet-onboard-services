@@ -28,6 +28,7 @@ import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
+import { NetworkSimple } from "@/components/network/NetworkSimple";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -452,9 +453,15 @@ export default function NetworkPage() {
         })}
       </div>
 
+      {mode === "simple" && (
+        <NetworkSimple overview={overview} onOpenAdvanced={() => switchMode("advanced")} />
+      )}
+
       {/* Tab Content — one tabpanel per tab, contents lazily mounted when
           the tab is active. `hidden` removes inactive panels from the
-          accessibility tree + layout flow. */}
+          accessibility tree + layout flow. Advanced mode only. */}
+      {mode === "advanced" && (
+        <>
       <div
         role="tabpanel"
         id="network-panel-overview"
@@ -509,6 +516,8 @@ export default function NetworkPage() {
       >
         {activeTab === "system" && <SystemTab overview={overview} />}
       </div>
+        </>
+      )}
       </div>
     </div>
   );
