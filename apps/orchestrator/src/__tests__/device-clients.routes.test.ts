@@ -1,0 +1,283 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import express from "express";
+import request from "supertest";
+
+// ── Mocks ──
+// Prisma double. $transaction runs the interactive-transaction callback against
+// mockPrisma itself, so per-test setups on pairingCode/deviceClient drive
+// behavior and any throw inside the callback rejects the transaction (models a
+// rollback — the consume is not committed).
+const mockPrisma = {
+  pairingCode: {
+    create: vi.fn(),
+    findUnique: vi.fn(),
+    update: vi.fn(),
+    updateMany: vi.fn(),
+  },
+  deviceClient: {
+    create: vi.fn(),
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
+    update: vi.fn(),
+  },
+  pushSubscription: { upsert: vi.fn(), deleteMany: vi.fn() },
+  $transaction: vi.fn(),
+};
+
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncGenerateAppPassword: vi.fn(),
+  ncDeleteAppPassword: vi.fn(),
+}));
+
+vi.mock("../services/nextcloud-session.service.js", () => ({
+  resolveNcToken: vi.fn(),
+}));
+
+vi.mock("../services/encryption.service.js", () => ({
+  encryptSecret: vi.fn((s: string) => `enc:${s}`),
+  decryptSecret: vi.fn((s: string) => s.replace(/^enc:/, "")),
+}));
+
+vi.mock("../services/cache.service.js", () => ({
+  cacheGet: vi.fn(),
+  cacheSet: vi.fn(),
+  cacheDel: vi.fn(),
+}));
+
+vi.mock("../services/mqtt.service.js", () => ({
+  publish: vi.fn(),
+}));
+
+vi.mock("../services/push-dispatch.service.js", () => ({
+  dispatchToUser: vi.fn(),
+  getPublicVapidKey: vi.fn(() => "vapid-pub"),
+}));
+
+import {
+  ncGenerateAppPassword,
+  ncDeleteAppPassword,
+} from "../services/nextcloud.client.js";
+import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import { cacheGet } from "../services/cache.service.js";
+import { createDeviceClientsRouter } from "../routes/device-clients.js";
+
+const mockNcGenerate = vi.mocked(ncGenerateAppPassword);
+const mockNcDelete = vi.mocked(ncDeleteAppPassword);
+const mockResolveNcToken = vi.mocked(resolveNcToken);
+const mockCacheGet = vi.mocked(cacheGet);
+
+const MAX_CLAIM = 20;
+
+function makeApp(username: string | null = "owner-1") {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    if (username) {
+      (req as any).user = { username };
+    }
+    next();
+  });
+  app.use("/api", createDeviceClientsRouter(mockPrisma as any));
+  // Minimal error handler so next(err) yields a 500 rather than hanging.
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      _next: express.NextFunction,
+    ) => {
+      res.status(500).json({ error: "internal" });
+    },
+  );
+  return app;
+}
+
+function validRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "pc-1",
+    code: "ABC123",
+    userId: "owner-1",
+    used: false,
+    claimedBy: null,
+    expiresAt: new Date(Date.now() + 60_000),
+    ...overrides,
+  };
+}
+
+function claim(app: express.Express) {
+  return request(app)
+    .post("/api/devices/pair/claim")
+    .send({ code: "ABC123", deviceName: "MacBook", appVersion: "1.0.0" });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Restore the default transaction runner after clearAllMocks wipes impls.
+  mockPrisma.$transaction.mockImplementation(
+    async (fn: (tx: typeof mockPrisma) => unknown) => fn(mockPrisma),
+  );
+  // Sensible defaults that individual tests override.
+  mockCacheGet.mockResolvedValue(null);
+  mockResolveNcToken.mockResolvedValue("nc-session-token");
+  mockNcGenerate.mockResolvedValue("nc-app-pw");
+  mockNcDelete.mockResolvedValue(undefined as never);
+});
+
+describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => {
+  it("claims a valid code: consumes atomically via updateMany and returns credentials", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(validRecord());
+    mockPrisma.pairingCode.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.deviceClient.create.mockResolvedValue({ id: "client-1" });
+    mockPrisma.pairingCode.update.mockResolvedValue({});
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(200);
+    expect(res.body.deviceId).toBe("client-1");
+    expect(res.body.appPassword).toBe("nc-app-pw");
+    expect(res.body.ncUsername).toBe("owner-1");
+    // The authoritative gate is the conditional updateMany, not the in-memory read.
+    expect(mockPrisma.pairingCode.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "pc-1", used: false },
+        data: expect.objectContaining({ used: true }),
+      }),
+    );
+    // Consume + create happen inside one transaction.
+    expect(mockPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(mockPrisma.deviceClient.create).toHaveBeenCalledOnce();
+    // Winner keeps the credential — no compensation.
+    expect(mockNcDelete).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 when the conditional consume loses the race (count===0) and compensates the app password", async () => {
+    // The pre-read still sees a usable row (read happened before the winner
+    // committed) ...
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(validRecord());
+    // ... but the atomic conditional consume finds no unused row to flip.
+    mockPrisma.pairingCode.updateMany.mockResolvedValue({ count: 0 });
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("Pairing code already used");
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+    // The app password was minted before the tx, so the loser must compensate.
+    expect(mockNcDelete).toHaveBeenCalledWith("nc-app-pw");
+  });
+
+  it("two parallel claims of one code → exactly one 200, the other 409, exactly one DeviceClient", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(validRecord());
+    mockPrisma.deviceClient.create.mockResolvedValue({ id: "client-1" });
+    mockPrisma.pairingCode.update.mockResolvedValue({});
+
+    // First conditional consume flips used=false→true (count 1); every
+    // subsequent one finds no unused row (count 0). Models the DB's atomic
+    // single-row update under a race.
+    let consumed = false;
+    mockPrisma.pairingCode.updateMany.mockImplementation(async () => {
+      if (consumed) return { count: 0 };
+      consumed = true;
+      return { count: 1 };
+    });
+
+    const [a, b] = await Promise.all([claim(makeApp()), claim(makeApp())]);
+
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]);
+
+    const ok = a.status === 200 ? a : b;
+    const lost = a.status === 409 ? a : b;
+    expect(ok.body.deviceId).toBe("client-1");
+    expect(lost.body.error).toBe("Pairing code already used");
+
+    // Exactly one DeviceClient minted across both racers.
+    expect(mockPrisma.deviceClient.create).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back the consume and compensates the app password when DeviceClient create fails", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(validRecord());
+    mockPrisma.pairingCode.updateMany.mockResolvedValue({ count: 1 });
+    // The create fails AFTER the consume inside the transaction.
+    mockPrisma.deviceClient.create.mockRejectedValue(new Error("db boom"));
+
+    const res = await claim(makeApp());
+
+    // Failure surfaces via the error handler (500), not a silent success.
+    expect(res.status).toBe(500);
+    // The transaction was entered (consume happened inside it, so a throw rolls
+    // it back → the code stays reusable).
+    expect(mockPrisma.$transaction).toHaveBeenCalledOnce();
+    // The orphaned Nextcloud app password is compensated (deleted).
+    expect(mockNcDelete).toHaveBeenCalledWith("nc-app-pw");
+  });
+
+  it("rejects an already-used code at read time with 409 (fast path)", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(
+      validRecord({ used: true }),
+    );
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("Pairing code already used");
+    expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+    // No credential generated for a code already consumed.
+    expect(mockNcGenerate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired code with 410 and never reaches the consume", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(
+      validRecord({ expiresAt: new Date(Date.now() - 1_000) }),
+    );
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(410);
+    expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown code with 404", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(null);
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(404);
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an owner mismatch with 403 before minting any credential", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(
+      validRecord({ userId: "someone-else" }),
+    );
+
+    const res = await claim(makeApp("owner-1"));
+
+    expect(res.status).toBe(403);
+    expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
+    expect(mockNcGenerate).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 when the Nextcloud session is unavailable (no consume)", async () => {
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(validRecord());
+    mockResolveNcToken.mockResolvedValue(null);
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(401);
+    expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+  });
+
+  it("rate-limits claims by IP with 429", async () => {
+    mockCacheGet.mockResolvedValue(MAX_CLAIM);
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(429);
+    expect(mockPrisma.pairingCode.findUnique).not.toHaveBeenCalled();
+  });
+});

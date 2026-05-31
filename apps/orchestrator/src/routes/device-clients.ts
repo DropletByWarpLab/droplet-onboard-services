@@ -19,6 +19,19 @@ import {
 
 const logger = pino({ name: "device-clients-route" });
 
+/**
+ * Thrown inside the claim transaction when the atomic conditional consume
+ * (`updateMany WHERE used=false`) flips zero rows — i.e. another request
+ * already claimed the code. Throwing rolls back the transaction and signals
+ * the handler to respond 409 (and compensate the pre-minted app password).
+ */
+class PairingCodeAlreadyClaimedError extends Error {
+  constructor() {
+    super("pairing code already claimed");
+    this.name = "PairingCodeAlreadyClaimedError";
+  }
+}
+
 // ── Tunables ──
 const PAIRING_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const PAIRING_CODE_LENGTH = 6;
@@ -217,6 +230,10 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      // Cheap pre-validation only. The AUTHORITATIVE single-use gate is the
+      // conditional updateMany in the transaction below — a `used` read here is
+      // just a fast-path 409 to avoid minting a credential for an already-
+      // consumed code.
       const record = await prisma.pairingCode.findUnique({
         where: { code: parsed.data.code },
       });
@@ -253,7 +270,11 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       const deviceType = meta?.deviceType ?? "desktop";
       const platform = meta?.platform ?? "other";
 
-      // Mint a dedicated Nextcloud app password for this device.
+      // Mint a dedicated Nextcloud app password for this device. Done BEFORE
+      // the DB transaction on purpose: it is a slow external call and must not
+      // hold an interactive Postgres transaction open. The trade-off is that we
+      // may mint a password for a claim that then loses the atomic consume race
+      // or fails to persist — both compensated below by deleting it.
       const ncToken = await resolveNcToken(req);
       if (!ncToken) {
         res.status(401).json({
@@ -269,23 +290,66 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      // Store the encrypted password + mark the code consumed in a single tx.
       const encrypted = encryptSecret(appPassword);
-      const client = await prisma.deviceClient.create({
-        data: {
-          userId: callerUser,
-          deviceName,
-          deviceType,
-          platform,
-          appVersion: parsed.data.appVersion ?? null,
-          ncAppPassword: encrypted,
-          status: "active",
-        },
-      });
-      await prisma.pairingCode.update({
-        where: { id: record.id },
-        data: { used: true, claimedBy: client.id },
-      });
+
+      let client: { id: string };
+      try {
+        // Atomic single-use consume + create in ONE transaction. The
+        // conditional updateMany flips used=false→true for exactly one racer
+        // (Postgres row lock serializes concurrent claimers); the loser gets
+        // count===0 and we throw PairingCodeAlreadyClaimedError → 409. If the
+        // create throws, the whole transaction rolls back, so the consume is
+        // undone and the code stays reusable (no code burned without a
+        // credential issued).
+        client = await prisma.$transaction(async (tx) => {
+          const consume = await tx.pairingCode.updateMany({
+            where: { id: record.id, used: false },
+            data: { used: true },
+          });
+          if (consume.count === 0) {
+            throw new PairingCodeAlreadyClaimedError();
+          }
+
+          const created = await tx.deviceClient.create({
+            data: {
+              userId: callerUser,
+              deviceName,
+              deviceType,
+              platform,
+              appVersion: parsed.data.appVersion ?? null,
+              ncAppPassword: encrypted,
+              status: "active",
+            },
+          });
+
+          await tx.pairingCode.update({
+            where: { id: record.id },
+            data: { claimedBy: created.id },
+          });
+
+          return created;
+        });
+      } catch (err) {
+        // The transaction rolled back (consume undone → code reusable). The
+        // Nextcloud app password was minted before the transaction, so
+        // compensate by deleting it — otherwise a lost race or a failed
+        // persist leaks a live credential.
+        try {
+          await ncDeleteAppPassword(appPassword);
+        } catch (compErr) {
+          logger.warn(
+            { err: compErr },
+            "Failed to compensate (delete) Nextcloud app password after claim rollback",
+          );
+        }
+
+        if (err instanceof PairingCodeAlreadyClaimedError) {
+          res.status(409).json({ error: "Pairing code already used" });
+          return;
+        }
+        throw err;
+      }
+
       await cacheDel(`pair:meta:${parsed.data.code}`);
 
       safePublish(`droplet/devices/${callerUser}/paired`, {
