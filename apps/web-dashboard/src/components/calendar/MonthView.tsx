@@ -126,7 +126,7 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay }: Props)
                   className={[
                     "type-caption-1 tabular-nums inline-flex items-center justify-center h-5 min-w-[20px] px-1 rounded-full",
                     isToday
-                      ? "bg-accent text-white font-semibold"
+                      ? "bg-accent text-accent-foreground font-semibold"
                       : inMonth
                         ? "text-label-secondary"
                         : "text-label-tertiary",
