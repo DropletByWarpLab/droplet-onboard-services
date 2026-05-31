@@ -18,9 +18,11 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
 /**
  * Customer-facing first-run wizard.
  *
- * Stateless setup detection (Nextcloud user check via /api/auth/setup)
- * gates whether `AuthGate` routes the customer here at all; once they
- * land we walk them through the wizard step machine.
+ * PR #372 — `AuthGate` routes the customer here when the explicit
+ * `/api/setup/state` machine reports the appliance is "unclaimed" (no
+ * longer the stateless Nextcloud `installed` check). Once they land we
+ * walk them through the wizard step machine, resuming at the persisted
+ * `setupState.setupStep`.
  *
  * Each step is its own component under `components/setup/steps/`. This
  * page only owns:
