@@ -30,7 +30,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger("droplet.bridge")
 
@@ -716,6 +716,49 @@ def _bus_for(device):
     return "disk"
 
 
+# WARP-612: SMART health + temperature. OFF by default — smartctl spins up
+# disks and adds a subprocess per drive, which we don't want on the 10s drive
+# poll. Operators opt in with DRIVE_SMART_ENABLED=true; results are cached per
+# device for 5 min so even then smartctl isn't hammered. Best-effort: any
+# failure (smartctl absent, not root, a USB bridge without SAT passthrough)
+# yields (None, None) and the dashboard simply hides the SMART/temp chips.
+SMART_ENABLED = os.environ.get(
+    "DRIVE_SMART_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+_smart_cache = {}  # device -> (checked_at, health, temp_c)
+_SMART_TTL_S = 300
+
+
+def _smart_for(device):
+    """Return (health, temp_c) for a device. health is 'PASSED'/'FAILED'/None;
+    temp_c is an int °C or None. Gated by DRIVE_SMART_ENABLED, cached 5 min,
+    never raises."""
+    if not SMART_ENABLED or not device:
+        return None, None
+    now = time.time()
+    hit = _smart_cache.get(device)
+    if hit and now - hit[0] < _SMART_TTL_S:
+        return hit[1], hit[2]
+    health = None
+    temp = None
+    _rc, out, _err = _run(["smartctl", "-H", "-A", device], timeout=8)
+    for line in (out or "").splitlines():
+        low = line.lower()
+        if "overall-health" in low:
+            if "passed" in low:
+                health = "PASSED"
+            elif "failed" in low:
+                health = "FAILED"
+        elif temp is None and "temperature" in low:
+            for tok in line.replace("(", " ").replace(")", " ").split():
+                if tok.isdigit():
+                    v = int(tok)
+                    if 0 < v < 120:  # plausible drive temp in °C
+                        temp = v
+                        break
+    _smart_cache[device] = (now, health, temp)
+    return health, temp
+
+
 # Filesystem types we consider "data storage" worth surfacing in the UI.
 # Excludes tmpfs, devtmpfs, cgroup, overlay, squashfs, procfs, sysfs, etc.
 _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
@@ -828,6 +871,7 @@ def drives_snapshot(invalidate=False):
             # deferred eject/fsck work will trust it — for a data-integrity-first
             # product an unknown state must not present as writable.
             fs, readonly = mount_meta.get(mp, ("", True))
+            smart, temp = _smart_for(m.get("device"))  # one smartctl pass, not two
             by_mount[mp] = {
                 "device": m.get("device"),
                 "mount": mp,
@@ -840,6 +884,8 @@ def drives_snapshot(invalidate=False):
                 "fs": fs,
                 "bus": _bus_for(m.get("device")),
                 "readonly": readonly,
+                "smart": smart,
+                "temp_c": temp,
                 "source": "automount",
             }
     except Exception:
@@ -874,6 +920,7 @@ def drives_snapshot(invalidate=False):
                 if total < _MIN_DRIVE_BYTES:
                     continue
                 label, uuid = _label_and_uuid_for(dev)
+                smart, temp = _smart_for(dev)  # one smartctl pass, not two
                 by_mount[mp] = {
                     "device": dev,
                     "mount": mp,
@@ -887,6 +934,8 @@ def drives_snapshot(invalidate=False):
                     "bus": _bus_for(dev),
                     # Same fail-safe default as the automount branch above.
                     "readonly": mount_meta.get(mp, (fs, True))[1],
+                    "smart": smart,
+                    "temp_c": temp,
                     "source": "fstab",
                 }
     except Exception:
@@ -906,6 +955,53 @@ def drives_snapshot(invalidate=False):
     _drives_cache["snap"] = snap
     _drives_cache["at"] = now
     return snap
+
+
+def eject_drive(uuid):
+    """Safely unmount + forget a hot-plug USB drive by FS UUID (WARP-612).
+
+    Guarded hard — only ever acts on a drive that (a) is in the automount
+    state file, (b) is mounted under /mnt/droplet/<…>, and (c) sits on a USB
+    bus (sd*). Internal NVMe, the eMMC boot medium, and fstab-installed mounts
+    are NEVER ejectable. Does not use `umount -l`: a busy drive should fail
+    loudly so the user closes files and retries, not silently lazy-unmount.
+    Returns (ok, message_or_dict). Never raises.
+    """
+    if not uuid:
+        return False, "missing uuid"
+    state_path = "/var/lib/droplet-automount/mounts.json"
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        return False, "automount state unreadable: {}".format(e)
+    mounts = state.get("mounts", [])
+    target = next((m for m in mounts if (m.get("uuid") or "") == uuid), None)
+    if not target:
+        return False, "no hot-plug drive with that uuid"
+    mp = (target.get("mount") or "").rstrip("/")
+    dev = target.get("device") or ""
+    if not mp.startswith("/mnt/droplet/") or mp == "/mnt/droplet":
+        return False, "refusing to eject a non-/mnt/droplet mount"
+    if _bus_for(dev) != "usb":
+        return False, "refusing to eject a non-USB device ({})".format(_bus_for(dev))
+    _run(["sync"], timeout=10)
+    rc, _out, err = _run(["umount", mp], timeout=20)
+    if rc != 0:
+        return False, (err.strip() or "umount failed — the drive may be in use")
+    # Forget it so the next snapshot drops it. umount already succeeded, so a
+    # write failure here only leaves a stale entry that self-heals (the next
+    # snapshot skips it via the os.path.ismount check).
+    state["mounts"] = [m for m in mounts if (m.get("uuid") or "") != uuid]
+    try:
+        tmp = state_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, state_path)
+    except Exception:                                               # noqa: BLE001
+        pass
+    drives_snapshot(invalidate=True)
+    return True, {"ejected": uuid, "mount": mp}
 
 
 def cameras_snapshot():
@@ -1015,6 +1111,19 @@ class Handler(BaseHTTPRequestHandler):
             # we just want to force the next GET /drives to re-read.
             drives_snapshot(invalidate=True)
             return self._send(200, {"ok": True})
+        if self.path.startswith("/drives/") and self.path.endswith("/eject"):
+            # WARP-612: unmount + forget a hot-plug USB drive. Auth-gated like
+            # the other mutating routes; eject_drive() itself refuses anything
+            # that isn't a USB mount under /mnt/droplet/.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            uuid = unquote(self.path[len("/drives/"):-len("/eject")])
+            ok, info = eject_drive(uuid)
+            if not ok:
+                # 409 Conflict — the drive is busy or not ejectable; the
+                # caller surfaces the message and the user retries.
+                return self._send(409, {"ok": False, "error": info})
+            return self._send(200, {"ok": True, **(info if isinstance(info, dict) else {})})
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})

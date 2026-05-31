@@ -24,6 +24,18 @@ const logger = pino({ name: "storage-route" });
  */
 const BRIDGE_URL = process.env.BRIDGE_URL || "http://172.17.0.1:9090";
 
+// WARP-612: shared secret the device-bridge requires on mutating routes
+// (eject). Mirrors the bridge's own env precedence. Read per-request (see the
+// eject handler) so a deployment that injects the secret after boot — and the
+// tests — see the current value rather than a boot-time snapshot.
+function bridgeAuthToken(): string {
+  return (
+    process.env.BRIDGE_AUTH_TOKEN ||
+    process.env.SERVICE_TOKEN_DISPLAY ||
+    ""
+  ).trim();
+}
+
 interface BridgeDrive {
   device: string;
   mount: string;
@@ -39,6 +51,11 @@ interface BridgeDrive {
   fs?: string;
   bus?: string;
   readonly?: boolean;
+  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present
+   *  only when the bridge has DRIVE_SMART_ENABLED and smartctl can read the
+   *  device; null/absent otherwise. The dashboard hides the chips when null. */
+  smart?: string | null;
+  temp_c?: number | null;
 }
 
 /** Mirror of the bridge's `_bus_for` so the dashboard always has a bus class
@@ -265,6 +282,53 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       return res.json({ ok: true });
     } catch (err) {
       logger.warn({ err }, "Failed to trigger drive rescan");
+      return res
+        .status(502)
+        .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  /**
+   * POST /api/storage/drives/:uuid/eject — unmount + forget a hot-plug USB
+   * drive (WARP-612). Admin-only. Forwards to the device-bridge's auth-gated
+   * /drives/:uuid/eject, which itself refuses anything that isn't a USB mount
+   * under /mnt/droplet/. Requires a bridge auth token; 503 if the deployment
+   * hasn't provisioned one. A 409 from the bridge (drive busy / not ejectable)
+   * is surfaced verbatim so the user can close files and retry.
+   */
+  router.post("/storage/drives/:uuid/eject", async (req, res) => {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    const { uuid } = req.params;
+    if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid)) {
+      return res.status(400).json({ error: "Invalid drive UUID" });
+    }
+    const bridgeToken = bridgeAuthToken();
+    if (!bridgeToken) {
+      return res.status(503).json({
+        ok: false,
+        error: "Drive eject is unavailable — the device-bridge auth token is not configured.",
+      });
+    }
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 25000);
+      const r = await fetch(`${BRIDGE_URL}/drives/${encodeURIComponent(uuid)}/eject`, {
+        method: "POST",
+        headers: { "X-Droplet-Auth": bridgeToken },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      const body = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) {
+        return res
+          .status(r.status === 409 ? 409 : 502)
+          .json({ ok: false, error: body.error || `bridge returned ${r.status}` });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      logger.warn({ err, uuid }, "Failed to eject drive");
       return res
         .status(502)
         .json({ ok: false, error: (err as Error).message || "bridge unreachable" });

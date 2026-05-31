@@ -396,6 +396,11 @@ export interface DriveInfo {
   bus?: string;
   fs?: string;
   readonly?: boolean;
+  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present only
+   *  when the bridge has DRIVE_SMART_ENABLED and smartctl can read the device;
+   *  the UI hides the chips when absent. */
+  smart?: string | null;
+  temp_c?: number | null;
   /** WARP-174: customer's friendly name from the setup wizard's Storage
    *  step. `null` until a Drive row is upserted via
    *  PATCH /api/storage/drives/:uuid. */
