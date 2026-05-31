@@ -3,16 +3,25 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { Check, Lock, User, Eye, EyeOff } from "lucide-react";
+import { Check } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
 import { translateError } from "@/lib/friendly-errors";
+import { AuroraPanel } from "@/components/auth/AuroraPanel";
+import { SignInForm } from "@/components/auth/SignInForm";
+
+/** Only allow same-origin path redirects from `?next=` (no open redirect). */
+function safeNext(next: string | null): string {
+  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
+  return next;
+}
 
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { login } = useAuth();
   const fromSetup = searchParams.get("from") === "setup";
-  const [username, setUsername] = useState("");
+
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,15 +30,18 @@ export default function LoginPage() {
   async function handleLogin() {
     setError(null);
 
-    if (!username.trim() || !password.trim()) {
-      setError("Username and password are required");
+    if (!email.trim() || !password.trim()) {
+      setError("Enter your work email and password to continue.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await login(username, password);
-      router.push("/");
+      // The built-in directory keys on email in a later PR; today the
+      // orchestrator validates the identifier as a username, so we pass it
+      // through unchanged.
+      await login(email.trim(), password);
+      router.push(safeNext(searchParams.get("next")));
     } catch (err) {
       // WARP-294: never render err.message verbatim — orchestrator may
       // surface terse strings like "OCS 401" / "connect ECONNREFUSED".
@@ -40,86 +52,46 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-surface-primary flex items-center justify-center p-4">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
-          <div className="flex items-center justify-center mx-auto mb-4">
-            <DropletMark size={40} className="text-accent" aria-label="Droplet" />
+    <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
+      <AuroraPanel className="hidden lg:flex" />
+
+      <div className="flex items-center justify-center p-6 sm:p-10">
+        <div className="w-full max-w-[380px]">
+          {/* Compact wordmark — stands in for the brand panel on small screens */}
+          <div className="lg:hidden flex items-center gap-2 mb-8">
+            <DropletMark size={24} className="text-accent" aria-label="Droplet" />
+            <span className="type-headline text-label-primary">Droplet</span>
           </div>
-          <h1 className="type-title-1 text-label-primary">Sign in</h1>
-          <p className="type-subheadline text-label-secondary mt-1">
-            Access your Droplet dashboard
+
+          <h1 className="type-title-1 text-label-primary">Welcome back</h1>
+          <p className="type-subheadline text-label-secondary mt-1.5 mb-6">
+            Sign in to your Droplet workspace.
           </p>
-        </div>
 
-        {fromSetup && (
-          <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
-            <Check size={16} className="flex-shrink-0" />
-            <p className="type-subheadline">
-              Setup already completed. Sign in to access your dashboard.
-            </p>
-          </div>
-        )}
-
-        <div className="space-y-4">
-          <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
-              Username
-            </label>
-            <div className="relative">
-              <User size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary" />
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Username"
-                autoComplete="username"
-                className="dp-input pl-10"
-                autoFocus
-              />
+          {fromSetup && (
+            <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
+              <Check size={16} className="flex-shrink-0" aria-hidden="true" />
+              <p className="type-subheadline">
+                Setup already completed. Sign in to access your dashboard.
+              </p>
             </div>
-          </div>
-
-          <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
-              Password
-            </label>
-            <div className="relative">
-              <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary" />
-              <input
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                autoComplete="current-password"
-                className="dp-input pl-10 pr-10"
-                onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                aria-label={showPassword ? "Hide password" : "Show password"}
-                aria-pressed={showPassword}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary"
-              >
-                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-          </div>
-
-          {error && (
-            <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
-              {error}
-            </p>
           )}
 
-          <button
-            onClick={handleLogin}
-            disabled={isSubmitting}
-            className="dp-btn-primary w-full"
-          >
-            {isSubmitting ? "Signing in..." : "Sign In"}
-          </button>
+          <SignInForm
+            email={email}
+            password={password}
+            showPassword={showPassword}
+            onEmailChange={setEmail}
+            onPasswordChange={setPassword}
+            onTogglePassword={() => setShowPassword((s) => !s)}
+            onSubmit={handleLogin}
+            error={error}
+            submitting={isSubmitting}
+          />
+
+          <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">
+            Sign-in happens on your local network — nothing leaves the box.
+          </p>
         </div>
       </div>
     </div>
