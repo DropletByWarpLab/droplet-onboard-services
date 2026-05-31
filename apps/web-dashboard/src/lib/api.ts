@@ -55,6 +55,7 @@ import type {
   VpnStatusInfo,
   VpnPeerCreatedInfo,
   DuckDnsStatus,
+  ToolCatalogResponse,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -2430,6 +2431,24 @@ export async function transcribeNow(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `transcribe-now failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Tools (WARP-555) ---
+
+/**
+ * Read-only catalog of the built-in tools the agent can call, grouped by
+ * domain, for the `/tools` surface. Backed by `GET /api/llm/tools/catalog`
+ * which reads `@droplet/tools-core`'s in-process registry (no MCP child),
+ * so it stays available even when the agent runtime is mid-restart. The
+ * orchestrator RBAC-filters write tools for non-privileged roles.
+ */
+export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
+  const res = await authFetch(`${BASE}/api/llm/tools/catalog`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load tools: ${res.status}`);
   }
   return res.json();
 }

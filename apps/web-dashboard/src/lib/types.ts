@@ -1056,3 +1056,22 @@ export interface ScheduleEvent {
   reason: string;
   occurredAt: string;
 }
+
+// WARP-555 — read-only tool capability catalog (`/tools` surface).
+// Mirrors the `GET /api/llm/tools/catalog` wire shape, which is derived
+// from `@droplet/tools-core`'s TOOL_CATALOG. `domain` is one of the
+// orchestrator's declared tool domains; it arrives as a string so the
+// dashboard never has to stay in lockstep with the registry's union.
+export interface ToolCatalogEntry {
+  name: string;
+  description: string;
+  domain: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+}
+
+export interface ToolCatalogResponse {
+  tools: ToolCatalogEntry[];
+  /** Domains in the orchestrator's canonical IA order — drives filter order. */
+  domains: string[];
+}
