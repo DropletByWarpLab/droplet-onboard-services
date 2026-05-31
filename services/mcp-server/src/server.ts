@@ -14,20 +14,39 @@ import { canCallTool, filterToolsForRole } from "./rbac.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
-export function createServer(deps: ContextDeps, claims?: Claims) {
+/**
+ * The caller's trust posture, declared explicitly by the transport that
+ * constructs the server. Trust is an AFFIRMATIVE input — it is NEVER inferred
+ * from the absence of a claims object (WARP-563). Two postures exist:
+ *
+ *   - `local-trusted` — the in-process stdio child the orchestrator spawns.
+ *     This is the ONLY trusted path: every tool is available and RBAC is
+ *     bypassed. It carries no principal claims by construction.
+ *   - `authenticated` — the network-facing HTTP transport. Untrusted: the
+ *     verified-JWT `claims` are required and RBAC is enforced on every
+ *     `tools/list` / `tools/call`.
+ *
+ * Fail-closed: any value that is not `local-trusted` (including a future
+ * transport that forgets to declare a posture) yields `trustedPrincipal =
+ * false` and an undefined role, so the rbac.ts helpers deny write tools.
+ */
+export type TrustContext =
+  | { kind: "local-trusted" }
+  | { kind: "authenticated"; claims: Claims };
+
+export function createServer(deps: ContextDeps, trust: TrustContext) {
+  // Trust is derived solely from the declared posture, not from the presence
+  // or absence of claims. Only `local-trusted` is trusted; everything else
+  // (authenticated, or any unrecognized shape) is untrusted and RBAC-gated.
+  const trustedPrincipal = trust.kind === "local-trusted";
+  const claims: Claims | undefined =
+    trust.kind === "authenticated" ? trust.claims : undefined;
+
   const server = new Server(SERVER_INFO, {
     capabilities: {
       tools: {},
     },
   });
-
-  // Trust is derived from transport selection, not from the role value.
-  // `claims === undefined` ONLY happens on the stdio in-proc path — the
-  // orchestrator agent spawning the mcp-server child does not pass any
-  // claims. The HTTP transport always synthesizes a `Claims` object from
-  // the verified JWT (even if `role` is undefined inside it), so an HTTP
-  // request can never set `trustedPrincipal: true`.
-  const trustedPrincipal = claims === undefined;
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     // Per spec §6.3 + §12 (WARP-103): tools/list is filtered by the
