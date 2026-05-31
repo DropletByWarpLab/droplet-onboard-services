@@ -255,59 +255,65 @@ configure_single_box_env() {
     return 1
   fi
 
-  # --- Append the single-box block ----------------------------------------
-  cat >> "$env_file" << 'EOF'
+  # --- Idempotent upsert of the single-box knobs (WARP-556) ----------------
+  # The base .env (generate_env + lib/compose.sh) already sets several of
+  # these keys (COMPOSE_PROFILES, OLLAMA_URL, ROUTING_MODE). A blind `>>`
+  # append duplicated them — harmless under `.env` last-wins, but fragile (a
+  # reorder flips OLLAMA_URL to the non-resolving host) and confusing to an
+  # operator debugging a fresh install. upsert_env strips any existing copy
+  # of a key before writing it, so re-running setup.sh never duplicates one.
+  upsert_env() {
+    local key="$1" val="$2"
+    if grep -qE "^${key}=" "$env_file"; then
+      # 0600 tmp (umask) so the secrets-bearing .env never transits world-
+      # readable; cat>file (not mv) preserves the original perms + inode.
+      ( umask 077; grep -vE "^${key}=" "$env_file" > "${env_file}.tmp" )
+      cat "${env_file}.tmp" > "$env_file"
+      rm -f "${env_file}.tmp"
+    fi
+    printf '%s=%s\n' "$key" "$val" >> "$env_file"
+  }
+
+  # COMPOSE_PROFILES is MERGED, not overwritten: keep whatever lib/compose.sh
+  # already set (`linux` for Frigate, `display` for the OLED sim) and add
+  # `single-box` (bundled ollama + openwrt). The old overwrite silently
+  # dropped `display`.
+  local existing_profiles merged_profiles
+  existing_profiles=$(grep -E '^COMPOSE_PROFILES=' "$env_file" | tail -1 | cut -d= -f2-)
+  case ",${existing_profiles}," in
+    *,single-box,*) merged_profiles="$existing_profiles" ;;
+    ,,)             merged_profiles="single-box" ;;
+    *)              merged_profiles="${existing_profiles},single-box" ;;
+  esac
+
+  # One-time descriptive header (idempotent — only on the first write).
+  if ! grep -q 'Single-box deployment knobs' "$env_file"; then
+    cat >> "$env_file" << 'EOF'
 
 # ============================================================================
 # Single-box deployment knobs (managed by scripts/lib/single-box.sh —
-# re-run setup.sh --regenerate-env to reset; see docs/SINGLE_BOX.md for
-# the deployment matrix).
+# re-run setup.sh --regenerate-env to reset; see docs/SINGLE_BOX.md).
+#   COMPOSE_PROFILES     linux (Frigate) + display (OLED sim) + single-box
+#   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
+#   OLLAMA_URL           compose-internal `ollama` service
+#   OPENSSL_CONF/FIPS/TPM consumer x86 has no FIPS OpenSSL / TPM 2.0
+#   LLM_MODEL            THE one model (architecture-guard one-model rule)
+#   OPENWRT_*            bundled openwrt container at 127.0.0.1:8181
 # ============================================================================
-# Compose profile selector — appends `single-box` to whatever's already there.
-# `linux` is needed for Frigate (set by lib/compose.sh on Linux hosts).
-# `single-box` activates the bundled ollama + openwrt services in
-# docker/docker-compose.yml.
-COMPOSE_PROFILES=linux,single-box
-
-# Frigate detects on the iGPU because the dGPU is reserved for Ollama.
-# AMD Raphael surfaces at renderD129 when an RDNA dGPU is at renderD128.
-FRIGATE_RENDER_NODE=/dev/dri/renderD129
-
-# Ollama uses the dGPU (default renderD128, no override needed unless
-# the host enumerates differently).
-# OLLAMA_RENDER_NODE=/dev/dri/renderD128
-
-# ai-gateway → compose-internal `ollama` service (bypasses the legacy
-# inference-engine.local mDNS path; works on single-box because the
-# ollama service runs alongside ai-gateway on the same compose network).
-OLLAMA_URL=http://ollama:11434
-
-# FIPS off: consumer x86 hosts don't ship a FIPS-validated OpenSSL build,
-# and the FIPS profile rejects Postgres TLS handshake ciphers (P1011).
-OPENSSL_CONF=
-DROPLET_FIPS_REQUIRED=false
-
-# No TPM 2.0 on consumer Ryzen — fall back to the mock backend.
-DROPLET_TPM_BACKEND=mock
-
-# The one model — voice-io, dashboard, orchestrator's model-readiness
-# service all read this. Per the architecture-guard one-model-rule, this
-# is THE model across all surfaces. gpt-oss:20b is the single-box default
-# per droplet-local-LLM manifest; the orchestrator's model-readiness
-# service auto-pulls it on first boot if Ollama doesn't have it yet, so
-# a clean rebuild produces a working dashboard ~20 min after `setup.sh`
-# finishes with no manual `ollama pull`.
-LLM_MODEL=gpt-oss:20b
-
-# Routing service talks to the bundled openwrt container at host
-# loopback :8181 (openwrt's published port-forward). OPENWRT_USERNAME
-# is root because that's the only authenticated rpcd user we provision
-# on single-box (its password lives in docker/secrets/openwrt_password).
-OPENWRT_HOST=127.0.0.1
-OPENWRT_PORT=8181
-OPENWRT_USERNAME=root
-ROUTING_MODE=real
 EOF
+  fi
 
-  log_success "Wrote single-box knobs to .env (COMPOSE_PROFILES=linux,single-box, FRIGATE_RENDER_NODE, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt at 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b)"
+  upsert_env COMPOSE_PROFILES    "$merged_profiles"
+  upsert_env FRIGATE_RENDER_NODE /dev/dri/renderD129
+  upsert_env OLLAMA_URL          http://ollama:11434
+  upsert_env OPENSSL_CONF        ""
+  upsert_env DROPLET_FIPS_REQUIRED false
+  upsert_env DROPLET_TPM_BACKEND mock
+  upsert_env LLM_MODEL           gpt-oss:20b
+  upsert_env OPENWRT_HOST        127.0.0.1
+  upsert_env OPENWRT_PORT        8181
+  upsert_env OPENWRT_USERNAME    root
+  upsert_env ROUTING_MODE        real
+
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b)"
 }
