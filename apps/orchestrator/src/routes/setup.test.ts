@@ -141,6 +141,46 @@ describe("PATCH /api/setup/state", () => {
     expect(res.body.appliance).toBe("ready");
   });
 
+  it("persists ready through the route → a later GET still reports ready (finish → persist → refresh)", async () => {
+    // The wizard-finish seam the reviewer flagged: PATCH appliance:ready must
+    // DURABLY flip the explicit state column, so a subsequent GET (hard
+    // refresh) reads ready and the dashboard does not re-trap the owner in
+    // the wizard. Drives the real markApplianceReady, not a seeded row.
+    const app = buildApp(prisma);
+    const patch = await request(app)
+      .patch("/api/setup/state")
+      .send({ appliance: "ready" });
+    expect(patch.status).toBe(200);
+    expect(patch.body).toEqual({
+      appliance: "ready",
+      setup_step: "done",
+      user_tour_completed: false,
+    });
+
+    const get = await request(app).get("/api/setup/state");
+    expect(get.body.appliance).toBe("ready");
+    expect(get.body.setup_step).toBe("done");
+  });
+
+  it("is idempotent — finishing twice (re-PATCH on a ready appliance) is a 200 no-op, not an error", async () => {
+    // Refreshing on /done, or DoneStep mounting again, re-fires the finish
+    // PATCH. markApplianceReady on an already-ready appliance must be a
+    // harmless no-op so the owner never sees an error on the last screen.
+    const app = buildApp(prisma);
+    const first = await request(app)
+      .patch("/api/setup/state")
+      .send({ appliance: "ready" });
+    expect(first.status).toBe(200);
+    expect(first.body.appliance).toBe("ready");
+
+    const second = await request(app)
+      .patch("/api/setup/state")
+      .send({ appliance: "ready" });
+    expect(second.status).toBe(200);
+    expect(second.body.appliance).toBe("ready");
+    expect(second.body.setup_step).toBe("done");
+  });
+
   it("marks the tour completed", async () => {
     const app = buildApp(prisma);
     const res = await request(app)
