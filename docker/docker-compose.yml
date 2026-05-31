@@ -1012,9 +1012,8 @@ services:
   # opt-in. PM_PILOT deploys them by NAME (which starts a profiled service
   # regardless of profile activation), so the pilot flow is unaffected.
   # Without this gate they sit in the default profile, so a plain
-  # `docker compose up` / setup.sh tries to start them on EVERY box — and
-  # since pm-worker's image 404s (see below) that aborts the whole stack
-  # Start on a non-PM provision. WARP-496 / ADR-010.
+  # `docker compose up` / setup.sh tries to start them on EVERY box and
+  # incur the full Plane image download on non-PM provisions. WARP-496 / ADR-010.
   postgres-pm:
     image: postgres:15-alpine
     container_name: droplet-postgres-pm
@@ -1068,13 +1067,12 @@ services:
       WEB_URL: ${DROPLET_PM_WEB_URL:-}
 
   pm-worker:
-    # FIXME(WARP-496): makeplane/plane-worker:v0.24.1 does NOT exist on Docker
-    # Hub (pull 404). Plane runs the worker from the backend image with a
-    # celery command, not a dedicated image. The correct image + command must
-    # be verified against the Plane v0.24.1 deploy (ADR-010 OQ3) before the
-    # `pm` profile can actually start. Gated below so it cannot block a
-    # non-PM provision in the meantime.
-    image: makeplane/plane-worker:v0.24.1
+    # Plane does not publish a standalone worker image. The Celery worker runs
+    # from the same backend image as pm-api via the bundled entrypoint — this
+    # is the upstream-canonical single-box deployment topology (ADR-010 OQ3).
+    # Reusing the already-pulled pm-api image means no extra download. (WARP-575)
+    image: makeplane/plane-backend:v0.24.1
+    command: ["./bin/docker-entrypoint-worker.sh"]
     container_name: droplet-pm-worker
     profiles: ["pm"]
     restart: unless-stopped
