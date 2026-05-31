@@ -753,13 +753,11 @@ test_tsc_full_uses_workspace_pinned_prisma() {
 # eventually has to swing through and clean them up. WARP-494 makes that
 # a static check that fails the gate on re-introduction.
 #
-# Note: this check covers the LEGACY repo names only. The sibling rename
-# `droplet-pi-platform` → `droplet-onboard-services` is intentionally
-# excluded from the check until the compose project-name + container-
-# name labels (`droplet-pi-platform-voice-io-1`, etc.) are renamed in a
-# coordinated PR — those are real string identifiers the running stack
-# depends on, not documentation drift. See ticket scope for the
-# exempted call sites.
+# Note: this check covers the LEGACY sibling-repo names only
+# (`inference-engine`, `droplet-jetson-ai`). The compose project is now
+# `droplet` and this repo is `droplet-onboard-services`; container names
+# are `droplet-*` (WARP-605). No hardware-specific project/container
+# identifiers remain in the covered surfaces.
 #
 # Synthetic regression: inject `inference-engine` into README.md (a
 # covered surface that the unmutated tree has already been swept clean
