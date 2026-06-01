@@ -350,7 +350,9 @@ fi
 # the entrypoint's own unit test must pass.
 
 MIGRATE_DOCKERFILE="$REPO_ROOT/apps/orchestrator/Dockerfile"
-if grep -qE 'migrate deploy[[:space:]]*&&' "$MIGRATE_DOCKERFILE"; then
+# Only flag an ACTUAL directive — strip comment lines first (the Dockerfile
+# legitimately documents the old `migrate deploy && node` chain in comments).
+if grep -vE '^[[:space:]]*#' "$MIGRATE_DOCKERFILE" | grep -qE 'migrate deploy[[:space:]]*&&'; then
   fail "orchestrator Dockerfile still uses unguarded 'migrate deploy &&' CMD (WARP-573)"
 elif ! grep -q "migrate-and-start.sh" "$MIGRATE_DOCKERFILE"; then
   fail "orchestrator Dockerfile does not invoke the guarded migrate-and-start.sh (WARP-573)"

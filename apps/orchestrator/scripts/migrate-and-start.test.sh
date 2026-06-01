@@ -34,28 +34,77 @@ make_sandbox() {
   SNAP_DIR="$SANDBOX/snapshots"
   mkdir -p "$SNAP_DIR"
 
-  # mock psql: handles (a) the "failed migration" detection SELECT and
-  # (b) the advisory lock/unlock SELECTs. Behavior driven by MOCK_FAILED_ROW.
+  # mock psql: models BOTH invocation styles the script uses —
+  #   (a) one-shot `psql ... -c "<sql>"` for the failed-migration detection
+  #       SELECT, and
+  #   (b) the kept-open coproc session (`psql ... -q`, no -c) that reads SQL
+  #       from stdin and holds the advisory lock for the whole migration phase.
+  #
+  # Crucially, the lock-lifetime is modeled with an on-disk lock file written
+  # the moment pg_try_advisory_lock succeeds and removed when the session ends
+  # (stdin closes / unlock). A real second connection would see LOCK_BUSY while
+  # the file exists — so the mock can prove cross-process mutual exclusion that
+  # the old one-shot mock could not. MOCK_LOCKFILE points all mocks at one file.
   cat > "$BIN/psql" <<'MOCK'
 #!/usr/bin/env bash
 echo "psql $*" >> "$MOCK_CALLLOG"
-# The SQL is passed via -c "<sql>". Find it.
+lockfile="${MOCK_LOCKFILE:-/tmp/.warp573-mock-lock}"
+
+# The detection SELECT comes via -c; find it.
 sql=""
 prev=""
 for a in "$@"; do
   if [[ "$prev" == "-c" ]]; then sql="$a"; fi
   prev="$a"
 done
-case "$sql" in
-  *pg_advisory_lock*)   echo "pg_advisory_lock" >> "$MOCK_CALLLOG" ;;
-  *pg_advisory_unlock*) echo "pg_advisory_unlock" >> "$MOCK_CALLLOG" ;;
-  *finished_at*IS*NULL*|*_prisma_migrations*)
-    # detection query: emit a migration name only if MOCK_FAILED_ROW set
-    if [[ -n "${MOCK_FAILED_ROW:-}" ]]; then
-      echo "$MOCK_FAILED_ROW"
-    fi
-    ;;
-esac
+
+if [[ -n "$sql" ]]; then
+  # one-shot mode
+  case "$sql" in
+    *finished_at*IS*NULL*|*_prisma_migrations*)
+      if [[ -n "${MOCK_FAILED_ROW:-}" ]]; then echo "$MOCK_FAILED_ROW"; fi
+      ;;
+  esac
+  exit 0
+fi
+
+# kept-open session mode (no -c): read SQL statements from stdin and respond.
+# The session "holds" the lock by creating $lockfile, and releases it (removes
+# the file) when stdin closes or on explicit unlock — modeling session-level
+# advisory-lock lifetime tied to this connection.
+held=""
+cleanup() { [[ -n "$held" ]] && rm -f "$lockfile"; }
+trap cleanup EXIT
+while IFS= read -r line; do
+  case "$line" in
+    *pg_try_advisory_lock*)
+      echo "pg_try_advisory_lock" >> "$MOCK_CALLLOG"
+      if ( set -o noclobber; : > "$lockfile" ) 2>/dev/null; then
+        held="yes"; echo "LOCK_ACQUIRED"
+      else
+        echo "LOCK_BUSY"
+      fi
+      ;;
+    *pg_advisory_unlock*)
+      echo "pg_advisory_unlock" >> "$MOCK_CALLLOG"
+      [[ -n "$held" ]] && { rm -f "$lockfile"; held=""; }
+      ;;
+    *pg_advisory_lock*)
+      # Blocking acquire: spin (bounded) until the file is free, then take it.
+      echo "pg_advisory_lock" >> "$MOCK_CALLLOG"
+      tries=0
+      until ( set -o noclobber; : > "$lockfile" ) 2>/dev/null; do
+        sleep 0.05; tries=$((tries+1)); [[ $tries -gt 200 ]] && break
+      done
+      held="yes"
+      ;;
+    *"SELECT 'LOCK_WAITED'"*)
+      # psql -tA would print the literal; the script awaits this marker after
+      # a successful blocking acquire.
+      echo "LOCK_WAITED"
+      ;;
+  esac
+done
 exit 0
 MOCK
 
@@ -115,6 +164,7 @@ MOCK
 run_script() {
   # run the entrypoint in script-only mode with mocks on PATH
   MOCK_CALLLOG="$CALLLOG" \
+  MOCK_LOCKFILE="${MOCK_LOCKFILE:-$SANDBOX/lockfile}" \
   PATH="$BIN:$PATH" \
   MIGRATE_SCRIPT_TEST=1 \
   DATABASE_URL="postgresql://u:p@db:5432/droplet" \
@@ -129,10 +179,36 @@ cleanup_sandbox() { rm -rf "$SANDBOX"; }
 info "Case A — advisory lock acquired and released on happy path"
 make_sandbox
 out="$(run_script env MOCK_PENDING= 2>&1)"; rc=$?
-if grep -q "pg_advisory_lock" "$CALLLOG"; then ok "acquires advisory lock"; else bad "no advisory lock call"; fi
+if grep -q "pg_try_advisory_lock" "$CALLLOG"; then ok "acquires advisory lock (try-lock)"; else bad "no advisory lock call"; fi
 if grep -q "pg_advisory_unlock" "$CALLLOG"; then ok "releases advisory lock"; else bad "no advisory unlock call"; fi
 if [[ $rc -eq 0 ]]; then ok "happy path exits 0"; else bad "happy path exit=$rc"; fi
 if grep -q "APP_START_MARKER" <<<"$out"; then ok "reaches app-start step"; else bad "did not reach app-start"; fi
+# Session-level lock must be released (lockfile gone) once the script exits.
+if [[ ! -e "$SANDBOX/lockfile" ]]; then ok "lock released after migration phase (session closed)"; else bad "lock still held after exit"; fi
+cleanup_sandbox
+
+info "Case A2 — lock is held ACROSS the whole phase (real mutual exclusion)"
+# The blocker fix: a second connection attempting pg_try_advisory_lock WHILE the
+# first holds it must observe LOCK_BUSY. We simulate by pre-creating the lockfile
+# (a concurrent holder) and asserting the script BLOCKS (try fails → blocking
+# acquire) rather than barrelling straight into deploy. We then release it and
+# confirm the script proceeds. Bounded so a regression (instant acquire) is caught.
+make_sandbox
+LOCK="$SANDBOX/lockfile"
+: > "$LOCK"   # pretend another orchestrator currently holds the migration lock
+# Release the held lock shortly after the script starts blocking on it.
+( sleep 0.6; rm -f "$LOCK" ) &
+releaser=$!
+out="$(MOCK_LOCKFILE="$LOCK" run_script env MOCK_PENDING=1 2>&1)"; rc=$?
+wait "$releaser" 2>/dev/null || true
+if grep -q "pg_try_advisory_lock" "$CALLLOG" && grep -q "LOCK_BUSY\|waiting for it to finish" <<<"$out"; then
+  ok "observes the lock as BUSY and waits (does not race a concurrent migrator)"
+else
+  bad "did not block on a held lock — mutual exclusion broken"
+fi
+# Deploy must only have happened AFTER the lock became free.
+if grep -q "migrate deploy" "$CALLLOG"; then ok "proceeds once the lock is released"; else bad "never migrated after acquiring lock"; fi
+if [[ $rc -eq 0 ]]; then ok "blocked-then-acquired path exits 0"; else bad "exit=$rc"; fi
 cleanup_sandbox
 
 info "Case B — snapshot taken BEFORE migrate deploy when migrations pending"
@@ -178,6 +254,38 @@ out="$(run_script env MOCK_PENDING=1 MOCK_FAILED_ROW=20260101000000_broken 2>&1)
 if grep -q "migrate resolve --applied" "$CALLLOG"; then bad "used blind --applied (lies about state)"; else ok "never uses --applied"; fi
 cleanup_sandbox
 
+info "Case C3 — deterministically-broken migration fails loud-and-stops, no infinite loop"
+# Boot 1: failed row + a snapshot present → auto-recovers once, marker written,
+# but deploy STILL fails (the migration SQL is bad) → fail loud, exit non-zero.
+# Boot 2: same failed row, marker already present → must NOT restore/re-deploy
+# again; must fail loud-and-stop. This is the loop the reviewer flagged.
+make_sandbox
+PERSIST_SNAP="$SANDBOX/persist-snapshots"   # models the persistent volume across boots
+mkdir -p "$PERSIST_SNAP"
+echo dump > "$PERSIST_SNAP/pre-migrate-1.dump"
+# Boot 1
+# shellcheck disable=SC2034  # out1 captured for symmetry / debugging; rc1 is asserted
+out1="$(MIGRATION_SNAPSHOT_DIR="$PERSIST_SNAP" SNAP_DIR="$PERSIST_SNAP" \
+  run_script env MIGRATION_SNAPSHOT_DIR="$PERSIST_SNAP" MOCK_PENDING=1 \
+  MOCK_FAILED_ROW=20260101000000_broken MOCK_DEPLOY_FAIL=1 2>&1)"; rc1=$?
+restore_count_1=$(grep -c "pg_restore" "$CALLLOG" || true)
+: > "$CALLLOG"   # reset call log for boot 2
+# Boot 2 — same persistent snapshot dir, marker should now exist
+out2="$(MIGRATION_SNAPSHOT_DIR="$PERSIST_SNAP" SNAP_DIR="$PERSIST_SNAP" \
+  run_script env MIGRATION_SNAPSHOT_DIR="$PERSIST_SNAP" MOCK_PENDING=1 \
+  MOCK_FAILED_ROW=20260101000000_broken MOCK_DEPLOY_FAIL=1 2>&1)"; rc2=$?
+restore_count_2=$(grep -c "pg_restore" "$CALLLOG" || true)
+if [[ $rc1 -ne 0 ]]; then ok "boot 1 attempts recovery then fails non-zero"; else bad "boot 1 should fail (rc=$rc1)"; fi
+if [[ "$restore_count_1" -ge 1 ]]; then ok "boot 1 DID attempt one recovery restore"; else bad "boot 1 never restored"; fi
+if [[ $rc2 -ne 0 ]]; then ok "boot 2 fails non-zero"; else bad "boot 2 should fail (rc=$rc2)"; fi
+if [[ "$restore_count_2" -eq 0 ]]; then ok "boot 2 does NOT re-restore/re-deploy (loop broken)"; else bad "boot 2 looped: restored again (${restore_count_2}x)"; fi
+if grep -qi "deterministically broken\|already auto-recovered" <<<"$out2"; then
+  ok "boot 2 banner explains the broken-migration stop"
+else
+  bad "boot 2 missing deterministic-break explanation"
+fi
+cleanup_sandbox
+
 info "Case D — unrecoverable deploy failure: distinct non-zero + loud banner, app NOT started"
 make_sandbox
 out="$(run_script env MOCK_PENDING=1 MOCK_DEPLOY_FAIL=1 2>&1)"; rc=$?
@@ -188,8 +296,26 @@ if grep -q "migrate resolve" <<<"$out"; then ok "banner names the prisma migrate
 if grep -qi "snapshot" <<<"$out"; then ok "banner names the snapshot path"; else bad "banner missing snapshot path"; fi
 cleanup_sandbox
 
+info "Case F — loser that waited on the lock skips a redundant deploy when nothing pending"
+# The winner migrated while we blocked; once we acquire the lock there is
+# nothing pending → we must NOT run migrate deploy again.
+make_sandbox
+LOCK="$SANDBOX/lockfile"
+: > "$LOCK"                       # a concurrent winner holds the lock
+( sleep 0.5; rm -f "$LOCK" ) &   # winner finishes and releases
+releaser=$!
+# After the winner releases, nothing is pending (MOCK_PENDING unset) and no failed row.
+out="$(MOCK_LOCKFILE="$LOCK" run_script env MOCK_PENDING= 2>&1)"; rc=$?
+wait "$releaser" 2>/dev/null || true
+if grep -q "migrate deploy" "$CALLLOG"; then bad "loser re-ran migrate deploy (redundant)"; else ok "loser skips redundant migrate deploy"; fi
+if grep -qi "skipping deploy\|nothing pending" <<<"$out"; then ok "loser logs the short-circuit"; else bad "no short-circuit log"; fi
+if [[ $rc -eq 0 ]] && grep -q "APP_START_MARKER" <<<"$out"; then ok "loser still starts the app"; else bad "loser did not start app (rc=$rc)"; fi
+cleanup_sandbox
+
 info "Case E — Dockerfile regression guard"
-if grep -qE 'migrate deploy[[:space:]]*&&' "$DOCKERFILE"; then
+# Only flag an ACTUAL directive — strip comment lines (the file legitimately
+# documents the old `migrate deploy && node` chain in comments) before matching.
+if grep -vE '^[[:space:]]*#' "$DOCKERFILE" | grep -qE 'migrate deploy[[:space:]]*&&'; then
   bad "Dockerfile still has inline 'migrate deploy &&' CMD"
 else
   ok "Dockerfile has no inline 'migrate deploy &&' CMD"
