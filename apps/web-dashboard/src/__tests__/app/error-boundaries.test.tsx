@@ -52,6 +52,18 @@ describe("error.tsx boundary (WARP-576)", () => {
     ).toBeInTheDocument();
   });
 
+  it("never surfaces the raw error message or digest to the DOM (logs, not shows)", () => {
+    const err = Object.assign(new Error("boom-secret-stacktrace"), {
+      digest: "digest-abc123",
+    });
+    render(<ErrorBoundary error={err} reset={() => {}} />);
+    // Security invariant: server error detail must not reach the browser.
+    expect(screen.queryByText(/boom-secret-stacktrace/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/digest-abc123/i)).not.toBeInTheDocument();
+    // …but it IS logged so it stays debuggable from the console / reporting.
+    expect(consoleErr).toHaveBeenCalledWith(err);
+  });
+
   it("logs the error via console.error", () => {
     const err = new Error("kaboom");
     render(<ErrorBoundary error={err} reset={() => {}} />);
@@ -89,6 +101,18 @@ describe("global-error.tsx boundary (WARP-576)", () => {
     expect(reset).toHaveBeenCalledTimes(1);
   });
 
+  it("never surfaces the raw error message or digest to the DOM (logs, not shows)", () => {
+    const err = Object.assign(new Error("layout-boom-secret"), {
+      digest: "layout-digest-xyz789",
+    });
+    render(<GlobalError error={err} reset={() => {}} />);
+    // Security invariant: server error detail must not reach the browser.
+    expect(screen.queryByText(/layout-boom-secret/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/layout-digest-xyz789/i)).not.toBeInTheDocument();
+    // …but it IS logged so it stays debuggable from the console / reporting.
+    expect(consoleErr).toHaveBeenCalledWith(err);
+  });
+
   it("logs the error via console.error", () => {
     const err = new Error("layout kaboom");
     render(<GlobalError error={err} reset={() => {}} />);
@@ -99,7 +123,7 @@ describe("global-error.tsx boundary (WARP-576)", () => {
 describe("not-found.tsx (WARP-576)", () => {
   it("renders a 404 surface with a link back to the home dashboard", () => {
     render(<NotFound />);
-    const link = screen.getByRole("link", { name: /dashboard|home|back/i });
+    const link = screen.getByRole("link", { name: /back to dashboard/i });
     expect(link).toHaveAttribute("href", "/");
   });
 });
