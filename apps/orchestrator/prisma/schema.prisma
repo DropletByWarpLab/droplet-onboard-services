@@ -1032,21 +1032,32 @@ model User {
   // Many-to-many to Group via GroupMembership (explicit join model
   // so future per-membership metadata — joinedAt, addedBy — has a
   // place to land).
-  memberships   GroupMembership[]
+  memberships         GroupMembership[]
   // Per-user scope bindings — controls which scopes this user can
   // act inside via requireScope() (see src/middleware/scope.ts).
-  scopeBindings ScopeBinding[]
+  scopeBindings       ScopeBinding[]
   // Optional guest time-box. Non-null when this user was minted as a
   // guest with an expiry; the nightly `guest-expiry-sweep` cron walks
   // GuestExpiry rows directly (no IS-NULL guessing — status is an
   // explicit enum on GuestExpiry).
-  guestExpiry   GuestExpiry?
+  guestExpiry         GuestExpiry?
   // ADR-013 (SSO OIDC): external-IdP identities (Google / Entra) linked
   // to this local user. A user may have several (e.g. both Google and
   // Entra resolve to the same work email → both link to one local row).
   // The link preserves this row's UUID — SSO never mints a second local
   // User for an email that already has one.
-  ssoIdentities SsoIdentity[]
+  ssoIdentities       SsoIdentity[]
+  // PR #377 (WARP-___): FIDO2/WebAuthn passkeys registered to this user.
+  // A user may enrol several (a platform authenticator on the laptop, a
+  // roaming security key, the phone's passkey). Each row carries its own
+  // signature counter for clone detection. Deleting the user cascades the
+  // credentials (see WebAuthnCredential.user onDelete: Cascade).
+  webauthnCredentials WebAuthnCredential[]
+  // PR #377: outstanding WebAuthn challenges minted FOR this user (the
+  // registration ceremony, and any authenticate ceremony where the email
+  // was supplied up front). Anonymous passwordless-authenticate challenges
+  // have a null userId, so they are NOT in this relation.
+  webauthnChallenges  WebAuthnChallenge[]
 
   @@index([role])
 }
@@ -1239,6 +1250,88 @@ model GuestExpiry {
 enum GuestExpiryStatus {
   ACTIVE
   EXPIRED
+}
+
+/// PR #377 (WARP-___): a registered FIDO2/WebAuthn credential (passkey or
+/// roaming security key) bound to a directory User (ADR-013).
+///
+/// Phishing-resistant, passwordless sign-in alternative to the argon2id
+/// login (PR #374). The orchestrator never sees a private key — only the
+/// public key the authenticator emits at registration, plus the rolling
+/// `counter` used for clone detection.
+///
+/// Stored fields map 1:1 onto `@simplewebauthn/server`'s `WebAuthnCredential`
+/// shape: `credentialId` (its `id`), `publicKey`, `counter`, `transports`.
+model WebAuthnCredential {
+  id           String    @id @default(uuid())
+  userId       String
+  // The authenticator's credential id, base64url-encoded. Globally unique
+  // — the same physical authenticator must not be registered twice, and
+  // the authenticate ceremony looks the credential up by this value.
+  credentialId String    @unique
+  // COSE public key bytes emitted at registration. NOT a secret (it's the
+  // public half), but treated as opaque and never logged.
+  publicKey    Bytes
+  // Signature counter. Monotonic clone-detection signal: the authenticator
+  // increments it on every assertion. A verify whose `newCounter` is not
+  // strictly greater than the stored value (when the stored value is > 0)
+  // means a cloned authenticator — the assertion is rejected and this row
+  // is left untouched. `@simplewebauthn/server` enforces the comparison;
+  // we persist the returned `newCounter` on every successful assertion.
+  counter      Int       @default(0)
+  // CSV of AuthenticatorTransportFuture values ("usb,nfc,ble,internal,
+  // hybrid"). Optional — older authenticators omit it. Used only as a UX
+  // hint to the browser on the next authenticate ceremony.
+  transports   String?
+  createdAt    DateTime  @default(now())
+  // Bumped on every successful assertion so the dashboard can show
+  // "last used 3 days ago" without a separate audit query.
+  lastUsedAt   DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// PR #377 (WARP-___): a single-use, time-bound WebAuthn ceremony challenge.
+///
+/// Replay defence for both the registration and authentication ceremonies.
+/// The server mints a random challenge, persists it here with an `expiresAt`,
+/// and hands the base64url challenge to the browser. On verify the row is
+/// looked up by `challenge`, checked for expiry, and DELETED — so a captured
+/// challenge can never be replayed (single-use = consume-by-delete;
+/// time-bound = expiresAt). A short background sweep prunes abandoned rows.
+///
+/// `userId` is non-null for the registration ceremony (you register a passkey
+/// for the signed-in user) and null for the passwordless authenticate
+/// ceremony (no user is known until the assertion resolves the credential).
+model WebAuthnChallenge {
+  id        String                @id @default(uuid())
+  // The base64url challenge handed to the browser. Unique so a verify can
+  // resolve exactly one row, and so two ceremonies can't collide.
+  challenge String                @unique
+  // Which ceremony this challenge belongs to. Explicit enum (no guessing
+  // from the presence/absence of userId) so verify can refuse a challenge
+  // minted for the wrong ceremony — a registration challenge must not be
+  // accepted by the authenticate verify and vice-versa.
+  type      WebAuthnChallengeType
+  // Non-null for registration (bound to the signed-in user). Null for the
+  // passwordless authenticate ceremony.
+  userId    String?
+  // Hard expiry. Verify rejects (and deletes) any row past this instant.
+  expiresAt DateTime
+  createdAt DateTime              @default(now())
+  user      User?                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+/// PR #377: which WebAuthn ceremony a challenge was minted for. Keeps the
+/// registration and authentication challenge pools from cross-contaminating
+/// (a register challenge must never satisfy an authenticate verify).
+enum WebAuthnChallengeType {
+  REGISTRATION
+  AUTHENTICATION
 }
 
 // ── WARP-455: File scope registry ──
