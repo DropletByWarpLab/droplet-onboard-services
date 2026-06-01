@@ -254,10 +254,23 @@ describe("POST /api/sso/oidc/authorize", () => {
     expect(buildAuthorizeRequest).toHaveBeenCalledWith("entra");
   });
 
-  it("rejects an unknown provider with 400 (no authorize, no persist)", async () => {
+  it("starts the OIDC flow for okta via the SAME authorize path (302)", async () => {
+    getOidcProviderConfig.mockReturnValue({ provider: "okta", issuer: "i", clientId: "c", clientSecret: "s", redirectUri: "r" });
+    buildAuthorizeRequest.mockResolvedValue({ authorizeUrl: "https://dev-12345.okta.com/oauth2/default/v1/authorize?x", state: "s3", nonce: "n3", codeVerifier: "v3" });
     const res = await request(buildApp(createPrismaMock()))
       .post("/api/sso/oidc/authorize")
       .send({ provider: "okta" });
+    expect(res.status).toBe(302);
+    expect(buildAuthorizeRequest).toHaveBeenCalledWith("okta");
+    expect(createLoginState).toHaveBeenCalled();
+  });
+
+  it("rejects an unknown provider with 400 (no authorize, no persist)", async () => {
+    // `okta` is now a supported provider (shipped in this PR); use a value
+    // that is genuinely outside the SsoProvider union to assert the reject.
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/sso/oidc/authorize")
+      .send({ provider: "workday" });
     expect(res.status).toBe(400);
     expect(buildAuthorizeRequest).not.toHaveBeenCalled();
     expect(createLoginState).not.toHaveBeenCalled();
