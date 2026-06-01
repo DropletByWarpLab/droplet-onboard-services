@@ -148,6 +148,14 @@ async function ensureLinkedUser(
     include: { user: true },
   });
   if (existing?.user) {
+    // WARP (SCIM): a user the directory deactivated (active:false →
+    // DEACTIVATED, soft) must not sign in via SSO either, even though the
+    // SsoIdentity link still resolves. Fail closed (parity with the
+    // /auth/login DEACTIVATED gate) — the row is retained for re-activate.
+    if (existing.user.directoryStatus === "DEACTIVATED") {
+      logger.warn({ provider, userId: existing.user.id }, "SSO sign-in rejected: directory user is deactivated");
+      return null;
+    }
     return {
       id: existing.user.id,
       username: existing.user.username,
@@ -169,6 +177,12 @@ async function ensureLinkedUser(
   // 2a. Link to an existing local user with this email.
   const byEmail = await prisma.user.findUnique({ where: { email } });
   if (byEmail) {
+    // Same deactivation gate as the by-sub branch: never re-activate a
+    // disabled directory row by silently minting a fresh SSO link to it.
+    if (byEmail.directoryStatus === "DEACTIVATED") {
+      logger.warn({ provider, userId: byEmail.id }, "SSO sign-in rejected: directory user is deactivated");
+      return null;
+    }
     await prisma.ssoIdentity.create({
       data: { userId: byEmail.id, provider, subject: identity.sub, email },
     });
