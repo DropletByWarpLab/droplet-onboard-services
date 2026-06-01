@@ -1059,6 +1059,15 @@ model User {
   // have a null userId, so they are NOT in this relation.
   webauthnChallenges  WebAuthnChallenge[]
 
+  // PR #375 — TOTP second factor (ADR-012 directory). One credential row
+  // per user (the secret is encrypted at rest). `confirmedAt` is the
+  // explicit "TOTP enabled" signal — the login gate reads it directly
+  // rather than inferring enablement from row presence.
+  totpCredential TotpCredential?
+  // One-time recovery codes (argon2id-hashed). Consumed rows keep an
+  // explicit `usedAt` so a replay matches nothing.
+  recoveryCodes RecoveryCode[]
+
   @@index([role])
 }
 
@@ -1128,6 +1137,47 @@ model SsoLoginState {
   createdAt    DateTime  @default(now())
 
   @@index([expiresAt])
+}
+
+// PR #375 — TOTP (RFC 6238) enrollment for the built-in directory's
+// second factor. One row per user; created on enroll, marked enabled on
+// the first successful verify.
+model TotpCredential {
+  id          String   @id @default(uuid())
+  // FK to the owning directory user. Unique → at most one TOTP secret
+  // per account. Cascade-delete so removing a user clears their factor.
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // The Base32 TOTP secret, encrypted at rest with the aes-256-gcm
+  // encryption.service (DEVICE_SECRET_KEY). NEVER plaintext; NEVER logged.
+  secretEnc   String
+  // Explicit enablement signal (no IS-NULL inference for state — project
+  // rule). Null while enrollment is pending; set to the verify timestamp
+  // on the first successful code. The login gate requires TOTP only when
+  // this is non-null.
+  confirmedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// PR #375 — one-time backup codes for the TOTP factor. Each row stores an
+// argon2id hash (reusing password.service); the plaintext is shown to the
+// user exactly once at generation. Single-use: `usedAt` is stamped on
+// consumption so a replay of the same code matches no unused row.
+model RecoveryCode {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // argon2id PHC hash of the code. NEVER plaintext; NEVER logged.
+  codeHash  String
+  // Explicit consumption marker (no IS-NULL state inference). Null = the
+  // code is still spendable; non-null = already used at that timestamp.
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  // The login/recovery path scans a user's UNUSED codes — index the
+  // hot lookup key.
+  @@index([userId])
 }
 
 // User-curated grouping (households, family branches, work cohorts).
