@@ -31,6 +31,11 @@ import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import {
+  createTeamInvite,
+  InvalidInviteEmailError,
+  InvalidInviteRoleError,
+} from "../services/onboarding-team-invite.service.js";
 
 const logger = pino({ name: "people-route" });
 
@@ -60,6 +65,17 @@ const scopeSchema = z.object({
   // are almost certainly a UX bug (the dashboard sent [] when it meant
   // ["team"]) and 400 prevents accidentally locking a user out.
   scopes: z.array(z.enum(SCOPE_VALUES)).min(1).max(SCOPE_VALUES.length),
+});
+
+// PR #381 — onboarding TEAM-invite body. The wizard invites by EMAIL + ROLE.
+// The schema only checks presence/type/bounds; the canonical email + role
+// VALIDATION lives in onboarding-team-invite.service (normalizeInviteEmail /
+// isValidEmail / isInviteRole), which throws the typed errors this route maps
+// to a 400 — so the service is the single source of truth for "what is a
+// valid invite" and the route doesn't duplicate the email regex / role list.
+const inviteSchema = z.object({
+  email: z.string().min(1).max(200),
+  role: z.string().min(1).max(32),
 });
 
 /**
@@ -156,6 +172,81 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
     "/people/permissions",
     (_req: Request, res: Response) => {
       res.json({ permissions: PERMISSIONS_MATRIX });
+    },
+  );
+
+  // ── POST /api/people/invite ─────────────────────────────────
+  // PR #381 — the onboarding TEAM step invites teammates by email + role.
+  // owner + admin only — issuing an invite is an administrative action, same
+  // guard as the rest of /api/people. The (email, role) pair is validated by
+  // onboarding-team-invite.service: the email is normalized to lowercase
+  // (#374 login-key contract) and the role is checked against the SHIPPED
+  // HOUSEHOLD model (owner/admin/family/guest); invalid input is rejected
+  // inline (400 + a `code`) so the wizard can show a field error.
+  //
+  // #386 (a SEPARATE PR on main) owns invite-ACCEPT-time argon2id passwordHash
+  // so the invited member can sign in on the email-keyed login. This route only
+  // CREATES the invite (the same UserInvite row #386's accept path consumes);
+  // they are compatible and this route does not re-implement accept.
+  router.post(
+    "/people/invite",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = inviteSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        let invite;
+        try {
+          invite = await createTeamInvite(prisma, {
+            email: parsed.data.email,
+            role: parsed.data.role,
+            createdBy: req.user?.username ?? "unknown",
+          });
+        } catch (err) {
+          // Typed validation errors → 400 with the service's `code` so the
+          // wizard renders the inline field error. Everything else bubbles.
+          if (
+            err instanceof InvalidInviteEmailError ||
+            err instanceof InvalidInviteRoleError
+          ) {
+            return res.status(400).json({ error: err.message, code: err.code });
+          }
+          throw err;
+        }
+
+        // Audit the issuance. We record WHO invited WHOM at WHAT role — but
+        // NEVER the token (it's a bearer credential; an audit row is not the
+        // place for it). Lifecycle events go on the `auth` kind (matches the
+        // DELETE /people/:id "User removed" convention above).
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-plus",
+          what: "Teammate invited",
+          sub: `${invite.email} · ${invite.role}`,
+          refs: {
+            actor: req.user?.username ?? null,
+            email: invite.email,
+            role: invite.role,
+          },
+        });
+
+        res.json({
+          ok: true,
+          token: invite.token,
+          email: invite.email,
+          role: invite.role,
+          expires_at: invite.expiresAt,
+        });
+      } catch (err) {
+        next(err);
+      }
     },
   );
 
