@@ -163,6 +163,17 @@ function createPrismaMock(opts: { totp?: TotpRow[]; recovery?: RecoveryRow[] } =
       if (row) Object.assign(row, data);
       return row;
     }),
+    // Atomic conditional consume guarded by usedAt:null. `count` reflects
+    // rows actually flipped; 0 means a concurrent racer already used it.
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      const matched = recovery.filter(
+        (r) =>
+          r.id === where.id &&
+          (where.usedAt === null ? r.usedAt === null : true),
+      );
+      for (const row of matched) Object.assign(row, data);
+      return { count: matched.length };
+    }),
   };
   self._totp = totp;
   self._recovery = () => recovery;
@@ -324,8 +335,12 @@ describe("POST /auth/recovery", () => {
       .send({ code: "aaaa-bbbb" });
 
     expect(res.status).toBe(200);
-    expect(prisma.recoveryCode.update).toHaveBeenCalledTimes(1);
-    expect(prisma.recoveryCode.update.mock.calls[0]![0].where).toEqual({ id: "rc2" });
+    // Consumed via an ATOMIC conditional update guarded by usedAt:null.
+    expect(prisma.recoveryCode.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.recoveryCode.updateMany.mock.calls[0]![0].where).toEqual({
+      id: "rc2",
+      usedAt: null,
+    });
   });
 
   it("no match → 401, nothing consumed", async () => {
@@ -338,6 +353,28 @@ describe("POST /auth/recovery", () => {
       .send({ code: "zzzz-zzzz" });
 
     expect(res.status).toBe(401);
-    expect(prisma.recoveryCode.update).not.toHaveBeenCalled();
+    expect(prisma.recoveryCode.updateMany).not.toHaveBeenCalled();
+  });
+
+  // ── Single-use race (QA-flagged on #375) ──
+  // A code that another request already consumed between our read and our
+  // write must fail the factor (401 RECOVERY_INVALID), not re-authenticate.
+  // The atomic guarded update returns count 0 → treat as already used.
+  it("already-used code (lost the race) → 401 RECOVERY_INVALID", async () => {
+    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-1");
+    const prisma = createPrismaMock({
+      // The findMany read still surfaces it as unused (stale read), but the
+      // row was consumed by a concurrent racer before our guarded update.
+      recovery: [{ id: "rc1", userId: "u-1", codeHash: "hash-1", usedAt: null }],
+    });
+    // Simulate the racer winning: the guarded updateMany flips nothing.
+    prisma.recoveryCode.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await request(buildApp(prisma))
+      .post("/api/auth/recovery")
+      .send({ code: "aaaa-bbbb" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("RECOVERY_INVALID");
   });
 });

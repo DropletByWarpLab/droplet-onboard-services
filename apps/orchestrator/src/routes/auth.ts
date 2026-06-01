@@ -553,11 +553,16 @@ export function createPublicAuthRouter(
           if (matchHash) {
             const consumed = unused.find((r) => r.codeHash === matchHash);
             if (consumed) {
-              await prisma.recoveryCode.update({
-                where: { id: consumed.id },
+              // Atomic single-use: only flip the row if it is STILL unused.
+              // Two concurrent logins presenting the same code both read it
+              // unused above; the usedAt:null guard means exactly one update
+              // flips a row (count 1) and the loser sees count 0 → the factor
+              // fails. Mirrors claimRefreshRotation / invite single-use.
+              const claimed = await prisma.recoveryCode.updateMany({
+                where: { id: consumed.id, usedAt: null },
                 data: { usedAt: new Date() },
               });
-              secondFactorOk = true;
+              secondFactorOk = claimed.count > 0;
             }
           }
         }
@@ -1418,10 +1423,18 @@ export function createProtectedAuthRouter(
         res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
         return;
       }
-      await prisma.recoveryCode.update({
-        where: { id: consumed.id },
+      // Atomic single-use: the usedAt:null guard makes the consume safe
+      // against a concurrent step-up presenting the same code. If a racer
+      // already spent it between our read and here, count is 0 → reject as
+      // invalid rather than re-authenticating. Mirrors claimRefreshRotation.
+      const claimed = await prisma.recoveryCode.updateMany({
+        where: { id: consumed.id, usedAt: null },
         data: { usedAt: new Date() },
       });
+      if (claimed.count === 0) {
+        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
+        return;
+      }
 
       const remaining = unused.length - 1;
       res.json({ ok: true, remaining });

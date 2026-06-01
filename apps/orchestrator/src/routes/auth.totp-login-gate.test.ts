@@ -151,10 +151,18 @@ function createPrismaMock(opts: {
         (r) => r.userId === where.userId && (where.usedAt === null ? r.usedAt === null : true),
       ),
     ),
-    update: vi.fn(async ({ where, data }: { where: any; data: any }) => {
-      const row = recovery.find((r) => r.id === where.id);
-      if (row) Object.assign(row, data);
-      return row;
+    // Atomic conditional consume: only matches rows still satisfying the
+    // `usedAt: null` guard, mirroring the DB-level WHERE. The returned
+    // `count` is the number of rows actually flipped — 0 means another
+    // racer already consumed it.
+    updateMany: vi.fn(async ({ where, data }: { where: any; data: any }) => {
+      const matched = recovery.filter(
+        (r) =>
+          r.id === where.id &&
+          (where.usedAt === null ? r.usedAt === null : true),
+      );
+      for (const row of matched) Object.assign(row, data);
+      return { count: matched.length };
     }),
   };
   self._recovery = recovery;
@@ -294,10 +302,11 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
     expect(res.status).toBe(200);
     expect(sessionCookie(res)).toBeDefined();
-    // Exactly the matched row (id rc2 → hash-2) is consumed.
-    expect(prisma.recoveryCode.update).toHaveBeenCalledTimes(1);
-    const call = prisma.recoveryCode.update.mock.calls[0]![0];
-    expect(call.where).toEqual({ id: "rc2" });
+    // Exactly the matched row (id rc2 → hash-2) is consumed via an ATOMIC
+    // conditional update guarded by usedAt:null — not a bare id update.
+    expect(prisma.recoveryCode.updateMany).toHaveBeenCalledTimes(1);
+    const call = prisma.recoveryCode.updateMany.mock.calls[0]![0];
+    expect(call.where).toEqual({ id: "rc2", usedAt: null });
     expect(call.data.usedAt).toBeInstanceOf(Date);
   });
 
@@ -315,7 +324,44 @@ describe("login TOTP gate — user WITH TOTP enabled", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("TOTP_REQUIRED");
-    expect(prisma.recoveryCode.update).not.toHaveBeenCalled();
+    expect(prisma.recoveryCode.updateMany).not.toHaveBeenCalled();
+  });
+
+  // ── Single-use race (medium-severity auth, QA-flagged on #375) ──
+  // Two concurrent logins present the SAME valid recovery code. Both reads
+  // see it unused. The consume MUST be atomic (conditional update guarded by
+  // usedAt:null) so exactly ONE login authenticates and the loser is failed
+  // back to the TOTP gate. A check-then-id-update lets both win → RED here.
+  it("two concurrent logins with the SAME recovery code → exactly ONE succeeds", async () => {
+    verifyPassword.mockResolvedValue(true);
+    // Both racers match the same unused row (rc1 → hash-1).
+    findMatchingRecoveryCodeHash.mockResolvedValue("hash-1");
+    const prisma = createPrismaMock({
+      users: [stefan],
+      totp: [enabledTotp],
+      recovery: [{ id: "rc1", userId: "u-stefan", codeHash: "hash-1", usedAt: null }],
+    });
+    const app = buildApp(prisma);
+
+    const [a, b] = await Promise.all([
+      request(app)
+        .post("/api/auth/login")
+        .send({ email: "stefan@warp.test", password: "pw", recoveryCode: "aaaa-bbbb" }),
+      request(app)
+        .post("/api/auth/login")
+        .send({ email: "stefan@warp.test", password: "pw", recoveryCode: "aaaa-bbbb" }),
+    ]);
+
+    const statuses = [a.status, b.status].sort();
+    // Exactly one 200 (session) and one 401 (TOTP_REQUIRED) — never two 200s.
+    expect(statuses).toEqual([200, 401]);
+    const winner = a.status === 200 ? a : b;
+    const loser = a.status === 200 ? b : a;
+    expect(sessionCookie(winner)).toBeDefined();
+    expect(sessionCookie(loser)).toBeUndefined();
+    expect(loser.body.code).toBe("TOTP_REQUIRED");
+    // The single row ends up consumed exactly once.
+    expect(prisma._recovery.filter((r: RecoveryRow) => r.usedAt !== null)).toHaveLength(1);
   });
 
   it("a valid second factor stamps lastMfaAt into the access token", async () => {
