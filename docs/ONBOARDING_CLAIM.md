@@ -1,57 +1,97 @@
-# Onboarding — appliance claim + hardware contract (scaffold)
+# Onboarding — appliance claim + hardware contract
 
-> **Status: DRAFT scaffold — no implementation in this PR.** Refs WARP-___.
-> Relates to WARP-564 (atomic single-use pairing-code claim).
+> **Status: IMPLEMENTED (PR #373).** Stacks on the #372 setup state machine.
+> Relates to WARP-564 (atomic single-use pairing-code claim — same consume
+> pattern).
 
 ## Purpose
 
 Bind a fresh appliance to its workspace. The customer reads a **claim code off
 the PyPortal lid display** and confirms it; the Claim wizard step also shows the
-detected hardware.
+detected hardware. Claim slots **first** in the wizard (welcome → claim →
+account, #371 handoff §1) and is **not skippable**.
 
 ## Backend contract
 
-- `GET /setup/appliance` → hardware contract (`FEATURES.md §9`):
-  `{ appliance_id, compute, storage, network, display, supply_chain }`. **Read
-  whatever the live box reports** — do not hardcode the handoff's fixed spec list.
-- `POST /setup/claim { code }` → bind appliance to workspace. **Atomic, single-
-  use, rate-limited**; the code **rotates**. (Reuse the WARP-564 pairing-claim
-  pattern.)
+- `GET /api/setup/appliance` → hardware contract
+  `{ appliance_id, compute, storage, network, display, supply_chain }`
+  (`FEATURES.md §9`). **A DOCUMENTED STUB** — `appliance-contract.service.ts`
+  assembles it; no orchestrator facility produces this shape end-to-end yet.
+  `compute`/`storage`/`display` are placeholders pending their real sources
+  (device-bridge inventory, model-readiness, PyPortal service); `network` is
+  best-effort enriched from the routing `/system/info` (router-only) and falls
+  back cleanly on the single-box shape; `supply_chain` is a static TAA/NDAA-§889
+  attestation. PUBLIC (runs before any account exists). The shape is the
+  contract; the per-field sources harden in follow-ups.
+- `POST /api/setup/claim { code }` → bind the appliance. **Atomic, single-use,
+  rate-limited**; the code is **hashed at rest** (keyed HMAC-SHA256 over the
+  normalized code) and compared in **constant time**. The consume is a
+  conditional `updateMany WHERE state='available'` inside a `$transaction` (the
+  WARP-564 pairing-claim pattern). Correct → 200 `{ claimed, next_step }` and
+  advance the wizard to `account` (does NOT flip the appliance "ready" — that's
+  the #372 finish transition). Already-claimed → 200 short-circuit. Wrong /
+  unknown / expired → 400 `CLAIM_CODE_INVALID` (never revealing the real code),
+  after decrementing the per-IP rate budget. Budget exhausted → 429.
 
-## PyPortal claim-code render
+## Claim-code provisioning — SCOPE
 
-- Adafruit PyPortal, USB vendor `239a`. A small display service renders the live
-  rotating code on the lid. Likely lives near `services/oled-display/` (confirm)
-  — **not** a hand-rolled script that bypasses `setup.sh`.
+**MINTING / ROTATION is OUT of scope for this PR.** It belongs to the PyPortal
+display-service (Adafruit PyPortal, USB vendor `239a`), which is a separate PR
+and **must not** be a hand-rolled script that bypasses `setup.sh`. For now a
+code is **seeded via env/fixture** (`CLAIM_CODE`, or a test fixture) and only
+**verified** here. `seedClaimCode()` materializes the hash idempotently;
+`ClaimCode.expiresAt` is carried so the rotation owner can expire codes later
+without another migration.
 
 ## Data model (Prisma)
 
 ```prisma
+enum ClaimCodeState { available consumed }   // explicit single-use lifecycle
+
 model ClaimCode {
-  id        String   @id @default(uuid())
-  codeHash  String   // store hashed; never plaintext
+  id        String         @id @default(uuid())
+  codeHash  String         @unique  // one-way hash; never plaintext
+  state     ClaimCodeState @default(available)  // NOT derived from usedAt
   expiresAt DateTime
-  usedAt    DateTime?
-  attempts  Int      @default(0)
+  usedAt    DateTime?      // audit-only; written in the consume transaction
+  attempts  Int            @default(0)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 }
 ```
 
-## Architecture rules
+`SetupStep` is also extended with `claim` (additive migration
+`20260601000000`, ordered after #372's `20260531000000`; guarded idempotent
+`ALTER TYPE … ADD VALUE`).
 
-- Rate-limit + lockout on `attempts`; constant-time compare; never echo the real code.
-- Explicit `usedAt`/state, not `IS NULL` inference for "claimed".
+## Architecture rules (held)
 
-## Dependencies
+- Rate-limit budget via the shared cache counter (no busy-loop; fails OPEN so a
+  down cache can't lock the owner out). Constant-time compare; never echo the
+  real code.
+- Explicit `state` lifecycle, **not** `usedAt IS NULL` inference for "claimed"
+  (CLAUDE.md no-guessing rule; WARP-218 `BrainMemoryItemStatus` precedent).
 
-Blocked by: setup state machine. Pairs with: org/owner (claim → account → org).
+## Frontend
 
-## Acceptance criteria
+`components/setup/steps/ClaimStep.tsx` per `OnbWizard.jsx WizClaim` + #371 §2:
+WizHead "Step 1" → "We found your Droplet"; appliance card (aurora badge +
+mono `appliance_id` + "Detected on LAN" chip + 2×2 spec grid); formatted
+claim-code field + PyPortal hint; supply-chain TAA/NDAA §889 chip. Edges:
+appliance unreachable → "We can't see your Droplet yet" + retry (continue
+blocked); wrong code → inline error; rate-limited → distinct message. Design
+tokens only (aurora badge via `aurora-bg`/`aurora-ring` — the login PR's
+`.aurora-brand` isn't on this branch).
 
-- Wrong code decrements budget + inline error; correct code binds once and is idempotent on re-run.
-- Hardware card renders from `GET /setup/appliance`.
-- PyPortal shows the rotating code; rotation invalidates the previous.
+## Follow-ups
+
+- PyPortal display-service: mint + rotate the claim code, render it on the lid
+  (rotation invalidates the previous code). Separate PR.
+- Wire the real per-field sources into `GET /api/setup/appliance`
+  (device-bridge drives, model-readiness compute, PyPortal display status,
+  device-identity `appliance_id`).
 
 ## References
 
 `FEATURES.md §9`; `services/routing/main.py` (`GET /system/info`); WARP-564 PR;
-`onboarding-handoff/src/OnbWizard.jsx` (`WizClaim`).
+`onboarding-handoff/src/OnbWizard.jsx` (`WizClaim`); `docs/ONBOARDING_STATE_MACHINE.md`.
