@@ -145,6 +145,22 @@ const envSchema = z.object({
   DROPLET_SSO_OKTA_CLIENT_SECRET: z.string().default(""),
   DROPLET_SSO_OKTA_REDIRECT_URI: z.string().default(""),
 
+  // --- SCIM 2.0 directory provisioning (Okta pushes users/groups here) ---
+  // WARP — Okta's SCIM client authenticates to /scim/v2/* with a DEDICATED
+  // provisioning bearer token (NOT a user session, NOT one of the
+  // SERVICE_TOKEN_* principals — those carry the `service` ROLE for inbound
+  // LLM/tool calls; SCIM provisioning is a separate trust boundary with its
+  // own secret and its own middleware). This is the SCIM bearer; it is
+  // validated (constant-time) on EVERY SCIM request and NEVER logged.
+  //
+  // EMPTY DEFAULT = FAIL CLOSED: with no token configured, every /scim/v2/*
+  // request 401s (scim-auth middleware refuses an unset secret), so an
+  // appliance that hasn't been wired for directory sync never accepts an
+  // unauthenticated — or empty-bearer — provisioning call. Same posture as
+  // DROPLET_PM_WEBHOOK_SECRET. Lives ONLY in .env (operator / setup.sh
+  // generates it); never tracked, never re-emitted.
+  DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
+
   // --- gRPC ---
   AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
 
