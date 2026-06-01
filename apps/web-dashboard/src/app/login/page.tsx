@@ -9,10 +9,29 @@ import { translateError } from "@/lib/friendly-errors";
 import { AuroraPanel } from "@/components/auth/AuroraPanel";
 import { SignInForm } from "@/components/auth/SignInForm";
 
-/** Only allow same-origin path redirects from `?next=` (no open redirect). */
+/**
+ * Resolve a `?next=` redirect to a same-origin path, or fall back to "/".
+ *
+ * A plain `startsWith("/")` / `startsWith("//")` guard is unsafe: the WHATWG
+ * URL parser (used by router.push → `new URL(next, origin)` in Next 14.2)
+ * collapses `\` → `/` and strips leading tab/newline, so `/\evil.com`,
+ * `/⇥/evil.com` and `/\n//evil.com` resolve to an off-origin authority *after*
+ * a naive string check passes. Instead we resolve the candidate against a
+ * sentinel origin and only honour it when its `.origin` is unchanged — then
+ * return just the path+query+fragment so the caller never pushes an absolute
+ * URL. Anything off-origin (incl. `//host`, `https:evil`, encoded variants) or
+ * malformed falls back to "/".
+ */
 function safeNext(next: string | null): string {
-  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
-  return next;
+  if (!next) return "/";
+  const SENTINEL = "http://x.invalid";
+  try {
+    const u = new URL(next, SENTINEL);
+    if (u.origin !== SENTINEL) return "/";
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return "/";
+  }
 }
 
 export default function LoginPage() {
