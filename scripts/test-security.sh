@@ -88,7 +88,27 @@ done
 # Docker Compose must receive --env-file explicitly because the sudo fallback
 # in run_docker_compose() strips shell environment variables (env_reset).
 
-compose_calls=$(grep -n 'run_docker_compose' "$COMPOSE_SH" || true)
+# Join backslash-continued shell lines into one logical line before matching,
+# keyed by the starting line number. Without this, a command split across a
+# `\` continuation (e.g. the flags on line N and `--env-file` on line N+1)
+# is falsely flagged as missing --env-file. Output: "<startlineno>:<joined>".
+join_continuations() {
+  awk '
+    { gsub(/\r$/, "") }
+    buf == "" { start = NR }
+    { line = $0
+      cont = (line ~ /\\[[:space:]]*$/)
+      sub(/\\[[:space:]]*$/, "", line)
+      buf = buf line
+      if (cont) { next }
+      print start ":" buf
+      buf = ""
+    }
+    END { if (buf != "") print start ":" buf }
+  ' "$1"
+}
+
+compose_calls=$(join_continuations "$COMPOSE_SH" | grep 'run_docker_compose' || true)
 missing_env_file=false
 
 while IFS= read -r line; do
@@ -113,7 +133,7 @@ fi
 
 # Every docker compose invocation in verify.sh must also include --env-file.
 VERIFY_SH="$REPO_ROOT/scripts/verify.sh"
-verify_calls=$(grep -nE '(_docker_compose|docker compose) -f' "$VERIFY_SH" | grep -v 'printf' || true)
+verify_calls=$(join_continuations "$VERIFY_SH" | grep -E '(_docker_compose|docker compose) -f' | grep -v 'printf' || true)
 missing_verify=false
 
 while IFS= read -r line; do
