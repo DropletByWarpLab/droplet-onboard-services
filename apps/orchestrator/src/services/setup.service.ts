@@ -24,9 +24,12 @@ export const APPLIANCE_SETUP_ID = "singleton";
  *
  * PR #373: `claim` ships and slots SECOND (welcome → claim → account, #371
  * handoff §1). PR #380: `org` ships and slots AFTER account (welcome → claim →
- * account → org → internet → …, #380 spec). `team` remains GATED (PR #381) —
- * it extends `SetupStep`, this list, the wizard array, and the route validation
- * together, the way claim and org do here.
+ * account → org → internet → …, #380 spec). PR #381: `team` ships and slots
+ * near the END, after `ai` and before `done` (… → ai → team → done): once the
+ * box is set up the owner brings people in. `team` is the LAST onboarding step
+ * to wire — it extends `SetupStep`, this list, the wizard array, and the route
+ * validation together, the way claim and org did. `team` IS skippable in the
+ * wizard, but it is still a real reachable resume target, so it belongs here.
  *
  * Declared as a plain string-literal tuple (NOT `SetupStep.welcome` etc.)
  * so this module has NO runtime dependency on the Prisma enum OBJECT at
@@ -47,6 +50,7 @@ export const SETUP_STEPS = [
   "cameras",
   "vpn",
   "ai",
+  "team",
   "done",
 ] as const satisfies readonly SetupStep[];
 
