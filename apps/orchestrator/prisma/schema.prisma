@@ -1041,9 +1041,9 @@ model User {
   // GuestExpiry rows directly (no IS-NULL guessing — status is an
   // explicit enum on GuestExpiry).
   guestExpiry   GuestExpiry?
-  // ADR-013 (SSO OIDC): external-IdP identities (Google / Entra) linked
-  // to this local user. A user may have several (e.g. both Google and
-  // Entra resolve to the same work email → both link to one local row).
+  // ADR-013 (SSO OIDC): external-IdP identities (Google / Entra / Okta)
+  // linked to this local user. A user may have several (e.g. both Google
+  // and Entra resolve to the same work email → both link to one local row).
   // The link preserves this row's UUID — SSO never mints a second local
   // User for an email that already has one.
   ssoIdentities SsoIdentity[]
@@ -1070,8 +1070,8 @@ model User {
 model SsoIdentity {
   id        String   @id @default(uuid())
   userId    String
-  provider  String // "google" | "entra"
-  subject   String // IdP 'sub' claim
+  provider  String // "google" | "entra" | "okta"
+  subject   String // IdP 'sub' claim (OIDC SSO) or SCIM resource id (directory provisioning)
   // Email seen at link time (already normalized). Audit/debug only — the
   // login key on User.email remains authoritative; this is not a second
   // source of truth.
@@ -1107,7 +1107,7 @@ model SsoLoginState {
   state        String    @unique
   nonce        String
   codeVerifier String
-  provider     String // "google" | "entra"
+  provider     String // "google" | "entra" | "okta"
   // Where to send the browser after a successful sign-in (defaults to
   // "/"). Validated to a same-origin relative path at issue time so it
   // can't become an open redirect.

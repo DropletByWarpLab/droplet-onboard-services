@@ -30,8 +30,11 @@ import {
 
 import { config } from "../config.js";
 
-/** The two IdPs this PR supports. Okta ships in a separate PR. */
-export const SSO_PROVIDERS = ["google", "entra"] as const;
+/** The external IdPs this orchestrator federates with as an OIDC RELYING
+ *  PARTY. Google + Entra shipped in PR #378; Okta is added here (WARP — Okta
+ *  SSO + SCIM). Okta SSO is plain OIDC — it reuses this exact authorize /
+ *  callback path; only the issuer/clientId/secret/redirect differ. */
+export const SSO_PROVIDERS = ["google", "entra", "okta"] as const;
 export type SsoProvider = (typeof SSO_PROVIDERS)[number];
 
 export interface OidcProviderConfig {
@@ -54,20 +57,30 @@ export function isSsoProvider(value: unknown): value is SsoProvider {
  * button that 500s mid-flow).
  */
 export function getOidcProviderConfig(provider: SsoProvider): OidcProviderConfig | null {
-  const fields =
-    provider === "google"
-      ? {
-          issuer: config.DROPLET_SSO_GOOGLE_ISSUER,
-          clientId: config.DROPLET_SSO_GOOGLE_CLIENT_ID,
-          clientSecret: config.DROPLET_SSO_GOOGLE_CLIENT_SECRET,
-          redirectUri: config.DROPLET_SSO_GOOGLE_REDIRECT_URI,
-        }
-      : {
-          issuer: config.DROPLET_SSO_ENTRA_ISSUER,
-          clientId: config.DROPLET_SSO_ENTRA_CLIENT_ID,
-          clientSecret: config.DROPLET_SSO_ENTRA_CLIENT_SECRET,
-          redirectUri: config.DROPLET_SSO_ENTRA_REDIRECT_URI,
-        };
+  // One group of four env vars per provider (config.ts DROPLET_SSO_<P>_*).
+  // A lookup (not a binary ternary) so adding a provider is a single arm,
+  // and an unknown value is impossible — the SsoProvider union is closed.
+  const byProvider: Record<SsoProvider, Omit<OidcProviderConfig, "provider">> = {
+    google: {
+      issuer: config.DROPLET_SSO_GOOGLE_ISSUER,
+      clientId: config.DROPLET_SSO_GOOGLE_CLIENT_ID,
+      clientSecret: config.DROPLET_SSO_GOOGLE_CLIENT_SECRET,
+      redirectUri: config.DROPLET_SSO_GOOGLE_REDIRECT_URI,
+    },
+    entra: {
+      issuer: config.DROPLET_SSO_ENTRA_ISSUER,
+      clientId: config.DROPLET_SSO_ENTRA_CLIENT_ID,
+      clientSecret: config.DROPLET_SSO_ENTRA_CLIENT_SECRET,
+      redirectUri: config.DROPLET_SSO_ENTRA_REDIRECT_URI,
+    },
+    okta: {
+      issuer: config.DROPLET_SSO_OKTA_ISSUER,
+      clientId: config.DROPLET_SSO_OKTA_CLIENT_ID,
+      clientSecret: config.DROPLET_SSO_OKTA_CLIENT_SECRET,
+      redirectUri: config.DROPLET_SSO_OKTA_REDIRECT_URI,
+    },
+  };
+  const fields = byProvider[provider];
 
   if (!fields.issuer || !fields.clientId || !fields.clientSecret || !fields.redirectUri) {
     return null;
