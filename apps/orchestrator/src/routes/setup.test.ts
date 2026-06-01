@@ -217,9 +217,11 @@ describe("PATCH /api/setup/state", () => {
 
   it("rejects an unknown step with 400 (not a silent coerce)", async () => {
     const app = buildApp(prisma);
+    // `org` is still GATED (PR #373 wires `claim` but not org/team) — it stays
+    // the canonical not-yet-shipped step the route must 400.
     const res = await request(app)
       .patch("/api/setup/state")
-      .send({ setup_step: "claim" });
+      .send({ setup_step: "org" });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("INVALID_SETUP_STEP");
   });

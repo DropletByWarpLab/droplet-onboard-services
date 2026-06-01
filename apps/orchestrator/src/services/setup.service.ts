@@ -18,10 +18,14 @@ import { type SetupStep, type PrismaClient } from "@prisma/client";
 export const APPLIANCE_SETUP_ID = "singleton";
 
 /**
- * The 9 SHIPPED wizard steps, in wizard order. Mirrors the dashboard
- * wizard's `STEPS` array 1:1. The GATE constraint (PR #372) keeps
- * claim / org / team OUT until they ship — they extend `SetupStep`, this
- * list, the wizard array, and the route validation together.
+ * The SHIPPED wizard steps, in WIZARD ORDER. Mirrors the dashboard wizard's
+ * `STEPS` array 1:1 — this is the authoritative resume-order, NOT the Prisma
+ * enum's declaration order (which only governs membership).
+ *
+ * PR #373: `claim` ships and slots SECOND (welcome → claim → account, #371
+ * handoff §1). org / team remain GATED (separate PRs) — they extend
+ * `SetupStep`, this list, the wizard array, and the route validation together,
+ * the way claim does here.
  *
  * Declared as a plain string-literal tuple (NOT `SetupStep.welcome` etc.)
  * so this module has NO runtime dependency on the Prisma enum OBJECT at
@@ -33,6 +37,7 @@ export const APPLIANCE_SETUP_ID = "singleton";
  */
 export const SETUP_STEPS = [
   "welcome",
+  "claim",
   "account",
   "internet",
   "storage",
