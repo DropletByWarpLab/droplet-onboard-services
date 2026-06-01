@@ -139,6 +139,62 @@ export async function setupAdmin(
   }
 }
 
+/**
+ * PR #372 — persist the wizard step so a mid-wizard refresh resumes here.
+ * Fire-and-forget from the caller's perspective: a failure to persist must
+ * never block the customer from advancing the wizard locally, so we
+ * swallow network errors (the in-memory step still moves forward; the next
+ * successful PATCH re-syncs). Public endpoint — runs before any user
+ * exists, like POST /api/auth/setup.
+ */
+export async function patchSetupStep(setupStep: string): Promise<void> {
+  try {
+    await fetch(`${BASE}/api/setup/state`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setup_step: setupStep }),
+    });
+  } catch {
+    /* non-fatal — local wizard progress is the source of truth mid-step */
+  }
+}
+
+/**
+ * PR #372 — the wizard-FINISH transition: durably flip the appliance to
+ * `ready` server-side (orchestrator `markApplianceReady`). This is the write
+ * that survives a hard refresh — without it `ApplianceSetup.state` stays
+ * `unclaimed` and `AuthGate` re-traps the owner in the first-run wizard.
+ * The server also lands `setup_step` on `done`, so the persisted row is
+ * internally consistent. markApplianceReady on an already-ready appliance is
+ * a 200 no-op, so finishing twice / refreshing on `/done` is safe.
+ *
+ * The wizard authenticated at the account step (loginUser sets the
+ * `droplet_session` cookie), and the orchestrator gates the `ready` claim
+ * on that session, so we send credentials with the request.
+ *
+ * M4 (PR #372 re-review) — this used to swallow EVERY error (network AND
+ * non-2xx). That left the UI showing "ready" (the optimistic in-memory flip)
+ * while the server stayed `unclaimed`, so the next refresh re-trapped the
+ * owner with no signal anything went wrong. We now THROW on a failed PATCH
+ * (network error or non-2xx) so the caller can roll back the optimistic flip
+ * and surface a retry. The server transition is idempotent, so retrying is
+ * always safe.
+ */
+export async function patchSetupReady(): Promise<void> {
+  const res = await fetch(`${BASE}/api/setup/state`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ appliance: "ready" }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || `Failed to finalize setup (appliance:ready): ${res.status}`,
+    );
+  }
+}
+
 export async function loginUser(
   username: string,
   password: string

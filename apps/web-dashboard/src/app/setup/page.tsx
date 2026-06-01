@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { useAuth } from "@/lib/auth";
+import { patchSetupStep } from "@/lib/api";
 import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
@@ -16,9 +18,11 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
 /**
  * Customer-facing first-run wizard.
  *
- * Stateless setup detection (Nextcloud user check via /api/auth/setup)
- * gates whether `AuthGate` routes the customer here at all; once they
- * land we walk them through the wizard step machine.
+ * PR #372 — `AuthGate` routes the customer here when the explicit
+ * `/api/setup/state` machine reports the appliance is "unclaimed" (no
+ * longer the stateless Nextcloud `installed` check). Once they land we
+ * walk them through the wizard step machine, resuming at the persisted
+ * `setupState.setupStep`.
  *
  * Each step is its own component under `components/setup/steps/`. This
  * page only owns:
@@ -56,10 +60,38 @@ const STEPS: Step[] = [
   "done",
 ];
 
+/**
+ * PR #372 — the persisted `setupStep` comes from `/api/setup/state` via the
+ * auth context. Resume there if it's a step this wizard can render; fall
+ * back to welcome otherwise (e.g. a gated claim/org/team value, or the
+ * terminal `done` which has nothing to resume into). Keeps the resume
+ * target congruent with the steps the wizard actually has — no blank screen.
+ */
+function resumeStepFrom(setupStep: string | undefined): Step {
+  if (setupStep && setupStep !== "done" && (STEPS as readonly string[]).includes(setupStep)) {
+    return setupStep as Step;
+  }
+  return "welcome";
+}
+
 export default function SetupPage() {
-  const [step, setStep] = useState<Step>("welcome");
+  const { setupState } = useAuth();
+  // Hydrate once from the persisted step (resumability). useState's
+  // initializer runs only on first render, so later context updates don't
+  // yank the customer back mid-wizard.
+  const [step, setStepState] = useState<Step>(() =>
+    resumeStepFrom(setupState?.setupStep),
+  );
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
+
+  // Advance the wizard AND persist the new step so a refresh resumes here.
+  // The PATCH is fire-and-forget (patchSetupStep swallows network errors) —
+  // local progress must never be gated on the round-trip.
+  const setStep = useCallback((next: Step) => {
+    setStepState(next);
+    void patchSetupStep(next);
+  }, []);
 
   return (
     <div className="min-h-screen bg-surface-primary flex items-center justify-center p-4">

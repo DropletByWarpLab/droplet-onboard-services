@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { Eye, EyeOff, Lock, User } from "lucide-react";
 import { setupAdmin, loginUser } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
 import { StepShell } from "@/components/setup/StepShell";
 
 const RESERVED_USERNAMES = ["admin", "root"];
@@ -13,9 +12,14 @@ const RESERVED_USERNAMES = ["admin", "root"];
  *
  * Owns its own form state (username / display name / password / confirm)
  * and the submit lifecycle. On success, calls `setupAdmin` + `loginUser`
- * + `completeSetup` from the auth context, then bubbles the chosen
- * display name up via `onComplete` so the wizard's final `done` step can
- * personalise the WelcomeFlourish ("Welcome, Robin").
+ * (auto-login so later steps can hit authenticated endpoints), then bubbles
+ * the chosen display name up via `onComplete` so the wizard's final `done`
+ * step can personalise the WelcomeFlourish ("Welcome, Robin").
+ *
+ * PR #372: the appliance is NOT claimed here — that would mark setup
+ * complete mid-wizard and break resumability (a refresh would route to the
+ * dashboard before the owner finished). The "ready" transition is fired at
+ * the wizard's terminal `done` step (DoneStep → completeSetup).
  *
  * Wraps `StepShell` for chrome (title / subtitle / primary CTA) so the
  * layout matches the rest of the wizard's typed steps. The form fields
@@ -31,7 +35,6 @@ export function AccountStep({
 }: {
   onComplete: (displayName: string) => void;
 }) {
-  const { completeSetup } = useAuth();
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
@@ -75,7 +78,6 @@ export function AccountStep({
       await setupAdmin(username, password, displayName || undefined);
       // Auto-login so we can call authenticated endpoints during discovery.
       await loginUser(username, password);
-      completeSetup();
       onComplete(displayName);
     } catch (err: unknown) {
       const msg =
