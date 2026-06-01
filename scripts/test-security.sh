@@ -88,7 +88,27 @@ done
 # Docker Compose must receive --env-file explicitly because the sudo fallback
 # in run_docker_compose() strips shell environment variables (env_reset).
 
-compose_calls=$(grep -n 'run_docker_compose' "$COMPOSE_SH" || true)
+# Join backslash-continued shell lines into one logical line before matching,
+# keyed by the starting line number. Without this, a command split across a
+# `\` continuation (e.g. the flags on line N and `--env-file` on line N+1)
+# is falsely flagged as missing --env-file. Output: "<startlineno>:<joined>".
+join_continuations() {
+  awk '
+    { gsub(/\r$/, "") }
+    buf == "" { start = NR }
+    { line = $0
+      cont = (line ~ /\\[[:space:]]*$/)
+      sub(/\\[[:space:]]*$/, "", line)
+      buf = buf line
+      if (cont) { next }
+      print start ":" buf
+      buf = ""
+    }
+    END { if (buf != "") print start ":" buf }
+  ' "$1"
+}
+
+compose_calls=$(join_continuations "$COMPOSE_SH" | grep 'run_docker_compose' || true)
 missing_env_file=false
 
 while IFS= read -r line; do
@@ -113,7 +133,7 @@ fi
 
 # Every docker compose invocation in verify.sh must also include --env-file.
 VERIFY_SH="$REPO_ROOT/scripts/verify.sh"
-verify_calls=$(grep -nE '(_docker_compose|docker compose) -f' "$VERIFY_SH" | grep -v 'printf' || true)
+verify_calls=$(join_continuations "$VERIFY_SH" | grep -E '(_docker_compose|docker compose) -f' | grep -v 'printf' || true)
 missing_verify=false
 
 while IFS= read -r line; do
@@ -342,7 +362,158 @@ else
 fi
 
 # =============================================================================
-# Test 10: WARP-573 — orchestrator migration-on-boot is guarded
+# Test 10: WARP-575 — makeplane/plane-worker must not appear anywhere
+# =============================================================================
+# makeplane/plane-worker:* does not exist on Docker Hub (404). Plane runs the
+# Celery worker from the backend image with an explicit command. This guard
+# prevents the 404 image name from re-entering compose files, docs, or scripts.
+
+plane_worker_hits=$(grep -rn 'makeplane/plane-worker' \
+  "$REPO_ROOT/docker/" "$REPO_ROOT/docs/" "$REPO_ROOT/scripts/" \
+  --exclude="test-security.sh" \
+  2>/dev/null || true)
+
+if [ -z "$plane_worker_hits" ]; then
+  pass "no makeplane/plane-worker references in docker/, docs/, scripts/"
+else
+  fail "makeplane/plane-worker found — image does not exist on Docker Hub (WARP-575)"
+  printf "${_RED}%s${_RESET}\n" "$plane_worker_hits" >&2
+  printf "    pm-worker must use makeplane/plane-backend with an explicit\n" >&2
+  printf "    command: [\"./bin/docker-entrypoint-worker.sh\"]\n\n" >&2
+fi
+
+# =============================================================================
+# Test 11: WARP-575 — pm-worker and pm-api must share the same plane-backend pin
+# =============================================================================
+# Both services must reference the same makeplane/plane-backend:<tag> so the
+# already-pulled pm-api image is reused; diverged pins introduce a hidden
+# second download and break the ADR-010 OQ3 'single upstream pin' posture.
+
+# Extract the image pin for a top-level service block, scoping by the service's
+# 2-space-indented key (e.g. "  pm-api:"). This walks the block until the next
+# top-level service key, so it is independent of whether image: comes before or
+# after container_name: — a plain grep -B5 silently false-passes if keys are
+# reordered (review nit, WARP-575). yq is not guaranteed in CI, so we stay awk-only.
+extract_pm_image_pin() {
+  awk -v svc="$1" '
+    $0 ~ "^  " svc ":[[:space:]]*$" { in_svc = 1; next }
+    in_svc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { in_svc = 0 }
+    in_svc && /^[[:space:]]+image:[[:space:]]+makeplane\/plane-backend:/ {
+      line = $0
+      sub(/.*image:[[:space:]]+/, "", line)
+      print line
+      exit
+    }
+  ' "$COMPOSE_FILE"
+}
+
+pm_api_pin=$(extract_pm_image_pin "pm-api")
+pm_worker_pin=$(extract_pm_image_pin "pm-worker")
+
+if [ -z "$pm_api_pin" ]; then
+  fail "pm-api image pin not found (expected makeplane/plane-backend:<tag>)"
+elif [ -z "$pm_worker_pin" ]; then
+  fail "pm-worker image pin not found (expected makeplane/plane-backend:<tag>)"
+elif [ "$pm_api_pin" = "$pm_worker_pin" ]; then
+  pass "pm-api and pm-worker share the same plane-backend pin ($pm_api_pin)"
+else
+  fail "pm-api ($pm_api_pin) and pm-worker ($pm_worker_pin) image pins diverged"
+  printf "${_RED}  pm-api:   %s${_RESET}\n" "$pm_api_pin" >&2
+  printf "${_RED}  pm-worker:%s${_RESET}\n" "$pm_worker_pin" >&2
+  printf "    Both must reference the same makeplane/plane-backend:<tag>.\n\n" >&2
+fi
+
+# =============================================================================
+# Test 12: WARP-575 — pm-worker environment must be a superset of pm-api
+# =============================================================================
+# The Celery worker runs the same Plane backend image as pm-api and reads the
+# same app config (SECRET_KEY for message/session signing, WEB_URL for email /
+# notification link hrefs at worker init). Any env key the API sets must also be
+# set on the worker, or the separate worker process silently diverges (this is
+# exactly how the WEB_URL gap slipped in). We compare the environment: key names.
+
+extract_pm_env_keys() {
+  awk -v svc="$1" '
+    $0 ~ "^  " svc ":[[:space:]]*$" { in_svc = 1; next }
+    in_svc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { in_svc = 0 }
+    in_svc && /^    environment:[[:space:]]*$/ { in_env = 1; next }
+    in_env && /^    [A-Za-z]/ { in_env = 0 }
+    in_env && /^      [A-Za-z0-9_]+:/ {
+      key = $0
+      sub(/^[[:space:]]+/, "", key)
+      sub(/:.*/, "", key)
+      print key
+    }
+  ' "$COMPOSE_FILE" | sort -u
+}
+
+pm_api_env=$(extract_pm_env_keys "pm-api")
+pm_worker_env=$(extract_pm_env_keys "pm-worker")
+missing_worker_env=$(comm -23 <(printf '%s\n' "$pm_api_env") <(printf '%s\n' "$pm_worker_env"))
+
+if [ -z "$pm_api_env" ]; then
+  fail "pm-api environment block not found (expected at least SECRET_KEY/WEB_URL)"
+elif [ -z "$missing_worker_env" ]; then
+  pass "pm-worker environment is a superset of pm-api"
+else
+  fail "pm-worker is missing env keys that pm-api sets (WARP-575)"
+  printf "${_RED}%s${_RESET}\n" "$missing_worker_env" >&2
+  printf "    The worker runs the same image; mirror pm-api's environment keys.\n\n" >&2
+fi
+
+# =============================================================================
+# Test 13: WARP-569 — Every service must have mem_limit (top-level key)
+# =============================================================================
+# Containers without a mem_limit are uncapped — a single runaway process can
+# OOM-kill the whole appliance (7 GB shared RAM, 30 services). Use top-level
+# `mem_limit`, NOT `deploy.resources.limits`: deploy.* is silently IGNORED by
+# `docker compose up` outside Swarm and would appear to fix this while
+# enforcing nothing.
+
+_limits_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+compose_file = sys.argv[1]
+try:
+    with open(compose_file) as f:
+        data = yaml.safe_load(f)
+except Exception as e:
+    print(f"YAML parse error: {e}", file=sys.stderr)
+    sys.exit(2)
+
+services = data.get("services", {})
+missing_limit = [name for name, cfg in services.items() if "mem_limit" not in cfg]
+has_deploy_resources = [
+    name for name, cfg in services.items()
+    if "deploy" in cfg and isinstance(cfg["deploy"], dict) and "resources" in cfg["deploy"]
+]
+
+ok = True
+if missing_limit:
+    print("Services missing mem_limit: " + ", ".join(sorted(missing_limit)), file=sys.stderr)
+    ok = False
+if has_deploy_resources:
+    print("Services using deploy.resources (silently ignored outside Swarm): " + ", ".join(sorted(has_deploy_resources)), file=sys.stderr)
+    ok = False
+
+if ok:
+    print(f"All {len(services)} services have mem_limit; no deploy.resources usage")
+sys.exit(0 if ok else 1)
+PYEOF
+)
+_limits_exit=$?
+
+if [ "$_limits_exit" -eq 0 ]; then
+  pass "docker-compose.yml: all services have mem_limit (no deploy.resources)"
+else
+  fail "docker-compose.yml: resource-limit coverage gap (WARP-569)"
+  printf "${_RED}%s${_RESET}\n" "$_limits_output" >&2
+  printf "    Add top-level mem_limit + cpus + pids_limit to every service.\n" >&2
+  printf "    Do NOT use deploy.resources.limits — it is silently ignored outside Swarm.\n\n" >&2
+fi
+
+# =============================================================================
+# Test 14: WARP-573 — orchestrator migration-on-boot is guarded
 # =============================================================================
 # The orchestrator container must NOT boot via the old unguarded
 # `prisma migrate deploy && node` CMD (no advisory lock, no snapshot, silent

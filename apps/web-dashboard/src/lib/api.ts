@@ -55,6 +55,7 @@ import type {
   VpnStatusInfo,
   VpnPeerCreatedInfo,
   DuckDnsStatus,
+  ToolCatalogResponse,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -62,11 +63,64 @@ const BASE = "";
 
 // --- Auth ---
 
-export async function checkSetupRequired(): Promise<boolean> {
-  const res = await authFetch(`${BASE}/api/auth/setup`);
-  if (!res.ok) return true;
-  const data = await res.json();
-  return data.setupRequired;
+/**
+ * Tri-state result of probing `GET /api/auth/setup` (WARP-577).
+ *
+ * - `'required'`  — orchestrator explicitly answered `setupRequired: true`.
+ * - `'complete'`  — orchestrator explicitly answered `setupRequired: false`.
+ * - `'unknown'`   — indeterminate: any non-2xx, network error, probe timeout,
+ *                   or a 2xx body that omits the `setupRequired` boolean.
+ *
+ * Callers MUST treat `'unknown'` as fail-CLOSED — i.e. never route a user into
+ * the first-run `/setup` wizard on an indeterminate answer. Only an explicit
+ * `'required'` may do that. This avoids guessing setup state from the absence
+ * of a clean response (the repo's "no guessing" standard).
+ */
+export type SetupStatus = "required" | "complete" | "unknown";
+
+/** Wall-clock budget for the setup probe before we treat it as `'unknown'`. */
+const SETUP_PROBE_TIMEOUT_MS = 5000;
+
+export async function checkSetupRequired(): Promise<SetupStatus> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    SETUP_PROBE_TIMEOUT_MS,
+  );
+
+  try {
+    // `/api/auth/setup` is a public, pre-auth probe (no session required), so
+    // we call `fetch` directly rather than `authFetch` — there is no 401 to
+    // refresh through, and the AbortController signal must reach the network
+    // call unaltered for the probe timeout to fire.
+    const res = await fetch(`${BASE}/api/auth/setup`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    // Any non-2xx (5xx cold-boot, 502 gateway, etc.) is indeterminate — never
+    // collapse "couldn't reach the orchestrator" into "setup is needed".
+    if (!res.ok) return "unknown";
+
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      // 2xx with an unparseable body — still indeterminate.
+      return "unknown";
+    }
+
+    const setupRequired = (data as { setupRequired?: unknown } | null)
+      ?.setupRequired;
+    // Only an explicit boolean is trusted; a missing field is NOT "complete".
+    if (setupRequired === true) return "required";
+    if (setupRequired === false) return "complete";
+    return "unknown";
+  } catch {
+    // Network error or aborted/timed-out probe → indeterminate.
+    return "unknown";
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function setupAdmin(
@@ -325,6 +379,37 @@ export async function fetchStorage(): Promise<StorageStats> {
 export async function fetchDrives(): Promise<DrivesResponse> {
   const res = await authFetch(`${BASE}/api/storage/drives`);
   if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-612: ask the device-bridge to refresh its drive snapshot (admin-only;
+ * proxies the bridge's /drives/changed cache hook — no mount side effects).
+ */
+export async function rescanDrives(): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`${BASE}/api/storage/drives/rescan`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to rescan drives: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-612: unmount + forget a hot-plug USB drive (admin-only). The
+ * orchestrator + bridge refuse anything that isn't a USB mount under
+ * /mnt/droplet/. Throws a friendly message on 409 (busy) / 503 (not
+ * configured) so the caller can surface it.
+ */
+export async function ejectDrive(uuid: string): Promise<{ ok: boolean }> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}/eject`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to eject drive: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -2430,6 +2515,24 @@ export async function transcribeNow(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `transcribe-now failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Tools (WARP-555) ---
+
+/**
+ * Read-only catalog of the built-in tools the agent can call, grouped by
+ * domain, for the `/tools` surface. Backed by `GET /api/llm/tools/catalog`
+ * which reads `@droplet/tools-core`'s in-process registry (no MCP child),
+ * so it stays available even when the agent runtime is mid-restart. The
+ * orchestrator RBAC-filters write tools for non-privileged roles.
+ */
+export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
+  const res = await authFetch(`${BASE}/api/llm/tools/catalog`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load tools: ${res.status}`);
   }
   return res.json();
 }

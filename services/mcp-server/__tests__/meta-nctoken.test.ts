@@ -38,11 +38,11 @@ function buildDepsCapturingNextcloudHeaders(captured: {
 }
 
 async function connectStdio(deps: ContextDeps) {
-  // Stdio transport: claims === undefined → trustedPrincipal: true, so
-  // file tools (which are read-only and not gated by RBAC) reach the
-  // handler regardless. This matches how the orchestrator's in-proc
-  // singleton spawns the child.
-  const server = createServer(deps);
+  // Stdio transport: the explicit `local-trusted` posture (WARP-563) →
+  // trustedPrincipal: true, so file tools (which are read-only and not
+  // gated by RBAC) reach the handler regardless. This matches how the
+  // orchestrator's in-proc singleton spawns the child.
+  const server = createServer(deps, { kind: "local-trusted" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(
     { name: "meta-nctoken-test", version: "0.0.1" },
@@ -123,7 +123,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps);
+    const server = createServer(deps, { kind: "local-trusted" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-userid-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -154,7 +154,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps);
+    const server = createServer(deps, { kind: "local-trusted" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-userid-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -230,7 +230,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps);
+    const server = createServer(deps, { kind: "local-trusted" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-enh-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -270,7 +270,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps);
+    const server = createServer(deps, { kind: "local-trusted" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-enh-bad-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -304,7 +304,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps);
+    const server = createServer(deps, { kind: "local-trusted" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-enh-array-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

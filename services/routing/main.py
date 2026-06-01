@@ -47,6 +47,8 @@ from schemas import (
     BlockDeviceRequest,
     UnblockDeviceRequest,
     PortForwardRequest,
+    PhoneHomeDeviceRequest,
+    PhoneHomeCamerasRequest,
     ApplyConfigRequest,
     CreateVlanRequest,
     CameraSubnetSetupRequest,
@@ -644,6 +646,33 @@ def add_port_forward(req: PortForwardRequest):
             req.name, req.src_port, req.dest_ip, req.dest_port, req.proto,
         )
         return {"status": "ok", "name": req.name}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# WARP-613: phone-home egress control (see ADR-012).
+@app.post("/firewall/phone-home/device")
+def set_device_phone_home(req: PhoneHomeDeviceRequest):
+    try:
+        fw = get_router().firewall
+        if req.blocked:
+            fw.block_phone_home(req.mac)
+        else:
+            fw.unblock_phone_home(req.mac)
+        return {"status": "ok", "mac": req.mac, "blocked": req.blocked}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/firewall/phone-home/cameras")
+def set_cameras_phone_home(req: PhoneHomeCamerasRequest):
+    # The camera zone toggle only affects the camera VLAN's WAN egress — it
+    # cannot sever the orchestrator's (LAN/mgmt-side) management path, so it
+    # commits+reloads directly like block_device rather than wrapping in
+    # safe_apply (which would conflict with the SDK method's own commit/reload).
+    try:
+        get_router().firewall.set_camera_phone_home(req.blocked)
+        return {"status": "ok", "scope": "cameras", "blocked": req.blocked}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

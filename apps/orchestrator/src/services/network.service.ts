@@ -260,6 +260,26 @@ export async function unblockDevice(mac: string): Promise<openwrt.WriteResult> {
   return result;
 }
 
+// WARP-613: phone-home egress control. Dispatched by the egress reconciler
+// (devices) and the phone-home routes (cameras). See ADR-012.
+export async function blockPhoneHome(mac: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.blockPhoneHome(mac);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function unblockPhoneHome(mac: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.unblockPhoneHome(mac);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function setCameraPhoneHome(blocked: boolean): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setCameraPhoneHome(blocked);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function addPortForward(
   name: string,
   srcPort: string,

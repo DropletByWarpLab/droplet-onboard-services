@@ -38,8 +38,9 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
     const searchSpy = vi.fn().mockResolvedValue([]);
     const deps = buildDeps(searchSpy);
 
-    // No claims → no userId → search_content returns AUTH_REQUIRED.
-    const server = createServer(deps);
+    // Trusted stdio posture, but no _meta.userId → no userId →
+    // search_content returns AUTH_REQUIRED (WARP-563).
+    const server = createServer(deps, { kind: "local-trusted" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(
@@ -71,7 +72,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
   it("searchHybrid spy is invoked with bound userId when authed", async () => {
     const searchSpy = vi.fn().mockResolvedValue([]);
     const deps = buildDeps(searchSpy);
-    const server = createServer(deps, { sub: "u1", role: "owner" });
+    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(
@@ -105,7 +106,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
 
   it("when ctx.searchHybrid is undefined, search_content surfaces SEARCH_UNAVAILABLE", async () => {
     const deps = buildDeps(undefined);
-    const server = createServer(deps, { sub: "u1", role: "owner" });
+    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(
@@ -136,7 +137,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
       .fn()
       .mockRejectedValue(new Error("UNAVAILABLE: ai-gateway"));
     const deps = buildDeps(searchSpy);
-    const server = createServer(deps, { sub: "u1", role: "owner" });
+    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(

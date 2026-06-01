@@ -280,11 +280,10 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
 
   if (transport === "stdio") {
-    // stdio: one server per process, no claims (the orchestrator is the
-    // trusted principal). MCP_TRUSTED=1 is the explicit signal the
-    // orchestrator sets in the spawn env, but functionally we just don't
-    // gate auth on this transport.
-    const server = createServer(deps);
+    // stdio: one server per process, deliberately the trusted in-process
+    // orchestrator child. Trust is declared explicitly via the
+    // `local-trusted` posture (WARP-563) — never inferred from absent claims.
+    const server = createServer(deps, { kind: "local-trusted" });
     await startStdio(server);
   } else {
     // http: per-request server with JWT-derived claims. JWT_SECRET is
@@ -300,7 +299,10 @@ async function main(): Promise<void> {
     startHttp({
       port,
       jwtSecret,
-      buildServer: (claims) => createServer(deps, claims),
+      // http: untrusted network transport. verifyJwt produces verified claims
+      // for every request; wrap them in the explicit `authenticated` posture
+      // so RBAC is always applied (WARP-563).
+      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }),
     });
     console.error(`mcp-server listening on :${port} (http, JWT-auth)`);
   }

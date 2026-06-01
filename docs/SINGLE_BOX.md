@@ -20,8 +20,8 @@ profile flag just picks which optional services bundle into the host.
 On a fresh Ubuntu 24.04 host with an AMD dGPU + iGPU + MT7922 Wi-Fi card:
 
 ```bash
-git clone git@github.com:DropletByWarpLab/droplet-pi-platform.git
-cd droplet-pi-platform
+git clone git@github.com:DropletByWarpLab/droplet-onboard-services.git
+cd droplet-onboard-services
 ./scripts/setup.sh
 ```
 
@@ -92,7 +92,7 @@ Plane's Django migrations are quarantined from Prisma's.
 |---|---|---|---|---|
 | `pm-web` | `makeplane/plane-frontend:v0.24.1` | 3000 (internal, Nginx /pm/) | ~120 MB | ~250 MB |
 | `pm-api` | `makeplane/plane-backend:v0.24.1` | 8000 (internal) | ~180 MB | ~400 MB |
-| `pm-worker` | `makeplane/plane-worker:v0.24.1` | — | ~140 MB | ~300 MB |
+| `pm-worker` | `makeplane/plane-backend:v0.24.1` + `./bin/docker-entrypoint-worker.sh` | — | ~140 MB | ~300 MB |
 | `postgres-pm` | `postgres:15-alpine` | 5432 (internal) | ~30 MB | ~80 MB |
 | `redis-pm` | `redis:7-alpine` | 6379 (internal) | ~10 MB | ~25 MB |
 | `pm-health` (sidecar) | `services/pm/Dockerfile` | 8090 (internal) | ~25 MB | ~30 MB |

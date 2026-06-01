@@ -99,6 +99,18 @@ vi.mock("../services/jwt.service.js", async () => {
   };
 });
 
+// ADR-013: login now verifies locally against the argon2id directory.
+// Mock the password.service boundary so these WARP-485 JWT-shape tests
+// (which only use login as a setup step to mint a session) don't need a
+// real hash — verifyPassword returns true for the seeded rows.
+const verifyPassword = vi.fn().mockResolvedValue(true);
+const verifyDummyPassword = vi.fn().mockResolvedValue(false);
+vi.mock("../services/password.service.js", () => ({
+  verifyPassword: (...args: unknown[]) => verifyPassword(...args),
+  verifyDummyPassword: (...args: unknown[]) => verifyDummyPassword(...args),
+  hashPassword: vi.fn().mockResolvedValue("$argon2id$mock"),
+}));
+
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
@@ -118,6 +130,7 @@ interface UserRow {
   displayName: string;
   email: string | null;
   nextcloudUsername: string | null;
+  passwordHash: string | null;
   role: string;
   isLocal: boolean;
   createdAt: Date;
@@ -132,6 +145,9 @@ function createPrismaMock(seed: UserRow[] = []) {
   self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
+      if (where.email !== undefined) {
+        return users.find((u) => u.email === where.email) ?? null;
+      }
       if (where.nextcloudUsername !== undefined) {
         return users.find((u) => u.nextcloudUsername === where.nextcloudUsername) ?? null;
       }
@@ -150,6 +166,7 @@ function createPrismaMock(seed: UserRow[] = []) {
         displayName: data.displayName ?? data.username,
         email: data.email ?? null,
         nextcloudUsername: data.nextcloudUsername ?? null,
+        passwordHash: data.passwordHash ?? null,
         role: data.role ?? "family",
         isLocal: data.isLocal ?? true,
         createdAt: new Date(),
@@ -177,6 +194,7 @@ function createPrismaMock(seed: UserRow[] = []) {
         displayName: create.displayName ?? create.username,
         email: create.email ?? null,
         nextcloudUsername: create.nextcloudUsername ?? null,
+        passwordHash: create.passwordHash ?? null,
         role: create.role ?? "family",
         isLocal: create.isLocal ?? true,
         createdAt: new Date(),
@@ -269,38 +287,35 @@ beforeEach(() => {
   touchNcToken.mockResolvedValue(undefined);
 });
 
-describe("WARP-485 round 2 — JWT login path", () => {
-  it("signs the access token with the local User.id UUID, NOT the NC username", async () => {
-    // Local User row already exists (operator added stefan-cruceru via
-    // /api/people before they ever logged in).
+// ADR-013 inverted the login auth model (Nextcloud-OCS → local argon2id
+// directory). These two tests preserve the WARP-485 round-2 anti-
+// regression contract — JWT.sub / NC-store key must be the local User.id
+// UUID — but now drive login through the new email + argon2id path. The
+// full ADR-013 login behavior (anti-enumeration, NC-as-provisioning,
+// wrong-password / unknown-email parity) lives in
+// `auth.directory-login.test.ts`; we do not duplicate it here.
+describe("WARP-485 round 2 — JWT login path (ADR-013 directory)", () => {
+  it("signs the access token with the local User.id UUID, NOT the username", async () => {
+    // Local directory row already exists with an argon2id hash.
     const localUser: UserRow = {
       id: "u-uuid-stefan-7777",
       username: "stefan-cruceru",
       displayName: "Stefan Cruceru",
-      email: null,
+      email: "stefan@warp.test",
       nextcloudUsername: "stefan-cruceru",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
       role: "owner",
-      isLocal: false,
+      isLocal: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     const prisma = createPrismaMock([localUser]);
-
-    (nc.ncLoginWithCredentials as any).mockResolvedValueOnce({
-      token: "nc-app-password-xyz",
-      loginName: "stefan-cruceru",
-    });
-    (nc.ncGetCurrentUser as any).mockResolvedValueOnce({
-      id: "stefan-cruceru",
-      displayName: "Stefan Cruceru",
-      email: null,
-      groups: ["admin"],
-    });
+    verifyPassword.mockResolvedValueOnce(true);
 
     const app = buildApp(prisma);
     const res = await request(app)
       .post("/api/auth/login")
-      .send({ username: "stefan-cruceru", password: "hunter22hunter22" });
+      .send({ email: "stefan@warp.test", password: "hunter22hunter22" });
 
     expect(res.status).toBe(200);
     // The canonical anti-regression assertion: JWT.sub is the UUID.
@@ -316,35 +331,32 @@ describe("WARP-485 round 2 — JWT login path", () => {
     expect(res.body.user.username).toBe("stefan-cruceru");
   });
 
-  it("stores the NC token keyed by local User.id UUID, not by NC username", async () => {
+  it("stores the downstream NC token keyed by local User.id UUID, not by username", async () => {
     const localUser: UserRow = {
       id: "u-uuid-romain-8888",
       username: "romain",
       displayName: "Romain",
-      email: null,
+      email: "romain@warp.test",
       nextcloudUsername: "romain",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
       role: "owner",
-      isLocal: false,
+      isLocal: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     const prisma = createPrismaMock([localUser]);
+    verifyPassword.mockResolvedValueOnce(true);
 
+    // Downstream provisioning returns an app-password to stash for WebDAV.
     (nc.ncLoginWithCredentials as any).mockResolvedValueOnce({
       token: "nc-token-for-romain",
       loginName: "romain",
-    });
-    (nc.ncGetCurrentUser as any).mockResolvedValueOnce({
-      id: "romain",
-      displayName: "Romain",
-      email: null,
-      groups: ["admin"],
     });
 
     const app = buildApp(prisma);
     const res = await request(app)
       .post("/api/auth/login")
-      .send({ username: "romain", password: "hunter22hunter22" });
+      .send({ email: "romain@warp.test", password: "hunter22hunter22" });
 
     expect(res.status).toBe(200);
     expect(storeNcToken).toHaveBeenCalledTimes(1);
@@ -354,67 +366,6 @@ describe("WARP-485 round 2 — JWT login path", () => {
     expect(storedUserId).not.toBe("romain");
     expect(storedToken).toBe("nc-token-for-romain");
   });
-
-  it("refuses login with 401 USER_NOT_PROVISIONED when no local User row matches", async () => {
-    // OCS validates the credential, but no local User row maps to
-    // this NC user — fail-closed instead of silently auto-provisioning.
-    const prisma = createPrismaMock([]); // empty directory
-
-    (nc.ncLoginWithCredentials as any).mockResolvedValueOnce({
-      token: "nc-token-of-mysterious-stranger",
-      loginName: "mystery-user",
-    });
-    (nc.ncGetCurrentUser as any).mockResolvedValueOnce({
-      id: "mystery-user",
-      displayName: "Mystery User",
-      email: null,
-      groups: [],
-    });
-
-    const app = buildApp(prisma);
-    const res = await request(app)
-      .post("/api/auth/login")
-      .send({ username: "mystery-user", password: "hunter22hunter22" });
-
-    expect(res.status).toBe(401);
-    expect(res.body).toMatchObject({ code: "USER_NOT_PROVISIONED" });
-    // No cookies set on the fail-closed branch — refusal is silent
-    // on the wire (no session credential ever materialised).
-    expect(res.headers["set-cookie"]).toBeUndefined();
-    // NC token is NEVER stored on the refusal path — we don't want a
-    // stale credential entry for an identity the orchestrator doesn't
-    // recognise.
-    expect(storeNcToken).not.toHaveBeenCalled();
-  });
-
-  it("refuses login with 401 USER_NOT_PROVISIONED when prisma client is missing (defense in depth)", async () => {
-    // The shim createAuthRouter() in legacy code paths wires the
-    // public router without prisma. If a deployment ever lands in
-    // that posture by accident, login must fail closed rather than
-    // mint the NC username string into JWT.sub.
-    const app = express();
-    app.use(express.json());
-    app.use(cookieParser());
-    app.use("/api", createPublicAuthRouter(undefined));
-
-    (nc.ncLoginWithCredentials as any).mockResolvedValueOnce({
-      token: "nc-token",
-      loginName: "anyone",
-    });
-    (nc.ncGetCurrentUser as any).mockResolvedValueOnce({
-      id: "anyone",
-      displayName: "Anyone",
-      email: null,
-      groups: [],
-    });
-
-    const res = await request(app)
-      .post("/api/auth/login")
-      .send({ username: "anyone", password: "hunter22hunter22" });
-
-    expect(res.status).toBe(401);
-    expect(res.body).toMatchObject({ code: "USER_NOT_PROVISIONED" });
-  });
 });
 
 describe("WARP-485 round 2 — JWT refresh path", () => {
@@ -423,23 +374,19 @@ describe("WARP-485 round 2 — JWT refresh path", () => {
       id: "u-uuid-rotate-1234",
       username: "rotator",
       displayName: "Rotator",
-      email: null,
+      email: "rotator@warp.test",
       nextcloudUsername: "rotator",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
       role: "family",
-      isLocal: false,
+      isLocal: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     const prisma = createPrismaMock([localUser]);
+    verifyPassword.mockResolvedValueOnce(true);
     (nc.ncLoginWithCredentials as any).mockResolvedValueOnce({
       token: "nc-token",
       loginName: "rotator",
-    });
-    (nc.ncGetCurrentUser as any).mockResolvedValueOnce({
-      id: "rotator",
-      displayName: "Rotator",
-      email: null,
-      groups: [],
     });
 
     const app = buildApp(prisma);
@@ -449,7 +396,7 @@ describe("WARP-485 round 2 — JWT refresh path", () => {
     // signAccessToken, but we need to ride end-to-end here).
     const login = await request(app)
       .post("/api/auth/login")
-      .send({ username: "rotator", password: "hunter22hunter22" });
+      .send({ email: "rotator@warp.test", password: "hunter22hunter22" });
     expect(login.status).toBe(200);
     const refreshCookie = (login.headers["set-cookie"] as unknown as string[])
       .find((c) => c.startsWith("droplet_refresh="))
@@ -482,30 +429,26 @@ describe("WARP-485 round 2 — JWT refresh path", () => {
       id: "u-uuid-removed-9999",
       username: "soon-removed",
       displayName: "Soon Removed",
-      email: null,
+      email: "soon-removed@warp.test",
       nextcloudUsername: "soon-removed",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
       role: "family",
-      isLocal: false,
+      isLocal: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     const prisma = createPrismaMock([localUser]);
+    verifyPassword.mockResolvedValueOnce(true);
     (nc.ncLoginWithCredentials as any).mockResolvedValueOnce({
       token: "nc-token",
       loginName: "soon-removed",
-    });
-    (nc.ncGetCurrentUser as any).mockResolvedValueOnce({
-      id: "soon-removed",
-      displayName: "Soon Removed",
-      email: null,
-      groups: [],
     });
 
     const app = buildApp(prisma);
 
     const login = await request(app)
       .post("/api/auth/login")
-      .send({ username: "soon-removed", password: "hunter22hunter22" });
+      .send({ email: "soon-removed@warp.test", password: "hunter22hunter22" });
     expect(login.status).toBe(200);
     const refreshCookie = (login.headers["set-cookie"] as unknown as string[])
       .find((c) => c.startsWith("droplet_refresh="))
@@ -576,10 +519,11 @@ describe("WARP-485 round 2 — logout NC token key shape", () => {
       id: "u-uuid-logout-5555",
       username: "logout-user",
       displayName: "Logout User",
-      email: null,
+      email: "logout-user@warp.test",
       nextcloudUsername: "logout-user",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
       role: "family",
-      isLocal: false,
+      isLocal: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };

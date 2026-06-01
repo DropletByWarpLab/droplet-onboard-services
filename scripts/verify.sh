@@ -158,10 +158,10 @@ check "Nginx → AI Gateway" \
 # configurable (plug one in later), not a verify.sh failure.
 if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'voice-io-1$'; then
   check_warn "Voice orchestrator /health" \
-    _docker exec droplet-pi-platform-voice-io-1 \
+    _docker exec droplet-voice-io-1 \
       curl -sf -o /dev/null --max-time 5 http://localhost:8086/health
   check_warn "Voice orchestrator /audio/devices" \
-    _docker exec droplet-pi-platform-voice-io-1 \
+    _docker exec droplet-voice-io-1 \
       curl -sf -o /dev/null --max-time 5 http://localhost:8086/audio/devices
 fi
 

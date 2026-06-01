@@ -11,6 +11,7 @@ import setWifiChannel from "./handlers/network/set-wifi-channel.js";
 import getFirewallRules from "./handlers/network/get-firewall-rules.js";
 import blockNetworkDevice from "./handlers/network/block-network-device.js";
 import unblockNetworkDevice from "./handlers/network/unblock-network-device.js";
+import setPhoneHomeBlocking from "./handlers/network/set-phone-home-blocking.js";
 import addPortForward from "./handlers/network/add-port-forward.js";
 import getRouterSystemInfo from "./handlers/network/get-router-system-info.js";
 // WARP-470: F2 network throughput summary (network_check card)
@@ -118,6 +119,8 @@ const allTools: Tool[] = [
   getFirewallRules,
   blockNetworkDevice,
   unblockNetworkDevice,
+  // WARP-613: phone-home egress control
+  setPhoneHomeBlocking,
   addPortForward,
   getRouterSystemInfo,
   // WARP-470: F2 network KPI rollup → network_check card

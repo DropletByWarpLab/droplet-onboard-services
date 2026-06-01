@@ -28,6 +28,7 @@
     "@prisma/client": "^5.14.0",
     "@project-chip/matter.js": "^0.16.10",
     "archiver": "^7.0.1",
+    "argon2": "^0.41.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "express": "^4.19.2",

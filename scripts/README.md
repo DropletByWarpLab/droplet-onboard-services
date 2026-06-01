@@ -13,7 +13,7 @@ cd edge-platform
 ./scripts/setup.sh
 ```
 
-This single command provisions a fresh device (Raspberry Pi or Linux dev machine) with everything needed to run the Droplet stack.
+This single command provisions a fresh device (router host, inference host, or Linux dev machine) with everything needed to run the Droplet stack.
 
 ---
 
@@ -155,7 +155,7 @@ The setup script handles this automatically during its run by falling back to `s
 
 ### Build fails with out-of-memory
 
-On Raspberry Pi 4 (2 GB), builds may run out of memory:
+On memory-constrained ARM64 hosts (2 GB RAM), builds may run out of memory:
 
 ```bash
 # Free up Docker resources

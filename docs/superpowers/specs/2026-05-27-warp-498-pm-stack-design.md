@@ -29,7 +29,7 @@ All implementation tickets under Epic WARP-496 must comply with:
 
 ## Overview
 
-Embed [Plane](https://plane.so) (AGPL-3.0) as a compose service inside `droplet-pi-platform`, behind the existing Nginx reverse-proxy. The orchestrator owns identity (JWT → Plane session handoff) and the LLM agent gets a new `pm` tool domain via `packages/tools-core` + MCP. Mobile clients consume read-only endpoints via the existing mobile-API contract.
+Embed [Plane](https://plane.so) (AGPL-3.0) as a compose service inside `droplet`, behind the existing Nginx reverse-proxy. The orchestrator owns identity (JWT → Plane session handoff) and the LLM agent gets a new `pm` tool domain via `packages/tools-core` + MCP. Mobile clients consume read-only endpoints via the existing mobile-API contract.
 
 This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https://warp-lab.atlassian.net/browse/WARP-496) implement them.
 
@@ -43,7 +43,7 @@ This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https:/
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  droplet-pi-platform compose network                            │
+│  droplet compose network                                        │
 │                                                                  │
 │   nginx ─────► pm-web (port 3000 internal) ──┐                  │
 │      │                                        │                  │
@@ -62,7 +62,7 @@ This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https:/
 |---|---|---|---|---|
 | `pm-web` | `makeplane/plane-frontend:<pinned-sha>` | 3000 | `single-box`, `multi-box` | Next.js. Behind Nginx; never exposed on host. |
 | `pm-api` | `makeplane/plane-backend:<pinned-sha>` | 8000 | `single-box`, `multi-box` | Django REST API. Server-to-server only from orchestrator. |
-| `pm-worker` | `makeplane/plane-worker:<pinned-sha>` | — | `single-box`, `multi-box` | Celery worker for async jobs. |
+| `pm-worker` | `makeplane/plane-backend:<pinned-sha>` + `./bin/docker-entrypoint-worker.sh` | — | `single-box`, `multi-box` | Celery worker for async jobs. Plane does not publish a standalone worker image; the worker runs from the backend image via the bundled entrypoint (WARP-575). |
 | `postgres-pm` | `postgres:15-alpine` | 5432 | `single-box`, `multi-box` | Dedicated per OQ1 resolution. Volume `postgres-pm-data`. |
 | `redis-pm` | `redis:7-alpine` | 6379 | `single-box`, `multi-box` | Dedicated per OQ1 resolution. Volume `redis-pm-data`. |
 
