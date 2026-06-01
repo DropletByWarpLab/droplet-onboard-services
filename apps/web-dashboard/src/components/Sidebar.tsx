@@ -12,6 +12,7 @@ import {
   FlaskConical,
   FolderOpen,
   Globe,
+  HardDrive,
   HelpCircle,
   Laptop,
   LayoutDashboard,
@@ -144,6 +145,7 @@ const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
 // Sub-navigation rendered under Files when we're on a /files/* route.
 const filesSubNav = [
   { href: "/files", label: "All files", icon: FolderOpen, exact: true },
+  { href: "/files/drives", label: "Drives", icon: HardDrive, exact: false },
   { href: "/files/recents", label: "Recents", icon: Clock, exact: false },
   { href: "/files/favorites", label: "Favorites", icon: Star, exact: false },
   { href: "/files/shared", label: "Shared", icon: Share2, exact: false },

@@ -5,6 +5,7 @@ import {
   CalendarClock,
   CheckCircle2,
   Globe,
+  Home,
   Loader2,
   Monitor,
   RefreshCw,
@@ -12,20 +13,24 @@ import {
   Shield,
   ShieldCheck,
   Signal,
+  SlidersHorizontal,
   Wifi,
   WifiOff,
   XCircle,
 } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
+import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
+import { useNetworkViewMode } from "@/lib/hooks/useNetworkViewMode";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
+import { NetworkSimple } from "@/components/network/NetworkSimple";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -98,6 +103,20 @@ export default function NetworkPage() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [pendingConfirm, setPendingConfirm] = useState<NetworkCommandResult | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
+
+  // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Home installs
+  // default to Simple — the everyday Overview only — while Business installs
+  // default to Advanced (the full OpenWrt tab surface). The persona default
+  // re-syncs once `isBusiness` resolves (useWorkspace hydrates it from the
+  // orchestrator after first paint) without clobbering an explicit user choice
+  // — see useNetworkViewMode. Switching to Simple snaps the active panel back to
+  // Overview so the hidden tab strip can't leave a power-user panel showing.
+  const { isBusiness } = useWorkspace();
+  const { mode, choose: chooseMode } = useNetworkViewMode(isBusiness);
+  function switchMode(next: "simple" | "advanced") {
+    chooseMode(next);
+    if (next === "simple") setActiveTab("overview");
+  }
 
   // WARP-40: poll the operation record until it reaches a terminal state.
   // Capped at 70s (safe-apply's 60s timeout + a little slack) so a lost
@@ -234,7 +253,34 @@ export default function NetworkPage() {
       {/* Refresh action — moved out of the Topbar so it sits next to the
           tab strip where the operator's eye lands. Keeps the Topbar
           chrome single-row at 360px. */}
-      <div className="flex justify-end mb-4">
+      <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+        {/* WARP-612: Simple / Advanced segmented control. Simple shows the
+            everyday Overview; Advanced reveals the full OpenWrt tab surface. */}
+        <div
+          className="inline-flex rounded-md bg-surface-secondary p-0.5"
+          role="group"
+          aria-label="Network view mode"
+        >
+          {([["simple", "Simple", Home], ["advanced", "Advanced", SlidersHorizontal]] as const).map(
+            ([id, label, Icon]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => switchMode(id)}
+                aria-pressed={mode === id}
+                className={[
+                  "inline-flex items-center gap-1.5 px-3 h-8 rounded type-subheadline transition-colors",
+                  mode === id
+                    ? "bg-surface-primary text-label-primary shadow-sm"
+                    : "text-label-tertiary hover:text-label-secondary",
+                ].join(" ")}
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ),
+          )}
+        </div>
         <button
           onClick={refresh}
           disabled={isRefreshing}
@@ -349,6 +395,7 @@ export default function NetworkPage() {
       <div
         role="tablist"
         aria-label="Network view tabs"
+        hidden={mode === "simple"}
         className="flex gap-1 mb-6 border-b border-separator"
       >
         {tabs.map((tab) => {
@@ -409,9 +456,15 @@ export default function NetworkPage() {
         })}
       </div>
 
-      {/* Tab Content — one tabpanel per tab, contents lazily mounted when
-          the tab is active. `hidden` removes inactive panels from the
-          accessibility tree + layout flow. */}
+      {mode === "simple" && (
+        <NetworkSimple overview={overview} onOpenAdvanced={() => switchMode("advanced")} />
+      )}
+
+      {/* Tab Content — one tabpanel per tab, contents lazily mounted when the
+          tab is active. In Simple mode the panels are hidden (via the wrapper)
+          rather than unmounted, so the tabs' `aria-controls` always resolves to
+          a panel that exists in the DOM and the tab subtree is preserved. */}
+      <div hidden={mode === "simple"}>
       <div
         role="tabpanel"
         id="network-panel-overview"
@@ -474,6 +527,7 @@ export default function NetworkPage() {
         hidden={activeTab !== "system"}
       >
         {activeTab === "system" && <SystemTab overview={overview} />}
+      </div>
       </div>
       </div>
     </div>
