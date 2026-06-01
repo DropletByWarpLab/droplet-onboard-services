@@ -22,8 +22,18 @@ Navigation
                the idle screen any tap = wake to stats
   30 s idle    auto-drop back to idle + dim brightness to ~38 %
 
+Lifecycle screens (WARP-624) — modal, not in the swipe carousel:
+  boot      Opened by main() on cold power-on: Droplet mark + "Starting
+            Droplet" + a stage caption + a progress band (indeterminate
+            until the host pushes a pct). The host moves the panel to the
+            live UI once it's ready (or after its readiness timeout).
+  shutdown  Dimmed mark + "Shutting down" + optional reason; phase=="halted"
+            shows "Safe to power off". Pushed by the host's systemd ExecStop.
+
 Host → display (one JSON per line, unchanged for back-compat)
   {"mode":"idle"|"stats"|"qr"|"logo"|"home"}    # logo/home map to idle/stats
+  {"mode":"boot",   "data":{stage,detail,pct}}     # pct optional (indeterminate)
+  {"mode":"shutdown","data":{reason,phase}}        # phase: stopping|halted
   {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now}}
   {"mode":"wifi",   "data":{networks, connected_to, adapter, state, ssid,
                              clients, channel, band, key_ttl_seconds}}
@@ -367,6 +377,13 @@ def _local_ss():
 # list. Tapping / swiping out of idle drops straight to the first active
 # screen (stats); from there left-swipe → qr, right-swipe → stats.
 SCREENS = ("stats", "qr")
+# Lifecycle screens (WARP-624) — host-driven, NOT user-navigable. They stay up
+# until the host pushes another mode, so the idle-timeout below skips them
+# (otherwise a >30 s cold boot would self-drop boot -> idle while the host
+# still believes it's showing the boot splash). They aren't in SCREENS, so
+# swipe is already a no-op on them. NB: "message" is intentionally NOT here —
+# it keeps its existing behaviour of dropping back to idle after the timeout.
+LIFECYCLE_SCREENS = ("boot", "shutdown")
 IDLE_TIMEOUT_S = 30.0
 # Brightness holds steady at 70 % whether the logo screensaver is up or a
 # live screen is — the panel is already pretty dim at 70 %, dropping it
@@ -399,6 +416,9 @@ state = {
     "qr": None,   # {matrix, ssid, security, payload, version, ok, ttl_seconds}
     "alerts": [],  # [{type, title, detail, time, cleared}]
     "events_open": False,
+    # Lifecycle screens (WARP-624). Modal — not in the SCREENS carousel.
+    "boot": {"stage": "Starting up", "detail": "", "pct": None},
+    "shutdown": {"reason": "", "phase": "stopping"},
     # Rolling sparkline history for the gauges. Each list is a ring buffer
     # capped at _SPARK_LEN; _record_sparks appends on every stats push.
     "sparks": {"cpu": [], "mem": [], "disk": [], "temp": []},
@@ -1206,14 +1226,115 @@ def render_message():
 
 
 # ---------------------------------------------------------------------------
+# Boot / Shutdown (lifecycle screens — modal, NOT in the SCREENS carousel)
+# ---------------------------------------------------------------------------
+
+def render_boot():
+    """Cold-boot splash: big Droplet mark, "Starting Droplet", a stage
+    caption from state["boot"], and a progress band (indeterminate when no
+    pct is set, else filled to pct). Mirrors host display.py render_boot().
+    """
+    global touch_regions
+    touch_regions = []
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+
+    boot = state.get("boot") or {}
+    mark_size = 96
+    mark_x = (DISPLAY_W - int(mark_size * 52 / 60)) // 2
+    mark_y = 40
+    _mark_poly(g, mark_size, mark_x, mark_y)
+
+    g.append(_text("Starting Droplet", x=DISPLAY_W // 2, y=mark_y + mark_size + 14,
+                   scale=3, color=TEXT, anchor=(0.5, 0.5)))
+
+    stage = str(boot.get("stage") or "Starting up")[:32]
+    g.append(_text(stage, x=DISPLAY_W // 2, y=mark_y + mark_size + 44,
+                   scale=2, color=LABEL_2, anchor=(0.5, 0.5)))
+    detail = str(boot.get("detail") or "")[:40]
+    if detail:
+        g.append(_text(detail, x=DISPLAY_W // 2, y=mark_y + mark_size + 66,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
+
+    # Progress band, bottom-centred.
+    bar_w = 280
+    bar_h = 8
+    bar_x = (DISPLAY_W - bar_w) // 2
+    bar_y = DISPLAY_H - 48
+    g.append(_rect(bar_x, bar_y, bar_w, bar_h, SURFACE_2))
+    pct = boot.get("pct")
+    if pct is None:
+        # Indeterminate: short accent segment anchored left.
+        g.append(_rect(bar_x, bar_y, bar_w // 3, bar_h, ACCENT))
+    else:
+        try:
+            p = max(0, min(100, int(pct)))
+        except (TypeError, ValueError):
+            p = 0
+        fw = int(bar_w * p / 100)
+        if fw > 0:
+            g.append(_rect(bar_x, bar_y, fw, bar_h, ACCENT))
+
+    board.DISPLAY.root_group = g
+
+
+def render_shutdown():
+    """Shutdown splash: dimmed Droplet mark + "Shutting down" (or
+    "Safe to power off" once phase == 'halted') + optional reason line.
+    Mirrors host display.py render_shutdown().
+    """
+    global touch_regions
+    touch_regions = []
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+
+    sd = state.get("shutdown") or {}
+    halted = sd.get("phase") == "halted"
+
+    # Dimmed mark — use subtle/low-luminance palette entries so it reads as
+    # powering down rather than active. _mark_poly always paints ACCENT_PRI/
+    # ACCENT_LIGHT, so draw the mark glyph via two muted polygons inline here
+    # to keep it dim (still cheap: 2 primitives).
+    mark_size = 96
+    mw = int(mark_size * 52 / 60)
+    mx = (DISPLAY_W - mw) // 2
+    my = 48
+    _sx = lambda px: mx + int(px / 52 * mw)   # noqa: E731
+    _sy = lambda py: my + int(py / 60 * mark_size)  # noqa: E731
+    outer = [(_sx(26), _sy(0)), (_sx(44), _sy(28)), (_sx(36), _sy(48)),
+             (_sx(16), _sy(48)), (_sx(8), _sy(28))]
+    inner = [(_sx(26), _sy(0)), (_sx(44), _sy(28)), (_sx(26), _sy(36))]
+    g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT_SUBTLE),
+                              points=outer, x=0, y=0))
+    g.append(vectorio.Polygon(pixel_shader=_palette(LABEL_4),
+                              points=inner, x=0, y=0))
+
+    title = "Safe to power off" if halted else "Shutting down"
+    title_color = GREEN if halted else TEXT
+    g.append(_text(title, x=DISPLAY_W // 2, y=my + mark_size + 18,
+                   scale=3, color=title_color, anchor=(0.5, 0.5)))
+
+    reason = str(sd.get("reason") or "")[:40]
+    sub = reason if (reason and not halted) else (
+        "You can unplug the device." if halted else "")
+    if sub:
+        g.append(_text(sub, x=DISPLAY_W // 2, y=my + mark_size + 48,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
+
+    board.DISPLAY.root_group = g
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
 RENDERERS = {
-    "stats":   render_stats,
-    "idle":    render_idle,
-    "qr":      render_qr,
-    "message": render_message,
+    "stats":    render_stats,
+    "idle":     render_idle,
+    "qr":       render_qr,
+    "message":  render_message,
+    "boot":     render_boot,
+    "shutdown": render_shutdown,
 }
 
 # Back-compat aliases so the old bridge's bare-mode pushes still route.
@@ -1412,6 +1533,17 @@ def handle(msg):
         state["msg_title"] = data.get("title", "")
         state["msg_lines"] = data.get("lines", []) or []
         set_screen("message")
+    elif mode == "boot":
+        # Merge so a {stage} update keeps a previously-pushed pct, etc.
+        for k in ("stage", "detail", "pct"):
+            if k in data:
+                state["boot"][k] = data[k]
+        set_screen("boot")
+    elif mode == "shutdown":
+        for k in ("reason", "phase"):
+            if k in data:
+                state["shutdown"][k] = data[k]
+        set_screen("shutdown")
     elif mode == "brightness":
         set_brightness(msg.get("value", ACTIVE_BRIGHTNESS))
     elif mode == "ping":
@@ -1426,7 +1558,12 @@ def handle(msg):
 # ---------------------------------------------------------------------------
 
 def main():
-    set_screen("idle")
+    # Open on the boot screen so a cold power-on reads "Starting Droplet"
+    # immediately (WARP-624). The host moves us off boot once it's ready
+    # (or after its readiness timeout). boot/shutdown are modal — not in
+    # SCREENS — so the idle-timeout + swipe logic below treats them as
+    # no-ops until the host navigates away.
+    set_screen("boot")
     _send("READY")
     # Ask the host to (re-)push its full state. Host may or may not honour
     # it — if it doesn't, we just fall through to normal steady-state pushes.
@@ -1514,7 +1651,11 @@ def main():
                 last_activity = time.monotonic()
 
         # Idle timer — drop back to idle after IDLE_TIMEOUT_S with no touch.
+        # Skip the host-driven lifecycle screens (boot/shutdown): they stay up
+        # until the host navigates away, so we don't self-drop to idle while a
+        # cold boot or a shutdown is in progress.
         if (state["screen"] != "idle" and
+                state["screen"] not in LIFECYCLE_SCREENS and
                 (time.monotonic() - last_activity) >= IDLE_TIMEOUT_S):
             state["events_open"] = False
             set_screen("idle")

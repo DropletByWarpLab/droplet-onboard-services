@@ -12,7 +12,7 @@ serial endpoints:
 
 ## What it shows
 
-A three-screen swipe UI:
+A three-screen swipe UI, plus two host-driven lifecycle screens:
 
 - **Idle (sleep screen)** — big centered Droplet mark with a tiny HH:MM
   in the top-right corner, date in the top-left, and a subtle footer
@@ -31,6 +31,24 @@ A three-screen swipe UI:
 Navigation at the bottom is a row of big rounded pills (active one
 highlighted with an indigo halo dot). Swipe left/right between Stats and
 QR, or tap a pill to jump; 30 s of inactivity returns to Idle.
+
+### Lifecycle screens (boot / shutdown)
+
+These are **modal** — they are not in the swipe carousel and the idle
+timeout does not apply to them (a long cold boot won't self-drop to idle).
+They stay up until the host pushes another mode.
+
+- **Boot** — `main()` opens on this screen, so a cold power-on immediately
+  reads **"Starting Droplet"**: big Droplet mark, the current startup stage
+  as a caption (+ optional detail line), and a progress band (indeterminate
+  when no `pct` is pushed, otherwise filled to `pct`). The host's
+  oled-display service moves the panel off boot to the live UI once the
+  system is healthy (or after its readiness timeout). The firmware still
+  sends `READY` + `REQUEST_STATE` on boot as before.
+- **Shutdown** — dimmed Droplet mark + **"Shutting down"** + an optional
+  reason line. When the host pushes `phase: "halted"` the copy switches to
+  **"Safe to power off"**. Pushed by the host's systemd ExecStop oneshot at
+  teardown (see the service README).
 
 ## Clock behavior
 
@@ -114,6 +132,8 @@ Then `docker compose -f docker/docker-compose.yml up -d --force-recreate oled-di
 | `{"mode":"qr","data":{matrix,ssid,security,payload,version,ok,key,ttl_seconds,rotation_enabled,error}}` | QR payload | Renders the Join-Wi-Fi screen. |
 | `{"mode":"alert","data":{type,title,detail,time}}` | system alert | Pushes a row into the alerts drawer. |
 | `{"mode":"message","data":{title,lines:[...]}}` | title + lines | Full-screen message card. |
+| `{"mode":"boot","data":{stage,detail,pct}}` | stage caption + optional detail + optional 0–100 pct | Boot/startup screen. Omit `pct` for an indeterminate band. Bare `{"mode":"boot"}` just navigates. |
+| `{"mode":"shutdown","data":{reason,phase}}` | optional reason + `phase` (`stopping`\|`halted`) | Shutdown screen. `halted` shows "Safe to power off". Bare `{"mode":"shutdown"}` just navigates. |
 | `{"mode":"brightness","value":0..255}` | 0–255 | Adjust backlight. |
 | `{"mode":"ping"}` | — | Round-trip check. |
 
