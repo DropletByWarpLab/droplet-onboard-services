@@ -42,6 +42,10 @@ vi.mock("@/lib/api", () => ({
   createVpnPeer: vi.fn(),
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
+  postTeamInvite: vi.fn(async () => ({
+    ok: true, token: "tok", email: "x@acme.co", role: "family",
+    expires_at: "2026-06-04T00:00:00.000Z",
+  })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [], switches: [], climate: [], sensors: [],
     media: [], covers: [], locks: [], other: [],
@@ -92,12 +96,25 @@ describe("setup wizard — resumable from setupState (PR #372)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("resumes on the team step (PR #381 wired it)", () => {
+    useAuthMock.mockReturnValue({
+      completeSetup: vi.fn(),
+      setupState: { appliance: "unclaimed", setupStep: "team", userTourCompleted: false },
+    });
+    render(<SetupPage />);
+    // Resumed at the Team step → the Welcome CTA is gone, the Team heading shows.
+    expect(
+      screen.queryByRole("button", { name: /get started/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
+  });
+
   it("ignores an unknown persisted step and falls back to welcome", () => {
     useAuthMock.mockReturnValue({
       completeSetup: vi.fn(),
-      // `team` is still gated (PR #380 wires `org` but not team) — a value the
-      // wizard can't render must not strand the customer on a blank screen.
-      setupState: { appliance: "unclaimed", setupStep: "team", userTourCompleted: false },
+      // A value the wizard can't render (not in SETUP_STEPS) must not strand
+      // the customer on a blank screen — it falls back to welcome.
+      setupState: { appliance: "unclaimed", setupStep: "nonexistent-step", userTourCompleted: false },
     });
     render(<SetupPage />);
     expect(

@@ -31,6 +31,12 @@ import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import {
+  createTeamInvite,
+  isInviteRole,
+  InvalidInviteEmailError,
+  InvalidInviteRoleError,
+} from "../services/onboarding-team-invite.service.js";
 
 const logger = pino({ name: "people-route" });
 
@@ -41,6 +47,21 @@ const logger = pino({ name: "people-route" });
 // tests (local-directory.schema.test.ts + scope.schema.test.ts) lock
 // the contract.
 const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
+
+// Privilege ladder for the household roles, inlined as a TS literal — the
+// same standalone-compile discipline as ROLE_VALUES above. This branch (#381)
+// predates the shared `ROLE_RANK` / `roleOutranks` helper added to
+// jwt.service.ts by the POST /auth/invites rank-cap fix; de-duplicate against
+// jwt.service.ROLE_RANK once both land on main. Higher = more authority;
+// `service` is floored so it can never outrank a human role in a comparison.
+const ROLE_RANK: Record<(typeof ROLE_VALUES)[number], number> = {
+  service: -1,
+  guest: 0,
+  family: 1,
+  admin: 2,
+  owner: 3,
+};
+
 const SCOPE_VALUES = [
   "team",
   "exec_only",
@@ -60,6 +81,17 @@ const scopeSchema = z.object({
   // are almost certainly a UX bug (the dashboard sent [] when it meant
   // ["team"]) and 400 prevents accidentally locking a user out.
   scopes: z.array(z.enum(SCOPE_VALUES)).min(1).max(SCOPE_VALUES.length),
+});
+
+// PR #381 — onboarding TEAM-invite body. The wizard invites by EMAIL + ROLE.
+// The schema only checks presence/type/bounds; the canonical email + role
+// VALIDATION lives in onboarding-team-invite.service (normalizeInviteEmail /
+// isValidEmail / isInviteRole), which throws the typed errors this route maps
+// to a 400 — so the service is the single source of truth for "what is a
+// valid invite" and the route doesn't duplicate the email regex / role list.
+const inviteSchema = z.object({
+  email: z.string().min(1).max(200),
+  role: z.string().min(1).max(32),
 });
 
 /**
@@ -156,6 +188,102 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
     "/people/permissions",
     (_req: Request, res: Response) => {
       res.json({ permissions: PERMISSIONS_MATRIX });
+    },
+  );
+
+  // ── POST /api/people/invite ─────────────────────────────────
+  // PR #381 — the onboarding TEAM step invites teammates by email + role.
+  // owner + admin only — issuing an invite is an administrative action, same
+  // guard as the rest of /api/people. The (email, role) pair is validated by
+  // onboarding-team-invite.service: the email is normalized to lowercase
+  // (#374 login-key contract) and the role is checked against the SHIPPED
+  // HOUSEHOLD model (owner/admin/family/guest); invalid input is rejected
+  // inline (400 + a `code`) so the wizard can show a field error.
+  //
+  // #386 (a SEPARATE PR on main) owns invite-ACCEPT-time argon2id passwordHash
+  // so the invited member can sign in on the email-keyed login. This route only
+  // CREATES the invite (the same UserInvite row #386's accept path consumes);
+  // they are compatible and this route does not re-implement accept.
+  router.post(
+    "/people/invite",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = inviteSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid request",
+            details: parsed.error.flatten(),
+          });
+        }
+
+        // Privilege-escalation guard (mirror of the POST /auth/invites fix).
+        // requireRole("owner","admin") proves the caller MAY invite, not WHICH
+        // role they may assign. Without this an admin could mint an owner
+        // invite, and the accept path grants an owner/admin invite an owner
+        // session role + Nextcloud admin group — a straight escalation. Reject
+        // (403) any assigned role that outranks the inviter's own. Only
+        // recognized invite roles are rank-checked here; an unknown role string
+        // falls through to createTeamInvite's typed 400. owner→owner is
+        // allowed, admin→owner is not. Fail closed if the role claim is absent.
+        const inviterRole = req.user?.role;
+        if (
+          isInviteRole(parsed.data.role) &&
+          (!inviterRole ||
+            ROLE_RANK[parsed.data.role] > ROLE_RANK[inviterRole])
+        ) {
+          return res.status(403).json({
+            error: "You cannot invite someone to a role higher than your own",
+            code: "ROLE_RANK_EXCEEDED",
+          });
+        }
+
+        let invite;
+        try {
+          invite = await createTeamInvite(prisma, {
+            email: parsed.data.email,
+            role: parsed.data.role,
+            createdBy: req.user?.username ?? "unknown",
+          });
+        } catch (err) {
+          // Typed validation errors → 400 with the service's `code` so the
+          // wizard renders the inline field error. Everything else bubbles.
+          if (
+            err instanceof InvalidInviteEmailError ||
+            err instanceof InvalidInviteRoleError
+          ) {
+            return res.status(400).json({ error: err.message, code: err.code });
+          }
+          throw err;
+        }
+
+        // Audit the issuance. We record WHO invited WHOM at WHAT role — but
+        // NEVER the token (it's a bearer credential; an audit row is not the
+        // place for it). Lifecycle events go on the `auth` kind (matches the
+        // DELETE /people/:id "User removed" convention above).
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-plus",
+          what: "Teammate invited",
+          sub: `${invite.email} · ${invite.role}`,
+          refs: {
+            actor: req.user?.username ?? null,
+            email: invite.email,
+            role: invite.role,
+          },
+        });
+
+        res.json({
+          ok: true,
+          token: invite.token,
+          email: invite.email,
+          role: invite.role,
+          expires_at: invite.expiresAt,
+        });
+      } catch (err) {
+        next(err);
+      }
     },
   );
 

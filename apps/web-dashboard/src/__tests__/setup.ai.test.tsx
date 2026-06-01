@@ -65,6 +65,11 @@ vi.mock("@/lib/api", () => ({
   createVpnPeer: vi.fn(),
   fetchModels: () => fetchModelsMock(),
   sendChat: (req: unknown) => sendChatMock(req),
+  // PR #381 — team slots after ai; TeamStep imports postTeamInvite.
+  postTeamInvite: vi.fn(async () => ({
+    ok: true, token: "tok", email: "x@acme.co", role: "family",
+    expires_at: "2026-06-04T00:00:00.000Z",
+  })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -244,7 +249,7 @@ describe("setup AI step (WARP-174)", () => {
     ).toBeInTheDocument();
   });
 
-  it("Take me to the dashboard advances to done", async () => {
+  it("Take me to the dashboard advances to the team step (PR #381)", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     sendChatMock.mockResolvedValue({
       ok: true,
@@ -265,10 +270,12 @@ describe("setup AI step (WARP-174)", () => {
       );
     });
 
-    expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
+    // PR #381 — team now slots after ai (… → ai → team → done), so the AI step
+    // advances onto the Team step, not straight to the done flourish.
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
-  it("Skip for now advances to done without calling sendChat", async () => {
+  it("Skip for now advances to the team step without calling sendChat", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     render(<SetupPage />);
     await advanceToAi();
@@ -278,7 +285,7 @@ describe("setup AI step (WARP-174)", () => {
     });
 
     expect(sendChatMock).not.toHaveBeenCalled();
-    expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
   it("surfaces an inline error when the chat request fails", async () => {

@@ -42,6 +42,7 @@ const updateDriveLabelMock = vi.fn();
 const acceptDiscoveredCameraMock = vi.fn();
 const createVpnPeerMock = vi.fn();
 const sendChatMock = vi.fn();
+const postTeamInviteMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   // Forwarders use typed Parameters<typeof …> so spread inference passes
@@ -145,6 +146,10 @@ vi.mock("@/lib/api", () => ({
   })),
   sendChat: (req: unknown) => sendChatMock(req),
 
+  // PR #381 — team slots after ai. The happy path invites one teammate.
+  postTeamInvite: (...args: Parameters<typeof postTeamInviteMock>) =>
+    postTeamInviteMock(...args),
+
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -169,6 +174,14 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     acceptDiscoveredCameraMock.mockClear();
     createVpnPeerMock.mockClear();
     sendChatMock.mockClear();
+    postTeamInviteMock.mockClear();
+    postTeamInviteMock.mockResolvedValue({
+      ok: true,
+      token: "tok-e2e",
+      email: "romain@acme.co",
+      role: "family",
+      expires_at: "2026-06-04T00:00:00.000Z",
+    });
 
     setDuckDnsConfigMock.mockResolvedValue({
       configured: true,
@@ -394,6 +407,26 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     await act(async () => {
       fireEvent.click(
         screen.getByRole("button", { name: /take me to the dashboard/i }),
+      );
+    });
+
+    // 8b. Team (PR #381) → invite one teammate → send invites & continue.
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/invite by email/i), {
+      target: { value: "romain@acme.co" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(postTeamInviteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ email: "romain@acme.co", role: "family" }),
+    );
+    expect(screen.getByText("romain@acme.co")).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /send invites & continue/i }),
       );
     });
 

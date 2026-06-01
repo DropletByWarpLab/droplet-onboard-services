@@ -2172,8 +2172,17 @@ model ApplianceSetup {
 /// single workspace and reserves its `droplet.local/<slug>` once the owner
 /// account exists. Appended at the END of the declaration for the same
 /// append-only `ALTER TYPE … ADD VALUE` reason as `claim`; the wizard order
-/// lives in `SETUP_STEPS` / the dashboard `STEPS` array. `team` remains GATED
-/// (separate PR #381) for the same reachable-step reason #372 documented.
+/// lives in `SETUP_STEPS` / the dashboard `STEPS` array.
+///
+/// PR #381 (WARP onb team) — `team` ships, the LAST onboarding step to wire.
+/// It slots near the END of the WIZARD, after `ai` and before `done`
+/// (`… → ai → team → done`): once the box is set up, the owner brings people
+/// in — invite by email + role, or note directory-sync over SSO. The step IS
+/// skippable ("I'll invite people later"; a solo owner is a valid end state),
+/// so the value is reachable but not gating. Appended at the END of the
+/// declaration for the same append-only `ALTER TYPE … ADD VALUE` reason as
+/// `claim` / `org` — declaration order is membership-only; the wizard ORDER
+/// (team before done) lives in `SETUP_STEPS` + the dashboard `STEPS` array.
 enum SetupStep {
   welcome
   account
@@ -2186,6 +2195,7 @@ enum SetupStep {
   done
   claim
   org
+  team
 }
 
 /// PR #373 — claim-code lifecycle. EXPLICIT, never derived from absence.
