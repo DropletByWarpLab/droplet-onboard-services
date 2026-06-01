@@ -991,7 +991,22 @@ model User {
   // auth middleware resolves directly to this row.
   username    String   @unique
   displayName String
-  email       String?
+  // ADR-012: email is the stable directory login key — the Aurora login
+  // (PR #370) sends "Work email" as the identifier and POST /auth/login
+  // resolves the row by email before the argon2id verify. Unique so two
+  // rows can't both claim one login identity (an auth ambiguity).
+  // Still nullable: service-only principals and locally-minted rows that
+  // predate ADR-012 may have no email; the login route fails closed when
+  // email or passwordHash is null.
+  email       String?  @unique
+  // ADR-012: argon2id PHC hash — the built-in directory is the auth
+  // source of truth (Nextcloud is demoted to downstream WebDAV
+  // provisioning). Written at account-creation (/auth/setup, invite
+  // accept) and verified at /auth/login via password.service. NEVER
+  // contains plaintext; NEVER logged. Nullable because service-only
+  // principals and pre-first-login invitees may not have one yet — the
+  // login route fails closed (no enumeration leak) when it's null.
+  passwordHash String?
   // WARP-485: stable mapping key from the Nextcloud OCS user id
   // (`ocs.data.id`, e.g. `stefan-cruceru`) to this row's UUID. The auth
   // middleware looks up `User` by `nextcloudUsername` on the OCS

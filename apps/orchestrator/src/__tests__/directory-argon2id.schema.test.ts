@@ -1,0 +1,73 @@
+/**
+ * ADR-012 — built-in argon2id directory schema regression.
+ *
+ * Runs against the schema.prisma file text (no DB) to lock the additive
+ * greenfield change that makes the local directory the auth source of
+ * truth:
+ *
+ *   - `User.passwordHash String?` — the argon2id PHC string. Nullable
+ *     because service-only principals and pre-first-login invitees may
+ *     not have one yet; the login route fails closed when it's null.
+ *   - `User.email` becomes UNIQUE — email is the stable login key
+ *     (Aurora login labels the field "Work email"). Still nullable
+ *     (locally-minted rows without an email predate this), but no two
+ *     rows may share a non-null email.
+ *
+ * The migration that backs this must stay additive + idempotent — same
+ * posture as the WARP-455 / WARP-485 migrations — because the box is
+ * greenfield (wiped + reflashed) and re-running the migration on a
+ * converged DB must be a no-op.
+ */
+import { describe, it, expect } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import * as path from "node:path";
+
+const SCHEMA_PATH = path.resolve(process.cwd(), "prisma", "schema.prisma");
+const MIGRATIONS_DIR = path.resolve(process.cwd(), "prisma", "migrations");
+
+function readSchema(): string {
+  return readFileSync(SCHEMA_PATH, "utf-8");
+}
+
+function userBlock(): string {
+  const block = readSchema().match(/model User \{[\s\S]*?\n\}/);
+  expect(block).not.toBeNull();
+  return block![0];
+}
+
+describe("ADR-012 schema: argon2id directory", () => {
+  it("User has a nullable passwordHash String column", () => {
+    expect(userBlock()).toMatch(/passwordHash\s+String\?/);
+  });
+
+  it("User.email is declared @unique (stable login key)", () => {
+    expect(userBlock()).toMatch(/email\s+String\?\s+@unique/);
+  });
+
+  it("preserves the local User.id UUID as the canonical key (WARP-485)", () => {
+    // ADR-012 explicitly keeps the existing UUID PK — JWTs/Redis key on
+    // it. Guard against an accidental swap to email-as-PK.
+    expect(userBlock()).toMatch(/id\s+String\s+@id\s+@default\(uuid\(\)\)/);
+  });
+
+  it("ships an additive, idempotent migration for passwordHash + email-unique", () => {
+    // Find the ADR-012 migration by its canonical directory name.
+    const dirs = readdirSync(MIGRATIONS_DIR).filter((d) =>
+      d.includes("adr_012"),
+    );
+    expect(dirs.length).toBeGreaterThanOrEqual(1);
+    const sql = readFileSync(
+      path.join(MIGRATIONS_DIR, dirs[0]!, "migration.sql"),
+      "utf-8",
+    );
+    // Additive column — must use IF NOT EXISTS so a re-run is a no-op.
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS "passwordHash"/);
+    // Unique index on email — must use IF NOT EXISTS for the same reason.
+    expect(sql).toMatch(
+      /CREATE UNIQUE INDEX IF NOT EXISTS "User_email_key"/,
+    );
+    // Greenfield: no data backfill / no UPDATE statements that would
+    // touch existing rows' credentials.
+    expect(sql).not.toMatch(/UPDATE\s+"User"/i);
+  });
+});
