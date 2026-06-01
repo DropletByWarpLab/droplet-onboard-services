@@ -68,6 +68,15 @@ vi.mock("@/lib/api", () => ({
   // AI step: no models yet → "Skip for now" is always present.
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
+  // PR #381 — team slots after ai; TeamStep imports postTeamInvite. The flow
+  // test skips the step (no invite), but the import must resolve.
+  postTeamInvite: vi.fn(async () => ({
+    ok: true,
+    token: "tok",
+    email: "x@acme.co",
+    role: "family",
+    expires_at: "2026-06-04T00:00:00.000Z",
+  })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -176,13 +185,23 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
-    // AI step → skip → Done. fetchModels mocked empty so the picker
-    // just shows "No models available yet"; the Skip link is always
-    // rendered.
+    // AI step → skip → Team (PR #381 slots team after ai). fetchModels mocked
+    // empty so the picker just shows "No models available yet"; the Skip link
+    // is always rendered.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // Team step → skip ("I'll invite people later") → Done. Team IS skippable
+    // (solo owner is a valid end state).
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /invite people later/i }),
+      );
     });
 
     // The new flourish must render — not the legacy static check screen.

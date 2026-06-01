@@ -67,6 +67,11 @@ vi.mock("@/lib/api", () => ({
   createVpnPeer: vi.fn(),
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
+  // PR #381 — team slots after ai; TeamStep imports postTeamInvite.
+  postTeamInvite: vi.fn(async () => ({
+    ok: true, token: "tok", email: "x@acme.co", role: "family",
+    expires_at: "2026-06-04T00:00:00.000Z",
+  })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -161,7 +166,8 @@ describe("setup Cameras step (WARP-174)", () => {
     render(<SetupPage />);
     await advanceToCameras();
     // Skipped through to Done — WelcomeFlourish renders.
-    // Cameras step finished. Skip VPN preCheck, then AI, to reach Done.
+    // Cameras step finished. Skip VPN preCheck, then AI, then Team (PR #381),
+    // to reach Done.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -171,6 +177,12 @@ describe("setup Cameras step (WARP-174)", () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /invite people later/i }),
+      );
     });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
     expect(acceptDiscoveredCameraMock).not.toHaveBeenCalled();
@@ -222,7 +234,8 @@ describe("setup Cameras step (WARP-174)", () => {
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-1");
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-2");
     // Landed on Done.
-    // Cameras step finished. Skip VPN preCheck, then AI, to reach Done.
+    // Cameras step finished. Skip VPN preCheck, then AI, then Team (PR #381),
+    // to reach Done.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -232,6 +245,12 @@ describe("setup Cameras step (WARP-174)", () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /invite people later/i }),
+      );
     });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
   });
@@ -246,7 +265,8 @@ describe("setup Cameras step (WARP-174)", () => {
     });
 
     expect(acceptDiscoveredCameraMock).not.toHaveBeenCalled();
-    // Cameras step finished. Skip VPN preCheck, then AI, to reach Done.
+    // Cameras step finished. Skip VPN preCheck, then AI, then Team (PR #381),
+    // to reach Done.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -256,6 +276,12 @@ describe("setup Cameras step (WARP-174)", () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /invite people later/i }),
+      );
     });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
   });

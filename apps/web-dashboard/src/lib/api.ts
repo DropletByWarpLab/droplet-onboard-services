@@ -52,6 +52,8 @@ import type {
   ClaimResult,
   OrgInput,
   OrgResult,
+  TeamInviteRequest,
+  TeamInviteResult,
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
@@ -292,6 +294,51 @@ export async function postOrg(input: OrgInput): Promise<OrgResult> {
     throw new OrgError(
       data.error || "Couldn't save your workspace. Try again in a moment.",
       data.code || "ORG_FAILED",
+    );
+  }
+  return res.json();
+}
+
+/** PR #381 — error carrying the invite failure kind so the Team step can show
+ *  the right inline message (bad email vs bad role vs generic) on the right
+ *  field. */
+export class InviteError extends Error {
+  /** Server `code` — e.g. INVITE_EMAIL_INVALID, INVITE_ROLE_INVALID. */
+  readonly code: string;
+  /** True when the email was malformed (400 INVITE_EMAIL_INVALID) — the
+   *  email-field error. */
+  readonly emailInvalid: boolean;
+  /** True when the role wasn't a valid household role (400 INVITE_ROLE_INVALID). */
+  readonly roleInvalid: boolean;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "InviteError";
+    this.code = code;
+    this.emailInvalid = code === "INVITE_EMAIL_INVALID";
+    this.roleInvalid = code === "INVITE_ROLE_INVALID";
+  }
+}
+
+/**
+ * PR #381 — invite a teammate by email + role (the onboarding TEAM step). The
+ * TEAM step runs after the owner has authenticated (account step), so this is
+ * an authenticated call (owner/admin-guarded on the orchestrator). On a bad
+ * email (400) or bad role (400) we throw an `InviteError` the step renders
+ * inline; the server is authoritative on email shape + the role vocabulary.
+ */
+export async function postTeamInvite(
+  input: TeamInviteRequest,
+): Promise<TeamInviteResult> {
+  const res = await authFetch(`${BASE}/api/people/invite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new InviteError(
+      data.error || "Couldn't send that invite. Try again in a moment.",
+      data.code || "INVITE_FAILED",
     );
   }
   return res.json();

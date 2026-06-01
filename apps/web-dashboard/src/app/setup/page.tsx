@@ -14,6 +14,7 @@ import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { CamerasStep } from "@/components/setup/steps/CamerasStep";
 import { VpnStep } from "@/components/setup/steps/VpnStep";
 import { AiStep } from "@/components/setup/steps/AiStep";
+import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 
 /**
@@ -48,10 +49,13 @@ type Step =
   | "cameras"
   | "vpn"
   | "ai"
+  | "team"
   | "done";
 // PR #373 — `claim` slots SECOND (welcome → claim → account), per #371 handoff
 // §1. PR #380 — `org` slots AFTER account (… → account → org → internet → …),
-// per the #380 spec. Mirrors the orchestrator `SETUP_STEPS` order 1:1, so a
+// per the #380 spec. PR #381 — `team` slots near the END, after `ai` and
+// before `done` (… → ai → team → done): once the box is set up, the owner
+// brings people in. Mirrors the orchestrator `SETUP_STEPS` order 1:1, so a
 // persisted `setupStep` always maps to a step this wizard can render.
 const STEPS: Step[] = [
   "welcome",
@@ -64,15 +68,17 @@ const STEPS: Step[] = [
   "cameras",
   "vpn",
   "ai",
+  "team",
   "done",
 ];
 
 /**
  * PR #372 — the persisted `setupStep` comes from `/api/setup/state` via the
  * auth context. Resume there if it's a step this wizard can render; fall
- * back to welcome otherwise (e.g. a gated claim/org/team value, or the
- * terminal `done` which has nothing to resume into). Keeps the resume
- * target congruent with the steps the wizard actually has — no blank screen.
+ * back to welcome otherwise (e.g. the terminal `done`, which has nothing to
+ * resume into). With PR #381 every SETUP_STEPS value (claim / org / team
+ * included) is now a renderable step. Keeps the resume target congruent with
+ * the steps the wizard actually has — no blank screen.
  */
 function resumeStepFrom(setupStep: string | undefined): Step {
   if (setupStep && setupStep !== "done" && (STEPS as readonly string[]).includes(setupStep)) {
@@ -164,6 +170,13 @@ export default function SetupPage() {
 
         {step === "ai" && (
           <AiStep
+            onComplete={() => setStep("team")}
+            onSkip={() => setStep("team")}
+          />
+        )}
+
+        {step === "team" && (
+          <TeamStep
             onComplete={() => setStep("done")}
             onSkip={() => setStep("done")}
           />

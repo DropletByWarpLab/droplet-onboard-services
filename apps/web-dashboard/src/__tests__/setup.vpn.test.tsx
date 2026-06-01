@@ -61,6 +61,11 @@ vi.mock("@/lib/api", () => ({
   // AI step is downstream — empty mock so its Skip link is always present.
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
+  // PR #381 — team slots after ai; TeamStep imports postTeamInvite.
+  postTeamInvite: vi.fn(async () => ({
+    ok: true, token: "tok", email: "x@acme.co", role: "family",
+    expires_at: "2026-06-04T00:00:00.000Z",
+  })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -181,11 +186,17 @@ describe("setup VPN step (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 
-    // VPN finished → AI step. Skip it to reach Done.
+    // VPN finished → AI step → Team step (PR #381). Skip both to reach Done.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /invite people later/i }),
+      );
     });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
     expect(createVpnPeerMock).not.toHaveBeenCalled();
@@ -306,11 +317,17 @@ describe("setup VPN step (WARP-174)", () => {
       );
     });
 
-    // VPN finished → AI step. Skip it to reach Done.
+    // VPN finished → AI step → Team step (PR #381). Skip both to reach Done.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /invite people later/i }),
+      );
     });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
   });
