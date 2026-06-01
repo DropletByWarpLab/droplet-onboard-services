@@ -37,7 +37,13 @@ Introduce a `voice` role in the ADR-004 taxonomy (sits between `guest` and `fami
 { all read tools } ∪ { write tools that are Tier 1 } ∪ { write tools that are Tier 2 AND not lock-like }
 ```
 
-Always **excluded** for `voice`: any Tier-2 **lock** tool, any **Tier-3** tool, and `commission_device` (pairing is a privileged setup action — dashboard/app only). The allow-set is **derived from `tools-core` metadata** (`requiresWrite` + safety tier + a `lockLike` flag), never hand-maintained — the same discipline that already keeps `WRITE_TOOLS` in sync.
+Always **excluded** for `voice`: any tool that is *wholly* a Tier-2 lock, any **Tier-3** tool (in the ADR-014 "blocked-for-AI" sense — see the disambiguation below), and `commission_device` (pairing is a privileged setup action — dashboard/app only).
+
+**Tier is a runtime property, not static per-tool metadata.** Safety tier is computed at dispatch time by `classifyCommand(domain, service, data)` (`apps/orchestrator/src/config/safety-rules.ts`) over the *command payload* — `domain=lock` → Tier 2, lights → Tier 1. It is **not** a field on `ToolDefinition`, which today carries only `requiresWrite` / `requiresConfirmation` (`packages/tools-core/src/types.ts`) — there is no `tier` and no `lockLike`. So the allow-set above cannot be a pure static lookup: it must be derived by classifying each write tool's `(domain, service)` surface, and `tools-core` must be **extended** to expose the tier/lock hint (it does not exist yet). "Derived from metadata, never hand-maintained" is still the goal — the metadata just has to be built first.
+
+**The multi-action `control_device` caveat — lock defense is runtime, not the allow-set.** A *single* tool, `control_device`, dispatches both `turn_on` (Tier 1 — the headline "turn on the kitchen light") **and** `lock`/`unlock` (Tier-2 lock) (`packages/tools-core/src/handlers/smart-home/control-device.ts`). A single per-tool tier is therefore ill-defined for it, and you **cannot** exclude "lock-like tools" from the voice allow-set while keeping `control_device` — they are the same tool. For `control_device`, the real lock defense is the **runtime command-string refusal** already in the handler (`LOCKLIKE_COMMAND_TOKENS = ["lock","unlock"]`, refused regardless of caller — see §3), **not** the allow-set. Implementation (WARP-625 / WARP-627) must pick one: **(a)** split `lock`/`unlock` out of `control_device` into a dedicated lock tool, so per-tool exclusion becomes a genuine static guarantee; or **(b)** keep `control_device` and treat the handler-layer refusal as the lock defense — in which case the model *does* see the tool and lock safety is enforced server-side, not by construction. The allow-set exclusion remains correct for *wholly*-tiered tools (`commission_device`, a future dedicated lock tool).
+
+**"Tier-3" disambiguation.** The smart-home classifier emits only Tier 1/2; its "Tier 3" means *audit-only* — everything is logged regardless of tier (`safety-rules.ts` header) — **not** a refusal class. The "exclude all Tier-3 tools" rule above borrows ADR-014's distinct meaning ("Tier-3 = blocked for AI"). Under the current smart-home classifier there is no refusal-class Tier-3 referent, so for the smart-home path this exclusion is a forward-compatibility guard, not an active filter today.
 
 ### 2. Spoken confirmation reuses the two-phase confirmation token
 
@@ -45,7 +51,9 @@ For a Tier-2 non-lock tool the orchestrator already returns `confirmation_requir
 
 1. Receives `confirmation_required` with a `userVisibleSummary`.
 2. Speaks it as a yes/no question ("Should I close the bedroom blinds? Say yes to confirm.") and opens a bounded listen window (~10 s, ≤ the token TTL).
-3. On an affirmative ("yes" / "confirm" / "do it") within the window, re-issues the same tool call with the `confirmationToken`. Anything else (silence, "no", a different request) cancels: "Okay, cancelled."
+3. On an affirmative ("yes" / "confirm" / "do it") within the window, re-issues **the same tool call bound to the same `confirmationToken`**. The token binds `{service, action, resourceId, targetDeviceId}` (ADR-014), so an affirmative can only commit the *exact* command it was spoken for — a "yes" can never be applied to a different queued or subsequent command. Anything else (silence, "no", a different request) cancels: "Okay, cancelled."
+
+**Self-echo / false-trigger guard.** The bounded listen window must suppress the device's own TTS and obvious non-human triggers — the spoken prompt "say yes to confirm" can otherwise be answered by a nearby TV or another voice assistant. voice-io gates the affirmative through the same wake/VAD path (not raw keyword spotting) and ignores audio overlapping its own playback, so the accepted "bystander confirm" risk is bounded to an actual nearby human inside the window.
 
 No new token type — voice is just another *surface* for the existing confirmation contract (mirrors ADR-014, where the desktop native modal is another surface for the same `confirmationToken`).
 
@@ -62,11 +70,11 @@ Reuse the canonical `tool_call` `ActivityRow` (WARP-456 / ADR-014) with `refs.su
 ### Positive
 - Implements the 2026-05-15 decision: "hey droplet, turn on the kitchen light" works, while pairing, locks, and Tier-3 stay off the voice channel.
 - One tier model + one confirmation token + one audit chain (consistent with ADR-014); no parallel consent system to keep aligned.
-- The weak voice channel's blast radius is bounded **by construction** (allow-set derived from tier metadata), not by prompt-engineering the model.
+- The weak voice channel's blast radius is bounded primarily **by construction** (the allow-set derived from runtime tier classification) for wholly-tiered tools; for the multi-action `control_device`, lock safety is the **runtime handler refusal** (`LOCKLIKE_COMMAND_TOKENS`, §1/§3) — defense-in-depth, not a static allow-set guarantee. Either way the bound is in code, not prompt-engineering.
 
 ### Negative
 - A new `voice` role is another row in the RBAC matrix to reason about and test.
-- Spoken confirmation has no speaker identity — a determined bystander can confirm a Tier-2 non-lock action within the ~10 s window. Accepted: scoped to non-lock, non-destructive Tier-2; locks + Tier-3 excluded.
+- Spoken confirmation has no speaker identity — a determined bystander can confirm a Tier-2 non-lock action within the ~10 s window (self-echo and overlapping-playback triggers are suppressed per §2, but a human in earshot is not). Accepted: scoped to non-lock, non-destructive Tier-2; locks + Tier-3 excluded.
 - Feels best with the 4 voice-control tools (WARP-627) and streaming (WARP-626), though it is independent of both.
 
 ## Alternatives considered
@@ -77,7 +85,7 @@ Reuse the canonical `tool_call` `ActivityRow` (WARP-456 / ADR-014) with `refs.su
 
 ## How to apply
 - Add the `voice` role to the ADR-004 taxonomy + `narrowAllowedToolsForRole()`; point voice-io's principal at it (its own `SERVICE_TOKEN_VOICE`-backed identity already exists).
-- Tag `tools-core` tools with their safety tier + a `lockLike` flag; derive the `voice` allow-set from that metadata (no hand-maintained list).
+- Build the tier/lock hint that does not exist yet: either add it to `tools-core` (`ToolDefinition` has only `requiresWrite`/`requiresConfirmation` today) or derive it by running `classifyCommand` over each write tool's `(domain, service)` surface; compute the `voice` allow-set from that, never a hand-maintained list. Decide the `control_device` lock split — §1 option (a) dedicated lock tool vs (b) handler-layer refusal — since it sets the WARP-625 / WARP-627 implementation contract.
 - voice-io implements the spoken-confirm window against the existing `confirmation_required` response; cap the window at ≤ token TTL.
 - All voice writes audit through `activity.service.ts` with `refs.surface = "voice"`.
 - **No code until this ADR is Accepted** (sign-off gate). Tracked in WARP-625.
