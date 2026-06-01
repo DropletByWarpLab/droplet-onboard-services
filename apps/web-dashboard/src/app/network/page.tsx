@@ -22,6 +22,7 @@ import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
 import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
+import { useNetworkViewMode } from "@/lib/hooks/useNetworkViewMode";
 import { DeviceGridSection } from "@/components/network/DeviceGridSection";
 import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
@@ -102,14 +103,15 @@ export default function NetworkPage() {
 
   // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Home installs
   // default to Simple — the everyday Overview only — while Business installs
-  // default to Advanced (the full OpenWrt tab surface). Switching to Simple
-  // snaps the active panel back to Overview so the hidden tab strip can't
-  // leave a power-user panel showing. The design's richer Simple cards
-  // (Wi-Fi password/guest/camera-privacy) are a follow-up under WARP-612.
+  // default to Advanced (the full OpenWrt tab surface). The persona default
+  // re-syncs once `isBusiness` resolves (useWorkspace hydrates it from the
+  // orchestrator after first paint) without clobbering an explicit user choice
+  // — see useNetworkViewMode. Switching to Simple snaps the active panel back to
+  // Overview so the hidden tab strip can't leave a power-user panel showing.
   const { isBusiness } = useWorkspace();
-  const [mode, setMode] = useState<"simple" | "advanced">(isBusiness ? "advanced" : "simple");
+  const { mode, choose: chooseMode } = useNetworkViewMode(isBusiness);
   function switchMode(next: "simple" | "advanced") {
-    setMode(next);
+    chooseMode(next);
     if (next === "simple") setActiveTab("overview");
   }
 
