@@ -248,13 +248,23 @@ export async function fetchApplianceContract(): Promise<ApplianceContract> {
 export class ClaimError extends Error {
   /** Server `code` — e.g. CLAIM_CODE_INVALID, CLAIM_RATE_LIMITED. */
   readonly code: string;
-  /** True when the failure was the per-IP rate-limit budget (HTTP 429). */
+  /** True when the failure was the per-IP rate-limit lock (HTTP 429). */
   readonly rateLimited: boolean;
-  constructor(message: string, code: string, rateLimited: boolean) {
+  /** WARP-631 — seconds the client must wait before retrying (429 only). The
+   *  Claim step starts a live m:ss countdown from this and re-enables the form
+   *  when it elapses. */
+  readonly retryAfterSeconds?: number;
+  constructor(
+    message: string,
+    code: string,
+    rateLimited: boolean,
+    retryAfterSeconds?: number,
+  ) {
     super(message);
     this.name = "ClaimError";
     this.code = code;
     this.rateLimited = rateLimited;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -262,8 +272,11 @@ export class ClaimError extends Error {
  * PR #373 — verify + consume a claim code, binding the appliance. PUBLIC
  * (claiming precedes account creation) → bare `fetch`. On the happy path /
  * already-claimed short-circuit the server returns 200; on a wrong code (400)
- * or exhausted rate budget (429) we throw a `ClaimError` the step renders
- * inline. The server never echoes the real code, so neither do we.
+ * or a rate-limit lock (429) we throw a `ClaimError` the step renders inline.
+ * The server never echoes the real code, so neither do we.
+ *
+ * WARP-631 — a 429 carries `retryAfterSeconds` (the progressive-backoff wait);
+ * we thread it onto the ClaimError so the step can run a live countdown.
  */
 export async function postClaim(code: string): Promise<ClaimResult> {
   const res = await fetch(`${BASE}/api/setup/claim`, {
@@ -273,10 +286,15 @@ export async function postClaim(code: string): Promise<ClaimResult> {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
+    const retryAfterSeconds =
+      typeof data.retryAfterSeconds === "number" && data.retryAfterSeconds > 0
+        ? data.retryAfterSeconds
+        : undefined;
     throw new ClaimError(
       data.error || "That claim code didn't match. Try again.",
       data.code || "CLAIM_FAILED",
       res.status === 429,
+      retryAfterSeconds,
     );
   }
   return res.json();

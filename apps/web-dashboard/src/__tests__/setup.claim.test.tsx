@@ -248,3 +248,137 @@ describe("setup Claim step (PR #373)", () => {
     expect(screen.getByText(/too many claim attempts/i)).toBeInTheDocument();
   });
 });
+
+// ── WARP-631 — live countdown on a rate-limited claim ───────────────
+describe("setup Claim step — rate-limit countdown (WARP-631)", () => {
+  beforeEach(() => {
+    fetchApplianceContractMock.mockReset();
+    postClaimMock.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    // Drain any pending timers the component scheduled, then restore real time.
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  /** Welcome → Claim, but under fake timers (so we pump promises manually). */
+  async function advanceToClaimFake() {
+    fireEvent.click(screen.getByRole("button", { name: /get started/i }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function rejectWithRateLimit(retryAfterSeconds: number) {
+    const { ClaimError } = await vi.importActual<typeof import("@/lib/api")>(
+      "@/lib/api",
+    );
+    fetchApplianceContractMock.mockResolvedValue(FIXTURE_CONTRACT);
+    postClaimMock.mockRejectedValue(
+      new ClaimError(
+        "Too many claim attempts. Try again shortly.",
+        "CLAIM_RATE_LIMITED",
+        true,
+        retryAfterSeconds,
+      ),
+    );
+    render(<SetupPage />);
+    await advanceToClaimFake();
+    fireEvent.change(screen.getByPlaceholderText(/DRPL/i), {
+      target: { value: "DRPL-0000-0000" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /claim this droplet/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("shows an m:ss countdown and disables the input + claim button (AC#5)", async () => {
+    await rejectWithRateLimit(15);
+
+    // Countdown message formatted m:ss — 15s → "0:15".
+    expect(screen.getByText(/try again in 0:15/i)).toBeInTheDocument();
+    // Input disabled while locked.
+    expect(screen.getByPlaceholderText(/DRPL/i)).toBeDisabled();
+    // The "Claim this Droplet" primary disabled while locked.
+    expect(
+      screen.getByRole("button", { name: /claim this droplet/i }),
+    ).toBeDisabled();
+  });
+
+  it("decrements the countdown each second (AC#5)", async () => {
+    await rejectWithRateLimit(15);
+    expect(screen.getByText(/try again in 0:15/i)).toBeInTheDocument();
+
+    // 3 seconds later → 0:12.
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(screen.getByText(/try again in 0:12/i)).toBeInTheDocument();
+  });
+
+  it("formats minutes correctly (e.g. 90s → 1:30) (AC#5)", async () => {
+    await rejectWithRateLimit(90);
+    expect(screen.getByText(/try again in 1:30/i)).toBeInTheDocument();
+    await act(async () => {
+      vi.advanceTimersByTime(31000);
+    });
+    // 90 - 31 = 59s → 0:59.
+    expect(screen.getByText(/try again in 0:59/i)).toBeInTheDocument();
+  });
+
+  it("clears the timer and re-enables the controls when it elapses (AC#5)", async () => {
+    await rejectWithRateLimit(2);
+    expect(screen.getByText(/try again in 0:0?2/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/DRPL/i)).toBeDisabled();
+
+    // Run out the clock.
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    // Countdown message gone, controls usable again.
+    expect(screen.queryByText(/try again in/i)).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/DRPL/i)).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /claim this droplet/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("does NOT start a countdown for an ordinary wrong-code 400 (no retryAfter)", async () => {
+    const { ClaimError } = await vi.importActual<typeof import("@/lib/api")>(
+      "@/lib/api",
+    );
+    fetchApplianceContractMock.mockResolvedValue(FIXTURE_CONTRACT);
+    postClaimMock.mockRejectedValue(
+      new ClaimError(
+        "That claim code didn't match. Check the PyPortal display and try again.",
+        "CLAIM_CODE_INVALID",
+        false,
+      ),
+    );
+    render(<SetupPage />);
+    await advanceToClaimFake();
+    fireEvent.change(screen.getByPlaceholderText(/DRPL/i), {
+      target: { value: "WRON-GGGG-GGGG" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /claim this droplet/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Inline error shown, but NO countdown and the input stays usable.
+    expect(screen.getByText(/didn't match/i)).toBeInTheDocument();
+    expect(screen.queryByText(/try again in/i)).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/DRPL/i)).not.toBeDisabled();
+  });
+});

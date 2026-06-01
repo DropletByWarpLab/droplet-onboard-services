@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Cpu,
@@ -48,6 +48,15 @@ const SPEC_ICONS = {
   Display: MonitorSmartphone,
 } as const;
 
+/** WARP-631 — format a whole-second remaining time as m:ss (e.g. 90 → "1:30",
+ *  15 → "0:15"). Used for the rate-limit retry countdown. */
+function formatCountdown(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 function SpecCell({ spec, divideRight, divideTop }: {
   spec: ApplianceSpec;
   divideRight: boolean;
@@ -82,6 +91,42 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
   const [code, setCode] = useState("");
   const [claiming, setClaiming] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
+  // WARP-631 — live retry countdown on a rate-limited (429) claim. `> 0` means
+  // we're locked out: the form is disabled and the inline message shows m:ss.
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  /** Stop any running countdown interval (idempotent). */
+  const stopCountdown = useCallback(() => {
+    if (countdownRef.current !== null) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+  }, []);
+
+  /** Start (or restart) the 1s retry countdown from `seconds`. At zero it
+   *  clears itself, drops the lockout, and clears the inline error so the
+   *  customer can try again cleanly. */
+  const startCountdown = useCallback(
+    (seconds: number) => {
+      stopCountdown();
+      setSecondsLeft(seconds);
+      countdownRef.current = setInterval(() => {
+        setSecondsLeft((prev) => {
+          if (prev <= 1) {
+            stopCountdown();
+            setClaimError(null);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    },
+    [stopCountdown],
+  );
+
+  // Clear the interval on unmount so it never fires into an unmounted tree.
+  useEffect(() => stopCountdown, [stopCountdown]);
 
   const loadContract = useCallback(async () => {
     setLoading(true);
@@ -102,6 +147,9 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
   }, [loadContract]);
 
   const handleClaim = useCallback(async () => {
+    // While the rate-limit countdown is running the controls are disabled, but
+    // guard here too so a stray Enter/programmatic call can't fire mid-lockout.
+    if (secondsLeft > 0) return;
     if (!code.trim()) {
       setClaimError("Enter the claim code shown on the PyPortal display.");
       return;
@@ -110,7 +158,10 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
     setClaiming(true);
     try {
       await postClaim(code);
-      // Both a fresh bind and an already-claimed short-circuit advance.
+      // Both a fresh bind and an already-claimed short-circuit advance. Tidy up
+      // any leftover countdown before leaving the step (WARP-631).
+      stopCountdown();
+      setSecondsLeft(0);
       onComplete();
     } catch (err) {
       // The server never echoes the real code, so neither do we — just the
@@ -121,8 +172,13 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
           : "Couldn't claim the appliance. Try again in a moment.";
       setClaimError(msg);
       setClaiming(false);
+      // WARP-631 — a rate-limited 429 carries the wait; start the live
+      // countdown so the form locks until the backoff window elapses.
+      if (err instanceof ClaimError && err.retryAfterSeconds) {
+        startCountdown(err.retryAfterSeconds);
+      }
     }
-  }, [code, onComplete]);
+  }, [code, onComplete, secondsLeft, startCountdown, stopCountdown]);
 
   // ── Appliance unreachable ────────────────────────────────────────
   // A single "Try again" primary; NO skip — claim is not skippable, and an
@@ -191,6 +247,8 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
         loadingLabel: "Claiming…",
         onClick: () => void handleClaim(),
         isLoading: claiming,
+        // WARP-631 — locked out during the retry countdown.
+        disabled: secondsLeft > 0,
       }}
     >
       {/* Detected-appliance card */}
@@ -236,10 +294,13 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
           placeholder="DRPL · 7K2Q · 9F4M"
           autoComplete="off"
           spellCheck={false}
+          // WARP-631 — locked while the retry countdown runs.
+          disabled={secondsLeft > 0}
           className="dp-input font-mono tracking-wide"
           aria-invalid={claimError !== null}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !claiming) void handleClaim();
+            if (e.key === "Enter" && !claiming && secondsLeft === 0)
+              void handleClaim();
           }}
         />
         <span className="type-caption-1 text-label-tertiary mt-1.5 block">
@@ -247,14 +308,30 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
         </span>
       </label>
 
-      {claimError && (
+      {/* WARP-631 — while rate-limited, the inline slot shows a calm live retry
+          countdown (m:ss) instead of the wrong-code error. Same alert slot, so
+          there's no layout jump between the two states. */}
+      {secondsLeft > 0 ? (
         <div
           role="alert"
+          aria-live="polite"
           className="mt-3 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
         >
           <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-          <span>{claimError}</span>
+          <span>
+            Too many attempts — try again in {formatCountdown(secondsLeft)}
+          </span>
         </div>
+      ) : (
+        claimError && (
+          <div
+            role="alert"
+            className="mt-3 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+          >
+            <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+            <span>{claimError}</span>
+          </div>
+        )
       )}
 
       {/* Supply-chain reassurance chip */}
