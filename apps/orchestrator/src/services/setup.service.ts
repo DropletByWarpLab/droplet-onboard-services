@@ -23,9 +23,10 @@ export const APPLIANCE_SETUP_ID = "singleton";
  * enum's declaration order (which only governs membership).
  *
  * PR #373: `claim` ships and slots SECOND (welcome → claim → account, #371
- * handoff §1). org / team remain GATED (separate PRs) — they extend
- * `SetupStep`, this list, the wizard array, and the route validation together,
- * the way claim does here.
+ * handoff §1). PR #380: `org` ships and slots AFTER account (welcome → claim →
+ * account → org → internet → …, #380 spec). `team` remains GATED (PR #381) —
+ * it extends `SetupStep`, this list, the wizard array, and the route validation
+ * together, the way claim and org do here.
  *
  * Declared as a plain string-literal tuple (NOT `SetupStep.welcome` etc.)
  * so this module has NO runtime dependency on the Prisma enum OBJECT at
@@ -39,6 +40,7 @@ export const SETUP_STEPS = [
   "welcome",
   "claim",
   "account",
+  "org",
   "internet",
   "storage",
   "discovery",

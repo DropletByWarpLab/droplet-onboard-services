@@ -119,6 +119,15 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     // endpoint enforces its own per-IP rate limit in routes/setup.ts.
     "/api/setup/appliance",
     "/api/setup/claim",
+    // PR #380: onboarding ORG step. POST /api/setup/org names the single
+    // workspace + reserves droplet.local/<slug>. Org slots AFTER account, but
+    // it shares the wizard's public posture so a refresh mid-org (before the
+    // freshly-created session cookie is durably established) can still persist
+    // instead of 401-ing the owner out of their own setup. Exact path — NOT a
+    // "/api/setup/" prefix — so no future /api/setup/* route is silently
+    // de-authed. The handler validates slug shape + uniqueness in
+    // routes/setup.ts; it persists locally only (nothing off-box).
+    "/api/setup/org",
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",
