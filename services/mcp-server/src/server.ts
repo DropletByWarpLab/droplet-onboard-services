@@ -85,7 +85,7 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
               status: "error",
               error: {
                 code: "forbidden_tool_for_role",
-                message: `role '${claims?.role}' may not call '${tool.name}'`,
+                message: `role '${claims?.role ?? "none"}' may not call '${tool.name}'`,
               },
             }),
           },
