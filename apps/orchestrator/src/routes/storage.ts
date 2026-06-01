@@ -294,12 +294,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   });
 
   /**
-   * POST /api/storage/drives/:uuid/eject — unmount + forget a hot-plug USB
-   * drive (WARP-612). Admin-only. Forwards to the device-bridge's auth-gated
-   * /drives/:uuid/eject, which itself refuses anything that isn't a USB mount
-   * under /mnt/droplet/. Requires a bridge auth token; 503 if the deployment
-   * hasn't provisioned one. A 409 from the bridge (drive busy / not ejectable)
-   * is surfaced verbatim so the user can close files and retry.
+   * POST /api/storage/drives/:uuid/eject — unmount + forget a hot-plug
+   * auto-mounted drive (WARP-612). Admin-only. Forwards to the device-bridge's
+   * auth-gated /drives/:uuid/eject, which gates on automount-state membership +
+   * a /mnt/droplet/ mount (bus-agnostic per ADR-011 — USB, external NVMe, SD,
+   * SATA dock, etc.), not on bus type. Requires a bridge auth token; 503 if the
+   * deployment hasn't provisioned one. A 409 (drive busy) is surfaced so the
+   * user can close files and retry; other bridge errors return a generic
+   * message and are logged server-side.
    */
   router.post("/storage/drives/:uuid/eject", async (req, res) => {
     if (!isAdmin(req)) {
@@ -318,7 +320,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     }
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 25000);
+      // The bridge's eject runs sync (≤10s) + umount (≤20s) = ~30s worst case,
+      // so wait longer than that: aborting at 25s would 502 an eject the bridge
+      // actually completed, leaving the user retrying an already-unmounted drive.
+      const timer = setTimeout(() => ctrl.abort(), 35000);
       const r = await fetch(`${BRIDGE_URL}/drives/${encodeURIComponent(uuid)}/eject`, {
         method: "POST",
         headers: { "X-Droplet-Auth": bridgeToken },
@@ -327,9 +332,17 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       clearTimeout(timer);
       const body = (await r.json().catch(() => ({}))) as { error?: string };
       if (!r.ok) {
-        return res
-          .status(r.status === 409 ? 409 : 502)
-          .json({ ok: false, error: body.error || `bridge returned ${r.status}` });
+        // Log the bridge's raw message server-side; only the 409 "busy" case is
+        // actionable enough to surface (and bridge errors can carry mount
+        // internals, so other statuses get a generic message).
+        logger.warn({ uuid, status: r.status, bridgeError: body.error }, "Drive eject rejected by bridge");
+        return res.status(r.status === 409 ? 409 : 502).json({
+          ok: false,
+          error:
+            r.status === 409
+              ? body.error || "The drive is in use — close any open files and try again."
+              : "The device-bridge could not complete the eject.",
+        });
       }
       return res.json({ ok: true });
     } catch (err) {

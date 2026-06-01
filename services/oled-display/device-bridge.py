@@ -755,21 +755,24 @@ def _smart_for(device):
         return hit[1], hit[2]
     health = None
     temp = None
-    _rc, out, _err = _run(["smartctl", "-H", "-A", device], timeout=8)
-    for line in (out or "").splitlines():
-        low = line.lower()
-        if "overall-health" in low:
-            if "passed" in low:
-                health = "PASSED"
-            elif "failed" in low:
-                health = "FAILED"
-        elif temp is None and "temperature" in low:
-            for tok in line.replace("(", " ").replace(")", " ").split():
-                if tok.isdigit():
-                    v = int(tok)
-                    if 0 < v < 120:  # plausible drive temp in °C
-                        temp = v
-                        break
+    # `-j` (JSON) so we read the canonical fields instead of scraping columns:
+    # `temperature.current` is the real °C, and `smart_status.passed` is an
+    # unambiguous bool. The old `-A` text scrape took the first plausible int on
+    # the Temperature_Celsius row — usually the *normalized* value (~100), not
+    # the raw temperature, so the chip showed the wrong number.
+    _rc, out, _err = _run(["smartctl", "-j", "-H", "-A", device], timeout=8)
+    try:
+        data = json.loads(out or "{}")
+        passed = data.get("smart_status", {}).get("passed")
+        if passed is True:
+            health = "PASSED"
+        elif passed is False:
+            health = "FAILED"
+        cur = data.get("temperature", {}).get("current")
+        if isinstance(cur, int) and 0 < cur < 120:  # plausible drive temp in °C
+            temp = cur
+    except (ValueError, AttributeError):
+        pass  # non-JSON output (smartctl absent / too old) → no SMART chips
     _smart_cache[device] = (now, health, temp)
     return health, temp
 
@@ -976,6 +979,21 @@ def drives_snapshot(invalidate=False):
     return snap
 
 
+def _device_at_mountpoint(mountpoint):
+    """The backing device the kernel currently has mounted at `mountpoint`, or
+    None. Reads /proc/mounts (the kernel's source of truth) so a tampered
+    automount state file can't misrepresent what is actually mounted where."""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and _unescape_mount(parts[1]) == mountpoint:
+                    return parts[0]
+    except Exception:                                               # noqa: BLE001
+        pass
+    return None
+
+
 def eject_drive(uuid):
     """Safely unmount + forget a hot-plug auto-mounted drive by FS UUID
     (WARP-612). Bus-agnostic per ADR-011 — works for USB, external NVMe, SD,
@@ -1001,14 +1019,31 @@ def eject_drive(uuid):
     if not target:
         return False, "no hot-plug drive with that uuid"
     mp = (target.get("mount") or "").rstrip("/")
-    if not mp.startswith("/mnt/droplet/") or mp == "/mnt/droplet":
-        return False, "refusing to eject a non-/mnt/droplet mount"
     # Bus-agnostic (ADR-011): any hot-plug drive the automounter placed under
     # /mnt/droplet/ is ejectable — USB, external NVMe, SD, SATA dock, etc.
     # System/boot disks are never in the automount state, so membership + the
-    # /mnt/droplet/ prefix is the safe gate; bus is irrelevant.
+    # /mnt/droplet/ prefix is the gate; bus is irrelevant.
+    #
+    # Defense in depth: the automount state file is writable state, so a
+    # malformed/poisoned entry must not be able to redirect the umount. Resolve
+    # symlinks/traversal and re-check the prefix on the real path; require it to
+    # actually be a mountpoint now; and confirm the kernel has the *expected*
+    # device mounted there (/proc/mounts) before touching anything.
+    real_mp = os.path.realpath(mp)
+    if not real_mp.startswith("/mnt/droplet/") or real_mp == "/mnt/droplet":
+        return False, "refusing to eject a non-/mnt/droplet mount"
+    if not os.path.ismount(real_mp):
+        return False, "drive is not currently mounted"
+    expected_dev = target.get("device") or ""
+    actual_dev = _device_at_mountpoint(real_mp)
+    if (
+        expected_dev
+        and actual_dev
+        and os.path.realpath(actual_dev) != os.path.realpath(expected_dev)
+    ):
+        return False, "mount/device mismatch — refusing to eject"
     _run(["sync"], timeout=10)
-    rc, _out, err = _run(["umount", mp], timeout=20)
+    rc, _out, err = _run(["umount", real_mp], timeout=20)
     if rc != 0:
         return False, (err.strip() or "umount failed — the drive may be in use")
     # Forget it so the next snapshot drops it. umount already succeeded, so a
@@ -1020,8 +1055,11 @@ def eject_drive(uuid):
         with open(tmp, "w") as f:
             json.dump(state, f)
         os.replace(tmp, state_path)
-    except Exception:                                               # noqa: BLE001
-        pass
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning(
+            "eject: failed to rewrite automount state (%s); the stale entry "
+            "self-heals on the next snapshot via the ismount check", e
+        )
     drives_snapshot(invalidate=True)
     return True, {"ejected": uuid, "mount": mp}
 
