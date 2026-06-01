@@ -18,6 +18,10 @@ import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createSsoRouter } from "./routes/sso.js";
+import {
+  createPublicWebAuthnRouter,
+  createProtectedWebAuthnRouter,
+} from "./routes/webauthn.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
@@ -118,6 +122,12 @@ export function createApp(prisma: PrismaClient) {
   // middleware so /sso/oidc/authorize + /sso/oidc/callback don't require one.
   app.use("/api", createSsoRouter(prisma));
 
+  // PR #377 — passwordless WebAuthn / passkey authentication. The
+  // authenticate/options + authenticate/verify endpoints are how a caller
+  // GETs a session, so they MUST mount BEFORE authMiddleware (same posture as
+  // /auth/login above). Registration lives on the PROTECTED router below.
+  app.use("/api", createPublicWebAuthnRouter(prisma));
+
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
   // without a session cookie. Token in the query string is the auth (HMAC
   // of DEVICE_SECRET + username, see routes/calendar.ts publishToken).
@@ -165,6 +175,11 @@ export function createApp(prisma: PrismaClient) {
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
+
+  // PR #377 — passkey REGISTRATION. You enrol a passkey for the signed-in
+  // user, so register/options + register/verify require an authenticated
+  // session and mount AFTER authMiddleware.
+  app.use("/api", createProtectedWebAuthnRouter(prisma));
   app.use("/api", createHealthRouter(prisma));
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
