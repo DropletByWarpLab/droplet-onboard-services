@@ -485,6 +485,30 @@ export interface OrgResult {
   next_step: string;
 }
 
+/** PR #381 — the roles the onboarding TEAM step can assign. The SHIPPED
+ *  HOUSEHOLD model (mirrors the orchestrator Role enum minus `service`). */
+export type TeamInviteRole = "owner" | "admin" | "family" | "guest";
+
+/** PR #381 — onboarding TEAM-invite request body. The wizard invites by
+ *  email + role; the orchestrator normalizes the email + validates the role. */
+export interface TeamInviteRequest {
+  email: string;
+  role: TeamInviteRole;
+}
+
+/** PR #381 — POST /api/people/invite result. */
+export interface TeamInviteResult {
+  ok: boolean;
+  /** The single-use invite token (bearer credential — not displayed). */
+  token: string;
+  /** The normalized (lowercased) invitee email. */
+  email: string;
+  /** The role the invite assigns. */
+  role: TeamInviteRole;
+  /** ISO timestamp the invite expires. */
+  expires_at: string;
+}
+
 // --- Health types ---
 
 export interface HealthResponse {
