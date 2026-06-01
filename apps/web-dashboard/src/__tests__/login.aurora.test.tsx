@@ -147,6 +147,69 @@ describe("Aurora LoginPage", () => {
     },
   );
 
+  // Residual (post-safeNext-v1): the sentinel-origin guard is NOT sufficient on
+  // its own. `..` resolution can pop the empty leading segment and leave the
+  // RETURNED path itself an authority — e.g. `/..//evil.com` resolves to
+  // `.pathname === "//evil.com"` while `.origin` stays the sentinel, so the
+  // origin check PASSES and safeNext hands back `//evil.com`. router.push then
+  // resolves that against the REAL location.origin → off-origin nav. The fix is
+  // an explicit guard on the returned path (`startsWith("//")` / `"/\\"`), which
+  // is why re-checking origin against the sentinel cannot catch this.
+  // (URLSearchParams percent-decodes, so safeNext sees the decoded form — prod.)
+  it.each([
+    ["dotdot to //authority", "next=%2F..%2F%2Fevil.com"], // -> "/..//evil.com"   -> "//evil.com"
+    ["nested dotdot to //authority", "next=/x/..//evil.com"], // -> "//evil.com"
+    ["dot-then-//authority", "next=/.//evil.com"], // -> "//evil.com"
+    ["dotdot+backslash authority", "next=/../\\evil.com"], // -> "/../\evil.com" -> "//evil.com"
+  ])(
+    "blocks a path-traversal-to-authority ?next= (%s) and redirects home",
+    async (_label, query) => {
+      searchString = query;
+      loginMock.mockResolvedValueOnce(undefined);
+      render(<LoginPage />);
+
+      fireEvent.change(screen.getByLabelText("Work email"), {
+        target: { value: "stefan@acme.co" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("Password"), {
+        target: { value: "hunter2" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+
+      await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/"));
+      // Hard guarantee: never hand router.push anything resolving off-origin.
+      for (const [arg] of pushMock.mock.calls) {
+        expect(new URL(arg as string, "http://x.invalid").origin).toBe(
+          "http://x.invalid",
+        );
+      }
+    },
+  );
+
+  it.each([
+    ["root", "next=/"],
+    ["files", "next=/files"],
+    ["setup with query", "next=/setup?from=x"],
+  ])(
+    "honours a legit same-origin ?next= (%s) unchanged after login",
+    async (_label, query) => {
+      searchString = query;
+      const expected = new URLSearchParams(query).get("next") as string;
+      loginMock.mockResolvedValueOnce(undefined);
+      render(<LoginPage />);
+
+      fireEvent.change(screen.getByLabelText("Work email"), {
+        target: { value: "stefan@acme.co" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("Password"), {
+        target: { value: "hunter2" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+
+      await waitFor(() => expect(pushMock).toHaveBeenCalledWith(expected));
+    },
+  );
+
   it("validates locally and does not call login when fields are empty", () => {
     render(<LoginPage />);
     fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
