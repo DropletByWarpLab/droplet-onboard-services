@@ -1,8 +1,8 @@
 # voice-io — Droplet's always-on voice loop (WARP-154).
 #
-# Multi-arch (x86 POC + Jetson production). Base is python:3.12-slim;
-# the audio stack adds ALSA + PortAudio + ffmpeg (for any audio
-# format conversion the TTS pipe needs later).
+# Multi-arch (single-box x86 + multi-box/v2.6 Jetson deployment shapes).
+# Base is python:3.12-slim; the audio stack adds ALSA + PortAudio +
+# ffmpeg (for any audio format conversion the TTS pipe needs later).
 FROM python:3.12-slim AS base
 
 # Audio + build deps. libasound2-dev gives ALSA headers for the
@@ -50,15 +50,37 @@ RUN python -c "from openwakeword.utils import download_models; download_models([
 # phrase — out of the box for every customer, with no per-box training
 # and no licensing fee. Extracted to the stable path the detector
 # resolves by default (see VOSK_DEFAULT_MODEL_DIRNAME in voice/wake.py;
-# override with VOSK_MODEL_PATH). Offline-build tolerant like the
-# openWakeWord pre-warm above: if the fetch fails, build still succeeds
-# and the factory falls back to openWakeWord until the model is present.
+# override with VOSK_MODEL_PATH).
+#
+# Supply-chain hardening (WARP-154 review item 5): the archive is a
+# third-party artifact that becomes acoustic-model bytes Kaldi loads, so
+# we don't trust it blindly.
+#   1. PIN the SHA-256 of the exact release and verify the download
+#      before touching it. A swapped/compromised artifact fails the
+#      build instead of silently shipping. Recompute on a model bump:
+#        curl -fsSL .../${VOSK_MODEL}.zip | sha256sum
+#   2. Validate every zip member before extracting — reject absolute
+#      paths and `..` traversal so a malicious archive can't write
+#      outside /app/models (zip-slip). We do NOT use the stdlib's bare
+#      extractall(), which has no such guard.
+#
+# Offline-build tolerant ONLY for a genuine fetch failure (no network at
+# build time): if curl can't retrieve the archive we skip bundling and
+# the factory falls back to openWakeWord until the model is present at
+# runtime. A present-but-tampered artifact (checksum mismatch or
+# zip-slip) is a HARD failure — never swallowed by the fallback.
 ARG VOSK_MODEL=vosk-model-small-en-us-0.15
-RUN (curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp/vosk.zip && \
-     python -c "import zipfile; zipfile.ZipFile('/tmp/vosk.zip').extractall('/app/models')" && \
-     mv "/app/models/${VOSK_MODEL}" /app/models/vosk-model-small-en-us && \
-     rm -f /tmp/vosk.zip) || \
-    echo "vosk model fetch skipped (offline build OK; runtime falls back to openWakeWord until the model is present)"
+ARG VOSK_MODEL_SHA256=30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+COPY services/voice-io/scripts/fetch_vosk_model.py /tmp/fetch_vosk_model.py
+RUN ( curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp/vosk.zip \
+        || { echo "vosk model fetch skipped (offline build OK; runtime falls back to openWakeWord until the model is present)"; exit 0; } ) && \
+    python /tmp/fetch_vosk_model.py \
+        --zip /tmp/vosk.zip \
+        --sha256 "${VOSK_MODEL_SHA256}" \
+        --dest /app/models \
+        --expected-root "${VOSK_MODEL}" \
+        --rename-to vosk-model-small-en-us && \
+    rm -f /tmp/vosk.zip /tmp/fetch_vosk_model.py
 
 # The service source.
 COPY services/voice-io/ /app/
