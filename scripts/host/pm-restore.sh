@@ -16,7 +16,9 @@
 # Engineering-handbook compliance (binding):
 #   - rule 1  shipping-product mindset — same restore script for every box
 #   - rule 14 no host-specific defaults — restores to whichever postgres-pm
-#             + pm-attachments-data volumes the local compose declares
+#             (and, when present, pm-attachments-data) volumes the local compose
+#             declares. NB: pm-attachments-data is not declared in the current
+#             compose; the attachment-restore phase guards for that and skips.
 #
 # =============================================================================
 set -euo pipefail
@@ -102,7 +104,17 @@ log_success "postgres-pm restored"
 ATTACH_VOLUME="${PROJECT:-droplet}_pm-attachments-data"
 if [ -f "$WORK_DIR/attachments/EMPTY" ]; then
   log_info "Archive marks attachments as absent at backup time — skipping volume restore"
-elif [ -f "$WORK_DIR/attachments/data.tar" ]; then
+elif [ ! -f "$WORK_DIR/attachments/data.tar" ]; then
+  log_warn "no attachments payload in archive — skipping"
+# GUARD (WARP-570 class): never let `docker run -v <name>:/data` AUTO-CREATE the
+# target volume. There is no `pm-attachments-data` volume in
+# docker/docker-compose.yml today (pm-api/pm-worker declare no `volumes:` mount),
+# so writing the payload into an auto-created phantom volume restores nothing
+# usable — nothing mounts it — and hides the gap. Only restore into a volume that
+# genuinely exists; otherwise warn and skip. Mirrors PR #356's device-backup fix.
+elif ! docker volume inspect "$ATTACH_VOLUME" >/dev/null 2>&1; then
+  log_warn "attachments volume '$ATTACH_VOLUME' is not declared by this stack — skipping (restoring would write into a phantom volume nothing mounts; Plane attachments are not on a named volume here)"
+else
   log_info "Restoring attachments volume..."
   docker run --rm \
     -v "$ATTACH_VOLUME:/data" \
@@ -110,8 +122,6 @@ elif [ -f "$WORK_DIR/attachments/data.tar" ]; then
     alpine:3.20 \
     sh -c 'rm -rf /data/* && tar -xf /in/data.tar -C /data'
   log_success "attachments volume restored"
-else
-  log_warn "no attachments payload in archive — skipping"
 fi
 
 # --- Phase 5: Bring Plane back up ----------------------------------------
