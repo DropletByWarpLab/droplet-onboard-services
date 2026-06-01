@@ -1637,8 +1637,18 @@ class TFTDisplay:
             self._complete_boot()
 
     def _complete_boot(self) -> None:
-        """Mark boot done and drop to the live UI (stats)."""
+        """Mark boot done and drop to the live UI (stats).
+
+        Emit a BARE stats frame ({"mode":"stats"}, no data) so the firmware
+        actually navigates off the boot splash: code.py:1473 only calls
+        set_screen() on a bare-mode message, while a data-laden stats push
+        re-renders *iff already on stats* (code.py:1497). Without this, the
+        host flips its own state to STATS but the PyPortal stays frozen on
+        "Starting Droplet" forever. _set_mode() alone only writes the sim
+        preview PNG and never touches the serial channel. (WARP-624 / B1)
+        """
         self._boot_complete = True
+        self._pyportal_send(self.STATS)
         # Don't pin the cycle: the live UI should resume its normal cadence.
         self._set_mode(self.STATS, pause_cycle=False)
 

@@ -114,6 +114,70 @@ def test_readiness_tick_times_out_to_live(
     assert sim_display._current_mode == TFTDisplay.STATS
 
 
+def _spy_pyportal_send(
+    display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, object]]:
+    """Record every serial frame `_pyportal_send(mode, data)` would emit.
+
+    The sim backend has `self._pyportal is None`, so `_pyportal_send` is a
+    no-op on the wire — but the *call* is the navigation boundary. Capturing
+    (mode, data) lets us assert what the firmware would receive.
+    """
+    sent: list[tuple[str, object]] = []
+    real = display._pyportal_send
+
+    def _record(mode: str, data: object = None):
+        sent.append((mode, data))
+        return real(mode, data)
+
+    monkeypatch.setattr(display, "_pyportal_send", _record)
+    return sent
+
+
+def test_complete_boot_emits_bare_stats_nav_frame(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # B1 (WARP-624): the firmware only `set_screen("stats")` on a BARE
+    # {"mode":"stats"} (code.py:1473). A data-laden stats push merely updates
+    # state and re-renders *iff already on stats* (code.py:1497), so without a
+    # bare nav frame the real PyPortal stays stuck on the boot splash forever
+    # after the box becomes healthy. _complete_boot MUST emit a bare STATS
+    # frame (no data) on the boot->stats transition.
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    monkeypatch.setattr(sim_display, "_check_readiness", lambda: True)
+    sim_display._boot_started_at = 1000.0
+
+    sim_display._readiness_tick(now=1003.0)
+
+    assert sim_display._boot_complete is True
+    assert sim_display._current_mode == TFTDisplay.STATS
+    # A bare nav frame == (mode="stats", data is None). data-laden frames do
+    # NOT navigate the firmware, so they don't count.
+    bare_stats = [m for (m, d) in sent if m == TFTDisplay.STATS and d is None]
+    assert bare_stats, (
+        f"expected a bare STATS nav frame on boot->stats; got {sent!r}"
+    )
+
+
+def test_complete_boot_emits_bare_stats_nav_frame_on_timeout(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # The timeout fallback path must navigate the firmware too — a degraded
+    # stack still has to leave the boot splash, not just flip host-side state.
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    monkeypatch.setattr(sim_display, "_check_readiness", lambda: False)
+    monkeypatch.setattr(display_module, "BOOT_MAX_SECONDS", 90)
+    sim_display._boot_started_at = 1000.0
+
+    sim_display._readiness_tick(now=1000.0 + 91)
+
+    assert sim_display._boot_complete is True
+    bare_stats = [m for (m, d) in sent if m == TFTDisplay.STATS and d is None]
+    assert bare_stats, (
+        f"expected a bare STATS nav frame on boot timeout; got {sent!r}"
+    )
+
+
 def test_readiness_tick_stays_on_boot_before_ready_and_before_timeout(
     sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
 ):
