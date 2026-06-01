@@ -1,59 +1,131 @@
-# Onboarding — Google / Entra OIDC SSO (scaffold)
+# Onboarding — Google / Entra OIDC SSO
 
-> **Status: DRAFT scaffold — no implementation in this PR.** Refs WARP-___.
+> **Status: IMPLEMENTED (PR #378).** Refs ADR-013. The directory-mirror /
+> air-gap path and Okta remain follow-ups (see "Deferred" below).
 
 ## Purpose
 
-External-IdP sign-in via OIDC for **Google Workspace** and **Microsoft Entra**,
-surfaced by the Aurora login SSO buttons (`flags.ts:sso`). Distinct from today's
-"OAuth2" which is **Nextcloud's own** — this is real third-party IdP federation.
+External-IdP sign-in via OIDC for **Google Workspace** and **Microsoft
+Entra**, surfaced by the Aurora login SSO buttons (`flags.ts`). Distinct from
+the legacy "OAuth2" path (which is **Nextcloud's own** `/auth/authorize`) —
+this is real third-party IdP federation, with the orchestrator acting as the
+OIDC **relying party** (the mirror of the `DROPLET_PM_OIDC_*` block, where it
+is the IdP for Plane).
 
-## Backend contract
+## Backend contract (as shipped)
 
-- `GET /auth/sso/:provider/start` → redirect to the IdP (PKCE + state in a CSRF
-  cookie; `provider ∈ {google, entra}`).
-- `GET /auth/sso/:provider/callback` → exchange code, verify ID token, resolve/
-  provision the local `User` by **email**, issue the cookie session.
-- **Air-gap / LAN-first**: on a fresh appliance, resolve against the **on-LAN
-  directory mirror** (see `ONBOARDING_DIRECTORY_SYNC.md`), not the public IdP, so
-  sign-in works with WAN down.
+Mounted on the PUBLIC router (before `authMiddleware`), under `/api`:
+
+- **`POST /api/sso/oidc/authorize`** — body `{ provider, returnTo? }` with
+  `provider ∈ {google, entra}`. Mints a single-use `state` (CSRF) + `nonce`
+  (ID-token replay) + PKCE `code_verifier`, persists them server-side
+  (`SsoLoginState`, time-bound ~10 min), sets an httpOnly cookie carrying the
+  opaque `state`, and **302-redirects** to the IdP authorize URL.
+- **`GET /api/sso/oidc/callback`** — `?code&state`. Enforces CSRF (cookie
+  `state` === query `state`), **atomically consumes** the server-side state
+  (rejects unknown / replayed / expired), exchanges the code, **validates the
+  ID token** (signature via JWKS, `iss`, `aud`, `exp`, `nonce`, `state`, PKCE
+  — all delegated to `openid-client`), resolves/links the local `User` by
+  normalized email, issues the SAME session cookies as `/auth/login`, and
+  redirects to the same-origin `returnTo`.
+
+### Endpoint-shape note (divergence from the original scaffold)
+
+The scaffold sketched `GET /auth/sso/:provider/start` + `…/callback`. The
+implemented contract follows the PR AC: `POST /sso/oidc/authorize` (provider
+in the body) + `GET /sso/oidc/callback`. The behaviour (PKCE + state + nonce,
+verify `iss`/`aud`/`exp`/signature) is unchanged; only the route shape and the
+provider-passing mechanism differ.
+
+## Account-linking policy
+
+On a fully-validated callback, in order:
+
+1. **Resolve by `(provider, sub)`** via `SsoIdentity` → sign in that user.
+   The IdP `sub` is the stable identity key (emails can be reassigned at the
+   IdP, `sub` cannot). Preserves the existing `User.id` (WARP-485).
+2. **Else resolve the local `User` by NORMALIZED email** (#374 trim+lowercase
+   — the same canonical form `/auth/login` uses):
+   - **found → LINK**: create an `SsoIdentity` pointing at that user. An owner
+     who set up with a password keeps the same row and can now also SSO in.
+   - **none → CREATE**: mint a local `User` (role `family` / least privilege,
+     `isLocal`, **no `passwordHash`** — SSO-only) and link.
+3. **No usable email in the token → reject** (401). We never create a
+   login-unable row.
 
 ## Data model (Prisma)
 
+Per-provider **config lives in env** (`config.ts` `DROPLET_SSO_*`), NOT a DB
+table — so there is deliberately **no `SsoConnection` model** (the scaffold
+sketched one; the AC overrides it with "reuse existing config/env").
+
 ```prisma
-model SsoConnection {
-  id           String  @id @default(uuid())
-  provider     String  // "google" | "entra"
-  issuer       String
-  clientId     String
-  clientSecret String  // encrypted at rest / secret ref, never tracked
-  enabled      Boolean @default(false)
-}
 model SsoIdentity {
-  id        String @id @default(uuid())
-  userId    String
-  provider  String
-  subject   String  // IdP 'sub'
+  id        String   @id @default(uuid())
+  userId    String   // FK → User.id (UUID preserved; ON DELETE CASCADE)
+  provider  String   // "google" | "entra"
+  subject   String   // IdP 'sub'
+  email     String?  // normalized, audit-only
   @@unique([provider, subject])
+}
+
+model SsoLoginState {
+  id           String    @id @default(uuid())
+  state        String    @unique  // CSRF
+  nonce        String              // ID-token replay
+  codeVerifier String              // PKCE
+  provider     String
+  returnTo     String    @default("/")
+  consumedAt   DateTime?           // single-use (UserInvite.acceptedAt idiom)
+  expiresAt    DateTime            // time-bound
 }
 ```
 
+The migration is additive + idempotent (`CREATE TABLE/INDEX IF NOT EXISTS` +
+a `pg_constraint`-guarded FK) — greenfield, same posture as the ADR-013
+directory migration.
+
+## Configuration (env, per provider)
+
+`config.ts` `DROPLET_SSO_{GOOGLE,ENTRA}_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}`.
+**All four** of a provider's vars must be set for that provider's button to go
+live (`getOidcProviderConfig` fails closed otherwise → the button stays the
+disabled "Soon" pill). Issuer is the discovery base (`openid-client` derives
+every endpoint + the JWKS from it — **no host is hardcoded in code**):
+
+- Google: `https://accounts.google.com`
+- Entra: `https://login.microsoftonline.com/<tenant>/v2.0`
+
+**Secrets** (`*_CLIENT_SECRET`) are real provider secrets — they live ONLY in
+`.env` (operator / setup.sh; never tracked), exactly like `OAUTH2_CLIENT_SECRET`
+and `DROPLET_PM_OIDC_CLIENT_SECRET`. They are read, never logged. The callback
+never logs the code, tokens, or claims.
+
 ## Architecture rules
 
-- PKCE + state + nonce; verify `iss`/`aud`/`exp`/signature.
+- PKCE + state + nonce; verify `iss`/`aud`/`exp`/signature (via JWKS).
 - Secrets via env/secret-ref, **never** committed.
-- Map IdP claims → role (see role-model ADR); default to least privilege.
+- New user defaults to least privilege (`family`); claim→role elevation is a
+  separate concern (role-model ADR), out of scope here.
+- Library: `openid-client@6` (ESM, the vetted OIDC RP lib). Wrapped behind
+  `services/sso-oidc.service.ts` (the single boundary the route mocks).
 
 ## Dependencies
 
-Built-in directory (ADR-012). Shares directory-mirror infra with the SCIM PR.
+Built-in directory (ADR-013) for the `User` row + normalized-email login key.
 
-## Acceptance criteria
+## Deferred (follow-ups, NOT in this PR)
 
-- Google + Entra round-trip provisions/links a user and signs in.
-- LAN-mirror path works WAN-down. Flips `ONB_AUTH_FLAGS.sso` true (with Okta).
+- **Okta** — its OIDC backend ships in `feat/onb-sso-okta-scim`. The Okta
+  button stays the disabled "Soon" pill here (`ONB_SSO_PROVIDERS_LIVE.okta =
+  false`).
+- **Air-gap / LAN-mirror** — resolving against an on-LAN directory mirror so
+  sign-in works WAN-down (`ONBOARDING_DIRECTORY_SYNC.md`) is a separate PR.
+  This PR resolves against the live IdP.
 
 ## References
 
-`apps/orchestrator/src/routes/auth.ts` (`/auth/authorize`,`/auth/callback`
-legacy NC OAuth2 to generalize); `FEATURES.md §3, §10`; ADR-004.
+`apps/orchestrator/src/routes/sso.ts`, `services/sso-oidc.service.ts`,
+`services/sso-login-state.service.ts`, `routes/auth.ts` (the ADR-013 directory
+login whose session-cookie issuance this mirrors); `FEATURES.md §3, §10`;
+ADR-004; ADR-013.
