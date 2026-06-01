@@ -388,9 +388,15 @@ class NetworkApi:
         contract so a single interface never 500s the whole Network overview
         (ADR-011):
 
-        * **Not configured on this box** (ubus ``NOT_FOUND``) — e.g. a single-box
-          where WAN is handled by the host, not the containerised OpenWrt —
-          reported as an explicit ``present: False`` stub.
+        * **Not present on this box** — e.g. a single-box where WAN is handled by
+          the host, not the containerised OpenWrt — reported as an explicit
+          ``present: False`` stub. Covers BOTH shapes of "absent" via
+          :func:`_ubus_object_absent`: a configured-but-missing interface (numeric
+          ubus ``NOT_FOUND``/``NO_DATA``) AND a whole missing ubus object, which
+          the low-level client surfaces as ``UbusError(-1, "Object not found")``
+          (the live single-box case — `network.interface.wan` simply isn't
+          registered, so `ubus call` returns a top-level JSON-RPC error, not a
+          numeric code).
         * **Transient read failure** of a configured interface (ubus
           ``TIMEOUT``) — reported as ``present: True, up: False`` and a warning
           logged, so a blip on one interface degrades to "down" and self-heals
@@ -412,7 +418,7 @@ class NetworkApi:
                 status["present"] = True
                 out[name] = status
             except UbusError as exc:
-                if exc.code == UBUS_STATUS_NOT_FOUND:
+                if _ubus_object_absent(exc):
                     out[name] = interface_stub(present=False)
                 elif exc.code == UBUS_STATUS_TIMEOUT:
                     logger.warning(

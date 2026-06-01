@@ -14,6 +14,7 @@ from droplet_openwrt_sdk import (
     NetworkApi,
     WirelessApi,
     UbusError,
+    interface_stub,
     UBUS_STATUS_NOT_FOUND,
     UBUS_STATUS_INVALID_ARGUMENT,
     UBUS_STATUS_TIMEOUT,
@@ -59,11 +60,58 @@ def test_interface_statuses_tolerate_missing_wan():
     assert out["wan"]["ipv4-address"] == []
 
 
+def test_interface_statuses_tolerate_missing_wan_object():
+    """The REAL single-box shape (root-caused live on 192.168.1.87): `wan` is a
+    whole missing ubus OBJECT, not a configured interface returning a numeric
+    NOT_FOUND. The low-level client surfaces that as a top-level JSON-RPC error →
+    ``UbusError(-1, "Object not found")`` (code -1, status UNKNOWN(-1)), distinct
+    from the numeric ``NOT_FOUND`` (4) the sibling test above exercises.
+
+    The loop must degrade BOTH shapes to a `present:False` stub via
+    `_ubus_object_absent`, NOT re-raise the -1 form. Re-raising here is exactly
+    what 500-ed `/network/interfaces` (and `/network/summary`) on the box."""
+    def responder(obj, method, args=None):
+        if obj == "network.interface.lan":
+            return dict(_LAN_STATUS)
+        if obj == "network.interface.wan":
+            # missing-OBJECT shape: code -1, message "Object not found"
+            raise UbusError(-1, "Object not found")
+        raise AssertionError(f"unexpected call {obj}.{method}")
+
+    net = NetworkApi(_FakeRouter(responder))
+    out = net.get_all_interface_statuses()  # must NOT raise
+
+    # lan is read live and explicitly present
+    assert out["lan"]["up"] is True
+    assert out["lan"]["present"] is True
+    # wan object absent on this box → identical present:False stub as the numeric
+    # NOT_FOUND case (full-shape equality, not just the `present` flag).
+    assert out["wan"] == interface_stub(present=False)
+    assert out["wan"]["present"] is False
+
+
 def test_interface_statuses_reraise_non_not_found():
     def responder(obj, method, args=None):
         if obj == "network.interface.lan":
             return dict(_LAN_STATUS)
         raise UbusError(6, "Permission denied")  # not NOT_FOUND → must propagate
+
+    net = NetworkApi(_FakeRouter(responder))
+    with pytest.raises(UbusError):
+        net.get_all_interface_statuses()
+
+
+def test_interface_statuses_reraise_unrelated_minus_one():
+    """A code -1 UbusError whose message is NOT the object-absent signal
+    (e.g. the low-level client's own "Empty result") is a genuine fault, not a
+    deployment shape — it must propagate. Guards the degrade path against keying
+    on bare code -1 instead of the not-found message class."""
+    def responder(obj, method, args=None):
+        if obj == "network.interface.lan":
+            return dict(_LAN_STATUS)
+        if obj == "network.interface.wan":
+            raise UbusError(-1, "Empty result")
+        raise AssertionError(f"unexpected call {obj}.{method}")
 
     net = NetworkApi(_FakeRouter(responder))
     with pytest.raises(UbusError):

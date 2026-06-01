@@ -21,10 +21,12 @@ surface — only the "object not found / not present on this deployment" class d
 import pytest
 
 from droplet_openwrt_sdk import (
+    NetworkApi,
     UbusError,
     ConnectionLost,
     get_network_summary,
     describe_network_for_llm,
+    interface_stub,
     UBUS_STATUS_NOT_FOUND,
     UBUS_STATUS_NO_DATA,
 )
@@ -276,4 +278,91 @@ def test_network_summary_route_stays_200_with_objects_absent(connected_client, m
     assert body["dhcp_leases"] == []
     assert body["firewall_zones"] == {}
     assert body["lan"]["present"] is True
+    assert body["system"]["hostname"] == "test-router"
+
+
+# ---------------------------------------------------------------------------
+# Route-level over the REAL interface loop: the `wan` ubus OBJECT is absent
+# ---------------------------------------------------------------------------
+# The exact 192.168.1.87 single-box trigger: `ubus list` has
+# `network.interface.lan` + `network.interface.loopback` but NO
+# `network.interface.wan`. `ubus call network.interface.wan status` → top-level
+# JSON-RPC error → the SDK raises `UbusError(-1, "Object not found")` (a whole
+# missing object, code -1 — NOT the numeric NOT_FOUND). The interface loop was
+# only catching numeric NOT_FOUND, so it re-raised → 500 on BOTH
+# `/network/interfaces` and `/network/summary` (which calls the loop first).
+#
+# Unlike `test_network_summary_route_stays_200_with_objects_absent` above (which
+# stubs `get_all_interface_statuses.return_value`, bypassing the loop entirely),
+# these drive the REAL `NetworkApi.get_all_interface_statuses` via a router whose
+# `_call` raises the missing-object shape for `network.interface.wan` — i.e. they
+# would 500 against the un-fixed loop, exactly as the live box did.
+OBJECT_NOT_FOUND_CALL = UbusError(-1, "Object not found")
+
+_LAN_LIVE = {
+    "up": True, "available": True, "device": "br-lan", "proto": "static",
+    "ipv4-address": [{"address": "192.168.20.1", "mask": 24}],
+}
+
+
+class _SingleBoxCallRouter:
+    """Minimal router whose `_call` mimics the single-box ubus surface: `lan`
+    answers live, `wan` is a whole missing OBJECT (-1 "Object not found")."""
+
+    def _call(self, obj, method, args=None):
+        if obj == "network.interface.lan":
+            return dict(_LAN_LIVE)
+        if obj == "network.interface.wan":
+            raise OBJECT_NOT_FOUND_CALL
+        raise AssertionError(f"unexpected ubus call {obj}.{method}")
+
+
+def test_network_interfaces_route_stays_200_with_wan_object_absent(connected_client, mock_router):
+    """`GET /network/interfaces` returns 200 (not the live 500) when the real
+    interface loop hits a missing `wan` OBJECT — lan present, wan degraded to a
+    present:False stub."""
+    mock_router.network = NetworkApi(_SingleBoxCallRouter())
+
+    resp = connected_client.get(
+        "/network/interfaces",
+        headers={"Authorization": "Bearer pytest-fake-token"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["lan"]["present"] is True
+    assert body["lan"]["up"] is True
+    assert body["wan"] == interface_stub(present=False)
+
+
+def test_network_summary_route_stays_200_with_wan_object_absent(connected_client, mock_router):
+    """`GET /network/summary` returns 200 over the REAL interface loop when `wan`
+    is an absent OBJECT. `get_network_summary` calls `get_all_interface_statuses`
+    FIRST, so a re-raise there 500s the whole summary before any `_section_or`
+    guard runs — this is why guarding only the optional sections wasn't enough.
+    The optional sections are also absent here (full single-box shape)."""
+    mock_router.network = NetworkApi(_SingleBoxCallRouter())
+    mock_router.system.resource_info.side_effect = OBJECT_NOT_FOUND_CALL
+    mock_router.wireless.status.side_effect = OBJECT_NOT_FOUND_CALL
+    mock_router.dhcp.active_leases.side_effect = OBJECT_NOT_FOUND_CALL
+    mock_router.firewall.get_zones.side_effect = OBJECT_NOT_FOUND_CALL
+    # board_info returns a real dict from the conftest mock_router fixture.
+
+    resp = connected_client.get(
+        "/network/summary",
+        headers={"Authorization": "Bearer pytest-fake-token"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) >= {
+        "system", "resources", "lan", "wan", "wireless", "dhcp_leases", "firewall_zones",
+    }
+    assert body["lan"]["present"] is True
+    assert body["wan"] == interface_stub(present=False)
+    # optional sections degraded, core system still present
+    assert body["resources"] == {}
+    assert body["wireless"] == {}
+    assert body["dhcp_leases"] == []
+    assert body["firewall_zones"] == {}
     assert body["system"]["hostname"] == "test-router"
