@@ -1,9 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Plus, RefreshCw, ChevronLeft, ChevronRight, Check } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { useCalendarEvents, useCalendarSources, type CalendarEvent } from "@/lib/hooks/useCalendar";
+import {
+  dayKey,
+  paletteColor,
+  eventVisibilityKey,
+  compareByStart,
+  EXTERNAL_KEY,
+  EXTERNAL_COLOR,
+} from "@/lib/calendar";
 import { AgendaView } from "@/components/calendar/AgendaView";
 import { MonthView, monthGridRange } from "@/components/calendar/MonthView";
 import { MiniMonth } from "@/components/calendar/MiniMonth";
@@ -12,17 +20,6 @@ import { RemindersPanel } from "@/components/calendar/RemindersPanel";
 import { SubscriptionsPanel } from "@/components/calendar/SubscriptionsPanel";
 
 type View = "month" | "agenda";
-
-/** Distinct hues for subscribed calendars in the rail. Local events use the
- *  brand accent; each external source cycles through this palette so the
- *  "Calendars" list reads at a glance. Presentation-only — no fake data. */
-const SOURCE_PALETTE = ["#0891b2", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6"];
-
-const sourceKey = (e: CalendarEvent) => (e.source === "local" ? "local" : e.sourceId ?? "external");
-
-function dayKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 function whenLabel(ev: CalendarEvent): string {
   const d = new Date(ev.startsAt);
@@ -58,13 +55,22 @@ export default function CalendarPage() {
   const [editing, setEditing] = useState<CalendarEvent | null>(null);
   const [newEventDate, setNewEventDate] = useState<Date | undefined>(undefined);
 
+  const knownSourceIds = useMemo(() => new Set(sources.map((s) => s.id)), [sources]);
+  const keyOf = useCallback(
+    (e: CalendarEvent) => eventVisibilityKey(e, knownSourceIds),
+    [knownSourceIds],
+  );
+
   const calendars = useMemo(() => {
     const list = [{ key: "local", name: "My events", color: "var(--color-accent)" }];
-    sources.forEach((s, i) =>
-      list.push({ key: s.id, name: s.name, color: SOURCE_PALETTE[i % SOURCE_PALETTE.length] }),
-    );
+    sources.forEach((s) => list.push({ key: s.id, name: s.name, color: paletteColor(s.id) }));
+    // Catch-all row so events with a null/unrecognized sourceId stay toggleable
+    // instead of being permanently visible with no control in the rail.
+    if (events.some((e) => keyOf(e) === EXTERNAL_KEY)) {
+      list.push({ key: EXTERNAL_KEY, name: "Other calendars", color: EXTERNAL_COLOR });
+    }
     return list;
-  }, [sources]);
+  }, [sources, events, keyOf]);
 
   const colorByKey = useMemo(
     () => Object.fromEntries(calendars.map((c) => [c.key, c.color])),
@@ -72,8 +78,8 @@ export default function CalendarPage() {
   );
 
   const visibleEvents = useMemo(
-    () => events.filter((e) => !hidden.has(sourceKey(e))),
-    [events, hidden],
+    () => events.filter((e) => !hidden.has(keyOf(e))),
+    [events, hidden, keyOf],
   );
 
   const eventDays = useMemo(() => {
@@ -86,7 +92,7 @@ export default function CalendarPage() {
     const now = Date.now();
     return visibleEvents
       .filter((e) => new Date(e.endsAt || e.startsAt).getTime() >= now)
-      .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
+      .sort(compareByStart)
       .slice(0, 5);
   }, [visibleEvents]);
 
@@ -247,7 +253,7 @@ export default function CalendarPage() {
                       >
                         <span
                           className="mt-1.5 h-2 w-2 rounded-full flex-none"
-                          style={{ background: colorByKey[sourceKey(ev)] ?? "var(--color-accent)" }}
+                          style={{ background: colorByKey[keyOf(ev)] ?? "var(--color-accent)" }}
                         />
                         <span className="min-w-0 flex-1">
                           <span className="block type-subheadline text-label-primary truncate">{ev.title}</span>

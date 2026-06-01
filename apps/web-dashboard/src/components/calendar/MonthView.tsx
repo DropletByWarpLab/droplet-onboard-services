@@ -2,12 +2,9 @@
 
 import { useMemo } from "react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
+import { dayKey } from "@/lib/calendar";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-function dayKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 /** 42 cells (6 weeks) starting on the Sunday on/before the 1st of `cursor`'s
  *  month, so the grid is always a full rectangle regardless of how the month
