@@ -122,6 +122,15 @@ Built-in directory (ADR-013) for the `User` row + normalized-email login key.
 - **Air-gap / LAN-mirror** — resolving against an on-LAN directory mirror so
   sign-in works WAN-down (`ONBOARDING_DIRECTORY_SYNC.md`) is a separate PR.
   This PR resolves against the live IdP.
+- **`email_verified` claim gate** — gating the email link/create branch on
+  `email_verified === true` is planned with the Okta PR
+  (`feat/onb-sso-okta-scim`), where unverified-email handling matters most.
+  It is intentionally NOT added here: Google's ID token always carries
+  `email_verified`, but Microsoft Entra frequently omits the claim, so a naive
+  `=== true` gate would reject legitimate Entra sign-ins (a regression). Doing
+  it correctly needs a per-provider policy (and a decision on whether an
+  already-linked `(provider, sub)` re-auth is exempt), which is its own
+  RED→GREEN cycle — out of scope for these two merge-blockers.
 
 ## References
 

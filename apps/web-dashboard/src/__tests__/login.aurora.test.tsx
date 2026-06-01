@@ -46,14 +46,22 @@ describe("Aurora LoginPage", () => {
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
   });
 
-  it("renders SSO and passkey as disabled until their backends ship", () => {
+  // ADR-013 (PR #378): Google + Entra (Microsoft) ship their OIDC backend in
+  // this PR, so those two buttons go LIVE. Okta's backend lands separately and
+  // passkey/WebAuthn is gated by its own flag, so both stay disabled "Soon"
+  // pills. Mirrors SignInForm.test.tsx's live-vs-disabled split.
+  it("renders the live SSO providers (Google + Microsoft) as enabled", () => {
     render(<LoginPage />);
     expect(
       screen.getByRole("button", { name: /continue with google/i }),
-    ).toBeDisabled();
+    ).toBeEnabled();
     expect(
       screen.getByRole("button", { name: /continue with microsoft/i }),
-    ).toBeDisabled();
+    ).toBeEnabled();
+  });
+
+  it("keeps Okta and passkey disabled until their backends ship", () => {
+    render(<LoginPage />);
     expect(
       screen.getByRole("button", { name: /continue with okta/i }),
     ).toBeDisabled();
