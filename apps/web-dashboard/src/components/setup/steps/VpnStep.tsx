@@ -156,7 +156,7 @@ export function VpnStep({
   // ──────────────────────────────────────────────────────────────────
   if (phase === "gate") {
     return (
-      <StepShell title="Connect your phone" subtitle="One moment…">
+      <StepShell current="vpn" title="Connect your phone" subtitle="One moment…">
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
@@ -181,7 +181,7 @@ export function VpnStep({
   // ──────────────────────────────────────────────────────────────────
   if (phase === "preCheck") {
     return (
-      <StepShell
+      <StepShell current="vpn"
         title="Connect your phone"
         subtitle="To set up remote access we need an internet name first."
         primary={{
@@ -225,7 +225,7 @@ export function VpnStep({
   // ──────────────────────────────────────────────────────────────────
   if (phase === "form") {
     return (
-      <StepShell
+      <StepShell current="vpn"
         title="Connect your phone"
         subtitle="Name the device you want to connect — usually your phone."
         primary={{
@@ -299,7 +299,7 @@ export function VpnStep({
   // ──────────────────────────────────────────────────────────────────
   if (!created) return null;
   return (
-    <StepShell
+    <StepShell current="vpn"
       title="Scan to connect"
       subtitle="Open WireGuard on your phone and scan this code."
       primary={{

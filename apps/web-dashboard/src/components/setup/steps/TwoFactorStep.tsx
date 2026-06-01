@@ -98,6 +98,7 @@ export function TwoFactorStep({
   if (phase === "intro") {
     return (
       <StepShell
+        current="twofactor"
         title="Add two-factor authentication"
         subtitle="A second factor keeps your Droplet yours, even if your password leaks."
         icon={
@@ -134,6 +135,7 @@ export function TwoFactorStep({
   if (phase === "enroll") {
     return (
       <StepShell
+        current="twofactor"
         title="Scan the QR code"
         subtitle="Open your authenticator app and scan this, then enter the code it shows."
         primary={{
@@ -201,6 +203,7 @@ export function TwoFactorStep({
   // ── codes ──────────────────────────────────────────────────────────────
   return (
     <StepShell
+      current="twofactor"
       title="Save your recovery codes"
       subtitle="Each code works once if you ever lose your authenticator. Store them somewhere safe — you won't see them again."
       icon={

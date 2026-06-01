@@ -90,6 +90,7 @@ export function AccountStep({
 
   return (
     <StepShell
+      current="account"
       title="Create your account"
       subtitle="This will be the administrator account for your Droplet."
       primary={{

@@ -7,12 +7,12 @@ import {
   HardDrive,
   MonitorSmartphone,
   Network,
-  RefreshCw,
   ShieldCheck,
 } from "lucide-react";
 import { fetchApplianceContract, postClaim, ClaimError } from "@/lib/api";
 import type { ApplianceContract, ApplianceSpec } from "@/lib/types";
 import { DropletMark } from "@/components/DropletMark";
+import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -22,29 +22,23 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * binds it to their workspace by entering the claim code shown on the PyPortal
  * lid display. Per #371 handoff §2 + OnbWizard.jsx `WizClaim`.
  *
- * Structure:
- *   - WizHead: kicker "Step 1" → "We found your Droplet" → sub.
- *   - Appliance card: aurora-badge drop icon + name + appliance_id (mono) +
- *     "Detected on LAN" chip; a 2×2 spec grid (compute/storage/network/display)
- *     rendered from GET /api/setup/appliance.
- *   - Claim-code input + PyPortal hint.
- *   - Supply-chain success chip (TAA / NDAA §889).
- *
- * Edge cases:
- *   - Appliance unreachable (contract fetch fails) → "We can't see your Droplet
- *     yet" + retry; the claim CTA is BLOCKED (claim is not skippable, so the
+ * PR #384 — reflowed into the shared aurora-rail `StepShell` (was a bespoke
+ * centered column with an in-body CTA). The three phases each render through
+ * `StepShell current="claim"`, so the rail is visible the whole time and the
+ * CTA sits in the standard footer position. Functional behavior is unchanged:
+ *   - loading  → "Looking for your Droplet…" + skeleton card, no actions.
+ *   - probeError → "We can't see your Droplet yet" + a single "Try again"
+ *     primary; the claim CTA is BLOCKED (claim is not skippable, so the
  *     customer can't proceed without a reachable, claimable box).
- *   - Wrong code → inline error, never revealing the real code; rate-limited
- *     (429) → a distinct "too many attempts" message.
- *
- * Claim is NOT skippable — there is no skip control (the box is useless until
- * claimed; it gates everything after).
+ *   - loaded   → detected-appliance card + claim-code input + supply-chain
+ *     chip; the single "Claim this Droplet" primary (NOT skippable → no skip
+ *     control). Wrong code → inline error, never revealing the real code;
+ *     rate-limited (429) → a distinct "too many attempts" message.
  *
  * Design tokens only (no hardcoded hex): the aurora badge composes the shipped
- * `aurora-bg` + `aurora-ring` utilities (the login PR's `.aurora-brand` isn't
- * on this branch); card → `dp-card`; input → `dp-input`; status chip →
- * `dp-status-chip`; success chip → the `system-green` family; mono →
- * Tailwind's `font-mono`; type → `type-*`; labels → `text-label-*`.
+ * `aurora-bg` + `aurora-ring` utilities; card → `dp-card`; input → `dp-input`;
+ * status chip → `dp-status-chip`; success chip → the `system-green` family;
+ * mono → Tailwind's `font-mono`; type → `type-*`; labels → `text-label-*`.
  */
 
 const SPEC_ICONS = {
@@ -131,43 +125,37 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
   }, [code, onComplete]);
 
   // ── Appliance unreachable ────────────────────────────────────────
+  // A single "Try again" primary; NO skip — claim is not skippable, and an
+  // unreachable box can't be claimed, so the customer can't proceed.
   if (probeError) {
     return (
-      <div className="animate-in fade-in duration-300 text-center">
-        <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-surface-secondary">
-          <AlertCircle size={26} className="text-label-tertiary" />
+      <StepShell
+        current="claim"
+        title="We can't see your Droplet yet"
+        subtitle="Make sure the appliance is powered on and connected to this network, then try again."
+        primary={{
+          label: "Try again",
+          loadingLabel: "Looking…",
+          onClick: () => void loadContract(),
+          isLoading: loading,
+          showArrow: false,
+        }}
+      >
+        <div className="dp-card flex items-start gap-3 !p-4">
+          <AlertCircle size={18} className="text-label-tertiary flex-shrink-0 mt-0.5" />
+          <p className="type-footnote text-label-secondary">
+            We probe the local network for your appliance. If it just powered
+            on, give it a few seconds and try again.
+          </p>
         </div>
-        <h1 className="type-title-1 text-label-primary mb-2">
-          We can&apos;t see your Droplet yet
-        </h1>
-        <p className="type-subheadline text-label-secondary mb-8 max-w-sm mx-auto">
-          Make sure the appliance is powered on and connected to this network,
-          then try again.
-        </p>
-        <button
-          type="button"
-          onClick={() => void loadContract()}
-          className="dp-btn-primary w-full"
-        >
-          <RefreshCw size={16} />
-          Try again
-        </button>
-      </div>
+      </StepShell>
     );
   }
 
   // ── Loading the contract ─────────────────────────────────────────
   if (loading && !contract) {
     return (
-      <div className="animate-in fade-in duration-300">
-        <div className="mb-7">
-          <p className="type-caption-2 font-bold uppercase tracking-wider text-accent">
-            Step 1
-          </p>
-          <h1 className="type-title-1 text-label-primary mt-2">
-            Looking for your Droplet…
-          </h1>
-        </div>
+      <StepShell current="claim" title="Looking for your Droplet…">
         <div className="dp-card overflow-hidden">
           <div className="flex items-center gap-4 p-5 bg-surface-secondary">
             <div className="h-[52px] w-[52px] rounded-2xl bg-surface-tertiary animate-pulse" />
@@ -177,7 +165,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
             </div>
           </div>
         </div>
-      </div>
+      </StepShell>
     );
   }
 
@@ -191,24 +179,22 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
   ];
 
   // ── Claim card ───────────────────────────────────────────────────
+  // The single "Claim this Droplet" primary lives in the StepShell footer.
+  // NOT skippable → no skip control.
   return (
-    <div className="animate-in fade-in duration-300">
-      {/* WizHead */}
-      <div className="mb-7">
-        <p className="type-caption-2 font-bold uppercase tracking-wider text-accent">
-          Step 1
-        </p>
-        <h1 className="type-title-1 text-label-primary mt-2">
-          We found your Droplet
-        </h1>
-        <p className="type-subheadline text-label-secondary mt-2">
-          This appliance is on your network and waiting to be claimed. Confirm
-          it&apos;s yours and we&apos;ll bind it to your workspace.
-        </p>
-      </div>
-
+    <StepShell
+      current="claim"
+      title="We found your Droplet"
+      subtitle="This appliance is on your network and waiting to be claimed. Confirm it's yours and we'll bind it to your workspace."
+      primary={{
+        label: "Claim this Droplet",
+        loadingLabel: "Claiming…",
+        onClick: () => void handleClaim(),
+        isLoading: claiming,
+      }}
+    >
       {/* Detected-appliance card */}
-      <div className="dp-card overflow-hidden mb-6">
+      <div data-testid="claim-appliance-card" className="dp-card overflow-hidden mb-6">
         <div className="flex items-center gap-4 p-5 bg-surface-secondary border-b border-separator">
           <span className="aurora-bg aurora-ring flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-2xl">
             <DropletMark size={26} className="text-accent" />
@@ -277,16 +263,6 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
         <span>{contract.supply_chain.summary}</span>
       </div>
 
-      {/* Primary CTA — NOT skippable, so no skip control. */}
-      <button
-        type="button"
-        onClick={() => void handleClaim()}
-        disabled={claiming}
-        className="dp-btn-primary w-full mt-6"
-      >
-        {claiming ? "Claiming…" : "Claim this Droplet"}
-      </button>
-
       <LearnMoreCard helpAnchor="claim">
         <p>
           Claiming binds this specific appliance to your workspace so only you
@@ -298,6 +274,6 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
           the appliance and try again.
         </p>
       </LearnMoreCard>
-    </div>
+    </StepShell>
   );
 }

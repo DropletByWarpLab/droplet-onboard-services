@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { fetchMatterDevices } from "@/lib/api";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
+import { StepShell } from "@/components/setup/StepShell";
 
 const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
   light: Lightbulb,
@@ -192,10 +193,10 @@ export function DiscoveryStep({
   }
 
   return (
-    <div className="animate-in fade-in duration-300">
-      {/* Scanning header */}
-      <div className="text-center mb-8">
-        <div className="relative w-16 h-16 mx-auto mb-5">
+    <StepShell
+      current="discovery"
+      icon={
+        <div className="relative w-16 h-16">
           <div className="absolute inset-0 rounded-full bg-accent/10 animate-scan-pulse" />
           <div
             className="absolute inset-2 rounded-full bg-accent/20 animate-scan-pulse"
@@ -205,19 +206,18 @@ export function DiscoveryStep({
             <Wifi size={28} className="text-accent" />
           </div>
         </div>
-
-        <h1 className="type-title-1 text-label-primary mb-2">
-          Discovering your devices
-        </h1>
-        <p className="type-subheadline text-label-tertiary">
-          {discoveredDevices.length === 0
-            ? "Scanning your network for smart home devices..."
-            : `${discoveredDevices.length} device${
-                discoveredDevices.length !== 1 ? "s" : ""
-              } found`}
-        </p>
-      </div>
-
+      }
+      title="Discovering your devices"
+      subtitle={
+        discoveredDevices.length === 0
+          ? "Scanning your network for smart home devices..."
+          : `${discoveredDevices.length} device${
+              discoveredDevices.length !== 1 ? "s" : ""
+            } found`
+      }
+      primary={{ label: "Continue", onClick: handleFinish, showArrow: true }}
+      skip={{ label: "Skip for now", onClick: handleFinish }}
+    >
       {/* Discovered devices grid */}
       <div className="space-y-2 mb-8 max-h-[320px] overflow-y-auto">
         {discoveredDevices.map((device, index) => {
@@ -335,25 +335,7 @@ export function DiscoveryStep({
         </a>
       </div>
 
-      {/* Actions */}
-      <div className="space-y-3">
-        <button
-          onClick={handleFinish}
-          className={`dp-btn-primary w-full transition-all duration-300 ${
-            discoveredDevices.length > 0 ? "opacity-100" : "opacity-60"
-          }`}
-        >
-          {discoveredDevices.length > 0 ? "Continue" : "Continue"}
-          <ArrowRight size={16} />
-        </button>
-        <button
-          onClick={handleFinish}
-          className="w-full type-subheadline text-label-tertiary hover:text-label-secondary py-2 transition-colors"
-        >
-          Skip for now
-        </button>
-      </div>
-    </div>
+    </StepShell>
   );
 }
 
