@@ -8,10 +8,19 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
  * Two layers under test:
  *  1. checkSetupRequired() in lib/api.ts — must return a tri-state
  *     ('required' | 'complete' | 'unknown') and map every non-2xx, network
- *     error, and timeout to 'unknown'.
- *  2. AuthGate — must NOT redirect to /setup on 'unknown' (renders a
- *     connecting interstitial instead); 'complete' renders the app;
- *     'required' redirects to /setup.
+ *     error, and timeout to 'unknown'. (API-level unit tests — unchanged by
+ *     PR #372; checkSetupRequired() still exists and still tri-states.)
+ *  2. AuthGate fail-closed gating — PR #372 replaced the legacy boolean
+ *     `setupRequired` / tri-state `setupStatus` AuthGate mechanism (and the
+ *     "Connecting to your Droplet…" interstitial) with routing off the
+ *     explicit `setupState.appliance` lifecycle. The WARP-577 GUARANTEE is
+ *     unchanged and re-expressed against that contract here: a transient,
+ *     unresolved setup state (`setupState === null`) must NEVER be mistaken
+ *     for "unclaimed", so it must NOT false-redirect a user into the wizard;
+ *     a probe FAILURE surfaces an explicit error + Retry instead of guessing.
+ *     (The happy-path `unclaimed → /setup` and `ready → dashboard` routes are
+ *     covered by auth-gate.routing.test.tsx; this block guards the
+ *     fail-closed edge WARP-577 originally introduced.)
  */
 
 // --- 1. checkSetupRequired() tri-state unit tests ---
@@ -115,7 +124,7 @@ describe("checkSetupRequired() tri-state (WARP-577)", () => {
   });
 });
 
-// --- 2. AuthGate gating on tri-state ---
+// --- 2. AuthGate fail-closed gating on the explicit setup state (PR #372) ---
 
 let mockReplace: ReturnType<typeof vi.fn>;
 let mockPush: ReturnType<typeof vi.fn>;
@@ -133,38 +142,46 @@ vi.mock("@/components/Sidebar", () => ({
   Sidebar: () => null,
 }));
 
-let mockAuthValue: {
+// PR #372 — AuthGate reads `setupState` (the explicit lifecycle) plus the
+// probe error/retry affordances. The legacy `setupStatus` / `retrySetupCheck`
+// fields are gone. We type the mock to exactly what AuthGate destructures so a
+// future field rename trips tsc here rather than passing a stale shape.
+type MockAuthValue = {
   user: unknown;
   isLoading: boolean;
-  setupRequired: boolean | null;
-  setupStatus: "required" | "complete" | "unknown";
-  retrySetupCheck: () => void;
-  login: () => Promise<void>;
-  logout: () => Promise<void>;
-  completeSetup: () => void;
+  setupState: {
+    appliance: "unclaimed" | "ready";
+    setupStep: string;
+    userTourCompleted: boolean;
+  } | null;
+  setupProbeError: string | null;
+  retrySetupProbe: () => Promise<void>;
 };
+
+let mockAuthValue: MockAuthValue;
 
 vi.mock("@/lib/auth", () => ({
   useAuth: () => mockAuthValue,
 }));
 
-describe("AuthGate tri-state gating (WARP-577)", () => {
+describe("AuthGate fail-closed gating (WARP-577, re-expressed for PR #372)", () => {
   beforeEach(() => {
     mockReplace = vi.fn();
     mockPush = vi.fn();
     mockPathname = "/";
   });
 
-  it("'unknown' renders the connecting interstitial and does NOT redirect", async () => {
+  it("does NOT false-redirect to /setup when the setup state is unresolved (null) — transient state is never read as 'unclaimed'", async () => {
+    // The WARP-577 guarantee in #372 vocabulary: a transient/unresolved
+    // `setupState` must not be mistaken for an unclaimed appliance, so it must
+    // not trap the user in the first-run wizard. (No probe error recorded, so
+    // this is the "still resolving" path, not the explicit-error path below.)
     mockAuthValue = {
       user: null,
       isLoading: false,
-      setupRequired: null,
-      setupStatus: "unknown",
-      retrySetupCheck: vi.fn(),
-      login: vi.fn(),
-      logout: vi.fn(),
-      completeSetup: vi.fn(),
+      setupState: null,
+      setupProbeError: null,
+      retrySetupProbe: vi.fn().mockResolvedValue(undefined),
     };
     const { AuthGate } = await import("../components/AuthGate");
     render(
@@ -172,27 +189,24 @@ describe("AuthGate tri-state gating (WARP-577)", () => {
         <div>protected content</div>
       </AuthGate>,
     );
-
+    // Give the routing effect a tick to (not) fire.
     await waitFor(() => {
-      expect(
-        screen.getByText(/connecting to your droplet/i),
-      ).toBeInTheDocument();
+      expect(mockReplace).not.toHaveBeenCalledWith("/setup");
     });
-    expect(mockReplace).not.toHaveBeenCalled();
+    // Fail-closed: protected content is withheld while unauthenticated.
     expect(screen.queryByText("protected content")).not.toBeInTheDocument();
   });
 
-  it("'unknown' interstitial exposes a manual Retry that calls retrySetupCheck", async () => {
-    const retry = vi.fn();
+  it("renders an explicit error + Retry (no guess-redirect) when the lifecycle probe failed with no state", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
     mockAuthValue = {
       user: null,
       isLoading: false,
-      setupRequired: null,
-      setupStatus: "unknown",
-      retrySetupCheck: retry,
-      login: vi.fn(),
-      logout: vi.fn(),
-      completeSetup: vi.fn(),
+      // Probe failed AND no state resolved, on a protected page → AuthGate
+      // surfaces the explicit error instead of routing off a guess.
+      setupState: null,
+      setupProbeError: "Couldn't reach the appliance to read setup state.",
+      retrySetupProbe: retry,
     };
     const { AuthGate } = await import("../components/AuthGate");
     render(
@@ -200,44 +214,36 @@ describe("AuthGate tri-state gating (WARP-577)", () => {
         <div>protected content</div>
       </AuthGate>,
     );
-    const btn = await screen.findByRole("button", { name: /retry/i });
-    fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/can't reach your appliance/i)).toBeInTheDocument();
+    });
+    // The recorded probe reason is shown to the user…
+    expect(
+      screen.getByText(/couldn't reach the appliance to read setup state/i),
+    ).toBeInTheDocument();
+    // …and the gate did NOT silently bounce off a guessed state.
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(screen.queryByText("protected content")).not.toBeInTheDocument();
+
+    // The Retry affordance re-runs the lifecycle probe.
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  it("'complete' + user present renders the app, no redirect to /setup", async () => {
-    mockAuthValue = {
-      user: { id: "1", username: "admin", displayName: "Admin", role: "admin" },
-      isLoading: false,
-      setupRequired: false,
-      setupStatus: "complete",
-      retrySetupCheck: vi.fn(),
-      login: vi.fn(),
-      logout: vi.fn(),
-      completeSetup: vi.fn(),
-    };
-    const { AuthGate } = await import("../components/AuthGate");
-    render(
-      <AuthGate>
-        <div>protected content</div>
-      </AuthGate>,
-    );
-    await waitFor(() => {
-      expect(screen.getByText("protected content")).toBeInTheDocument();
-    });
-    expect(mockReplace).not.toHaveBeenCalledWith("/setup");
-  });
-
-  it("'required' redirects to /setup", async () => {
+  it("routes an unclaimed appliance into the wizard (/setup)", async () => {
+    // The positive control for the fail-closed cases above: a genuinely
+    // resolved "unclaimed" state DOES route to the wizard.
     mockAuthValue = {
       user: null,
       isLoading: false,
-      setupRequired: true,
-      setupStatus: "required",
-      retrySetupCheck: vi.fn(),
-      login: vi.fn(),
-      logout: vi.fn(),
-      completeSetup: vi.fn(),
+      setupState: {
+        appliance: "unclaimed",
+        setupStep: "welcome",
+        userTourCompleted: false,
+      },
+      setupProbeError: null,
+      retrySetupProbe: vi.fn().mockResolvedValue(undefined),
     };
     const { AuthGate } = await import("../components/AuthGate");
     render(
