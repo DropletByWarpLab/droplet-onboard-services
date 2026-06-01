@@ -112,6 +112,41 @@ describe("Aurora LoginPage", () => {
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/"));
   });
 
+  // Regression: a naive `startsWith("/")` / `startsWith("//")` string guard is
+  // defeated because the WHATWG URL parser (used by router.push → new URL(next,
+  // origin) in Next 14.2) collapses `\` → `/` and strips leading tab/newline,
+  // turning these into an off-origin authority AFTER the string guard passed.
+  // Note: URLSearchParams already percent-decodes, so the component's safeNext
+  // receives the decoded form below (e.g. "/\evil.com") — exactly prod.
+  it.each([
+    ["backslash authority", "next=/%5Cevil.com"], // -> "/\evil.com"  -> http://evil.com
+    ["tab-prefixed authority", "next=/%09/evil.com"], // -> "/\t/evil.com" -> http://evil.com
+    ["newline-prefixed authority", "next=/%0A//evil.com"], // -> "/\n//evil.com" -> http://evil.com
+  ])(
+    "blocks a normalization-bypass ?next= (%s) and redirects home",
+    async (_label, query) => {
+      searchString = query;
+      loginMock.mockResolvedValueOnce(undefined);
+      render(<LoginPage />);
+
+      fireEvent.change(screen.getByLabelText("Work email"), {
+        target: { value: "stefan@acme.co" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("Password"), {
+        target: { value: "hunter2" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+
+      await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/"));
+      // Hard guarantee: never hand router.push anything resolving off-origin.
+      for (const [arg] of pushMock.mock.calls) {
+        expect(new URL(arg as string, "http://x.invalid").origin).toBe(
+          "http://x.invalid",
+        );
+      }
+    },
+  );
+
   it("validates locally and does not call login when fields are empty", () => {
     render(<LoginPage />);
     fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
