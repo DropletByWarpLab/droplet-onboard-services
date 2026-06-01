@@ -3,7 +3,6 @@
 import { useCallback, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { patchSetupStep } from "@/lib/api";
-import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { ClaimStep } from "@/components/setup/steps/ClaimStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
@@ -38,8 +37,15 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
  * slots Internet / Storage / Cameras / VPN / AI between discovery and
  * done in subsequent commits — see `docs/SETUP_WIZARD_WALKTHROUGH.md`
  * and its addendum for the contract.
+ *
+ * PR #384 — the visual frame is the aurora left-rail `StepShell` (rail on
+ * `lg+`, compact progress header below). Each step renders its own
+ * `StepShell`; this page no longer paints a centered card or progress
+ * dots. The rail's step list is derived from the `STEPS` export below, so
+ * the frame and this state machine can never drift. The state machine
+ * (STEPS, resumeStepFrom, patchSetupStep) is unchanged.
  */
-type Step =
+export type Step =
   | "welcome"
   | "claim"
   | "account"
@@ -63,7 +69,11 @@ type Step =
 // and before `done` (… → ai → team → done): once the box is set up, the owner
 // brings people in. It is a persisted `SETUP_STEPS` value, so the same 1:1
 // mapping holds and a resumed `setupStep === "team"` renders cleanly.
-const STEPS: Step[] = [
+//
+// PR #384 — `StepShell` derives its aurora rail from this exact array (order +
+// membership), keyed into `RAIL_LABELS` for the plain-language label + icon.
+// Exported so the rail can't drift from the state machine.
+export const STEPS: Step[] = [
   "welcome",
   "claim",
   "account",
@@ -113,96 +123,97 @@ export default function SetupPage() {
     void patchSetupStep(next);
   }, []);
 
-  return (
-    <div className="min-h-screen bg-surface-primary flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <ProgressDots steps={STEPS} current={step} />
-
-        {step === "welcome" && (
-          <WelcomeStep onContinue={() => setStep("claim")} />
-        )}
-
-        {step === "claim" && (
-          <ClaimStep onComplete={() => setStep("account")} />
-        )}
-
-        {step === "account" && (
-          <AccountStep
-            onComplete={(name) => {
-              setDisplayName(name);
-              setStep("org");
-            }}
-          />
-        )}
-
-        {step === "org" && <OrgStep onComplete={() => setStep("twofactor")} />}
-
-        {step === "twofactor" && (
-          <TwoFactorStep
-            onComplete={() => setStep("internet")}
-            onSkip={() => setStep("internet")}
-          />
-        )}
-
-        {step === "internet" && (
-          <InternetStep
-            onComplete={() => setStep("storage")}
-            onSkip={() => setStep("storage")}
-          />
-        )}
-
-        {step === "storage" && (
-          <StorageStep
-            onComplete={() => setStep("discovery")}
-            onSkip={() => setStep("discovery")}
-          />
-        )}
-
-        {step === "discovery" && (
-          <DiscoveryStep
-            onContinue={(count) => {
-              setDiscoveredCount(count);
-              setStep("cameras");
-            }}
-          />
-        )}
-
-        {step === "cameras" && (
-          <CamerasStep
-            onComplete={() => setStep("vpn")}
-            onSkip={() => setStep("vpn")}
-          />
-        )}
-
-        {step === "vpn" && (
-          <VpnStep
-            onComplete={() => setStep("ai")}
-            onSkip={() => setStep("ai")}
-            onBackToInternet={() => setStep("internet")}
-          />
-        )}
-
-        {step === "ai" && (
-          <AiStep
-            onComplete={() => setStep("team")}
-            onSkip={() => setStep("team")}
-          />
-        )}
-
-        {step === "team" && (
-          <TeamStep
-            onComplete={() => setStep("done")}
-            onSkip={() => setStep("done")}
-          />
-        )}
-
-        {step === "done" && (
-          <DoneStep
-            displayName={displayName}
-            discoveredCount={discoveredCount}
-          />
-        )}
+  // PR #384 — each step paints its own full-bleed aurora-rail `StepShell`, so
+  // the page is just the step switch. The terminal `done` step is the
+  // exception: it's a centered celebration (WelcomeFlourish), so it gets its
+  // own centering wrapper rather than the rail frame.
+  if (step === "done") {
+    return (
+      <div className="grid min-h-dvh place-items-center bg-surface-primary p-4">
+        <DoneStep displayName={displayName} discoveredCount={discoveredCount} />
       </div>
-    </div>
+    );
+  }
+
+  return (
+    <>
+      {step === "welcome" && (
+        <WelcomeStep onContinue={() => setStep("claim")} />
+      )}
+
+      {step === "claim" && (
+        <ClaimStep onComplete={() => setStep("account")} />
+      )}
+
+      {step === "account" && (
+        <AccountStep
+          onComplete={(name) => {
+            setDisplayName(name);
+            setStep("org");
+          }}
+        />
+      )}
+
+      {step === "org" && <OrgStep onComplete={() => setStep("twofactor")} />}
+
+      {step === "twofactor" && (
+        <TwoFactorStep
+          onComplete={() => setStep("internet")}
+          onSkip={() => setStep("internet")}
+        />
+      )}
+
+      {step === "internet" && (
+        <InternetStep
+          onComplete={() => setStep("storage")}
+          onSkip={() => setStep("storage")}
+        />
+      )}
+
+      {step === "storage" && (
+        <StorageStep
+          onComplete={() => setStep("discovery")}
+          onSkip={() => setStep("discovery")}
+        />
+      )}
+
+      {step === "discovery" && (
+        <DiscoveryStep
+          onContinue={(count) => {
+            setDiscoveredCount(count);
+            setStep("cameras");
+          }}
+        />
+      )}
+
+      {step === "cameras" && (
+        <CamerasStep
+          onComplete={() => setStep("vpn")}
+          onSkip={() => setStep("vpn")}
+        />
+      )}
+
+      {step === "vpn" && (
+        <VpnStep
+          onComplete={() => setStep("ai")}
+          onSkip={() => setStep("ai")}
+          onBackToInternet={() => setStep("internet")}
+        />
+      )}
+
+      {step === "ai" && (
+        <AiStep
+          onComplete={() => setStep("team")}
+          onSkip={() => setStep("team")}
+        />
+      )}
+
+      {step === "team" && (
+        <TeamStep
+          onComplete={() => setStep("done")}
+          onSkip={() => setStep("done")}
+        />
+      )}
+    </>
   );
 }
