@@ -3,6 +3,7 @@ const path = require("path");
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  transpilePackages: ["@droplet/auth-policy"],
   // Monorepo: tell Next where the workspace root is so the standalone
   // file-trace walks up to the hoisted node_modules instead of stopping
   // at apps/web-dashboard. In Next 14.2 this lives under `experimental`.
