@@ -89,9 +89,15 @@ directory migration.
 
 `config.ts` `DROPLET_SSO_{GOOGLE,ENTRA}_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}`.
 **All four** of a provider's vars must be set for that provider's button to go
-live (`getOidcProviderConfig` fails closed otherwise → the button stays the
-disabled "Soon" pill). Issuer is the discovery base (`openid-client` derives
-every endpoint + the JWKS from it — **no host is hardcoded in code**):
+live (`getOidcProviderConfig` fails closed otherwise). The login shows that
+button **only** when the provider is fully configured: the page reads the live
+set at runtime from `GET /api/sso/oidc/providers` (WARP-629,
+[`ONBOARDING_SSO_RUNTIME_DISCOVERY.md`](ONBOARDING_SSO_RUNTIME_DISCOVERY.md)),
+so an unconfigured provider is simply **not rendered** — there is no disabled
+"Soon" pill and no button that could POST to an unconfigured provider. (A box
+with no `DROPLET_SSO_*` env shows a password-only login.) Issuer is the
+discovery base (`openid-client` derives every endpoint + the JWKS from it —
+**no host is hardcoded in code**):
 
 - Google: `https://accounts.google.com`
 - Entra: `https://login.microsoftonline.com/<tenant>/v2.0`
@@ -118,8 +124,9 @@ Built-in directory (ADR-013) for the `User` row + normalized-email login key.
 
 - **Okta** — ✅ SHIPPED in `feat/onb-sso-okta-scim` (PR #379): Okta added as a
   third OIDC provider reusing this exact RP path, plus a SCIM 2.0 server for
-  directory provisioning. The Okta button is now live
-  (`ONB_SSO_PROVIDERS_LIVE.okta = true`). See `ONBOARDING_DIRECTORY_SYNC.md`.
+  directory provisioning. The Okta button shows on the login whenever the box
+  has Okta's four `DROPLET_SSO_OKTA_*` vars set (surfaced by runtime discovery,
+  WARP-629 — no build-time flag). See `ONBOARDING_DIRECTORY_SYNC.md`.
 - **Air-gap / LAN-mirror** — resolving against an on-LAN directory mirror so
   sign-in works WAN-down (`ONBOARDING_DIRECTORY_SYNC.md`) is a separate PR.
   This PR resolves against the live IdP.
