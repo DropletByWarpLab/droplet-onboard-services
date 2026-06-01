@@ -17,6 +17,7 @@ import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
 import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
+import { createSsoRouter } from "./routes/sso.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
@@ -111,6 +112,11 @@ export function createApp(prisma: PrismaClient) {
   // Public auth routes (setup + login + invite-accept) — no authentication required.
   // Prisma is required for the WARP-217 invite-accept endpoints (token lookup).
   app.use("/api", createPublicAuthRouter(prisma));
+
+  // ADR-013 (PR #378) — external-IdP OIDC SSO (Google / Entra). Public:
+  // a user signing in via SSO has no session yet. Mounted BEFORE the auth
+  // middleware so /sso/oidc/authorize + /sso/oidc/callback don't require one.
+  app.use("/api", createSsoRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
   // without a session cookie. Token in the query string is the auth (HMAC
