@@ -16,7 +16,7 @@
  * the whole `@/lib/api` surface the wizard imports is mocked.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, within } from "@testing-library/react";
 import React from "react";
 
 vi.mock("framer-motion", async () => {
@@ -113,9 +113,13 @@ describe("setup Claim step (PR #373)", () => {
     expect(screen.getByText("droplet-rack-1-9c4f12")).toBeInTheDocument();
     // "Detected on LAN" status chip.
     expect(screen.getByText(/detected on lan/i)).toBeInTheDocument();
-    // 2×2 spec grid — every subsystem label present.
+    // 2×2 spec grid — every subsystem label present. Scoped to the appliance
+    // card: PR #384's aurora rail also renders a "Storage" wizard-step label,
+    // so a global getByText would be ambiguous. The grid is the assertion's
+    // intent, so scope to it.
+    const card = within(screen.getByTestId("claim-appliance-card"));
     for (const label of ["Compute", "Storage", "Network", "Display"]) {
-      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(card.getByText(label)).toBeInTheDocument();
     }
     // Supply-chain reassurance chip.
     expect(

@@ -158,7 +158,7 @@ export function AiStep({
   const selectedIsLocal = localSelected ? isLocalModel(localSelected) : true;
 
   return (
-    <StepShell
+    <StepShell current="ai"
       title="Your private AI is ready"
       subtitle="Try it — it runs entirely on your hardware."
       primary={{

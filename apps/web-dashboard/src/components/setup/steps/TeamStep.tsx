@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, Plus, Users, X } from "lucide-react";
 import { postTeamInvite, InviteError } from "@/lib/api";
 import type { TeamInviteRole } from "@/lib/types";
+import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -18,9 +19,14 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * state), so this step takes BOTH an `onComplete` (Send invites & continue) and
  * an `onSkip`, the same contract the other skippable steps use.
  *
+ * PR #384 — reflowed into the shared aurora-rail `StepShell` (was a bespoke
+ * centered column with in-body CTAs). `StepShell current="team"` owns the
+ * "Step N" kicker, the "Bring in your team" title + sub, the container fade,
+ * and the footer primary ("Send invites & continue") + skip ("I'll invite
+ * people later"). The body below is the SSO card + invite UI. Functional
+ * behavior is unchanged.
+ *
  * Structure (mirrors the WizTeam design):
- *   - WizHead: kicker "Step 11" → "Bring in your team" → sub explaining roles
- *     map to what the AI may do on each person's behalf.
  *   - Directory-sync (SSO) note card — the bulk alternative (OIDC / Okta /
  *     Entra / Google Workspace), stays on the LAN.
  *   - Invite row: email input + role select + Add. Each Add POSTs
@@ -28,8 +34,6 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *     list and clears the email for the next one.
  *   - Pending invitee list: neutral initials avatar + email + role chip +
  *     remove control.
- *   - Skip link ("I'll invite people later") + primary "Send invites &
- *     continue".
  *
  * Edge cases:
  *   - Invalid email (client-side shape check) → inline error on the email
@@ -48,9 +52,9 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * Add → `dp-btn-secondary`; the role CHIP uses the neutral `dp-status-chip`
  * treatment (border-separator / surface-tertiary / label-secondary) because the
  * design system has no `--role-family` color token — see the PR self-assessment
- * (token gap flagged for UI/UX). Motion: the shipped `animate-in fade-in
- * duration-300` container reveal the other steps use, plus a restraint-first
- * `animate-fade-rise` on each newly-added row.
+ * (token gap flagged for UI/UX). Motion: the StepShell container fade the
+ * other steps share, plus a restraint-first `animate-fade-rise` on each
+ * newly-added invitee row.
  */
 
 /** Roles the invite select offers — the shipped household model. Value is the
@@ -148,21 +152,16 @@ export function TeamStep({
   }, []);
 
   return (
-    <div className="animate-in fade-in duration-300">
-      {/* WizHead */}
-      <div className="mb-7">
-        <p className="type-caption-2 font-bold uppercase tracking-wider text-accent">
-          Step 11
-        </p>
-        <h1 className="type-title-1 text-label-primary mt-2">
-          Bring in your team
-        </h1>
-        <p className="type-subheadline text-label-secondary mt-2">
-          Invite people now or sync your whole directory. Roles map to what the
-          AI is allowed to do on their behalf.
-        </p>
-      </div>
-
+    <StepShell
+      current="team"
+      title="Bring in your team"
+      subtitle="Invite people now or sync your whole directory. Roles map to what the AI is allowed to do on their behalf."
+      primary={{
+        label: invites.length > 0 ? "Send invites & continue" : "Continue",
+        onClick: onComplete,
+      }}
+      skip={{ label: "I'll invite people later", onClick: onSkip }}
+    >
       {/* Directory sync (SSO) — the bulk alternative. */}
       <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-6">
         <Users size={20} className="flex-shrink-0 text-accent" />
@@ -301,24 +300,9 @@ export function TeamStep({
           : "Roles can be changed anytime in People → Roles."}
       </p>
 
-      {/* Primary CTA — send invites & continue. */}
-      <button
-        type="button"
-        onClick={onComplete}
-        className="dp-btn-primary w-full mt-6"
-      >
-        {invites.length > 0 ? "Send invites & continue" : "Continue"}
-      </button>
-
-      {/* Skip — solo owner is a valid end state. */}
-      <button
-        type="button"
-        onClick={onSkip}
-        className="mt-3 block w-full type-footnote text-label-tertiary transition-colors duration-200 ease-smooth hover:text-label-secondary"
-      >
-        I&rsquo;ll invite people later
-      </button>
-
+      {/* Primary "Send invites & continue" + the "I'll invite people later"
+          skip live in the StepShell footer (Team IS skippable — a solo owner
+          is a valid end state). */}
       <LearnMoreCard helpAnchor="roles">
         <p>
           Each role maps to what Droplet&rsquo;s AI may do on that
@@ -334,6 +318,6 @@ export function TeamStep({
           nothing sent off the box.
         </p>
       </LearnMoreCard>
-    </div>
+    </StepShell>
   );
 }

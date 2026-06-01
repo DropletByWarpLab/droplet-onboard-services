@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ImageUp } from "lucide-react";
 import { postOrg, OrgError } from "@/lib/api";
+import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -13,8 +14,13 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * its `droplet.local/<slug>`. Per the #380 spec + #371 handoff §3 +
  * OnbWizard.jsx `WizOrg`.
  *
+ * PR #384 — reflowed into the shared aurora-rail `StepShell` (was a bespoke
+ * centered column with an in-body CTA). `StepShell current="org"` owns the
+ * "Step N" kicker, the "Create your workspace" title + sub, and the footer
+ * "Continue" CTA; the body below is just the form. Functional behavior
+ * (slug validation, "nothing off-box" footnote, NOT skippable) is unchanged.
+ *
  * Structure (mirrors the WizOrg design):
- *   - WizHead: kicker "Step 4" → "Create your workspace" → sub.
  *   - Logo dropzone (dashed accent tile, OPTIONAL) beside the workspace-name
  *     input.
  *   - URL slug input with a `droplet.local /` prefix.
@@ -208,21 +214,17 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
   }, [name, normalizedSlug, tz, industry, size, onComplete]);
 
   return (
-    <div className="animate-in fade-in duration-300">
-      {/* WizHead */}
-      <div className="mb-7">
-        <p className="type-caption-2 font-bold uppercase tracking-wider text-accent">
-          Step 4
-        </p>
-        <h1 className="type-title-1 text-label-primary mt-2">
-          Create your workspace
-        </h1>
-        <p className="type-subheadline text-label-secondary mt-2">
-          This names your company brain. Everyone you invite joins this single
-          workspace.
-        </p>
-      </div>
-
+    <StepShell
+      current="org"
+      title="Create your workspace"
+      subtitle="This names your company brain. Everyone you invite joins this single workspace."
+      primary={{
+        label: "Continue",
+        loadingLabel: "Creating workspace…",
+        onClick: () => void handleContinue(),
+        isLoading: submitting,
+      }}
+    >
       {/* Logo tile + workspace name */}
       <div className="flex items-start gap-4">
         <div className="flex-shrink-0">
@@ -363,16 +365,8 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
         </div>
       )}
 
-      {/* Primary CTA — NOT skippable, so no skip control. */}
-      <button
-        type="button"
-        onClick={() => void handleContinue()}
-        disabled={submitting}
-        className="dp-btn-primary w-full mt-6"
-      >
-        {submitting ? "Creating workspace…" : "Continue"}
-      </button>
-
+      {/* Primary CTA lives in the StepShell footer — NOT skippable, so no
+          skip control is passed. */}
       <LearnMoreCard helpAnchor="workspace">
         <p>
           Your workspace is the single &ldquo;company brain&rdquo; everyone you
@@ -385,6 +379,6 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           policies you can change anytime.
         </p>
       </LearnMoreCard>
-    </div>
+    </StepShell>
   );
 }

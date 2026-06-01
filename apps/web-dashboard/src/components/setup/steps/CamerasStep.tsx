@@ -94,7 +94,7 @@ export function CamerasStep({
   // so we don't briefly flash an empty page before the unmount.
   if (loading && cameras.length === 0) {
     return (
-      <StepShell title="Set up your cameras" subtitle="One moment…">
+      <StepShell current="cameras" title="Set up your cameras" subtitle="One moment…">
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
@@ -114,7 +114,7 @@ export function CamerasStep({
   }
 
   return (
-    <StepShell
+    <StepShell current="cameras"
       title="Set up your cameras"
       subtitle={`We found ${cameras.length} camera${cameras.length !== 1 ? "s" : ""} on your network.`}
       primary={{

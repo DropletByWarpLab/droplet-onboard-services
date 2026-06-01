@@ -120,7 +120,7 @@ export function StorageStep({
   // tiny placeholder so we don't briefly flash an empty page.
   if (loading && drives.length === 0) {
     return (
-      <StepShell title="Name your storage" subtitle="One moment…">
+      <StepShell current="storage" title="Name your storage" subtitle="One moment…">
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
@@ -140,7 +140,7 @@ export function StorageStep({
   }
 
   return (
-    <StepShell
+    <StepShell current="storage"
       title="Name your storage"
       subtitle="Give each drive a name so you remember what's on it."
       primary={{

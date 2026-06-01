@@ -132,7 +132,7 @@ export function InternetStep({
   const alreadyConfigured = existing?.configured === true;
 
   return (
-    <StepShell
+    <StepShell current="internet"
       title="Connect to the internet"
       subtitle="Give your Droplet a name people can find from anywhere."
       primary={{
