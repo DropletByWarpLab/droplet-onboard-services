@@ -1023,20 +1023,33 @@ export function createPublicAuthRouter(
       const inviteEmail = invite.email
         ? invite.email.trim().toLowerCase()
         : null;
+      // ADR-013: the built-in argon2id directory is the auth source of
+      // truth, so the invitee's passwordHash is written HERE — exactly as
+      // /auth/setup does for the first owner. Nextcloud was already
+      // provisioned above (ncCreateUser) with the same plaintext for
+      // downstream WebDAV, but it no longer authenticates anyone:
+      // /auth/login verifies THIS hash, keyed by email. Without this write
+      // the invitee lands with passwordHash = null and the email-keyed
+      // login fails closed — an accepted invite that can never sign in.
+      // The plaintext is hashed before it touches the row and never logged.
+      const passwordHash = await hashPassword(password);
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
           // If a row already exists, keep its UUID — the invite-accept
           // is essentially a re-acceptance of the same identity (rare
           // but possible under retry). Refresh `displayName` from the
-          // invite in case the operator updated it.
+          // invite in case the operator updated it, and refresh the
+          // credential so a retry never leaves a stale or absent hash.
           displayName: invite.displayName || invite.username,
+          passwordHash,
         },
         create: {
           username: invite.username,
           displayName: invite.displayName || invite.username,
           email: inviteEmail,
           nextcloudUsername: invite.username,
+          passwordHash,
           role: invite.role as any, // canonical Role enum from the invite
           // `isLocal` defaults to true in the schema; mirror-from-NC
           // would only flip false for setup-time admins.
