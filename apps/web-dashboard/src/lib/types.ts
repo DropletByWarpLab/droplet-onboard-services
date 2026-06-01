@@ -429,6 +429,38 @@ export interface DrivesResponse {
   error?: string;
 }
 
+/** PR #373 — one subsystem descriptor in the onboarding Claim hardware card. */
+export interface ApplianceSpec {
+  label: string;
+  value: string;
+  online: boolean;
+}
+
+/** PR #373 — GET /api/setup/appliance. The read-only hardware contract the
+ *  Claim wizard step renders (a DOCUMENTED STUB on the backend; see
+ *  docs/ONBOARDING_CLAIM.md). */
+export interface ApplianceContract {
+  appliance_id: string;
+  compute: ApplianceSpec;
+  storage: ApplianceSpec;
+  network: ApplianceSpec;
+  display: ApplianceSpec;
+  supply_chain: {
+    taa_compliant: boolean;
+    ndaa_889_clear: boolean;
+    summary: string;
+  };
+}
+
+/** PR #373 — POST /api/setup/claim result. */
+export interface ClaimResult {
+  claimed: boolean;
+  /** True when the box was already bound (idempotent re-run short-circuit). */
+  already_claimed?: boolean;
+  /** The wizard step to advance to after a successful claim. */
+  next_step: string;
+}
+
 // --- Health types ---
 
 export interface HealthResponse {

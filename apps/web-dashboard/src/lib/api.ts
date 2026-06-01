@@ -48,6 +48,8 @@ import type {
   ShareDetail,
   ShareCreateOptions,
   ShareUpdateOptions,
+  ApplianceContract,
+  ClaimResult,
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
@@ -193,6 +195,61 @@ export async function patchSetupReady(): Promise<void> {
       data.error || `Failed to finalize setup (appliance:ready): ${res.status}`,
     );
   }
+}
+
+/**
+ * PR #373 — fetch the read-only hardware contract the Claim step renders.
+ * PUBLIC (runs before any account exists, like the rest of the wizard's
+ * pre-account calls), so a bare `fetch` with no credentials. Throws on a
+ * non-2xx so the Claim step can show the "We can't see your Droplet yet"
+ * retry state and BLOCK continue (the appliance-unreachable edge).
+ */
+export async function fetchApplianceContract(): Promise<ApplianceContract> {
+  const res = await fetch(`${BASE}/api/setup/appliance`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch appliance contract: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** PR #373 — error carrying the claim failure kind so the Claim step can show
+ *  the right inline message (wrong code vs rate-limited) without leaking the
+ *  real code. */
+export class ClaimError extends Error {
+  /** Server `code` — e.g. CLAIM_CODE_INVALID, CLAIM_RATE_LIMITED. */
+  readonly code: string;
+  /** True when the failure was the per-IP rate-limit budget (HTTP 429). */
+  readonly rateLimited: boolean;
+  constructor(message: string, code: string, rateLimited: boolean) {
+    super(message);
+    this.name = "ClaimError";
+    this.code = code;
+    this.rateLimited = rateLimited;
+  }
+}
+
+/**
+ * PR #373 — verify + consume a claim code, binding the appliance. PUBLIC
+ * (claiming precedes account creation) → bare `fetch`. On the happy path /
+ * already-claimed short-circuit the server returns 200; on a wrong code (400)
+ * or exhausted rate budget (429) we throw a `ClaimError` the step renders
+ * inline. The server never echoes the real code, so neither do we.
+ */
+export async function postClaim(code: string): Promise<ClaimResult> {
+  const res = await fetch(`${BASE}/api/setup/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new ClaimError(
+      data.error || "That claim code didn't match. Try again.",
+      data.code || "CLAIM_FAILED",
+      res.status === 429,
+    );
+  }
+  return res.json();
 }
 
 export async function loginUser(

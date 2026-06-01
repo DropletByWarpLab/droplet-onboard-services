@@ -5,6 +5,7 @@ import { useAuth } from "@/lib/auth";
 import { patchSetupStep } from "@/lib/api";
 import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
+import { ClaimStep } from "@/components/setup/steps/ClaimStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
 import { InternetStep } from "@/components/setup/steps/InternetStep";
 import { StorageStep } from "@/components/setup/steps/StorageStep";
@@ -37,6 +38,7 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
  */
 type Step =
   | "welcome"
+  | "claim"
   | "account"
   | "internet"
   | "storage"
@@ -45,8 +47,12 @@ type Step =
   | "vpn"
   | "ai"
   | "done";
+// PR #373 — `claim` slots SECOND (welcome → claim → account), per #371 handoff
+// §1. Mirrors the orchestrator `SETUP_STEPS` order 1:1, so a persisted
+// `setupStep` always maps to a step this wizard can render.
 const STEPS: Step[] = [
   "welcome",
+  "claim",
   "account",
   "internet",
   "storage",
@@ -96,7 +102,11 @@ export default function SetupPage() {
         <ProgressDots steps={STEPS} current={step} />
 
         {step === "welcome" && (
-          <WelcomeStep onContinue={() => setStep("account")} />
+          <WelcomeStep onContinue={() => setStep("claim")} />
+        )}
+
+        {step === "claim" && (
+          <ClaimStep onComplete={() => setStep("account")} />
         )}
 
         {step === "account" && (

@@ -33,6 +33,16 @@ vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
   patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  // PR #373 — claim slots before account; the Claim step calls these.
+  fetchApplianceContract: vi.fn(async () => ({
+    appliance_id: "droplet-appliance-test",
+    compute: { label: "Compute", value: "Local AI compute", online: true },
+    storage: { label: "Storage", value: "Encrypted at rest", online: true },
+    network: { label: "Network", value: "Local network", online: true },
+    display: { label: "Display", value: "PyPortal lid display", online: true },
+    supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
+  })),
+  postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
@@ -57,9 +67,11 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
+import { passClaimStep } from "./helpers/claim-step";
 
 async function advanceToVpn() {
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
+  await passClaimStep();
   fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
     target: { value: "owner" },
   });

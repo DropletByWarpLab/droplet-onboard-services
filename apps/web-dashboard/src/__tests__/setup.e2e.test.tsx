@@ -30,6 +30,7 @@ vi.mock("@/lib/auth", () => ({
 
 const setupAdminMock = vi.fn(async () => undefined);
 const loginUserMock = vi.fn(async () => undefined);
+const postClaimMock = vi.fn(async () => ({ claimed: true, next_step: "account" }));
 const setDuckDnsConfigMock = vi.fn();
 const updateDriveLabelMock = vi.fn();
 const acceptDiscoveredCameraMock = vi.fn();
@@ -47,6 +48,19 @@ vi.mock("@/lib/api", () => ({
     loginUserMock(...args),
   // PR #372: the wizard persists each step transition via patchSetupStep.
   patchSetupStep: vi.fn(async () => undefined),
+
+  // PR #373 — Claim step (welcome → claim → account). The forwarder lets the
+  // e2e assert postClaim actually fired, matching the per-step API contract
+  // this test enforces.
+  fetchApplianceContract: vi.fn(async () => ({
+    appliance_id: "droplet-appliance-test",
+    compute: { label: "Compute", value: "Local AI compute", online: true },
+    storage: { label: "Storage", value: "Encrypted at rest", online: true },
+    network: { label: "Network", value: "Local network", online: true },
+    display: { label: "Display", value: "PyPortal lid display", online: true },
+    supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
+  })),
+  postClaim: (...args: Parameters<typeof postClaimMock>) => postClaimMock(...args),
 
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
@@ -186,13 +200,31 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("walks welcome → account → internet → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
+  it("walks welcome → claim → account → internet → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
     render(<SetupPage />);
 
     // 1. Welcome → Get Started.
     fireEvent.click(screen.getByRole("button", { name: /get started/i }));
 
-    // 2. Account → fill + submit.
+    // 2. Claim → enter code + claim (PR #373; slots before account).
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    fireEvent.change(screen.getByPlaceholderText(/DRPL/i), {
+      target: { value: "DRPL-7K2Q-9F4M" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /claim this droplet/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(postClaimMock).toHaveBeenCalledWith("DRPL-7K2Q-9F4M");
+
+    // 3. Account → fill + submit.
     fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
       target: { value: "owner" },
     });

@@ -95,9 +95,10 @@ describe("setup wizard — resumable from setupState (PR #372)", () => {
   it("ignores an unknown persisted step and falls back to welcome", () => {
     useAuthMock.mockReturnValue({
       completeSetup: vi.fn(),
-      // claim/org/team are gated — a value the wizard can't render must not
-      // strand the customer on a blank screen.
-      setupState: { appliance: "unclaimed", setupStep: "claim", userTourCompleted: false },
+      // org/team are still gated (PR #373 wires `claim` but not org/team) — a
+      // value the wizard can't render must not strand the customer on a blank
+      // screen.
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
     });
     render(<SetupPage />);
     expect(
