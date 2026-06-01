@@ -42,6 +42,15 @@ enforcement.
 
 ## RAM budget
 
+> **These are ceilings, not reservations.** `mem_limit` caps a container's
+> *peak* usage; it does not pre-allocate RAM. On a single box the summed
+> `mem_limit` values across *all* profiles intentionally exceed physical RAM —
+> no deployment runs every profile at once, and even within one profile
+> containers rarely hit their ceiling simultaneously. Only `mem_reservation`
+> (set on `db`, `cache`, `orchestrator`) represents guaranteed floor RAM. The
+> budget that must fit physical RAM is the **default-profile total (~5 GB)**
+> plus whichever profiles are enabled — not the grand sum of every row below.
+
 ### Default-profile services (always-on, counted against the 7 GB target)
 
 | Service | `mem_limit` | `mem_reservation` | Notes |
@@ -70,7 +79,7 @@ Host/kernel reserve target: ~1 GB. Default-profile budget fits within ~6 GB.
 | email-indexer | full | 256 MB | IMAP/SMTP |
 | switch | full | 128 MB | FastAPI, host-net |
 | camera-discovery | full | 256 MB | ONVIF scan |
-| frigate | linux | 1 GB | NVR + FFmpeg + detector |
+| frigate | linux | 1 GB | NVR + FFmpeg + detector. cgroups v2: the `shm_size: 256mb` tmpfs counts against `mem_limit`, so the effective process budget is ~768 MB. Single-stream is fine; for 2+ streams set `FRIGATE_MEM_LIMIT=1536m`. |
 | voice-io | linux | 512 MB | Voice loop |
 | wyoming-faster-whisper | linux | 1 GB | Whisper small.en ~470 MB |
 | wyoming-piper | linux | 512 MB | Piper TTS |

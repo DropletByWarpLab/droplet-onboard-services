@@ -50,13 +50,6 @@ name: droplet-pi-platform
 #   ops:         ops-console 256 MB
 # =============================================================================
 
-# YAML extension for small, stateless API/proxy services.
-# Apply with: <<: *svc-small
-x-svc-small: &svc-small
-  mem_limit: ${SMALL_SVC_MEM_LIMIT:-256m}
-  cpus: ${SMALL_SVC_CPUS:-1.0}
-  pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
-
 services:
   # --- Ingress ---
   gateway:
@@ -792,6 +785,10 @@ services:
     restart: always
     # Frigate is the most memory-intensive linux-profile service: it runs
     # the detector model + FFmpeg decode pipelines concurrently.
+    # NOTE (cgroups v2): the 256mb shm_size above is tmpfs that counts
+    # AGAINST mem_limit, so the effective process budget here is ~768 MB,
+    # not 1 GB. Single-stream is fine; for 2+ camera streams raise the
+    # ceiling, e.g. FRIGATE_MEM_LIMIT=1536m. See docs/ADR-012.
     mem_limit: ${FRIGATE_MEM_LIMIT:-1g}
     cpus: ${FRIGATE_CPUS:-2.0}
     pids_limit: ${FRIGATE_PIDS_LIMIT:-1024}
