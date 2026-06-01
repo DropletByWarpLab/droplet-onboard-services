@@ -91,9 +91,14 @@ detect_single_box_mode() {
   fi
 
   # Signal 3: dGPU silicon present?
+  # NB: lspci labels GPUs "VGA compatible controller" (and "3D controller" /
+  # "Display controller"), so the class match must allow the optional
+  # " compatible" word — a bare "VGA controller" never appears and silently
+  # set has_dgpu=0, which made single-box auto-detect decline on real dGPU
+  # boxes (e.g. the AMD single-box: "VGA compatible controller ... [AMD/ATI]").
   local has_dgpu=0
   if command -v lspci >/dev/null 2>&1; then
-    if lspci 2>/dev/null | grep -iE '(VGA|3D|Display) controller' \
+    if lspci 2>/dev/null | grep -iE '(VGA|3D|Display)( compatible)? controller' \
         | grep -iE '(AMD|Advanced Micro|NVIDIA|Radeon)' >/dev/null 2>&1; then
       has_dgpu=1
     fi
