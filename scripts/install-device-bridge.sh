@@ -44,7 +44,12 @@ for unit in droplet-device-bridge.service \
     log "missing source: $src"
     exit 1
   fi
-  install -m 0644 "$src" "$dst"
+  # Substitute the @REPO_ROOT@ placeholder (droplet-device-bridge.service's
+  # ExecStart) with this checkout's actual path; a harmless no-op for units
+  # that contain no placeholder. Using sed > file (not `install`) so the
+  # substitution lands; perms set explicitly after.
+  sed "s|@REPO_ROOT@|$REPO_ROOT|g" "$src" > "$dst"
+  chmod 0644 "$dst"
   log "installed $dst"
 done
 
@@ -142,11 +147,26 @@ fi
 
 # --- 3) Activate ---
 systemctl daemon-reload
-systemctl enable --now droplet-device-bridge.service
+
+# The bridge is a host Python service (FastAPI + uvicorn). On a host without
+# those modules it exits immediately and Restart=on-failure crash-loops it —
+# and under `set -e` an `enable --now` whose start fails would abort this
+# script before the shutdown-screen below is wired up. So only enable the
+# bridge when its deps import; otherwise install the unit but leave it
+# disabled with a clear pointer. The front-panel shutdown screen needs none of
+# these deps and is always enabled.
+if python3 -c 'import fastapi, uvicorn' >/dev/null 2>&1; then
+  systemctl enable --now droplet-device-bridge.service
+  log "device-bridge: enabled"
+else
+  systemctl disable droplet-device-bridge.service >/dev/null 2>&1 || true
+  log "device-bridge: host python lacks fastapi/uvicorn — unit installed but NOT enabled"
+  log "  (to enable: python3 -m pip install fastapi uvicorn && sudo systemctl enable --now droplet-device-bridge.service)"
+fi
 
 # Shutdown-screen oneshot. enable so it's wired into multi-user.target; --now
 # starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
-# ExecStop fires on the next shutdown). Idempotent.
+# ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
 
 # Wi-Fi key rotation: off by default so saved credentials on phones keep
