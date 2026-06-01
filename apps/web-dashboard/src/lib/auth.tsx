@@ -13,7 +13,7 @@ import {
 // `completeSetup` callback), never during module evaluation, so the live
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
-import { patchSetupReady } from "./api";
+import { patchSetupReady, patchTourCompleted } from "./api";
 
 export interface AuthUser {
   id: string;
@@ -80,6 +80,13 @@ interface AuthContextValue {
   // `void completeSetup()` at the call site is safe. Returns whether the
   // server persist succeeded so a caller can sequence on it.
   completeSetup: () => Promise<boolean>;
+  // PR #382 — post-setup tour-finish transition. Optimistically flips the
+  // in-memory `userTourCompleted` to true so AuthGate stops routing to /tour
+  // immediately (no flash of the tour), AND awaits the server PATCH
+  // (`markTourCompleted`) so a hard refresh reads the persisted flag instead
+  // of replaying the tour. Same awaitable/never-rejects contract as
+  // completeSetup. No-op-safe if `setupState` hasn't resolved yet.
+  completeTour: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -329,6 +336,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await probeSetupState();
   }, [probeSetupState]);
 
+  const completeTour = useCallback(async () => {
+    // Optimistically flip the in-memory tour flag so AuthGate's
+    // "ready + tour pending → /tour" branch stops firing the instant the
+    // owner finishes (no flash of the tour on the way to the dashboard). If
+    // `setupState` hasn't resolved yet we synthesize a ready/done baseline —
+    // reaching the tour at all means the appliance is claimed.
+    setSetupState((prev) =>
+      prev
+        ? { ...prev, userTourCompleted: true }
+        : { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    );
+    // Durably persist. Mirrors completeSetup: awaited so persisted + in-memory
+    // agree before we settle; patchTourCompleted swallows transient network
+    // errors and the next state GET re-syncs, so this never rejects.
+    await patchTourCompleted();
+  }, []);
+
   // Back-compat: derive the legacy boolean from the explicit state so any
   // consumer still reading `setupRequired` keeps working during migration.
   const setupRequired: boolean | null =
@@ -349,6 +373,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUserFromPasskey,
         logout,
         completeSetup,
+        completeTour,
       }}
     >
       {children}

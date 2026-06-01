@@ -13,6 +13,7 @@ import {
   FolderOpen,
   Globe,
   HardDrive,
+  HeartPulse,
   HelpCircle,
   Laptop,
   LayoutDashboard,
@@ -113,6 +114,9 @@ const NAV_GROUPS: NavGroup[] = [
       // safe read-only subset. Visible in both workspaces.
       { href: "/tools", label: "Tools", icon: Wrench },
       { href: "/settings", label: "Settings", icon: Settings },
+      // PR #382: appliance/service health status page. Reads the existing
+      // WARP-43 aggregate; sits in the support/reference zone next to Help.
+      { href: "/health", label: "Health", icon: HeartPulse },
       // WARP-174: customer-facing manual + "How Droplet works" replay
       // modal. Sits next to Settings — same "support / reference" zone.
       { href: "/help", label: "Help", icon: HelpCircle },

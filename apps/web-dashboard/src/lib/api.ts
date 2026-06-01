@@ -200,6 +200,32 @@ export async function patchSetupReady(): Promise<void> {
 }
 
 /**
+ * PR #382 — mark the post-setup product tour complete. PATCHes
+ * `{ user_tour_completed: true }` to the same `/api/setup/state` machine #372
+ * shipped (orchestrator `markTourCompleted`, an idempotent flip that can only
+ * move false → true). Once persisted, AuthGate's "ready + tour pending → tour"
+ * branch stops firing and the owner passes through to the dashboard.
+ *
+ * Public endpoint, same as the other setup-state writes (the tour runs
+ * immediately post-claim, before any session-refresh concerns), so the plain
+ * `fetch` — no authFetch refresh dance. We swallow a transient network error:
+ * the optimistic in-memory flip in `completeTour` already routed the owner
+ * onward, and the next `/api/setup/state` GET re-syncs. Re-running the tour
+ * later is an explicit Help-page action, never an accidental re-trap.
+ */
+export async function patchTourCompleted(): Promise<void> {
+  try {
+    await fetch(`${BASE}/api/setup/state`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_tour_completed: true }),
+    });
+  } catch {
+    /* non-fatal — optimistic flip already routed; next GET re-syncs */
+  }
+}
+
+/**
  * PR #373 — fetch the read-only hardware contract the Claim step renders.
  * PUBLIC (runs before any account exists, like the rest of the wizard's
  * pre-account calls), so a bare `fetch` with no credentials. Throws on a
