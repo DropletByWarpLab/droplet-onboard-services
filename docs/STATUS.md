@@ -42,7 +42,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 
 ### Web UI
 - Next.js 14 App Router with setup wizard, login, dashboard, files, chat, settings (`apps/web-dashboard/src/app/`).
-- Auth-gated routes; token flow via `localStorage`; `/setup` redirect when no users exist (`apps/web-dashboard/src/app/setup/`, `apps/web-dashboard/src/app/users/`, `apps/web-dashboard/src/app/settings/`).
+- Auth-gated routes; token flow via HTTP-only cookies (this line previously read `localStorage` — corrected per the stale-banner; prod is cookie-based, see `LAUNCH_READINESS_AUDIT.md`); `/setup` redirect when no users exist (`apps/web-dashboard/src/app/setup/`, `apps/web-dashboard/src/app/users/`, `apps/web-dashboard/src/app/settings/`).
 
 ### Infrastructure
 - **Unified Docker Compose stack** — 20 services in a single file (`docker/docker-compose.yml`).
