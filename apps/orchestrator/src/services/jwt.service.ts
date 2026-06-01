@@ -34,6 +34,39 @@ export function roleFromGroups(groups: string[]): Role {
   return "family";
 }
 
+/**
+ * Privilege ladder for the household role taxonomy (ADR-004 §3). Higher
+ * number = more authority. Used to stop a lower-ranked operator from
+ * minting an invite that assigns a role outranking their own — the
+ * privilege-escalation vector on the invite-creation routes (an
+ * owner/admin invite is granted an `owner` session role on accept).
+ *
+ * Mirrors the ascending ladder in `scim-role-mapping.service.ts`
+ * (`ROLE_PRIVILEGE`, the SCIM directory branch) — keep the two in sync
+ * until they're unified. `service` is the non-human inbound principal: it
+ * sits at the floor so it can never outrank a human role in a comparison,
+ * and it is never invite-assignable (the invite role enum excludes it)
+ * nor clears the owner/admin route guard, so it only appears here for
+ * total coverage of the Role union.
+ */
+export const ROLE_RANK: Record<Role, number> = {
+  service: -1,
+  guest: 0,
+  family: 1,
+  admin: 2,
+  owner: 3,
+};
+
+/**
+ * True iff role `a` holds strictly more privilege than role `b`. Drives
+ * the invite-creation rank cap: reject when the assigned role outranks
+ * the authenticated inviter's own role (owner→owner is allowed; an admin
+ * may not mint an owner invite).
+ */
+export function roleOutranks(a: Role, b: Role): boolean {
+  return ROLE_RANK[a] > ROLE_RANK[b];
+}
+
 function getSecret(): string {
   return config.JWT_SECRET;
 }
