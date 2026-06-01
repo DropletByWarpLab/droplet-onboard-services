@@ -31,6 +31,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const probeBlocked =
     setupProbeError !== null && setupState === null && !isPublicPage;
 
+  // Tour gate: the appliance is claimed ("ready") but the post-setup product
+  // tour hasn't been completed yet. We require an explicit `false` (not just
+  // a falsy/unresolved state) so a transient `/setup/state` failure leaves
+  // `setupState` null and can't shove an authenticated user into the tour
+  // on every cold load. The tour only makes sense once the owner exists, so
+  // we also gate on `user`.
+  const tourPending =
+    setupState?.appliance === "ready" &&
+    setupState.userTourCompleted === false;
+
   useEffect(() => {
     if (isLoading) return;
     if (probeBlocked) return;
@@ -48,16 +58,29 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    // NOTE (PR #372): the spec's "ready + tour pending → tour" branch is
-    // intentionally NOT wired here — no /tour route ships on this branch
-    // (the product tour is a separate, gated workstream). `setupState
-    // .userTourCompleted` is plumbed through the context so that branch
-    // slots in cleanly when the tour route lands, without a dead redirect
-    // target today.
-
     // If not authenticated and not on a public page, redirect to login.
     if (!user && !isPublicPage && !applianceUnclaimed) {
       router.replace("/login");
+      return;
+    }
+
+    // PR #382 — the spec's "ready + tour pending → tour" branch (plumbed but
+    // left unwired by #372). An authenticated owner on a claimed appliance
+    // who hasn't finished the post-setup tour is routed to /tour. We only
+    // redirect when they're NOT already there and NOT on a public page
+    // (login/setup own their own flow), so the tour shows exactly once and
+    // refreshing mid-tour lands back on /tour rather than the dashboard.
+    if (user && tourPending && !isPublicPage && pathname !== "/tour") {
+      router.replace("/tour");
+      return;
+    }
+
+    // Tour already complete but the user is parked on /tour (e.g. they
+    // finished it in another tab, or hit /tour directly) → let them into the
+    // dashboard. Replaying the tour later goes through the Help page's
+    // explicit trigger, not this route.
+    if (user && !tourPending && pathname === "/tour") {
+      router.replace("/");
       return;
     }
 
@@ -66,7 +89,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
       router.replace("/");
       return;
     }
-  }, [user, isLoading, applianceUnclaimed, pathname, router, isPublicPage, probeBlocked]);
+  }, [
+    user,
+    isLoading,
+    applianceUnclaimed,
+    tourPending,
+    pathname,
+    router,
+    isPublicPage,
+    probeBlocked,
+  ]);
 
   // Loading state
   if (isLoading) {
@@ -123,6 +155,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // Not authenticated — show nothing while redirecting
   if (!user) {
     return null;
+  }
+
+  // The post-setup tour is an authenticated, full-screen takeover (like the
+  // wizard) — render it without the sidebar/main chrome so the walkthrough
+  // owns the viewport. It still requires `user`, unlike PUBLIC_PATHS.
+  if (pathname === "/tour") {
+    return <>{children}</>;
   }
 
   // Authenticated — show sidebar + main content
