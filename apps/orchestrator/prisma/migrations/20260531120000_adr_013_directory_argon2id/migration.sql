@@ -1,4 +1,4 @@
--- ADR-012: make the built-in argon2id directory the auth source of truth.
+-- ADR-013: make the built-in argon2id directory the auth source of truth.
 --
 -- Two additive columns/indexes on "User":
 --

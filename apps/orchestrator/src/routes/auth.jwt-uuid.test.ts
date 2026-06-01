@@ -99,7 +99,7 @@ vi.mock("../services/jwt.service.js", async () => {
   };
 });
 
-// ADR-012: login now verifies locally against the argon2id directory.
+// ADR-013: login now verifies locally against the argon2id directory.
 // Mock the password.service boundary so these WARP-485 JWT-shape tests
 // (which only use login as a setup step to mint a session) don't need a
 // real hash — verifyPassword returns true for the seeded rows.
@@ -287,14 +287,14 @@ beforeEach(() => {
   touchNcToken.mockResolvedValue(undefined);
 });
 
-// ADR-012 inverted the login auth model (Nextcloud-OCS → local argon2id
+// ADR-013 inverted the login auth model (Nextcloud-OCS → local argon2id
 // directory). These two tests preserve the WARP-485 round-2 anti-
 // regression contract — JWT.sub / NC-store key must be the local User.id
 // UUID — but now drive login through the new email + argon2id path. The
-// full ADR-012 login behavior (anti-enumeration, NC-as-provisioning,
+// full ADR-013 login behavior (anti-enumeration, NC-as-provisioning,
 // wrong-password / unknown-email parity) lives in
 // `auth.directory-login.test.ts`; we do not duplicate it here.
-describe("WARP-485 round 2 — JWT login path (ADR-012 directory)", () => {
+describe("WARP-485 round 2 — JWT login path (ADR-013 directory)", () => {
   it("signs the access token with the local User.id UUID, NOT the username", async () => {
     // Local directory row already exists with an argon2id hash.
     const localUser: UserRow = {

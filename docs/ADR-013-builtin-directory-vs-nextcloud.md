@@ -1,4 +1,4 @@
-# ADR-012 — Built-in argon2id directory vs Nextcloud as credential store
+# ADR-013 — Built-in argon2id directory vs Nextcloud as credential store
 
 > **Status: Accepted.** Decision set by Stefan: **replace Nextcloud as the
 > identity source of truth with a built-in argon2id directory.** Implemented in

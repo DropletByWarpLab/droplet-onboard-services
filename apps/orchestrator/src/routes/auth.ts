@@ -81,7 +81,7 @@ const usernameField = z
     "This username is reserved and cannot be used",
   );
 
-// ADR-012 (PR #374 review fix): email is the directory login key and the
+// ADR-013 (PR #374 review fix): email is the directory login key and the
 // only stable login identifier (the Nextcloud auth fallback was removed).
 // The btree unique index on `User.email` is case-SENSITIVE, so without
 // normalization `Stefan@Warp.test` (written at setup) and `stefan@warp.test`
@@ -103,8 +103,8 @@ const setupSchema = z.object({
   username: usernameField,
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-012 (PR #374 N2): email is the directory login key and is now
-  // REQUIRED on the first-owner bootstrap. ADR-012 removed the Nextcloud
+  // ADR-013 (PR #374 N2): email is the directory login key and is now
+  // REQUIRED on the first-owner bootstrap. ADR-013 removed the Nextcloud
   // auth fallback, so an owner row written without an email can never sign
   // in (the email-keyed /auth/login lookup has nothing to match) — a
   // permanent lockout recoverable only by a DB edit. Requiring it here
@@ -113,7 +113,7 @@ const setupSchema = z.object({
   email: emailField,
 });
 
-// ADR-012: the directory login key is email. The Aurora login (PR #370)
+// ADR-013: the directory login key is email. The Aurora login (PR #370)
 // labels the field "Work email" and sends it as the identifier. We accept
 // it under `email` (canonical) and still tolerate the legacy `username`
 // field carrying the same value, so a client mid-rollout that hasn't
@@ -121,7 +121,7 @@ const setupSchema = z.object({
 // of the two must be present and non-empty.
 const loginSchema = z
   .object({
-    // ADR-012 (PR #374): the directory login key is case-insensitive but
+    // ADR-013 (PR #374): the directory login key is case-insensitive but
     // the unique index is case-sensitive, so the lookup value must be
     // trim+lowercased to match the (already-normalized) stored value —
     // otherwise an owner who set up `Stefan@Warp.test` is locked out when
@@ -161,7 +161,7 @@ const inviteRoleField = z.preprocess(
 const createInviteSchema = z.object({
   username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-012 (PR #374): normalized — the invite email becomes the invitee's
+  // ADR-013 (PR #374): normalized — the invite email becomes the invitee's
   // directory login key on accept (written to User.email at accept time),
   // so it must already be trim+lowercased to stay consistent with the
   // email-keyed login lookup and the case-sensitive unique index.
@@ -195,7 +195,7 @@ function buildInviteUrl(req: Request, token: string): string {
 const updateUserSchema = z
   .object({
     displayName: z.string().min(1).max(128).optional(),
-    // ADR-012 (PR #374): normalized so an admin editing a member's email
+    // ADR-013 (PR #374): normalized so an admin editing a member's email
     // writes the same canonical form the login lookup + unique index expect.
     email: emailField.optional(),
     // Accept either a byte count (1073741824) or a human string ("5 GB", "none").
@@ -317,7 +317,7 @@ export function createPublicAuthRouter(
       }
 
       // ── N1 (PR #374): owner-already-exists guard. ──
-      // ADR-012 made LOCAL rows (not Nextcloud `installed=true`) the
+      // ADR-013 made LOCAL rows (not Nextcloud `installed=true`) the
       // authoritative source, which re-opened a hole on this route: a
       // re-POST to /auth/setup would either (a) rewrite the existing
       // owner's argon2id passwordHash via the username-keyed upsert below
@@ -361,7 +361,7 @@ export function createPublicAuthRouter(
       // ncInstall — exactly what we want for transient infrastructure
       // failures.
       //
-      // ADR-012: the directory is the auth source of truth, so the
+      // ADR-013: the directory is the auth source of truth, so the
       // owner's argon2id passwordHash is written HERE (not derived from
       // Nextcloud). Nextcloud is provisioned downstream below with the
       // same plaintext so its WebDAV account works, but it no longer
@@ -400,7 +400,7 @@ export function createPublicAuthRouter(
 
   // ── Login: validate credentials LOCALLY against the directory, issue JWT ──
   //
-  // ADR-012 — the built-in argon2id directory is the auth source of truth.
+  // ADR-013 — the built-in argon2id directory is the auth source of truth.
   // We resolve the User by email, verify the password against the stored
   // argon2id hash (password.service), and only then provision/refresh the
   // downstream Nextcloud session for WebDAV. Nextcloud no longer
@@ -415,7 +415,7 @@ export function createPublicAuthRouter(
 
       // Email is the stable directory login key (accept the legacy
       // `username` field carrying the same value during rollout). Already
-      // trim+lowercased by loginSchema (ADR-012 / PR #374), so it matches
+      // trim+lowercased by loginSchema (ADR-013 / PR #374), so it matches
       // the normalized value stored on the row by the case-sensitive
       // unique index. Keep the `.trim()` as belt-and-suspenders.
       const loginEmail = (parsed.data.email ?? parsed.data.username ?? "").trim();
@@ -449,7 +449,7 @@ export function createPublicAuthRouter(
       // to a real lookup, then deny with the identical error.
       if (!prisma) {
         logger.warn(
-          "Directory login: prisma not wired into public auth router; failing closed (ADR-012)",
+          "Directory login: prisma not wired into public auth router; failing closed (ADR-013)",
         );
         await verifyDummyPassword(password);
         await denyInvalid(loginEmail);
@@ -499,7 +499,7 @@ export function createPublicAuthRouter(
         } else {
           logger.warn(
             { userId },
-            "Directory login: Nextcloud session could not be provisioned; WebDAV will be unavailable until next login (ADR-012)",
+            "Directory login: Nextcloud session could not be provisioned; WebDAV will be unavailable until next login (ADR-013)",
           );
         }
       } catch (err) {
@@ -1014,7 +1014,7 @@ export function createPublicAuthRouter(
       // the create endpoint); the JWT session `role` keeps the legacy
       // mapping above (admin invite → owner session) which existing
       // routes still depend on.
-      // ADR-012 (PR #374): this email lands directly in User.email — the
+      // ADR-013 (PR #374): this email lands directly in User.email — the
       // case-sensitive unique-indexed login key. createInviteSchema already
       // normalizes new invites, but re-normalize here as defense in depth so
       // a stale (pre-fix) or hand-edited invite row can't plant a row whose

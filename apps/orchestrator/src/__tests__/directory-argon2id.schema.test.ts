@@ -1,5 +1,5 @@
 /**
- * ADR-012 — built-in argon2id directory schema regression.
+ * ADR-013 — built-in argon2id directory schema regression.
  *
  * Runs against the schema.prisma file text (no DB) to lock the additive
  * greenfield change that makes the local directory the auth source of
@@ -35,7 +35,7 @@ function userBlock(): string {
   return block![0];
 }
 
-describe("ADR-012 schema: argon2id directory", () => {
+describe("ADR-013 schema: argon2id directory", () => {
   it("User has a nullable passwordHash String column", () => {
     expect(userBlock()).toMatch(/passwordHash\s+String\?/);
   });
@@ -45,15 +45,15 @@ describe("ADR-012 schema: argon2id directory", () => {
   });
 
   it("preserves the local User.id UUID as the canonical key (WARP-485)", () => {
-    // ADR-012 explicitly keeps the existing UUID PK — JWTs/Redis key on
+    // ADR-013 explicitly keeps the existing UUID PK — JWTs/Redis key on
     // it. Guard against an accidental swap to email-as-PK.
     expect(userBlock()).toMatch(/id\s+String\s+@id\s+@default\(uuid\(\)\)/);
   });
 
   it("ships an additive, idempotent migration for passwordHash + email-unique", () => {
-    // Find the ADR-012 migration by its canonical directory name.
+    // Find the ADR-013 migration by its canonical directory name.
     const dirs = readdirSync(MIGRATIONS_DIR).filter((d) =>
-      d.includes("adr_012"),
+      d.includes("adr_013"),
     );
     expect(dirs.length).toBeGreaterThanOrEqual(1);
     const sql = readFileSync(

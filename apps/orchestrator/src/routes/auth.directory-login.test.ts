@@ -1,5 +1,5 @@
 /**
- * ADR-012 — built-in argon2id directory is the auth source of truth.
+ * ADR-013 — built-in argon2id directory is the auth source of truth.
  *
  * POST /auth/login is inverted: it now validates the password LOCALLY
  * (argon2id verify on User.passwordHash, keyed by email) instead of
@@ -207,7 +207,7 @@ beforeEach(() => {
   });
 });
 
-describe("ADR-012 — POST /auth/login validates locally against the directory", () => {
+describe("ADR-013 — POST /auth/login validates locally against the directory", () => {
   it("happy path: local argon2id verify passes → 200 + JWT.sub is the User.id UUID", async () => {
     verifyPassword.mockResolvedValueOnce(true);
     const prisma = createPrismaMock([stefan]);
@@ -323,7 +323,7 @@ describe("ADR-012 — POST /auth/login validates locally against the directory",
     // email. A login that types the address with different casing must
     // still resolve the same row — otherwise the owner who set up with
     // `Foo@X.com` is locked out when they later sign in as `foo@x.com`
-    // (ADR-012 removed the Nextcloud auth fallback, so there's no recovery
+    // (ADR-013 removed the Nextcloud auth fallback, so there's no recovery
     // short of a DB edit).
     verifyPassword.mockResolvedValueOnce(true);
     const normalized: UserRow = {

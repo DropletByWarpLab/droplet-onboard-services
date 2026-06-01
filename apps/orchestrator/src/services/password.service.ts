@@ -1,7 +1,7 @@
 import argon2 from "argon2";
 
 /**
- * ADR-012 — built-in argon2id directory.
+ * ADR-013 — built-in argon2id directory.
  *
  * Vetted-library boundary for password hashing + verification. The
  * built-in directory (`User.passwordHash`) is the auth source of truth;

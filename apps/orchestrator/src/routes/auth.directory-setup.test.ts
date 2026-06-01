@@ -1,5 +1,5 @@
 /**
- * ADR-012 — account creation writes the argon2id hash to the directory.
+ * ADR-013 — account creation writes the argon2id hash to the directory.
  *
  * POST /auth/setup (the onboarding Account-step backend / first-admin
  * bootstrap) must persist the argon2id `passwordHash` to the local
@@ -173,7 +173,7 @@ beforeEach(() => {
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
 });
 
-describe("ADR-012 — POST /auth/setup writes the argon2id hash to the directory", () => {
+describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory", () => {
   it("hashes the password and stores the argon2id PHC string on the User row", async () => {
     const prisma = createPrismaMock();
     (nc.ncInstallAndCreateAdmin as any).mockImplementation(() => {
@@ -366,7 +366,7 @@ describe("N2 — first owner cannot be created login-unable (email required at s
 
     expect(res.status).toBe(400);
     // The owner-creating write must not happen — a login-unable owner is
-    // exactly the lockout ADR-012 forbids (no NC auth fallback).
+    // exactly the lockout ADR-013 forbids (no NC auth fallback).
     expect(prisma.user.upsert).not.toHaveBeenCalled();
     expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
   });

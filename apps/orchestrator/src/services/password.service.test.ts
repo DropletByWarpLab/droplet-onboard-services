@@ -1,5 +1,5 @@
 /**
- * ADR-012 — built-in argon2id directory.
+ * ADR-013 — built-in argon2id directory.
  *
  * The directory is the auth source of truth. This service is the
  * vetted-library boundary for password hashing + verification. Contract
@@ -30,7 +30,7 @@ import {
   PASSWORD_HASH_PARAMS,
 } from "./password.service.js";
 
-describe("ADR-012 password.service — argon2id directory", () => {
+describe("ADR-013 password.service — argon2id directory", () => {
   it("hashes to an argon2id PHC string (never bcrypt, never plaintext)", async () => {
     const hash = await hashPassword("correct horse battery staple");
     expect(hash).toMatch(/^\$argon2id\$/);
