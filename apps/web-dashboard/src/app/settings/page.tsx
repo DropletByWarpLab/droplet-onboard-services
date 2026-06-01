@@ -5,6 +5,7 @@ import { Plus, Trash2, Users, X } from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
+import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
@@ -132,6 +133,9 @@ export default function SettingsPage() {
           </div>
         </div>
       </section>
+
+      {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
+      <PasskeysSection />
 
       {/* User Management */}
       <section className="mb-10">

@@ -40,6 +40,11 @@ interface AuthContextValue {
    *  now" affordance). Resets the bounded-backoff schedule. */
   retrySetupCheck: () => void;
   login: (username: string, password: string) => Promise<void>;
+  // PR #377: hydrate the context after a passwordless passkey sign-in. The
+  // orchestrator's authenticate/verify already set the session cookie and
+  // returned the user; this mirrors the tail of login() (cache + setUser)
+  // without a second network round-trip.
+  setUserFromPasskey: (user: AuthUser) => void;
   logout: () => Promise<void>;
   completeSetup: () => void;
 }
@@ -234,6 +239,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSetupStatus("complete");
   }, []);
 
+  const setUserFromPasskey = useCallback((u: AuthUser) => {
+    // The cookie is already set server-side by authenticate/verify — same as
+    // the password login, we only persist the profile for fast hydration.
+    try {
+      localStorage.setItem(USER_KEY, JSON.stringify(u));
+    } catch {
+      /* ignore — privacy mode, etc. */
+    }
+    setUser(u);
+    // WARP-577: a successful passkey sign-in means setup is complete, mirroring
+    // the password login() path (main renamed the flag to the tri-state status).
+    setSetupStatus("complete");
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await authFetch("/api/auth/logout", { method: "POST" });
@@ -258,6 +277,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setupStatus,
         retrySetupCheck,
         login,
+        // PR #377: passwordless passkey sign-in hydrates the context here.
+        setUserFromPasskey,
         logout,
         completeSetup,
       }}
