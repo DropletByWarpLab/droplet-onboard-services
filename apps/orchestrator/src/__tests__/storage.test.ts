@@ -337,5 +337,16 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
       const res = await request(app).post("/api/storage/drives/rescan");
       expect(res.status).toBe(403);
     });
+
+    it("fails closed when no authenticated user is present", async () => {
+      // No synthetic user injected — mirrors a request that never passed
+      // authMiddleware. isAdmin() must treat a missing req.user.role as
+      // not-admin (fail closed): 403, not a throw and not an allow.
+      const app = express();
+      app.use(express.json());
+      app.use("/api", createStorageRouter(createPrismaMock() as any));
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(403);
+    });
   });
 });
