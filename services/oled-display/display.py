@@ -28,6 +28,7 @@ import os
 import time
 import json
 import socket
+import ssl
 import logging
 import threading
 import urllib.request
@@ -1628,10 +1629,20 @@ class TFTDisplay:
         Cheap and fail-safe: any connection error / non-2xx reads as "not
         ready yet" (returns False, never raises) so a still-starting stack
         doesn't crash the cycle loop.
+
+        The probe targets a same-host loopback health endpoint. The nginx
+        gateway 301-redirects http->https and serves a self-signed cert, so
+        urllib follows the redirect using an unverified TLS context — cert
+        verification buys nothing on a 127.0.0.1 hop and would otherwise make
+        every cold boot fall through to the BOOT_MAX_SECONDS timeout (a ~90s
+        "Starting Droplet" splash) even when the orchestrator is already up.
         """
         try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             req = urllib.request.Request(BOOT_READINESS_URL, method="GET")
-            with urllib.request.urlopen(req, timeout=2.0) as r:
+            with urllib.request.urlopen(req, timeout=2.0, context=ctx) as r:
                 return 200 <= getattr(r, "status", 0) < 300
         except Exception as e:                                       # noqa: BLE001
             logger.debug("readiness probe failed: %s", e)
