@@ -26,8 +26,12 @@
  * that only needs "is SSO available at all".
  */
 export const ONB_AUTH_FLAGS = {
+  // ADR-013 (PR #378): SSO is live — see ONB_SSO_PROVIDERS_LIVE for which
+  // providers have shipped a backend (Google + Entra).
   sso: true,
-  passkey: false,
+  // Flipped by PR #377 — the WebAuthn backend (register + passwordless
+  // authenticate) ships in this PR, so the passkey affordance goes live.
+  passkey: true,
   totp: false,
   forgotPassword: false,
 } as const;

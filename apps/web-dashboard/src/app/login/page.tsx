@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { Check } from "lucide-react";
@@ -8,6 +8,8 @@ import { DropletMark } from "@/components/DropletMark";
 import { translateError } from "@/lib/friendly-errors";
 import { AuroraPanel } from "@/components/auth/AuroraPanel";
 import { SignInForm } from "@/components/auth/SignInForm";
+// PR #377: passwordless passkey sign-in helpers.
+import { isPasskeySupported, signInWithPasskey } from "@/lib/webauthn";
 
 /**
  * Resolve a `?next=` redirect to a same-origin path, or fall back to "/".
@@ -51,7 +53,7 @@ function safeNext(next: string | null): string {
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { login } = useAuth();
+  const { login, setUserFromPasskey } = useAuth();
   const fromSetup = searchParams.get("from") === "setup";
 
   const [email, setEmail] = useState("");
@@ -59,6 +61,15 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // PR #377: passkeys are an alternative passwordless path. The affordance is
+  // only shown on browsers that support WebAuthn (detected client-side after
+  // mount, so SSR renders nothing and we don't flash an unusable button).
+  const [passkeyReady, setPasskeyReady] = useState(false);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+
+  useEffect(() => {
+    setPasskeyReady(isPasskeySupported());
+  }, []);
 
   async function handleLogin() {
     setError(null);
@@ -81,6 +92,22 @@ export default function LoginPage() {
       setError(translateError(err, "auth"));
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function handlePasskeySignIn() {
+    setError(null);
+    setPasskeyBusy(true);
+    try {
+      const user = await signInWithPasskey();
+      setUserFromPasskey(user);
+      router.push("/");
+    } catch {
+      // Passkey-specific friendly copy — never echo the ceremony error (it can
+      // carry transport details). Sentence case, no exclamation (copy rules).
+      setError("We couldn't sign you in with that passkey. Try again, or use your password.");
+    } finally {
+      setPasskeyBusy(false);
     }
   }
 
@@ -110,6 +137,9 @@ export default function LoginPage() {
             </div>
           )}
 
+          {/* PR #377: the passkey affordance lives inside SignInForm (one
+              button, no duplication). Pass the handler only when the browser
+              supports WebAuthn — otherwise the form omits the action entirely. */}
           <SignInForm
             email={email}
             password={password}
@@ -124,6 +154,8 @@ export default function LoginPage() {
             // requested page. Reuse the same same-origin guard as the
             // password path so a crafted `?next=` can't redirect off-origin.
             returnTo={safeNext(searchParams.get("next"))}
+            onPasskey={passkeyReady ? handlePasskeySignIn : undefined}
+            passkeyBusy={passkeyBusy}
           />
 
           <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">
