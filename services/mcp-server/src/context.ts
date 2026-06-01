@@ -84,7 +84,8 @@ export interface ContextDeps {
  *   - HTTP transport — `claims.sub` is authoritative. `metaUserId` is
  *     ignored even if a malicious client tried to set `_meta.userId`,
  *     because the JWT-derived `claims.sub` is the trust boundary.
- *   - Stdio transport (trusted, `claims === undefined`) — fall back to
+ *   - Stdio transport (trusted, `local-trusted` posture → `claims` is
+ *     `undefined`) — fall back to
  *     `metaUserId` plumbed by the orchestrator's mcp-client. The
  *     orchestrator is the only producer here and synthesizes it from
  *     `req.user.username`, so the transitive trust comes from

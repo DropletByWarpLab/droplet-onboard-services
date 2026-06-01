@@ -4,6 +4,8 @@
 
 Control-plane monorepo for the Droplet edge AI appliance. This monorepo contains the orchestrator API, web dashboard, AI gateway proxy, file indexer service, and all supporting Docker infrastructure.
 
+> **New to this repo / an agent?** Read [`docs/COMPONENTS.md`](docs/COMPONENTS.md) first — an agent-usable fact sheet for every component (purpose, entry point, ports, what it talks to, and gotchas), plus the system map and repo-wide conventions.
+
 ## Monorepo structure
 
 ```

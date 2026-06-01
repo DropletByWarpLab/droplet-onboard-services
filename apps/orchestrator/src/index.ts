@@ -58,6 +58,25 @@ import { ensureDefaultModelPulled } from "./services/model-readiness.service.js"
 
 const logger = pino({ name: "orchestrator" });
 
+// WARP-572: re-entrancy guard for the graceful-shutdown path. After an
+// uncaughtException the process is (by Node's contract) in an undefined state
+// and the event loop keeps turning while teardown `await`s resolve. A second
+// uncaughtException — or an overlapping SIGTERM/SIGINT during teardown — would
+// otherwise re-enter `shutdown` and run a second concurrent teardown (double
+// `$disconnect`, double `process.exit`, interleaved SDK closes). The flag is
+// module-scoped so it is shared across every shutdown trigger.
+let shuttingDown = false;
+
+// WARP-572: how long the graceful teardown is allowed to run before we hard-
+// exit regardless. The fatal/SIGTERM paths await `shutdownMatterService()`,
+// `shutdownCameraService()`, `stopMcp()`, and `prisma.$disconnect()`; if any
+// of those hangs (the exact silent-hang WARP-572 targets) the normal
+// `process.exit()` at the end of `shutdown` never runs. An unref'd timer armed
+// at the top of `shutdown` bounds that — see registerShutdown.
+const SHUTDOWN_FORCE_EXIT_MS = Number(
+  process.env.SHUTDOWN_FORCE_EXIT_MS ?? 10_000,
+);
+
 // WARP-229: FIPS 140-3 boot self-test. Runs synchronously before any
 // async crypto operation (Prisma connect, TLS to Redis/MQTT, etc.).
 //
@@ -422,9 +441,10 @@ async function main() {
     logger.info("API server listening on port %d", config.PORT);
   });
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    logger.info("Shutting down...");
+  // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their
+  // clean-exit semantics; the uncaughtException path (WARP-572) passes 1 so
+  // Docker's restart policy brings a fresh instance back.
+  const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
     stopHealthMonitor();
     // WARP-165: stop the screen-QR poller's setInterval so integration
@@ -437,20 +457,136 @@ async function main() {
     await shutdownCameraService();
     // Stop the MCP stdio child first so it doesn't keep its Prisma
     // connection pool alive past our $disconnect below. stopMcp() is
-    // best-effort; even if the SDK close hangs we time out via
-    // process.exit(0) regardless.
+    // best-effort; if the SDK close throws we log and continue, and if it
+    // hangs the force-exit timer armed inside createShutdownRunner bounds
+    // the wait.
     await stopMcp().catch((err) => {
       logger.warn("MCP stdio child stop failed: %s", (err as Error).message);
     });
     await prisma.$disconnect();
-    process.exit(0);
-  };
+  });
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => void shutdown(0));
+  process.on("SIGINT", () => void shutdown(0));
+
+  // WARP-572: process-level safety net. The orchestrator is an always-on
+  // control plane that fires many background promises outside the request
+  // lifecycle (cron ticks, pollers, the streaming flush timer, best-effort
+  // MQTT / activity writes). On modern Node an unhandled rejection or
+  // uncaught exception terminates the process by default — so one stray
+  // background throw could take down the whole appliance with only Node's
+  // default stderr dump. Wire structured handlers so the failure is logged
+  // and recovery is deterministic. onFatal runs the graceful shutdown with a
+  // non-zero exit code.
+  registerProcessSafetyNet(logger, () => void shutdown(1));
 }
 
-main().catch((err) => {
-  logger.fatal({ err }, "Failed to start API server");
-  process.exit(1);
-});
+// WARP-572: graceful-shutdown runner, extracted so the re-entrancy guard and
+// force-exit failsafe are unit-testable without booting Prisma/Redis/MQTT (see
+// src/__tests__/process-safety-net.test.ts). `teardown` is the injectable body
+// — in production it stops the cron runtime, Matter/Camera/MCP services and
+// disconnects Prisma; in tests it's a stub.
+//
+// Behavior:
+//   - Re-entrancy guard: a second call (second uncaughtException, or a SIGTERM
+//     arriving mid-teardown) short-circuits — no double teardown, no double
+//     process.exit. Shared via the module-scope `shuttingDown` flag.
+//   - Force-exit failsafe: an unref'd timer is armed before teardown begins, so
+//     a hung teardown step can't strand the corrupted process. unref() keeps
+//     the timer from holding the loop open when teardown finishes first.
+export function createShutdownRunner(
+  log: pino.Logger,
+  teardown: () => Promise<void>,
+): (exitCode?: number) => Promise<void> {
+  return async (exitCode = 0) => {
+    if (shuttingDown) {
+      log.warn("Shutdown already in progress, ignoring re-entry");
+      return;
+    }
+    shuttingDown = true;
+
+    const forceExit = setTimeout(() => {
+      log.fatal(
+        { code: "shutdownForceExit", timeoutMs: SHUTDOWN_FORCE_EXIT_MS },
+        "Graceful shutdown timed out, forcing exit",
+      );
+      process.exit(exitCode);
+    }, SHUTDOWN_FORCE_EXIT_MS);
+    forceExit.unref();
+
+    log.info("Shutting down...");
+    await teardown();
+    clearTimeout(forceExit);
+    process.exit(exitCode);
+  };
+}
+
+// Test-only: reset the shutdown re-entrancy latch so each unit test starts
+// clean. Not called from production code paths.
+export function __resetShutdownGuardForTests(): void {
+  shuttingDown = false;
+}
+
+// WARP-572: extracted so the handler wiring is unit-testable without booting
+// the full stack (see src/__tests__/process-safety-net.test.ts). Kept in
+// index.ts so process lifecycle stays centralized.
+//
+// - unhandledRejection is logged-but-survivable: log at error with a stable,
+//   greppable `code` and DO NOT exit, so a single stray background throw
+//   degrades rather than kills the control plane. This mirrors the
+//   never-silently-swallow posture of cron-runtime's safeRun logging.
+// - uncaughtException is fatal-after-flush: log at fatal (matching the
+//   boot-failure handler below), then run the caller's onFatal (graceful
+//   shutdown + non-zero exit). Logged synchronously before onFatal so the
+//   diagnostic lands in container logs even if exit races a pino flush.
+// Idempotency guard: a double call (e.g. a botched merge wiring it from both
+// main() and a test harness) must not attach two listeners that would log the
+// same rejection twice and fire onFatal twice. Tracked at module scope so the
+// guard survives across calls within one process.
+let safetyNetRegistered = false;
+
+export function registerProcessSafetyNet(
+  log: pino.Logger,
+  onFatal: () => void,
+): void {
+  if (safetyNetRegistered) {
+    log.warn(
+      { code: "safetyNetAlreadyRegistered" },
+      "Process safety net already registered, skipping duplicate wiring",
+    );
+    return;
+  }
+  safetyNetRegistered = true;
+
+  process.on("unhandledRejection", (reason) => {
+    log.error(
+      { err: reason, code: "unhandledRejection" },
+      "Unhandled promise rejection (surviving)",
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    log.fatal({ err, code: "uncaughtException" }, "Uncaught exception, shutting down");
+    onFatal();
+  });
+}
+
+// Test-only: reset the idempotency latch so each unit test starts clean. Not
+// called from production code paths.
+export function __resetProcessSafetyNetForTests(): void {
+  safetyNetRegistered = false;
+}
+
+// Only boot the stack when this module is the process entrypoint. Importing
+// it from a test (vitest) must not run main() — the runner is the entrypoint
+// then, so this guard is false. The orchestrator package has no
+// `"type": "module"`, so even with tsconfig `module: NodeNext` this file
+// emits CommonJS — hence the `require.main`/`module` idiom rather than
+// `import.meta` (which tsc rejects with TS1470 in CJS output). Works under
+// `tsx src/index.ts` (dev) and `node dist/index.js` (prod); under vitest
+// `require.main` is the runner, so the guard stays false.
+if (require.main === module) {
+  main().catch((err) => {
+    logger.fatal({ err }, "Failed to start API server");
+    process.exit(1);
+  });
+}

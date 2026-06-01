@@ -36,6 +36,7 @@ import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useAuth } from "@/lib/auth";
 import { useWorkspace, type HomeVariant } from "@/lib/workspace";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
+import { resolveHealthCopy } from "@/app/health-copy";
 import type { FileEntryInfo } from "@/lib/types";
 
 /* ─────────────────────────────── helpers ─────────────────────────────── */
@@ -73,12 +74,6 @@ const SUGGESTIONS = [
   "What's using the most storage?",
   "Draft a changelog from recent notes",
 ];
-
-const HEALTH_COPY: Record<SystemHealth["status"], { label: string; dot: string }> = {
-  ok:       { label: "All systems operational", dot: "bg-system-green" },
-  degraded: { label: "Degraded",                dot: "bg-system-orange" },
-  down:     { label: "Needs attention",         dot: "bg-system-red" },
-};
 
 /* ─────────────────────────────── page ─────────────────────────────── */
 
@@ -428,13 +423,13 @@ function GreetingStrip({
           }
         >
           <span
-            className={`w-1.5 h-1.5 rounded-full ${HEALTH_COPY[ctx.systemHealth.status].dot}`}
+            className={`w-1.5 h-1.5 rounded-full ${resolveHealthCopy(ctx.systemHealth.status).dot}`}
           />
           <span className="text-label-primary font-medium">
             {ctx.device?.hostname ?? "Droplet"}
           </span>
           <span className="text-label-tertiary">·</span>
-          <span>{HEALTH_COPY[ctx.systemHealth.status].label}</span>
+          <span>{resolveHealthCopy(ctx.systemHealth.status).label}</span>
         </div>
       )}
     </div>
@@ -777,7 +772,7 @@ function NeedsAttentionCard({ ctx }: { ctx: SharedContext }) {
         </span>
         <div className="flex-1">
           <p className="type-subheadline text-label-primary font-medium">
-            {HEALTH_COPY[ctx.systemHealth.status].label}
+            {resolveHealthCopy(ctx.systemHealth.status).label}
           </p>
           <p className="type-caption-1 text-label-tertiary">
             {ctx.systemHealth.components?.length

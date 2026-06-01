@@ -1,115 +1,76 @@
-# scripts/host/ — captured single-box host state (Phase 0)
+# Host scripts
 
-This directory is a **read-only capture** of files that exist on the live
-single-box deployment at `192.168.1.87` (`droplet-sys`) but are NOT yet
-declared anywhere in this repo. Captured 2026-05-24 from the running box on
-branch `feat/poc-single-box-rebuild`.
+Scripts and units that run **on the device host** (not inside a container).
 
-> **Phase 0 is CAPTURE ONLY.** Nothing here is wired into `setup.sh` or
-> the compose stack yet — these are reference copies so a future
-> rebuild-from-scratch doesn't strip away the box's hand-built integrations.
-> Phase 1 designs how these get installed cleanly (`setup.sh` flag,
-> profile, ADR on which parts belong in compose vs systemd).
+## Backup & restore (WARP-570)
 
-## Filename conventions
+| Script | Purpose |
+|--------|---------|
+| `device-backup.sh` | Full-device backup: `pg_dump` of both Postgres instances (`db` + `postgres-pm`) plus tar snapshots of every data volume → one timestamped `*.tar.gz` |
+| `device-restore.sh` | Restore a `device-backup-*.tar.gz` into the live stack (DESTRUCTIVE; confirm-gated, `--force` to skip) |
+| `pm-backup.sh` / `pm-restore.sh` | Older Plane-PM-only backup (WARP-514). `device-backup.sh` supersedes it for whole-device DR; pm-backup remains for PM-scoped pilot snapshots |
 
-| Prefix | Meaning |
-|---|---|
-| `_*.md` | **Point-in-time snapshot, may be stale.** `_box-snapshot-2026-05-24.md` and `_uncommitted-on-box.md` are dated captures of the box at the moment they were written. Their contents drift the instant the live box is touched; treat them as archaeological reference, not current state. |
-| (no underscore) | Active files / docs that should track the repo. Edit normally. |
+```bash
+# Back up everything (default /var/lib/droplet/backups, archive chmod 600)
+./scripts/host/device-backup.sh [OUTPUT_DIR]
 
-If you add a new dated snapshot to this directory, prefix it with `_` so future
-readers don't mistake it for current state.
+# Keep N rotations (default 7)
+BACKUP_KEEP=14 ./scripts/host/device-backup.sh
 
-## Why this exists
-
-The PoC was bootstrapped over ~6 weeks of incremental SSH work — the team
-landed pieces directly on the box as `docker-compose.override.yml`,
-`/usr/local/sbin/*` scripts, and `/etc/systemd/system/*.service` units.
-None of that lives in any repo today. A naive `factory-reset.sh + setup.sh`
-would reset to a state that's strictly **less functional** than the box
-because none of these layers exist in `setup.sh`.
-
-Capturing them here gives Phase 1 a known-good baseline to design from.
-
-## What's in here
-
-```
-scripts/host/
-├── README.md                                        ← you are here
-├── _box-snapshot-2026-05-24.md                      ← state of the box at capture
-├── _uncommitted-on-box.md                           ← 2 working-tree files needing a call
-├── docker-compose.poc.yml                           ← captured docker-compose.override.yml
-├── usr-local-sbin/
-│   ├── droplet-openwrt-attach                       ← 20 KB AP/OpenWrt bootstrap script (current)
-│   ├── droplet-openwrt-attach.bak                   ← 13 KB previous version (kept on box)
-│   └── droplet-poc-host-net                         ← br-lan DHCP + Lantronix route
-├── etc-default/
-│   ├── droplet-openwrt-attach.example               ← REDACTED env file (AP_PSK stripped)
-│   └── droplet-poc-host-net                         ← no secrets, captured as-is
-├── etc-systemd-system/
-│   ├── droplet.service                              ← starts `docker compose up -d` on boot
-│   ├── droplet-openwrt-attach.service               ← runs the attach script after docker
-│   ├── droplet-openwrt-attach.service.d/
-│   │   └── override.conf                            ← pulls EnvironmentFile=
-│   └── droplet-poc-host-net.service                 ← host br-lan DHCP daemon
-├── etc-droplet-poc-host-net/
-│   └── lan-dhcp.conf                                ← dnsmasq config for br-lan
-├── etc-dnsmasq.d/
-│   ├── droplet-ap.conf                              ← legacy system-dnsmasq drop-in (current)
-│   └── droplet-ap.conf.pre-bridge                   ← pre-bridge variant kept on box
-├── etc-tmpfiles.d/
-│   └── droplet.conf                                 ← /run/droplet tmpfiles spec
-└── etc-avahi/
-    └── services/
-        └── droplet.service                          ← mDNS service advert (http + https)
+# Restore
+./scripts/host/device-restore.sh [--force] <device-backup-*.tar.gz>
 ```
 
-## How files map back to the box
+**Captured surfaces:** orchestrator Postgres (`db`), Plane Postgres
+(`postgres-pm`), and the `nextcloud-data`, `aikeys`, `matter-data`,
+`brain-memory-data`, `nvrdata` (NVR recordings), and `ops-audit` (WARP-337
+audit trail) volumes. These are the real top-level volumes in
+`docker/docker-compose.yml`; the backup script's `DATA_VOLUMES` list is kept in
+lock-step with `factory-reset.sh`'s wipe list, and a static test asserts every
+captured name is a genuine compose volume (a wrong name would otherwise
+auto-create an empty volume and silently back up nothing).
 
-| Captured path | Real path on box | Owner |
-|---|---|---|
-| `docker-compose.poc.yml` | `/home/droplet/edge-platform/docker/docker-compose.override.yml` | git-ignored in repo; auto-loaded by `docker compose` when no `-f` flag is given |
-| `usr-local-sbin/*` | `/usr/local/sbin/*` | `chmod +x`, owned by root |
-| `etc-default/*` | `/etc/default/*` | sourced by systemd `EnvironmentFile=` |
-| `etc-systemd-system/*` | `/etc/systemd/system/*` | enabled in `multi-user.target.wants/` |
-| `etc-droplet-poc-host-net/lan-dhcp.conf` | `/etc/droplet-poc-host-net/lan-dhcp.conf` | referenced from `droplet-poc-host-net` script |
-| `etc-dnsmasq.d/*` | `/etc/dnsmasq.d/*` | system dnsmasq (NOT used in current config — see snapshot) |
-| `etc-tmpfiles.d/droplet.conf` | `/etc/tmpfiles.d/droplet.conf` | creates `/run/droplet` on boot |
-| `etc-avahi/services/droplet.service` | `/etc/avahi/services/droplet.service` | mDNS advertisement |
+**Not captured (rebuilt on reinstall):** the Postgres data volumes themselves
+(`pgdata`, `postgres-pm-data` — captured transactionally via `pg_dump`
+instead), plus pure caches / rebuildable state: `redis-pm-data`,
+`frigate-config`, `rag-eval-data`, the whisper/piper/ollama model caches, and
+`openwrt-config`/`openwrt-overlay`. The backup manifest's `excluded` array is
+the machine-readable record, and `factory-reset.sh` prints the same list before
+it wipes.
 
-## Important: the AP PSK in `etc-default/droplet-openwrt-attach.example`
+**Integrity:** every dump is verified with `gzip -t` at backup time and a
+sha256 of each artifact is recorded in `manifest.json`. `device-restore.sh`
+re-verifies those checksums **before** the first `DROP DATABASE`, so a
+truncated/corrupt artifact aborts the restore instead of leaving an empty DB
+with the good copy already gone.
 
-The live box has `/etc/default/droplet-openwrt-attach` with
-`DROPLET_AP_PSK=Droplet123!`. Per the architecture-guard rule on no
-secrets in tracked files, the `.example` here strips that value to a
-placeholder. The real PSK ships via the setup wizard (or operator-provided
-env override). DO NOT replace the placeholder with the real value — if
-you find yourself doing that, you're solving the wrong problem.
+**Secrets safety:** the archive holds DB dumps + the `aikeys` volume, so it is
+`chmod 600` and its directory `chmod 700`. The repo `.env` is never copied into
+the tarball.
 
-## Phase 1 design questions this capture enables
+### Scheduling (systemd)
 
-- Does `docker-compose.poc.yml` get merged into `docker/docker-compose.yml`
-  under a `poc` compose profile? Or kept as a separate file loaded via
-  `COMPOSE_FILE` env? (Probably the former — single source of truth.)
-- Does `setup.sh` grow a `--poc` flag that installs the systemd units and
-  scripts into the host? Or do we factor those into a separate
-  `scripts/host/install.sh` callable from setup.sh? (Probably the latter —
-  setup.sh stays slim, install.sh owns host-touching logic.)
-- Do the `droplet-openwrt-attach.service` + `droplet-poc-host-net.service`
-  patterns generalize beyond the PoC, or are they single-box-only? (TBD —
-  the production multi-box uses a real OpenWrt router and a separate
-  Jetson, so the AP-in-container and br-lan DHCP pieces become moot.)
-- The legacy `etc-dnsmasq.d/droplet-ap.conf` files conflict with the
-  newer `droplet-poc-host-net` design — should they be removed from the
-  box? (Phase 1 cleanup.)
+`systemd/droplet-backup.service` + `droplet-backup.timer` run a daily backup.
 
-## What's intentionally NOT captured here
+```bash
+sudo cp systemd/droplet-backup.{service,timer} /etc/systemd/system/
+# edit WorkingDirectory + ExecStart in the .service to your checkout path
+sudo systemctl daemon-reload
+sudo systemctl enable --now droplet-backup.timer
+```
 
-- `/home/droplet/edge-platform/.env` — device-unique secrets generated by
-  `setup.sh`. Captured in `setup.sh` itself, not here.
-- `/home/droplet/edge-platform/docker/secrets/*` — generated by setup.sh.
-- `/var/lib/droplet-bridge/` — runtime state (rotation timestamps, key
-  digests). Recreated by `droplet-device-bridge.service`.
-- Docker volumes (`pgdata`, `nextcloud-data`, etc.) — see `_box-snapshot`
-  for inventory of what's IN them and the strategy for migration.
+Rotation (`BACKUP_KEEP`, default 7) is handled by `device-backup.sh` itself.
+The orchestrator's in-container cron-runtime is deliberately NOT used for this
+host-level dump — it can't reach the sibling DB containers or the host disk.
+
+### factory-reset safeguard
+
+`scripts/factory-reset.sh` runs `device-backup.sh` before it wipes anything.
+A failed safety backup aborts the reset; pass `--no-backup` to opt out.
+
+### Drill / test
+
+`npm run test:backup` (or `bash tests/device-backup.test.sh`) runs the full
+backup→mutate→restore round-trip against a disposable docker compose project,
+asserting a restorable artifact per volume + both DBs, mode 600, and rotation.
+It SKIPs the live drill (keeping the static checks) when Docker is unavailable.
