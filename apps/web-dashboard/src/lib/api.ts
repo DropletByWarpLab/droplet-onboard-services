@@ -343,6 +343,24 @@ export async function rescanDrives(): Promise<{ ok: boolean; error?: string }> {
 }
 
 /**
+ * WARP-612: unmount + forget a hot-plug USB drive (admin-only). The
+ * orchestrator + bridge refuse anything that isn't a USB mount under
+ * /mnt/droplet/. Throws a friendly message on 409 (busy) / 503 (not
+ * configured) so the caller can surface it.
+ */
+export async function ejectDrive(uuid: string): Promise<{ ok: boolean }> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}/eject`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to eject drive: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * WARP-174: upsert the customer's friendly name (+ optional icon + notes)
  * for a drive. Used by the setup wizard's Storage step and the
  * post-setup `/storage` page.

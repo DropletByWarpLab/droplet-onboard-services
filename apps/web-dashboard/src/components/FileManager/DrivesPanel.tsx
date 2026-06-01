@@ -3,8 +3,9 @@
 import { useMemo, useState } from "react";
 import { HardDrive, Usb, MemoryStick, RefreshCw } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
-import { rescanDrives } from "@/lib/api";
+import { ejectDrive, rescanDrives } from "@/lib/api";
 import { useToast } from "@/components/Toast";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { DriveInfo } from "@/lib/types";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
@@ -51,16 +52,30 @@ function BusIcon({ bus, className }: { bus?: string; className?: string }) {
 }
 
 function busLabel(bus?: string): string {
-  if (bus === "nvme") return "Internal NVMe";
-  if (bus === "usb") return "USB";
-  if (bus === "mmc") return "eMMC / SD";
-  return "Disk";
+  switch (bus) {
+    case "nvme":
+      return "NVMe";
+    case "usb":
+      return "USB";
+    case "sata":
+      return "SATA";
+    case "sas":
+      return "SAS";
+    case "scsi":
+      return "SCSI";
+    case "mmc":
+      return "SD / eMMC";
+    default:
+      return "Disk";
+  }
 }
 
 export function DrivesPanel() {
-  const { drives, isLoading, bridgeError } = useDrives();
+  const { drives, isLoading, bridgeError, refresh } = useDrives();
   const { toast } = useToast();
   const [rescanning, setRescanning] = useState(false);
+  const [ejectTarget, setEjectTarget] = useState<DriveInfo | null>(null);
+  const [ejecting, setEjecting] = useState<string | null>(null);
 
   const pool = useMemo(() => {
     const size = drives.reduce((a, d) => a + (d.size_bytes || 0), 0);
@@ -80,6 +95,23 @@ export function DrivesPanel() {
       toast(err instanceof Error ? err.message : "Couldn't rescan drives", "error");
     } finally {
       setRescanning(false);
+    }
+  }
+
+  async function doEject() {
+    const d = ejectTarget;
+    if (!d) return;
+    setEjecting(d.uuid);
+    try {
+      await ejectDrive(d.uuid);
+      setEjectTarget(null);
+      toast(`${driveName(d)} ejected — safe to unplug`, "success");
+      refresh();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Couldn't eject the drive", "error");
+      throw err;
+    } finally {
+      setEjecting(null);
     }
   }
 
@@ -104,7 +136,7 @@ export function DrivesPanel() {
         <p className="type-subheadline text-label-secondary mb-4">
           {bridgeError
             ? "The storage service isn't reachable right now."
-            : "Plug in a USB drive and it mounts automatically."}
+            : "Plug in a drive and it mounts automatically."}
         </p>
         <button
           onClick={onRescan}
@@ -220,15 +252,53 @@ export function DrivesPanel() {
                     {d.fs}
                   </span>
                 )}
+                {typeof d.temp_c === "number" && (
+                  <span className="px-1.5 py-0.5 rounded border border-separator text-label-tertiary tabular-nums">
+                    {d.temp_c}°C
+                  </span>
+                )}
+                {d.smart && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded ${
+                      d.smart === "PASSED"
+                        ? "bg-system-green/10 text-system-green"
+                        : "bg-system-red/10 text-system-red"
+                    }`}
+                  >
+                    SMART {d.smart}
+                  </span>
+                )}
               </div>
 
               {d.notes && (
                 <p className="mt-2 type-caption-1 text-label-tertiary">{d.notes}</p>
               )}
+
+              {d.removable && d.mounted && (
+                <div className="mt-3 pt-3 border-t border-separator flex justify-end">
+                  <button
+                    onClick={() => setEjectTarget(d)}
+                    disabled={ejecting === d.uuid}
+                    className="dp-btn-secondary type-caption-1 px-2.5 h-8 rounded-md"
+                  >
+                    {ejecting === d.uuid ? "Ejecting…" : "Eject"}
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={ejectTarget !== null}
+        onConfirm={doEject}
+        onCancel={() => setEjectTarget(null)}
+        title="Eject this drive?"
+        description={`${ejectTarget ? driveName(ejectTarget) : "The drive"} will be unmounted. Wait for the confirmation before unplugging it.`}
+        confirmLabel="Eject"
+        variant="destructive"
+      />
     </div>
   );
 }

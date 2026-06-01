@@ -260,7 +260,11 @@ describe("storage routes (WARP-174)", () => {
 });
 
 describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
-  it("derives a bus class for every drive when the bridge omits it", async () => {
+  it("falls back to a neutral bus class when the bridge omits it", async () => {
+    // The bridge sends the real transport (it reads lsblk on the host). When
+    // an older bridge omits it, the orchestrator name-guesses: nvme is
+    // unambiguous, but sd* stays neutral 'disk' — it could be SATA/SAS, not
+    // necessarily USB (ADR-011, no hardware assumption).
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -268,7 +272,7 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
         json: async () => ({
           drives: [
             { device: "/dev/nvme0n1p1", mount: "/mnt/droplet/vault", label: "Vault", uuid: "U-NVME", size_bytes: 4e12, used_bytes: 1e12, free_bytes: 3e12, mounted: true },
-            { device: "/dev/sda1", mount: "/mnt/droplet/usb", label: "USB", uuid: "U-USB", size_bytes: 2e12, used_bytes: 0, free_bytes: 2e12, mounted: true },
+            { device: "/dev/sda1", mount: "/mnt/droplet/data", label: "Data", uuid: "U-SD", size_bytes: 2e12, used_bytes: 0, free_bytes: 2e12, mounted: true },
           ],
           count: 2,
           snapshot_at: "2026-05-31T00:00:00Z",
@@ -280,7 +284,7 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
     expect(res.status).toBe(200);
     const byUuid = Object.fromEntries(res.body.drives.map((d: any) => [d.uuid, d]));
     expect(byUuid["U-NVME"].bus).toBe("nvme");
-    expect(byUuid["U-USB"].bus).toBe("usb");
+    expect(byUuid["U-SD"].bus).toBe("disk");
   });
 
   it("passes through the bridge's fs/bus/readonly when present", async () => {
@@ -347,6 +351,86 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
       app.use("/api", createStorageRouter(createPrismaMock() as any));
       const res = await request(app).post("/api/storage/drives/rescan");
       expect(res.status).toBe(403);
+    });
+  });
+});
+
+describe("storage routes — SMART + eject (WARP-612)", () => {
+  it("passes through SMART health + temperature when the bridge provides them", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sda1", mount: "/mnt/droplet/x", label: "X", uuid: "U1", size_bytes: 1e9, used_bytes: 0, free_bytes: 1e9, mounted: true, smart: "PASSED", temp_c: 41 },
+          ],
+          count: 1,
+          snapshot_at: "2026-05-31T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.body.drives[0].smart).toBe("PASSED");
+    expect(res.body.drives[0].temp_c).toBe(41);
+  });
+
+  describe("POST /api/storage/drives/:uuid/eject", () => {
+    it("forbids non-admins", async () => {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
+          id: "fam", username: "fam", displayName: "Fam", role: "family",
+        };
+        next();
+      });
+      app.use("/api", createStorageRouter(createPrismaMock() as any));
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects an invalid UUID", async () => {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/has spaces/eject");
+      expect(res.status).toBe(400);
+    });
+
+    it("503s when no device-bridge auth token is configured", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "");
+      vi.stubEnv("SERVICE_TOKEN_DISPLAY", "");
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(503);
+      vi.unstubAllEnvs();
+    });
+
+    it("forwards to the bridge with auth + returns ok on success", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+      const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, ejected: "U1" }) }));
+      vi.stubGlobal("fetch", fetchMock);
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string> }];
+      expect(String(url)).toMatch(/\/drives\/U1\/eject$/);
+      expect(init.headers["X-Droplet-Auth"]).toBe("secret-token");
+      vi.unstubAllEnvs();
+    });
+
+    it("surfaces a 409 from the bridge (drive busy / not ejectable)", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ ok: false, error: "umount failed — the drive may be in use" }) })),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/in use/i);
+      vi.unstubAllEnvs();
     });
   });
 });
