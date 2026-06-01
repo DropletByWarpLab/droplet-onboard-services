@@ -18,13 +18,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // openid-client is the vetted lib; mock its network-touching functions.
-const discovery = vi.fn();
-const buildAuthorizationUrl = vi.fn();
-const authorizationCodeGrant = vi.fn();
-const randomState = vi.fn(() => "fixed-state");
-const randomNonce = vi.fn(() => "fixed-nonce");
-const randomPKCECodeVerifier = vi.fn(() => "fixed-verifier");
-const calculatePKCECodeChallenge = vi.fn(async () => "fixed-challenge");
+const discovery = vi.fn((..._a: unknown[]) => undefined as unknown);
+const buildAuthorizationUrl = vi.fn((..._a: unknown[]) => undefined as unknown);
+const authorizationCodeGrant = vi.fn((..._a: unknown[]) => undefined as unknown);
+const randomState = vi.fn((..._a: unknown[]) => "fixed-state");
+const randomNonce = vi.fn((..._a: unknown[]) => "fixed-nonce");
+const randomPKCECodeVerifier = vi.fn((..._a: unknown[]) => "fixed-verifier");
+const calculatePKCECodeChallenge = vi.fn(async (..._a: unknown[]) => "fixed-challenge");
 vi.mock("openid-client", () => ({
   discovery: (...a: unknown[]) => discovery(...a),
   buildAuthorizationUrl: (...a: unknown[]) => buildAuthorizationUrl(...a),
