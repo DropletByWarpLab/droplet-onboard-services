@@ -143,6 +143,11 @@ function createPrismaMock(seed: UserRow[] = []) {
   let inviteCounter = 0;
   const self: any = {};
   self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  // PR #375 — login checks for an enabled TOTP factor post-password. These
+  // UUID-shape fixtures have none, so the delegate returns null (gate skipped).
+  self.totpCredential = {
+    findUnique: vi.fn(async () => null),
+  };
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
       if (where.email !== undefined) {

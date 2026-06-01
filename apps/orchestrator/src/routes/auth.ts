@@ -54,6 +54,18 @@ import {
   verifyPassword,
   verifyDummyPassword,
 } from "../services/password.service.js";
+import {
+  TOTP_ISSUER,
+  generateTotpEnrollment,
+  encryptTotpSecret,
+  decryptTotpSecret,
+  verifyTotpCode,
+} from "../services/totp.service.js";
+import {
+  generateRecoveryCodes,
+  findMatchingRecoveryCodeHash,
+} from "../services/recovery.service.js";
+import QRCode from "qrcode";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -133,6 +145,12 @@ const loginSchema = z
     email: z.string().trim().toLowerCase().min(1).optional(),
     username: z.string().trim().toLowerCase().min(1).optional(),
     password: z.string().min(1),
+    // PR #375 — optional second factor for the TOTP login gate. Only
+    // consulted when the resolved user has TOTP enabled; a 6-digit TOTP
+    // code or a one-time recovery code. Bounded to keep a junk payload
+    // cheap. Absent for password-only accounts.
+    totp: z.string().trim().max(16).optional(),
+    recoveryCode: z.string().trim().max(64).optional(),
   })
   .refine((d) => Boolean(d.email ?? d.username), {
     message: "Email and password are required",
@@ -142,6 +160,16 @@ const createUserSchema = z.object({
   username: usernameField,
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
+});
+
+// PR #375 — TOTP verify / re-challenge body: exactly six decimal digits.
+const totpVerifySchema = z.object({
+  code: z.string().trim().regex(/^\d{6}$/, "A 6-digit code is required"),
+});
+
+// PR #375 — recovery-code consumption body.
+const recoveryConsumeSchema = z.object({
+  code: z.string().trim().min(1).max(64),
 });
 
 // ── WARP-217 invite schemas ──
@@ -483,6 +511,85 @@ export function createPublicAuthRouter(
       const displayName = localUser.displayName;
       const role: Role = localUser.role as Role;
 
+      // ── PR #375 — second-factor gate ──────────────────────────────────
+      // The password verified. If this user has TOTP ENABLED
+      // (TotpCredential.confirmedAt non-null — explicit enablement column,
+      // never IS-NULL inference), require a valid TOTP code OR an unused
+      // recovery code from the login body BEFORE issuing the session. A
+      // pending (unconfirmed) enrollment does NOT gate login. The gate runs
+      // before Nextcloud provisioning + token issuance so a failed second
+      // factor mints nothing.
+      //
+      // On a successful challenge we stamp `mfaStampIso` into the access
+      // token (signAccessToken) so require-recent-mfa (WARP-230) can gate
+      // sensitive routes for this session.
+      let mfaStampIso: string | undefined;
+      const totpCred = await prisma.totpCredential.findUnique({
+        where: { userId },
+      });
+      if (totpCred && totpCred.confirmedAt) {
+        const totpCode =
+          typeof parsed.data.totp === "string" ? parsed.data.totp.trim() : "";
+        const recoveryCode =
+          typeof parsed.data.recoveryCode === "string"
+            ? parsed.data.recoveryCode
+            : "";
+
+        let secondFactorOk = false;
+
+        if (totpCode) {
+          const secret = decryptTotpSecret(totpCred.secretEnc);
+          secondFactorOk = await verifyTotpCode(secret, totpCode);
+        } else if (recoveryCode) {
+          // Match against the user's UNUSED codes only; consume exactly the
+          // matched row so a replay of the same code finds nothing.
+          const unused = await prisma.recoveryCode.findMany({
+            where: { userId, usedAt: null },
+          });
+          const matchHash = await findMatchingRecoveryCodeHash(
+            recoveryCode,
+            unused.map((r) => r.codeHash),
+          );
+          if (matchHash) {
+            const consumed = unused.find((r) => r.codeHash === matchHash);
+            if (consumed) {
+              await prisma.recoveryCode.update({
+                where: { id: consumed.id },
+                data: { usedAt: new Date() },
+              });
+              secondFactorOk = true;
+            }
+          }
+        }
+
+        if (!secondFactorOk) {
+          // Distinguishable from "Invalid credentials" so the dashboard can
+          // prompt for the code instead of treating it as a bad password.
+          // The password was already correct, so this leaks no enumeration
+          // signal a logged-in attacker doesn't already have.
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "shield-alert",
+            what: "Two-factor challenge failed",
+            sub: `${username} • ${callerIpFromReq(req) ?? "unknown"}`,
+            refs: {
+              outcome: "totp_required",
+              userId,
+              username,
+              ip: callerIpFromReq(req) ?? null,
+            },
+          });
+          res.status(401).json({
+            error: "Two-factor authentication required",
+            code: "TOTP_REQUIRED",
+          });
+          return;
+        }
+
+        mfaStampIso = new Date().toISOString();
+      }
+
       // Downstream provisioning (NOT authentication): ensure the caller
       // has a live Nextcloud app-password so Files/WebDAV keep working.
       // The directory already authenticated them; if Nextcloud is down or
@@ -512,8 +619,15 @@ export function createPublicAuthRouter(
         );
       }
 
-      // Issue JWT access + refresh tokens
-      const accessToken = signAccessToken({ id: userId, username, displayName, role });
+      // Issue JWT access + refresh tokens. The access token carries the
+      // MFA stamp (PR #375) when a second factor was just satisfied.
+      const accessToken = signAccessToken({
+        id: userId,
+        username,
+        displayName,
+        role,
+        lastMfaAt: mfaStampIso,
+      });
       const refreshToken = signRefreshToken({ id: userId, username, displayName, role });
 
       const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
@@ -1130,6 +1244,187 @@ export function createProtectedAuthRouter(
         displayName: req.user.displayName,
         role: req.user.role,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── PR #375 — TOTP enrollment ──
+  // Mint a fresh secret, store it ENCRYPTED (never plaintext, never logged),
+  // and hand back the otpauth:// URI + a QR data-URL for the authenticator
+  // app. The factor is NOT active until POST /auth/totp/verify confirms a
+  // code (confirmedAt). Re-enrolling before confirmation re-mints the
+  // pending secret; once the factor is enabled this 409s rather than
+  // silently rotating a working secret out from under the user.
+  router.post("/auth/totp/enroll", async (req, res, next) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "TOTP unavailable: database not wired" });
+        return;
+      }
+      const userId = req.user.id;
+
+      const existing = await prisma.totpCredential.findUnique({
+        where: { userId },
+      });
+      if (existing?.confirmedAt) {
+        res.status(409).json({
+          error: "Two-factor authentication is already enabled.",
+          code: "TOTP_ALREADY_ENABLED",
+        });
+        return;
+      }
+
+      // Label the authenticator entry with the user's email when present,
+      // else the username — both are non-secret display identifiers.
+      const label = req.user.username;
+      const { secret, otpauthUri } = generateTotpEnrollment(label);
+      const secretEnc = encryptTotpSecret(secret);
+
+      // Upsert the pending credential. confirmedAt stays null until verify.
+      await prisma.totpCredential.upsert({
+        where: { userId },
+        create: { userId, secretEnc, confirmedAt: null },
+        update: { secretEnc, confirmedAt: null },
+      });
+
+      const qrDataUrl = await QRCode.toDataURL(otpauthUri, {
+        errorCorrectionLevel: "M",
+        margin: 1,
+      });
+
+      // The plaintext `secret` is deliberately NOT returned — the QR / URI
+      // carry it to the authenticator app; nothing else needs it.
+      res.json({ otpauthUri, qrDataUrl, issuer: TOTP_ISSUER });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── PR #375 — TOTP verify / re-challenge ──
+  // Verify a 6-digit code against the (decrypted) stored secret. On the
+  // FIRST success, enable the factor (set confirmedAt) and mint one-time
+  // recovery codes — returned ONCE in this response and never again. A
+  // verify against an already-enabled factor is a re-challenge (e.g. a
+  // step-up) and returns no new codes.
+  router.post("/auth/totp/verify", async (req, res, next) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "TOTP unavailable: database not wired" });
+        return;
+      }
+      const parsed = totpVerifySchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "A 6-digit code is required" });
+        return;
+      }
+      const userId = req.user.id;
+
+      const cred = await prisma.totpCredential.findUnique({ where: { userId } });
+      if (!cred) {
+        res.status(400).json({
+          error: "No enrollment in progress. Start with /auth/totp/enroll.",
+          code: "TOTP_NOT_ENROLLED",
+        });
+        return;
+      }
+
+      const secret = decryptTotpSecret(cred.secretEnc);
+      const codeOk = await verifyTotpCode(secret, parsed.data.code);
+      if (!codeOk) {
+        res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
+        return;
+      }
+
+      const firstConfirmation = !cred.confirmedAt;
+      if (!firstConfirmation) {
+        // Re-challenge against an already-enabled factor — no new codes.
+        res.json({ enabled: true });
+        return;
+      }
+
+      // First successful verify → enable + mint recovery codes. Clear any
+      // stale codes from a prior (re-)enrollment so the displayed set is
+      // the only valid set.
+      await prisma.totpCredential.update({
+        where: { userId },
+        data: { confirmedAt: new Date() },
+      });
+      const { plaintext, hashes } = await generateRecoveryCodes();
+      await prisma.recoveryCode.deleteMany({ where: { userId } });
+      await prisma.recoveryCode.createMany({
+        data: hashes.map((codeHash) => ({ userId, codeHash })),
+      });
+
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield-check",
+        what: `${req.user.displayName} enabled two-factor authentication`,
+        sub: callerIpFromReq(req) ?? null,
+        refs: { outcome: "totp_enabled", userId, username: req.user.username },
+      });
+
+      // Recovery codes are returned ONCE here and never persisted in
+      // plaintext — the client must show them now.
+      res.json({ enabled: true, recoveryCodes: plaintext });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── PR #375 — consume a recovery code (step-up for a live session) ──
+  // The login route consumes recovery codes pre-session; this endpoint
+  // covers an already-authenticated step-up. Single-use: the matched row
+  // is marked used so a replay matches nothing.
+  router.post("/auth/recovery", async (req, res, next) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "Recovery unavailable: database not wired" });
+        return;
+      }
+      const parsed = recoveryConsumeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "A recovery code is required" });
+        return;
+      }
+      const userId = req.user.id;
+
+      const unused = await prisma.recoveryCode.findMany({
+        where: { userId, usedAt: null },
+      });
+      const matchHash = await findMatchingRecoveryCodeHash(
+        parsed.data.code,
+        unused.map((r) => r.codeHash),
+      );
+      if (!matchHash) {
+        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
+        return;
+      }
+      const consumed = unused.find((r) => r.codeHash === matchHash);
+      if (!consumed) {
+        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
+        return;
+      }
+      await prisma.recoveryCode.update({
+        where: { id: consumed.id },
+        data: { usedAt: new Date() },
+      });
+
+      const remaining = unused.length - 1;
+      res.json({ ok: true, remaining });
     } catch (err) {
       next(err);
     }
