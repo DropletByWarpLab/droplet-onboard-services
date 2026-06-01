@@ -143,7 +143,7 @@ git branch -D feat/poc-single-box-rebuild  # local delete
 
 ```bash
 # From a dev machine:
-gh api -X DELETE repos/DropletByWarpLab/droplet-pi-platform/git/refs/heads/feat/poc-single-box-rebuild
+gh api -X DELETE repos/DropletByWarpLab/droplet-onboard-services/git/refs/heads/feat/poc-single-box-rebuild
 ```
 
 ### Step 4 — Update the photo-studio snapshot

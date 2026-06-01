@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 
 from auth.byok import get_api_key
@@ -24,9 +25,28 @@ from schemas import ChatRequest, ModelInfo
 
 logger = logging.getLogger(__name__)
 
-# Model name prefix → provider mapping
+# Model name prefix → provider mapping.
+#
+# Order matters: dicts iterate in insertion order, and `resolve_provider`
+# returns the first provider whose prefix matches. `ollama` is listed
+# FIRST so a local family whose name collides with a cloud prefix wins.
+# The canonical collision is `gpt-oss` — OpenAI's OPEN-WEIGHTS model,
+# served locally by Ollama, whose name starts with the openai cloud
+# prefix `gpt`. It must route to ollama (the off-LAN gate blocks the
+# nonexistent cloud call with HTTP 451). `gpt-oss` is more specific than
+# `gpt`, and matched first, so genuine cloud models (`gpt-4o`, `o1`)
+# still resolve to openai.
 PROVIDER_PREFIXES = {
-    "ollama": ["llama", "mistral", "phi", "gemma", "qwen", "codellama", "deepseek"],
+    "ollama": [
+        "llama",
+        "mistral",
+        "phi",
+        "gemma",
+        "qwen",
+        "codellama",
+        "deepseek",
+        "gpt-oss",
+    ],
     "anthropic": ["claude"],
     "openai": ["gpt", "o1", "o3"],
 }
@@ -44,6 +64,14 @@ class ProviderRouter:
             "anthropic": self.anthropic,
             "openai": self.openai,
         }
+        # The one configured local model (the "one-model rule"). When the
+        # chat request targets exactly this model it ALWAYS routes to the
+        # local Ollama provider, regardless of any cloud-looking name —
+        # we know it's local because it's what this deployment runs, so we
+        # never have to guess from the model string. Empty when unset
+        # (e.g. tests / cloud-only deploys), in which case routing falls
+        # back to prefix matching alone.
+        self._local_model = (os.getenv("LLM_MODEL") or "").strip().lower() or None
 
     async def refresh_keys(self):
         """Reload API keys from the BYOK keystore."""
@@ -60,6 +88,13 @@ class ProviderRouter:
             return self._providers[explicit_provider]
 
         model_lower = model.lower()
+
+        # The configured local model always routes local, even if its name
+        # collides with a cloud prefix (the gpt-oss / cloud-finetune case).
+        # This is the explicit one-model rule, not a name heuristic.
+        if self._local_model and model_lower == self._local_model:
+            return self.ollama
+
         for provider_name, prefixes in PROVIDER_PREFIXES.items():
             if any(model_lower.startswith(p) for p in prefixes):
                 return self._providers[provider_name]

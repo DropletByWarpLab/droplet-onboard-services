@@ -32,10 +32,12 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from urllib.parse import urlparse
 
 import httpx
 import paho.mqtt.client as mqtt
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -551,28 +553,58 @@ async def scan_and_discover() -> None:
         })
 
 
-# --- Background task ---
+# --- Scan scheduler (WARP-221) ---
+#
+# The periodic discovery sweep runs on an apscheduler AsyncIOScheduler
+# interval job rather than a hand-rolled `while True: ... asyncio.sleep`
+# loop. This is the canonical pattern (CLAUDE.md "No `while True` loops
+# for scheduling"; mirrors services/routing/scheduler.py). apscheduler
+# gives us coalesce + max_instances overlap protection and graceful
+# shutdown the bare loop lacked.
 
-_discovery_task: asyncio.Task | None = None
+_scan_scheduler: AsyncIOScheduler | None = None
 
 
-async def discovery_loop() -> None:
-    """Continuous discovery loop running in background."""
-    logger.info("Camera discovery loop started (interval: %ds)", SCAN_INTERVAL)
+async def run_scan() -> None:
+    """One discovery sweep, with the try/except the old loop body had.
 
-    # Wait for Frigate to be ready
-    for _ in range(30):
-        if await frigate.health_check():
-            break
-        logger.info("Waiting for Frigate to be ready...")
-        await asyncio.sleep(5)
+    A failing scan is logged and swallowed so a transient sweep error
+    never tears down the schedule — the next interval tick retries.
+    """
+    try:
+        await scan_and_discover()
+    except Exception as e:
+        logger.error("Discovery scan error: %s", e)
 
-    while True:
-        try:
-            await scan_and_discover()
-        except Exception as e:
-            logger.error("Discovery scan error: %s", e)
-        await asyncio.sleep(SCAN_INTERVAL)
+
+def build_scan_scheduler() -> AsyncIOScheduler:
+    """Build (but do not start) the AsyncIOScheduler that drives the
+    periodic discovery sweep.
+
+    ``next_run_time=datetime.now()`` fires the first scan immediately,
+    preserving the old loop's "scan, then sleep" cadence.
+    ``coalesce=True`` + ``max_instances=1`` mean a scan that overruns
+    SCAN_INTERVAL never overlaps itself, and the backed-up ticks that
+    piled up while it ran collapse into a single catch-up run instead of
+    a burst — a guarantee the bare while-True loop didn't make. We set
+    ``misfire_grace_time`` generously (one full SCAN_INTERVAL) so those
+    missed ticks are actually treated as misfires eligible for coalescing
+    rather than silently dropped by the default 1 s grace window; the net
+    effect for idempotent discovery is a delayed catch-up scan, never a
+    lost one.
+    """
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_scan,
+        "interval",
+        seconds=SCAN_INTERVAL,
+        id="camera-discovery-scan",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=SCAN_INTERVAL,
+        next_run_time=datetime.now(),
+    )
+    return scheduler
 
 
 # --- FastAPI app ---
@@ -611,7 +643,7 @@ async def _reconcile_with_frigate() -> None:
 
 @app.on_event("startup")
 async def startup():
-    global mqtt_client, _discovery_task
+    global mqtt_client, _scan_scheduler
     try:
         mqtt_client = _connect_mqtt()
         logger.info("Connected to MQTT broker")
@@ -620,7 +652,9 @@ async def startup():
 
     # Wait briefly for Frigate to be ready, then reconcile our cache with
     # its view of the world so a prior-run known_cameras doesn't block
-    # re-adoption of a camera that Frigate forgot.
+    # re-adoption of a camera that Frigate forgot. This Frigate-readiness
+    # wait is a one-time startup step — the scan scheduler below doesn't
+    # repeat it per tick.
     for _ in range(12):
         if await frigate.health_check():
             await _reconcile_with_frigate()
@@ -628,13 +662,22 @@ async def startup():
         logger.info("Waiting for Frigate to be ready...")
         await asyncio.sleep(5)
 
-    _discovery_task = asyncio.create_task(discovery_loop())
+    # WARP-221: drive the periodic sweep with apscheduler instead of a
+    # hand-rolled while-True loop. next_run_time fires the first scan now.
+    _scan_scheduler = build_scan_scheduler()
+    _scan_scheduler.start()
+    logger.info(
+        "Camera discovery scan scheduler started (interval: %ds)", SCAN_INTERVAL
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    if _discovery_task:
-        _discovery_task.cancel()
+    if _scan_scheduler is not None:
+        try:
+            _scan_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("scan scheduler shutdown failed: %s", exc)
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()

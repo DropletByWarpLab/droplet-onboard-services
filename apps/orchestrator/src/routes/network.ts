@@ -24,6 +24,7 @@ import { registerFirewallRoutes } from "./network-firewall.routes.js";
 import { registerVlanRoutes } from "./network-vlan.routes.js";
 import { registerDeviceRoutes } from "./network-devices.routes.js";
 import { registerScheduleRoutes } from "./network-schedules.routes.js";
+import { registerPhoneHomeRoutes } from "./network-phone-home.routes.js";
 
 export function createNetworkRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -66,6 +67,7 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   registerVlanRoutes(router, {});
   registerDeviceRoutes(router, { networkDeviceService });
   registerScheduleRoutes(router, { scheduleApi });
+  registerPhoneHomeRoutes(router, { prisma });
 
   return router;
 }

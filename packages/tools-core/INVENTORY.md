@@ -19,6 +19,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | get_firewall_rules | network | List firewall zones, rules, and port forwards. | false | false | gateway |
 | block_network_device | network | Block a device from internet access by MAC. | true | true | both (canonical name; was `block_device` in orchestrator) |
 | unblock_network_device | network | Restore internet for a previously blocked MAC. | true | true | both (canonical name; was `unblock_device` in orchestrator) |
+| set_phone_home_blocking | network | Block or allow 'phone home' (internet/WAN egress) for IoT, camera, and smart-home devices while keeping them working on the local network and on time (NTP + local DNS stay allowed). scope 'master' toggles the whole feature, 'cameras' the camera VLAN, 'group' a single device group (pass groupId). | true | true | WARP-613 |
 | add_port_forward | network | Add a port-forward rule (external port -> internal IP:port, tcp/udp). | true | true | gateway |
 | get_router_system_info | network | Router hardware, OpenWrt version, uptime, CPU/memory. | false | false | gateway |
 | list_ap_devices | network | List every coverage-extender AP the orchestrator knows about (status, model, IP, audit columns). | false | false | WARP-446 |

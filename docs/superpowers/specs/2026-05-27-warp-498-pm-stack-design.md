@@ -29,7 +29,7 @@ All implementation tickets under Epic WARP-496 must comply with:
 
 ## Overview
 
-Embed [Plane](https://plane.so) (AGPL-3.0) as a compose service inside `droplet-pi-platform`, behind the existing Nginx reverse-proxy. The orchestrator owns identity (JWT → Plane session handoff) and the LLM agent gets a new `pm` tool domain via `packages/tools-core` + MCP. Mobile clients consume read-only endpoints via the existing mobile-API contract.
+Embed [Plane](https://plane.so) (AGPL-3.0) as a compose service inside `droplet`, behind the existing Nginx reverse-proxy. The orchestrator owns identity (JWT → Plane session handoff) and the LLM agent gets a new `pm` tool domain via `packages/tools-core` + MCP. Mobile clients consume read-only endpoints via the existing mobile-API contract.
 
 This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https://warp-lab.atlassian.net/browse/WARP-496) implement them.
 
@@ -43,7 +43,7 @@ This spec defines the contracts and surfaces; Phases 1–6 in [WARP-496](https:/
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  droplet-pi-platform compose network                            │
+│  droplet compose network                                        │
 │                                                                  │
 │   nginx ─────► pm-web (port 3000 internal) ──┐                  │
 │      │                                        │                  │
