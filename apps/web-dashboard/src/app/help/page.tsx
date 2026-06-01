@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
+  ArrowRight,
   Cpu,
   FolderOpen,
   Globe,
   HardDrive,
   MessageSquare,
+  Search,
   Sparkles,
   Video,
 } from "lucide-react";
 import { WizardReplay } from "@/components/help/WizardReplay";
+import { searchHelp } from "@/lib/help-index";
 
 /**
  * /help — single-page customer-facing manual for Droplet.
@@ -25,7 +29,31 @@ import { WizardReplay } from "@/components/help/WizardReplay";
  * The page is plain-text on purpose — no markdown library needed.
  */
 export default function HelpPage() {
+  const router = useRouter();
   const [replayOpen, setReplayOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const trimmed = query.trim();
+  const searching = trimmed.length > 0;
+  // Ranked matches from the local in-repo index. Memoized so we don't
+  // re-rank on unrelated re-renders.
+  const results = useMemo(
+    () => (searching ? searchHelp(trimmed) : []),
+    [searching, trimmed],
+  );
+
+  // Hand the query to on-device chat using the same pendingPrompt handoff the
+  // home-page hero uses (sessionStorage → /chat auto-sends once a model is
+  // ready). No new endpoint — "Ask Droplet AI" is local chat, not a cloud
+  // search.
+  const askDropletAI = () => {
+    try {
+      window.sessionStorage.setItem("droplet.pendingPrompt", trimmed);
+    } catch {
+      /* private mode — /chat still opens, just without the prefilled prompt */
+    }
+    router.push("/chat");
+  };
 
   // If the URL carries a hash (#internet, #cameras, etc.) and the page
   // mounted before the hash was processed, scroll to the section after
@@ -48,7 +76,7 @@ export default function HelpPage() {
 
   return (
     <div className="p-6 lg:p-8 max-w-3xl mx-auto">
-      <header className="mb-8">
+      <header className="mb-6">
         <h1 className="type-large-title text-label-primary mb-2">Help</h1>
         <p className="type-body text-label-secondary mb-5">
           Plain answers to the questions that come up most often. Looking
@@ -64,44 +92,120 @@ export default function HelpPage() {
         </button>
       </header>
 
-      <nav
-        aria-label="Help table of contents"
-        className="dp-card !p-4 mb-8"
-      >
-        <p className="type-subheadline text-label-primary mb-2">
-          On this page
-        </p>
-        <ul className="space-y-1 type-footnote text-label-secondary">
-          {SECTIONS.map((s) => (
-            <li key={s.anchor}>
-              <a
-                href={`#${s.anchor}`}
-                className="text-accent hover:underline"
-              >
-                {s.title}
-              </a>
-            </li>
-          ))}
-        </ul>
-      </nav>
+      {/* Search over the local help index. Offline — no cloud round-trip. */}
+      <div className="relative mb-8">
+        <Search
+          size={18}
+          className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
+          aria-hidden="true"
+        />
+        <input
+          type="search"
+          role="searchbox"
+          aria-label="Search help"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search help — cameras, VPN, storage…"
+          className="dp-input !pl-10"
+        />
+      </div>
 
-      {SECTIONS.map((section) => (
-        <section
-          key={section.anchor}
-          id={section.anchor}
-          className="mb-10 scroll-mt-20"
-        >
-          <div className="flex items-center gap-2 mb-3">
-            <section.Icon size={20} className="text-accent" />
-            <h2 className="type-title-2 text-label-primary">
-              {section.title}
-            </h2>
-          </div>
-          <div className="space-y-3 type-body text-label-secondary">
-            {section.body}
-          </div>
+      {searching ? (
+        <section aria-label="Search results">
+          {results.length === 0 ? (
+            <div className="dp-card p-8 text-center">
+              <p className="type-headline text-label-primary mb-1">
+                No results for &ldquo;{trimmed}&rdquo;
+              </p>
+              <p className="type-subheadline text-label-secondary mb-5">
+                Nothing in the on-box help matched. Ask the local AI — it
+                can answer in your own words, privately on this Droplet.
+              </p>
+              <button
+                type="button"
+                onClick={askDropletAI}
+                className="dp-btn-primary mx-auto"
+              >
+                <MessageSquare size={16} aria-hidden="true" />
+                Ask Droplet AI
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="type-footnote text-label-tertiary">
+                {results.length} result{results.length !== 1 ? "s" : ""}
+              </p>
+              {results.map((r) => (
+                <a
+                  key={r.id}
+                  href={`#${r.id}`}
+                  onClick={() => setQuery("")}
+                  className="dp-card !p-4 block hover:bg-surface-secondary transition-colors duration-200 ease-smooth"
+                >
+                  <p className="type-subheadline text-label-primary mb-1">
+                    {r.title}
+                  </p>
+                  <p className="type-footnote text-label-secondary line-clamp-2">
+                    {r.summary}
+                  </p>
+                </a>
+              ))}
+              {/* Always offer the AI even with hits — the article may not be
+                  the exact answer the customer needs. */}
+              <button
+                type="button"
+                onClick={askDropletAI}
+                className="dp-btn-secondary"
+              >
+                <MessageSquare size={16} aria-hidden="true" />
+                Ask Droplet AI instead
+                <ArrowRight size={16} aria-hidden="true" />
+              </button>
+            </div>
+          )}
         </section>
-      ))}
+      ) : (
+        <>
+          <nav
+            aria-label="Help table of contents"
+            className="dp-card !p-4 mb-8"
+          >
+            <p className="type-subheadline text-label-primary mb-2">
+              On this page
+            </p>
+            <ul className="space-y-1 type-footnote text-label-secondary">
+              {SECTIONS.map((s) => (
+                <li key={s.anchor}>
+                  <a
+                    href={`#${s.anchor}`}
+                    className="text-accent hover:underline"
+                  >
+                    {s.title}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+
+          {SECTIONS.map((section) => (
+            <section
+              key={section.anchor}
+              id={section.anchor}
+              className="mb-10 scroll-mt-20"
+            >
+              <div className="flex items-center gap-2 mb-3">
+                <section.Icon size={20} className="text-accent" />
+                <h2 className="type-title-2 text-label-primary">
+                  {section.title}
+                </h2>
+              </div>
+              <div className="space-y-3 type-body text-label-secondary">
+                {section.body}
+              </div>
+            </section>
+          ))}
+        </>
+      )}
 
       <WizardReplay
         open={replayOpen}
