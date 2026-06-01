@@ -103,6 +103,12 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
     });
 
+    // PR #375 — we're now on `twofactor`. Skip TOTP enrollment to advance
+    // to `internet` (the gate is exercised in TwoFactorStep.test.tsx).
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
     // We're now on `internet`. Skip to `discovery`. Need to flush again so
     // the InternetStep's fetchDuckDnsStatus effect resolves before the
     // "Skip for now" button is queried — the button is present regardless,

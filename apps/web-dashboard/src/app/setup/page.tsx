@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
+import { TwoFactorStep } from "@/components/setup/steps/TwoFactorStep";
 import { InternetStep } from "@/components/setup/steps/InternetStep";
 import { StorageStep } from "@/components/setup/steps/StorageStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
@@ -34,6 +35,7 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
 type Step =
   | "welcome"
   | "account"
+  | "twofactor"
   | "internet"
   | "storage"
   | "discovery"
@@ -44,6 +46,7 @@ type Step =
 const STEPS: Step[] = [
   "welcome",
   "account",
+  "twofactor",
   "internet",
   "storage",
   "discovery",
@@ -71,8 +74,15 @@ export default function SetupPage() {
           <AccountStep
             onComplete={(name) => {
               setDisplayName(name);
-              setStep("internet");
+              setStep("twofactor");
             }}
+          />
+        )}
+
+        {step === "twofactor" && (
+          <TwoFactorStep
+            onComplete={() => setStep("internet")}
+            onSkip={() => setStep("internet")}
           />
         )}
 

@@ -190,6 +190,53 @@ export async function deleteUser(username: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
 }
 
+// --- PR #375 — TOTP 2FA enrollment ---
+
+export interface TotpEnrollResponse {
+  /** otpauth:// URI for manual entry into an authenticator app. */
+  otpauthUri: string;
+  /** Pre-rendered QR data-url (data:image/png;base64,…) for <img src>. */
+  qrDataUrl: string;
+  issuer: string;
+}
+
+export interface TotpVerifyResponse {
+  enabled: boolean;
+  /** Present only on the first successful verify — shown to the user once. */
+  recoveryCodes?: string[];
+}
+
+/** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
+export async function enrollTotp(): Promise<TotpEnrollResponse> {
+  const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Could not start two-factor setup");
+  }
+  return res.json();
+}
+
+/**
+ * Confirm a 6-digit code. On the first success the response carries the
+ * one-time recovery codes (shown once); a later call enables nothing new.
+ */
+export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
+  const res = await authFetch(`${BASE}/api/auth/totp/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "That code didn't match. Try again.");
+  }
+  return res.json();
+}
+
 // --- WARP-217 invites ---
 
 /**

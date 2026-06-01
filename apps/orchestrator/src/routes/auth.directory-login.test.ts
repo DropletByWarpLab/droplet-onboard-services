@@ -161,6 +161,12 @@ function createPrismaMock(seed: UserRow[] = []) {
       return null;
     }),
   };
+  // PR #375 — the login route checks for an enabled TOTP factor after the
+  // password verify. These directory-login fixtures have no TOTP enrolled,
+  // so the delegate returns null and the second-factor gate is skipped.
+  self.totpCredential = {
+    findUnique: vi.fn(async () => null),
+  };
   self._users = users;
   return self;
 }

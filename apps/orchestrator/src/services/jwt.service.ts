@@ -10,6 +10,14 @@ export interface JwtPayload {
   username: string;
   displayName: string;
   role: Role;
+  /**
+   * PR #375 — ISO timestamp of the most-recent successful MFA challenge
+   * (TOTP code or recovery code at login). Optional: only present when the
+   * session was minted behind a second factor. The auth middleware copies
+   * it onto `req.user.lastMfaAt` so `require-recent-mfa` (WARP-230) can
+   * gate sensitive routes. Absent for password-only sessions.
+   */
+  lastMfaAt?: string;
 }
 
 // Single source of truth for token lifetimes. Both the jwt `expiresIn` option
@@ -80,6 +88,8 @@ export function signAccessToken(user: {
   username: string;
   displayName: string;
   role: Role;
+  /** PR #375 — stamp when this session passed a TOTP/recovery challenge. */
+  lastMfaAt?: string;
 }): string {
   return jwt.sign(
     {
@@ -87,6 +97,9 @@ export function signAccessToken(user: {
       username: user.username,
       displayName: user.displayName,
       role: user.role,
+      // Only include the claim when present so password-only sessions
+      // (and every existing caller) keep their current token shape.
+      ...(user.lastMfaAt ? { lastMfaAt: user.lastMfaAt } : {}),
       type: "access",
     },
     getSecret(),
@@ -135,6 +148,9 @@ export function verifyAccessToken(token: string): JwtPayload | null {
       username: decoded.username,
       displayName: decoded.displayName ?? decoded.username,
       role: decoded.role as Role,
+      ...(typeof decoded.lastMfaAt === "string"
+        ? { lastMfaAt: decoded.lastMfaAt }
+        : {}),
     };
   } catch {
     return null;

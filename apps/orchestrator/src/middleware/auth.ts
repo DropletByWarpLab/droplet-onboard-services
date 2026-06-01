@@ -155,6 +155,9 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       username: jwtPayload.username,
       displayName: jwtPayload.displayName,
       role: jwtPayload.role,
+      // PR #375 — carry the MFA-challenge timestamp through so
+      // require-recent-mfa can gate sensitive routes (WARP-230).
+      lastMfaAt: jwtPayload.lastMfaAt ?? null,
     };
     next();
     return;

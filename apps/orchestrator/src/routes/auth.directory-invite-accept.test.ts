@@ -209,6 +209,22 @@ function createPrismaMock() {
       return invites[idx];
     }),
   };
+  // PR #375 — the directory /auth/login route now consults the TOTP
+  // second-factor gate before issuing a session: it reads
+  // `prisma.totpCredential.findUnique({ where: { userId } })` and only
+  // gates when a CONFIRMED credential exists. A freshly-invited member has
+  // no TOTP row, so this stub returns null and login proceeds exactly as it
+  // did pre-#375 (200 round-trip). `recoveryCode` is stubbed for the same
+  // reason — the gate never reaches it on the no-TOTP path, but defining the
+  // delegate keeps the mock faithful to the real client surface so a future
+  // edit to the gate can't 500 on an undefined delegate.
+  self.totpCredential = {
+    findUnique: vi.fn(async () => null),
+  };
+  self.recoveryCode = {
+    findMany: vi.fn(async () => []),
+    updateMany: vi.fn(async () => ({ count: 0 })),
+  };
   self._users = users;
   self._invites = invites;
   return self;
