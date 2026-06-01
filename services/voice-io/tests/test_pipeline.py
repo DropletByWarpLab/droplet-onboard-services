@@ -145,6 +145,22 @@ class _RaisingDetector(WakeWordDetector):
         raise RuntimeError("predict failed (test)")
 
 
+class _ResetCountingDetector(_ScriptedDetector):
+    """A scripted detector that also records reset() calls. Used to pin
+    the contract that the pipeline resets the wake detector when it
+    returns to 'listening' after a transcription cycle — so a stateful
+    recognizer (Vosk's KaldiRecognizer) doesn't carry a stale utterance
+    across the STT excursion. (WARP-154 review item 1)
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reset_calls = 0
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
 # ────────────────────────────────────────────────────────────────────
 # Construction + idle state
 # ────────────────────────────────────────────────────────────────────
@@ -687,6 +703,58 @@ class TestTranscribingFlow:
         assert s.last_transcript_at is not None
         assert s.state == "transcript_ready"
 
+    def test_vad_ends_capture_on_trailing_silence(self):
+        # Once the user has actually spoken, a short run of trailing
+        # silence ends the capture EARLY — before the (long) max-record
+        # window. This is "stop listening the moment they finish".
+        stt = _RecordingSTT(scripted_transcripts=["turn on the lights"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,   # long — VAD must be what finishes it
+            vad_silence_s=0.2,        # ~3 frames (0.08 s each) of silence
+            vad_min_speech_s=0.0,     # don't gate on wall-clock in the test
+            vad_speech_rms=300.0,
+        )
+        pipe._stt_available = True
+        speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
+
+        pipe._on_frame(_silence_frame())   # wake (scripted; content irrelevant)
+        pipe._on_frame(speech)             # begin transcription + first speech chunk
+        assert pipe.status().state == "transcribing"
+        pipe._on_frame(speech)             # more speech
+        for _ in range(4):                 # trailing silence trips VAD
+            pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert stt.finished is True
+        assert s.state == "transcript_ready"
+        assert s.last_transcript == "turn on the lights"
+
+    def test_vad_does_not_fire_before_any_speech(self):
+        # Pure silence after wake must NOT trip VAD (no speech detected
+        # yet) — otherwise a false wake would instantly "finish" on an
+        # empty capture. Only the max-record cap ends a silent capture.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,
+            vad_silence_s=0.2,
+            vad_min_speech_s=0.0,
+            vad_speech_rms=300.0,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())   # wake
+        pipe._on_frame(_silence_frame())   # begin transcription
+        for _ in range(10):
+            pipe._on_frame(_silence_frame())   # all silence, never any speech
+        assert stt.finished is False
+        assert pipe.status().state == "transcribing"
+
     def test_transcript_ready_decays_to_listening(self):
         stt = _RecordingSTT(scripted_transcripts=["test"])
         pipe = WakePipeline(
@@ -706,6 +774,51 @@ class TestTranscribingFlow:
         time.sleep(0.1)
         # Read-time decay flips it back to listening
         assert pipe.status().state == "listening"
+
+    def test_detector_reset_on_resume_to_listening_after_transcription(self):
+        # WARP-154 review item 1: a stateful recognizer (Vosk) carries
+        # decoder state across calls. After a wake fires, frames are routed
+        # to STT and the recognizer is starved; when we return to 'listening'
+        # the next AcceptWaveform would otherwise continue the STALE
+        # utterance. The pipeline must reset() the detector on the
+        # transcription → listening transition so each turn starts fresh.
+        det = _ResetCountingDetector([{"hey_jarvis": 0.9}])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=0.01,
+            visual_decay_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake → wake_detected
+        pipe._on_frame(_silence_frame())  # begin transcription
+        time.sleep(0.05)
+        pipe._on_frame(_silence_frame())  # finish → transcript_ready
+        assert pipe.status().state == "transcript_ready"
+        assert det.reset_calls == 0       # not yet — still in the wake cycle
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())  # decays to listening → reset fires
+        assert pipe.status().state == "listening"
+        assert det.reset_calls == 1, "detector not reset on resume to listening"
+
+    def test_detector_not_reset_while_merely_listening(self):
+        # The reset is tied to the transcription → listening transition, not
+        # to every frame. A detector that's just listening (no wake, no STT
+        # excursion) must never be reset — that would throw away in-progress
+        # partial recognition mid-phrase. (WARP-154 review item 1)
+        det = _ResetCountingDetector([{"hey_jarvis": 0.1}])
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+        )
+        pipe._set_state("listening")
+        for _ in range(5):
+            pipe._on_frame(_silence_frame())  # all below threshold, no wake
+        assert det.reset_calls == 0
 
     def test_transcript_callback_fires_with_text(self):
         captured: list[str] = []
@@ -849,9 +962,10 @@ class TestTranscribingFlow:
         assert s.listening is True
 
     def test_default_stt_max_record_constant(self):
-        # Drift detector — make sure README's "5-second post-wake window"
-        # documentation still matches the default.
-        assert DEFAULT_STT_MAX_RECORD_S == 5.0
+        # Drift detector — this is the HARD cap on capture length; the
+        # end-of-speech VAD cuts sooner when the room goes quiet. Kept
+        # short so a noisy room (no detectable silence) still stops fast.
+        assert DEFAULT_STT_MAX_RECORD_S == 3.0
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1103,13 +1217,17 @@ class _RecordingLLM(LLMClient):
         self._available = available
         self._raise_on_reply = raise_on_reply
         self.requests: list[str] = []
+        # Records tool_choice values for parity with MockLLM so tests can
+        # assert the intent gate's decision is threaded through to the LLM.
+        self.tool_choices: list = []
 
     @property
     def available(self) -> bool:
         return self._available
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice=None) -> str:
         self.requests.append(user_text)
+        self.tool_choices.append(tool_choice)
         if self._raise_on_reply:
             raise LLMUnavailable("LLM blew up (test)")
         return self._scripts.pop(0) if self._scripts else ""
@@ -1328,7 +1446,7 @@ class _FlippableLLM(LLMClient):
         self.probe_count += 1
         return self._available
 
-    def reply(self, user_text):
+    def reply(self, user_text, *, tool_choice=None):
         return ""
 
 
