@@ -32,7 +32,6 @@ import {
   verifyRefreshToken,
   denyRefreshToken,
   claimRefreshRotation,
-  roleFromGroups,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   type Role,
@@ -49,6 +48,11 @@ import {
   touchNcToken,
   resolveNcToken,
 } from "../services/nextcloud-session.service.js";
+import {
+  hashPassword,
+  verifyPassword,
+  verifyDummyPassword,
+} from "../services/password.service.js";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -81,12 +85,29 @@ const setupSchema = z.object({
   username: usernameField,
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
+  // ADR-012: email is the directory login key. Optional here so the
+  // first-admin bootstrap still works when the Account step hasn't
+  // collected one yet (the Aurora "Work email" step, PR #370, supplies
+  // it); when present it's written to the row so the owner can sign in
+  // through the email-keyed /auth/login.
+  email: z.string().email().max(200).optional(),
 });
 
-const loginSchema = z.object({
-  username: z.string().min(1),
-  password: z.string().min(1),
-});
+// ADR-012: the directory login key is email. The Aurora login (PR #370)
+// labels the field "Work email" and sends it as the identifier. We accept
+// it under `email` (canonical) and still tolerate the legacy `username`
+// field carrying the same value, so a client mid-rollout that hasn't
+// renamed the field keeps working through one deploy window. At least one
+// of the two must be present and non-empty.
+const loginSchema = z
+  .object({
+    email: z.string().min(1).optional(),
+    username: z.string().min(1).optional(),
+    password: z.string().min(1),
+  })
+  .refine((d) => Boolean(d.email ?? d.username), {
+    message: "Email and password are required",
+  });
 
 const createUserSchema = z.object({
   username: usernameField,
@@ -239,7 +260,7 @@ export function createPublicAuthRouter(
         return;
       }
 
-      const { username, password, displayName } = parsed.data;
+      const { username, password, displayName, email } = parsed.data;
 
       // WARP-485 follow-up (Romain PR #279 review): the local User
       // mirror is a HARD precondition for setup, not a best-effort
@@ -278,18 +299,28 @@ export function createPublicAuthRouter(
       // upsert succeeds and ncInstall later fails, the next retry
       // hits the same idempotent upsert (no-op) and re-attempts
       // ncInstall — exactly what we want for transient infrastructure
-      // failures. An orphan local row from this path is harmless: the
-      // login route 401s USER_NOT_PROVISIONED anyway (no NC user
-      // exists yet), so there's no security or UX gap from the
-      // orphan.
+      // failures.
+      //
+      // ADR-012: the directory is the auth source of truth, so the
+      // owner's argon2id passwordHash is written HERE (not derived from
+      // Nextcloud). Nextcloud is provisioned downstream below with the
+      // same plaintext so its WebDAV account works, but it no longer
+      // authenticates anyone. The plaintext is hashed before it touches
+      // the row and is never logged.
+      const passwordHash = await hashPassword(password);
       await prisma.user.upsert({
         where: { nextcloudUsername: username },
-        update: { displayName: displayName || username },
+        update: {
+          displayName: displayName || username,
+          passwordHash,
+          ...(email ? { email } : {}),
+        },
         create: {
           username,
           displayName: displayName || username,
-          email: null,
+          email: email ?? null,
           nextcloudUsername: username,
+          passwordHash,
           role: "owner" as any,
         },
       });
@@ -304,102 +335,114 @@ export function createPublicAuthRouter(
     }
   });
 
-  // ── Login: validate credentials, issue JWT tokens ──
+  // ── Login: validate credentials LOCALLY against the directory, issue JWT ──
+  //
+  // ADR-012 — the built-in argon2id directory is the auth source of truth.
+  // We resolve the User by email, verify the password against the stored
+  // argon2id hash (password.service), and only then provision/refresh the
+  // downstream Nextcloud session for WebDAV. Nextcloud no longer
+  // authenticates — it's a downstream-provisioned account.
   router.post("/auth/login", async (req, res, next) => {
     try {
       const parsed = loginSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Username and password are required" });
+        res.status(400).json({ error: "Email and password are required" });
         return;
       }
 
-      const result = await ncLoginWithCredentials(parsed.data.username, parsed.data.password);
-      if (!result) {
-        // WARP-456: failed login audit row. We intentionally include
-        // the attempted username so an audit reviewer can spot
-        // patterns; the password never reaches the recorder.
+      // Email is the stable directory login key (accept the legacy
+      // `username` field carrying the same value during rollout).
+      const loginEmail = (parsed.data.email ?? parsed.data.username ?? "").trim();
+      const password = parsed.data.password;
+
+      // Shared failure path. Identical status + body for every
+      // unsuccessful branch (unknown email, no password set, wrong
+      // password) so an attacker can't enumerate registered emails by
+      // diffing the response. The `username` label in the audit row is
+      // the attempted login identifier; the password never reaches the
+      // recorder.
+      const denyInvalid = async (attempted: string): Promise<void> => {
         await recordActivity({
           kind: "auth",
           severity: "warn",
           sourceIcon: "shield-alert",
           what: "Sign-in failed",
-          sub: `${parsed.data.username} • ${callerIpFromReq(req) ?? "unknown"}`,
+          sub: `${attempted} • ${callerIpFromReq(req) ?? "unknown"}`,
           refs: {
             outcome: "invalid_credentials",
-            username: parsed.data.username,
+            username: attempted,
             ip: callerIpFromReq(req) ?? null,
           },
         });
         res.status(401).json({ error: "Invalid credentials" });
-        return;
-      }
+      };
 
-      // Fetch user details (groups included) to determine role
-      const ncUser = await ncGetCurrentUser(result.token);
-
-      const ncUsername = ncUser?.id || result.loginName;
-      const displayName = ncUser?.displayName || result.loginName;
-      const role: Role = roleFromGroups(ncUser?.groups ?? []);
-
-      // WARP-485 round 2 — resolve the local User row by `nextcloudUsername`
-      // BEFORE signing the JWT, so `JWT.sub = localUser.id` (UUID) instead
-      // of the NC username string. Fail-closed when no local row matches:
-      // the operator must explicitly provision the user via /api/people
-      // before they can authenticate. Silent auto-provision would be a
-      // privilege-escalation vector — an attacker who somehow holds a
-      // valid OCS credential for an unrelated NC user could otherwise
-      // mint a default-`family`-role local row.
-      //
-      // The shim createAuthRouter() in legacy code paths calls
-      // createPublicAuthRouter() without prisma; we treat that the same
-      // as "no matching row" so a misconfigured deployment can't sneak
-      // past with an unnormalized id either.
+      // The shim createAuthRouter() wires the public router without
+      // prisma. Without the directory we can't authenticate anyone — but
+      // we still spend a dummy verify so this branch is timing-comparable
+      // to a real lookup, then deny with the identical error.
       if (!prisma) {
         logger.warn(
-          { ncUsername },
-          "JWT login: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
+          "Directory login: prisma not wired into public auth router; failing closed (ADR-012)",
         );
-        res.status(401).json({
-          error:
-            "User not provisioned. Ask an owner to add this account via /api/people.",
-          code: "USER_NOT_PROVISIONED",
-        });
+        await verifyDummyPassword(password);
+        await denyInvalid(loginEmail);
         return;
       }
+
+      // Resolve the directory user by email. On a miss, still run an
+      // argon2id verify against a dummy hash so the unknown-email branch
+      // costs roughly the same wall-clock as the wrong-password branch
+      // (anti-enumeration). A user without a passwordHash (service-only
+      // principal, pre-first-login invitee) is treated identically — no
+      // leak distinguishing "no account" from "account, no password".
       const localUser = await prisma.user.findUnique({
-        where: { nextcloudUsername: ncUsername },
+        where: { email: loginEmail },
       });
-      if (!localUser) {
-        logger.warn(
-          { ncUsername },
-          "JWT login: no local User row for Nextcloud user; operator must provision via /api/people (WARP-485 round 2)",
-        );
-        res.status(401).json({
-          error:
-            "User not provisioned. Ask an owner to add this account via /api/people.",
-          code: "USER_NOT_PROVISIONED",
-        });
+      if (!localUser || !localUser.passwordHash) {
+        await verifyDummyPassword(password);
+        await denyInvalid(loginEmail);
+        return;
+      }
+
+      const ok = await verifyPassword(localUser.passwordHash, password);
+      if (!ok) {
+        await denyInvalid(loginEmail);
         return;
       }
 
       const userId = localUser.id; // local UUID — fed into JWT.sub + NC store key
-      const username = ncUsername; // human-readable handle (display + audit only)
+      const username = localUser.username; // human-readable handle (display + audit only)
+      const displayName = localUser.displayName;
+      const role: Role = localUser.role as Role;
 
-      // Stash the Nextcloud app-password server-side so downstream routes
-      // (files, storage, user admin) can impersonate the caller against
-      // Nextcloud's WebDAV/OCS APIs — the browser only ever sees our JWT.
-      // TTL matches the refresh-token lifetime; the entry is overwritten on
-      // every successful login and deleted at logout.
-      //
-      // WARP-485 round 2 — keyed by the local User.id UUID so logout's
-      // getNcToken(req.user.id) hits the same key (req.user.id is the
-      // UUID across all consumers post-round-2).
+      // Downstream provisioning (NOT authentication): ensure the caller
+      // has a live Nextcloud app-password so Files/WebDAV keep working.
+      // The directory already authenticated them; if Nextcloud is down or
+      // the account isn't provisioned yet, we log and continue — login
+      // must not fail just because the WebDAV side is unavailable. The
+      // same NC password is provisioned downstream at account creation,
+      // so credential-based session minting is a provisioning detail.
+      const ncUsername = localUser.nextcloudUsername ?? username;
       try {
-        await storeNcToken(userId, result.token, REFRESH_TOKEN_TTL_SECONDS);
+        const ncSession = await ncLoginWithCredentials(ncUsername, password);
+        if (ncSession) {
+          // Keyed by the local User.id UUID so logout's
+          // getNcToken(req.user.id) hits the same slot (WARP-485).
+          await storeNcToken(userId, ncSession.token, REFRESH_TOKEN_TTL_SECONDS);
+        } else {
+          logger.warn(
+            { userId },
+            "Directory login: Nextcloud session could not be provisioned; WebDAV will be unavailable until next login (ADR-012)",
+          );
+        }
       } catch (err) {
-        logger.error({ err }, "Failed to persist Nextcloud session token");
-        res.status(500).json({ error: "Session store unavailable" });
-        return;
+        // Non-fatal — the directory is the source of truth. Surface in
+        // logs so on-call can spot a degraded WebDAV provisioning path.
+        logger.error(
+          { err, userId },
+          "Directory login: downstream Nextcloud provisioning failed (non-fatal)",
+        );
       }
 
       // Issue JWT access + refresh tokens
