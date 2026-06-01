@@ -233,10 +233,20 @@ if [ "${SKIP_SERVICE_RESTART:-0}" != "1" ]; then
   # pm-api blocked on `wait_for_migrations`. Force-recreate the migrator so it
   # actually re-runs (it waits for postgres-pm/redis-pm health via its own
   # depends_on); Django `migrate` is idempotent, so a same-version restore is a
-  # safe no-op. pm-api's own `wait_for_migrations` covers ordering, so we do not
-  # need to block on completion here. (WARP-496)
+  # safe no-op.
+  #
+  # This run is LOAD-BEARING (unlike the plain restarts above): if migrations
+  # don't apply, pm-api hangs forever inside `wait_for_migrations`. So — unlike
+  # the cosmetic restarts — we do NOT swallow its output, and we block on the
+  # one-shot's exit code via `dc wait` (when the Compose build supports it) so a
+  # failed migration is surfaced in the restore log instead of leaving the
+  # operator with a silent hang and a misleading "Restore complete." (WARP-496)
   if dc ps --services 2>/dev/null | grep -qx "pm-api"; then
-    dc up -d --force-recreate pm-migrator >/dev/null 2>&1 || true
+    if ! dc up -d --force-recreate pm-migrator; then
+      log_warn "pm-migrator failed to start — PM stack may hang on wait_for_migrations"
+    elif dc wait --help >/dev/null 2>&1 && ! dc wait pm-migrator >/dev/null; then
+      log_warn "pm-migrator exited non-zero — migrations may be incomplete; check 'docker logs droplet-pm-migrator'"
+    fi
   fi
   for svc in pm-api pm-worker pm-beat pm-web; do
     if dc ps --services 2>/dev/null | grep -qx "$svc"; then
