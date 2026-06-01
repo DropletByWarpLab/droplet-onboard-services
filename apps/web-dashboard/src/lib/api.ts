@@ -62,11 +62,64 @@ const BASE = "";
 
 // --- Auth ---
 
-export async function checkSetupRequired(): Promise<boolean> {
-  const res = await authFetch(`${BASE}/api/auth/setup`);
-  if (!res.ok) return true;
-  const data = await res.json();
-  return data.setupRequired;
+/**
+ * Tri-state result of probing `GET /api/auth/setup` (WARP-577).
+ *
+ * - `'required'`  — orchestrator explicitly answered `setupRequired: true`.
+ * - `'complete'`  — orchestrator explicitly answered `setupRequired: false`.
+ * - `'unknown'`   — indeterminate: any non-2xx, network error, probe timeout,
+ *                   or a 2xx body that omits the `setupRequired` boolean.
+ *
+ * Callers MUST treat `'unknown'` as fail-CLOSED — i.e. never route a user into
+ * the first-run `/setup` wizard on an indeterminate answer. Only an explicit
+ * `'required'` may do that. This avoids guessing setup state from the absence
+ * of a clean response (the repo's "no guessing" standard).
+ */
+export type SetupStatus = "required" | "complete" | "unknown";
+
+/** Wall-clock budget for the setup probe before we treat it as `'unknown'`. */
+const SETUP_PROBE_TIMEOUT_MS = 5000;
+
+export async function checkSetupRequired(): Promise<SetupStatus> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    SETUP_PROBE_TIMEOUT_MS,
+  );
+
+  try {
+    // `/api/auth/setup` is a public, pre-auth probe (no session required), so
+    // we call `fetch` directly rather than `authFetch` — there is no 401 to
+    // refresh through, and the AbortController signal must reach the network
+    // call unaltered for the probe timeout to fire.
+    const res = await fetch(`${BASE}/api/auth/setup`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    // Any non-2xx (5xx cold-boot, 502 gateway, etc.) is indeterminate — never
+    // collapse "couldn't reach the orchestrator" into "setup is needed".
+    if (!res.ok) return "unknown";
+
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      // 2xx with an unparseable body — still indeterminate.
+      return "unknown";
+    }
+
+    const setupRequired = (data as { setupRequired?: unknown } | null)
+      ?.setupRequired;
+    // Only an explicit boolean is trusted; a missing field is NOT "complete".
+    if (setupRequired === true) return "required";
+    if (setupRequired === false) return "complete";
+    return "unknown";
+  } catch {
+    // Network error or aborted/timed-out probe → indeterminate.
+    return "unknown";
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function setupAdmin(
