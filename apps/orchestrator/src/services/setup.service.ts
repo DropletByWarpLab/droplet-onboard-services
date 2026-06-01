@@ -75,6 +75,26 @@ export class InvalidSetupStepError extends Error {
   }
 }
 
+/**
+ * M2 (PR #372 re-review) — thrown when the `appliance:"ready"` transition is
+ * requested before setup has actually completed, i.e. before any admin
+ * account exists. Marking an account-less box "ready" would route every
+ * subsequent visitor to /login on a box with no credentials = a permanent
+ * lockout (and a pre-claim takeover vector). We require proof setup
+ * finished — at least one local `User` row — before honoring the claim.
+ * The route layer maps this to a 409 Conflict (the request is well-formed
+ * but the appliance isn't in a state where it can be claimed yet).
+ */
+export class SetupNotCompleteError extends Error {
+  public readonly code = "SETUP_NOT_COMPLETE";
+  constructor() {
+    super(
+      "Cannot mark the appliance ready before setup completes: no admin account exists yet.",
+    );
+    this.name = "SetupNotCompleteError";
+  }
+}
+
 /** Precise type guard over the shipped steps. */
 export function isSetupStep(value: unknown): value is SetupStep {
   return (
@@ -100,19 +120,31 @@ function toSetupState(row: {
   };
 }
 
+/** The welcome / unclaimed baseline returned when the singleton row hasn't
+ *  been materialized yet. Mirrors the schema column defaults and the
+ *  migration-seeded row, so a read can synthesize it WITHOUT writing. */
+const DEFAULT_STATE: SetupState = {
+  appliance: "unclaimed",
+  setupStep: "welcome",
+  userTourCompleted: false,
+};
+
 /**
- * Read the current setup state, materializing the singleton at the
- * welcome / unclaimed default on first call. We upsert (not just read)
- * so the row exists for subsequent writers — and so resumability has a
- * concrete anchor from the very first `/setup/state` hit.
+ * Read the current setup state.
+ *
+ * M5 (PR #372 re-review) — this is a PUBLIC, unauthenticated read, so it
+ * MUST be side-effect-free: a `GET /api/setup/state` from any LAN caller
+ * can never write. We `findUnique` and fall back to the welcome/unclaimed
+ * default in memory. The row is materialized by the migration seed
+ * (`INSERT ... ON CONFLICT DO NOTHING`) and by the authenticated writers
+ * below, so a real appliance always has a concrete row to resume from; the
+ * in-memory default only covers the pre-migration / fresh-mock edge.
  */
 export async function getSetupState(prisma: PrismaClient): Promise<SetupState> {
-  const row = await prisma.applianceSetup.upsert({
+  const row = await prisma.applianceSetup.findUnique({
     where: { id: APPLIANCE_SETUP_ID },
-    create: { id: APPLIANCE_SETUP_ID },
-    update: {},
   });
-  return toSetupState(row);
+  return row ? toSetupState(row) : DEFAULT_STATE;
 }
 
 /**
@@ -140,10 +172,34 @@ export async function setSetupStep(
  * column write; the dashboard never infers ready-ness from `setupStep`.
  * Also lands the step on `done` so the persisted row is internally
  * consistent (a ready appliance is on the terminal step).
+ *
+ * M2 (PR #372 re-review) — PRECONDITION: setup must actually have
+ * completed before the box can be claimed. Without this guard an
+ * account-less box could be flipped "ready" (by a pre-claim LAN attacker,
+ * or a buggy client), after which `AuthGate` routes every visitor to
+ * /login on a box with NO admin — a permanent lockout. We fail CLOSED.
+ *
+ * "Setup completed" is proven by EITHER:
+ *   - `opts.authorized === true` — the caller presented a valid dashboard
+ *     session (verified inline in the route). A session can only exist if
+ *     an admin account was created and logged in, so it IS proof of a
+ *     completed account step — this covers the narrow window where the
+ *     finish PATCH fires from the freshly-authenticated wizard before any
+ *     other admin-count read could observe the new row; OR
+ *   - at least one local `User` (admin) row exists.
+ * Neither ⇒ `SetupNotCompleteError` (409), appliance stays unclaimed.
+ * Once claimable, a re-flip is an idempotent no-op.
  */
 export async function markApplianceReady(
   prisma: PrismaClient,
+  opts: { authorized?: boolean } = {},
 ): Promise<SetupState> {
+  if (!opts.authorized) {
+    const adminCount = await prisma.user.count();
+    if (adminCount === 0) {
+      throw new SetupNotCompleteError();
+    }
+  }
   const row = await prisma.applianceSetup.upsert({
     where: { id: APPLIANCE_SETUP_ID },
     create: { id: APPLIANCE_SETUP_ID, state: "ready", setupStep: TERMINAL_STEP },

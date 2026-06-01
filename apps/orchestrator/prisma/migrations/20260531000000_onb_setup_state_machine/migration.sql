@@ -45,12 +45,20 @@ END $$;
 -- singleton). A uuid default would mint a fresh row per upsert-create and
 -- break the singleton invariant.
 
+-- M6 (PR #372 re-review): `updatedAt` carries a DB-level DEFAULT
+-- CURRENT_TIMESTAMP. Prisma's `@updatedAt` only sets the column from the
+-- Prisma client on writes — it does NOT emit a column DEFAULT — so a raw
+-- INSERT that omits `updatedAt` (e.g. the singleton seed below, or any
+-- out-of-band SQL) would violate the NOT NULL constraint and fail the
+-- migration. The DEFAULT makes the column safe to omit on INSERT while the
+-- application-level `@updatedAt` still bumps it on every Prisma update.
+
 CREATE TABLE IF NOT EXISTS "ApplianceSetup" (
     "id" TEXT NOT NULL DEFAULT 'singleton',
     "state" TEXT NOT NULL DEFAULT 'unclaimed',
     "setupStep" "SetupStep" NOT NULL DEFAULT 'welcome',
     "userTourCompleted" BOOLEAN NOT NULL DEFAULT false,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "ApplianceSetup_pkey" PRIMARY KEY ("id")

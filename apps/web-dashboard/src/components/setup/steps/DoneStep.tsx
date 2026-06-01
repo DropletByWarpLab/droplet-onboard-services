@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { WelcomeFlourish } from "@/components/auth/WelcomeFlourish";
 import { useAuth } from "@/lib/auth";
 
@@ -20,6 +20,12 @@ import { useAuth } from "@/lib/auth";
  * or a refresh landing back on `done` must not matter (the server call is an
  * idempotent 200 no-op on an already-ready appliance regardless).
  *
+ * M4 (PR #372 re-review) — if the finish PATCH fails, `completeSetup` rolls
+ * the optimistic flip back and exposes `completeSetupError`. We surface that
+ * here with a RETRY button instead of showing the celebratory flourish while
+ * the server is still `unclaimed` — otherwise the owner gets bounced back
+ * into the wizard on the next refresh with no explanation.
+ *
  * Subtitle reflects whether the discovery step actually found anything:
  *   - >0 devices: "N device(s) connected and ready to control."
  *   - 0 devices: hint that they can add devices later.
@@ -31,18 +37,50 @@ export function DoneStep({
   displayName?: string;
   discoveredCount: number;
 }) {
-  const { completeSetup } = useAuth();
+  const { completeSetup, completeSetupError } = useAuth();
   const finishedRef = useRef(false);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     if (finishedRef.current) return;
     finishedRef.current = true;
-    // Fire-and-forget at the call site: completeSetup awaits the server PATCH
-    // internally and never rejects (patchSetupReady swallows network errors),
-    // so there is nothing to catch here and the flourish/redirect proceeds
-    // independently of the round-trip.
+    // Fire-and-forget at the call site: completeSetup never rejects (it
+    // captures any failure into `completeSetupError`), so there's nothing to
+    // catch here. On success the flourish/redirect proceeds; on failure the
+    // error branch below renders the retry.
     void completeSetup();
   }, [completeSetup]);
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      await completeSetup();
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  // M4 — the persist failed; don't pretend we're done. Offer a retry.
+  if (completeSetupError) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-4 text-center">
+        <p className="type-headline text-label-primary">
+          Almost there — we couldn&apos;t finish setting up your appliance.
+        </p>
+        <p className="type-subheadline text-label-tertiary">
+          {completeSetupError}
+        </p>
+        <button
+          type="button"
+          onClick={handleRetry}
+          disabled={retrying}
+          className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline disabled:opacity-60"
+        >
+          {retrying ? "Retrying…" : "Retry"}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <WelcomeFlourish

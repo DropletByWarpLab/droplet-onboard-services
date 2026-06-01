@@ -12,7 +12,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // PR #372 — route off the explicit `/setup/state` machine. The appliance
   // lifecycle ("unclaimed" | "ready") replaces the boolean `setupRequired`
   // that was derived from Nextcloud's `installed` flag.
-  const { user, isLoading, setupState } = useAuth();
+  const { user, isLoading, setupState, setupProbeError, retrySetupProbe } =
+    useAuth();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -23,8 +24,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // so a transient `/setup/state` failure can't trap the user in the wizard.
   const applianceUnclaimed = setupState?.appliance === "unclaimed";
 
+  // M3 — when the lifecycle probe failed and we have no appliance state on a
+  // protected page, we render an explicit error/retry (below) instead of
+  // routing off a guess. Suppress the routing effect in that case so we
+  // don't silently bounce the user (e.g. to /login) before they can retry.
+  const probeBlocked =
+    setupProbeError !== null && setupState === null && !isPublicPage;
+
   useEffect(() => {
     if (isLoading) return;
+    if (probeBlocked) return;
 
     // Unclaimed appliance → first-run wizard. The wizard itself hydrates
     // `setupState.setupStep` to resume at the right step (resumability).
@@ -57,7 +66,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       router.replace("/");
       return;
     }
-  }, [user, isLoading, applianceUnclaimed, pathname, router, isPublicPage]);
+  }, [user, isLoading, applianceUnclaimed, pathname, router, isPublicPage, probeBlocked]);
 
   // Loading state
   if (isLoading) {
@@ -68,6 +77,39 @@ export function AuthGate({ children }: { children: ReactNode }) {
             <DropletMark size={32} className="text-accent" aria-label="Droplet" />
           </div>
           <p className="type-subheadline text-label-tertiary">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // M3 (PR #372 re-review) — the lifecycle probe failed and we have no
+  // appliance state to route off. Rather than fail open silently (guess
+  // "ready" and bounce a first-run owner to /login on an unclaimed box), and
+  // only when we're not already on a public page, surface an EXPLICIT error
+  // with a retry. A public page (/setup, /login) still renders so a deep-link
+  // isn't blocked behind a transient probe failure.
+  if (probeBlocked) {
+    return (
+      <div className="min-h-screen bg-surface-primary flex items-center justify-center">
+        <div className="text-center max-w-sm px-6">
+          <div className="flex items-center justify-center mx-auto mb-3">
+            <DropletMark size={32} className="text-accent" aria-label="Droplet" />
+          </div>
+          <p className="type-headline text-label-primary mb-2">
+            Can&apos;t reach your appliance
+          </p>
+          <p className="type-subheadline text-label-tertiary mb-4">
+            {setupProbeError}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              void retrySetupProbe();
+            }}
+            className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline"
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
