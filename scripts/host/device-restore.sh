@@ -218,7 +218,27 @@ fi
 # --- Restart affected services -------------------------------------------
 if [ "${SKIP_SERVICE_RESTART:-0}" != "1" ]; then
   log_info "Restarting affected services..."
-  for svc in "$DB_SERVICE" "$PM_SERVICE" orchestrator nextcloud pm-api pm-worker pm-beat pm-web; do
+
+  # Datastores + non-PM services: a plain restart picks up the restored volumes.
+  for svc in "$DB_SERVICE" "$PM_SERVICE" orchestrator nextcloud; do
+    if dc ps --services 2>/dev/null | grep -qx "$svc"; then
+      dc restart "$svc" >/dev/null 2>&1 || true
+    fi
+  done
+
+  # Plane PM services need the one-shot pm-migrator re-run against the restored
+  # postgres-pm volume. `docker compose restart` does NOT re-evaluate
+  # depends_on, so it would skip the migrator — and a cross-version restore
+  # (older schema in the restored volume, newer Plane image) would then leave
+  # pm-api blocked on `wait_for_migrations`. Force-recreate the migrator so it
+  # actually re-runs (it waits for postgres-pm/redis-pm health via its own
+  # depends_on); Django `migrate` is idempotent, so a same-version restore is a
+  # safe no-op. pm-api's own `wait_for_migrations` covers ordering, so we do not
+  # need to block on completion here. (WARP-496)
+  if dc ps --services 2>/dev/null | grep -qx "pm-api"; then
+    dc up -d --force-recreate pm-migrator >/dev/null 2>&1 || true
+  fi
+  for svc in pm-api pm-worker pm-beat pm-web; do
     if dc ps --services 2>/dev/null | grep -qx "$svc"; then
       dc restart "$svc" >/dev/null 2>&1 || true
     fi

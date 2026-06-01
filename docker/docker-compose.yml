@@ -1223,6 +1223,12 @@ services:
       # connection). WEB_URL is link-rendering only — not needed to migrate.
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
     mem_limit: ${PM_MIGRATOR_MEM_LIMIT:-512m}
+    # Soft floor so the migrator isn't the first OOM-eviction target when the
+    # rest of the stack is under memory pressure during its run — a kill here
+    # exits non-zero and blocks pm-api/pm-worker (they gate on its success).
+    # Mirrors postgres-pm. (Note: this protects against contention, not against
+    # a migration batch exceeding the 512m mem_limit — 512m is ample for migrate.)
+    mem_reservation: ${PM_MIGRATOR_MEM_RESERVATION:-256m}
     cpus: ${PM_MIGRATOR_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
