@@ -313,6 +313,20 @@ describe("POST /api/auth/invites — create", () => {
       .send({ username: "has spaces", role: "user" });
     expect(res.status).toBe(400);
   });
+
+  it("normalizes the invite email to trim+lowercase before persisting (BLOCKER)", async () => {
+    // createInviteSchema is one of the email boundaries: the email stored
+    // on the invite becomes the invitee's directory login key on accept,
+    // so it must already be normalized to stay consistent with the
+    // email-keyed login lookup.
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({ username: "alice", email: "  Alice@Example.COM  " });
+    expect(res.status).toBe(200);
+    expect(prisma.rows[0].email).toBe("alice@example.com");
+  });
 });
 
 describe("GET /api/auth/invites — list", () => {
@@ -658,5 +672,24 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
       });
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ status: "ok", username: "alice" });
+  });
+});
+
+describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () => {
+  it("forwards a trim+lowercased email to Nextcloud (updateUserSchema boundary)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ email: "  Alice@Example.COM  " });
+
+    expect(res.status).toBe(200);
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(
+      "test-nc-token",
+      "alice",
+      "email",
+      "alice@example.com",
+    );
   });
 });
