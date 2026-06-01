@@ -119,6 +119,21 @@ class WifiConnectRequest(BaseModel):
     password: str = Field("", max_length=128)
 
 
+class BootRequest(BaseModel):
+    stage: str = Field(..., max_length=48, description="Current boot stage caption")
+    detail: str = Field("", max_length=54, description="Optional detail line")
+    pct: Optional[int] = Field(
+        None, ge=0, le=100,
+        description="Progress 0-100; omit for an indeterminate band")
+
+
+class ShutdownRequest(BaseModel):
+    reason: str = Field("", max_length=54, description="Why we're shutting down")
+    phase: str = Field(
+        "stopping", max_length=16,
+        description="'stopping' (in progress) or 'halted' (safe to power off)")
+
+
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
 # Cap decoded pixel count to prevent PIL decompression-bomb DoS — an 8 MB
 # PNG/TIFF can balloon to multi-GB on decode and OOM the container. 24 MP
@@ -178,6 +193,36 @@ async def show_message(req: MessageRequest):
         raise HTTPException(503, "Display not initialized")
     display.show_message(req.title, req.lines)
     return {"ok": True, "mode": "message", "hold_seconds": 30}
+
+
+@app.post("/display/boot")
+async def show_boot(req: BootRequest):
+    """Show the boot/startup screen with a stage caption + optional progress.
+
+    The boot screen is otherwise self-driven (the service opens on it and the
+    readiness loop clears it); this endpoint lets the host's startup
+    orchestration push finer-grained stage/progress updates while the stack
+    comes up.
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_boot(req.stage, req.detail, req.pct)
+    return {"ok": True, "mode": "boot"}
+
+
+@app.post("/display/shutdown")
+async def show_shutdown(req: ShutdownRequest):
+    """Show the shutdown screen and freeze the panel on it.
+
+    Driven by the host's systemd ExecStop oneshot (droplet-shutdown-screen)
+    at teardown so the last thing on the panel is "Shutting down" rather than
+    a frozen live screen. `phase=halted` switches the copy to
+    "Safe to power off".
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_shutdown(req.reason, req.phase)
+    return {"ok": True, "mode": "shutdown"}
 
 
 @app.post("/display/custom")
