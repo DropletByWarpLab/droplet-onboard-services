@@ -52,7 +52,10 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
 
   // Coverage access points (extenders). Read-only for every role (ADR-005
   // RBAC). On error/absent the hook yields no data and the section hides.
-  const { data: apData } = useSWR("/api/aps", fetchApDevices, { refreshInterval: 30000 });
+  // 10s to match the orchestrator AP-discovery poller (DROPLET_AP_DISCOVERY_INTERVAL=10)
+  // and CoverageExtendersPanel — otherwise, with only Simple mode mounted, an
+  // AWAITING_APPROVAL extender would surface up to ~20s late.
+  const { data: apData } = useSWR("/api/aps", fetchApDevices, { refreshInterval: 10_000 });
   const aps = apData?.aps ?? [];
   const hasExtenders = aps.length > 0;
   const apsOnline = aps.filter((a) => a.status === "ONLINE").length;
