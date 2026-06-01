@@ -85,7 +85,7 @@ echo "--- Phase 2: unit invariants (COMPOSE_PROFILES=linux,display) ---"
 COMPOSE_PROFILES="linux,display"
 export COMPOSE_PROFILES
 
-UNIT_TEXT="$(render_systemd_unit "$TMP_ROOT" "$FAKE_COMPOSE_FILE")"
+UNIT_TEXT="$(render_systemd_unit "$TMP_ROOT" "$FAKE_COMPOSE_FILE" "dropletuser")"
 
 # Invariant 1: ExecStartPre runs 'config -q' as a preflight
 if echo "$UNIT_TEXT" | grep -q "ExecStartPre="; then
@@ -138,6 +138,42 @@ else
   fail "ExecStart missing --profile when COMPOSE_PROFILES=linux,display"
 fi
 
+# Invariant 5a: each comma-split profile is its OWN --profile flag.
+# The Compose CLI does NOT comma-split --profile (only the COMPOSE_PROFILES
+# env var does), so "--profile linux,display" matches no profile and the
+# linux/display services never start. Assert the count of --profile flags
+# equals the number of comma-split profiles.
+EXEC_START_LINE="$(echo "$UNIT_TEXT" | grep "ExecStart=" | grep -v "ExecStartPre")"
+PROFILE_FLAG_COUNT="$(echo "$EXEC_START_LINE" | grep -o -- "--profile" | wc -l | tr -d ' ')"
+if [ "$PROFILE_FLAG_COUNT" -eq 2 ]; then
+  pass "ExecStart has one --profile per profile (2 flags for linux,display)"
+else
+  fail "ExecStart has $PROFILE_FLAG_COUNT --profile flag(s); expected 2 (one per comma-split profile)"
+fi
+
+# Invariant 5b: no single --profile carries a comma-joined value.
+if echo "$EXEC_START_LINE" | grep -qE -- "--profile +[A-Za-z0-9_-]+,[A-Za-z0-9_-]+"; then
+  fail "ExecStart has a comma-joined --profile value (e.g. --profile linux,display) — Compose treats it as one profile name"
+else
+  pass "ExecStart has no comma-joined --profile value"
+fi
+
+# Invariant 5c: both expected profile names are present as flags.
+if echo "$EXEC_START_LINE" | grep -q -- "--profile linux" \
+   && echo "$EXEC_START_LINE" | grep -q -- "--profile display"; then
+  pass "ExecStart contains both '--profile linux' and '--profile display'"
+else
+  fail "ExecStart missing one of '--profile linux' / '--profile display'"
+fi
+
+# Invariant 5d: ExecReload mirrors the repeated-flag form too.
+RELOAD_PROFILE_COUNT="$(echo "$UNIT_TEXT" | grep "ExecReload=" | grep -o -- "--profile" | wc -l | tr -d ' ')"
+if [ "$RELOAD_PROFILE_COUNT" -eq 2 ]; then
+  pass "ExecReload has one --profile per profile (2 flags for linux,display)"
+else
+  fail "ExecReload has $RELOAD_PROFILE_COUNT --profile flag(s); expected 2"
+fi
+
 # Invariant 6: ExecReload uses 'up -d --force-recreate' (NOT bare restart)
 if echo "$UNIT_TEXT" | grep "ExecReload=" | grep -q -- "--force-recreate"; then
   pass "ExecReload uses --force-recreate"
@@ -187,6 +223,48 @@ else
   fail "ExecStart does not use absolute path for compose file"
 fi
 
+# Invariant 12: [Unit] ordering — After=docker.service network-online.target
+if echo "$UNIT_TEXT" | grep -q "^After=docker.service network-online.target"; then
+  pass "After=docker.service network-online.target is present"
+else
+  fail "After=docker.service network-online.target missing/incorrect"
+fi
+
+# Invariant 13: [Service] is a oneshot that stays active
+if echo "$UNIT_TEXT" | grep -q "^Type=oneshot"; then
+  pass "Type=oneshot is present"
+else
+  fail "Type=oneshot missing (boot start would not run to completion correctly)"
+fi
+
+if echo "$UNIT_TEXT" | grep -q "^RemainAfterExit=yes"; then
+  pass "RemainAfterExit=yes is present"
+else
+  fail "RemainAfterExit=yes missing (oneshot would report inactive after start)"
+fi
+
+# Invariant 14: User= is the explicit non-root user passed to the renderer
+if echo "$UNIT_TEXT" | grep -q "^User=dropletuser"; then
+  pass "User= reflects the explicit run_user argument (not ambient \$USER)"
+else
+  fail "User= does not reflect the explicit run_user argument (got: $(echo "$UNIT_TEXT" | grep '^User=' || true))"
+fi
+
+# Invariant 15: render is idempotent — same inputs produce byte-identical output
+UNIT_TEXT_AGAIN="$(render_systemd_unit "$TMP_ROOT" "$FAKE_COMPOSE_FILE" "dropletuser")"
+if [ "$UNIT_TEXT" = "$UNIT_TEXT_AGAIN" ]; then
+  pass "render_systemd_unit is idempotent for identical inputs"
+else
+  fail "render_systemd_unit produced different output for identical inputs"
+fi
+
+# Invariant 16: run_user is required — calling without it must fail.
+if ( render_systemd_unit "$TMP_ROOT" "$FAKE_COMPOSE_FILE" >/dev/null 2>&1 ); then
+  fail "render_systemd_unit succeeded without a run_user arg (should be required)"
+else
+  pass "render_systemd_unit rejects a missing run_user argument"
+fi
+
 # =============================================================================
 # Phase 3: empty COMPOSE_PROFILES (macOS / default-only)
 # =============================================================================
@@ -195,7 +273,7 @@ echo "--- Phase 3: unit invariants (COMPOSE_PROFILES empty) ---"
 COMPOSE_PROFILES=""
 export COMPOSE_PROFILES
 
-UNIT_TEXT_EMPTY="$(render_systemd_unit "$TMP_ROOT" "$FAKE_COMPOSE_FILE")"
+UNIT_TEXT_EMPTY="$(render_systemd_unit "$TMP_ROOT" "$FAKE_COMPOSE_FILE" "dropletuser")"
 
 # With empty profiles, ExecStart should NOT have '--profile ""' (bad syntax)
 # It may either omit --profile entirely or use no-profile form.
@@ -216,6 +294,13 @@ if echo "$UNIT_TEXT_EMPTY" | grep "ExecStart=" | grep -v "ExecStartPre" | grep -
   fail "ExecStart has '--profile \"\"' (empty-string profile arg) — bad syntax"
 else
   pass "ExecStart does not have '--profile \"\"' (empty profiles handled cleanly)"
+fi
+
+# With empty profiles, NO --profile flag should be emitted at all.
+if echo "$UNIT_TEXT_EMPTY" | grep "ExecStart=" | grep -v "ExecStartPre" | grep -q -- "--profile"; then
+  fail "ExecStart emits a --profile flag when COMPOSE_PROFILES is empty"
+else
+  pass "ExecStart omits --profile entirely when COMPOSE_PROFILES is empty"
 fi
 
 # ExecReload must also stay correct with empty profiles
