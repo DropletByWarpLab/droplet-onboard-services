@@ -268,7 +268,7 @@ export function createNetworkDeviceService(
 
   async function renameGroup(
     id: string,
-    patch: { name?: string; color?: string; icon?: string },
+    patch: { name?: string; color?: string; icon?: string; blockPhoneHome?: boolean },
   ) {
     if (patch.name !== undefined) {
       const clash = await prisma.deviceGroup.findFirst({
@@ -284,6 +284,8 @@ export function createNetworkDeviceService(
     if (patch.name !== undefined) data.name = patch.name;
     if (patch.color !== undefined) data.color = patch.color;
     if (patch.icon !== undefined) data.icon = patch.icon;
+    // WARP-613: per-group phone-home flag. The egress reconciler enforces it.
+    if (patch.blockPhoneHome !== undefined) data.blockPhoneHome = patch.blockPhoneHome;
     const result = await mapPrismaNotFound("Group", () =>
       prisma.deviceGroup.update({ where: { id }, data }),
     );

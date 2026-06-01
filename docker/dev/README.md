@@ -41,7 +41,7 @@ services.
    General → "Use the WSL 2 based engine"). 4+ GB RAM allocated.
 
 2. **Clone the repo** somewhere Docker Desktop can reach. If you're using the
-   WSL2 backend, **clone INSIDE WSL** (e.g. `~/code/droplet-pi-platform`) — not
+   WSL2 backend, **clone INSIDE WSL** (e.g. `~/code/droplet-onboard-services`) — not
    under `C:\Users\…\GitHub\`. Bind-mounts from `/mnt/c/` into Linux containers
    are 10–100× slower than mounts inside the WSL2 filesystem. If you must stay
    on `C:\`, expect first-boot to take 10+ minutes and `next dev` recompiles to
@@ -50,8 +50,8 @@ services.
    ```bash
    # Inside WSL2 (Ubuntu)
    cd ~ && mkdir -p code && cd code
-   git clone git@github.com:DropletByWarpLab/droplet-pi-platform.git
-   cd droplet-pi-platform
+   git clone git@github.com:DropletByWarpLab/droplet-onboard-services.git
+   cd droplet-onboard-services
    git checkout feat/dashboard-redesign
    ```
 

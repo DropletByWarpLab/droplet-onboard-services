@@ -15,7 +15,7 @@ Droplet is shipping two native companion apps in production:
 - **`stefan-cruceru/droplet-ios`** — SwiftUI, Apple-platform-native
 - **`stefan-cruceru/droplet-android`** — Kotlin + Jetpack Compose
 
-Two earlier branches in `droplet-pi-platform` produced native scaffolds:
+Two earlier branches in `droplet-onboard-services` produced native scaffolds:
 - `feat/android-app` — WebView shell only (dead end; not production-track)
 - `feat/native-mobile-clients` — Kotlin Multiplatform + SwiftUI iOS shell
   + Compose Android + full WebDAV file sync. Stefan flagged this branch

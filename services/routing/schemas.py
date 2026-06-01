@@ -81,6 +81,16 @@ class PortForwardRequest(BaseModel):
     proto: str = Field(default="tcp", description="Protocol (tcp, udp, tcpudp)")
 
 
+# WARP-613: phone-home egress control.
+class PhoneHomeDeviceRequest(BaseModel):
+    mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address")
+    blocked: bool = Field(..., description="True to block phone-home (WAN egress), False to restore")
+
+
+class PhoneHomeCamerasRequest(BaseModel):
+    blocked: bool = Field(..., description="True to block the camera VLAN from phoning home, False to restore")
+
+
 class ApplyConfigRequest(BaseModel):
     configs: list[str] = Field(..., min_length=1, description="Config names to apply (e.g. ['network', 'wireless'])")
     # WARP-41: 60s matches the orchestrator's confirmation token TTL so a Tier 2

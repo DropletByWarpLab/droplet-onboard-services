@@ -17,6 +17,7 @@ const EXPECTED_TOOL_NAMES = [
   "list_dhcp_leases",
   "list_network_devices",
   "scan_wifi_networks",
+  "set_phone_home_blocking", // WARP-613
   "set_wifi_channel",
   "set_wifi_ssid",
   "unblock_network_device",

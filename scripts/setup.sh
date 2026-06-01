@@ -369,6 +369,14 @@ main() {
     start_stack
   fi
 
+  # Single-box: (re)provision the OpenWrt container now that start_stack
+  # (re)created it. The boot-time oneshot droplet-openwrt-attach does not fire
+  # on a no-reboot re-provision, so trigger it here or routing crash-loops
+  # against an unprovisioned openwrt (WARP-578).
+  if [ "$SINGLE_BOX_MODE" = "true" ] && [ "$SKIP_START" != "true" ]; then
+    provision_single_box_openwrt
+  fi
+
   # --- Workspace settings seeder (WARP-457) ---
   # Idempotent first-boot hook for the WorkspaceSetting table. The
   # orchestrator's app.ts already invokes this at every start; calling

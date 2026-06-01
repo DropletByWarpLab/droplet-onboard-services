@@ -55,6 +55,7 @@ import type {
   VpnStatusInfo,
   VpnPeerCreatedInfo,
   DuckDnsStatus,
+  ToolCatalogResponse,
 } from "./types";
 import { authFetch } from "./auth";
 
@@ -325,6 +326,37 @@ export async function fetchStorage(): Promise<StorageStats> {
 export async function fetchDrives(): Promise<DrivesResponse> {
   const res = await authFetch(`${BASE}/api/storage/drives`);
   if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-612: ask the device-bridge to refresh its drive snapshot (admin-only;
+ * proxies the bridge's /drives/changed cache hook — no mount side effects).
+ */
+export async function rescanDrives(): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`${BASE}/api/storage/drives/rescan`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to rescan drives: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-612: unmount + forget a hot-plug USB drive (admin-only). The
+ * orchestrator + bridge refuse anything that isn't a USB mount under
+ * /mnt/droplet/. Throws a friendly message on 409 (busy) / 503 (not
+ * configured) so the caller can surface it.
+ */
+export async function ejectDrive(uuid: string): Promise<{ ok: boolean }> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}/eject`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to eject drive: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -2430,6 +2462,24 @@ export async function transcribeNow(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `transcribe-now failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Tools (WARP-555) ---
+
+/**
+ * Read-only catalog of the built-in tools the agent can call, grouped by
+ * domain, for the `/tools` surface. Backed by `GET /api/llm/tools/catalog`
+ * which reads `@droplet/tools-core`'s in-process registry (no MCP child),
+ * so it stays available even when the agent runtime is mid-restart. The
+ * orchestrator RBAC-filters write tools for non-privileged roles.
+ */
+export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
+  const res = await authFetch(`${BASE}/api/llm/tools/catalog`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load tools: ${res.status}`);
   }
   return res.json();
 }

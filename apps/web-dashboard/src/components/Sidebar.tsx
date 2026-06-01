@@ -12,6 +12,7 @@ import {
   FlaskConical,
   FolderOpen,
   Globe,
+  HardDrive,
   HelpCircle,
   Laptop,
   LayoutDashboard,
@@ -27,6 +28,7 @@ import {
   Share2,
   Users,
   Video,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { DropletMark } from "./DropletMark";
@@ -105,6 +107,11 @@ const NAV_GROUPS: NavGroup[] = [
       // updates and adds the full Roles / Groups / Sessions entries
       // with workspace:"business" set.
       { href: "/users", label: "Users", icon: Users },
+      // WARP-555: read-only catalog of the assistant's built-in tools.
+      // No role restriction — the /api/llm/tools/catalog route filters
+      // write tools out for non-privileged roles, so family/guest see a
+      // safe read-only subset. Visible in both workspaces.
+      { href: "/tools", label: "Tools", icon: Wrench },
       { href: "/settings", label: "Settings", icon: Settings },
       // WARP-174: customer-facing manual + "How Droplet works" replay
       // modal. Sits next to Settings — same "support / reference" zone.
@@ -138,6 +145,7 @@ const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
 // Sub-navigation rendered under Files when we're on a /files/* route.
 const filesSubNav = [
   { href: "/files", label: "All files", icon: FolderOpen, exact: true },
+  { href: "/files/drives", label: "Drives", icon: HardDrive, exact: false },
   { href: "/files/recents", label: "Recents", icon: Clock, exact: false },
   { href: "/files/favorites", label: "Favorites", icon: Star, exact: false },
   { href: "/files/shared", label: "Shared", icon: Share2, exact: false },

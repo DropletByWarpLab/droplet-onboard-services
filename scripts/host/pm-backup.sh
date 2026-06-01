@@ -99,7 +99,7 @@ mkdir -p "$WORK_DIR/attachments"
 # traffic is consistent. The spec WARP-498 OQ1 flag noted a brief
 # pause-write window may be needed for high-traffic deployments; for V1
 # we accept the small inconsistency risk.
-ATTACH_VOLUME="${PROJECT:-droplet-pi-platform}_pm-attachments-data"
+ATTACH_VOLUME="${PROJECT:-droplet}_pm-attachments-data"
 if ! docker run --rm \
        -v "$ATTACH_VOLUME:/data:ro" \
        -v "$WORK_DIR/attachments:/out" \

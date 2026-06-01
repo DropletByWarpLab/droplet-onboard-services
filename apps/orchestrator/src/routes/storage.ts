@@ -24,6 +24,18 @@ const logger = pino({ name: "storage-route" });
  */
 const BRIDGE_URL = process.env.BRIDGE_URL || "http://172.17.0.1:9090";
 
+// WARP-612: shared secret the device-bridge requires on mutating routes
+// (eject). Mirrors the bridge's own env precedence. Read per-request (see the
+// eject handler) so a deployment that injects the secret after boot — and the
+// tests — see the current value rather than a boot-time snapshot.
+function bridgeAuthToken(): string {
+  return (
+    process.env.BRIDGE_AUTH_TOKEN ||
+    process.env.SERVICE_TOKEN_DISPLAY ||
+    ""
+  ).trim();
+}
+
 interface BridgeDrive {
   device: string;
   mount: string;
@@ -33,6 +45,33 @@ interface BridgeDrive {
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-612: read-only enrichment from the device-bridge. Optional so an
+   *  older bridge that predates the enrichment still type-checks; `bus` is
+   *  re-derived server-side (deriveBus) when the bridge omits it. */
+  fs?: string;
+  bus?: string;
+  readonly?: boolean;
+  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present
+   *  only when the bridge has DRIVE_SMART_ENABLED and smartctl can read the
+   *  device; null/absent otherwise. The dashboard hides the chips when null. */
+  smart?: string | null;
+  temp_c?: number | null;
+  /** WARP-612: hot-plug auto-mounted (ejectable) vs installed/fstab — the
+   *  bus-agnostic ejectability signal (ADR-011). The UI shows Eject on this,
+   *  not on bus. */
+  removable?: boolean;
+}
+
+/** Fallback bus class for the icon when the bridge omits `bus` (older bridge).
+ *  The bridge sends the *real* transport (it reads lsblk on the host); the
+ *  orchestrator runs in a container without the host's block devices, so it
+ *  can only name-guess. Stay neutral for sd* rather than guessing 'usb' — a
+ *  /dev/sd* drive is just as likely SATA/SAS (ADR-011). Presentation-only. */
+function deriveBus(device: string): string {
+  const base = (device || "").split("/").pop() || "";
+  if (base.startsWith("nvme")) return "nvme";
+  if (base.startsWith("mmcblk")) return "mmc";
+  return "disk";
 }
 
 interface BridgeDrivesSnapshot {
@@ -133,6 +172,9 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         const label = byUuid.get(d.uuid);
         return {
           ...d,
+          // Guarantee a bus class for the dashboard even if the bridge is
+          // older than the WARP-612 enrichment.
+          bus: d.bus ?? deriveBus(d.device),
           displayName: label?.displayName ?? null,
           icon: label?.icon ?? null,
           notes: label?.notes ?? null,
@@ -217,6 +259,97 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     } catch (err) {
       logger.warn({ err, uuid: req.params.uuid }, "Failed to update Drive label");
       next(err);
+    }
+  });
+
+  /**
+   * POST /api/storage/drives/rescan — refresh the device-bridge's drive
+   * snapshot (it caches ~10s). Proxies the bridge's existing
+   * `/drives/changed` cache-invalidation hook — the same one the automount
+   * udev rule calls on hot-plug — so this only drops a cache; it never
+   * mounts or unmounts. Admin-only because it's a device-control action.
+   */
+  router.post("/storage/drives/rescan", async (req, res) => {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${BRIDGE_URL}/drives/changed`, {
+        method: "POST",
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!r.ok) {
+        return res.status(502).json({ ok: false, error: `bridge returned ${r.status}` });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      logger.warn({ err }, "Failed to trigger drive rescan");
+      return res
+        .status(502)
+        .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  /**
+   * POST /api/storage/drives/:uuid/eject — unmount + forget a hot-plug
+   * auto-mounted drive (WARP-612). Admin-only. Forwards to the device-bridge's
+   * auth-gated /drives/:uuid/eject, which gates on automount-state membership +
+   * a /mnt/droplet/ mount (bus-agnostic per ADR-011 — USB, external NVMe, SD,
+   * SATA dock, etc.), not on bus type. Requires a bridge auth token; 503 if the
+   * deployment hasn't provisioned one. A 409 (drive busy) is surfaced so the
+   * user can close files and retry; other bridge errors return a generic
+   * message and are logged server-side.
+   */
+  router.post("/storage/drives/:uuid/eject", async (req, res) => {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    const { uuid } = req.params;
+    if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid)) {
+      return res.status(400).json({ error: "Invalid drive UUID" });
+    }
+    const bridgeToken = bridgeAuthToken();
+    if (!bridgeToken) {
+      return res.status(503).json({
+        ok: false,
+        error: "Drive eject is unavailable — the device-bridge auth token is not configured.",
+      });
+    }
+    try {
+      const ctrl = new AbortController();
+      // The bridge's eject runs sync (≤10s) + umount (≤20s) = ~30s worst case,
+      // so wait longer than that: aborting at 25s would 502 an eject the bridge
+      // actually completed, leaving the user retrying an already-unmounted drive.
+      const timer = setTimeout(() => ctrl.abort(), 35000);
+      const r = await fetch(`${BRIDGE_URL}/drives/${encodeURIComponent(uuid)}/eject`, {
+        method: "POST",
+        headers: { "X-Droplet-Auth": bridgeToken },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      const body = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) {
+        // Log the bridge's raw message server-side; only the 409 "busy" case is
+        // actionable enough to surface (and bridge errors can carry mount
+        // internals, so other statuses get a generic message).
+        logger.warn({ uuid, status: r.status, bridgeError: body.error }, "Drive eject rejected by bridge");
+        return res.status(r.status === 409 ? 409 : 502).json({
+          ok: false,
+          error:
+            r.status === 409
+              ? body.error || "The drive is in use — close any open files and try again."
+              : "The device-bridge could not complete the eject.",
+        });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      logger.warn({ err, uuid }, "Failed to eject drive");
+      return res
+        .status(502)
+        .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
     }
   });
 
