@@ -156,6 +156,10 @@ services:
       # "Router supervision disabled" banner. `mock` is handled on the routing
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
+      # WARP-562: credentialed CORS allowlist. Empty falls through to the safe
+      # code default (https://droplet-ai.local). NEVER set this to '*' — the
+      # orchestrator rejects a wildcard at startup.
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}

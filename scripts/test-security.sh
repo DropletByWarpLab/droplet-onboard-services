@@ -462,7 +462,27 @@ else
 fi
 
 # =============================================================================
-# Test 13: WARP-569 — Every service must have mem_limit (top-level key)
+# Test 13: WARP-562 — Orchestrator CORS allowlist rejects wildcard + credentials
+# =============================================================================
+# `credentials: true` is always on for the orchestrator, so a `*` CORS allowlist
+# would let any site the appliance owner visits perform credentialed reads. The
+# config parser must die loud on a wildcard (mirrors ai-gateway main.py). This
+# static guard ensures the fail-fast `throw` stays in config.ts so a future edit
+# can't silently drop it (the unit test in cors-config.test.ts covers runtime).
+
+CORS_CONFIG_FILE="$REPO_ROOT/apps/orchestrator/src/config.ts"
+if [ -f "$CORS_CONFIG_FILE" ] \
+  && grep -q 'corsAllowedOrigins' "$CORS_CONFIG_FILE" \
+  && grep -qE 'includes\("\*"\)' "$CORS_CONFIG_FILE" \
+  && grep -qiE 'throw new Error' "$CORS_CONFIG_FILE"; then
+  pass "config.ts: CORS allowlist rejects wildcard '*' with credentials"
+else
+  fail "config.ts: missing fail-fast guard rejecting CORS_ALLOWED_ORIGINS=* (WARP-562)"
+  printf "    Credentialed CORS must never allow '*'; config parse must throw.\n\n" >&2
+fi
+
+# =============================================================================
+# Test 14: WARP-569 — Every service must have mem_limit (top-level key)
 # =============================================================================
 # Containers without a mem_limit are uncapped — a single runaway process can
 # OOM-kill the whole appliance (7 GB shared RAM, 30 services). Use top-level
