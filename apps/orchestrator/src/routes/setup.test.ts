@@ -217,11 +217,12 @@ describe("PATCH /api/setup/state", () => {
 
   it("rejects an unknown step with 400 (not a silent coerce)", async () => {
     const app = buildApp(prisma);
-    // `team` is still GATED (PR #380 wires `org` but not team) — it stays the
-    // canonical not-yet-shipped step the route must 400.
+    // A value that is not a member of the SetupStep enum must 400, not be
+    // silently coerced. (`team` is now a shipped step as of this PR, so use a
+    // genuinely-unknown sentinel for the negative assertion.)
     const res = await request(app)
       .patch("/api/setup/state")
-      .send({ setup_step: "team" });
+      .send({ setup_step: "nonsense" });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("INVALID_SETUP_STEP");
   });
