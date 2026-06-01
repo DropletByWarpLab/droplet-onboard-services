@@ -202,6 +202,16 @@ DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # wakes promptly.
 DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 
+# End-of-speech (VAD) for the STT capture window. Once the user has
+# actually started talking, the capture ends after a short run of
+# trailing silence — so the box stops listening the moment they finish
+# their statement instead of always holding the mic for the full
+# max-record window. Energy-based on frame RMS; the max-record window
+# stays the hard cap for noisy rooms where a clean silence never arrives.
+DEFAULT_VAD_SILENCE_S = 0.8       # trailing silence (s) that ends the turn
+DEFAULT_VAD_SPEECH_RMS = 300.0    # int16 frame RMS above which = "speech"
+DEFAULT_VAD_MIN_SPEECH_S = 0.3    # min capture before VAD may fire
+
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
 # than an Enum because all reads cross thread boundaries + JSON, and
@@ -285,6 +295,9 @@ class WakePipeline:
         llm: Optional[LLMClient] = None,
         upstream_probe_interval_s: float = DEFAULT_UPSTREAM_PROBE_INTERVAL_S,
         post_speak_cooldown_s: float = DEFAULT_POST_SPEAK_COOLDOWN_S,
+        vad_silence_s: float = DEFAULT_VAD_SILENCE_S,
+        vad_speech_rms: float = DEFAULT_VAD_SPEECH_RMS,
+        vad_min_speech_s: float = DEFAULT_VAD_MIN_SPEECH_S,
         sd_module: Any = None,
     ):
         self._detector = detector
@@ -314,6 +327,14 @@ class WakePipeline:
         # to absorb TTS bleed-back + user "ok thanks" follow-up talk.
         self._post_speak_cooldown_s = post_speak_cooldown_s
         self._speak_ended_at: Optional[float] = None
+        # End-of-speech (VAD) config + per-utterance state (reset each turn
+        # in _begin_transcription).
+        self._vad_silence_s = vad_silence_s
+        self._vad_speech_rms = vad_speech_rms
+        self._vad_min_speech_s = vad_min_speech_s
+        self._frame_s = WAKE_FRAME_SAMPLES / float(WAKE_SAMPLE_RATE)
+        self._stt_speech_started = False
+        self._stt_silence_s = 0.0
         self._sd_module = sd_module  # dependency injection for tests
 
         self._thread: Optional[threading.Thread] = None
@@ -639,17 +660,30 @@ class WakePipeline:
                 self._set_error(f"sounddevice unavailable: {exc}")
                 return
 
+        # Capture at the device's NATIVE input-channel count. Many USB mic
+        # arrays — notably the ReSpeaker XVF3800 — expose ONLY a 2-channel
+        # capture interface (no mono altset) and hand back digital silence
+        # when opened as mono on the raw hw device. We open the native count
+        # (capped at 2) and downmix to a 1-D mono frame, which is what the
+        # detector + STT both expect.
+        in_channels = 1
+        try:
+            info = sd.query_devices(self._input_device_index)
+            in_channels = max(1, min(2, int(info.get("max_input_channels") or 1)))
+        except Exception:
+            in_channels = 1
         try:
             with sd.InputStream(
                 samplerate=WAKE_SAMPLE_RATE,
-                channels=1,
+                channels=in_channels,
                 dtype="int16",
                 device=self._input_device_index,
                 blocksize=WAKE_FRAME_SAMPLES,
             ) as stream:
                 logger.info(
-                    "wake pipeline: listening on device %s, model=%s, threshold=%.2f",
+                    "wake pipeline: listening on device %s (%d ch), model=%s, threshold=%.2f",
                     self._input_device_index,
+                    in_channels,
                     self._detector.model_name,
                     self._threshold,
                 )
@@ -661,8 +695,14 @@ class WakePipeline:
                         # on first run while ONNX kernels JIT; logs once
                         # to avoid spam.
                         logger.debug("wake pipeline: input buffer overflow")
-                    # frames is shape (1280, 1) int16; flatten for openWakeWord.
-                    self._on_frame(frames.flatten())
+                    # frames is shape (1280, in_channels) int16. Downmix to a
+                    # mono 1-D frame (mean across channels) for the detector
+                    # + STT; a 1-channel device just flattens.
+                    if frames.ndim > 1 and frames.shape[1] > 1:
+                        mono = frames.mean(axis=1).astype("int16")
+                    else:
+                        mono = frames.reshape(-1)
+                    self._on_frame(mono)
         except Exception as exc:
             self._set_error(f"wake loop crashed: {exc}")
             logger.exception("wake pipeline crashed")
@@ -792,6 +832,9 @@ class WakePipeline:
             return
         self._stt_session = session
         self._transcribe_started_at = time.time()
+        # Reset end-of-speech (VAD) state for this turn.
+        self._stt_speech_started = False
+        self._stt_silence_s = 0.0
         with self._lock:
             self._state = "transcribing"
         logger.info("transcribing: capture window opened")
@@ -809,12 +852,39 @@ class WakePipeline:
         except STTUnavailable as exc:
             self._abort_transcription(f"send_chunk: {exc}")
             return
-        # Time-bound the capture. VAD-based cutoff lands in a follow-up
-        # commit; for now we use a fixed window. 5 s covers most short
-        # commands ("turn off the lights", "what's on the news"); longer
-        # phrases get truncated for now.
+
         elapsed = time.time() - self._transcribe_started_at
+
+        # End-of-speech (VAD): once the user has actually started talking,
+        # finish as soon as we see a short run of trailing silence — so the
+        # box stops listening the moment they finish their statement rather
+        # than holding the mic for the whole max-record window.
+        rms = (
+            float(np.sqrt(np.mean(np.square(frame.astype(np.float64)))))
+            if frame.size
+            else 0.0
+        )
+        if rms >= self._vad_speech_rms:
+            self._stt_speech_started = True
+            self._stt_silence_s = 0.0
+        elif self._stt_speech_started:
+            self._stt_silence_s += self._frame_s
+        if (
+            self._stt_speech_started
+            and elapsed >= self._vad_min_speech_s
+            and self._stt_silence_s >= self._vad_silence_s
+        ):
+            logger.info(
+                "transcribing: end-of-speech (%.1fs spoken, %.1fs trailing silence)",
+                elapsed, self._stt_silence_s,
+            )
+            self._finish_transcription()
+            return
+
+        # Hard cap so a noisy room (VAD never sees a clean silence) or a
+        # runaway never holds the mic open forever.
         if elapsed >= self._stt_max_record_s:
+            logger.info("transcribing: max-record cap reached (%.1fs)", elapsed)
             self._finish_transcription()
 
     def _finish_transcription(self) -> None:

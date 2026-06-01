@@ -687,6 +687,58 @@ class TestTranscribingFlow:
         assert s.last_transcript_at is not None
         assert s.state == "transcript_ready"
 
+    def test_vad_ends_capture_on_trailing_silence(self):
+        # Once the user has actually spoken, a short run of trailing
+        # silence ends the capture EARLY — before the (long) max-record
+        # window. This is "stop listening the moment they finish".
+        stt = _RecordingSTT(scripted_transcripts=["turn on the lights"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,   # long — VAD must be what finishes it
+            vad_silence_s=0.2,        # ~3 frames (0.08 s each) of silence
+            vad_min_speech_s=0.0,     # don't gate on wall-clock in the test
+            vad_speech_rms=300.0,
+        )
+        pipe._stt_available = True
+        speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
+
+        pipe._on_frame(_silence_frame())   # wake (scripted; content irrelevant)
+        pipe._on_frame(speech)             # begin transcription + first speech chunk
+        assert pipe.status().state == "transcribing"
+        pipe._on_frame(speech)             # more speech
+        for _ in range(4):                 # trailing silence trips VAD
+            pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert stt.finished is True
+        assert s.state == "transcript_ready"
+        assert s.last_transcript == "turn on the lights"
+
+    def test_vad_does_not_fire_before_any_speech(self):
+        # Pure silence after wake must NOT trip VAD (no speech detected
+        # yet) — otherwise a false wake would instantly "finish" on an
+        # empty capture. Only the max-record cap ends a silent capture.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,
+            vad_silence_s=0.2,
+            vad_min_speech_s=0.0,
+            vad_speech_rms=300.0,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())   # wake
+        pipe._on_frame(_silence_frame())   # begin transcription
+        for _ in range(10):
+            pipe._on_frame(_silence_frame())   # all silence, never any speech
+        assert stt.finished is False
+        assert pipe.status().state == "transcribing"
+
     def test_transcript_ready_decays_to_listening(self):
         stt = _RecordingSTT(scripted_transcripts=["test"])
         pipe = WakePipeline(

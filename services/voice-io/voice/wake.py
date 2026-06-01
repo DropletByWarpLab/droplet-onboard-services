@@ -351,27 +351,60 @@ class VoskWakeWordDetector(WakeWordDetector):
             return {}
         try:
             pcm = np.ascontiguousarray(audio_frame, dtype=np.int16).tobytes()
-            # Wait for an utterance endpoint before scoring so the
-            # confidence reflects the whole phrase, not a mid-word partial.
-            if not self._rec.AcceptWaveform(pcm):
-                return {}
-            res = json.loads(self._rec.Result())
+            # Continuous keyword spotting: check the partial hypothesis on
+            # every frame and fire the moment the phrase appears — don't
+            # wait for an utterance endpoint (silence), which a wake word
+            # in a noisy room may never produce. On a true endpoint we also
+            # get a final Result with per-word confidences for a better
+            # score.
+            if self._rec.AcceptWaveform(pcm):
+                res = json.loads(self._rec.Result())
+                text = (res.get("text") or "").strip().lower()
+                is_final = True
+            else:
+                res = json.loads(self._rec.PartialResult())
+                text = (res.get("partial") or "").strip().lower()
+                is_final = False
         except Exception as exc:
             logger.warning("vosk predict error: %s", exc)
             return {}
-        text = (res.get("text") or "").strip().lower()
-        if not text or self._phrase not in text:
+
+        if not text:
             return {}
-        # Score = mean per-word confidence over the phrase's words
-        # (SetWords gives a `result` array of {word, conf, start, end}).
-        words = res.get("result") or []
-        phrase_tokens = set(self._phrase.split())
-        confs = [
-            float(w["conf"])
-            for w in words
-            if isinstance(w, dict) and w.get("word") in phrase_tokens and "conf" in w
-        ]
-        score = sum(confs) / len(confs) if confs else 1.0
+        if self._phrase not in text:
+            # Diagnostic: surface what Vosk actually heard on completed
+            # utterances so misrecognitions are visible in the logs without
+            # spamming a line per partial frame.
+            if is_final:
+                logger.info("vosk: heard %r (no wake match)", text)
+            return {}
+
+        # Matched the wake phrase. A final Result carries per-word
+        # confidences (SetWords); a partial does not, so use a high
+        # constant that clears any sane threshold.
+        score = 1.0
+        if is_final:
+            words = res.get("result") or []
+            phrase_tokens = set(self._phrase.split())
+            confs = [
+                float(w["conf"])
+                for w in words
+                if isinstance(w, dict) and w.get("word") in phrase_tokens and "conf" in w
+            ]
+            if confs:
+                score = sum(confs) / len(confs)
+        else:
+            score = 0.9
+        logger.info(
+            "vosk: WAKE match on %r (score=%.2f, final=%s)", text, score, is_final,
+        )
+        # Reset so the matched phrase doesn't linger in the next partial
+        # and re-fire every subsequent frame (the pipeline debounce is a
+        # second guard).
+        try:
+            self._rec.Reset()
+        except Exception:
+            pass
         return {self._wake_word: score}
 
 

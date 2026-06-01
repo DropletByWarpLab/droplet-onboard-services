@@ -346,14 +346,17 @@ class TestVoskWakeWordDetector:
     and pin the frame→score contract the pipeline depends on.
     """
 
-    def _install_fake_vosk(self, monkeypatch, accept_seq, result_obj):
+    def _install_fake_vosk(self, monkeypatch, accept_seq, result_obj=None, partial_obj=None):
         """Fake the `vosk` module. `accept_seq` is the bool returned by
         AcceptWaveform on each call (was an utterance endpoint reached?);
-        `result_obj` is the dict Result() returns as JSON at an endpoint.
-        Returns a state dict tracking call counts."""
+        `result_obj` is what Result() returns at an endpoint; `partial_obj`
+        is what PartialResult() returns between endpoints. Returns a state
+        dict tracking call counts (accepts / models / resets)."""
         import sys
         import types
-        state = {"accepts": 0, "models": 0}
+        state = {"accepts": 0, "models": 0, "resets": 0}
+        _result = result_obj if result_obj is not None else {"text": ""}
+        _partial = partial_obj if partial_obj is not None else {"partial": ""}
 
         class _FakeRec:
             def __init__(self, model, rate, grammar):
@@ -369,10 +372,13 @@ class TestVoskWakeWordDetector:
                 return accept_seq[i] if i < len(accept_seq) else False
 
             def Result(self):
-                return json.dumps(result_obj)
+                return json.dumps(_result)
 
             def PartialResult(self):
-                return json.dumps({"partial": ""})
+                return json.dumps(_partial)
+
+            def Reset(self):
+                state["resets"] += 1
 
         class _FakeModel:
             def __init__(self, path):
@@ -385,6 +391,21 @@ class TestVoskWakeWordDetector:
         # setitem so pytest auto-restores sys.modules after the test.
         monkeypatch.setitem(sys.modules, "vosk", fake)
         return state
+
+    def test_fires_on_partial_before_endpoint(self, monkeypatch, tmp_path):
+        # A wake word must fire from the in-progress partial hypothesis,
+        # not only at an utterance endpoint (which a noisy room may never
+        # reach). Frame is mid-utterance (AcceptWaveform False) but the
+        # partial already contains the phrase.
+        state = self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[False],
+            partial_obj={"partial": "hey droplet"},
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        scores = det.predict(_silence_frame())
+        assert scores == {"hey_droplet": 0.9}   # partials carry no conf → 0.9
+        assert state["resets"] == 1              # recognizer reset after a match
 
     def test_recognizes_phrase_and_scores_mean_confidence(self, monkeypatch, tmp_path):
         # First frame buffers (AcceptWaveform False), second hits the
