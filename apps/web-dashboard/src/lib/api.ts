@@ -50,6 +50,8 @@ import type {
   ShareUpdateOptions,
   ApplianceContract,
   ClaimResult,
+  OrgInput,
+  OrgResult,
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
@@ -247,6 +249,49 @@ export async function postClaim(code: string): Promise<ClaimResult> {
       data.error || "That claim code didn't match. Try again.",
       data.code || "CLAIM_FAILED",
       res.status === 429,
+    );
+  }
+  return res.json();
+}
+
+/** PR #380 — error carrying the org failure kind so the Org step can show the
+ *  right inline message (slug taken vs slug invalid vs generic) on the right
+ *  field. */
+export class OrgError extends Error {
+  /** Server `code` — e.g. ORG_SLUG_TAKEN, ORG_SLUG_INVALID, ORG_FIELDS_REQUIRED. */
+  readonly code: string;
+  /** True when the slug is already reserved (409) — the URL field error. */
+  readonly slugTaken: boolean;
+  /** True when the slug is malformed (400 ORG_SLUG_INVALID) — the URL field error. */
+  readonly slugInvalid: boolean;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "OrgError";
+    this.code = code;
+    this.slugTaken = code === "ORG_SLUG_TAKEN";
+    this.slugInvalid = code === "ORG_SLUG_INVALID";
+  }
+}
+
+/**
+ * PR #380 — name the single workspace + reserve droplet.local/<slug>. Org slots
+ * AFTER account, but shares the wizard's public posture (the route is
+ * allow-listed), so a bare `fetch` with same-origin credentials. On a taken
+ * (409) or invalid (400) slug we throw an `OrgError` the step renders inline on
+ * the URL field; the server validates the slug shape + uniqueness server-side.
+ */
+export async function postOrg(input: OrgInput): Promise<OrgResult> {
+  const res = await fetch(`${BASE}/api/setup/org`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new OrgError(
+      data.error || "Couldn't save your workspace. Try again in a moment.",
+      data.code || "ORG_FAILED",
     );
   }
   return res.json();

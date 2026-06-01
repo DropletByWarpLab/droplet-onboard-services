@@ -31,6 +31,12 @@ vi.mock("@/lib/auth", () => ({
 const setupAdminMock = vi.fn(async () => undefined);
 const loginUserMock = vi.fn(async () => undefined);
 const postClaimMock = vi.fn(async () => ({ claimed: true, next_step: "account" }));
+const postOrgMock = vi.fn(async () => ({
+  ok: true,
+  slug: "acme",
+  reserved_host: "droplet.local/acme",
+  next_step: "internet",
+}));
 const setDuckDnsConfigMock = vi.fn();
 const updateDriveLabelMock = vi.fn();
 const acceptDiscoveredCameraMock = vi.fn();
@@ -61,6 +67,10 @@ vi.mock("@/lib/api", () => ({
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: (...args: Parameters<typeof postClaimMock>) => postClaimMock(...args),
+
+  // PR #380 — Org step (account → org → internet). Forwarder so the e2e can
+  // assert postOrg actually fired with the workspace name + slug.
+  postOrg: (...args: Parameters<typeof postOrgMock>) => postOrgMock(...args),
 
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
@@ -153,6 +163,7 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
   beforeEach(() => {
     setupAdminMock.mockClear();
     loginUserMock.mockClear();
+    postOrgMock.mockClear();
     setDuckDnsConfigMock.mockClear();
     updateDriveLabelMock.mockClear();
     acceptDiscoveredCameraMock.mockClear();
@@ -200,7 +211,7 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("walks welcome → claim → account → internet → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
+  it("walks welcome → claim → account → org → internet → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
     render(<SetupPage />);
 
     // 1. Welcome → Get Started.
@@ -248,7 +259,24 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     expect(setupAdminMock).toHaveBeenCalledWith("owner", "longenoughpw", "Robin");
     expect(loginUserMock).toHaveBeenCalledWith("owner", "longenoughpw");
 
-    // 3. Internet → save DuckDNS.
+    // 3b. Org (PR #380) → name the workspace + reserve the slug → continue.
+    fireEvent.change(screen.getByLabelText(/workspace name/i), {
+      target: { value: "Acme HQ" },
+    });
+    fireEvent.change(screen.getByLabelText(/workspace url/i), {
+      target: { value: "acme" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(postOrgMock).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "Acme HQ", slug: "acme" }),
+    );
+
+    // 4. Internet → save DuckDNS.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

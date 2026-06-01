@@ -7,6 +7,7 @@ import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { ClaimStep } from "@/components/setup/steps/ClaimStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
+import { OrgStep } from "@/components/setup/steps/OrgStep";
 import { InternetStep } from "@/components/setup/steps/InternetStep";
 import { StorageStep } from "@/components/setup/steps/StorageStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
@@ -40,6 +41,7 @@ type Step =
   | "welcome"
   | "claim"
   | "account"
+  | "org"
   | "internet"
   | "storage"
   | "discovery"
@@ -48,12 +50,14 @@ type Step =
   | "ai"
   | "done";
 // PR #373 — `claim` slots SECOND (welcome → claim → account), per #371 handoff
-// §1. Mirrors the orchestrator `SETUP_STEPS` order 1:1, so a persisted
-// `setupStep` always maps to a step this wizard can render.
+// §1. PR #380 — `org` slots AFTER account (… → account → org → internet → …),
+// per the #380 spec. Mirrors the orchestrator `SETUP_STEPS` order 1:1, so a
+// persisted `setupStep` always maps to a step this wizard can render.
 const STEPS: Step[] = [
   "welcome",
   "claim",
   "account",
+  "org",
   "internet",
   "storage",
   "discovery",
@@ -113,10 +117,12 @@ export default function SetupPage() {
           <AccountStep
             onComplete={(name) => {
               setDisplayName(name);
-              setStep("internet");
+              setStep("org");
             }}
           />
         )}
+
+        {step === "org" && <OrgStep onComplete={() => setStep("internet")} />}
 
         {step === "internet" && (
           <InternetStep

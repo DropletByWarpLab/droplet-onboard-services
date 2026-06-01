@@ -42,6 +42,13 @@ vi.mock("@/lib/api", () => ({
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
+  // PR #380 — org slots after account; the Org step calls postOrg.
+  postOrg: vi.fn(async () => ({
+    ok: true,
+    slug: "acme",
+    reserved_host: "droplet.local/acme",
+    next_step: "internet",
+  })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
@@ -127,6 +134,20 @@ describe("setup flow → done state", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /create account/i }));
       // Flush the in-flight setupAdmin/loginUser promises.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // PR #380 — we're now on `org`. Name the workspace + continue to `internet`.
+    fireEvent.change(screen.getByLabelText(/workspace name/i), {
+      target: { value: "Acme HQ" },
+    });
+    fireEvent.change(screen.getByLabelText(/workspace url/i), {
+      target: { value: "acme" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();

@@ -461,6 +461,30 @@ export interface ClaimResult {
   next_step: string;
 }
 
+/** PR #380 — the onboarding ORG step form values. `industry`/`size` are LOCAL
+ *  smart-default hints only — never sent off the box (FEATURES §10). The
+ *  orchestrator still records them to pick local defaults. */
+export interface OrgInput {
+  name: string;
+  slug: string;
+  tz: string;
+  industry?: string;
+  size?: string;
+  /** On-NVMe logo path (optional). */
+  logo?: string;
+}
+
+/** PR #380 — POST /api/setup/org result. */
+export interface OrgResult {
+  ok: boolean;
+  /** The normalized, reserved slug. */
+  slug: string;
+  /** The reserved `droplet.local/<slug>` host. */
+  reserved_host: string;
+  /** The wizard step to advance to after a successful persist (`internet`). */
+  next_step: string;
+}
+
 // --- Health types ---
 
 export interface HealthResponse {

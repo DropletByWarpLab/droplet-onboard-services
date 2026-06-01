@@ -45,6 +45,13 @@ vi.mock("@/lib/api", () => ({
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
+  // PR #380 — org slots after account; the Org step calls postOrg.
+  postOrg: vi.fn(async () => ({
+    ok: true,
+    slug: "acme",
+    reserved_host: "droplet.local/acme",
+    next_step: "internet",
+  })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: () => fetchDrivesMock(),
@@ -73,6 +80,7 @@ vi.mock("@/lib/api", () => ({
 
 import SetupPage from "@/app/setup/page";
 import { passClaimStep } from "./helpers/claim-step";
+import { passOrgStep } from "./helpers/org-step";
 
 async function advanceToStorage() {
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
@@ -95,6 +103,8 @@ async function advanceToStorage() {
     await Promise.resolve();
     await Promise.resolve();
   });
+  // PR #380 — pass through the org step (account → org → internet).
+  await passOrgStep();
   // Internet step → skip to Storage.
   await act(async () => {
     await Promise.resolve();
