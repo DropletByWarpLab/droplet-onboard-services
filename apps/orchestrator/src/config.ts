@@ -106,6 +106,36 @@ const envSchema = z.object({
   OAUTH2_CLIENT_ID: z.string().default(""),
   OAUTH2_CLIENT_SECRET: z.string().default(""),
 
+  // --- SSO (external-IdP OIDC: Google Workspace + Microsoft Entra) ---
+  // ADR-013 (PR #378). The orchestrator acts as an OIDC RELYING PARTY (the
+  // mirror of the DROPLET_PM_OIDC_* block above, where it is the IdP). One
+  // group of four vars per provider; ALL FOUR must be set for that provider's
+  // SSO button to go live (getOidcProviderConfig fails closed otherwise —
+  // half-configured providers render disabled). Empty defaults keep tests +
+  // un-configured appliances from minting half-built authorize URLs.
+  //
+  // The CLIENT_SECRET values are real provider secrets — they live ONLY in
+  // `.env` (populated by the operator / setup.sh; never tracked) exactly like
+  // OAUTH2_CLIENT_SECRET and DROPLET_PM_OIDC_CLIENT_SECRET. They are read here
+  // and never re-emitted, never logged.
+  //
+  // ISSUER is the provider's discovery base; openid-client appends
+  // /.well-known/openid-configuration and pulls the JWKS from it (ID-token
+  // signature validation). No host is hardcoded in code — the issuer is the
+  // single source.
+  //   - Google:  https://accounts.google.com
+  //   - Entra:   https://login.microsoftonline.com/<tenant>/v2.0
+  // REDIRECT_URI must exactly match the redirect registered at the IdP and the
+  // /api/sso/oidc/callback route this orchestrator serves.
+  DROPLET_SSO_GOOGLE_ISSUER: z.string().default(""),
+  DROPLET_SSO_GOOGLE_CLIENT_ID: z.string().default(""),
+  DROPLET_SSO_GOOGLE_CLIENT_SECRET: z.string().default(""),
+  DROPLET_SSO_GOOGLE_REDIRECT_URI: z.string().default(""),
+  DROPLET_SSO_ENTRA_ISSUER: z.string().default(""),
+  DROPLET_SSO_ENTRA_CLIENT_ID: z.string().default(""),
+  DROPLET_SSO_ENTRA_CLIENT_SECRET: z.string().default(""),
+  DROPLET_SSO_ENTRA_REDIRECT_URI: z.string().default(""),
+
   // --- gRPC ---
   AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
 
