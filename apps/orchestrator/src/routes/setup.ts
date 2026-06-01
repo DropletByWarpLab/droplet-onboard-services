@@ -60,6 +60,11 @@ import {
   consumeClaimCode,
   CLAIM_OUTCOME,
 } from "../services/setup-claim.service.js";
+import {
+  persistOrg,
+  SlugInvalidError,
+  SlugTakenError,
+} from "../services/setup-org.service.js";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
@@ -75,6 +80,33 @@ const logger = pino({ name: "setup-route" });
  * dashboard `STEPS` array.
  */
 const STEP_AFTER_CLAIM = "account";
+
+/**
+ * PR #380 — the wizard step the customer lands on after naming their workspace.
+ * Org slots AFTER account (welcome → claim → account → org → internet → …, per
+ * the #380 spec), so a successful persist advances the resumable wizard to
+ * `internet`. This is the ONLY place that step name is written for the org
+ * flow; keep it in sync with the dashboard `STEPS` array + `SETUP_STEPS`.
+ */
+const STEP_AFTER_ORG = "internet";
+
+/**
+ * PR #380 — org request body. `name`, `slug`, `tz` are required (the workspace
+ * must have a name + reservable host + a time zone). `industry` / `size` are
+ * OPTIONAL LOCAL smart-default hints — the orchestrator persists them but never
+ * sends them off the box (FEATURES.md §10). `logo` is the optional logo path.
+ * Slug *shape* validation lives in the service (setup-org.service.isValidSlug)
+ * so the schema only checks presence/type; the service throws the typed
+ * SlugInvalidError the route maps to a 400.
+ */
+const orgSchema = z.object({
+  name: z.string().min(1).max(120),
+  slug: z.string().min(1).max(80),
+  tz: z.string().min(1).max(64),
+  industry: z.string().max(80).optional(),
+  size: z.string().max(40).optional(),
+  logo: z.string().max(512).optional(),
+});
 
 /**
  * PR #373 — wrong-code rate-limit BUDGET. A claim code is short and read off a
@@ -341,6 +373,77 @@ export function createSetupRouter(prisma: PrismaClient): Router {
       });
     } catch (err) {
       logger.error({ err }, "Failed to process claim");
+      next(err);
+    }
+  });
+
+  // ── POST /api/setup/org ────────────────────────────────────────
+  //
+  // PR #380 — name the single workspace (the "company brain") and reserve its
+  // `droplet.local/<slug>` host. Org slots AFTER account in the resumable
+  // wizard, so a successful persist advances the wizard to `internet`.
+  //
+  // The slug is validated `[a-z0-9-]` + uniqueness in setup-org.service; the
+  // route maps the typed errors onto inline-error HTTP codes so the wizard can
+  // block continue and show the field error:
+  //   valid          → 200 { ok, slug, reserved_host, next_step:"internet" }
+  //   missing fields → 400 { code:"ORG_FIELDS_REQUIRED" }
+  //   bad slug shape → 400 { code:"ORG_SLUG_INVALID" }
+  //   slug taken     → 409 { code:"ORG_SLUG_TAKEN" }
+  //
+  // industry / size are LOCAL smart-default hints only — persisted on the box,
+  // NEVER sent off it (FEATURES.md §10). This handler makes no outbound call.
+  router.post("/setup/org", async (req: Request, res, next) => {
+    try {
+      const parsed = orgSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "A workspace name, URL, and time zone are required.",
+          code: "ORG_FIELDS_REQUIRED",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const body = parsed.data;
+
+      const result = await persistOrg(prisma, {
+        name: body.name,
+        slug: body.slug,
+        tz: body.tz,
+        industry: body.industry ?? null,
+        size: body.size ?? null,
+        logoPath: body.logo ?? null,
+      });
+
+      // Advance the resumable wizard. Best-effort: a failure to persist the
+      // step must not fail the (already-committed) org write — the dashboard
+      // also advances locally and re-syncs on the next PATCH. (Mirrors the
+      // claim route's post-bind step advance.)
+      try {
+        await setSetupStep(prisma, STEP_AFTER_ORG);
+      } catch (stepErr) {
+        logger.warn(
+          { err: stepErr },
+          "Org persisted but advancing the wizard step failed",
+        );
+      }
+
+      res.json({
+        ok: true,
+        slug: result.slug,
+        reserved_host: result.reservedHost,
+        next_step: STEP_AFTER_ORG,
+      });
+    } catch (err) {
+      if (err instanceof SlugInvalidError) {
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+      if (err instanceof SlugTakenError) {
+        res.status(409).json({ error: err.message, code: err.code });
+        return;
+      }
+      logger.error({ err }, "Failed to persist org settings");
       next(err);
     }
   });
