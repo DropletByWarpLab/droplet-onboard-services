@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { Check, KeyRound } from "lucide-react";
+import { Check } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
 import { translateError } from "@/lib/friendly-errors";
 import { AuroraPanel } from "@/components/auth/AuroraPanel";
@@ -137,6 +137,9 @@ export default function LoginPage() {
             </div>
           )}
 
+          {/* PR #377: the passkey affordance lives inside SignInForm (one
+              button, no duplication). Pass the handler only when the browser
+              supports WebAuthn — otherwise the form omits the action entirely. */}
           <SignInForm
             email={email}
             password={password}
@@ -151,29 +154,9 @@ export default function LoginPage() {
             // requested page. Reuse the same same-origin guard as the
             // password path so a crafted `?next=` can't redirect off-origin.
             returnTo={safeNext(searchParams.get("next"))}
+            onPasskey={passkeyReady ? handlePasskeySignIn : undefined}
+            passkeyBusy={passkeyBusy}
           />
-
-          {passkeyReady && (
-            <>
-              {/* PR #377: passkey is an equal, alternative path, so it sits
-                  below the primary form behind a quiet "or". */}
-              <div className="flex items-center gap-3 mt-6" aria-hidden="true">
-                <span className="h-px flex-1 bg-separator" />
-                <span className="type-caption-1 text-label-tertiary">or</span>
-                <span className="h-px flex-1 bg-separator" />
-              </div>
-
-              <button
-                type="button"
-                onClick={handlePasskeySignIn}
-                disabled={passkeyBusy}
-                className="dp-btn-secondary w-full mt-6"
-              >
-                <KeyRound size={16} strokeWidth={1.5} />
-                {passkeyBusy ? "Waiting for passkey..." : "Sign in with a passkey"}
-              </button>
-            </>
-          )}
 
           <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">
             Sign-in happens on your local network — nothing leaves the box.

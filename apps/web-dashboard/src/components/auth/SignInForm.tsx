@@ -121,6 +121,14 @@ export type SignInFormProps = {
   /** Same-origin path to land on after a successful SSO sign-in (the login
    *  page's `?next=`). Omitted → the orchestrator defaults to "/". */
   returnTo?: string;
+  /**
+   * Start the passwordless passkey ceremony. Wired by the login page once the
+   * WebAuthn backend shipped (PR #377). When omitted, the passkey affordance
+   * falls back to the disabled "Soon" placeholder.
+   */
+  onPasskey?: () => void;
+  /** True while the passkey ceremony is in flight (drives the busy label). */
+  passkeyBusy?: boolean;
 };
 
 export function SignInForm({
@@ -134,6 +142,8 @@ export function SignInForm({
   error,
   submitting,
   returnTo,
+  onPasskey,
+  passkeyBusy = false,
 }: SignInFormProps) {
   return (
     <div className="flex flex-col gap-3">
@@ -262,13 +272,26 @@ export function SignInForm({
         {!submitting && <ArrowRight size={15} aria-hidden="true" />}
       </button>
 
-      {/* Passkey — gated until WebAuthn lands */}
-      {!ONB_AUTH_FLAGS.passkey && (
+      {/* Passkey. Three states:
+          - flag on + onPasskey wired (browser supports WebAuthn) → live button
+          - flag on but no handler (browser can't do WebAuthn) → render nothing
+          - flag off (backend not shipped) → disabled "Soon" placeholder */}
+      {!ONB_AUTH_FLAGS.passkey ? (
         <ComingSoon className="!min-h-[40px]">
           <KeyRound size={14} aria-hidden="true" />
           Use a security key or passkey
         </ComingSoon>
-      )}
+      ) : onPasskey ? (
+        <button
+          type="button"
+          onClick={onPasskey}
+          disabled={passkeyBusy}
+          className="dp-btn-secondary w-full justify-center gap-2.5 disabled:opacity-70"
+        >
+          <KeyRound size={14} aria-hidden="true" />
+          {passkeyBusy ? "Waiting for passkey…" : "Sign in with a passkey"}
+        </button>
+      ) : null}
     </div>
   );
 }

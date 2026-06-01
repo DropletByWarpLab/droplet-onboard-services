@@ -7,11 +7,21 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
  */
 
 const loginMock = vi.fn();
+const setUserMock = vi.fn();
 const pushMock = vi.fn();
 let searchString = "";
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ login: loginMock }),
+  useAuth: () => ({ login: loginMock, setUserFromPasskey: setUserMock }),
+}));
+
+// PR #377 — passkeys are live on this branch. jsdom has no WebAuthn API, so
+// pin support on (the real browserSupportsWebAuthn would return false here and
+// hide the affordance); the unsupported-browser case is covered in
+// login.passkey.test.tsx. The ceremony helper is never invoked by this suite.
+vi.mock("@/lib/webauthn", () => ({
+  isPasskeySupported: () => true,
+  signInWithPasskey: vi.fn(),
 }));
 
 vi.mock("next/navigation", async () => {
@@ -65,9 +75,16 @@ describe("Aurora LoginPage", () => {
     expect(
       screen.getByRole("button", { name: /continue with okta/i }),
     ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: /security key or passkey/i }),
-    ).toBeDisabled();
+  });
+
+  // PR #377 ships the WebAuthn backend, so the passkey affordance flips from a
+  // disabled "Soon" placeholder to the single live "Sign in with a passkey"
+  // action (rendered by SignInForm via onPasskey). SSO stays disabled until #378.
+  it("renders exactly one passkey action and it is enabled", () => {
+    render(<LoginPage />);
+    const passkeyButtons = screen.getAllByRole("button", { name: /passkey/i });
+    expect(passkeyButtons).toHaveLength(1);
+    expect(passkeyButtons[0]).toBeEnabled();
   });
 
   it("submits email + password to login() and routes home on success", async () => {
