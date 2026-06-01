@@ -584,8 +584,14 @@ def build_scan_scheduler() -> AsyncIOScheduler:
     ``next_run_time=datetime.now()`` fires the first scan immediately,
     preserving the old loop's "scan, then sleep" cadence.
     ``coalesce=True`` + ``max_instances=1`` mean a scan that overruns
-    SCAN_INTERVAL collapses backed-up ticks into one and never overlaps
-    itself — a guarantee the bare while-True loop didn't make.
+    SCAN_INTERVAL never overlaps itself, and the backed-up ticks that
+    piled up while it ran collapse into a single catch-up run instead of
+    a burst — a guarantee the bare while-True loop didn't make. We set
+    ``misfire_grace_time`` generously (one full SCAN_INTERVAL) so those
+    missed ticks are actually treated as misfires eligible for coalescing
+    rather than silently dropped by the default 1 s grace window; the net
+    effect for idempotent discovery is a delayed catch-up scan, never a
+    lost one.
     """
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -595,6 +601,7 @@ def build_scan_scheduler() -> AsyncIOScheduler:
         id="camera-discovery-scan",
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=SCAN_INTERVAL,
         next_run_time=datetime.now(),
     )
     return scheduler

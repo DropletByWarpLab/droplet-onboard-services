@@ -63,15 +63,33 @@ class TestSchedulerFactory:
         job = scheduler.get_job("camera-discovery-scan")
         assert job.coalesce is True
         assert job.max_instances == 1
+        # misfire_grace_time is set to a full SCAN_INTERVAL (not the 1s
+        # default) so a tick missed while a long scan runs is treated as a
+        # coalescable misfire and caught up, not silently dropped.
+        assert job.misfire_grace_time == main.SCAN_INTERVAL
 
     def test_first_run_fires_immediately(self):
         """next_run_time is set so the first scan fires at startup,
         preserving the old loop's "scan, then sleep" cadence (not
-        "sleep, then scan")."""
+        "sleep, then scan").
+
+        Asserting `is not None` alone is vacuous — every interval job has
+        a next_run_time. Pin it to ~now so this actually guards the
+        immediate-first-scan behavior and would catch a regression to the
+        default (first fire one full SCAN_INTERVAL out)."""
+        from datetime import datetime
+
         main = _fresh_main()
         scheduler = main.build_scan_scheduler()
         job = scheduler.get_job("camera-discovery-scan")
         assert job.next_run_time is not None
+        # First fire must be ~now, not SCAN_INTERVAL away. Allow a small
+        # window for build/scheduling latency; SCAN_INTERVAL is >= 2s.
+        delta = abs((job.next_run_time.replace(tzinfo=None) - datetime.now()).total_seconds())
+        assert delta < 2, (
+            f"first scan should fire immediately (~now), but next_run_time is "
+            f"{delta:.1f}s away"
+        )
 
 
 class TestRunScan:
