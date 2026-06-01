@@ -151,6 +151,13 @@ else
   log_step 0 4 "Emitting a final safety backup before wipe"
   if "$BACKUP_SCRIPT"; then
     log_success "Safety backup complete (default dir: /var/lib/droplet/backups)"
+    # Be explicit about what the wipe destroys that the backup does NOT
+    # capture (caches / rebuildable state). The backup manifest's `excluded`
+    # array is the machine-readable source of truth; this is the operator-
+    # facing heads-up so nobody assumes "backup taken" == "everything saved".
+    log_warn "NOT in the safety backup (rebuilt on reinstall): redis-pm cache,"
+    log_warn "  frigate-config, rag-eval output, whisper/piper/ollama model"
+    log_warn "  caches, openwrt config/overlay. See manifest 'excluded' for the list."
   else
     log_error "Safety backup FAILED — aborting factory reset."
     log_error "Re-run with --no-backup to reset anyway (DATA WILL BE LOST)."

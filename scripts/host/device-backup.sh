@@ -8,11 +8,20 @@
 #   - main orchestrator Postgres   (compose service `db`)         pg_dump
 #   - Plane PM Postgres            (compose service `postgres-pm`) pg_dump
 #   - nextcloud-data               volume (files)                 tar
-#   - aikeys-data                  volume (AI provider keys)       tar
-#   - matter-data                  volume (Matter fabric)         tar
-#   - matter-storage-data          volume (Matter storage)        tar
+#   - aikeys                       volume (AI provider keys)       tar
+#   - matter-data                  volume (Matter fabric+storage)  tar
 #   - brain-memory-data            volume (assistant memory)      tar
-#   - pm-attachments-data          volume (Plane attachments)     tar
+#   - nvrdata                      volume (NVR recordings)        tar
+#   - ops-audit                    volume (WARP-337 audit trail)  tar
+#
+# The volume names above are the REAL top-level volumes in
+# docker/docker-compose.yml — kept in lock-step with the destructive wipe list
+# in scripts/factory-reset.sh so the "safety backup before reset" actually
+# captures everything the reset destroys. The Postgres volumes (pgdata,
+# postgres-pm-data) are NOT tarred — they are captured transactionally via
+# pg_dump above. Pure caches / rebuildable state (redis-pm-data, frigate-config,
+# rag-eval-data, model caches, openwrt-*, ollama-data) are intentionally NOT
+# backed up. A static test asserts every name here exists as a real volume.
 #
 # Generalizes the per-service `pm-backup.sh` pattern into one device-wide
 # artifact. Restic (WARP-254) is the long-term home; this is the boring,
@@ -71,14 +80,34 @@ DB_SERVICE="${DB_SERVICE:-db}"
 PM_SERVICE="${PM_SERVICE:-postgres-pm}"
 BACKUP_KEEP="${BACKUP_KEEP:-7}"
 
-# Data volumes to archive (logical name -> docker volume is "<PROJECT>_<name>").
+# Data volumes to archive. These are the REAL top-level volume names from
+# docker/docker-compose.yml (the docker volume is "<PROJECT>_<name>"). They are
+# kept in lock-step with scripts/factory-reset.sh's wipe list — anything the
+# reset destroys and that holds customer/operator data must be captured here.
+# Postgres volumes are excluded (captured via pg_dump); caches are excluded.
 DATA_VOLUMES=(
   nextcloud-data
-  aikeys-data
+  aikeys
   matter-data
-  matter-storage-data
   brain-memory-data
-  pm-attachments-data
+  nvrdata
+  ops-audit
+)
+
+# Volumes that factory-reset's `down -v` ALSO wipes but that we deliberately do
+# NOT back up — recorded verbatim in the manifest as `excluded` so an operator
+# can see exactly what a restore will NOT bring back. These are pure caches /
+# rebuildable state (regenerated on reinstall), not customer data. Keep in sync
+# with factory-reset.sh's wipe list minus DATA_VOLUMES minus the pg_dump'd DBs.
+EXCLUDED_VOLUMES=(
+  redis-pm-data      # Plane redis cache — rebuilt on start
+  frigate-config     # NVR config — regenerated from .env on setup
+  rag-eval-data      # RAGAS eval output — not customer data
+  whisper-models     # STT model cache (~470MB) — re-downloaded
+  piper-voices       # TTS voice cache — re-downloaded
+  ollama-data        # local model blobs — re-pulled
+  openwrt-config     # single-box router config — re-provisioned
+  openwrt-overlay    # single-box router overlay — re-provisioned
 )
 
 # --- Source logging library if present (matches setup.sh convention) ------
@@ -122,14 +151,15 @@ dump_pg() {
   # $1 = compose service, $2 = output file, $3 = user override (may be empty),
   # $4 = dbname override (may be empty)
   local svc="$1" out="$2" user="$3" db="$4"
-  local userexpr dbexpr
   # Prefer explicit overrides, else read the container's own env vars so we
-  # never hard-code credentials (mirrors pm-backup.sh).
-  userexpr="${user:-\${POSTGRES_USER}}"
-  dbexpr="${db:-\${POSTGRES_DB}}"
+  # never hard-code credentials (mirrors pm-backup.sh). We pass the overrides
+  # as container env (-e) and let the in-container shell fall back to the
+  # container's own $POSTGRES_USER/$POSTGRES_DB when they're empty — this
+  # avoids the fragile nested `${user:-${POSTGRES_USER}}` host-side expansion
+  # (a stray `}` leaked into the role name otherwise).
   log_info "Dumping Postgres service '$svc'..."
-  if dc exec -T "$svc" \
-       sh -c "pg_dump --username=\"$userexpr\" --dbname=\"$dbexpr\" --format=plain --no-owner --no-privileges" \
+  if dc exec -T -e "DROPLET_DUMP_USER=$user" -e "DROPLET_DUMP_DB=$db" "$svc" \
+       sh -c 'pg_dump --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" --format=plain --no-owner --no-privileges' \
        | gzip --best > "$out"; then
     log_success "'$svc' dumped ($(wc -c < "$out") bytes gzipped)"
     return 0
@@ -155,6 +185,15 @@ for vol in "${DATA_VOLUMES[@]}"; do
   full="${PROJECT}_${vol}"
   dest="$WORK_DIR/volumes/$vol"
   mkdir -p "$dest"
+  # GUARD: `docker run -v <name>:/data` AUTO-CREATES the named volume if it does
+  # not exist, which would silently tar an empty volume and mask a typo'd name
+  # (the WARP-570 review blocker). Only snapshot volumes that genuinely exist;
+  # a truly-absent volume is recorded as EMPTY, never auto-created.
+  if ! docker volume inspect "$full" >/dev/null 2>&1; then
+    log_warn "volume '$full' absent — skipping (recording EMPTY marker)"
+    printf 'volume-absent-at-backup-time\n' > "$dest/EMPTY"
+    continue
+  fi
   log_info "Snapshotting volume '$full'..."
   # Throwaway sibling container mounts the named volume read-only and tars it,
   # so we don't need the data service running or libs on the host.
@@ -166,12 +205,49 @@ for vol in "${DATA_VOLUMES[@]}"; do
     log_success "volume '$vol' archived ($(wc -c < "$dest/data.tar") bytes)"
     CAPTURED+=("volume:$vol")
   else
-    log_warn "volume '$full' absent or empty — skipping"
-    printf 'volume-absent-at-backup-time\n' > "$dest/EMPTY"
+    log_error "volume '$full' exists but tar failed — aborting (refusing a partial backup)"
+    exit 1
   fi
 done
 
-# --- Phase 3: Manifest ---------------------------------------------------
+# --- Phase 3: Integrity verification + manifest --------------------------
+# Verify every captured artifact is well-formed BEFORE we declare the backup
+# good. device-restore.sh re-checks these sha256s before its first DROP
+# DATABASE, so a truncated/corrupt artifact can never destroy the live copy.
+log_info "Verifying artifact integrity..."
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+  else echo "unavailable"; fi
+}
+
+checksums_json=""
+add_checksum() {
+  # $1 = manifest key (relative path inside the tarball), $2 = file on disk
+  local sum; sum="$(sha256_of "$2")"
+  checksums_json="$checksums_json\"$1\": \"$sum\","
+}
+
+# gzip -t catches a truncated/corrupt dump; abort rather than ship a backup
+# that would fail mid-restore after the live DB has already been dropped.
+for dump in "$WORK_DIR/postgres/main.sql.gz" "$WORK_DIR/postgres/pm.sql.gz"; do
+  [ -f "$dump" ] || continue
+  if ! gzip -t "$dump" 2>/dev/null; then
+    log_error "integrity check failed: $(basename "$dump") is not a valid gzip — aborting"
+    exit 1
+  fi
+  add_checksum "postgres/$(basename "$dump")" "$dump"
+done
+log_success "Postgres dumps pass gzip integrity check"
+
+# Record a sha256 for each volume artifact too (verified on restore).
+for vol in "${DATA_VOLUMES[@]}"; do
+  art="$WORK_DIR/volumes/$vol/data.tar"
+  [ -f "$art" ] && add_checksum "volumes/$vol/data.tar" "$art"
+done
+checksums_json="{${checksums_json%,}}"
+
 log_info "Writing manifest..."
 captured_json=""
 for c in "${CAPTURED[@]}"; do
@@ -179,13 +255,21 @@ for c in "${CAPTURED[@]}"; do
 done
 captured_json="[${captured_json%,}]"
 
+excluded_json=""
+for e in "${EXCLUDED_VOLUMES[@]}"; do
+  excluded_json="$excluded_json\"$e\","
+done
+excluded_json="[${excluded_json%,}]"
+
 cat > "$WORK_DIR/manifest.json" <<MANIFEST
 {
   "taken_at": "$TS",
   "warp_ticket": "WARP-570",
   "project": "$PROJECT",
   "host": "$(hostname 2>/dev/null || echo unknown)",
-  "captured": $captured_json
+  "captured": $captured_json,
+  "excluded": $excluded_json,
+  "checksums": $checksums_json
 }
 MANIFEST
 
@@ -206,8 +290,13 @@ log_info "  Captured: ${CAPTURED[*]}"
 # --- Phase 5: Rotation ---------------------------------------------------
 # Keep only the newest BACKUP_KEEP device-backup-*.tar.gz. Newline-safe: our
 # own filenames never contain newlines (timestamped), so a simple list is fine.
+# Avoid `mapfile` (bash 4+) so this also runs under macOS's bash 3.2 during the
+# dev drill; read the newest-first listing line by line instead.
 log_info "Pruning to newest $BACKUP_KEEP backups..."
-mapfile -t ALL < <(ls -1t "$OUTPUT_DIR"/device-backup-*.tar.gz 2>/dev/null || true)
+ALL=()
+while IFS= read -r line; do
+  [ -n "$line" ] && ALL+=("$line")
+done < <(ls -1t "$OUTPUT_DIR"/device-backup-*.tar.gz 2>/dev/null || true)
 if [ "${#ALL[@]}" -gt "$BACKUP_KEEP" ]; then
   for old in "${ALL[@]:$BACKUP_KEEP}"; do
     rm -f "$old" && log_info "  pruned $(basename "$old")"

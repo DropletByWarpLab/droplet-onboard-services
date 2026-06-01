@@ -104,6 +104,55 @@ log_info "Manifest:"
 cat "$WORK_DIR/manifest.json"
 echo
 
+# --- Integrity gate (BEFORE any destructive step) ------------------------
+# A truncated/corrupt dump must be caught here — never after DROP DATABASE,
+# which would leave an empty DB with the good copy already gone. We re-run the
+# same checks device-backup.sh recorded: gzip -t every dump, and verify the
+# sha256 of each artifact against the manifest when present.
+log_info "Verifying backup integrity before any destructive step..."
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+  else echo "unavailable"; fi
+}
+
+# Read a checksum for a manifest key (relative path) without needing jq.
+manifest_checksum() {
+  # $1 = key like "postgres/main.sql.gz"
+  grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[0-9a-f]*\"" "$WORK_DIR/manifest.json" 2>/dev/null \
+    | grep -o '[0-9a-f]\{64\}' | head -1
+}
+
+verify_artifact() {
+  # $1 = file on disk, $2 = manifest key
+  local file="$1" key="$2" want got
+  [ -f "$file" ] || return 0
+  if [[ "$file" == *.gz ]] && ! gzip -t "$file" 2>/dev/null; then
+    log_error "integrity check failed: $(basename "$file") is not a valid gzip — refusing to restore"
+    exit 1
+  fi
+  want="$(manifest_checksum "$key")"
+  if [ -n "$want" ]; then
+    got="$(sha256_of "$file")"
+    if [ "$got" != "unavailable" ] && [ "$got" != "$want" ]; then
+      log_error "integrity check failed: $key sha256 mismatch (manifest=$want disk=$got) — refusing to restore"
+      exit 1
+    fi
+  fi
+}
+
+verify_artifact "$WORK_DIR/postgres/main.sql.gz" "postgres/main.sql.gz"
+verify_artifact "$WORK_DIR/postgres/pm.sql.gz"   "postgres/pm.sql.gz"
+if [ -d "$WORK_DIR/volumes" ]; then
+  for dir in "$WORK_DIR"/volumes/*/; do
+    [ -d "$dir" ] || continue
+    vol="$(basename "$dir")"
+    verify_artifact "$dir/data.tar" "volumes/$vol/data.tar"
+  done
+fi
+log_success "Integrity checks passed — safe to proceed."
+
 # --- Confirmation --------------------------------------------------------
 if [ "$FORCE" -ne 1 ]; then
   read -r -p "This OVERWRITES the live DBs + data volumes. Continue? [y/N] " ans
@@ -117,29 +166,24 @@ fi
 restore_pg() {
   # $1 = service, $2 = dump.sql.gz, $3 = user override, $4 = db override
   local svc="$1" dump="$2" user="$3" db="$4"
-  local userexpr dbexpr
-  userexpr="${user:-\${POSTGRES_USER}}"
-  dbexpr="${db:-\${POSTGRES_DB}}"
 
   log_info "Restoring Postgres service '$svc'..."
   # Drop+recreate the target DB from the maintenance 'postgres' DB so a partial
-  # prior state doesn't linger. WITH (FORCE) terminates open connections. We run
-  # the drop+create INSIDE the container so the DB name resolves whether it came
-  # from an explicit override or the container's own ${POSTGRES_DB}.
-  if [ -z "$db" ]; then
-    dc exec -T "$svc" sh -c '
-      psql --username="${POSTGRES_USER}" --dbname=postgres -v ON_ERROR_STOP=1 \
-        -c "DROP DATABASE IF EXISTS \"${POSTGRES_DB}\" WITH (FORCE);" \
-        -c "CREATE DATABASE \"${POSTGRES_DB}\";"'
-  else
-    dc exec -T "$svc" sh -c "
-      psql --username=\"$userexpr\" --dbname=postgres -v ON_ERROR_STOP=1 \
-        -c 'DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);' \
-        -c 'CREATE DATABASE \"$db\";'"
-  fi
+  # prior state doesn't linger. WITH (FORCE) terminates open connections. The
+  # overrides are passed as container env (-e) and the in-container shell falls
+  # back to the container's own $POSTGRES_USER/$POSTGRES_DB when they're empty —
+  # mirroring device-backup.sh's dump_pg and avoiding the fragile nested
+  # `${user:-${POSTGRES_USER}}` host-side expansion that leaked a stray `}`.
+  dc exec -T -e "DROPLET_DUMP_USER=$user" -e "DROPLET_DUMP_DB=$db" "$svc" sh -c '
+    U="${DROPLET_DUMP_USER:-$POSTGRES_USER}"
+    D="${DROPLET_DUMP_DB:-$POSTGRES_DB}"
+    psql --username="$U" --dbname=postgres -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS \"$D\" WITH (FORCE);" \
+      -c "CREATE DATABASE \"$D\";"'
 
   gunzip -c "$dump" \
-    | dc exec -T "$svc" sh -c "psql --username=\"$userexpr\" --dbname=\"$dbexpr\""
+    | dc exec -T -e "DROPLET_DUMP_USER=$user" -e "DROPLET_DUMP_DB=$db" "$svc" sh -c '
+        psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}"'
   log_success "'$svc' restored."
 }
 

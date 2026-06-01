@@ -22,8 +22,27 @@ BACKUP_KEEP=14 ./scripts/host/device-backup.sh
 ```
 
 **Captured surfaces:** orchestrator Postgres (`db`), Plane Postgres
-(`postgres-pm`), and the `nextcloud-data`, `aikeys-data`, `matter-data`,
-`matter-storage-data`, `brain-memory-data`, `pm-attachments-data` volumes.
+(`postgres-pm`), and the `nextcloud-data`, `aikeys`, `matter-data`,
+`brain-memory-data`, `nvrdata` (NVR recordings), and `ops-audit` (WARP-337
+audit trail) volumes. These are the real top-level volumes in
+`docker/docker-compose.yml`; the backup script's `DATA_VOLUMES` list is kept in
+lock-step with `factory-reset.sh`'s wipe list, and a static test asserts every
+captured name is a genuine compose volume (a wrong name would otherwise
+auto-create an empty volume and silently back up nothing).
+
+**Not captured (rebuilt on reinstall):** the Postgres data volumes themselves
+(`pgdata`, `postgres-pm-data` — captured transactionally via `pg_dump`
+instead), plus pure caches / rebuildable state: `redis-pm-data`,
+`frigate-config`, `rag-eval-data`, the whisper/piper/ollama model caches, and
+`openwrt-config`/`openwrt-overlay`. The backup manifest's `excluded` array is
+the machine-readable record, and `factory-reset.sh` prints the same list before
+it wipes.
+
+**Integrity:** every dump is verified with `gzip -t` at backup time and a
+sha256 of each artifact is recorded in `manifest.json`. `device-restore.sh`
+re-verifies those checksums **before** the first `DROP DATABASE`, so a
+truncated/corrupt artifact aborts the restore instead of leaving an empty DB
+with the good copy already gone.
 
 **Secrets safety:** the archive holds DB dumps + the `aikeys` volume, so it is
 `chmod 600` and its directory `chmod 700`. The repo `.env` is never copied into

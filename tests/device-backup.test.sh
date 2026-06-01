@@ -46,8 +46,9 @@ DISPOSABLE_COMPOSE=""
 WORK_ROOT=""
 OUTPUT_DIR=""
 
-# Data volumes device-backup must capture (mirrors the real stack).
-VOLUMES=(nextcloud-data aikeys-data matter-data matter-storage-data brain-memory-data pm-attachments-data)
+# Data volumes device-backup must capture. These are the REAL top-level volume
+# names from docker/docker-compose.yml — a static check below asserts that.
+VOLUMES=(nextcloud-data aikeys matter-data brain-memory-data nvrdata ops-audit)
 
 echo ""
 echo "  ================================================"
@@ -83,6 +84,39 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ]; then
     grep -q "$v" "$BACKUP_SCRIPT" && pass "backup references volume $v" || fail "backup omits volume $v"
   done
 
+  # REGRESSION GUARD (WARP-570 review blocker): every volume the backup script
+  # captures MUST be a real top-level volume in docker/docker-compose.yml.
+  # `docker run -v <name>:/data` auto-creates a missing volume empty, so a
+  # typo'd name silently backs up nothing. This is the check that would have
+  # caught the original `aikeys-data`/`matter-storage-data`/`pm-attachments-data`
+  # mismatch. We parse DATA_VOLUMES straight from the script so the two can't
+  # drift.
+  COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+  if [ -f "$COMPOSE_FILE" ]; then
+    # Extract the top-level `volumes:` block keys (2-space-indented names).
+    real_volumes="$(awk '
+      /^volumes:/ {invol=1; next}
+      invol && /^[^[:space:]]/ {invol=0}
+      invol && /^  [A-Za-z0-9_-]+:/ {gsub(/[: ]/,""); print}
+    ' "$COMPOSE_FILE")"
+    # Extract DATA_VOLUMES entries from the backup script itself.
+    script_volumes="$(awk '
+      /^DATA_VOLUMES=\(/ {inarr=1; next}
+      inarr && /\)/ {inarr=0}
+      inarr {gsub(/[[:space:]]/,""); if ($0 != "") print}
+    ' "$BACKUP_SCRIPT")"
+    while IFS= read -r v; do
+      [ -z "$v" ] && continue
+      if printf '%s\n' "$real_volumes" | grep -qx "$v"; then
+        pass "DATA_VOLUMES '$v' is a real compose volume"
+      else
+        fail "DATA_VOLUMES '$v' is NOT a top-level volume in docker-compose.yml (would auto-create empty)"
+      fi
+    done <<< "$script_volumes"
+  else
+    fail "docker-compose.yml not found for volume-name cross-check"
+  fi
+
   # Secrets safety: chmod 600 on the archive.
   grep -qE 'chmod 600' "$BACKUP_SCRIPT" && pass "backup chmod 600 the archive" || fail "backup does not chmod 600 (secrets exposure)"
 
@@ -99,10 +133,16 @@ if [ -f "$FACTORY_RESET" ]; then
     && pass "factory-reset invokes device-backup.sh" || fail "factory-reset does not call device-backup.sh"
 
   # The safety backup MUST be emitted before the destructive `down -v`.
-  backup_line="$(grep -n 'device-backup.sh' "$FACTORY_RESET" | grep -v 'BACKUP_SCRIPT=' | head -1 | cut -d: -f1)"
-  downv_line="$(grep -n 'down -v' "$FACTORY_RESET" | head -1 | cut -d: -f1)"
+  # Match the actual SHELL STATEMENTS, not prose: strip comment lines
+  # (leading-whitespace + '#') before locating the backup invocation
+  # (`"$BACKUP_SCRIPT"`) and the first real `down -v` command. Earlier this
+  # grep matched a `down -v` mention inside a comment, which made the ordering
+  # check spuriously fail.
+  reset_code="$(grep -vE '^[[:space:]]*#' "$FACTORY_RESET")"
+  backup_line="$(printf '%s\n' "$reset_code" | grep -n '"\$BACKUP_SCRIPT"' | head -1 | cut -d: -f1)"
+  downv_line="$(printf '%s\n' "$reset_code" | grep -nE '(^|[^#])\bdown -v\b' | head -1 | cut -d: -f1)"
   if [ -n "$backup_line" ] && [ -n "$downv_line" ] && [ "$backup_line" -lt "$downv_line" ]; then
-    pass "safety backup runs before 'down -v' (line $backup_line < $downv_line)"
+    pass "safety backup runs before 'down -v' (stmt $backup_line < $downv_line)"
   else
     fail "safety backup not guaranteed before 'down -v' (backup@$backup_line, down-v@$downv_line)"
   fi
@@ -145,11 +185,12 @@ services:
       POSTGRES_DB: droplet
       POSTGRES_PASSWORD: testpass
     volumes:
-      - aikeys-data:/keys
+      - aikeys:/keys
       - matter-data:/data/matter
-      - matter-storage-data:/data/matter-storage
       - brain-memory-data:/data/brain
       - nextcloud-data:/var/www/html
+      - nvrdata:/data/nvr
+      - ops-audit:/data/audit
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U droplet"]
       interval: 2s
@@ -161,20 +202,18 @@ services:
       POSTGRES_USER: planeuser
       POSTGRES_DB: plane
       POSTGRES_PASSWORD: planepass
-    volumes:
-      - pm-attachments-data:/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U planeuser"]
       interval: 2s
       timeout: 3s
       retries: 40
 volumes:
-  aikeys-data:
+  aikeys:
   matter-data:
-  matter-storage-data:
   brain-memory-data:
   nextcloud-data:
-  pm-attachments-data:
+  nvrdata:
+  ops-audit:
 YAML
 }
 
@@ -196,11 +235,11 @@ seed_volume_markers() {
   dc exec -T db sh -c '
     echo AIKEY-MARKER > /keys/marker.txt
     echo MATTER-MARKER > /data/matter/marker.txt
-    echo MATTER-STORAGE-MARKER > /data/matter-storage/marker.txt
     echo BRAIN-MARKER > /data/brain/marker.txt
     echo NEXTCLOUD-MARKER > /var/www/html/marker.txt
+    echo NVR-MARKER > /data/nvr/marker.txt
+    echo AUDIT-MARKER > /data/audit/marker.txt
   '
-  dc exec -T postgres-pm sh -c 'echo PM-ATTACH-MARKER > /data/marker.txt'
 }
 
 seed_db_rows() {
@@ -265,8 +304,7 @@ else
       # --- Mutate ---------------------------------------------------------
       dc exec -T db sh -c 'psql -U droplet -d droplet -c "DELETE FROM t;"' >/dev/null 2>&1
       dc exec -T postgres-pm sh -c 'psql -U planeuser -d plane -c "DELETE FROM t;"' >/dev/null 2>&1
-      dc exec -T db sh -c 'rm -f /keys/marker.txt /data/matter/marker.txt /data/matter-storage/marker.txt /data/brain/marker.txt /var/www/html/marker.txt' >/dev/null 2>&1
-      dc exec -T postgres-pm sh -c 'rm -f /data/marker.txt' >/dev/null 2>&1
+      dc exec -T db sh -c 'rm -f /keys/marker.txt /data/matter/marker.txt /data/brain/marker.txt /var/www/html/marker.txt /data/nvr/marker.txt /data/audit/marker.txt' >/dev/null 2>&1
       { [ "$(db_count_main)" = "0" ] && [ "$(db_count_pm)" = "0" ]; } && pass "data mutated (rows dropped)" || fail "mutation did not take"
 
       # --- Restore --------------------------------------------------------
@@ -284,12 +322,12 @@ else
       [ "$(db_count_main)" = "1" ] && pass "main db row restored" || fail "main db row NOT restored (count=$(db_count_main))"
       [ "$(db_count_pm)" = "1" ]   && pass "pm db row restored"   || fail "pm db row NOT restored (count=$(db_count_pm))"
 
-      [ "$(marker_present db /keys/marker.txt)" = "yes" ]                && pass "aikeys volume restored"         || fail "aikeys volume NOT restored"
-      [ "$(marker_present db /data/matter/marker.txt)" = "yes" ]         && pass "matter volume restored"         || fail "matter volume NOT restored"
-      [ "$(marker_present db /data/matter-storage/marker.txt)" = "yes" ] && pass "matter-storage volume restored" || fail "matter-storage volume NOT restored"
-      [ "$(marker_present db /data/brain/marker.txt)" = "yes" ]          && pass "brain-memory volume restored"   || fail "brain-memory volume NOT restored"
-      [ "$(marker_present db /var/www/html/marker.txt)" = "yes" ]        && pass "nextcloud volume restored"      || fail "nextcloud volume NOT restored"
-      [ "$(marker_present postgres-pm /data/marker.txt)" = "yes" ]       && pass "pm-attachments volume restored" || fail "pm-attachments volume NOT restored"
+      [ "$(marker_present db /keys/marker.txt)" = "yes" ]        && pass "aikeys volume restored"       || fail "aikeys volume NOT restored"
+      [ "$(marker_present db /data/matter/marker.txt)" = "yes" ] && pass "matter volume restored"       || fail "matter volume NOT restored"
+      [ "$(marker_present db /data/brain/marker.txt)" = "yes" ]  && pass "brain-memory volume restored" || fail "brain-memory volume NOT restored"
+      [ "$(marker_present db /var/www/html/marker.txt)" = "yes" ] && pass "nextcloud volume restored"   || fail "nextcloud volume NOT restored"
+      [ "$(marker_present db /data/nvr/marker.txt)" = "yes" ]    && pass "nvrdata volume restored"      || fail "nvrdata volume NOT restored"
+      [ "$(marker_present db /data/audit/marker.txt)" = "yes" ]  && pass "ops-audit volume restored"    || fail "ops-audit volume NOT restored"
 
       # --- Rotation -------------------------------------------------------
       info "testing rotation (BACKUP_KEEP=2)"
