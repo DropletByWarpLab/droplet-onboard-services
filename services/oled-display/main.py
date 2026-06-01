@@ -89,6 +89,18 @@ async def lifespan(app: FastAPI):
                 display._backend, touch._backend)
     yield
     display.stop_cycle()
+    # M1 (WARP-624): render the shutdown frame from here as a best-effort
+    # fallback. The systemd ExecStop oneshot only fires on a systemd-driven
+    # halt; `docker compose down`, a container crash/OOM, or a host without
+    # the unit would otherwise freeze the last live frame on the panel — the
+    # exact "stale frame" this feature set out to fix. This runs inside the
+    # container before teardown, so it covers every teardown path. It MUST be
+    # best-effort: show_shutdown() bounds its own serial write, and we swallow
+    # any error so a display fault can never wedge container shutdown.
+    try:
+        display.show_shutdown(reason="System stopping", phase="stopping")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shutdown-frame fallback failed (non-fatal): %s", e)
     touch.stop()
     logger.info("TFT display service stopped")
 

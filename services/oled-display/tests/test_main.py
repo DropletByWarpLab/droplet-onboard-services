@@ -7,6 +7,8 @@ routes drive the display into the right mode.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -97,3 +99,40 @@ def test_shutdown_halted_phase(client: TestClient):
     )
     assert r.status_code == 200
     assert main.display._shutdown_phase == "halted"
+
+
+# --- Lifespan shutdown fallback (M1) ----------------------------------------
+
+def test_lifespan_shutdown_renders_shutdown_frame():
+    # M1 (WARP-624): non-systemd teardown (docker compose down, crash/OOM, a
+    # host without the ExecStop unit) leaves the last live frame frozen unless
+    # the container renders the shutdown screen itself. The FastAPI lifespan
+    # shutdown runs inside the container before teardown, so it must drive the
+    # panel to SHUTDOWN as a best-effort fallback regardless of teardown path.
+    async def _drive():
+        cm = main.lifespan(main.app)
+        await cm.__aenter__()
+        assert main.display._current_mode == main.display.BOOT
+        await cm.__aexit__(None, None, None)
+
+    asyncio.run(_drive())
+    assert main.display._current_mode == main.display.SHUTDOWN
+    # And cycling must be stopped so nothing repaints over the shutdown frame.
+    assert main.display._cycle_running is False
+
+
+def test_lifespan_shutdown_fallback_never_raises(monkeypatch: pytest.MonkeyPatch):
+    # The fallback is best-effort: a failure rendering/sending the shutdown
+    # frame must never escape lifespan and wedge container teardown.
+    async def _drive():
+        cm = main.lifespan(main.app)
+        await cm.__aenter__()
+
+        def _boom(*a, **k):
+            raise RuntimeError("serial gone")
+
+        monkeypatch.setattr(main.display, "show_shutdown", _boom)
+        # Must not raise even though show_shutdown blows up.
+        await cm.__aexit__(None, None, None)
+
+    asyncio.run(_drive())
