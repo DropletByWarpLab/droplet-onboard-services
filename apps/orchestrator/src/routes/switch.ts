@@ -398,13 +398,21 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     try {
       const userId = requireUserId(req.user?.id);
       const { vlan_id, camera_ports, uplink_ports } = req.body || {};
+      // Resolve the defaults once so the values the safety tier audits are the
+      // exact values executed below (WARP-559 review follow-up). Previously the
+      // audit saw `vlan_id || 100` etc. while `setupCameraPorts` was called with
+      // the raw, possibly-undefined body fields — auditing one thing, doing
+      // another.
+      const resolvedVlanId = vlan_id || 100;
+      const resolvedCameraPorts = camera_ports || [1, 2, 3, 4, 5, 6, 7, 8];
+      const resolvedUplinkPorts = uplink_ports || [9, 10];
       const result = await evalSwitchCommand(
         prisma, "switch_setup_cameras",
-        { vlan_id: vlan_id || 100, camera_ports: camera_ports || [1,2,3,4,5,6,7,8], uplink_ports: uplink_ports || [9,10] },
+        { vlan_id: resolvedVlanId, camera_ports: resolvedCameraPorts, uplink_ports: resolvedUplinkPorts },
         userId
       );
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      const setupResult = await switchClient.setupCameraPorts(vlan_id, camera_ports, uplink_ports);
+      const setupResult = await switchClient.setupCameraPorts(resolvedVlanId, resolvedCameraPorts, resolvedUplinkPorts);
       res.json(setupResult);
     } catch (err) {
       next(err);
