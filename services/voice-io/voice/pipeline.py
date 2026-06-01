@@ -189,7 +189,12 @@ def classify_tool_choice(transcript: str) -> Optional[ToolChoice]:
 DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
-DEFAULT_STT_MAX_RECORD_S = 5.0  # captured audio per wake (no VAD yet — fixed window)
+DEFAULT_STT_MAX_RECORD_S = 3.0  # hard cap on captured audio per wake. The
+                                # end-of-speech VAD cuts sooner when the room
+                                # goes quiet; this cap guarantees the capture
+                                # always stops (e.g. in a room with continuous
+                                # background audio where no silence is ever
+                                # detected). Overridable via STT_MAX_RECORD_S.
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # Window after TTS playback ends during which wake detection is suppressed.
 # The reSpeaker XVF3800 is both speaker and mic on the same USB endpoint;
@@ -208,9 +213,14 @@ DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 # their statement instead of always holding the mic for the full
 # max-record window. Energy-based on frame RMS; the max-record window
 # stays the hard cap for noisy rooms where a clean silence never arrives.
-DEFAULT_VAD_SILENCE_S = 0.8       # trailing silence (s) that ends the turn
-DEFAULT_VAD_SPEECH_RMS = 300.0    # int16 frame RMS above which = "speech"
-DEFAULT_VAD_MIN_SPEECH_S = 0.3    # min capture before VAD may fire
+DEFAULT_VAD_SILENCE_S = 1.0       # trailing silence (s) that ends the turn
+DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speech"
+                                  # (sits between a typical room floor ~400
+                                  # and normal speech ~1000+; tune per-room
+                                  # via VAD_SPEECH_RMS).
+DEFAULT_VAD_MIN_SPEECH_S = 0.4    # min CUMULATIVE speech before end-of-speech
+                                  # may fire — keeps the wake-word tail + a
+                                  # pause before the command from ending early
 
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
@@ -335,6 +345,7 @@ class WakePipeline:
         self._frame_s = WAKE_FRAME_SAMPLES / float(WAKE_SAMPLE_RATE)
         self._stt_speech_started = False
         self._stt_silence_s = 0.0
+        self._stt_speech_s = 0.0
         self._sd_module = sd_module  # dependency injection for tests
 
         self._thread: Optional[threading.Thread] = None
@@ -835,6 +846,7 @@ class WakePipeline:
         # Reset end-of-speech (VAD) state for this turn.
         self._stt_speech_started = False
         self._stt_silence_s = 0.0
+        self._stt_speech_s = 0.0
         with self._lock:
             self._state = "transcribing"
         logger.info("transcribing: capture window opened")
@@ -866,17 +878,20 @@ class WakePipeline:
         )
         if rms >= self._vad_speech_rms:
             self._stt_speech_started = True
+            self._stt_speech_s += self._frame_s
             self._stt_silence_s = 0.0
         elif self._stt_speech_started:
             self._stt_silence_s += self._frame_s
+        # End only once we've heard enough ACTUAL speech (so the brief
+        # wake-word tail + any pause before the command don't end the turn
+        # prematurely) followed by a run of trailing silence.
         if (
-            self._stt_speech_started
-            and elapsed >= self._vad_min_speech_s
+            self._stt_speech_s >= self._vad_min_speech_s
             and self._stt_silence_s >= self._vad_silence_s
         ):
             logger.info(
-                "transcribing: end-of-speech (%.1fs spoken, %.1fs trailing silence)",
-                elapsed, self._stt_silence_s,
+                "transcribing: end-of-speech (%.1fs speech, %.1fs trailing silence)",
+                self._stt_speech_s, self._stt_silence_s,
             )
             self._finish_transcription()
             return

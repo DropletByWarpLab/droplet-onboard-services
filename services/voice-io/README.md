@@ -93,7 +93,7 @@ USB mic in after the box has already booted.
 | `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
 | `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
 | `STT_LANGUAGE` | `en` | Language code for transcription. |
-| `STT_MAX_RECORD_S` | `5.0` | Seconds of audio captured per wake before sending audio-stop. VAD-based cutoff lands in a follow-up; for now this is a fixed window. |
+| `STT_MAX_RECORD_S` | `3.0` | **Hard cap** on seconds of audio captured per wake. The end-of-speech VAD ends the capture sooner once you stop talking; this cap guarantees it always stops — even in a room with continuous background audio where no silence is ever detected. Kept short so the box doesn't feel like it "keeps listening". |
 | `TTS_URL` | `tcp://wyoming-piper:10200` | Wyoming-protocol Piper server. Set to `__mock__` for silent playback (dev box without a Piper container). |
 | `TTS_VOICE` | `en_US-ryan-medium` | Piper voice name. ~70 MB per voice; downloads on first request and caches in the `piper-voices` volume. Other natural-sounding options: `en_US-lessac-medium`, `en_GB-jenny-medium`. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |

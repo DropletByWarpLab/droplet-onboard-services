@@ -901,9 +901,10 @@ class TestTranscribingFlow:
         assert s.listening is True
 
     def test_default_stt_max_record_constant(self):
-        # Drift detector — make sure README's "5-second post-wake window"
-        # documentation still matches the default.
-        assert DEFAULT_STT_MAX_RECORD_S == 5.0
+        # Drift detector — this is the HARD cap on capture length; the
+        # end-of-speech VAD cuts sooner when the room goes quiet. Kept
+        # short so a noisy room (no detectable silence) still stops fast.
+        assert DEFAULT_STT_MAX_RECORD_S == 3.0
 
 
 # ────────────────────────────────────────────────────────────────────
