@@ -52,14 +52,29 @@ interface AuthContextValue {
   // Back-compat convenience: true when the appliance is unclaimed. Derived
   // from `setupState`; prefer `setupState.appliance` in new code.
   setupRequired: boolean | null;
+  // M3 (PR #372 re-review) — the lifecycle probe (`GET /api/setup/state` in
+  // init) is explicit about failure instead of failing open silently. When
+  // the probe couldn't resolve the state, this carries the reason so the UI
+  // can surface "couldn't reach the appliance" + a retry, rather than
+  // guessing. `null` once a probe succeeds.
+  setupProbeError: string | null;
+  // M3 — re-run the lifecycle probe (used by a retry affordance).
+  retrySetupProbe: () => Promise<void>;
+  // M4 (PR #372 re-review) — the wizard-FINISH PATCH can fail. When it does,
+  // this carries the error and the optimistic in-memory `ready` flip is
+  // rolled back, so the UI shows the failure + a retry instead of silently
+  // diverging from the (still `unclaimed`) server. `null` on success.
+  completeSetupError: string | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   // Wizard-finish transition. Optimistically flips the in-memory appliance
   // to "ready" (no flash of the wizard) AND awaits the server PATCH that
   // durably persists `ready` — the two must agree, or a hard refresh
-  // re-traps the owner in setup. Awaitable so callers can sequence the
-  // redirect after the write if they want; safe to fire-and-forget too.
-  completeSetup: () => Promise<void>;
+  // re-traps the owner in setup. On a failed PATCH it ROLLS BACK the
+  // optimistic flip and records `completeSetupError` (M4); never throws, so
+  // `void completeSetup()` at the call site is safe. Returns whether the
+  // server persist succeeded so a caller can sequence on it.
+  completeSetup: () => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -133,23 +148,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [setupState, setSetupState] = useState<SetupStateInfo | null>(null);
+  const [setupProbeError, setSetupProbeError] = useState<string | null>(null);
+  const [completeSetupError, setCompleteSetupError] = useState<string | null>(
+    null,
+  );
+
+  /**
+   * M3 — the lifecycle probe. Fetches `GET /api/setup/state` and records an
+   * EXPLICIT error when it can't resolve (network failure OR non-2xx) instead
+   * of silently leaving `setupState` null and letting AuthGate guess. On
+   * success it clears the error and stores the state. Returns whether the
+   * probe resolved, so init() (and the retry affordance) can branch on it.
+   */
+  const probeSetupState = useCallback(async (): Promise<boolean> => {
+    try {
+      const setupRes = await fetch("/api/setup/state");
+      if (!setupRes.ok) {
+        setSetupProbeError(
+          `Couldn't read appliance setup state (HTTP ${setupRes.status}).`,
+        );
+        return false;
+      }
+      const data = await setupRes.json();
+      setSetupState({
+        appliance: data.appliance,
+        setupStep: data.setup_step,
+        userTourCompleted: data.user_tour_completed,
+      });
+      setSetupProbeError(null);
+      return true;
+    } catch {
+      setSetupProbeError(
+        "Couldn't reach the appliance to read setup state. Check the connection and retry.",
+      );
+      return false;
+    }
+  }, []);
 
   // On mount, check stored auth and setup status
   useEffect(() => {
     async function init() {
-      try {
-        // PR #372 — explicit, resumable setup state. The orchestrator
-        // returns snake_case; map it onto the camelCase context shape.
-        const setupRes = await fetch("/api/setup/state");
-        if (setupRes.ok) {
-          const data = await setupRes.json();
-          setSetupState({
-            appliance: data.appliance,
-            setupStep: data.setup_step,
-            userTourCompleted: data.user_tour_completed,
-          });
-        }
+      // PR #372 — explicit, resumable setup state. M3: the probe records its
+      // own error/retry state; it never throws, so a failed probe doesn't
+      // short-circuit the session restore below.
+      await probeSetupState();
 
+      try {
         // Try to restore session — the HTTP-only cookie is sent automatically.
         // We call /api/auth/me; if the cookie is valid the server returns user info.
         const meRes = await authFetch("/api/auth/me");
@@ -179,7 +223,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     init();
-  }, []);
+  }, [probeSetupState]);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await fetch("/api/auth/login", {
@@ -219,24 +263,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
-  const completeSetup = useCallback(async () => {
-    // Optimistically flip the appliance to ready so AuthGate routes to the
-    // dashboard immediately — no flash of the wizard while the server write
-    // and the next `/api/setup/state` fetch land.
-    setSetupState((prev) =>
-      prev
+  const completeSetup = useCallback(async (): Promise<boolean> => {
+    setCompleteSetupError(null);
+    // Snapshot the pre-flip appliance so we can ROLL BACK if the server
+    // persist fails (M4) — otherwise the UI would show "ready" while the
+    // server stays "unclaimed" and the next refresh re-traps the owner.
+    let previousAppliance: "unclaimed" | "ready" = "unclaimed";
+    setSetupState((prev) => {
+      previousAppliance = prev?.appliance ?? "unclaimed";
+      return prev
         ? { ...prev, appliance: "ready" }
-        : { appliance: "ready", setupStep: "done", userTourCompleted: false },
-    );
-    // Durably persist the finish transition. THIS is the call the optimistic
-    // flip was always meant to mirror: the orchestrator's `markApplianceReady`
-    // flips the explicit `ApplianceSetup.state` column so a hard refresh reads
-    // `ready` instead of re-trapping the owner in the first-run wizard. Awaited
-    // (not fire-and-forget) so persisted and in-memory state agree before we
-    // settle; patchSetupReady swallows transient network errors internally and
-    // the next state GET re-syncs, so this never rejects.
-    await patchSetupReady();
+        : { appliance: "ready", setupStep: "done", userTourCompleted: false };
+    });
+    // Durably persist the finish transition. The orchestrator's
+    // `markApplianceReady` flips the explicit `ApplianceSetup.state` column so
+    // a hard refresh reads `ready` instead of re-trapping the owner.
+    try {
+      await patchSetupReady();
+      return true;
+    } catch (err) {
+      // M4 — the persist failed. Roll the optimistic flip back to the real
+      // (server-truth) value and surface the error so the UI can show a
+      // retry, instead of leaving UI/server diverged. The transition is
+      // idempotent, so retrying is safe.
+      setSetupState((prev) =>
+        prev ? { ...prev, appliance: previousAppliance } : prev,
+      );
+      setCompleteSetupError(
+        err instanceof Error
+          ? err.message
+          : "Couldn't finish setup. Please retry.",
+      );
+      return false;
+    }
   }, []);
+
+  // M3 — retry affordance for the lifecycle probe.
+  const retrySetupProbe = useCallback(async () => {
+    await probeSetupState();
+  }, [probeSetupState]);
 
   // Back-compat: derive the legacy boolean from the explicit state so any
   // consumer still reading `setupRequired` keeps working during migration.
@@ -245,7 +310,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, isLoading, setupState, setupRequired, login, logout, completeSetup }}
+      value={{
+        user,
+        isLoading,
+        setupState,
+        setupRequired,
+        setupProbeError,
+        retrySetupProbe,
+        completeSetupError,
+        login,
+        logout,
+        completeSetup,
+      }}
     >
       {children}
     </AuthContext.Provider>

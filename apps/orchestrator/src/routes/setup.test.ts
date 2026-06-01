@@ -20,17 +20,41 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
+import cookieParser from "cookie-parser";
 
 vi.unmock("@prisma/client");
+
+// M1 — the route verifies a dashboard session cookie inline (mirroring
+// routes/pm.ts) to authorize the `appliance:"ready"` claim. Stub the JWT
+// verifier so a test can present an "authenticated" cookie deterministically
+// without minting a real signed token.
+vi.mock("../services/jwt.service.js", () => ({
+  verifyAccessToken: (token: string) =>
+    token === "valid-session"
+      ? { sub: "u1", username: "owner", displayName: "Owner", role: "owner" }
+      : null,
+}));
 
 import { createSetupRouter } from "./setup.js";
 
 // ── In-memory applianceSetup singleton store ──
-function createPrismaMock() {
+//
+// `userCount` models whether an admin account exists (the M2 precondition
+// for the `ready` transition). Defaults to 1 (admin present) so the
+// pre-existing happy-path cases keep exercising the claim; the M1/M2 cases
+// seed 0 explicitly to drive the pre-claim rejection.
+function createPrismaMock(opts: { userCount?: number } = {}) {
   let row: Record<string, unknown> | null = null;
+  let userCount = opts.userCount ?? 1;
   return {
     _seed: (r: Record<string, unknown> | null) => {
       row = r;
+    },
+    _setUserCount: (n: number) => {
+      userCount = n;
+    },
+    user: {
+      count: async () => userCount,
     },
     applianceSetup: {
       findUnique: async ({ where }: { where: { id: string } }) =>
@@ -64,6 +88,7 @@ function createPrismaMock() {
 
 function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
   const app = express();
+  app.use(cookieParser());
   app.use(express.json());
   app.use("/api", createSetupRouter(prisma as never));
   return app;
@@ -211,5 +236,90 @@ describe("PATCH /api/setup/state", () => {
     const app = buildApp(prisma);
     const res = await request(app).patch("/api/setup/state").send({});
     expect(res.status).toBe(400);
+  });
+});
+
+// ── M1 — the lifecycle-mutating `appliance:"ready"` claim is gated ──
+describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
+  it("rejects an UNAUTHENTICATED ready transition on a pre-claim box (no admin) with 403", async () => {
+    // The takeover vector: a LAN caller with no session, before any admin
+    // account exists, must NOT be able to flip the box ready.
+    const prisma = createPrismaMock({ userCount: 0 });
+    const res = await request(buildApp(prisma))
+      .patch("/api/setup/state")
+      .send({ appliance: "ready" });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
+  });
+
+  it("does NOT write the appliance when the claim is rejected", async () => {
+    const prisma = createPrismaMock({ userCount: 0 });
+    const app = buildApp(prisma);
+    await request(app).patch("/api/setup/state").send({ appliance: "ready" });
+    // The box stays unclaimed — the rejection happened before any write.
+    const get = await request(app).get("/api/setup/state");
+    expect(get.body.appliance).toBe("unclaimed");
+  });
+
+  it("ALLOWS the ready transition when a valid session cookie is presented (pre-admin)", async () => {
+    // The wizard authenticates at the account step, so the finish PATCH
+    // rides the dashboard session cookie even in the narrow window before
+    // user.count() reflects the new admin.
+    const prisma = createPrismaMock({ userCount: 0 });
+    const res = await request(buildApp(prisma))
+      .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
+      .send({ appliance: "ready" });
+    expect(res.status).toBe(200);
+    expect(res.body.appliance).toBe("ready");
+  });
+
+  it("ALLOWS the ready transition (no cookie) once an admin account exists", async () => {
+    // Backstop path (b): an admin row exists ⇒ the box is genuinely
+    // claimable; the finish PATCH succeeds without re-presenting a cookie.
+    const prisma = createPrismaMock({ userCount: 1 });
+    const res = await request(buildApp(prisma))
+      .patch("/api/setup/state")
+      .send({ appliance: "ready" });
+    expect(res.status).toBe(200);
+    expect(res.body.appliance).toBe("ready");
+  });
+
+  it("rejects an invalid session cookie on a pre-claim box with 403", async () => {
+    const prisma = createPrismaMock({ userCount: 0 });
+    const res = await request(buildApp(prisma))
+      .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=garbage")
+      .send({ appliance: "ready" });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
+  });
+
+  it("still allows PUBLIC resumability writes (setup_step) with no auth", async () => {
+    // Resumability must not regress: an unauthenticated pre-claim wizard
+    // can still persist its step.
+    const prisma = createPrismaMock({ userCount: 0 });
+    const res = await request(buildApp(prisma))
+      .patch("/api/setup/state")
+      .send({ setup_step: "storage" });
+    expect(res.status).toBe(200);
+    expect(res.body.setup_step).toBe("storage");
+  });
+});
+
+// ── M5 — the public GET must be side-effect-free ──
+describe("GET /api/setup/state — read is side-effect-free (M5)", () => {
+  it("does not upsert/create a row on read (findUnique only)", async () => {
+    const prisma = createPrismaMock({ userCount: 0 });
+    // Tripwire: any write through the singleton is a test failure.
+    const upsertSpy = vi.spyOn(prisma.applianceSetup, "upsert");
+    const res = await request(buildApp(prisma)).get("/api/setup/state");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      appliance: "unclaimed",
+      setup_step: "welcome",
+      user_tour_completed: false,
+    });
+    expect(upsertSpy).not.toHaveBeenCalled();
   });
 });

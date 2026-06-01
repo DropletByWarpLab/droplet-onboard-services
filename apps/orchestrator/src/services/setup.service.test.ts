@@ -39,6 +39,7 @@ import {
   isSetupStep,
   SETUP_STEPS,
   InvalidSetupStepError,
+  SetupNotCompleteError,
 } from "./setup.service.js";
 
 // ── In-memory applianceSetup singleton store ──
@@ -46,10 +47,20 @@ import {
 // Mirrors the slice of PrismaClient the service touches: findUnique +
 // upsert keyed on the pinned `id`. The real model pins `id` to a fixed
 // singleton value the same way `Workspace` pins `id = 1`.
-function createPrismaMock() {
+function createPrismaMock(opts: { userCount?: number } = {}) {
   let row: Record<string, unknown> | null = null;
+  let userCount = opts.userCount ?? 1;
   return {
     _peek: () => row,
+    _setUserCount: (n: number) => {
+      userCount = n;
+    },
+    // M2 — `markApplianceReady` requires at least one admin (User) row
+    // before it will claim the box. Defaults to 1 so the existing
+    // happy-path cases keep flipping ready.
+    user: {
+      count: async () => userCount,
+    },
     applianceSetup: {
       findUnique: async ({ where }: { where: { id: string } }) =>
         row && row.id === where.id ? { ...row } : null,
@@ -92,14 +103,15 @@ describe("setup.service — state machine", () => {
     prisma = createPrismaMock();
   });
 
-  it("materializes the singleton at welcome/unclaimed on first read", async () => {
+  it("returns the welcome/unclaimed default on first read WITHOUT writing (M5)", async () => {
     const state = await getSetupState(prisma as never);
     expect(state.appliance).toBe("unclaimed");
     expect(state.setupStep).toBe("welcome");
     expect(state.userTourCompleted).toBe(false);
-    // The row must actually be persisted, not synthesized per-call — a
-    // subsequent writer (setSetupStep) upserts against it.
-    expect(prisma._peek()).not.toBeNull();
+    // M5 — the public GET must be side-effect-free: a read on a fresh
+    // appliance synthesizes the default in memory and does NOT materialize
+    // a row (the migration seed / authenticated writers own that).
+    expect(prisma._peek()).toBeNull();
   });
 
   it("persists and round-trips a setup step (resumable mid-wizard)", async () => {
@@ -134,6 +146,30 @@ describe("setup.service — state machine", () => {
     // Re-reading reflects the persisted flip (explicit, not derived).
     const reread = await getSetupState(prisma as never);
     expect(reread.appliance).toBe("ready");
+  });
+
+  it("REFUSES to mark ready when no admin account exists (M2 — anti-lockout)", async () => {
+    // The lockout vector: flipping an account-less box "ready" would route
+    // every visitor to /login on a box with no credentials. markApplianceReady
+    // must fail CLOSED until setup actually completed (an admin row exists).
+    prisma._setUserCount(0);
+    await expect(
+      markApplianceReady(prisma as never),
+    ).rejects.toBeInstanceOf(SetupNotCompleteError);
+    // The appliance stays unclaimed — no partial write.
+    const reread = await getSetupState(prisma as never);
+    expect(reread.appliance).toBe("unclaimed");
+  });
+
+  it("marks ready once an admin account exists (precondition satisfied)", async () => {
+    prisma._setUserCount(0);
+    await expect(
+      markApplianceReady(prisma as never),
+    ).rejects.toBeInstanceOf(SetupNotCompleteError);
+    // Admin is created (POST /auth/setup) → the claim now succeeds.
+    prisma._setUserCount(1);
+    const after = await markApplianceReady(prisma as never);
+    expect(after.appliance).toBe("ready");
   });
 
   it("flips tour-completed independently of appliance state", async () => {

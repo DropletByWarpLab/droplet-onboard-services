@@ -1847,7 +1847,11 @@ model ApplianceSetup {
   state             String    @default("unclaimed")
   setupStep         SetupStep @default(welcome)
   userTourCompleted Boolean   @default(false)
-  updatedAt         DateTime  @updatedAt
+  // M6 (PR #372 re-review): `@default(now())` emits a DB-level
+  // DEFAULT CURRENT_TIMESTAMP so a raw INSERT omitting `updatedAt` (the
+  // singleton migration seed) can't violate NOT NULL; `@updatedAt` still
+  // bumps it on every Prisma write.
+  updatedAt         DateTime  @updatedAt @default(now())
   createdAt         DateTime  @default(now())
 }
 
