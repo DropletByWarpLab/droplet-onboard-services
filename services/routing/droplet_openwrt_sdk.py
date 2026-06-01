@@ -50,7 +50,40 @@ UBUS_STATUS = {
     7: "TIMEOUT",
 }
 
+# Named ubus status codes (subset) used for shape-agnostic error handling —
+# a deployment may legitimately lack an interface/device the SDK asks about
+# (e.g. a single-box with no `wan`); see ADR-011.
+UBUS_STATUS_INVALID_ARGUMENT = 2
+UBUS_STATUS_NOT_FOUND = 4
+UBUS_STATUS_NO_DATA = 5
+UBUS_STATUS_TIMEOUT = 7
+
 NULL_SESSION = "00000000000000000000000000000000"
+
+# Fresh placeholder status for an interface the SDK can't read live. Mirrors the
+# `InterfaceStatus` wire shape (orchestrator `types/network.ts`) so the Network
+# overview renders instead of 500-ing. `present` is the canonical presence
+# signal (CLAUDE.md coding-standard #2 — never derive state from the absence of
+# a field): `present=False` means the interface isn't configured on this box,
+# distinct from a configured-but-down interface (`present=True, up=False`).
+# Returns a NEW dict each call so callers never share the nested `data`/lists.
+def interface_stub(present: bool) -> dict:
+    return {
+        "up": False,
+        "pending": False,
+        "available": False,
+        "autostart": False,
+        "device": "",
+        "proto": "",
+        "uptime": 0,
+        "l3_device": "",
+        "ipv4-address": [],
+        "ipv6-address": [],
+        "route": [],
+        "dns-server": [],
+        "present": present,
+        "data": {},
+    }
 
 
 class UbusError(Exception):
@@ -305,12 +338,47 @@ class NetworkApi:
         return self._r._call("network", "restart")
 
     def get_all_interface_statuses(self) -> dict[str, dict]:
-        """Batch-fetch status of lan, wan, and wan6 interfaces."""
-        results = self._r._batch_call([
-            (f"network.interface.lan", "status", {}),
-            (f"network.interface.wan", "status", {}),
-        ])
-        return {"lan": results[0], "wan": results[1]}
+        """Status of the standard `lan`/`wan` interfaces, deployment-shape-agnostic.
+
+        Queries each interface independently with an explicit degradation
+        contract so a single interface never 500s the whole Network overview
+        (ADR-011):
+
+        * **Not configured on this box** (ubus ``NOT_FOUND``) — e.g. a single-box
+          where WAN is handled by the host, not the containerised OpenWrt —
+          reported as an explicit ``present: False`` stub.
+        * **Transient read failure** of a configured interface (ubus
+          ``TIMEOUT``) — reported as ``present: True, up: False`` and a warning
+          logged, so a blip on one interface degrades to "down" and self-heals
+          on the next poll rather than taking the page down.
+        * **Any other ubus error** (e.g. ``PERMISSION_DENIED``,
+          ``INVALID_ARGUMENT``) is a real fault and propagates — it is not
+          masked as "down".
+        * A **total transport loss** (``ConnectionLost`` — the router is
+          unreachable at all) also propagates, so a genuinely offline router
+          surfaces as offline upstream instead of as fake all-interfaces-down.
+
+        Consumers read ``present`` to warn on a configured-but-down interface
+        distinctly from one that simply isn't on this hardware shape.
+        """
+        out: dict[str, dict] = {}
+        for name in ("lan", "wan"):
+            try:
+                status = self.interface_status(name)
+                status["present"] = True
+                out[name] = status
+            except UbusError as exc:
+                if exc.code == UBUS_STATUS_NOT_FOUND:
+                    out[name] = interface_stub(present=False)
+                elif exc.code == UBUS_STATUS_TIMEOUT:
+                    logger.warning(
+                        "interface_status(%s) timed out; degrading to down for "
+                        "this poll", name,
+                    )
+                    out[name] = interface_stub(present=True)
+                else:
+                    raise
+        return out
 
     def set_lan_ip(self, ipaddr: str, netmask: str = "255.255.255.0"):
         """Change the LAN IP address via UCI."""
@@ -368,8 +436,25 @@ class WirelessApi:
         return result.get("results", [])
 
     def connected_clients(self, device: str = "wlan0") -> list[dict]:
-        """Get list of connected wireless clients."""
-        result = self._r._call("iwinfo", "assoclist", {"device": device})
+        """Get list of connected wireless clients for `device`.
+
+        Returns an empty list when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default `wlan0` on a box whose
+        radio is named `wlp14s0`): a missing radio has no clients and shouldn't
+        500 the page (ADR-011, shape-agnostic).
+
+        ``INVALID_ARGUMENT`` is deliberately NOT swallowed — it signals a
+        malformed `device` argument (a caller bug), so converting it to "zero
+        clients" would silently mask the error. It propagates instead. (The real
+        fix for this deployment is to derive the radio name rather than default
+        to `wlan0` — acknowledged follow-up.)
+        """
+        try:
+            result = self._r._call("iwinfo", "assoclist", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
         return result.get("results", [])
 
     def radio_info(self, device: str = "wlan0") -> dict:
@@ -1336,11 +1421,15 @@ def get_network_summary(router: DropletRouter) -> dict:
     Returns a dict with interfaces, wireless, DHCP leases, and system info
     that can be fed into the LLM's context window.
     """
+    # Shape-agnostic (ADR-011): on a box without `wan` the per-interface
+    # NOT_FOUND degrades to a present:False stub instead of raising and breaking
+    # the whole LLM summary.
+    interfaces = router.network.get_all_interface_statuses()
     return {
         "system": router.system.board_info(),
         "resources": router.system.resource_info(),
-        "lan": router.network.interface_status("lan"),
-        "wan": router.network.interface_status("wan"),
+        "lan": interfaces.get("lan", interface_stub(present=False)),
+        "wan": interfaces.get("wan", interface_stub(present=False)),
         "wireless": router.wireless.status(),
         "dhcp_leases": router.dhcp.active_leases(),
         "firewall_zones": router.firewall.get_zones(),
@@ -1366,6 +1455,10 @@ def describe_network_for_llm(router: DropletRouter) -> str:
     wan_ip = "unknown"
     if wan.get("ipv4-address"):
         wan_ip = wan["ipv4-address"][0]["address"]
+    elif wan.get("present") is False:
+        # WAN not configured on this box (e.g. single-box: WAN handled by the
+        # host, not the containerised OpenWrt) — distinct from a down WAN.
+        wan_ip = "n/a (WAN handled by host)"
 
     uptime_hours = resources.get("uptime", 0) // 3600
     mem_total = resources.get("memory", {}).get("total", 0) // (1024 * 1024)
