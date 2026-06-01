@@ -1,4 +1,4 @@
-# ADR-011: LLM client-dispatched actions (desktop tool-host)
+# ADR-014: LLM client-dispatched actions (desktop tool-host)
 
 - **Status:** Accepted
 - **Date:** 2026-05-29 (accepted 2026-05-30)
@@ -8,7 +8,7 @@
 - **Related ADRs:** ADR-004 (RBAC per-route guards — role taxonomy), ADR-008 (native mobile design system + API contract — same wire protocol), ADR-009 (canonical system architecture)
 - **Related docs:** [`docs/llm-safety-tiers.md`](llm-safety-tiers.md) (Tier 1/2/3 model this ADR extends), `apps/orchestrator/src/services/safety-tier.service.ts`
 
-> **Numbering note.** This ADR was tracked in Jira as "ADR-003" (the number it carried when WARP-350/351 were filed against the 2026-05 `shared_brain` snapshot). In this repo `docs/ADR-003-rag-techniques-adoption.md` (RAG techniques) landed on `main` first, so — exactly as ADR-004 did before it — the document is renumbered to the next free slot, **ADR-011**, and named for what it does (`llm-client-dispatched-actions`) rather than its old number. The Jira epic/story titles still say "ADR-003"; treat that as a stale alias for this file. The originally-referenced `ADR-003-llm-client-dispatched-actions.md` and `desktop-tool-host-rpc.md` were never committed to `shared_brain`; this ADR supersedes those dead links.
+> **Numbering note.** This ADR was tracked in Jira as "ADR-003" (the number it carried when WARP-350/351 were filed against the 2026-05 `shared_brain` snapshot). In this repo `docs/ADR-003-rag-techniques-adoption.md` (RAG techniques) landed on `main` first, so — exactly as ADR-004 did before it — the document is renumbered to the next free slot and named for what it does (`llm-client-dispatched-actions`) rather than its old number. The number is **ADR-014**: this PR first drafted as ADR-011, but `docs/ADR-011-hardware-agnostic-codebase.md`, `ADR-012-phone-home-egress-control.md`, and `ADR-013-builtin-directory-vs-nextcloud.md` already exist on `main`, so ADR-014 is the next free slot. The Jira epic/story titles still say "ADR-003"; treat that as a stale alias for this file. The originally-referenced `ADR-003-llm-client-dispatched-actions.md` and `desktop-tool-host-rpc.md` were never committed to `shared_brain`; this ADR supersedes those dead links.
 
 ## Context
 
@@ -34,8 +34,9 @@ target: 'self' | { kind: 'client', deviceId: string }
 
 - `confirmationToken` binding is extended to `{ service, action, resourceId, targetDeviceId }`.
 - For `target = client`, the Tier-2 confirmation surface is the **target device's native modal**, not the dashboard `/command/confirm` round-trip. The client signs its consent (ed25519 over `{requestId}|{outcome}|{deviceId}|{timestamp}`); the orchestrator verifies the signature and checks a 5-minute `(deviceId, requestId)` replay cache before executing.
-- The per-conversation tool catalog is synthesized as `{ self-target tools } ∪ { for each connected, opted-in client: its consented tools }`, with names disambiguated by target (e.g. `open_file__stefans_macbook`). Catalog membership requires `DeviceClient.last_seen_ws_at` within 90 s **and** non-empty `tool_consent`.
-- Every dispatched call writes a signed `ActivityRow` (canonical audit chain per WARP-456) carrying `target_device_id` and `request_id`; the legacy `CommandAuditLog` view is dual-written for the existing `/api/network/audit` path.
+- The per-conversation tool catalog is synthesized as `{ self-target tools } ∪ { for each connected, opted-in client: its consented tools }`, with names disambiguated by target (e.g. `open_file__stefans_macbook`). Catalog membership requires the client's last WebSocket heartbeat to be within 90 s **and** a non-empty per-tool consent map.
+  - **Schema note (forward design — not yet present).** Both predicates need new `DeviceClient` columns that do **not** exist as of WARP-352. Today's `model DeviceClient` (`apps/orchestrator/prisma/schema.prisma`) has `lastSeen` (a coarse "active" timestamp) and *no* consent column. Implementing this requires a Prisma migration adding (a) a WS-liveness timestamp — either tighten the semantics of `lastSeen` or add a dedicated `lastSeenWsAt` (camelCase per this schema's convention; the draft's `last_seen_ws_at` was a placeholder name) — and (b) a `toolConsent` JSON column holding the per-tool `allow`/`confirm`/`block` map. Implementers must add these in the WARP-352+ migration, not assume they already exist.
+- Every dispatched call writes a signed `ActivityRow` (canonical audit chain per WARP-456). Client dispatch reuses the existing **`tool_call`** activity kind (it *is* a tool call, just target-routed) and carries `targetDeviceId` + `requestId` in `refs` — it does **not** introduce a new `"client"` kind. The canonical `ActivityKindName` union and the `KNOWN_KINDS` guard (`apps/orchestrator/src/services/activity.service.ts`) are a closed allow-list that throws on unknown kinds, so a hypothetical `kind: "client"` would fail at runtime; `tool_call` + a `refs.targetDeviceId` discriminator avoids touching the union while keeping client actions filterable. The legacy `CommandAuditLog` view is dual-written for the existing `/api/network/audit` path.
 
 ### Sign-off decisions (WARP-351)
 
@@ -55,7 +56,7 @@ target: 'self' | { kind: 'client', deviceId: string }
 
 **② `get_clipboard` and `screenshot` — DEFERRED. Tier-3 (blocked for AI) in V1.** These two are *excluded from V1* and reclassified from the draft's Tier-2 to **Tier 3** until a separate **"deep assist" ADR** defines stronger, explicit enrollment (hardware-token / Yubikey-grade opt-in, distinct from ordinary pairing). Rationale: clipboard and screen capture are ambient-surveillance-shaped — they can exfiltrate content the user never deliberately handed to the assistant — and do not meet the per-action-intent bar that the rest of the V1 catalog clears. WARP-357 is re-scoped to "blocked in V1; design the deep-assist enrollment" and no longer blocks V1 GA. The deep-assist work is tracked as **WARP-549** (ADR / decision) → **WARP-550** (enrollment gate) → WARP-357 (clipboard/screenshot implementation).
 
-**③ Default state — DEFAULT-OFF, opt-in per tool.** After pairing, *every* client tool is `block` in `DeviceClient.tool_consent`. Nothing on the desktop is reachable by the LLM until the user explicitly enables each tool (`allow always` or `confirm each time`) from the menu-bar **AI permissions** settings. Pairing grants presence + identity, never capability. This is the sovereign-by-default posture; the smoother "default-on after pairing" alternative was rejected.
+**③ Default state — DEFAULT-OFF, opt-in per tool.** After pairing, *every* client tool is `block` in the per-tool consent map (`DeviceClient.toolConsent`, the new column described in the schema note above). Nothing on the desktop is reachable by the LLM until the user explicitly enables each tool (`allow always` or `confirm each time`) from the menu-bar **AI permissions** settings. Pairing grants presence + identity, never capability. This is the sovereign-by-default posture; the smoother "default-on after pairing" alternative was rejected.
 
 **④ Native consent-modal copy — APPROVED (strings below).** Per-call Tier-2 modal, device-named, data-named, deny-defaulted.
 
@@ -112,7 +113,7 @@ Design intent for the copy: name the **device**, name the **data/target**, make 
 - Tier classification for new client tools follows `docs/llm-safety-tiers.md`. Client tools are `requiresWrite`/`requiresConfirmation` per the same registry conventions as on-appliance tools.
 - New client tools beyond the V1 catalog require an ADR amendment (catalog is a closed whitelist for V1).
 - `get_clipboard` / `screenshot` (and any keystroke / screen-recording / arbitrary-exec capability) are **blocked** until the deep-assist ADR (**WARP-549**) is Accepted.
-- All client dispatch audit-logs through `activity.service.ts::record({ kind: "client", … , refs: { targetDeviceId, requestId } })`.
+- All client dispatch audit-logs through `activity.service.ts::record({ kind: "tool_call", … , refs: { targetDeviceId, requestId } })`. Use the existing `tool_call` kind (a `"client"` kind is **not** valid — it is absent from the `ActivityKindName` union / `KNOWN_KINDS` guard and would throw); distinguish client-targeted calls by the `refs.targetDeviceId` field.
 
 ## Open questions (non-blocking — tracked as follow-ups)
 
