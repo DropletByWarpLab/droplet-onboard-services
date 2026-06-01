@@ -372,6 +372,18 @@ if [ -d "$REPO_ROOT/.data" ]; then
   log_success "Removed .data/ (logs and lock files)"
 fi
 
+# Shutdown-screen oneshot unit + host script (WARP-624). Disable + remove so
+# a factory reset truly returns to out-of-box; install-device-bridge.sh
+# reinstalls them on re-provision. Silent if not installed.
+if [ -f /etc/systemd/system/droplet-shutdown-screen.service ] || \
+   [ -f /usr/local/sbin/droplet-shutdown-screen.sh ]; then
+  sudo systemctl disable --now droplet-shutdown-screen.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-shutdown-screen.service 2>/dev/null || true
+  sudo rm -f /usr/local/sbin/droplet-shutdown-screen.sh 2>/dev/null || true
+  sudo systemctl daemon-reload 2>/dev/null || true
+  log_success "Removed shutdown-screen unit and host script"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then

@@ -124,6 +124,53 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 # for interaction, not a billboard. Setting AUTO_CYCLE=1 restores the
 # old logo -> stats carousel for headless demos.
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
+
+# ---------------------------------------------------------------------------
+# Boot readiness (WARP-624)
+# ---------------------------------------------------------------------------
+# The panel opens on the boot screen at construction and stays there until
+# the system is healthy, then flips to the live UI. Health is probed against
+# the same-host orchestrator behind the nginx gateway (loopback — matches
+# droplet-device-bridge.service's ORCHESTRATOR_URL=http://127.0.0.1). A 2xx
+# means "ready". If we never see a 2xx within BOOT_MAX_SECONDS we surface the
+# UI anyway so a degraded stack still shows something instead of a stuck
+# splash. Both knobs are overridable; defaults stay on loopback so there are
+# no host-specific defaults baked in.
+BOOT_READINESS_URL = os.environ.get(
+    "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
+
+
+def _env_positive_int(name: str, default: int, raw: Optional[str] = None) -> int:
+    """Read a positive-int env var, degrading gracefully instead of raising.
+
+    L1 (WARP-624): a malformed value (e.g. ``BOOT_MAX_SECONDS=ninety``) would
+    otherwise raise ValueError at import and kill the whole service. We fall
+    back to ``default`` on anything non-integer and clamp non-positive values
+    to ``default`` too — a zero/negative boot budget would make the timeout
+    fallback fire instantly (or never make sense). ``raw`` is injectable for
+    deterministic tests.
+    """
+    if raw is None:
+        raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not an integer — falling back to %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning(
+            "%s=%r must be positive — falling back to %s", name, raw, default)
+        return default
+    return value
+
+
+BOOT_MAX_SECONDS = _env_positive_int("BOOT_MAX_SECONDS", 90)
+# How often the cycle loop actually probes readiness. The loop ticks ~12.5x/s;
+# gating the probe to every 2s keeps it cheap.
+BOOT_READINESS_INTERVAL = float(os.environ.get("BOOT_READINESS_INTERVAL", "2.0"))
 LOGO_DURATION = 5
 STATS_DURATION = 10
 MESSAGE_HOLD = 30
@@ -213,6 +260,9 @@ class TFTDisplay:
     SETTINGS = "settings"
     LOGO = "logo"
     MESSAGE = "message"
+    # Lifecycle overlays (WARP-624) — modal, not part of the touch carousel.
+    BOOT = "boot"
+    SHUTDOWN = "shutdown"
 
     def __init__(self):
         self._pyportal = None
@@ -236,7 +286,22 @@ class TFTDisplay:
         # (files = 30s) — i.e. "the screen doesn't auto-fill on reboot".
         self._needs_resync = False
         self._backend = "sim"
-        self._current_mode = self.HOME
+        # Open on the boot screen (WARP-624): a cold power-on must read
+        # "Starting Droplet" until the readiness check (or its timeout)
+        # flips us to the live UI.
+        self._current_mode = self.BOOT
+        # Boot/shutdown caption state, rendered by render_boot/render_shutdown.
+        self._boot_stage = "Starting up"
+        self._boot_detail = ""
+        self._boot_pct: Optional[int] = None
+        self._shutdown_reason = ""
+        self._shutdown_phase = "stopping"
+        # Readiness transition state. `_boot_complete` is an explicit flag —
+        # we never infer "done" from the absence of something. `_boot_started_at`
+        # anchors the timeout; `_last_readiness_check` gates the probe cadence.
+        self._boot_complete = False
+        self._boot_started_at = time.time()
+        self._last_readiness_check = 0.0
         self._current_image: Optional[Image.Image] = None
         self._custom_title: Optional[str] = None
         self._custom_lines: Optional[List[str]] = None
@@ -1024,6 +1089,108 @@ class TFTDisplay:
             y += 24
         return img
 
+    def render_boot(self, stage: str, detail: str = "",
+                    pct: Optional[int] = None) -> Image.Image:
+        """Cold-boot splash — mirrors the firmware's render_boot().
+
+        Centered Droplet mark, "Starting Droplet" title, the current stage
+        as a caption (+ optional detail line), and a progress band. The band
+        is indeterminate (a short accent segment near the left) when `pct`
+        is None, otherwise it fills to `pct`%.
+        """
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        mark_size = 92
+        mark_x = (WIDTH - mark_size) // 2
+        mark_y = 56
+        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
+                          primary=ACCENT_PRIMARY, highlight=ACCENT_LIGHT)
+
+        font_title = _get_font(26, bold=True)
+        title = "Starting Droplet"
+        bbox = draw.textbbox((0, 0), title, font=font_title)
+        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, mark_y + mark_size + 16),
+                  title, fill=TEXT_COLOR, font=font_title)
+
+        font_cap = _get_font(15)
+        caption = (stage or "Starting up")[:48]
+        bbox = draw.textbbox((0, 0), caption, font=font_cap)
+        cap_y = mark_y + mark_size + 54
+        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, cap_y),
+                  caption, fill=LABEL_SECONDARY, font=font_cap)
+        if detail:
+            font_detail = _get_font(12)
+            dtext = detail[:54]
+            bbox = draw.textbbox((0, 0), dtext, font=font_detail)
+            draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, cap_y + 22),
+                      dtext, fill=LABEL_TERTIARY, font=font_detail)
+
+        # Progress band
+        bar_w = 280
+        bar_h = 8
+        bar_x = (WIDTH - bar_w) // 2
+        bar_y = HEIGHT - 56
+        draw.rounded_rectangle(
+            [(bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h)],
+            radius=bar_h // 2, fill=SURFACE_SECONDARY,
+        )
+        if pct is None:
+            # Indeterminate: a short accent segment anchored to the left.
+            seg = bar_w // 3
+            draw.rounded_rectangle(
+                [(bar_x, bar_y), (bar_x + seg, bar_y + bar_h)],
+                radius=bar_h // 2, fill=ACCENT_COLOR,
+            )
+        else:
+            fill_w = int(bar_w * min(max(pct, 0), 100) / 100)
+            if fill_w > 0:
+                draw.rounded_rectangle(
+                    [(bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h)],
+                    radius=bar_h // 2, fill=ACCENT_COLOR,
+                )
+        return img
+
+    def render_shutdown(self, reason: str = "",
+                        phase: str = "stopping") -> Image.Image:
+        """Shutdown splash — mirrors the firmware's render_shutdown().
+
+        Dimmed Droplet mark, "Shutting down" (or "Safe to power off" once
+        `phase == 'halted'`), and an optional reason line.
+        """
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        halted = phase == "halted"
+        mark_size = 92
+        mark_x = (WIDTH - mark_size) // 2
+        mark_y = 64
+        # Dimmed mark: use the quaternary/separator-weight tones so it reads
+        # as powering-down rather than active.
+        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
+                          primary=ACCENT_SUBTLE, highlight=LABEL_QUATERNARY)
+
+        font_title = _get_font(26, bold=True)
+        title = "Safe to power off" if halted else "Shutting down"
+        bbox = draw.textbbox((0, 0), title, font=font_title)
+        title_color = STATUS_GREEN if halted else TEXT_COLOR
+        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, mark_y + mark_size + 18),
+                  title, fill=title_color, font=font_title)
+
+        sub = reason[:54] if (reason and not halted) else (
+            "You can unplug the device." if halted else "")
+        if sub:
+            font_sub = _get_font(14)
+            bbox = draw.textbbox((0, 0), sub, font=font_sub)
+            draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2,
+                       mark_y + mark_size + 56),
+                      sub, fill=LABEL_TERTIARY, font=font_sub)
+        return img
+
     @staticmethod
     def _draw_metric_card(draw, x, y, w, h, label, value, pct,
                           font_label, font_value, font_sm, danger_thresh=(80, 95)):
@@ -1140,6 +1307,44 @@ class TFTDisplay:
             self._pyportal_send("message", {"title": title, "lines": list(lines)})
             self._render_current_locked()
 
+    def show_boot(self, stage: str, detail: str = "",
+                  pct: Optional[int] = None):
+        """Show the boot screen with a stage caption + optional progress.
+
+        Self-driven by the service (the readiness loop and lifespan call
+        this); also exposed via POST /display/boot for finer-grained boot
+        progress from the host's startup orchestration.
+        """
+        with self._lock:
+            self._current_mode = self.BOOT
+            self._boot_stage = stage
+            self._boot_detail = detail
+            self._boot_pct = pct
+            self._pyportal_send("boot", {
+                "stage": stage, "detail": detail, "pct": pct,
+            })
+            self._render_current_locked()
+
+    def show_shutdown(self, reason: str = "", phase: str = "stopping"):
+        """Show the shutdown screen and freeze the panel on it.
+
+        Stops the cycle loop first so no periodic re-render or auto-cycle
+        tick overwrites the shutdown frame while the host tears the stack
+        down. `phase == 'halted'` switches the copy to "Safe to power off".
+        """
+        # Stop cycling outside the lock — stop_cycle only flips a flag and
+        # the loop checks it each tick; doing it first guarantees nothing
+        # races the frame we are about to push.
+        self.stop_cycle()
+        with self._lock:
+            self._current_mode = self.SHUTDOWN
+            self._shutdown_reason = reason
+            self._shutdown_phase = phase
+            self._pyportal_send("shutdown", {
+                "reason": reason, "phase": phase,
+            })
+            self._render_current_locked()
+
     def show_custom_image(self, image: Image.Image):
         with self._lock:
             self._current_mode = "custom"
@@ -1206,7 +1411,13 @@ class TFTDisplay:
     def _render_current_locked(self):
         """Render whatever the current screen is. Assumes _lock held."""
         mode = self._current_mode
-        if mode == self.LOGO:
+        if mode == self.BOOT:
+            img = self.render_boot(self._boot_stage, self._boot_detail,
+                                   self._boot_pct)
+        elif mode == self.SHUTDOWN:
+            img = self.render_shutdown(self._shutdown_reason,
+                                       self._shutdown_phase)
+        elif mode == self.LOGO:
             img = self.render_logo()
         elif mode == self.STATS:
             img = self.render_stats()
@@ -1409,6 +1620,67 @@ class TFTDisplay:
                 return r.name
         return None
 
+    # ----- Boot readiness ----------------------------------------------
+
+    def _check_readiness(self) -> bool:
+        """Probe the readiness URL; True only on a 2xx.
+
+        Cheap and fail-safe: any connection error / non-2xx reads as "not
+        ready yet" (returns False, never raises) so a still-starting stack
+        doesn't crash the cycle loop.
+        """
+        try:
+            req = urllib.request.Request(BOOT_READINESS_URL, method="GET")
+            with urllib.request.urlopen(req, timeout=2.0) as r:
+                return 200 <= getattr(r, "status", 0) < 300
+        except Exception as e:                                       # noqa: BLE001
+            logger.debug("readiness probe failed: %s", e)
+            return False
+
+    def _readiness_tick(self, now: Optional[float] = None) -> None:
+        """Advance the boot->live transition. Called from the cycle loop.
+
+        No-op once boot is complete (we never yank the user back, and never
+        re-probe). Otherwise, at most once per BOOT_READINESS_INTERVAL,
+        probe readiness; flip to the live UI when the probe passes OR when
+        BOOT_MAX_SECONDS have elapsed (timeout fallback so a degraded stack
+        still surfaces the UI). `now` is injectable for deterministic tests.
+        """
+        if self._boot_complete:
+            return
+        if now is None:
+            now = time.time()
+        # Timeout fallback first so a hung readiness endpoint can't pin the
+        # splash past the budget.
+        if now - self._boot_started_at >= BOOT_MAX_SECONDS:
+            logger.warning(
+                "boot readiness timed out after %ss — surfacing live UI",
+                BOOT_MAX_SECONDS)
+            self._complete_boot()
+            return
+        if now - self._last_readiness_check < BOOT_READINESS_INTERVAL:
+            return
+        self._last_readiness_check = now
+        if self._check_readiness():
+            logger.info("boot readiness satisfied — surfacing live UI")
+            self._complete_boot()
+
+    def _complete_boot(self) -> None:
+        """Mark boot done and drop to the live UI (stats).
+
+        Emit a BARE stats frame ({"mode":"stats"}, no data) so the firmware
+        actually navigates off the boot splash: code.py:1473 only calls
+        set_screen() on a bare-mode message, while a data-laden stats push
+        re-renders *iff already on stats* (code.py:1497). Without this, the
+        host flips its own state to STATS but the PyPortal stays frozen on
+        "Starting Droplet" forever. _set_mode() alone only writes the sim
+        preview PNG and never touches the serial channel. (WARP-624 / B1)
+        """
+        self._boot_complete = True
+        self._pyportal_send(self.STATS)
+        # Don't pin the cycle: the live UI should resume its normal cadence.
+        self._set_mode(self.STATS, pause_cycle=False)
+
     # ----- Auto-cycle / interactive loop -------------------------------
 
     def start_cycle(self):
@@ -1528,6 +1800,11 @@ class TFTDisplay:
                 last_release = state.get("release_count", 0) if touch else 0
 
             now = time.time()
+
+            # Boot -> live transition (WARP-624). Hosted on this managed
+            # cycle thread (no separate scheduler). Internally gated to
+            # ~every BOOT_READINESS_INTERVAL and a no-op once boot is done.
+            self._readiness_tick(now)
 
             # Return home after a message timeout
             if (self._current_mode == self.MESSAGE and

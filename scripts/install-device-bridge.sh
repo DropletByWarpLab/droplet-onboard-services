@@ -36,7 +36,8 @@ log() { printf '[install-bridge] %s\n' "$*"; }
 # --- 1) Install the unit files ---
 for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.service \
-            droplet-wifi-rotate.timer; do
+            droplet-wifi-rotate.timer \
+            droplet-shutdown-screen.service; do
   src="$SRC_DIR/$unit"
   dst="$UNIT_DIR/$unit"
   if [[ ! -f "$src" ]]; then
@@ -46,6 +47,22 @@ for unit in droplet-device-bridge.service \
   install -m 0644 "$src" "$dst"
   log "installed $dst"
 done
+
+# --- 1b) Install the shutdown-screen host script ---
+# droplet-shutdown-screen.service's ExecStop runs this on teardown to push
+# the "Shutting down" frame to the front panel. It belongs on the host (not
+# in a container) so it can reach the oled-display service on loopback while
+# the stack is being stopped. Lives in /usr/local/sbin per the host-script
+# convention; installed here (never hand-placed) so factory-reset can remove
+# it cleanly.
+SHUTDOWN_SCRIPT_SRC="$SRC_DIR/droplet-shutdown-screen.sh"
+SHUTDOWN_SCRIPT_DST="/usr/local/sbin/droplet-shutdown-screen.sh"
+if [[ ! -f "$SHUTDOWN_SCRIPT_SRC" ]]; then
+  log "missing source: $SHUTDOWN_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$SHUTDOWN_SCRIPT_SRC" "$SHUTDOWN_SCRIPT_DST"
+log "installed $SHUTDOWN_SCRIPT_DST"
 
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
@@ -126,6 +143,11 @@ fi
 # --- 3) Activate ---
 systemctl daemon-reload
 systemctl enable --now droplet-device-bridge.service
+
+# Shutdown-screen oneshot. enable so it's wired into multi-user.target; --now
+# starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
+# ExecStop fires on the next shutdown). Idempotent.
+systemctl enable --now droplet-shutdown-screen.service
 
 # Wi-Fi key rotation: off by default so saved credentials on phones keep
 # working after a restart. Enable only if the operator opts in via

@@ -52,6 +52,8 @@ Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).
 | POST | `/display/home`        | Navigate to the Stats screen |
 | POST | `/display/stats`       | Navigate to the Stats screen (4 half-donut gauges + rollup cards) |
 | POST | `/display/logo`        | Navigate to the Idle screen (clock + mark + info chips) |
+| POST | `/display/boot`        | Boot screen `{stage, detail?, pct?}` — omit `pct` for an indeterminate band |
+| POST | `/display/shutdown`    | Shutdown screen `{reason?, phase?}` — `phase=halted` shows "Safe to power off" |
 | POST | `/display/message`     | Custom text `{title, lines[]}` — up to 10 lines |
 | POST | `/display/custom`      | Upload image (multipart, max 8 MB) |
 | POST | `/display/brightness`  | Set brightness `{value: 0–255}` (PyPortal only) |
@@ -71,6 +73,35 @@ not a billboard). Set `AUTO_CYCLE=1` to restore the logo → stats carousel for
 headless demos. When an LLM calls `/display/message`, cycling pauses for 30 s
 before resuming.
 
+## Boot & shutdown screens
+
+The panel has two host-driven lifecycle screens (modal — not part of the
+swipe carousel):
+
+- **Boot** — the service constructs in boot mode, so the first frame on a
+  cold start is "Starting Droplet" rather than a live screen. A bounded
+  readiness check (hosted on the existing display cycle thread — no separate
+  scheduler) flips the panel to the live UI once the system is healthy. It
+  probes `BOOT_READINESS_URL` (default: the same-host orchestrator behind the
+  gateway, on loopback) about every 2 s; a `2xx` means ready. If readiness is
+  never observed within `BOOT_MAX_SECONDS` (default 90) the live UI is
+  surfaced anyway so a degraded stack still shows something. `POST
+  /display/boot` lets the host's startup orchestration push finer-grained
+  stage/progress while the stack comes up.
+- **Shutdown** — `POST /display/shutdown` shows "Shutting down" and freezes
+  the panel on that frame (the cycle loop is stopped so nothing overwrites
+  it). `phase=halted` switches the copy to "Safe to power off".
+
+The shutdown screen is driven at teardown by a systemd oneshot,
+`droplet-shutdown-screen.service`, whose `ExecStop` runs the host script
+`/usr/local/sbin/droplet-shutdown-screen.sh`. The unit is ordered
+`After=docker.service` so systemd stops it **before** the docker stack on
+shutdown — while the `oled-display` container is still alive to receive the
+POST. The script is best-effort and time-bounded (`curl -m 5`), so it can
+never block the shutdown sequence. `scripts/install-device-bridge.sh`
+installs the unit + script and enables the unit; `scripts/factory-reset.sh`
+removes them.
+
 ## Environment
 
 | Variable | Default | Description |
@@ -83,6 +114,8 @@ before resuming.
 | `DISPLAY_TIMEZONE` | `America/Los_Angeles` | Timezone for the wall-clock pushed to the PyPortal |
 | `SERVICE_SECRET` | _(empty)_ | Bearer token required on all non-`/health` routes |
 | `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Token the container sends to `device-bridge` when calling `POST /openwrt/wifi/rotate` |
+| `BOOT_READINESS_URL` | `http://127.0.0.1/api/health` | Health endpoint polled to leave the boot screen (loopback orchestrator behind the gateway) |
+| `BOOT_MAX_SECONDS` | `90` | Timeout fallback — surface the live UI even if readiness never reports healthy |
 | `SIM_OUTPUT` | `/tmp/tft_preview.png` | Simulated output path (also used as preview cache for PyPortal) |
 
 ## Wi-Fi QR (static password, default)
