@@ -2128,16 +2128,22 @@ model ApplianceSetup {
 /// `apps/web-dashboard/src/app/setup/page.tsx` 1:1, so the persisted
 /// resume-point can never reference a step the wizard can't render.
 ///
-/// GATE (PR #372): only the 9 SHIPPED steps are listed. The
-/// claim / org / team steps from the broader onboarding spec are GATED
-/// pending a Claude Design round-trip and are NOT wired anywhere yet
-/// (no backend endpoint, no step component). They EXTEND this enum — and
-/// the wizard array, and the route validation — in one coherent change
-/// when they ship. Listing them here today would create a persistable
-/// `setupStep` value with no reachable wizard step (a dead resume
-/// target), which is exactly the unreachable-state the no-guessing rule
-/// is meant to prevent. Keep this enum congruent with what the appliance
-/// can actually walk a customer through.
+/// GATE (PR #372): listed only the 9 SHIPPED steps and documented that the
+/// claim / org / team steps EXTEND this enum — and the wizard array, and the
+/// route validation — in one coherent change when they ship.
+///
+/// PR #373 (this change) — `claim` ships. It slots FIRST (after the welcome
+/// splash, before account): the customer binds the appliance to their
+/// workspace before any account exists, per #371 handoff §1
+/// (`welcome → claim → account → …`). The value is appended at the END of the
+/// enum DECLARATION (not inserted between `welcome` and `account`) because
+/// Postgres enums are ordered by their physical declaration order and
+/// `ALTER TYPE … ADD VALUE` can only append cheaply; the WIZARD ORDER lives in
+/// `SETUP_STEPS` (setup.service.ts) and the dashboard `STEPS` array, which both
+/// place `claim` second. The enum is an unordered membership set here — nothing
+/// reads its declaration order — so appending is safe and keeps the additive
+/// migration trivial. org / team remain GATED (separate PRs) for the same
+/// reachable-step reason #372 documented.
 enum SetupStep {
   welcome
   account
@@ -2148,4 +2154,64 @@ enum SetupStep {
   vpn
   ai
   done
+  claim
+}
+
+/// PR #373 — claim-code lifecycle. EXPLICIT, never derived from absence.
+///
+/// `available` — the code can still bind the appliance.
+/// `consumed`  — the code has bound the appliance (single-use; terminal).
+///
+/// The "is this code still claimable?" decision reads this column, NOT
+/// `usedAt IS NULL` (CLAUDE.md no-guessing rule; canonical precedent WARP-218
+/// `BrainMemoryItemStatus`). `usedAt` exists for AUDIT only — when the bind
+/// happened — and is written in the same atomic transaction that flips the
+/// state, so the two can never disagree. Mirrors the `state`-column discipline
+/// `ApplianceSetup` uses for the appliance lifecycle.
+enum ClaimCodeState {
+  available
+  consumed
+}
+
+/// PR #373 — a single-use code that binds a fresh appliance to its workspace
+/// (the onboarding Claim step). The customer reads the code off the PyPortal
+/// lid display and confirms it; `POST /api/setup/claim` verifies it and flips
+/// the appliance to "ready".
+///
+/// SECURITY POSTURE (per docs/ONBOARDING_CLAIM.md + #371 handoff §2):
+///   - `codeHash` stores a one-way hash, NEVER the plaintext code, so a DB
+///     read (backup, breach, hand-edit) can't recover a live claim code.
+///     Verification re-hashes the candidate and compares in constant time
+///     (timingSafeEqual) — no plaintext at rest, no early-exit byte compare.
+///   - `state` (ClaimCodeState) is the explicit single-use guard. The atomic
+///     consume is a conditional `updateMany WHERE state = 'available'` inside a
+///     `$transaction` (the WARP-564 pairing-claim pattern): the Postgres row
+///     lock serializes concurrent claimers, the loser flips zero rows and is
+///     rejected, so a code can bind the box exactly once even under a race.
+///   - `attempts` counts wrong-code guesses against this code for lockout /
+///     observability; the live rate-limit BUDGET is enforced in the route via
+///     the shared cache-counter helper (no busy-loop), and a wrong guess
+///     decrements that budget without revealing the real code.
+///
+/// MINTING / ROTATION IS OUT OF SCOPE for this PR (it belongs to the PyPortal
+/// display-service — a separate PR). Here a code is seeded via env/fixture
+/// (`CLAIM_CODE` / a test fixture) and only VERIFIED. `expiresAt` is carried so
+/// the rotation owner can expire codes later; the consume already treats expiry
+/// as authoritative (`expiresAt > now` in the conditional update).
+model ClaimCode {
+  id        String         @id @default(uuid())
+  // One-way hash of the claim code. Never the plaintext.
+  codeHash  String         @unique
+  // Explicit single-use lifecycle — never inferred from `usedAt`.
+  state     ClaimCodeState @default(available)
+  // When the code expires. The rotation owner (PyPortal service, future PR)
+  // sets this; the consume treats it as authoritative.
+  expiresAt DateTime
+  // Audit-only: when the successful bind happened. Written in the same
+  // transaction that flips `state` → consumed. Null while available.
+  usedAt    DateTime?
+  // Wrong-guess counter for this code (lockout / observability).
+  attempts  Int            @default(0)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 }

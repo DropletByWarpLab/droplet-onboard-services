@@ -56,10 +56,58 @@ import {
   SetupNotCompleteError,
   type SetupState,
 } from "../services/setup.service.js";
+import {
+  consumeClaimCode,
+  CLAIM_OUTCOME,
+} from "../services/setup-claim.service.js";
+import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
+import { cacheGet, cacheSet } from "../services/cache.service.js";
 
 const logger = pino({ name: "setup-route" });
+
+/**
+ * PR #373 — the wizard step the customer lands on after a successful claim.
+ * Claim slots FIRST (welcome → claim → account, #371 handoff §1), so binding
+ * the appliance advances the resumable wizard to `account`. This is the ONLY
+ * place that step name is written for the claim flow; keep it in sync with the
+ * dashboard `STEPS` array.
+ */
+const STEP_AFTER_CLAIM = "account";
+
+/**
+ * PR #373 — wrong-code rate-limit BUDGET. A claim code is short and read off a
+ * physical display, so an attacker on the LAN could otherwise brute-force it.
+ * We cap wrong guesses per window using the shared cache counter (no busy-loop;
+ * fails OPEN if the cache is down so a flaky Redis can't lock a legitimate
+ * owner out of claiming their box). Keyed by client IP.
+ */
+const CLAIM_RATE_LIMIT_WINDOW_SEC = 15 * 60; // 15 minutes
+const MAX_CLAIM_ATTEMPTS_PER_WINDOW = 10;
+
+/**
+ * Increment-and-check the per-IP claim budget. Returns whether the request is
+ * allowed. Mirrors the WARP-564 device-clients rate limiter: read the current
+ * count, reject at the cap, otherwise bump with a TTL. Fails OPEN on cache
+ * error (a down cache must not brick first-run claiming).
+ */
+async function withinClaimBudget(ip: string): Promise<boolean> {
+  const key = `ratelimit:setup-claim:${ip}`;
+  try {
+    const current = (await cacheGet<number>(key)) ?? 0;
+    if (current >= MAX_CLAIM_ATTEMPTS_PER_WINDOW) return false;
+    await cacheSet(key, current + 1, CLAIM_RATE_LIMIT_WINDOW_SEC);
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/** Claim request body — a single non-empty `code` string. */
+const claimSchema = z.object({
+  code: z.string().min(1).max(64),
+});
 
 /** Map the camelCase domain object onto the snake_case wire contract. */
 function toWire(state: SetupState): {
@@ -196,6 +244,103 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         return;
       }
       logger.error({ err }, "Failed to update setup state");
+      next(err);
+    }
+  });
+
+  // ── GET /api/setup/appliance ───────────────────────────────────
+  //
+  // PR #373 — the hardware contract the Claim step renders
+  // ({ appliance_id, compute, storage, network, display, supply_chain }).
+  // PUBLIC: shown before any account exists. This is a DOCUMENTED STUB — no
+  // orchestrator facility produces this exact shape yet; the contract service
+  // assembles it (best-effort enriching `network` from the routing
+  // /system/info, which is router-only). The route stays thin so the UI has a
+  // stable shape to build against while the real per-field sources land.
+  router.get("/setup/appliance", async (_req: Request, res, next) => {
+    try {
+      const contract = await getApplianceContract();
+      res.json(contract);
+    } catch (err) {
+      logger.error({ err }, "Failed to assemble appliance contract");
+      next(err);
+    }
+  });
+
+  // ── POST /api/setup/claim ──────────────────────────────────────
+  //
+  // PR #373 — bind the appliance to the workspace. Atomic, single-use,
+  // rate-limited; the code is hashed at rest and compared in constant time
+  // (setup-claim.service). PUBLIC: claiming precedes account creation.
+  //
+  //   correct code      → 200 { claimed:true, next_step } and advance the
+  //                        resumable wizard to `account`. Does NOT flip the
+  //                        appliance to "ready" — that's the wizard-FINISH
+  //                        transition (#372); claim is the FIRST step.
+  //   already claimed    → 200 { claimed:true, already_claimed:true, next_step }
+  //                        — idempotent short-circuit so a refresh/re-run moves
+  //                        the customer on instead of erroring.
+  //   wrong/unknown/expired → 400 { code:"CLAIM_CODE_INVALID" }, never echoing
+  //                        the real code, after decrementing the rate budget.
+  //   budget exhausted   → 429, before any DB read.
+  router.post("/setup/claim", async (req: Request, res, next) => {
+    try {
+      const parsed = claimSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "A claim code is required.",
+          code: "CLAIM_CODE_REQUIRED",
+        });
+        return;
+      }
+
+      // Rate-limit BEFORE any DB work so a brute-force burst can't hammer the
+      // lookup. `req.ip` is the client address (Express trust-proxy aware).
+      const ip = req.ip ?? "unknown";
+      if (!(await withinClaimBudget(ip))) {
+        res.status(429).json({
+          error: "Too many claim attempts. Wait a few minutes and try again.",
+          code: "CLAIM_RATE_LIMITED",
+        });
+        return;
+      }
+
+      const result = await consumeClaimCode(prisma, parsed.data.code);
+
+      if (result.outcome === CLAIM_OUTCOME.CLAIMED) {
+        // Advance the resumable wizard to the next step. Best-effort: a failure
+        // to persist the step must not fail the (already-committed) claim — the
+        // dashboard also advances locally and re-syncs on the next PATCH.
+        try {
+          await setSetupStep(prisma, STEP_AFTER_CLAIM);
+        } catch (stepErr) {
+          logger.warn(
+            { err: stepErr },
+            "Claim succeeded but persisting the post-claim step failed",
+          );
+        }
+        res.json({ claimed: true, next_step: STEP_AFTER_CLAIM });
+        return;
+      }
+
+      if (result.outcome === CLAIM_OUTCOME.ALREADY_CLAIMED) {
+        // Idempotent short-circuit — the box is already bound, move on.
+        res.json({
+          claimed: true,
+          already_claimed: true,
+          next_step: STEP_AFTER_CLAIM,
+        });
+        return;
+      }
+
+      // Invalid (wrong / unknown / expired). Inline error, no reveal. The
+      // budget was already decremented above.
+      res.status(400).json({
+        error: "That claim code didn't match. Check the PyPortal display and try again.",
+        code: "CLAIM_CODE_INVALID",
+      });
+    } catch (err) {
+      logger.error({ err }, "Failed to process claim");
       next(err);
     }
   });
