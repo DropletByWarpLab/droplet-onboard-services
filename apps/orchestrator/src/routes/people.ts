@@ -33,6 +33,7 @@ import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import {
   createTeamInvite,
+  isInviteRole,
   InvalidInviteEmailError,
   InvalidInviteRoleError,
 } from "../services/onboarding-team-invite.service.js";
@@ -46,6 +47,21 @@ const logger = pino({ name: "people-route" });
 // tests (local-directory.schema.test.ts + scope.schema.test.ts) lock
 // the contract.
 const ROLE_VALUES = ["owner", "admin", "family", "guest", "service"] as const;
+
+// Privilege ladder for the household roles, inlined as a TS literal — the
+// same standalone-compile discipline as ROLE_VALUES above. This branch (#381)
+// predates the shared `ROLE_RANK` / `roleOutranks` helper added to
+// jwt.service.ts by the POST /auth/invites rank-cap fix; de-duplicate against
+// jwt.service.ROLE_RANK once both land on main. Higher = more authority;
+// `service` is floored so it can never outrank a human role in a comparison.
+const ROLE_RANK: Record<(typeof ROLE_VALUES)[number], number> = {
+  service: -1,
+  guest: 0,
+  family: 1,
+  admin: 2,
+  owner: 3,
+};
+
 const SCOPE_VALUES = [
   "team",
   "exec_only",
@@ -198,6 +214,27 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
           return res.status(400).json({
             error: "Invalid request",
             details: parsed.error.flatten(),
+          });
+        }
+
+        // Privilege-escalation guard (mirror of the POST /auth/invites fix).
+        // requireRole("owner","admin") proves the caller MAY invite, not WHICH
+        // role they may assign. Without this an admin could mint an owner
+        // invite, and the accept path grants an owner/admin invite an owner
+        // session role + Nextcloud admin group — a straight escalation. Reject
+        // (403) any assigned role that outranks the inviter's own. Only
+        // recognized invite roles are rank-checked here; an unknown role string
+        // falls through to createTeamInvite's typed 400. owner→owner is
+        // allowed, admin→owner is not. Fail closed if the role claim is absent.
+        const inviterRole = req.user?.role;
+        if (
+          isInviteRole(parsed.data.role) &&
+          (!inviterRole ||
+            ROLE_RANK[parsed.data.role] > ROLE_RANK[inviterRole])
+        ) {
+          return res.status(403).json({
+            error: "You cannot invite someone to a role higher than your own",
+            code: "ROLE_RANK_EXCEEDED",
           });
         }
 
