@@ -43,6 +43,13 @@ vi.mock("@/lib/api", () => ({
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
+  // PR #380 — org slots after account; the Org step calls postOrg.
+  postOrg: vi.fn(async () => ({
+    ok: true,
+    slug: "acme",
+    reserved_host: "droplet.local/acme",
+    next_step: "internet",
+  })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
@@ -68,6 +75,7 @@ vi.mock("@/lib/api", () => ({
 
 import SetupPage from "@/app/setup/page";
 import { passClaimStep } from "./helpers/claim-step";
+import { passOrgStep } from "./helpers/org-step";
 
 async function advanceToVpn() {
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
@@ -90,7 +98,9 @@ async function advanceToVpn() {
     await Promise.resolve();
     await Promise.resolve();
   });
-  // PR #375 — TwoFactor step → skip.
+  // PR #380 — pass through the org step (account → org → …).
+  await passOrgStep();
+  // PR #375 — TwoFactor step → skip (org → twofactor → internet).
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
