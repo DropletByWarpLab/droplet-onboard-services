@@ -1158,7 +1158,15 @@ services:
     volumes:
       - postgres-pm-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DROPLET_PM_DB_USER:-plane}"]
+      # `pg_isready` flips to "accepting connections" before Postgres
+      # finishes internal recovery — clients that connect during that
+      # window see "FATAL: the database system is starting up" and
+      # crash. pm-api/pm-worker both gate on this via depends_on:
+      # service_healthy, so a premature green here crash-loops them on
+      # cold boot (same failure mode the main `db` service hit). Run an
+      # actual SELECT 1 instead so the check fails until the query
+      # path is genuinely ready.
+      test: ["CMD-SHELL", "psql -U ${DROPLET_PM_DB_USER:-plane} -d ${DROPLET_PM_DB_NAME:-plane} -c 'SELECT 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 3s
       retries: 5
