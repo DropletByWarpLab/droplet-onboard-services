@@ -47,6 +47,59 @@ function resolveStatus(err: unknown): number | null {
   return null;
 }
 
+/**
+ * Whether an error's `message` and `code` are safe to surface verbatim to the
+ * client. Only our own typed errors — which deliberately carry a client-facing
+ * message + a stable, documented `code` — qualify:
+ *
+ *   - `HttpError` / `RouterError` / `DeviceRegistryError` (own `status`/`code`)
+ *   - `ZodError` (validation feedback is the whole point)
+ *   - the `http-errors` package (carries `statusCode` + an HTTP-safe message)
+ *
+ * Anything else — most importantly a raw Prisma `PrismaClientKnownRequestError`,
+ * whose `message` embeds model/field/constraint internals and whose `code`
+ * (`P2002`/`P2025`) exposes the persistence layer as public API surface — is
+ * NOT trusted. Its synthesized 4xx gets a fixed safe message and no `code`;
+ * the real text still reaches `logger.error`.
+ */
+function isClientSafeError(err: unknown): boolean {
+  if (err instanceof ZodError) return true;
+  if (err && typeof err === "object") {
+    const name = (err as { name?: unknown }).name;
+    if (
+      name === "HttpError" ||
+      name === "RouterError" ||
+      name === "DeviceRegistryError"
+    ) {
+      return true;
+    }
+    // `http-errors` instances carry a numeric `statusCode` and an
+    // HTTP-status-derived message that is safe to return.
+    if (typeof (err as { statusCode?: unknown }).statusCode === "number") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Generic, leak-free message for an untrusted error at a given status. */
+function safeMessageFor(status: number): string {
+  switch (status) {
+    case 400:
+      return "Bad request";
+    case 401:
+      return "Unauthorized";
+    case 403:
+      return "Forbidden";
+    case 404:
+      return "Not found";
+    case 409:
+      return "Conflict";
+    default:
+      return "Request failed";
+  }
+}
+
 export function errorHandler(
   err: Error,
   _req: Request,
@@ -55,7 +108,19 @@ export function errorHandler(
 ): void {
   logger.error({ err }, "Unhandled error");
 
+  // If the response has already started streaming, we can't change the status
+  // or body — hand off to Express's default handler to abort the connection.
+  if (res.headersSent) {
+    _next(err);
+    return;
+  }
+
   const status = resolveStatus(err) ?? 500;
+  const trusted = isClientSafeError(err);
+  const rawMessage =
+    typeof (err as { message?: unknown })?.message === "string"
+      ? (err as { message: string }).message
+      : "";
 
   const body: {
     error: string;
@@ -67,22 +132,30 @@ export function errorHandler(
     message: "",
   };
 
-  // For server faults (>= 500) redact the message outside development so we
-  // never leak stack/internal detail to clients. Client errors (4xx) are
-  // safe-to-surface and are always returned verbatim.
   if (status >= 500) {
+    // Server faults: redact outside development so we never leak stack/internal
+    // detail to clients.
     body.message =
-      process.env.NODE_ENV === "development"
-        ? err.message
-        : "Something went wrong";
+      process.env.NODE_ENV === "development" ? rawMessage : "Something went wrong";
+  } else if (trusted) {
+    // Client errors from our own typed errors carry a client-facing message —
+    // surface it verbatim.
+    body.message = rawMessage;
   } else {
-    body.message = err.message;
+    // 4xx synthesized from an untrusted error (e.g. a raw Prisma error mapped
+    // to 404/409): the raw message embeds persistence internals, so return a
+    // fixed safe message. The real text is preserved in `logger.error` above.
+    body.message = safeMessageFor(status);
   }
 
-  // Surface a stable machine-readable code when the error carries one.
-  const code = (err as { code?: unknown }).code;
-  if (typeof code === "string") {
-    body.code = code;
+  // Surface a stable machine-readable `code` ONLY for trusted typed errors.
+  // Untrusted errors' `code` (e.g. Prisma `P2002`/`P2025`) would expose the
+  // persistence layer as public API surface, so it is withheld.
+  if (trusted) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string") {
+      body.code = code;
+    }
   }
 
   // Surface flattened validation details for Zod failures.

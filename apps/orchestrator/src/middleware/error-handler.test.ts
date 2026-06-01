@@ -78,6 +78,70 @@ describe("errorHandler", () => {
     expect(statusOf(res)).toBe(409);
   });
 
+  it("redacts a Prisma-derived 4xx message and withholds its code in production", () => {
+    process.env.NODE_ENV = "production";
+    const res = mockRes();
+    const err = Object.assign(
+      new Error("Unique constraint failed on the fields: (`nextcloudUsername`)"),
+      { name: "PrismaClientKnownRequestError", code: "P2002" }
+    );
+    errorHandler(err, req, res, next);
+    expect(statusOf(res)).toBe(409);
+    // The internal Prisma text (model/field/constraint) must not reach the client.
+    expect(bodyOf(res).message).toBe("Conflict");
+    expect(bodyOf(res).message).not.toContain("nextcloudUsername");
+    expect(bodyOf(res).message).not.toContain("constraint");
+    // The Prisma code must not be exposed as public API surface.
+    expect(bodyOf(res).code).toBeUndefined();
+  });
+
+  it("redacts a Prisma-derived 404 message in production", () => {
+    process.env.NODE_ENV = "production";
+    const res = mockRes();
+    const err = Object.assign(
+      new Error("An operation failed because it depends on one or more records that were required but not found. Record to update not found."),
+      { name: "PrismaClientKnownRequestError", code: "P2025" }
+    );
+    errorHandler(err, req, res, next);
+    expect(statusOf(res)).toBe(404);
+    expect(bodyOf(res).message).toBe("Not found");
+    expect(bodyOf(res).code).toBeUndefined();
+  });
+
+  it("still exposes code for a trusted typed 4xx error", () => {
+    process.env.NODE_ENV = "production";
+    const res = mockRes();
+    errorHandler(HttpError.conflict("group still in use"), req, res, next);
+    expect(statusOf(res)).toBe(409);
+    expect(bodyOf(res).message).toBe("group still in use");
+    expect(bodyOf(res).code).toBe("CONFLICT");
+  });
+
+  it("hands off to next() and writes nothing when headers were already sent", () => {
+    const res = mockRes();
+    (res as unknown as { headersSent: boolean }).headersSent = true;
+    const passthrough = vi.fn() as unknown as NextFunction;
+    const err = new Error("kaboom");
+    errorHandler(err, req, res, passthrough);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).not.toHaveBeenCalled();
+    expect(passthrough).toHaveBeenCalledWith(err);
+  });
+
+  it("does not throw on a non-Error throw (string) and defaults to 500", () => {
+    process.env.NODE_ENV = "production";
+    const res = mockRes();
+    errorHandler("just a string" as unknown as Error, req, res, next);
+    expect(statusOf(res)).toBe(500);
+    expect(bodyOf(res).message).toBe("Something went wrong");
+  });
+
+  it("does not throw on a null throw and defaults to 500", () => {
+    const res = mockRes();
+    errorHandler(null as unknown as Error, req, res, next);
+    expect(statusOf(res)).toBe(500);
+  });
+
   it("falls back to 500 for an unexpected error", () => {
     const res = mockRes();
     errorHandler(new Error("kaboom"), req, res, next);
