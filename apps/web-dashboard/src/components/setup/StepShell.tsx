@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { DropletMark } from "@/components/DropletMark";
-import { STEPS, type Step } from "@/app/setup/page";
+import { STEPS, type Step } from "@/components/setup/wizard-steps";
 
 /**
  * Shared chrome for setup-wizard step components — the **aurora left-rail
@@ -30,7 +30,7 @@ import { STEPS, type Step } from "@/app/setup/page";
  * rail (every wizard step, current highlighted) is painted from `current`.
  *
  * The rail's step list is DERIVED from the wizard's live `STEPS` source
- * (`app/setup/page.tsx`) — not a hardcoded array — so the frame and the
+ * (`components/setup/wizard-steps`) — not a hardcoded array — so the frame and the
  * resumable state machine can never drift. `RAIL_LABELS` only supplies the
  * presentation metadata (a plain-language label + a Lucide icon) for each
  * step id; the `Record<Step, …>` type makes a missing entry a compile error,

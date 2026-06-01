@@ -3,7 +3,7 @@
  *
  * The re-skin replaces the centered card + ProgressDots with a persistent
  * aurora left-rail (lg+) whose step list is DERIVED from the wizard's live
- * `STEPS` source (`app/setup/page.tsx`), so the rail and the state machine
+ * `STEPS` source (`components/setup/wizard-steps`), so the rail and the state machine
  * can never drift. Below `lg` a compact progress header stands in for the
  * rail.
  *
@@ -23,7 +23,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { StepShell, RAIL_LABELS } from "./StepShell";
-import { STEPS, type Step } from "@/app/setup/page";
+import { STEPS, type Step } from "@/components/setup/wizard-steps";
 
 describe("StepShell aurora rail (PR #384)", () => {
   it("renders a rail row for every wizard step in the page's STEPS source", () => {
