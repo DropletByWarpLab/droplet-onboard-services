@@ -846,6 +846,10 @@ export interface CameraSSEEvent {
 
 export interface InterfaceStatus {
   up: boolean;
+  /** Whether this interface is configured on this box. `false` = absent on this
+   *  hardware shape (e.g. no `wan` on a single-box), distinct from a configured
+   *  interface that is currently down (`present: true, up: false`). */
+  present?: boolean;
   pending?: boolean;
   available?: boolean;
   autostart?: boolean;

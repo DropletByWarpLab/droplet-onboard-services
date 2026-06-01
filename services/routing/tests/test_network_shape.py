@@ -15,7 +15,11 @@ from droplet_openwrt_sdk import (
     WirelessApi,
     UbusError,
     UBUS_STATUS_NOT_FOUND,
+    UBUS_STATUS_INVALID_ARGUMENT,
+    UBUS_STATUS_TIMEOUT,
 )
+
+UBUS_STATUS_PERMISSION_DENIED = 6
 
 _LAN_STATUS = {"up": True, "available": True, "device": "br-lan", "proto": "static"}
 
@@ -43,11 +47,14 @@ def test_interface_statuses_tolerate_missing_wan():
     net = NetworkApi(_FakeRouter(responder))
     out = net.get_all_interface_statuses()
 
+    # lan is read live and explicitly present
     assert out["lan"]["up"] is True
-    # wan isn't configured on this box → absent/down stub, not a raised error
+    assert out["lan"]["present"] is True
+    # wan isn't configured on this box → explicit present:False stub, not a raise.
+    # `present` is the canonical signal (not an overloaded up:false + nested flag).
+    assert out["wan"]["present"] is False
     assert out["wan"]["up"] is False
     assert out["wan"]["available"] is False
-    assert out["wan"]["data"]["absent"] is True
     # empty collections so the dashboard can map over them without crashing
     assert out["wan"]["ipv4-address"] == []
 
@@ -70,3 +77,40 @@ def test_connected_clients_empty_when_device_absent():
 
     wifi = WirelessApi(_FakeRouter(responder))
     assert wifi.connected_clients("wlan0") == []
+
+
+def test_interface_statuses_timeout_degrades_to_down():
+    """A transient ubus TIMEOUT reading one interface degrades to a
+    present-but-down stub (self-heals next poll) instead of 500-ing the whole
+    overview — distinct from an absent interface, which is present:False."""
+    def responder(obj, method, args=None):
+        if obj == "network.interface.lan":
+            raise UbusError(UBUS_STATUS_TIMEOUT, "Command timed out")
+        if obj == "network.interface.wan":
+            return dict(_LAN_STATUS)
+        raise AssertionError(f"unexpected call {obj}.{method}")
+
+    net = NetworkApi(_FakeRouter(responder))
+    out = net.get_all_interface_statuses()
+
+    # lan timed out → degraded, but still PRESENT (configured, just unreadable now)
+    assert out["lan"]["present"] is True
+    assert out["lan"]["up"] is False
+    # wan read fine
+    assert out["wan"]["present"] is True
+    assert out["wan"]["up"] is True
+
+
+def test_connected_clients_propagates_caller_error_codes():
+    """Symmetric negative test for the wireless path: connected_clients swallows
+    only an absent radio (NOT_FOUND/NO_DATA). Codes that signal a caller bug —
+    INVALID_ARGUMENT (a malformed `device`) and PERMISSION_DENIED — must
+    propagate, not masquerade as 'zero clients'. Guards against the swallow set
+    silently widening."""
+    for code in (UBUS_STATUS_INVALID_ARGUMENT, UBUS_STATUS_PERMISSION_DENIED):
+        def responder(obj, method, args=None, _code=code):
+            raise UbusError(_code, "caller error")
+
+        wifi = WirelessApi(_FakeRouter(responder))
+        with pytest.raises(UbusError):
+            wifi.connected_clients("wlan0")
