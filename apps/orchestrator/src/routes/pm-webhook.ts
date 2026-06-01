@@ -119,13 +119,22 @@ export function createPmWebhookRouter(): Router {
 
       // Signature verified. Parse the raw bytes now; malformed JSON is a
       // 400 (bad payload), never a 500.
-      let payload: PmWebhookPayload;
+      let parsed: unknown;
       try {
-        payload = JSON.parse(rawBody.toString("utf8")) as PmWebhookPayload;
+        parsed = JSON.parse(rawBody.toString("utf8"));
       } catch {
         logger.warn({ event_type: "webhook_bad_payload", reason: "malformed_json" });
         return res.status(400).json({ error: "malformed JSON" });
       }
+
+      // A signature-valid body that parses to a non-object (null, array,
+      // scalar) must not reach `payload.event` and throw a TypeError → 500.
+      // Fail-CLOSED to 400 (bad payload) instead.
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        logger.warn({ event_type: "webhook_bad_payload", reason: "not_an_object" });
+        return res.status(400).json({ error: "payload must be a JSON object" });
+      }
+      const payload = parsed as PmWebhookPayload;
 
       // Authenticated. Emit + 204.
       logger.info(

@@ -208,6 +208,41 @@ describe("WARP-566 pm-webhook HMAC over raw bytes", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 400 (not 500) for a signature-valid non-object payload (literal null)", async () => {
+    // WARP-566 review (stefan-cruceru, Low #1): a validly-signed body that
+    // parses to a non-object (null / array / scalar) must not reach
+    // `payload.event` and throw a TypeError → 500. Fail-CLOSED to 400.
+    const app = buildApp();
+    const ts = String(Date.now());
+    const rawBody = "null";
+    const sig = sign(mockConfig.DROPLET_PM_WEBHOOK_SECRET, ts, rawBody);
+
+    const res = await request(app)
+      .post(WEBHOOK_PATH)
+      .set(SIGNATURE_HEADER, sig)
+      .set(TIMESTAMP_HEADER, ts)
+      .set("Content-Type", "application/json")
+      .send(rawBody);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 (not 500) for a signature-valid JSON array payload", async () => {
+    const app = buildApp();
+    const ts = String(Date.now());
+    const rawBody = "[1,2,3]";
+    const sig = sign(mockConfig.DROPLET_PM_WEBHOOK_SECRET, ts, rawBody);
+
+    const res = await request(app)
+      .post(WEBHOOK_PATH)
+      .set(SIGNATURE_HEADER, sig)
+      .set(TIMESTAMP_HEADER, ts)
+      .set("Content-Type", "application/json")
+      .send(rawBody);
+
+    expect(res.status).toBe(400);
+  });
+
   it("leaves non-webhook routes receiving parsed JSON objects", async () => {
     const app = buildApp();
     const res = await request(app)
