@@ -47,6 +47,13 @@ vi.mock("@/lib/api", () => ({
     },
   })),
   postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
+  // PR #380 — org slots after account; the Org step calls postOrg.
+  postOrg: vi.fn(async () => ({
+    ok: true,
+    slug: "acme",
+    reserved_host: "droplet.local/acme",
+    next_step: "internet",
+  })),
   fetchDuckDnsStatus: () => fetchDuckDnsStatusMock(),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
@@ -74,6 +81,7 @@ vi.mock("@/lib/api", () => ({
 
 import SetupPage from "@/app/setup/page";
 import { passClaimStep } from "./helpers/claim-step";
+import { passOrgStep } from "./helpers/org-step";
 
 async function advanceToInternet() {
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
@@ -96,7 +104,9 @@ async function advanceToInternet() {
     await Promise.resolve();
     await Promise.resolve();
   });
-  // PR #375 — TwoFactor step → skip to reach Internet.
+  // PR #380 — pass through the org step (account → org → …).
+  await passOrgStep();
+  // PR #375 — TwoFactor step → skip to reach Internet (org → twofactor → internet).
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });

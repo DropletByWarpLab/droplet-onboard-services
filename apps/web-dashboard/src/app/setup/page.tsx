@@ -7,6 +7,7 @@ import { ProgressDots } from "@/components/setup/ProgressDots";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { ClaimStep } from "@/components/setup/steps/ClaimStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
+import { OrgStep } from "@/components/setup/steps/OrgStep";
 import { TwoFactorStep } from "@/components/setup/steps/TwoFactorStep";
 import { InternetStep } from "@/components/setup/steps/InternetStep";
 import { StorageStep } from "@/components/setup/steps/StorageStep";
@@ -41,6 +42,7 @@ type Step =
   | "welcome"
   | "claim"
   | "account"
+  | "org"
   | "twofactor"
   | "internet"
   | "storage"
@@ -50,12 +52,18 @@ type Step =
   | "ai"
   | "done";
 // PR #373 — `claim` slots SECOND (welcome → claim → account), per #371 handoff
-// §1. Mirrors the orchestrator `SETUP_STEPS` order 1:1, so a persisted
-// `setupStep` always maps to a step this wizard can render.
+// §1. PR #380 — `org` slots AFTER account (… → account → org → …), per the
+// #380 spec. `org` directly follows `account` to mirror the orchestrator
+// `SETUP_STEPS` order 1:1 for the PERSISTED steps, so a persisted `setupStep`
+// always maps to a step this wizard can render. PR #375's `twofactor` is a
+// client-only step (no `SetupStep` enum value / no backend `SETUP_STEPS`
+// entry — it skips straight to internet), so it sits after `org` without
+// disturbing that 1:1 mapping.
 const STEPS: Step[] = [
   "welcome",
   "claim",
   "account",
+  "org",
   "twofactor",
   "internet",
   "storage",
@@ -116,10 +124,12 @@ export default function SetupPage() {
           <AccountStep
             onComplete={(name) => {
               setDisplayName(name);
-              setStep("twofactor");
+              setStep("org");
             }}
           />
         )}
+
+        {step === "org" && <OrgStep onComplete={() => setStep("twofactor")} />}
 
         {step === "twofactor" && (
           <TwoFactorStep

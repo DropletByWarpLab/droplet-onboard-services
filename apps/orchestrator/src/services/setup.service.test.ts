@@ -131,10 +131,10 @@ describe("setup.service — state machine", () => {
   });
 
   it("rejects an unknown step instead of coercing it", async () => {
-    // `org` is still GATED (PR #373 wires `claim` but not org/team), so it
-    // remains the canonical not-yet-shipped step the guard must reject.
+    // `team` is still GATED (PR #380 wires `org` but not team), so it remains
+    // the canonical not-yet-shipped step the guard must reject.
     await expect(
-      setSetupStep(prisma as never, "org"),
+      setSetupStep(prisma as never, "team"),
     ).rejects.toBeInstanceOf(InvalidSetupStepError);
     await expect(
       setSetupStep(prisma as never, "not-a-step"),
@@ -183,12 +183,14 @@ describe("setup.service — state machine", () => {
     expect(reread.userTourCompleted).toBe(true);
   });
 
-  it("isSetupStep is a precise type guard over the shipped steps (claim now wired, PR #373)", () => {
-    // PR #373: `claim` ships and slots SECOND (welcome → claim → account).
+  it("isSetupStep is a precise type guard over the shipped steps (org now wired, PR #380)", () => {
+    // PR #373: `claim` slots SECOND. PR #380: `org` slots AFTER account
+    // (welcome → claim → account → org → internet → …).
     expect(SETUP_STEPS).toEqual([
       "welcome",
       "claim",
       "account",
+      "org",
       "internet",
       "storage",
       "discovery",
@@ -199,11 +201,11 @@ describe("setup.service — state machine", () => {
     ]);
     expect(isSetupStep("welcome")).toBe(true);
     expect(isSetupStep("done")).toBe(true);
-    // claim is now a real, wired step (PR #373).
+    // claim + org are now real, wired steps (PR #373 / PR #380).
     expect(isSetupStep("claim")).toBe(true);
-    // org / team remain GATED — they extend the enum + this list when they
-    // ship, the way claim did here.
-    expect(isSetupStep("org")).toBe(false);
+    expect(isSetupStep("org")).toBe(true);
+    // team remains GATED — it extends the enum + this list when it ships
+    // (PR #381), the way claim and org did here.
     expect(isSetupStep("team")).toBe(false);
     expect(isSetupStep("")).toBe(false);
     // Every member of the runtime list is a member of the Prisma enum.

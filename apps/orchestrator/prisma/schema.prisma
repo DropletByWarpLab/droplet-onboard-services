@@ -2066,6 +2066,29 @@ model Workspace {
   /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
   /// Surfaced in the chrome workspace pill + setup wizard.
   displayName String?
+  /// PR #380 (WARP onb org) — the onboarding ORG step fields. The org step
+  /// names this single workspace (the "company brain") and reserves its
+  /// `droplet.local/<slug>` host. Everyone the owner invites joins this ONE
+  /// workspace, so the org data lives on the SAME singleton row rather than a
+  /// second workspace table.
+  ///
+  /// `slug` is UNIQUE and validated `[a-z0-9-]` (setup-org.service.ts); it
+  /// reserves `droplet.local/<slug>`. Nullable because the pre-#380 Home/
+  /// Business path (and a box that hasn't run the org step yet) has no slug.
+  ///
+  /// `industry` / `size` are LOCAL smart-default hints ONLY — folder
+  /// structure, example tools, camera policy. NEVER sent off the box
+  /// (FEATURES.md §10). `logoPath` is the on-NVMe path of the optional logo.
+  slug        String?        @unique
+  tz          String?
+  industry    String?
+  size        String?
+  logoPath    String?
+  /// PR #380 — EXPLICIT completion flag for the org step. The wizard / state
+  /// machine reads THIS, never `slug IS NULL` (CLAUDE.md no-guessing rule;
+  /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
+  /// the org step is NOT skippable.
+  orgConfigured Boolean      @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
   setBy       String?
@@ -2142,8 +2165,15 @@ model ApplianceSetup {
 /// `SETUP_STEPS` (setup.service.ts) and the dashboard `STEPS` array, which both
 /// place `claim` second. The enum is an unordered membership set here — nothing
 /// reads its declaration order — so appending is safe and keeps the additive
-/// migration trivial. org / team remain GATED (separate PRs) for the same
-/// reachable-step reason #372 documented.
+/// migration trivial.
+///
+/// PR #380 (WARP onb org) — `org` ships. It slots AFTER account
+/// (`welcome → claim → account → org → internet → …`): the customer names the
+/// single workspace and reserves its `droplet.local/<slug>` once the owner
+/// account exists. Appended at the END of the declaration for the same
+/// append-only `ALTER TYPE … ADD VALUE` reason as `claim`; the wizard order
+/// lives in `SETUP_STEPS` / the dashboard `STEPS` array. `team` remains GATED
+/// (separate PR #381) for the same reachable-step reason #372 documented.
 enum SetupStep {
   welcome
   account
@@ -2155,6 +2185,7 @@ enum SetupStep {
   ai
   done
   claim
+  org
 }
 
 /// PR #373 — claim-code lifecycle. EXPLICIT, never derived from absence.
