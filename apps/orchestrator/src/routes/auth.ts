@@ -34,6 +34,7 @@ import {
   claimRefreshRotation,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
+  roleOutranks,
   type Role,
 } from "../services/jwt.service.js";
 import {
@@ -1463,6 +1464,23 @@ export function createProtectedAuthRouter(
       const parsed = createInviteSchema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        return;
+      }
+
+      // Privilege-escalation guard. `requireRole("owner","admin")` proved the
+      // caller may issue invites, but NOT which role they may assign. Without
+      // this cap an `admin` could mint an `owner` invite, and the accept path
+      // grants an owner/admin invite an `owner` session role + Nextcloud
+      // `admin` group (see POST /auth/invites/accept/:token above) — a
+      // straight privilege escalation. Reject any assigned role that outranks
+      // the inviter's own; owner→owner is allowed, admin→owner is not. Fail
+      // closed if the role claim is somehow absent.
+      const inviterRole = req.user?.role;
+      if (!inviterRole || roleOutranks(parsed.data.role, inviterRole)) {
+        res.status(403).json({
+          error: "You cannot invite someone to a role higher than your own",
+          code: "ROLE_RANK_EXCEEDED",
+        });
         return;
       }
 
