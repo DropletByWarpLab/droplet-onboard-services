@@ -111,6 +111,14 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     // before any user exists (resumable wizard), same posture as
     // /api/auth/setup above.
     "/api/setup/state",
+    // PR #373: onboarding CLAIM step. The hardware contract
+    // (GET /api/setup/appliance) and the claim verify (POST /api/setup/claim)
+    // run BEFORE any account exists (welcome → claim → account), so they share
+    // the same public posture. Exact paths — NOT a "/api/setup/" prefix —
+    // so no future /api/setup/* route is silently de-authed. The claim
+    // endpoint enforces its own per-IP rate limit in routes/setup.ts.
+    "/api/setup/appliance",
+    "/api/setup/claim",
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",

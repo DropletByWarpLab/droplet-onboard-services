@@ -131,8 +131,10 @@ describe("setup.service — state machine", () => {
   });
 
   it("rejects an unknown step instead of coercing it", async () => {
+    // `org` is still GATED (PR #373 wires `claim` but not org/team), so it
+    // remains the canonical not-yet-shipped step the guard must reject.
     await expect(
-      setSetupStep(prisma as never, "claim"),
+      setSetupStep(prisma as never, "org"),
     ).rejects.toBeInstanceOf(InvalidSetupStepError);
     await expect(
       setSetupStep(prisma as never, "not-a-step"),
@@ -181,9 +183,11 @@ describe("setup.service — state machine", () => {
     expect(reread.userTourCompleted).toBe(true);
   });
 
-  it("isSetupStep is a precise type guard over the shipped 9 steps", () => {
+  it("isSetupStep is a precise type guard over the shipped steps (claim now wired, PR #373)", () => {
+    // PR #373: `claim` ships and slots SECOND (welcome → claim → account).
     expect(SETUP_STEPS).toEqual([
       "welcome",
+      "claim",
       "account",
       "internet",
       "storage",
@@ -195,9 +199,10 @@ describe("setup.service — state machine", () => {
     ]);
     expect(isSetupStep("welcome")).toBe(true);
     expect(isSetupStep("done")).toBe(true);
-    // Gated steps (claim/org/team) are NOT wired here — they extend the
-    // enum when they ship (see GATE constraint in PR #372).
-    expect(isSetupStep("claim")).toBe(false);
+    // claim is now a real, wired step (PR #373).
+    expect(isSetupStep("claim")).toBe(true);
+    // org / team remain GATED — they extend the enum + this list when they
+    // ship, the way claim did here.
     expect(isSetupStep("org")).toBe(false);
     expect(isSetupStep("team")).toBe(false);
     expect(isSetupStep("")).toBe(false);
