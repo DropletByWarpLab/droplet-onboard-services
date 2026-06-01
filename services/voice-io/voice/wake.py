@@ -312,6 +312,8 @@ class VoskWakeWordDetector(WakeWordDetector):
         self._wake_word = wake_word
         # Spoken form of the phrase: "hey_droplet" -> "hey droplet".
         self._phrase = wake_word.replace("_", " ").strip().lower()
+        # Precomputed tokens for whole-word matching (review item 6).
+        self._phrase_tokens = self._phrase.split()
         self._model_path = model_path
         self._sample_rate = sample_rate
         self._loaded = False
@@ -399,7 +401,7 @@ class VoskWakeWordDetector(WakeWordDetector):
 
         if not text:
             return {}
-        if self._phrase not in text:
+        if not self._phrase_in_text(text):
             # Diagnostic: surface what Vosk actually heard on completed
             # utterances so misrecognitions are visible in the logs without
             # spamming a line per partial frame.
@@ -453,6 +455,23 @@ class VoskWakeWordDetector(WakeWordDetector):
             rec.Reset()
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning("vosk: recognizer reset failed: %s", exc)
+
+    def _phrase_in_text(self, text: str) -> bool:
+        """Whole-word match: the wake phrase must appear as a contiguous run
+        of WHOLE tokens in `text`, not merely as a substring — so a
+        recognized "hey droplets" (trailing token) or a phrase glued inside
+        another token doesn't fire. The grammar already constrains output to
+        [phrase, "[unk]"] so real-world risk is low, but exact-token matching
+        removes the surprise and is robust if the grammar ever loosens.
+        (WARP-154 review item 6.)
+        """
+        words = text.split()
+        p = self._phrase_tokens
+        if not p or len(words) < len(p):
+            return False
+        return any(
+            words[i:i + len(p)] == p for i in range(len(words) - len(p) + 1)
+        )
 
 
 # ────────────────────────────────────────────────────────────────────
