@@ -1,6 +1,7 @@
-# Onboarding — TOTP 2FA + recovery codes (scaffold)
+# Onboarding — TOTP 2FA + recovery codes
 
-> **Status: DRAFT scaffold — no implementation in this PR.** Refs WARP-___.
+> **Status: IMPLEMENTED (shipped in PR #375).** RFC 6238 TOTP + one-time
+> recovery codes are live on the orchestrator (`apps/orchestrator/src/routes/auth.ts`).
 
 ## Purpose
 
