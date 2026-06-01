@@ -1103,13 +1103,17 @@ class _RecordingLLM(LLMClient):
         self._available = available
         self._raise_on_reply = raise_on_reply
         self.requests: list[str] = []
+        # Records tool_choice values for parity with MockLLM so tests can
+        # assert the intent gate's decision is threaded through to the LLM.
+        self.tool_choices: list = []
 
     @property
     def available(self) -> bool:
         return self._available
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice=None) -> str:
         self.requests.append(user_text)
+        self.tool_choices.append(tool_choice)
         if self._raise_on_reply:
             raise LLMUnavailable("LLM blew up (test)")
         return self._scripts.pop(0) if self._scripts else ""
@@ -1328,7 +1332,7 @@ class _FlippableLLM(LLMClient):
         self.probe_count += 1
         return self._available
 
-    def reply(self, user_text):
+    def reply(self, user_text, *, tool_choice=None):
         return ""
 
 

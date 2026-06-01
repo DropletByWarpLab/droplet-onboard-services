@@ -86,8 +86,10 @@ USB mic in after the box has already booted.
 | `DEVICE_RESCAN_INTERVAL` | `5` | Seconds between hot-plug rescans. |
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Where to POST chat turns. |
 | `ORCHESTRATOR_TOKEN` | *(empty)* | Bearer token for orchestrator. Set in compose from the same secret the rest of the stack uses. |
-| `WAKE_WORD` | `hey_jarvis` | Wake-word model name. openWakeWord ships several bundled models — `hey_jarvis`, `alexa`, `hey_mycroft`. To use a custom-trained model, drop `<name>.onnx` into `/app/models/` and set `WAKE_WORD=<name>`. The custom "Hey Droplet" model ships once Stefan's training data lands; until then the default is `hey_jarvis` for dev. Set to `__mock__` for a dev box with no real wake model. |
-| `WAKE_THRESHOLD` | `0.3` | Detector confidence threshold (0 – 1). Tuned low for the bundled `hey_jarvis` fallback model, which under-fires at 0.5 on speech at typical room distance. Raise back toward 0.5 once a custom-trained `hey_droplet.onnx` lands. |
+| `WAKE_ENGINE` | `vosk` | Which wake-word backend to use. `vosk` (default) recognizes the `WAKE_WORD` phrase out of the box via a grammar-constrained Vosk model — no per-phrase training, no licensing fee — so "hey droplet" works on every box. `openwakeword` uses the bundled-ONNX engine (`hey_jarvis`/`alexa`/`hey_mycroft`) instead. If `vosk` is selected but its model dir is missing, the service automatically falls back to openWakeWord so wake stays armed. |
+| `WAKE_WORD` | `hey_droplet` | The wake phrase. Under the default `vosk` engine it's recognized directly (underscores map to spaces: `hey_droplet` → "hey droplet"); any in-vocabulary English phrase works with no training. Under `openwakeword` it must be a bundled model name (`hey_jarvis`, `alexa`, `hey_mycroft`) or a custom `<name>.onnx` in `/app/models/`. Set to `__mock__` for a dev box with no wake runtime. |
+| `VOSK_MODEL_PATH` | `/app/models/vosk-model-small-en-us` | Directory of the Vosk model (baked into the image by the Dockerfile). Override to point at a larger/different Vosk model. |
+| `WAKE_THRESHOLD` | `0.3` | Detector confidence threshold (0 – 1). Under `vosk` this gates the mean per-word confidence of a phrase match; ~0.5 is a reasonable floor since the grammar already constrains to the phrase. For the `openwakeword` fallback, 0.3 catches real wakes at typical room distance (~3–6 ft) while rejecting most background talk. |
 | `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
 | `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
 | `STT_LANGUAGE` | `en` | Language code for transcription. |
@@ -133,10 +135,12 @@ into stacked commits per `docs/voice-assistant-plan.md`:
 1. **Foundation** — hardware detection, audio I/O, FastAPI shell,
    Docker. `/audio/devices`, `/audio/test-tone`, `/audio/test-record`
    work without any wake/STT/TTS.
-2. **openWakeWord** — wake-word detection loop on a background
-   thread; `/voice/status` surfaces state. Default wake word
-   `hey_jarvis` ships pre-baked in the image; custom "Hey Droplet"
-   `.onnx` swaps in later once Stefan has training data ready.
+2. **Wake word** — wake-word detection loop on a background thread;
+   `/voice/status` surfaces state. The default `vosk` engine recognizes
+   the branded "hey droplet" phrase out of the box (no per-phrase
+   training, no licensing fee); `openwakeword` (`hey_jarvis` et al.) is
+   available as an alternative and the automatic fallback. Pluggable
+   `WakeWordDetector` backends live in `voice/wake.py`.
 3. **STT** — wyoming-faster-whisper sidecar container speaks Wyoming
    protocol over TCP. After wake, voice-io streams the next
    5 s of mic audio (fixed window — VAD-based cutoff in a follow-up),

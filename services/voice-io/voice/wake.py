@@ -4,9 +4,17 @@ The wake loop in `voice.pipeline` doesn't know or care which detector
 is wired up; it just calls `predict()` on every 80 ms frame and acts
 on the returned scores. Three concrete detectors live here:
 
-  - **OpenWakeWordDetector** — production. Uses openWakeWord with the
-    ONNX backend (NOT TFLite — `tflite-runtime` has no Python 3.12 wheel
-    for x86_64 and openWakeWord supports ONNX natively).
+  - **VoskWakeWordDetector** — production default. Recognizes ANY
+    in-vocabulary phrase (incl. "hey droplet") out of the box via a
+    grammar-constrained Vosk model — no per-phrase training, no
+    licensing fee, fully offline. Selected by `WAKE_ENGINE=vosk`
+    (the default).
+
+  - **OpenWakeWordDetector** — bundled-ONNX engine (hey_jarvis, alexa,
+    hey_mycroft). Used when `WAKE_ENGINE=openwakeword`, or as the
+    automatic fallback when the Vosk model isn't on disk. ONNX backend
+    (NOT TFLite — `tflite-runtime` has no Python 3.12 wheel for x86_64
+    and openWakeWord supports ONNX natively).
 
   - **MockWakeWordDetector** — drives scripted score sequences from
     tests; also useful as a "press the button to wake" dev shim before
@@ -31,6 +39,7 @@ false positives); raise it to make it pickier.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 import time
@@ -46,6 +55,11 @@ logger = logging.getLogger("voice.wake")
 # Exported so the pipeline can size its capture buffer to match.
 WAKE_FRAME_SAMPLES = 1280
 WAKE_SAMPLE_RATE = 16_000
+
+# Default on-disk location (a directory) of the bundled Vosk model. The
+# Dockerfile extracts vosk-model-small-en-us-0.15 here under this stable
+# name. Overridable via the VOSK_MODEL_PATH env var.
+VOSK_DEFAULT_MODEL_DIRNAME = "vosk-model-small-en-us"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -234,6 +248,134 @@ class OpenWakeWordDetector(WakeWordDetector):
 
 
 # ────────────────────────────────────────────────────────────────────
+# Vosk — recognizes arbitrary phrases (incl. "hey droplet") out of the box
+# ────────────────────────────────────────────────────────────────────
+
+class VoskWakeWordDetector(WakeWordDetector):
+    """Vosk (Kaldi) keyword spotting — recognizes ANY in-vocabulary
+    phrase with no per-phrase model training.
+
+    This is how "hey droplet" becomes a first-class wake word for every
+    customer without shipping a trained .onnx: a small general English
+    acoustic model runs grammar-constrained to just the wake phrase plus
+    "[unk]" (everything else). Each 80 ms frame is fed to a
+    KaldiRecognizer; when an utterance endpoint is reached and the
+    recognized text contains the wake phrase, we fire with the averaged
+    per-word confidence as the [0, 1] score the pipeline thresholds.
+
+    Apache-2.0, fully offline, no AccessKey, no licensing fee. CPU cost
+    of the small model is negligible on Droplet-class hosts (Ryzen /
+    Jetson Orin).
+
+    Lazy-loads on first predict() (like OpenWakeWordDetector) so FastAPI
+    startup isn't blocked by the model load. Unlike openWakeWord there is
+    no phrase fallback — the whole point is that the requested phrase is
+    what's actually matched — so `using_fallback` is always False and
+    `model_name` is the configured wake word.
+    """
+
+    def __init__(
+        self,
+        wake_word: str = "hey_droplet",
+        model_path: str = "/app/models/" + VOSK_DEFAULT_MODEL_DIRNAME,
+        sample_rate: int = WAKE_SAMPLE_RATE,
+    ):
+        self._requested_wake_word = wake_word
+        self._wake_word = wake_word
+        # Spoken form of the phrase: "hey_droplet" -> "hey droplet".
+        self._phrase = wake_word.replace("_", " ").strip().lower()
+        self._model_path = model_path
+        self._sample_rate = sample_rate
+        self._loaded = False
+        self._load_attempted = False
+        self._rec: Any = None
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded or self._load_attempted:
+            return
+        self._load_attempted = True
+        # Cheap on-disk check first so a missing model doesn't pay the
+        # import cost and the error message is precise.
+        if not os.path.isdir(self._model_path):
+            logger.error(
+                "vosk: model dir %s not found — wake detection disabled",
+                self._model_path,
+            )
+            self._loaded = False
+            return
+        try:
+            # Lazy import — keeps the module importable on dev boxes
+            # without vosk installed (tests inject a fake module).
+            from vosk import KaldiRecognizer, Model  # type: ignore[import-not-found]
+
+            logger.info(
+                "vosk: loading model %s (phrase=%r)",
+                self._model_path, self._phrase,
+            )
+            model = Model(self._model_path)
+            # Grammar-constrain recognition to the wake phrase + [unk].
+            # This biases the recognizer hard toward the phrase and keeps
+            # CPU + false-accepts down vs. open-vocabulary decoding.
+            grammar = json.dumps([self._phrase, "[unk]"])
+            self._rec = KaldiRecognizer(model, self._sample_rate, grammar)
+            self._rec.SetWords(True)  # per-word confidences for scoring
+            self._loaded = True
+        except Exception as exc:
+            logger.error(
+                "vosk failed to load (%s) — wake detection disabled", exc,
+            )
+            self._loaded = False
+
+    @property
+    def model_name(self) -> str:
+        return self._wake_word
+
+    @property
+    def requested_wake_word(self) -> str:
+        return self._requested_wake_word
+
+    @property
+    def using_fallback(self) -> bool:
+        # Vosk recognizes the requested phrase directly — never a
+        # substitute. "hey droplet" really means "hey droplet".
+        return False
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
+        if not self._load_attempted:
+            self._ensure_loaded()
+        if self._rec is None:
+            return {}
+        try:
+            pcm = np.ascontiguousarray(audio_frame, dtype=np.int16).tobytes()
+            # Wait for an utterance endpoint before scoring so the
+            # confidence reflects the whole phrase, not a mid-word partial.
+            if not self._rec.AcceptWaveform(pcm):
+                return {}
+            res = json.loads(self._rec.Result())
+        except Exception as exc:
+            logger.warning("vosk predict error: %s", exc)
+            return {}
+        text = (res.get("text") or "").strip().lower()
+        if not text or self._phrase not in text:
+            return {}
+        # Score = mean per-word confidence over the phrase's words
+        # (SetWords gives a `result` array of {word, conf, start, end}).
+        words = res.get("result") or []
+        phrase_tokens = set(self._phrase.split())
+        confs = [
+            float(w["conf"])
+            for w in words
+            if isinstance(w, dict) and w.get("word") in phrase_tokens and "conf" in w
+        ]
+        score = sum(confs) / len(confs) if confs else 1.0
+        return {self._wake_word: score}
+
+
+# ────────────────────────────────────────────────────────────────────
 # Mock — tests + dev mode
 # ────────────────────────────────────────────────────────────────────
 
@@ -299,18 +441,53 @@ def build_detector_from_env() -> WakeWordDetector:
     """Resolve env config → detector instance.
 
     `WAKE_WORD` defaults to "hey_droplet" — the product's branded wake
-    phrase. We don't ship a trained `hey_droplet.onnx` yet; Stefan's
-    voice samples + the openWakeWord training notebook produce it.
-    Until that .onnx lands in /app/models/, `OpenWakeWordDetector`
-    falls back to a bundled model so wake detection still works.
+    phrase.
 
-    Set `WAKE_WORD=__mock__` for a dev box with no openwakeword
-    available. Set to any other string to override (custom .onnx
-    filename in /app/models, or one of openwakeword's bundled names:
-    hey_jarvis, alexa, hey_mycroft, hey_rhasspy).
+    `WAKE_ENGINE` (default "vosk") selects the backend:
+      - "vosk" — recognizes the WAKE_WORD phrase out of the box via a
+        grammar-constrained Vosk model, no per-phrase training. This is
+        how "hey droplet" works for every customer with no licensing
+        fee. Falls back to openWakeWord if the Vosk model dir isn't
+        present, so a stripped image still wakes (on the bundled
+        hey_jarvis model) rather than going silent.
+      - "openwakeword" — the bundled-ONNX engine (hey_jarvis, alexa,
+        hey_mycroft), with its own runtime fallback to a bundled model
+        when the requested phrase has no .onnx.
+
+    Set `WAKE_WORD=__mock__` for a dev box with no wake runtime
+    available (forces the MockWakeWordDetector).
     """
     wake_word = os.environ.get("WAKE_WORD", "hey_droplet").strip()
     if wake_word == "__mock__":
         logger.info("WAKE_WORD=__mock__ → MockWakeWordDetector (dev only)")
         return MockWakeWordDetector()
+
+    engine = os.environ.get("WAKE_ENGINE", "vosk").strip().lower()
+    if engine in ("openwakeword", "oww"):
+        return OpenWakeWordDetector(wake_word=wake_word)
+    if engine and engine != "vosk":
+        logger.warning("unknown WAKE_ENGINE=%r — using vosk", engine)
+
+    # Vosk path (default). A cheap on-disk check decides Vosk vs. the
+    # openWakeWord fallback WITHOUT importing vosk or loading the model,
+    # so FastAPI startup stays fast.
+    models_dir = os.environ.get("WAKE_MODELS_DIR", "/app/models")
+    vosk_model_path = os.environ.get(
+        "VOSK_MODEL_PATH",
+        os.path.join(models_dir, VOSK_DEFAULT_MODEL_DIRNAME),
+    )
+    if os.path.isdir(vosk_model_path):
+        logger.info(
+            "WAKE_ENGINE=vosk → VoskWakeWordDetector (phrase=%r, model=%s)",
+            wake_word, vosk_model_path,
+        )
+        return VoskWakeWordDetector(
+            wake_word=wake_word, model_path=vosk_model_path,
+        )
+
+    logger.warning(
+        "WAKE_ENGINE=vosk but no Vosk model at %s — falling back to "
+        "openWakeWord (wake will use its bundled fallback until the Vosk "
+        "model is present)", vosk_model_path,
+    )
     return OpenWakeWordDetector(wake_word=wake_word)

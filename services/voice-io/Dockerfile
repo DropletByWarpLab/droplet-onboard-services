@@ -45,6 +45,21 @@ RUN pip install --no-cache-dir -r /app/requirements-dev.txt && \
 RUN python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis_v0.1', 'alexa_v0.1', 'hey_mycroft_v0.1'])" || \
     echo "openwakeword model pre-fetch skipped (offline build OK; runtime will fetch)"
 
+# Bundle the Vosk small English model (Apache-2.0, ~40 MB) so the
+# default wake engine recognizes "hey droplet" — and any in-vocabulary
+# phrase — out of the box for every customer, with no per-box training
+# and no licensing fee. Extracted to the stable path the detector
+# resolves by default (see VOSK_DEFAULT_MODEL_DIRNAME in voice/wake.py;
+# override with VOSK_MODEL_PATH). Offline-build tolerant like the
+# openWakeWord pre-warm above: if the fetch fails, build still succeeds
+# and the factory falls back to openWakeWord until the model is present.
+ARG VOSK_MODEL=vosk-model-small-en-us-0.15
+RUN (curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp/vosk.zip && \
+     python -c "import zipfile; zipfile.ZipFile('/tmp/vosk.zip').extractall('/app/models')" && \
+     mv "/app/models/${VOSK_MODEL}" /app/models/vosk-model-small-en-us && \
+     rm -f /tmp/vosk.zip) || \
+    echo "vosk model fetch skipped (offline build OK; runtime falls back to openWakeWord until the model is present)"
+
 # The service source.
 COPY services/voice-io/ /app/
 
