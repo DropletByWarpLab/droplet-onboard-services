@@ -466,7 +466,19 @@ export function createPublicAuthRouter(
       const localUser = await prisma.user.findUnique({
         where: { email: loginEmail },
       });
-      if (!localUser || !localUser.passwordHash) {
+      // WARP (SCIM directory sync): a user the directory deactivated
+      // (Okta SCIM `active:false` → `directoryStatus = DEACTIVATED`, a SOFT
+      // disable, never a row delete) must be denied even if the row + hash
+      // still exist. Fold it into the SAME shared deny branch as
+      // unknown-email / null-hash so a deactivated account is
+      // wire-indistinguishable from a non-existent one (no oracle for "this
+      // email exists but is disabled") and the timing matches (dummy verify
+      // spent, real argon2id verify never runs).
+      if (
+        !localUser ||
+        !localUser.passwordHash ||
+        localUser.directoryStatus === "DEACTIVATED"
+      ) {
         await verifyDummyPassword(password);
         await denyInvalid(loginEmail);
         return;

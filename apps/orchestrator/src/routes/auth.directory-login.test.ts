@@ -137,6 +137,9 @@ interface UserRow {
   passwordHash: string | null;
   role: string;
   isLocal: boolean;
+  // WARP (SCIM directory sync): soft-deactivation status. A DEACTIVATED
+  // row is denied at /auth/login (indistinguishable from unknown-email).
+  directoryStatus: "ACTIVE" | "DEACTIVATED";
   createdAt: Date;
   updatedAt: Date;
 }
@@ -193,6 +196,7 @@ const stefan: UserRow = {
   passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$abc$def",
   role: "owner",
   isLocal: true,
+  directoryStatus: "ACTIVE",
   createdAt: new Date(),
   updatedAt: new Date(),
 };
@@ -298,6 +302,37 @@ describe("ADR-013 — POST /auth/login validates locally against the directory",
     // Must spend a comparable verify even though there's no hash to check.
     expect(verifyDummyPassword).toHaveBeenCalledTimes(1);
     expect(storeNcToken).not.toHaveBeenCalled();
+  });
+
+  it("DEACTIVATED directory user → 401 even with the correct password (soft-deactivation gate)", async () => {
+    // WARP (SCIM): a user Okta deactivated (active:false → DEACTIVATED, soft,
+    // NOT deleted) must not be able to sign in even though the row + hash
+    // still exist. Fail closed on the SHARED deny path so a deactivated
+    // account is wire-indistinguishable from an unknown one (no oracle for
+    // "this email exists but is disabled"). The real argon2id verify must
+    // NOT run — we deny before it, spending the dummy verify instead so the
+    // timing matches the unknown-email branch.
+    const deactivated: UserRow = {
+      ...stefan,
+      id: "u-deactivated",
+      email: "ex-employee@warp.test",
+      directoryStatus: "DEACTIVATED",
+    };
+    const prisma = createPrismaMock([deactivated]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "ex-employee@warp.test", password: "correct-horse" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("Invalid credentials");
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    // Deny happened BEFORE the real verify; dummy verify spent instead.
+    expect(verifyPassword).not.toHaveBeenCalled();
+    expect(verifyDummyPassword).toHaveBeenCalledTimes(1);
+    expect(storeNcToken).not.toHaveBeenCalled();
+    expect(nc.ncLoginWithCredentials).not.toHaveBeenCalled();
   });
 
   it("Nextcloud provisioning failure is non-fatal — login still 200s", async () => {
