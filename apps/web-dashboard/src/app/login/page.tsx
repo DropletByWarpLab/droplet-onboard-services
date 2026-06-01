@@ -120,6 +120,10 @@ export default function LoginPage() {
             onSubmit={handleLogin}
             error={error}
             submitting={isSubmitting}
+            // ADR-013 (PR #378): SSO sign-in lands back on the originally
+            // requested page. Reuse the same same-origin guard as the
+            // password path so a crafted `?next=` can't redirect off-origin.
+            returnTo={safeNext(searchParams.get("next"))}
           />
 
           <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">

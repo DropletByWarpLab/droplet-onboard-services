@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { Lock, Mail, Eye, EyeOff, KeyRound, ArrowRight } from "lucide-react";
-import { ONB_AUTH_FLAGS } from "./flags";
+import { ONB_AUTH_FLAGS, ONB_SSO_PROVIDERS_LIVE, type OnbSsoProviderId } from "./flags";
 
 /* ── Brand glyphs (mock marks, not official logos) ───────────────── */
 function GoogleGlyph() {
@@ -31,11 +31,20 @@ function OktaGlyph() {
   );
 }
 
-const SSO_PROVIDERS = [
-  { id: "google", label: "Continue with Google", glyph: <GoogleGlyph /> },
-  { id: "microsoft", label: "Continue with Microsoft", glyph: <MicrosoftGlyph /> },
-  { id: "okta", label: "Continue with Okta", glyph: <OktaGlyph /> },
-] as const;
+/**
+ * `providerId` is the wire value sent to /api/sso/oidc/authorize and MUST
+ * match the orchestrator's SsoProvider union. Note "Continue with Microsoft"
+ * maps to the `entra` provider id (Microsoft Entra is the IdP).
+ */
+const SSO_PROVIDERS: ReadonlyArray<{
+  providerId: OnbSsoProviderId;
+  label: string;
+  glyph: ReactNode;
+}> = [
+  { providerId: "google", label: "Continue with Google", glyph: <GoogleGlyph /> },
+  { providerId: "entra", label: "Continue with Microsoft", glyph: <MicrosoftGlyph /> },
+  { providerId: "okta", label: "Continue with Okta", glyph: <OktaGlyph /> },
+];
 
 /** A method whose backend hasn't shipped yet: visible, disabled, no-op. */
 function ComingSoon({
@@ -61,6 +70,44 @@ function ComingSoon({
   );
 }
 
+/**
+ * A LIVE SSO provider. Rendered as a full-page form POST because the
+ * response is a 302 to a cross-origin IdP (Google / Microsoft) — a `fetch`
+ * can't follow that, so we let the browser navigate. The orchestrator mints
+ * + persists the single-use state/nonce server-side; we only send the
+ * provider (and an optional same-origin returnTo).
+ *
+ * Visual parity with the disabled pill (same surface-secondary tint,
+ * separator border, full width) so the live and not-yet-live providers read
+ * as one set — but enabled, with a restrained hover/active affordance from
+ * the dp-btn-secondary token plus a subtle border-emphasis on hover.
+ */
+function SsoProviderButton({
+  providerId,
+  label,
+  glyph,
+  returnTo,
+}: {
+  providerId: OnbSsoProviderId;
+  label: string;
+  glyph: ReactNode;
+  returnTo?: string;
+}) {
+  return (
+    <form action="/api/sso/oidc/authorize" method="POST" className="contents">
+      <input type="hidden" name="provider" value={providerId} />
+      {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
+      <button
+        type="submit"
+        className="dp-btn-secondary w-full justify-center gap-2.5 !bg-surface-secondary !text-label-primary border border-separator hover:!bg-fill-secondary hover:border-label-tertiary/40"
+      >
+        {glyph}
+        {label}
+      </button>
+    </form>
+  );
+}
+
 export type SignInFormProps = {
   email: string;
   password: string;
@@ -71,6 +118,9 @@ export type SignInFormProps = {
   onSubmit: () => void;
   error: string | null;
   submitting: boolean;
+  /** Same-origin path to land on after a successful SSO sign-in (the login
+   *  page's `?next=`). Omitted → the orchestrator defaults to "/". */
+  returnTo?: string;
 };
 
 export function SignInForm({
@@ -83,14 +133,25 @@ export function SignInForm({
   onSubmit,
   error,
   submitting,
+  returnTo,
 }: SignInFormProps) {
   return (
     <div className="flex flex-col gap-3">
-      {/* SSO — gated until the OIDC/SAML backends land */}
+      {/* SSO — each provider is LIVE once its OIDC backend ships (ADR-013,
+          PR #378: Google + Entra). Providers without a backend yet stay a
+          disabled "Soon" pill rather than a dead button. */}
       <div className="flex flex-col gap-2">
         {SSO_PROVIDERS.map((p) =>
-          ONB_AUTH_FLAGS.sso ? null : (
-            <ComingSoon key={p.id}>
+          ONB_AUTH_FLAGS.sso && ONB_SSO_PROVIDERS_LIVE[p.providerId] ? (
+            <SsoProviderButton
+              key={p.providerId}
+              providerId={p.providerId}
+              label={p.label}
+              glyph={p.glyph}
+              returnTo={returnTo}
+            />
+          ) : (
+            <ComingSoon key={p.providerId}>
               {p.glyph}
               {p.label}
             </ComingSoon>
