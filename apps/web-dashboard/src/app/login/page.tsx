@@ -21,6 +21,16 @@ import { SignInForm } from "@/components/auth/SignInForm";
  * return just the path+query+fragment so the caller never pushes an absolute
  * URL. Anything off-origin (incl. `//host`, `https:evil`, encoded variants) or
  * malformed falls back to "/".
+ *
+ * The sentinel-origin check is necessary but NOT sufficient: `..` resolution
+ * can pop the empty leading path segment so the *resolved path itself* becomes
+ * an authority while `.origin` stays the sentinel. `/..//evil.com` resolves to
+ * `.pathname === "//evil.com"` with `.origin === SENTINEL` (the origin check
+ * passes), and returning `//evil.com` lets the caller's `router.push` resolve
+ * it against the *real* `location.origin` → off-origin nav. Re-checking the
+ * origin can't catch this — under the sentinel `//evil.com` looks same-origin —
+ * so we additionally reject any resolved path that opens with `//` or `/\`
+ * (`/x/..//evil.com`, `/.//evil.com`, `/../\evil.com`, …) and fall back to "/".
  */
 function safeNext(next: string | null): string {
   if (!next) return "/";
@@ -28,7 +38,11 @@ function safeNext(next: string | null): string {
   try {
     const u = new URL(next, SENTINEL);
     if (u.origin !== SENTINEL) return "/";
-    return u.pathname + u.search + u.hash;
+    const path = u.pathname + u.search + u.hash;
+    // Reject a protocol-relative / authority-leading resolved path, which
+    // router.push would otherwise resolve against the real location.origin.
+    if (path.startsWith("//") || path.startsWith("/\\")) return "/";
+    return path;
   } catch {
     return "/";
   }
