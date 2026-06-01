@@ -131,13 +131,13 @@ describe("setup.service — state machine", () => {
   });
 
   it("rejects an unknown step instead of coercing it", async () => {
-    // `team` is still GATED (PR #380 wires `org` but not team), so it remains
-    // the canonical not-yet-shipped step the guard must reject.
-    await expect(
-      setSetupStep(prisma as never, "team"),
-    ).rejects.toBeInstanceOf(InvalidSetupStepError);
+    // PR #381 ships `team`, so it is no longer the not-yet-shipped sentinel.
+    // A truly unknown step is still rejected (not silently coerced).
     await expect(
       setSetupStep(prisma as never, "not-a-step"),
+    ).rejects.toBeInstanceOf(InvalidSetupStepError);
+    await expect(
+      setSetupStep(prisma as never, "department"),
     ).rejects.toBeInstanceOf(InvalidSetupStepError);
   });
 
@@ -183,9 +183,11 @@ describe("setup.service — state machine", () => {
     expect(reread.userTourCompleted).toBe(true);
   });
 
-  it("isSetupStep is a precise type guard over the shipped steps (org now wired, PR #380)", () => {
-    // PR #373: `claim` slots SECOND. PR #380: `org` slots AFTER account
-    // (welcome → claim → account → org → internet → …).
+  it("isSetupStep is a precise type guard over the shipped steps (team now wired, PR #381)", () => {
+    // PR #373: `claim` slots SECOND. PR #380: `org` slots AFTER account.
+    // PR #381: `team` slots near the END, after `ai` and before `done`
+    // (welcome → claim → account → org → internet → storage → discovery →
+    // cameras → vpn → ai → team → done).
     expect(SETUP_STEPS).toEqual([
       "welcome",
       "claim",
@@ -197,16 +199,15 @@ describe("setup.service — state machine", () => {
       "cameras",
       "vpn",
       "ai",
+      "team",
       "done",
     ]);
     expect(isSetupStep("welcome")).toBe(true);
     expect(isSetupStep("done")).toBe(true);
-    // claim + org are now real, wired steps (PR #373 / PR #380).
+    // claim + org + team are now real, wired steps (PR #373 / #380 / #381).
     expect(isSetupStep("claim")).toBe(true);
     expect(isSetupStep("org")).toBe(true);
-    // team remains GATED — it extends the enum + this list when it ships
-    // (PR #381), the way claim and org did here.
-    expect(isSetupStep("team")).toBe(false);
+    expect(isSetupStep("team")).toBe(true);
     expect(isSetupStep("")).toBe(false);
     // Every member of the runtime list is a member of the Prisma enum.
     for (const step of SETUP_STEPS) {
