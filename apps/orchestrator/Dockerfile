@@ -78,12 +78,32 @@ FROM node:20-bookworm-slim
 # WARP-573: also install `postgresql-client-16` so the guarded boot
 # entrypoint (scripts/migrate-and-start.sh) can run psql / pg_dump /
 # pg_restore for the advisory lock + pre-migration snapshot + auto-recovery.
-# Pinned to major 16 to match the `db` service (PostgreSQL 16) so
-# pg_dump/pg_restore never version-mismatch. Debian Bookworm ships
-# postgresql-client-16 in the base repos.
+#
+# postgresql-client-16 is NOT in Debian Bookworm's base repos (Bookworm ships
+# postgresql-client-15), so we pull major 16 from the official PostgreSQL APT
+# repository (PGDG). WARP-573's assumption that the base image carried it was
+# wrong; once the cached apt index rolled over, the build began failing with
+# `E: Unable to locate package postgresql-client-16` (exit 100).
+#
+# Why major 16 specifically: pg_dump refuses to dump a server NEWER than
+# itself, so the client major must be >= every Postgres server it touches.
+# Deployed servers (`db`, `postgres-pm`) are postgres:15; the integration-test
+# server (tests/docker-compose.test.yml) is postgres:16. Client 16 covers both
+# (16 >= 16 >= 15). If any server major is raised, bump this pin in lockstep.
+#
+# `curl` is pulled in only to fetch the (ASCII-armored) PGDG signing key for
+# apt's `signed-by`, then purged so it doesn't linger in the runtime image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates postgresql-client-16 && \
+      openssl ca-certificates curl && \
+    install -d /usr/share/postgresql-common/pgdg && \
+    curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+      https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client-16 && \
+    apt-get purge -y --auto-remove curl && \
     rm -rf /var/lib/apt/lists/*
 
 # WARP-229: activate the OpenSSL 3 FIPS provider. Both the Node process
