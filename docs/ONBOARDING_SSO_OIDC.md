@@ -116,9 +116,10 @@ Built-in directory (ADR-013) for the `User` row + normalized-email login key.
 
 ## Deferred (follow-ups, NOT in this PR)
 
-- **Okta** — its OIDC backend ships in `feat/onb-sso-okta-scim`. The Okta
-  button stays the disabled "Soon" pill here (`ONB_SSO_PROVIDERS_LIVE.okta =
-  false`).
+- **Okta** — ✅ SHIPPED in `feat/onb-sso-okta-scim` (PR #379): Okta added as a
+  third OIDC provider reusing this exact RP path, plus a SCIM 2.0 server for
+  directory provisioning. The Okta button is now live
+  (`ONB_SSO_PROVIDERS_LIVE.okta = true`). See `ONBOARDING_DIRECTORY_SYNC.md`.
 - **Air-gap / LAN-mirror** — resolving against an on-LAN directory mirror so
   sign-in works WAN-down (`ONBOARDING_DIRECTORY_SYNC.md`) is a separate PR.
   This PR resolves against the live IdP.
