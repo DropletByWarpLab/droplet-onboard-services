@@ -33,6 +33,23 @@ interface BridgeDrive {
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-612: read-only enrichment from the device-bridge. Optional so an
+   *  older bridge that predates the enrichment still type-checks; `bus` is
+   *  re-derived server-side (deriveBus) when the bridge omits it. */
+  fs?: string;
+  bus?: string;
+  readonly?: boolean;
+}
+
+/** Mirror of the bridge's `_bus_for` so the dashboard always has a bus class
+ *  to pick an icon + Internal/USB chip, even against a bridge that predates
+ *  the enrichment. Presentation-only — never a mount/security decision. */
+function deriveBus(device: string): string {
+  const base = (device || "").split("/").pop() || "";
+  if (base.startsWith("nvme")) return "nvme";
+  if (base.startsWith("mmcblk")) return "mmc";
+  if (base.startsWith("sd")) return "usb";
+  return "disk";
 }
 
 interface BridgeDrivesSnapshot {
@@ -133,6 +150,9 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         const label = byUuid.get(d.uuid);
         return {
           ...d,
+          // Guarantee a bus class for the dashboard even if the bridge is
+          // older than the WARP-612 enrichment.
+          bus: d.bus ?? deriveBus(d.device),
           displayName: label?.displayName ?? null,
           icon: label?.icon ?? null,
           notes: label?.notes ?? null,
@@ -217,6 +237,37 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     } catch (err) {
       logger.warn({ err, uuid: req.params.uuid }, "Failed to update Drive label");
       next(err);
+    }
+  });
+
+  /**
+   * POST /api/storage/drives/rescan — refresh the device-bridge's drive
+   * snapshot (it caches ~10s). Proxies the bridge's existing
+   * `/drives/changed` cache-invalidation hook — the same one the automount
+   * udev rule calls on hot-plug — so this only drops a cache; it never
+   * mounts or unmounts. Admin-only because it's a device-control action.
+   */
+  router.post("/storage/drives/rescan", async (req, res) => {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${BRIDGE_URL}/drives/changed`, {
+        method: "POST",
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!r.ok) {
+        return res.status(502).json({ ok: false, error: `bridge returned ${r.status}` });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      logger.warn({ err }, "Failed to trigger drive rescan");
+      return res
+        .status(502)
+        .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
     }
   });
 

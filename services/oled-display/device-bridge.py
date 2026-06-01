@@ -695,6 +695,27 @@ def _bytes_for(path):
         return 0, 0, 0
 
 
+def _bus_for(device):
+    """Classify a block device by bus from its kernel name. Cheap, no I/O.
+
+    nvme*  -> internal NVMe (the modular primary store on Droplet)
+    mmcblk* -> eMMC / SD (the boot medium)
+    sd*    -> 'usb' (Droplet's hot-plug data drives are USB; bare SATA is
+              not a deployment shape we ship, so this is the safe label)
+    else   -> 'disk'
+    The dashboard uses this only to pick an icon + an Internal/USB chip;
+    it is never a security or mount decision.
+    """
+    base = os.path.basename(device or "")
+    if base.startswith("nvme"):
+        return "nvme"
+    if base.startswith("mmcblk"):
+        return "mmc"
+    if base.startswith("sd"):
+        return "usb"
+    return "disk"
+
+
 # Filesystem types we consider "data storage" worth surfacing in the UI.
 # Excludes tmpfs, devtmpfs, cgroup, overlay, squashfs, procfs, sysfs, etc.
 _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
@@ -740,6 +761,20 @@ def _label_and_uuid_for(device):
     return label, uuid
 
 
+# /proc/mounts octal-escapes whitespace + backslash in the mount path
+# (space -> \040, tab -> \011, newline -> \012, backslash -> \134). Unescape so
+# the keys/paths match the real ones the automount state file + statvfs use;
+# backslash is decoded last so an escaped backslash can't swallow the digits
+# of a following escape.
+def _unescape_mount(path: str) -> str:
+    return (
+        path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
 def drives_snapshot(invalidate=False):
     """Return every 'data' drive mounted on /mnt/*, from both the automount
     state file (hot-plug USB/NVMe) and /proc/mounts (fstab-installed
@@ -751,6 +786,26 @@ def drives_snapshot(invalidate=False):
         return _drives_cache["snap"]
 
     by_mount = {}  # mount-point -> entry, so state + /proc/mounts merge cleanly
+
+    # Filesystem type + read-only flag per mount, parsed once from
+    # /proc/mounts so both the automount and fstab branches below can
+    # annotate their entries (fs/readonly) without a second pass or a
+    # blkid subprocess. Read-only — never mutates anything.
+    mount_meta = {}  # mount-point -> (fstype, readonly)
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4:
+                    # Key on the unescaped path so lookups by the real mount
+                    # point (automount state / statvfs) match even when the path
+                    # contains a space or other escaped char.
+                    mount_meta[_unescape_mount(parts[1])] = (
+                        parts[2],
+                        "ro" in parts[3].split(","),
+                    )
+    except Exception:
+        pass
 
     # 1) Hot-plug automount state (authoritative label/uuid for USB drives)
     state_path = "/var/lib/droplet-automount/mounts.json"
@@ -768,6 +823,11 @@ def drives_snapshot(invalidate=False):
             if not os.path.ismount(mp):
                 continue
             total, used, free = _bytes_for(mp)
+            # Fail SAFE on a /proc/mounts miss: report read-only, never a false
+            # "writable". The UI renders mount status from this flag and the
+            # deferred eject/fsck work will trust it — for a data-integrity-first
+            # product an unknown state must not present as writable.
+            fs, readonly = mount_meta.get(mp, ("", True))
             by_mount[mp] = {
                 "device": m.get("device"),
                 "mount": mp,
@@ -777,6 +837,9 @@ def drives_snapshot(invalidate=False):
                 "used_bytes": used,
                 "free_bytes": free,
                 "mounted": True,
+                "fs": fs,
+                "bus": _bus_for(m.get("device")),
+                "readonly": readonly,
                 "source": "automount",
             }
     except Exception:
@@ -791,7 +854,7 @@ def drives_snapshot(invalidate=False):
                 parts = line.split()
                 if len(parts) < 3:
                     continue
-                dev, mp, fs = parts[0], parts[1], parts[2]
+                dev, mp, fs = parts[0], _unescape_mount(parts[1]), parts[2]
                 if not mp.startswith("/mnt/"):
                     continue
                 if fs not in _DATA_FSTYPES:
@@ -820,6 +883,10 @@ def drives_snapshot(invalidate=False):
                     "used_bytes": used,
                     "free_bytes": free,
                     "mounted": True,
+                    "fs": fs,
+                    "bus": _bus_for(dev),
+                    # Same fail-safe default as the automount branch above.
+                    "readonly": mount_meta.get(mp, (fs, True))[1],
                     "source": "fstab",
                 }
     except Exception:
