@@ -254,3 +254,38 @@ def test_readiness_url_defaults_to_loopback():
     # Host-specific defaults are banned; loopback (same-host orchestrator
     # behind the gateway) matches device-bridge.service's ORCHESTRATOR_URL.
     assert display_module.BOOT_READINESS_URL.startswith("http://127.0.0.1")
+
+
+# --- BOOT_MAX_SECONDS parsing (L1) ------------------------------------------
+
+def test_env_positive_int_parses_valid_value():
+    assert display_module._env_positive_int("X", 90, raw="120") == 120
+
+
+def test_env_positive_int_falls_back_on_malformed_value():
+    # L1 (WARP-624): a malformed BOOT_MAX_SECONDS must NOT raise at import and
+    # kill the service — it degrades to the default.
+    assert display_module._env_positive_int("X", 90, raw="ninety") == 90
+    assert display_module._env_positive_int("X", 90, raw="") == 90
+    assert display_module._env_positive_int("X", 90, raw="12.5") == 90
+
+
+def test_env_positive_int_clamps_non_positive_to_default():
+    # A zero/negative budget would make the boot timeout fire instantly (or
+    # never make sense); clamp to the default so the fallback stays meaningful.
+    assert display_module._env_positive_int("X", 90, raw="0") == 90
+    assert display_module._env_positive_int("X", 90, raw="-5") == 90
+
+
+def test_env_positive_int_uses_environ_when_no_raw(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SOME_BUDGET", "45")
+    assert display_module._env_positive_int("SOME_BUDGET", 90) == 45
+    monkeypatch.setenv("SOME_BUDGET", "garbage")
+    assert display_module._env_positive_int("SOME_BUDGET", 90) == 90
+
+
+def test_boot_max_seconds_is_a_positive_int():
+    # The module-level constant must always be a usable positive int regardless
+    # of how the env was set.
+    assert isinstance(display_module.BOOT_MAX_SECONDS, int)
+    assert display_module.BOOT_MAX_SECONDS > 0

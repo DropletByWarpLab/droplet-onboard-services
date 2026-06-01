@@ -138,7 +138,36 @@ AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 # no host-specific defaults baked in.
 BOOT_READINESS_URL = os.environ.get(
     "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
-BOOT_MAX_SECONDS = int(os.environ.get("BOOT_MAX_SECONDS", "90"))
+
+
+def _env_positive_int(name: str, default: int, raw: Optional[str] = None) -> int:
+    """Read a positive-int env var, degrading gracefully instead of raising.
+
+    L1 (WARP-624): a malformed value (e.g. ``BOOT_MAX_SECONDS=ninety``) would
+    otherwise raise ValueError at import and kill the whole service. We fall
+    back to ``default`` on anything non-integer and clamp non-positive values
+    to ``default`` too — a zero/negative boot budget would make the timeout
+    fallback fire instantly (or never make sense). ``raw`` is injectable for
+    deterministic tests.
+    """
+    if raw is None:
+        raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not an integer — falling back to %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning(
+            "%s=%r must be positive — falling back to %s", name, raw, default)
+        return default
+    return value
+
+
+BOOT_MAX_SECONDS = _env_positive_int("BOOT_MAX_SECONDS", 90)
 # How often the cycle loop actually probes readiness. The loop ticks ~12.5x/s;
 # gating the probe to every 2s keeps it cheap.
 BOOT_READINESS_INTERVAL = float(os.environ.get("BOOT_READINESS_INTERVAL", "2.0"))
