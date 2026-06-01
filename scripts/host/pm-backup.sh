@@ -92,22 +92,42 @@ log_success "postgres-pm dumped ($DB_SIZE bytes gzipped)"
 log_info "Snapshotting Plane attachments volume..."
 mkdir -p "$WORK_DIR/attachments"
 
-# The Plane backend container writes attachments to /mnt/data/uploads. We
-# tar the live directory via a throwaway sibling container that mounts the
-# same volume read-only. Plane keeps attachments append-only at the file
-# level (renames-then-replaces on edit), so a hot snapshot during low
-# traffic is consistent. The spec WARP-498 OQ1 flag noted a brief
-# pause-write window may be needed for high-traffic deployments; for V1
+# When Plane attachments live on a named volume, we tar it via a throwaway
+# sibling container that mounts it read-only. Plane keeps attachments
+# append-only at the file level (renames-then-replaces on edit), so a hot
+# snapshot during low traffic is consistent. The spec WARP-498 OQ1 flag noted
+# a brief pause-write window may be needed for high-traffic deployments; for V1
 # we accept the small inconsistency risk.
+#
+# CURRENT STATE: there is NO `pm-attachments-data` volume in
+# docker/docker-compose.yml — pm-api/pm-worker declare no `volumes:` mount, so
+# the only PM-related named volumes are postgres-pm-data + redis-pm-data. Plane
+# attachments therefore sit on the ephemeral container layer in this stack, and
+# this phase skips. The phase is kept (guarded) so that once attachments are
+# moved onto a `pm-attachments-data` volume — the durability fix the
+# docs/SINGLE_BOX.md storage budget already assumes — backup picks it up with no
+# further change. That deeper attachment-durability gap is tracked separately;
+# this script must surface it, never paper over it.
 ATTACH_VOLUME="${PROJECT:-droplet}_pm-attachments-data"
-if ! docker run --rm \
+# GUARD (WARP-570 class): `docker run -v <name>:/data` AUTO-CREATES a missing
+# named volume, which would silently tar an EMPTY volume and mask the fact that
+# attachments aren't on a named volume at all — the exact review blocker fixed
+# for device-backup.sh in PR #356. Only snapshot the volume if it genuinely
+# exists; otherwise record an EMPTY marker so pm-restore.sh skips cleanly
+# instead of writing back into a phantom volume.
+if ! docker volume inspect "$ATTACH_VOLUME" >/dev/null 2>&1; then
+  log_warn "attachments volume '$ATTACH_VOLUME' absent — skipping (Plane attachments are not on a named volume in this stack)"
+  printf 'attachments-volume-absent-at-backup-time\n' > "$WORK_DIR/attachments/EMPTY"
+elif ! docker run --rm \
        -v "$ATTACH_VOLUME:/data:ro" \
        -v "$WORK_DIR/attachments:/out" \
        alpine:3.20 \
        sh -c 'tar -cf /out/data.tar -C /data .'; then
-  log_warn "attachments volume not present (skipping — pre-Phase-1-merge state?)"
-  # Still write an empty marker so the restore script can detect intent.
-  printf 'attachments-volume-absent-at-backup-time\n' > "$WORK_DIR/attachments/EMPTY"
+  # Volume exists but the snapshot failed — refuse a partial backup (matches
+  # device-backup.sh's posture) rather than emitting a misleadingly "complete"
+  # archive that is silently missing attachments.
+  log_error "attachments volume '$ATTACH_VOLUME' exists but tar failed"
+  exit 1
 fi
 
 # --- Phase 3: Manifest ---------------------------------------------------
