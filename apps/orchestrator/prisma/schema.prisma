@@ -1059,7 +1059,7 @@ model User {
   // have a null userId, so they are NOT in this relation.
   webauthnChallenges  WebAuthnChallenge[]
 
-  // PR #375 — TOTP second factor (ADR-012 directory). One credential row
+  // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
   // explicit "TOTP enabled" signal — the login gate reads it directly
   // rather than inferring enablement from row presence.

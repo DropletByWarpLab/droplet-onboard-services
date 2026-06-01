@@ -1,6 +1,6 @@
 -- PR #375 — TOTP 2FA + one-time recovery codes for the built-in
--- argon2id directory (stacks on ADR-012, migration
--- 20260531120000_adr_012_directory_argon2id).
+-- argon2id directory (stacks on ADR-013, migration
+-- 20260531120000_adr_013_directory_argon2id; PR #374).
 --
 -- Two additive tables, both keyed to "User"."id" with ON DELETE CASCADE:
 --

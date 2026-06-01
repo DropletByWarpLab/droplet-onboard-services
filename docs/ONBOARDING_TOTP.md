@@ -42,7 +42,7 @@ model RecoveryCode {
 
 ## Dependencies
 
-Pairs with the built-in directory (ADR-012) and the Account wizard step.
+Pairs with the built-in directory (ADR-013) and the Account wizard step.
 Flips `ONB_AUTH_FLAGS.totp` true in the same PR.
 
 ## Acceptance criteria

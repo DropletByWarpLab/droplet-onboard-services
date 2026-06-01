@@ -1,7 +1,7 @@
 /**
  * PR #375 — POST /auth/login TOTP/recovery gate.
  *
- * After the ADR-012 argon2id password verify passes, if the user has TOTP
+ * After the ADR-013 argon2id password verify passes, if the user has TOTP
  * ENABLED (TotpCredential.confirmedAt non-null) the login must require a
  * valid second factor — a TOTP code OR an unused recovery code — BEFORE
  * issuing the session cookie. A missing/invalid second factor returns a

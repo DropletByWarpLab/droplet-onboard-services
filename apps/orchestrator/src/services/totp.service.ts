@@ -3,7 +3,7 @@ import { encryptSecret, decryptSecret } from "./encryption.service.js";
 
 /**
  * TOTP (RFC 6238) second factor for the built-in argon2id directory
- * (ADR-012). This module is the single boundary to the `otplib` vetted
+ * (ADR-013). This module is the single boundary to the `otplib` vetted
  * library and the only place that ever holds a TOTP secret in plaintext.
  *
  * Secret-at-rest: the per-user TOTP secret is encrypted with the existing
