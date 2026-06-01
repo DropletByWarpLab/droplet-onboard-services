@@ -161,8 +161,8 @@ prepare_and_build() {
   # profile services are visible regardless of --profile flags.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux \
-        -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --env-file "$COMPOSE_ENV_FILE" \
+        -f "$COMPOSE_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix
