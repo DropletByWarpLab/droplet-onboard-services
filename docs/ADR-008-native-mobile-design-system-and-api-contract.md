@@ -302,3 +302,26 @@ module.
 **Do not rename the design tokens between platforms.** The color/type
 table above is the cross-platform truth; keep names in sync (accent =
 accent, type-headline = .headline = TextStyle.Headline).
+
+## 2026-06-01 reconciliation — auth realigned to the shipped backend
+
+A cross-repo audit (2026-06-01) found the apps had drifted from the
+shipped orchestrator. The §3 token-lifecycle above described
+`/api/devices/pair/claim` as a one-shot login returning JWTs. Shipped
+`main` instead implements:
+
+- **Auth = `POST /api/auth/login` (ADR-013 directory): email + password
+  verified with argon2id, plus a `TOTP_REQUIRED` second-factor gate.**
+  Action item #2 (`?return=body`) is **done** on `main`.
+- **`claim` = a Bearer-authenticated, post-login device-enrollment step**
+  that returns a per-device Nextcloud WebDAV app-password — not JWTs.
+
+Decision (Stefan, 2026-06-01): **align the apps to the shipped backend**
+(login-first; pairing demoted to optional enrollment) rather than change
+shipped auth. `docs/mobile-api-contract.md` is corrected in the same PR;
+its "Sign-in + optional enrollment sequence" supersedes the §3 step list.
+iOS realigned in `droplet-ios` PR #1; Android + Windows to follow.
+
+**Scope note:** TOTP/MFA and SCIM directory sync are LIVE on `main` (this
+ADR predated them) — native clients MUST handle the `TOTP_REQUIRED`
+login challenge. WebAuthn is not part of the app login path.
