@@ -74,9 +74,16 @@ FROM node:20-bookworm-slim
 # base image already ships `openssl` and `libssl3`, which together
 # provide the FIPS module config (`/etc/ssl/fipsmodule.cnf`). We
 # explicitly apt-install to pin it across image rebuilds.
+#
+# WARP-573: also install `postgresql-client-16` so the guarded boot
+# entrypoint (scripts/migrate-and-start.sh) can run psql / pg_dump /
+# pg_restore for the advisory lock + pre-migration snapshot + auto-recovery.
+# Pinned to major 16 to match the `db` service (PostgreSQL 16) so
+# pg_dump/pg_restore never version-mismatch. Debian Bookworm ships
+# postgresql-client-16 in the base repos.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
+      openssl ca-certificates postgresql-client-16 && \
     rm -rf /var/lib/apt/lists/*
 
 # WARP-229: activate the OpenSSL 3 FIPS provider. Both the Node process
@@ -109,6 +116,11 @@ COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
 COPY --from=builder /app/apps/orchestrator/package.json ./apps/orchestrator/package.json
 COPY --from=builder /app/apps/orchestrator/dist ./apps/orchestrator/dist
 COPY --from=builder /app/apps/orchestrator/prisma ./apps/orchestrator/prisma
+# WARP-573: guarded migration-on-boot entrypoint (advisory lock +
+# pre-migration snapshot + auto-recovery). Replaces the old inline
+# `migrate deploy && node` CMD.
+COPY --from=builder /app/apps/orchestrator/scripts ./apps/orchestrator/scripts
+RUN chmod +x ./apps/orchestrator/scripts/migrate-and-start.sh
 # WARP-81: bundle the IEEE OUI vendor registry snapshot. oui-lookup.service
 # reads this at startup to resolve MAC prefixes → vendor names.
 COPY --from=builder /app/apps/orchestrator/data/oui.csv ./apps/orchestrator/data/oui.csv
@@ -149,5 +161,13 @@ WORKDIR /app/apps/orchestrator
 #   Until a provider is installed, set `DROPLET_FIPS_REQUIRED=false`
 #   in the container env to skip the boot self-test and run in a
 #   non-FIPS posture (development / CI / staging).
+# WARP-573: boot through the guarded migration entrypoint instead of the old
+# unguarded `npx prisma migrate deploy && node dist/index.js`. The script takes
+# a Postgres advisory lock (so concurrent/looping starts can't race the
+# _prisma_migrations table), snapshots the DB before applying pending
+# migrations, auto-recovers a power-cut-induced failed migration, and on
+# unrecoverable failure exits non-zero with a loud, greppable banner + recovery
+# runbook instead of silently restart-looping. See scripts/migrate-and-start.sh
+# and .superpowers/brainstorm/WARP-573.md.
 EXPOSE 3000
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+CMD ["./scripts/migrate-and-start.sh"]

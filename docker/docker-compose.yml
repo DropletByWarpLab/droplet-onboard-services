@@ -183,6 +183,10 @@ services:
       - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
     volumes:
       - matter-data:/data/matter-storage
+      # WARP-573: pre-migration DB snapshots written by the guarded boot
+      # entrypoint (scripts/migrate-and-start.sh) immediately before applying
+      # pending migrations, so a power-cut mid-migration can be auto-recovered.
+      - migration-snapshots:/data/migration-snapshots
       # WARP-203: chat-attached "brain memory" files. Per-user dirs at
       # /data/brain-memory/<userId>/<itemId>/ hold the original bytes,
       # extracted text, and a manifest mirroring the BrainMemoryItem
@@ -1392,6 +1396,9 @@ volumes:
   # engagements and doesn't require operators to pre-create a host dir.
   ops-audit:
   matter-data:
+  # WARP-573: pre-migration snapshots taken by the orchestrator's guarded
+  # boot entrypoint. Wiped on factory reset (see scripts/factory-reset.sh).
+  migration-snapshots:
   brain-memory-data:
   # WARP-RAG-EVAL: per-run RAGAS JSON + Markdown + the bootstrap
   # baselines.candidate.json. Named volume so results survive container
