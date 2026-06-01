@@ -68,7 +68,7 @@ import {
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
-import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 
 const logger = pino({ name: "setup-route" });
 
@@ -109,31 +109,113 @@ const orgSchema = z.object({
 });
 
 /**
- * PR #373 — wrong-code rate-limit BUDGET. A claim code is short and read off a
- * physical display, so an attacker on the LAN could otherwise brute-force it.
- * We cap wrong guesses per window using the shared cache counter (no busy-loop;
- * fails OPEN if the cache is down so a flaky Redis can't lock a legitimate
- * owner out of claiming their box). Keyed by client IP.
+ * WARP-631 — wrong-code rate-limit with PROGRESSIVE BACKOFF (replaces the flat
+ * PR #373 10-attempts/15-min sliding lockout). A claim code is short and read
+ * off a physical display, so an attacker on the LAN could otherwise brute-force
+ * it. But the old flat lockout had a field-incident failure mode (2026-06-01):
+ * its sliding TTL was bumped on EVERY attempt, so a user who kept trying never
+ * let the window elapse — a correct code entered during the lock read as
+ * rejected. The backoff model locks for a FIXED, escalating duration instead,
+ * so the lock always elapses on its own and a correct code clears the state.
+ *
+ * FREE_TIER wrong codes are forgiven (inline CLAIM_CODE_INVALID, no lock). The
+ * (FREE_TIER+1)th wrong code is the first lock; each successive lockout
+ * escalates along BACKOFF_SCHEDULE and caps at its last value. Everything fails
+ * OPEN if the cache is down so a flaky Redis can't lock a legitimate owner out
+ * of claiming their box. Keyed by client IP.
  */
-const CLAIM_RATE_LIMIT_WINDOW_SEC = 15 * 60; // 15 minutes
-const MAX_CLAIM_ATTEMPTS_PER_WINDOW = 10;
+const CLAIM_FREE_TIER = 3;
+/** Lockout seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
+const CLAIM_BACKOFF_SCHEDULE = [15, 30, 60, 120, 300, 900] as const;
+/** Wrong-code counter resets after an hour of no failures (rolling window). */
+const CLAIM_FAILS_TTL_SEC = 60 * 60;
+
+/** `ratelimit:setup-claim:fails:<ip>` — running wrong-code count for the IP. */
+function claimFailsKey(ip: string): string {
+  return `ratelimit:setup-claim:fails:${ip}`;
+}
+/** `ratelimit:setup-claim:lock:<ip>` — locked-until epoch ms for the IP. */
+function claimLockKey(ip: string): string {
+  return `ratelimit:setup-claim:lock:${ip}`;
+}
 
 /**
- * Increment-and-check the per-IP claim budget. Returns whether the request is
- * allowed. Mirrors the WARP-564 device-clients rate limiter: read the current
- * count, reject at the cap, otherwise bump with a TTL. Fails OPEN on cache
- * error (a down cache must not brick first-run claiming).
+ * WARP-631 — PURE progressive-backoff schedule. Maps a running wrong-code count
+ * onto the lockout duration in seconds. The first `CLAIM_FREE_TIER` failures
+ * are forgiven (0 = no lock); the next failure is the first scheduled lock, and
+ * the schedule escalates then caps at its final value. Monotonic
+ * non-decreasing. Exported + unit-tested independently of any I/O (AC#7).
+ *
+ *   idx = failureCount - CLAIM_FREE_TIER - 1
+ *   idx < 0                        → 0
+ *   else SCHEDULE[min(idx, last)]
  */
-async function withinClaimBudget(ip: string): Promise<boolean> {
-  const key = `ratelimit:setup-claim:${ip}`;
+export function claimBackoffSeconds(failureCount: number): number {
+  const idx = failureCount - CLAIM_FREE_TIER - 1;
+  if (idx < 0) return 0;
+  return CLAIM_BACKOFF_SCHEDULE[
+    Math.min(idx, CLAIM_BACKOFF_SCHEDULE.length - 1)
+  ];
+}
+
+/**
+ * Read the per-IP lock. If a lock exists and is still in the future, the
+ * request is locked and we report the whole-seconds wait. Fails OPEN (reports
+ * not-locked) on any cache error — a down cache must never brick first-run
+ * claiming.
+ */
+async function checkClaimLock(
+  ip: string,
+): Promise<{ locked: boolean; retryAfterSeconds: number }> {
   try {
-    const current = (await cacheGet<number>(key)) ?? 0;
-    if (current >= MAX_CLAIM_ATTEMPTS_PER_WINDOW) return false;
-    await cacheSet(key, current + 1, CLAIM_RATE_LIMIT_WINDOW_SEC);
-    return true;
+    const until = (await cacheGet<number>(claimLockKey(ip))) ?? 0;
+    const now = Date.now();
+    if (until > now) {
+      return {
+        locked: true,
+        retryAfterSeconds: Math.ceil((until - now) / 1000),
+      };
+    }
+    return { locked: false, retryAfterSeconds: 0 };
   } catch {
-    return true;
+    return { locked: false, retryAfterSeconds: 0 };
   }
+}
+
+/**
+ * Record one wrong-code attempt for the IP: bump the rolling failure counter
+ * (1h TTL) and, if the new count crosses into a scheduled lock, write the
+ * locked-until timestamp with a TTL equal to the lock duration so it expires on
+ * its own. Returns the lock duration applied (0 = still within the free tier).
+ * Fails OPEN (returns 0) on any cache error.
+ */
+async function recordClaimFailure(ip: string): Promise<{ lockedSeconds: number }> {
+  try {
+    const current = (await cacheGet<number>(claimFailsKey(ip))) ?? 0;
+    const next = current + 1;
+    await cacheSet(claimFailsKey(ip), next, CLAIM_FAILS_TTL_SEC);
+    const lockedSeconds = claimBackoffSeconds(next);
+    if (lockedSeconds > 0) {
+      await cacheSet(
+        claimLockKey(ip),
+        Date.now() + lockedSeconds * 1000,
+        lockedSeconds,
+      );
+    }
+    return { lockedSeconds };
+  } catch {
+    return { lockedSeconds: 0 };
+  }
+}
+
+/**
+ * Clear the per-IP failure + lock state. Called after a successful (or
+ * already-claimed) bind so a correct code always resets the counters (AC#3),
+ * and so a brief lock can't outlive a legitimate success.
+ */
+async function clearClaimRateState(ip: string): Promise<void> {
+  await cacheDel(claimFailsKey(ip));
+  await cacheDel(claimLockKey(ip));
 }
 
 /** Claim request body — a single non-empty `code` string. */
@@ -308,13 +390,19 @@ export function createSetupRouter(prisma: PrismaClient): Router {
   //   correct code      → 200 { claimed:true, next_step } and advance the
   //                        resumable wizard to `account`. Does NOT flip the
   //                        appliance to "ready" — that's the wizard-FINISH
-  //                        transition (#372); claim is the FIRST step.
+  //                        transition (#372); claim is the FIRST step. CLEARS
+  //                        the per-IP failure/lock counters (WARP-631 AC#3).
   //   already claimed    → 200 { claimed:true, already_claimed:true, next_step }
   //                        — idempotent short-circuit so a refresh/re-run moves
-  //                        the customer on instead of erroring.
-  //   wrong/unknown/expired → 400 { code:"CLAIM_CODE_INVALID" }, never echoing
-  //                        the real code, after decrementing the rate budget.
-  //   budget exhausted   → 429, before any DB read.
+  //                        the customer on instead of erroring. Also clears the
+  //                        rate state.
+  //   wrong/unknown/expired → 400 { code:"CLAIM_CODE_INVALID" } while within the
+  //                        free tier (WARP-631), never echoing the real code;
+  //                        the (FREE_TIER+1)th wrong code instead returns
+  //                        429 { code:"CLAIM_RATE_LIMITED", retryAfterSeconds }
+  //                        + a Retry-After header.
+  //   already locked     → 429 { code:"CLAIM_RATE_LIMITED", retryAfterSeconds }
+  //                        + Retry-After, BEFORE any DB read.
   router.post("/setup/claim", async (req: Request, res, next) => {
     try {
       const parsed = claimSchema.safeParse(req.body);
@@ -326,13 +414,19 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      // Rate-limit BEFORE any DB work so a brute-force burst can't hammer the
-      // lookup. `req.ip` is the client address (Express trust-proxy aware).
+      // WARP-631 — check the per-IP lock BEFORE any DB work so a locked client
+      // can't hammer the lookup, and so a correct code attempted DURING a lock
+      // still reads as rate-limited (the lock must elapse first). `req.ip` is
+      // the client address (Express trust-proxy aware). Fails OPEN if the
+      // cache is down (checkClaimLock returns not-locked on error).
       const ip = req.ip ?? "unknown";
-      if (!(await withinClaimBudget(ip))) {
+      const lock = await checkClaimLock(ip);
+      if (lock.locked) {
+        res.setHeader("Retry-After", String(lock.retryAfterSeconds));
         res.status(429).json({
-          error: "Too many claim attempts. Wait a few minutes and try again.",
+          error: "Too many claim attempts. Try again shortly.",
           code: "CLAIM_RATE_LIMITED",
+          retryAfterSeconds: lock.retryAfterSeconds,
         });
         return;
       }
@@ -340,6 +434,9 @@ export function createSetupRouter(prisma: PrismaClient): Router {
       const result = await consumeClaimCode(prisma, parsed.data.code);
 
       if (result.outcome === CLAIM_OUTCOME.CLAIMED) {
+        // A correct code clears the failure/lock counters (WARP-631 AC#3).
+        // Best-effort: a cache hiccup here must not fail the committed claim.
+        await clearClaimRateState(ip).catch(() => {});
         // Advance the resumable wizard to the next step. Best-effort: a failure
         // to persist the step must not fail the (already-committed) claim — the
         // dashboard also advances locally and re-syncs on the next PATCH.
@@ -356,7 +453,9 @@ export function createSetupRouter(prisma: PrismaClient): Router {
       }
 
       if (result.outcome === CLAIM_OUTCOME.ALREADY_CLAIMED) {
-        // Idempotent short-circuit — the box is already bound, move on.
+        // Idempotent short-circuit — the box is already bound, move on. Clear
+        // the rate state too so a prior partial-lock can't linger (WARP-631).
+        await clearClaimRateState(ip).catch(() => {});
         res.json({
           claimed: true,
           already_claimed: true,
@@ -365,8 +464,21 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      // Invalid (wrong / unknown / expired). Inline error, no reveal. The
-      // budget was already decremented above.
+      // Invalid (wrong / unknown / expired). Inline error, no reveal. WARP-631:
+      // record the failure; if this crosses into a scheduled lock (the
+      // FREE_TIER+1th wrong code), it was both wrong AND is now locked, so we
+      // answer 429 with the wait — satisfying AC#1. Otherwise the usual inline
+      // 400 within the free tier.
+      const { lockedSeconds } = await recordClaimFailure(ip);
+      if (lockedSeconds > 0) {
+        res.setHeader("Retry-After", String(lockedSeconds));
+        res.status(429).json({
+          error: "Too many claim attempts. Try again shortly.",
+          code: "CLAIM_RATE_LIMITED",
+          retryAfterSeconds: lockedSeconds,
+        });
+        return;
+      }
       res.status(400).json({
         error: "That claim code didn't match. Check the PyPortal display and try again.",
         code: "CLAIM_CODE_INVALID",
