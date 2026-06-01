@@ -45,7 +45,7 @@ describe("CORS allowlist config parsing (WARP-562)", () => {
     delete process.env.CORS_ALLOWED_ORIGINS;
     process.env.NODE_ENV = "development";
     const { config } = await import("../config.js");
-    expect(config.corsAllowedOrigins).toContain("http://localhost:3000");
+    expect(config.corsAllowedOrigins).toContain("http://localhost:3001");
   });
 
   it("does NOT append the dev origin in production", async () => {
@@ -56,7 +56,7 @@ describe("CORS allowlist config parsing (WARP-562)", () => {
     process.env.JWT_SECRET = "x".repeat(64);
     try {
       const { config } = await import("../config.js");
-      expect(config.corsAllowedOrigins).not.toContain("http://localhost:3000");
+      expect(config.corsAllowedOrigins).not.toContain("http://localhost:3001");
       expect(config.corsAllowedOrigins).toContain("https://droplet-ai.local");
     } finally {
       if (prevJwt === undefined) delete process.env.JWT_SECRET;

@@ -290,7 +290,10 @@ function resolveCorsAllowedOrigins(raw: string, nodeEnv: string): string[] {
       ? explicit
       : [
           "https://droplet-ai.local",
-          ...(nodeEnv !== "production" ? ["http://localhost:3000"] : []),
+          // Dev dashboard origin: the Next.js dev server runs on :3001
+          // (`apps/web-dashboard/package.json` → `next dev -p 3001`). :3000 is
+          // the orchestrator's own PORT, so it would grant nothing useful here.
+          ...(nodeEnv !== "production" ? ["http://localhost:3001"] : []),
         ];
 
   // Fail-fast on wildcard + credentials, mirroring ai-gateway's guard
