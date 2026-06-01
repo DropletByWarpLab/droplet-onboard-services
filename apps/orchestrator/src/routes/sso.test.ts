@@ -68,7 +68,7 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { createSsoRouter } from "./sso.js";
+import { createSsoRouter, safeReturnTo } from "./sso.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 
 interface UserRow {
@@ -445,5 +445,85 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     const body = JSON.stringify(res.body) + (res.text ?? "");
     expect(body).not.toContain("super-secret-code");
     expect(body).not.toContain("ve-123"); // codeVerifier
+  });
+});
+
+/**
+ * safeReturnTo — open-redirect guard for the post-login landing path.
+ *
+ * The returnTo value reaches the browser via the `Location` response header
+ * (res.redirect). The original `startsWith("/") && !startsWith("//")` string
+ * guard was defeated several ways, all confirmed below:
+ *   1. A backslash authority (`/\evil.com`) passed the `/` / `//` check yet a
+ *      browser treats `\` as `/`, turning it into `//evil.com` → off-origin.
+ *   2. A leading tab/newline before `//` (`/\t//evil.com`) passed the string
+ *      check but the URL parser un-hides the authority → off-origin.
+ *   3. `..` resolution can leave the RETURNED path itself authority-leading
+ *      (`/x/..//evil.com` → `//evil.com`), which the browser then resolves
+ *      against the real appliance origin → off-origin navigation.
+ *
+ * The hardened guard mirrors the merged Aurora login's safeNext: require a
+ * single leading "/" (never "//" or "/\"), resolve against a sentinel origin,
+ * require the resolved origin to equal the sentinel, return ONLY the resolved
+ * path+search+hash, and reject a resolved path that is itself protocol-relative
+ * / authority-leading.
+ *
+ * Note: query-string values are percent-decoded before they reach the route
+ * (URLSearchParams for the dashboard; Express for the JSON body), so these
+ * tests probe the DECODED forms — exactly what prod sees.
+ */
+describe("safeReturnTo — open-redirect hardening", () => {
+  it.each([
+    ["backslash authority (decoded /%5C)", "/\\evil.com"],
+    ["tab then // (decoded /%09//)", "/\t//evil.com"],
+    ["tab then single / (decoded /%09/)", "/\t/evil.com"],
+    ["newline then // (decoded /%0A//)", "/\n//evil.com"],
+    ["protocol-relative //host", "//host"],
+    ["scheme-relative https:evil", "https:evil"],
+    ["absolute http URL", "http://evil.com/x"],
+    ["dotdot to authority", "/..//evil.com"],
+    ["nested dotdot to authority", "/x/..//evil.com"],
+    ["carriage-return then //", "/\r//evil.com"],
+    ["backslash-backslash authority", "\\\\evil.com"],
+    ["non-string (object)", { toString: () => "//evil.com" } as unknown],
+    ["non-string (number)", 42 as unknown],
+    ["empty string", ""],
+    ["bare relative (no leading slash)", "evil.com"],
+  ])("rejects an off-origin / authority-leading returnTo (%s) → '/'", (_label, input) => {
+    const out = safeReturnTo(input);
+    // The returned value must itself resolve same-origin against ANY origin —
+    // i.e. it can never carry an authority the browser would honour.
+    expect(out).toBe("/");
+  });
+
+  it.each([
+    ["root", "/", "/"],
+    ["files", "/files", "/files"],
+    ["files with query", "/files?x=1", "/files?x=1"],
+    ["setup with query", "/setup?from=x", "/setup?from=x"],
+    ["path with hash", "/files#section", "/files#section"],
+    ["nested path", "/people/123", "/people/123"],
+  ])("passes a legit same-origin path (%s) through unchanged", (_label, input, expected) => {
+    expect(safeReturnTo(input)).toBe(expected);
+  });
+
+  it("never returns a value that resolves off-origin against the real appliance origin", () => {
+    // Belt-and-suspenders: whatever safeReturnTo returns, resolving it against
+    // a concrete appliance origin must stay on that origin (no Location-header
+    // open redirect). This is the actual security invariant — independent of
+    // whether a given input is rejected to "/" or normalized to a safe path.
+    const probes = [
+      "/\\evil.com",
+      "/\t//evil.com",
+      "/\n//evil.com",
+      "//evil.com",
+      "/..//evil.com",
+      "/x/..//evil.com",
+      "https://evil.com",
+    ];
+    for (const p of probes) {
+      const out = safeReturnTo(p);
+      expect(new URL(out, "https://droplet.local").origin).toBe("https://droplet.local");
+    }
   });
 });

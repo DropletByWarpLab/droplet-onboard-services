@@ -66,12 +66,47 @@ function normalizeEmail(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
-/** Accept only a same-origin relative path (starts with a single "/", not
- *  "//" which browsers treat as protocol-relative). Anything else → "/". */
-function safeReturnTo(value: unknown): string {
-  if (typeof value !== "string") return "/";
-  if (!value.startsWith("/") || value.startsWith("//")) return "/";
-  return value;
+/**
+ * Resolve `returnTo` to a SAFE same-origin path for the post-login redirect.
+ *
+ * The value reaches the browser via the `Location` response header, so a naive
+ * `startsWith("/") && !startsWith("//")` string guard is not enough — it is
+ * defeated by (a) `\` / leading-control-char normalization (`/\evil.com`,
+ * `/\t//evil.com`), which the browser collapses into an off-origin authority,
+ * and (b) `..` resolution that leaves the path itself authority-leading
+ * (`/x/..//evil.com` → `//evil.com`).
+ *
+ * Hardened guard, mirroring the merged Aurora login's `safeNext`
+ * (apps/web-dashboard/src/app/login/page.tsx): resolve against a sentinel
+ * origin, require the resolved origin to equal the sentinel, return ONLY the
+ * resolved path+search+hash, and reject a resolved path that is itself
+ * protocol-relative / authority-leading. Anything else → "/".
+ */
+export function safeReturnTo(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) return "/";
+  // Must be an absolute path on THIS origin: a single leading "/", never "//"
+  // (protocol-relative) and never a backslash-authority ("/\"). This rejects
+  // bare-relative inputs (`evil.com`) and the backslash/control-char tricks
+  // before they ever reach the parser.
+  if (!value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) {
+    return "/";
+  }
+  const SENTINEL = "http://x.invalid";
+  try {
+    const url = new URL(value, SENTINEL);
+    // A value that resolves to any origin other than the sentinel carried an
+    // authority the parser un-hid (leading tab/newline + "//", e.g.
+    // "/\t//evil.com") → off-origin.
+    if (url.origin !== SENTINEL) return "/";
+    const path = url.pathname + url.search + url.hash;
+    // `..` traversal can pop the leading segment and leave the RESOLVED path
+    // itself authority-leading (`/x/..//evil.com` → `//evil.com`); the browser
+    // would resolve that against the real appliance origin. Reject those.
+    if (path.startsWith("//") || path.startsWith("/\\")) return "/";
+    return path;
+  } catch {
+    return "/";
+  }
 }
 
 /** Local-part of an email, sanitized for use as a username seed. */
