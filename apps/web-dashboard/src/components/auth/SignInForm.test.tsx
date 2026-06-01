@@ -70,13 +70,26 @@ describe("SignInForm — live SSO providers (Google + Entra)", () => {
   });
 });
 
-describe("SignInForm — Okta stays disabled (backend ships separately)", () => {
-  it("renders Okta as a disabled Soon button, NOT a form", () => {
+describe("SignInForm — Okta is now LIVE (backend shipped in this PR)", () => {
+  it("renders Okta as a form POST to the authorize endpoint with provider=okta (no dead button)", () => {
     renderForm();
     const button = screen.getByRole("button", { name: /continue with okta/i });
-    expect(button).toBeDisabled();
-    expect(button.closest("form")).toBeNull();
-    expect(button).toHaveTextContent(/soon/i);
+    expect(button).toBeEnabled();
+    const form = button.closest("form");
+    expect(form).not.toBeNull();
+    expect(form!.getAttribute("action")).toBe("/api/sso/oidc/authorize");
+    expect(form!.getAttribute("method")?.toLowerCase()).toBe("post");
+    const provider = within(form!).getByDisplayValue("okta");
+    expect(provider).toHaveAttribute("name", "provider");
+    expect(provider.getAttribute("type")).toBe("hidden");
+    // No longer the disabled "Soon" pill.
+    expect(button).not.toHaveTextContent(/soon/i);
+  });
+
+  it("forwards returnTo on the Okta button too", () => {
+    renderForm({ returnTo: "/files" });
+    const form = screen.getByRole("button", { name: /continue with okta/i }).closest("form")!;
+    expect(within(form).getByDisplayValue("/files")).toHaveAttribute("name", "returnTo");
   });
 });
 

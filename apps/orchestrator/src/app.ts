@@ -23,6 +23,7 @@ import {
   createProtectedWebAuthnRouter,
 } from "./routes/webauthn.js";
 import { createSetupRouter } from "./routes/setup.js";
+import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
@@ -112,15 +113,19 @@ export function createApp(prisma: PrismaClient) {
     express.raw({ type: () => true, limit: "1mb" }),
   );
 
-  app.use(express.json());
+  // Parse `application/json` AND `application/scim+json` (Okta's SCIM client
+  // sends the latter for /scim/v2/* — without it, req.body would arrive empty
+  // and every SCIM create/update would 400). The explicit `type` list keeps
+  // the default JSON behavior intact for every other route.
+  app.use(express.json({ type: ["application/json", "application/scim+json"] }));
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.
   // Prisma is required for the WARP-217 invite-accept endpoints (token lookup).
   app.use("/api", createPublicAuthRouter(prisma));
 
-  // ADR-013 (PR #378) — external-IdP OIDC SSO (Google / Entra). Public:
-  // a user signing in via SSO has no session yet. Mounted BEFORE the auth
-  // middleware so /sso/oidc/authorize + /sso/oidc/callback don't require one.
+  // ADR-013 (PR #378) — external-IdP OIDC SSO (Google / Entra / Okta).
+  // Public: a user signing in via SSO has no session yet. Mounted BEFORE the
+  // auth middleware so /sso/oidc/authorize + /sso/oidc/callback don't need one.
   app.use("/api", createSsoRouter(prisma));
 
   // PR #377 — passwordless WebAuthn / passkey authentication. The
@@ -133,6 +138,14 @@ export function createApp(prisma: PrismaClient) {
   // PUBLIC: first-run happens before any user exists, like POST /auth/setup.
   // Mounted BEFORE the auth middleware and allow-listed in middleware/auth.ts.
   app.use("/api", createSetupRouter(prisma));
+
+  // WARP (ADR-013) — SCIM 2.0 directory-provisioning server. Okta PUSHES
+  // users/groups here (/scim/v2/*); it has no human session and authenticates
+  // with its own dedicated provisioning bearer (DROPLET_SCIM_BEARER_TOKEN),
+  // validated by the router's built-in scimAuthMiddleware. Mounted at root
+  // (the router self-prefixes /scim/v2) and BEFORE authMiddleware — the SCIM
+  // surface never touches the human-session auth path.
+  app.use(createScimRouter(prisma));
 
   // Public calendar ICS publish endpoint — phones subscribe via webcal://
   // without a session cookie. Token in the query string is the auth (HMAC

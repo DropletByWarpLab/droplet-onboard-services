@@ -17,13 +17,13 @@
  * This is a build-time constant, not runtime config — the dashboard has no
  * env-flag mechanism and these gate UI affordances, not security decisions.
  *
- * ADR-013 (PR #378): SSO is wired PER PROVIDER, not as one boolean. The
- * orchestrator's /api/sso/oidc/authorize endpoint ships Google + Entra in
- * this PR; Okta's OIDC backend lands in a separate PR. `ssoProviders` below
- * marks which providers are LIVE so a provider whose backend hasn't shipped
- * keeps rendering the disabled "Soon" pill (no dead button). The legacy
- * `sso` boolean is kept (true once any provider is live) for any consumer
- * that only needs "is SSO available at all".
+ * ADR-013: SSO is wired PER PROVIDER, not as one boolean. The orchestrator's
+ * /api/sso/oidc/authorize endpoint shipped Google + Entra in PR #378 and Okta
+ * in PR #379 (this branch — Okta is plain OIDC, reusing the same RP path).
+ * `ssoProviders` below marks which providers are LIVE so a provider whose
+ * backend hasn't shipped keeps rendering the disabled "Soon" pill (no dead
+ * button). The legacy `sso` boolean is kept (true once any provider is live)
+ * for any consumer that only needs "is SSO available at all".
  */
 export const ONB_AUTH_FLAGS = {
   // ADR-013 (PR #378): SSO is live — see ONB_SSO_PROVIDERS_LIVE for which
@@ -47,7 +47,7 @@ export type OnbAuthFlag = keyof typeof ONB_AUTH_FLAGS;
 export const ONB_SSO_PROVIDERS_LIVE = {
   google: true,
   entra: true,
-  okta: false,
+  okta: true,
 } as const;
 
 export type OnbSsoProviderId = keyof typeof ONB_SSO_PROVIDERS_LIVE;
