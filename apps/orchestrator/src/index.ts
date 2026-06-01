@@ -38,6 +38,10 @@ import {
   type FirewallClient,
 } from "./services/schedule-ticker.js";
 import {
+  createEgressReconciler,
+  type EgressClient,
+} from "./services/egress-reconciler.js";
+import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
@@ -226,6 +230,28 @@ async function main() {
     tickMs,
     () => scheduleTicker.tickOnce(),
     { lockKey: "droplet:schedule-ticker" },
+  );
+
+  // WARP-613: phone-home egress reconciler (ADR-012). Additive sibling to the
+  // schedule ticker — enforces per-group/master phone-home WAN-egress blocks
+  // (and the camera-VLAN toggle) using distinct `phonehome-*` rules, yielding
+  // to any full block the schedule ticker holds. Same advisory-lock pattern.
+  const egressClient: EgressClient = {
+    async blockPhoneHome(mac) {
+      await openwrt.blockPhoneHome(mac);
+    },
+    async unblockPhoneHome(mac) {
+      await openwrt.unblockPhoneHome(mac);
+    },
+    async setCameraPhoneHome(blocked) {
+      await openwrt.setCameraPhoneHome(blocked);
+    },
+  };
+  const egressReconciler = createEgressReconciler(prisma, egressClient);
+  cronRuntime.scheduleInterval(
+    tickMs,
+    () => egressReconciler.tickOnce(),
+    { lockKey: "droplet:egress-reconciler" },
   );
 
   // WARP-89: device-intelligence reconciler poller + daily presence purge.

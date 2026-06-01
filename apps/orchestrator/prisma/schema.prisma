@@ -564,6 +564,20 @@ enum BrainMemoryItemStatus {
   failed
 }
 
+// ── WARP-613: phone-home egress policy ──
+// Explicit applied-state for the egress reconciler (handbook "state is
+// explicit, never derive from absence"). Distinct from the schedule ticker's
+// boolean full-block state on `lastAppliedBlocked`.
+//   - open               → no phone-home rule on the router
+//   - phone_home_blocked → WAN egress denied except NTP + local DNS
+//   - full_blocked       → all WAN denied (owned by the schedule ticker; the
+//                          egress reconciler never sets this, only yields to it)
+enum DeviceEgressState {
+  open
+  phone_home_blocked
+  full_blocked
+}
+
 // ── WARP-80: Device intelligence ──
 // Per-client-device registry (laptops, phones, smart bulbs, printers on the LAN).
 // Populated by the reconciler (WARP-81) from routing-service leases/ARP snapshots.
@@ -586,6 +600,10 @@ model NetworkDevice {
   // orchestrator restart this field reconstitutes the ticker's state so we
   // don't re-dispatch every device. See WARP critical-fix-cron-state.
   lastAppliedBlocked Boolean?
+  // WARP-613: last egress policy the egress-reconciler pushed to the router.
+  // Maintained independently of lastAppliedBlocked (which the schedule ticker
+  // owns). See enum DeviceEgressState above.
+  lastAppliedEgress  DeviceEgressState   @default(open)
   groups             DeviceGroup[]       @relation("DeviceGroups")
   presenceDays       DevicePresenceDay[]
   schedules          Schedule[]          @relation("DeviceSchedules")
@@ -605,6 +623,11 @@ model DeviceGroup {
   name      String             @unique
   color     String?
   icon      String?
+  // WARP-613: when true AND the master toggle
+  // (WorkspaceSetting `network.block_phone_home_enabled`) is on, every device
+  // in this group gets a phone-home WAN-egress block (NTP + local DNS still
+  // allowed). Enforced by the egress reconciler.
+  blockPhoneHome Boolean        @default(false)
   devices   NetworkDevice[]    @relation("DeviceGroups")
   schedules Schedule[]         @relation("GroupSchedules")
   overrides ScheduleOverride[] @relation("GroupOverrides")

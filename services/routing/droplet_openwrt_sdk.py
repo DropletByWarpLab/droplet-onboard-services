@@ -688,6 +688,97 @@ class FirewallApi:
         self._r.uci.commit("firewall")
         self.reload()
 
+    # WARP-613: phone-home egress control. Softer than block_device — denies a
+    # device's WAN egress but keeps NTP (time) working; LAN DNS is already
+    # permitted by the shipped Allow-DNS-LAN rule. Rules are named
+    # `phonehome-<mac>` / `phonehome-ntp-<mac>` so they never collide with the
+    # schedule ticker's `block-<mac>` full-block rules.
+    def _remove_phone_home_rules(self, mac: str) -> None:
+        """Delete this MAC's phone-home rules. Does NOT commit (callers do)."""
+        suffix = mac.replace(":", "")
+        names = {f"phonehome-{suffix}", f"phonehome-ntp-{suffix}"}
+        config = self._r.uci.get("firewall", type="rule")
+        for section_name, section_data in config.get("values", {}).items():
+            if section_data.get("name") in names:
+                self._r.uci.delete("firewall", section_name)
+
+    def block_phone_home(self, mac: str):
+        """Block a device (by MAC) from phoning home: REJECT WAN egress while
+        allowing NTP. The NTP ACCEPT is added BEFORE the REJECT so fw4 matches
+        it first. Idempotent — clears any prior phone-home rules first."""
+        suffix = mac.replace(":", "")
+        self._remove_phone_home_rules(mac)
+        self._r.uci.add("firewall", "rule", {
+            "name": f"phonehome-ntp-{suffix}",
+            "src": "lan",
+            "src_mac": mac,
+            "dest": "wan",
+            "proto": "udp",
+            "dest_port": "123",
+            "target": "ACCEPT",
+            "enabled": "1",
+        })
+        self._r.uci.add("firewall", "rule", {
+            "name": f"phonehome-{suffix}",
+            "src": "lan",
+            "src_mac": mac,
+            "dest": "wan",
+            "target": "REJECT",
+            "enabled": "1",
+        })
+        self._r.uci.commit("firewall")
+        self.reload()
+
+    def unblock_phone_home(self, mac: str):
+        """Remove a device's phone-home rules (REJECT + NTP allow)."""
+        self._remove_phone_home_rules(mac)
+        self._r.uci.commit("firewall")
+        self.reload()
+
+    def set_camera_phone_home(self, blocked: bool):
+        """Toggle the whole camera VLAN's ability to phone home. When blocked,
+        drop the broad `cameras → wan` forwarding and add an NTP allow so camera
+        clocks/timestamps stay correct (camera DNS to the router is already
+        permitted by Allow-Camera-DNS). When unblocked, restore the forwarding
+        and drop the NTP allow. Idempotent."""
+        fw = self._r.uci.get("firewall")
+        fwd_sections: list[str] = []
+        ntp_sections: list[str] = []
+        if isinstance(fw, dict):
+            for section_name, section in fw.items():
+                if not isinstance(section, dict):
+                    continue
+                if (section.get(".type") == "forwarding"
+                        and section.get("src") == "cameras"
+                        and section.get("dest") == "wan"):
+                    fwd_sections.append(section_name)
+                if (section.get(".type") == "rule"
+                        and section.get("name") == "Allow-Camera-NTP"):
+                    ntp_sections.append(section_name)
+        if blocked:
+            for s in fwd_sections:
+                self._r.uci.delete("firewall", s)
+            if not ntp_sections:
+                self._r.uci.add("firewall", "rule", {
+                    "name": "Allow-Camera-NTP",
+                    "src": "cameras",
+                    "dest": "wan",
+                    "proto": "udp",
+                    "dest_port": "123",
+                    "target": "ACCEPT",
+                    "enabled": "1",
+                })
+        else:
+            if not fwd_sections:
+                self._r.uci.add("firewall", "forwarding", {
+                    "src": "cameras",
+                    "dest": "wan",
+                })
+            for s in ntp_sections:
+                self._r.uci.delete("firewall", s)
+        self._r.uci.commit("firewall")
+        self.reload()
+
     def add_port_forward(self, name: str, src_port: str, dest_ip: str,
                          dest_port: str, proto: str = "tcp"):
         """Add a port forwarding rule (WAN -> LAN device)."""
