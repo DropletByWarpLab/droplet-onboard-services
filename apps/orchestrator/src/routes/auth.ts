@@ -81,16 +81,36 @@ const usernameField = z
     "This username is reserved and cannot be used",
   );
 
+// ADR-012 (PR #374 review fix): email is the directory login key and the
+// only stable login identifier (the Nextcloud auth fallback was removed).
+// The btree unique index on `User.email` is case-SENSITIVE, so without
+// normalization `Stefan@Warp.test` (written at setup) and `stefan@warp.test`
+// (typed at login) resolve to different rows → owner lock-out, and
+// `owner@x` / `Owner@x` both insert → unique-bypass. Normalize to
+// trim+lowercase at EVERY boundary (write + read) so every value that ever
+// touches the column is already canonical; the plain unique index then
+// catches collisions and the email-keyed lookup always hits. Validation
+// (length, RFC shape) runs on the normalized value. `.email()` after the
+// transform also rejects a value that was only well-formed before trimming.
+const emailField = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email()
+  .max(200);
+
 const setupSchema = z.object({
   username: usernameField,
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-012: email is the directory login key. Optional here so the
-  // first-admin bootstrap still works when the Account step hasn't
-  // collected one yet (the Aurora "Work email" step, PR #370, supplies
-  // it); when present it's written to the row so the owner can sign in
-  // through the email-keyed /auth/login.
-  email: z.string().email().max(200).optional(),
+  // ADR-012 (PR #374 N2): email is the directory login key and is now
+  // REQUIRED on the first-owner bootstrap. ADR-012 removed the Nextcloud
+  // auth fallback, so an owner row written without an email can never sign
+  // in (the email-keyed /auth/login lookup has nothing to match) — a
+  // permanent lockout recoverable only by a DB edit. Requiring it here
+  // makes a login-unable owner unrepresentable. Normalized (trim+lowercase)
+  // via emailField so the stored value matches the login lookup.
+  email: emailField,
 });
 
 // ADR-012: the directory login key is email. The Aurora login (PR #370)
@@ -101,8 +121,16 @@ const setupSchema = z.object({
 // of the two must be present and non-empty.
 const loginSchema = z
   .object({
-    email: z.string().min(1).optional(),
-    username: z.string().min(1).optional(),
+    // ADR-012 (PR #374): the directory login key is case-insensitive but
+    // the unique index is case-sensitive, so the lookup value must be
+    // trim+lowercased to match the (already-normalized) stored value —
+    // otherwise an owner who set up `Stefan@Warp.test` is locked out when
+    // they sign in as `stefan@warp.test`. Normalize on BOTH the canonical
+    // `email` field and the legacy `username` field (which carries the same
+    // email value during the rollout window). `.min(1)` runs AFTER trim so
+    // an all-whitespace identifier is rejected.
+    email: z.string().trim().toLowerCase().min(1).optional(),
+    username: z.string().trim().toLowerCase().min(1).optional(),
     password: z.string().min(1),
   })
   .refine((d) => Boolean(d.email ?? d.username), {
@@ -133,7 +161,11 @@ const inviteRoleField = z.preprocess(
 const createInviteSchema = z.object({
   username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
-  email: z.string().email().max(200).optional(),
+  // ADR-012 (PR #374): normalized — the invite email becomes the invitee's
+  // directory login key on accept (written to User.email at accept time),
+  // so it must already be trim+lowercased to stay consistent with the
+  // email-keyed login lookup and the case-sensitive unique index.
+  email: emailField.optional(),
   role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
@@ -163,7 +195,9 @@ function buildInviteUrl(req: Request, token: string): string {
 const updateUserSchema = z
   .object({
     displayName: z.string().min(1).max(128).optional(),
-    email: z.string().email().max(200).optional(),
+    // ADR-012 (PR #374): normalized so an admin editing a member's email
+    // writes the same canonical form the login lookup + unique index expect.
+    email: emailField.optional(),
     // Accept either a byte count (1073741824) or a human string ("5 GB", "none").
     quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
     password: z.string().min(8).max(128).optional(),
@@ -282,6 +316,32 @@ export function createPublicAuthRouter(
         return;
       }
 
+      // ── N1 (PR #374): owner-already-exists guard. ──
+      // ADR-012 made LOCAL rows (not Nextcloud `installed=true`) the
+      // authoritative source, which re-opened a hole on this route: a
+      // re-POST to /auth/setup would either (a) rewrite the existing
+      // owner's argon2id passwordHash via the username-keyed upsert below
+      // — a full account takeover — or (b) mint a SECOND owner row. Setup
+      // is a one-time bootstrap: once any `owner`-role row exists, refuse
+      // with 409 and touch neither the hash nor Nextcloud. The owner-count
+      // idiom mirrors people.ts's last-owner guard. This runs BEFORE
+      // hashPassword + upsert + ncInstallAndCreateAdmin so a takeover
+      // attempt has zero side effects.
+      const existingOwners = await prisma.user.count({
+        where: { role: "owner" },
+      });
+      if (existingOwners > 0) {
+        logger.warn(
+          { username },
+          "setup: refused — an owner already exists (N1 owner-already-exists guard, PR #374)",
+        );
+        res.status(409).json({
+          error: "Setup has already been completed for this appliance.",
+          code: "OWNER_EXISTS",
+        });
+        return;
+      }
+
       // Romain PR #279 round 2: order matters here because the two
       // calls have very different recovery profiles.
       //
@@ -308,17 +368,20 @@ export function createPublicAuthRouter(
       // authenticates anyone. The plaintext is hashed before it touches
       // the row and is never logged.
       const passwordHash = await hashPassword(password);
+      // `email` is guaranteed present + normalized (N2 makes it required on
+      // this path; emailField trim+lowercased it). Write it directly so the
+      // stored login key matches the case-insensitive /auth/login lookup.
       await prisma.user.upsert({
         where: { nextcloudUsername: username },
         update: {
           displayName: displayName || username,
           passwordHash,
-          ...(email ? { email } : {}),
+          email,
         },
         create: {
           username,
           displayName: displayName || username,
-          email: email ?? null,
+          email,
           nextcloudUsername: username,
           passwordHash,
           role: "owner" as any,
@@ -351,7 +414,10 @@ export function createPublicAuthRouter(
       }
 
       // Email is the stable directory login key (accept the legacy
-      // `username` field carrying the same value during rollout).
+      // `username` field carrying the same value during rollout). Already
+      // trim+lowercased by loginSchema (ADR-012 / PR #374), so it matches
+      // the normalized value stored on the row by the case-sensitive
+      // unique index. Keep the `.trim()` as belt-and-suspenders.
       const loginEmail = (parsed.data.email ?? parsed.data.username ?? "").trim();
       const password = parsed.data.password;
 
@@ -948,6 +1014,14 @@ export function createPublicAuthRouter(
       // the create endpoint); the JWT session `role` keeps the legacy
       // mapping above (admin invite → owner session) which existing
       // routes still depend on.
+      // ADR-012 (PR #374): this email lands directly in User.email — the
+      // case-sensitive unique-indexed login key. createInviteSchema already
+      // normalizes new invites, but re-normalize here as defense in depth so
+      // a stale (pre-fix) or hand-edited invite row can't plant a row whose
+      // email casing breaks the email-keyed /auth/login lookup.
+      const inviteEmail = invite.email
+        ? invite.email.trim().toLowerCase()
+        : null;
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
@@ -960,7 +1034,7 @@ export function createPublicAuthRouter(
         create: {
           username: invite.username,
           displayName: invite.displayName || invite.username,
-          email: invite.email ?? null,
+          email: inviteEmail,
           nextcloudUsername: invite.username,
           role: invite.role as any, // canonical Role enum from the invite
           // `isLocal` defaults to true in the schema; mirror-from-NC

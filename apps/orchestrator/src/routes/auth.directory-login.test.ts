@@ -318,6 +318,61 @@ describe("ADR-012 — POST /auth/login validates locally against the directory",
     expect(decoded.sub).toBe("u-uuid-stefan-7777");
   });
 
+  it("mixed-case email at login resolves the normalized stored row (case-insensitive login)", async () => {
+    // BLOCKER regression: the directory stores the normalized (lowercased)
+    // email. A login that types the address with different casing must
+    // still resolve the same row — otherwise the owner who set up with
+    // `Foo@X.com` is locked out when they later sign in as `foo@x.com`
+    // (ADR-012 removed the Nextcloud auth fallback, so there's no recovery
+    // short of a DB edit).
+    verifyPassword.mockResolvedValueOnce(true);
+    const normalized: UserRow = {
+      ...stefan,
+      id: "u-uuid-foo",
+      username: "foo",
+      email: "foo@x.com", // stored normalized
+    };
+    const prisma = createPrismaMock([normalized]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "  Foo@X.com  ", password: "correct-horse" });
+
+    expect(res.status).toBe(200);
+    // The lookup value handed to Prisma must be trim+lowercased so it
+    // matches the normalized stored row.
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { email: "foo@x.com" },
+    });
+    expect(verifyPassword).toHaveBeenCalledWith(normalized.passwordHash, "correct-horse");
+    const decoded = decode(res);
+    expect(decoded.sub).toBe("u-uuid-foo");
+  });
+
+  it("normalizes the legacy `username`-carried identifier the same way", async () => {
+    // A client mid-rollout still sends the address under `username`. That
+    // path feeds the same `loginEmail` lookup and must normalize identically.
+    verifyPassword.mockResolvedValueOnce(true);
+    const normalized: UserRow = {
+      ...stefan,
+      id: "u-uuid-foo2",
+      username: "foo2",
+      email: "foo2@x.com",
+    };
+    const prisma = createPrismaMock([normalized]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ username: "FOO2@X.COM", password: "correct-horse" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { email: "foo2@x.com" },
+    });
+  });
+
   it("unknown-email and wrong-password branches are wire-indistinguishable", async () => {
     // Wrong password against an existing account.
     verifyPassword.mockResolvedValueOnce(false);
