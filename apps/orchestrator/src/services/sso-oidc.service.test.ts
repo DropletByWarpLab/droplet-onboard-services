@@ -44,6 +44,14 @@ const baseConfig = {
   DROPLET_SSO_ENTRA_CLIENT_ID: "entra-client-id",
   DROPLET_SSO_ENTRA_CLIENT_SECRET: "entra-secret",
   DROPLET_SSO_ENTRA_REDIRECT_URI: "https://droplet.local/api/sso/oidc/callback",
+  // WARP — Okta SSO (same OIDC RP path as Google/Entra). Okta's issuer is
+  // the org domain (an `/oauth2/<authServerId>` suffix when a custom
+  // authorization server is used); openid-client derives every endpoint +
+  // the JWKS from it, so no host is hardcoded here either.
+  DROPLET_SSO_OKTA_ISSUER: "https://dev-12345.okta.com/oauth2/default",
+  DROPLET_SSO_OKTA_CLIENT_ID: "okta-client-id",
+  DROPLET_SSO_OKTA_CLIENT_SECRET: "okta-secret",
+  DROPLET_SSO_OKTA_REDIRECT_URI: "https://droplet.local/api/sso/oidc/callback",
 };
 const mockConfig: Record<string, unknown> = { ...baseConfig };
 vi.mock("../config.js", () => ({
@@ -70,10 +78,10 @@ beforeEach(() => {
 });
 
 describe("isSsoProvider", () => {
-  it("accepts google and entra, rejects everything else", () => {
+  it("accepts google, entra and okta, rejects everything else", () => {
     expect(isSsoProvider("google")).toBe(true);
     expect(isSsoProvider("entra")).toBe(true);
-    expect(isSsoProvider("okta")).toBe(false); // separate PR
+    expect(isSsoProvider("okta")).toBe(true); // shipped in this PR
     expect(isSsoProvider("microsoft")).toBe(false); // wire label maps to entra upstream
     expect(isSsoProvider("")).toBe(false);
     expect(isSsoProvider("GOOGLE")).toBe(false);
@@ -97,6 +105,16 @@ describe("getOidcProviderConfig — env-sourced, fail-closed", () => {
     expect(cfg?.clientId).toBe("entra-client-id");
   });
 
+  it("returns the full per-provider config for okta", () => {
+    expect(getOidcProviderConfig("okta")).toEqual({
+      provider: "okta",
+      issuer: "https://dev-12345.okta.com/oauth2/default",
+      clientId: "okta-client-id",
+      clientSecret: "okta-secret",
+      redirectUri: "https://droplet.local/api/sso/oidc/callback",
+    });
+  });
+
   it("returns null when ANY required field is blank (half-configured = disabled)", () => {
     mockConfig.DROPLET_SSO_GOOGLE_CLIENT_SECRET = "";
     expect(getOidcProviderConfig("google")).toBeNull();
@@ -106,6 +124,10 @@ describe("getOidcProviderConfig — env-sourced, fail-closed", () => {
     Object.assign(mockConfig, baseConfig);
     mockConfig.DROPLET_SSO_ENTRA_REDIRECT_URI = "";
     expect(getOidcProviderConfig("entra")).toBeNull();
+    // Okta fails closed on a blank field too (half-configured = disabled).
+    Object.assign(mockConfig, baseConfig);
+    mockConfig.DROPLET_SSO_OKTA_CLIENT_SECRET = "";
+    expect(getOidcProviderConfig("okta")).toBeNull();
   });
 });
 

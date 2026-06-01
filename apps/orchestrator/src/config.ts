@@ -125,6 +125,8 @@ const envSchema = z.object({
   // single source.
   //   - Google:  https://accounts.google.com
   //   - Entra:   https://login.microsoftonline.com/<tenant>/v2.0
+  //   - Okta:    https://<org>.okta.com/oauth2/<authServerId> (or the org
+  //              root issuer when no custom authorization server is used)
   // REDIRECT_URI must exactly match the redirect registered at the IdP and the
   // /api/sso/oidc/callback route this orchestrator serves.
   DROPLET_SSO_GOOGLE_ISSUER: z.string().default(""),
@@ -135,6 +137,29 @@ const envSchema = z.object({
   DROPLET_SSO_ENTRA_CLIENT_ID: z.string().default(""),
   DROPLET_SSO_ENTRA_CLIENT_SECRET: z.string().default(""),
   DROPLET_SSO_ENTRA_REDIRECT_URI: z.string().default(""),
+  // WARP — Okta SSO. Okta is a plain OIDC provider; the orchestrator reuses
+  // the same authorize/callback RP path as Google/Entra (sso-oidc.service.ts
+  // / routes/sso.ts). All four must be set for the Okta button to go live.
+  DROPLET_SSO_OKTA_ISSUER: z.string().default(""),
+  DROPLET_SSO_OKTA_CLIENT_ID: z.string().default(""),
+  DROPLET_SSO_OKTA_CLIENT_SECRET: z.string().default(""),
+  DROPLET_SSO_OKTA_REDIRECT_URI: z.string().default(""),
+
+  // --- SCIM 2.0 directory provisioning (Okta pushes users/groups here) ---
+  // WARP — Okta's SCIM client authenticates to /scim/v2/* with a DEDICATED
+  // provisioning bearer token (NOT a user session, NOT one of the
+  // SERVICE_TOKEN_* principals — those carry the `service` ROLE for inbound
+  // LLM/tool calls; SCIM provisioning is a separate trust boundary with its
+  // own secret and its own middleware). This is the SCIM bearer; it is
+  // validated (constant-time) on EVERY SCIM request and NEVER logged.
+  //
+  // EMPTY DEFAULT = FAIL CLOSED: with no token configured, every /scim/v2/*
+  // request 401s (scim-auth middleware refuses an unset secret), so an
+  // appliance that hasn't been wired for directory sync never accepts an
+  // unauthenticated — or empty-bearer — provisioning call. Same posture as
+  // DROPLET_PM_WEBHOOK_SECRET. Lives ONLY in .env (operator / setup.sh
+  // generates it); never tracked, never re-emitted.
+  DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
 
   // --- gRPC ---
   AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),

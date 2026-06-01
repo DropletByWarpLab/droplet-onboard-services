@@ -80,6 +80,10 @@ interface UserRow {
   passwordHash: string | null;
   role: string;
   isLocal: boolean;
+  // WARP (SCIM): soft-deactivation status. A DEACTIVATED user is denied at
+  // the SSO callback too (not just /auth/login) — Okta can SSO a person
+  // whose directory account it later deactivates.
+  directoryStatus?: "ACTIVE" | "DEACTIVATED";
 }
 interface IdentityRow {
   id: string;
@@ -110,6 +114,7 @@ function createPrismaMock(users: UserRow[] = [], identities: IdentityRow[] = [])
         passwordHash: data.passwordHash ?? null,
         role: data.role ?? "family",
         isLocal: data.isLocal ?? true,
+        directoryStatus: data.directoryStatus ?? "ACTIVE",
       };
       self._users.push(row);
       return row;
@@ -254,10 +259,23 @@ describe("POST /api/sso/oidc/authorize", () => {
     expect(buildAuthorizeRequest).toHaveBeenCalledWith("entra");
   });
 
-  it("rejects an unknown provider with 400 (no authorize, no persist)", async () => {
+  it("starts the OIDC flow for okta via the SAME authorize path (302)", async () => {
+    getOidcProviderConfig.mockReturnValue({ provider: "okta", issuer: "i", clientId: "c", clientSecret: "s", redirectUri: "r" });
+    buildAuthorizeRequest.mockResolvedValue({ authorizeUrl: "https://dev-12345.okta.com/oauth2/default/v1/authorize?x", state: "s3", nonce: "n3", codeVerifier: "v3" });
     const res = await request(buildApp(createPrismaMock()))
       .post("/api/sso/oidc/authorize")
       .send({ provider: "okta" });
+    expect(res.status).toBe(302);
+    expect(buildAuthorizeRequest).toHaveBeenCalledWith("okta");
+    expect(createLoginState).toHaveBeenCalled();
+  });
+
+  it("rejects an unknown provider with 400 (no authorize, no persist)", async () => {
+    // `okta` is now a supported provider (shipped in this PR); use a value
+    // that is genuinely outside the SsoProvider union to assert the reject.
+    const res = await request(buildApp(createPrismaMock()))
+      .post("/api/sso/oidc/authorize")
+      .send({ provider: "workday" });
     expect(res.status).toBe(400);
     expect(buildAuthorizeRequest).not.toHaveBeenCalled();
     expect(createLoginState).not.toHaveBeenCalled();
@@ -390,6 +408,65 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     expect(prisma.user.create).not.toHaveBeenCalled();
     const session = sessionFromRes(res);
     expect(session?.sub).toBe("u-uuid-stefan-7777");
+  });
+
+  it("links an okta identity by email and signs in via the SAME callback path", async () => {
+    // Okta SSO is plain OIDC — the callback is provider-agnostic. Prove the
+    // okta provider flows through link-by-email + session issuance identically.
+    primeValidState("okta");
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "okta-sub-42",
+      email: "stefan@warp.test",
+      name: "Stefan Cruceru",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(302);
+    expect(prisma.user.create).not.toHaveBeenCalled(); // linked, UUID preserved
+    const linkData = prisma.ssoIdentity.create.mock.calls[0]![0].data;
+    expect(linkData.provider).toBe("okta");
+    expect(linkData.subject).toBe("okta-sub-42");
+    expect(linkData.userId).toBe("u-uuid-stefan-7777");
+    const session = sessionFromRes(res);
+    expect(session?.sub).toBe("u-uuid-stefan-7777");
+  });
+
+  it("DENIES a DEACTIVATED user at the SSO callback even when linked by sub (401, no session)", async () => {
+    // WARP (SCIM): Okta SSO'd this person, then deactivated their directory
+    // account (active:false). The SsoIdentity link still resolves, but the
+    // callback must fail closed — a deactivated user can't sign in by any
+    // path (parity with the /auth/login DEACTIVATED gate).
+    primeValidState();
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "google-sub-1", email: "x@y.com", name: "X" });
+    const deactivated: UserRow = { ...stefan, directoryStatus: "DEACTIVATED" };
+    const prisma = createPrismaMock(
+      [deactivated],
+      [{ id: "i-1", userId: "u-uuid-stefan-7777", provider: "google", subject: "google-sub-1", email: "stefan@warp.test" }],
+    );
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(401);
+    expectNoSessionIssued(res);
+  });
+
+  it("DENIES a DEACTIVATED user resolved by email (401, no session, no link minted)", async () => {
+    primeValidState();
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "fresh-sub", email: "stefan@warp.test", name: "S" });
+    const deactivated: UserRow = { ...stefan, directoryStatus: "DEACTIVATED" };
+    const prisma = createPrismaMock([deactivated]);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(401);
+    // Must not silently re-activate by minting a link to a disabled row.
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+    expectNoSessionIssued(res);
   });
 
   it("normalizes the IdP email (trim + lowercase) at the lookup boundary (#374)", async () => {
