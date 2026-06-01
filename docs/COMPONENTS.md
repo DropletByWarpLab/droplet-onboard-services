@@ -5,7 +5,7 @@
 > reading the whole codebase first.
 >
 > **Scope:** Every component in this repo (`droplet-onboard-services`, GitHub
-> `DropletByWarpLab/droplet-pi-platform`) — the **intelligence layer** of the
+> `DropletByWarpLab/droplet-onboard-services`) — the **intelligence layer** of the
 > Droplet edge AI appliance. Inference (Ollama + `ollama-manager`) lives in the
 > sibling repo [`droplet-jetson-ai`](../../droplet-jetson-ai); the physical
 > appliance lives in `pcb-claude-tool`. See [`agentic-workflows.md`](agentic-workflows.md)
@@ -56,7 +56,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
           │  inference  ── gRPC ───► ai-gateway ──► Ollama (sibling repo) / cloud LLMs
           │  files      ── HTTP ───► nextcloud ;  index ◄─ MQTT ─ file-indexer
           │  network    ── HTTP ───► routing ──► OpenWrt router (ubus)
-          │  switch     ── gRPC ───► switch service ──► managed switch
+          │  switch     ── HTTP ───► switch service ──► managed switch
           │  cameras    ── HTTP ───► camera-discovery + frigate (NVR)
           │  display    ── HTTP ───► oled-display ;  voice ── HTTP ── voice-io
           │  PM (Plane) ── HTTP ───► pm-api  (+ OIDC IdP, webhooks in orchestrator)
@@ -140,7 +140,7 @@ network. Host-published ports and host-network services are called out.
   `src/index.ts` → `main()`: FIPS self-test → Prisma connect → init services
   (Redis, MQTT, Matter, OpenWrt, Frigate, MCP stdio child) → start cron-runtime
   → Express + WebSocket bridge → listen on `PORT` (3000). Build `tsc`; dev `tsx watch`.
-- **Surface:** **55 route modules** under `src/routes/`, all mounted under `/api/*`
+- **Surface:** **51 route modules** under `src/routes/`, all mounted under `/api/*`
   (exceptions: `/_/fips`, the Plane OIDC IdP endpoints under `/api/pm/oidc/*`, and
   the HMAC-signed Plane webhook receiver — these mount **before** auth middleware).
   Highlights: `llm` (chat / agent loop), `auth`, `devices`/`device-clients`
@@ -161,7 +161,7 @@ network. Host-published ports and host-network services are called out.
   `nextcloud.client.ts`, `pm.client.ts`, plus pollers/tickers (device-reconcile,
   AP discovery, schedule, reminders, tool-schedule, screen-QR).
 - **Talks to:** ai-gateway (gRPC + REST), mcp-server (stdio child), routing /
-  switch / display / camera-discovery / frigate / nextcloud (HTTP/gRPC), Redis,
+  switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
   MQTT, embedded Plane (`pm-api`), device-identity-svc (gRPC unix socket).
 - **Auth:** Bearer JWT (HS256 access + refresh) with Nextcloud OCS fallback;
   roles `owner | admin | family | guest | service`; per-route RBAC via
