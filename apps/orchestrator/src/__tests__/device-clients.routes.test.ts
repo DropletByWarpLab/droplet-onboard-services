@@ -140,7 +140,12 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     // The authoritative gate is the conditional updateMany, not the in-memory read.
     expect(mockPrisma.pairingCode.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "pc-1", used: false },
+        where: expect.objectContaining({
+          id: "pc-1",
+          used: false,
+          // Expiry is authoritative at consume time too (closes the read→consume window).
+          expiresAt: { gt: expect.any(Date) },
+        }),
         data: expect.objectContaining({ used: true }),
       }),
     );
@@ -238,6 +243,28 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(res.status).toBe(410);
     expect(mockPrisma.pairingCode.updateMany).not.toHaveBeenCalled();
     expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+  });
+
+  it("treats a code that expires between the read and the atomic consume as not-consumable (count===0 → 409, compensates)", async () => {
+    // Unexpired at read time (passes the 410 fast-path) ...
+    mockPrisma.pairingCode.findUnique.mockResolvedValue(validRecord());
+    // ... but the conditional consume carries `expiresAt: { gt: now }`, so a row
+    // that crossed expiresAt in the sub-second window matches no rows → count 0.
+    mockPrisma.pairingCode.updateMany.mockResolvedValue({ count: 0 });
+
+    const res = await claim(makeApp());
+
+    expect(res.status).toBe(409);
+    // The consume `where` includes the expiry guard — proving expiry is
+    // authoritative at consume time, not only at the in-memory read.
+    expect(mockPrisma.pairingCode.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ expiresAt: { gt: expect.any(Date) } }),
+      }),
+    );
+    expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+    // App password minted before the tx must be compensated.
+    expect(mockNcDelete).toHaveBeenCalledWith("nc-app-pw");
   });
 
   it("rejects an unknown code with 404", async () => {

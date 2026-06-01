@@ -297,13 +297,17 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         // Atomic single-use consume + create in ONE transaction. The
         // conditional updateMany flips used=false→true for exactly one racer
         // (Postgres row lock serializes concurrent claimers); the loser gets
-        // count===0 and we throw PairingCodeAlreadyClaimedError → 409. If the
+        // count===0 and we throw PairingCodeAlreadyClaimedError → 409. The
+        // `expiresAt: { gt: now }` predicate also makes expiry authoritative at
+        // consume time, closing the sub-second window where a code unexpired at
+        // the read above crosses expiresAt before this update runs. If the
         // create throws, the whole transaction rolls back, so the consume is
         // undone and the code stays reusable (no code burned without a
         // credential issued).
+        const consumeNow = new Date();
         client = await prisma.$transaction(async (tx) => {
           const consume = await tx.pairingCode.updateMany({
-            where: { id: record.id, used: false },
+            where: { id: record.id, used: false, expiresAt: { gt: consumeNow } },
             data: { used: true },
           });
           if (consume.count === 0) {
