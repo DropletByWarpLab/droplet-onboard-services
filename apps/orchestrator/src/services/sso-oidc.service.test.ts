@@ -65,6 +65,8 @@ import {
   isSsoProvider,
   buildAuthorizeRequest,
   exchangeCodeAndValidate,
+  enabledSsoProviders,
+  SSO_PROVIDERS,
 } from "./sso-oidc.service.js";
 
 beforeEach(() => {
@@ -128,6 +130,30 @@ describe("getOidcProviderConfig — env-sourced, fail-closed", () => {
     Object.assign(mockConfig, baseConfig);
     mockConfig.DROPLET_SSO_OKTA_CLIENT_SECRET = "";
     expect(getOidcProviderConfig("okta")).toBeNull();
+  });
+});
+
+describe("enabledSsoProviders — the runtime-discovery source of truth (WARP-629)", () => {
+  it("lists every fully-configured provider in the canonical order", () => {
+    expect(enabledSsoProviders()).toEqual(["google", "entra", "okta"]);
+  });
+
+  it("returns [] when nothing is configured (password-only appliance)", () => {
+    for (const k of Object.keys(mockConfig)) delete mockConfig[k];
+    expect(enabledSsoProviders()).toEqual([]);
+  });
+
+  it("omits a provider whose env is partial — fails closed (missing one var)", () => {
+    // Google fully set, Entra missing its secret, Okta missing its redirect.
+    mockConfig.DROPLET_SSO_ENTRA_CLIENT_SECRET = "";
+    mockConfig.DROPLET_SSO_OKTA_REDIRECT_URI = "";
+    expect(enabledSsoProviders()).toEqual(["google"]);
+  });
+
+  it("only ever returns values from the closed SsoProvider union", () => {
+    for (const p of enabledSsoProviders()) {
+      expect(SSO_PROVIDERS).toContain(p);
+    }
   });
 });
 
