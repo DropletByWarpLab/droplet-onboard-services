@@ -1085,7 +1085,11 @@ services:
     environment:
       DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
       REDIS_URL: redis://redis-pm:6379
-      SECRET_KEY: ${DROPLET_PM_SECRET_KEY}
+      # Must match pm-api's env exactly: SECRET_KEY signs Celery messages /
+      # sessions, and WEB_URL is baked into notification/email link hrefs at
+      # worker app init (the API having it does not cover the worker process).
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      WEB_URL: ${DROPLET_PM_WEB_URL:-}
 
   pm-web:
     image: makeplane/plane-frontend:v0.24.1

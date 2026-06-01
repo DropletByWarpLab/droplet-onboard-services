@@ -369,15 +369,26 @@ fi
 # already-pulled pm-api image is reused; diverged pins introduce a hidden
 # second download and break the ADR-010 OQ3 'single upstream pin' posture.
 
-# Extract pin by finding the image: line in the pm-api service block (image: appears
-# before container_name in this compose file, so we look backwards from container_name).
-pm_api_pin=$(grep -B5 'container_name: droplet-pm-api' "$COMPOSE_FILE" \
-  | grep 'image: makeplane/plane-backend:' \
-  | grep -oE 'makeplane/plane-backend:[^[:space:]]+' | head -1 || true)
+# Extract the image pin for a top-level service block, scoping by the service's
+# 2-space-indented key (e.g. "  pm-api:"). This walks the block until the next
+# top-level service key, so it is independent of whether image: comes before or
+# after container_name: — a plain grep -B5 silently false-passes if keys are
+# reordered (review nit, WARP-575). yq is not guaranteed in CI, so we stay awk-only.
+extract_pm_image_pin() {
+  awk -v svc="$1" '
+    $0 ~ "^  " svc ":[[:space:]]*$" { in_svc = 1; next }
+    in_svc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { in_svc = 0 }
+    in_svc && /^[[:space:]]+image:[[:space:]]+makeplane\/plane-backend:/ {
+      line = $0
+      sub(/.*image:[[:space:]]+/, "", line)
+      print line
+      exit
+    }
+  ' "$COMPOSE_FILE"
+}
 
-pm_worker_pin=$(grep -B5 'container_name: droplet-pm-worker' "$COMPOSE_FILE" \
-  | grep 'image: makeplane/plane-backend:' \
-  | grep -oE 'makeplane/plane-backend:[^[:space:]]+' | head -1 || true)
+pm_api_pin=$(extract_pm_image_pin "pm-api")
+pm_worker_pin=$(extract_pm_image_pin "pm-worker")
 
 if [ -z "$pm_api_pin" ]; then
   fail "pm-api image pin not found (expected makeplane/plane-backend:<tag>)"
@@ -390,6 +401,44 @@ else
   printf "${_RED}  pm-api:   %s${_RESET}\n" "$pm_api_pin" >&2
   printf "${_RED}  pm-worker:%s${_RESET}\n" "$pm_worker_pin" >&2
   printf "    Both must reference the same makeplane/plane-backend:<tag>.\n\n" >&2
+fi
+
+# =============================================================================
+# Test 12: WARP-575 — pm-worker environment must be a superset of pm-api
+# =============================================================================
+# The Celery worker runs the same Plane backend image as pm-api and reads the
+# same app config (SECRET_KEY for message/session signing, WEB_URL for email /
+# notification link hrefs at worker init). Any env key the API sets must also be
+# set on the worker, or the separate worker process silently diverges (this is
+# exactly how the WEB_URL gap slipped in). We compare the environment: key names.
+
+extract_pm_env_keys() {
+  awk -v svc="$1" '
+    $0 ~ "^  " svc ":[[:space:]]*$" { in_svc = 1; next }
+    in_svc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { in_svc = 0 }
+    in_svc && /^    environment:[[:space:]]*$/ { in_env = 1; next }
+    in_env && /^    [A-Za-z]/ { in_env = 0 }
+    in_env && /^      [A-Za-z0-9_]+:/ {
+      key = $0
+      sub(/^[[:space:]]+/, "", key)
+      sub(/:.*/, "", key)
+      print key
+    }
+  ' "$COMPOSE_FILE" | sort -u
+}
+
+pm_api_env=$(extract_pm_env_keys "pm-api")
+pm_worker_env=$(extract_pm_env_keys "pm-worker")
+missing_worker_env=$(comm -23 <(printf '%s\n' "$pm_api_env") <(printf '%s\n' "$pm_worker_env"))
+
+if [ -z "$pm_api_env" ]; then
+  fail "pm-api environment block not found (expected at least SECRET_KEY/WEB_URL)"
+elif [ -z "$missing_worker_env" ]; then
+  pass "pm-worker environment is a superset of pm-api"
+else
+  fail "pm-worker is missing env keys that pm-api sets (WARP-575)"
+  printf "${_RED}%s${_RESET}\n" "$missing_worker_env" >&2
+  printf "    The worker runs the same image; mirror pm-api's environment keys.\n\n" >&2
 fi
 
 # =============================================================================
