@@ -77,6 +77,10 @@ async function advanceToVpn() {
     await Promise.resolve();
     await Promise.resolve();
   });
+  // PR #375 — TwoFactor step → skip.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
   // Internet → skip
   await act(async () => {
     await Promise.resolve();

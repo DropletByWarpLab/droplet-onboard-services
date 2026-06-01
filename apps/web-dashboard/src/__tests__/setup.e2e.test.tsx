@@ -214,6 +214,12 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     expect(setupAdminMock).toHaveBeenCalledWith("owner", "longenoughpw", "Robin");
     expect(loginUserMock).toHaveBeenCalledWith("owner", "longenoughpw");
 
+    // 2.5 PR #375 — TwoFactor step → skip (full TOTP flow lives in
+    // TwoFactorStep.test.tsx; the e2e just needs to advance past it).
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
     // 3. Internet → save DuckDNS.
     await act(async () => {
       await Promise.resolve();

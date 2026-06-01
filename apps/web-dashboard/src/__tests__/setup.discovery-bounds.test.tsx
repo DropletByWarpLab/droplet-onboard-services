@@ -84,6 +84,10 @@ async function advanceToDiscovery() {
     await Promise.resolve();
     await Promise.resolve();
   });
+  // PR #375 — TwoFactor step → skip (sits between account and internet).
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
   // Account → Internet. The Internet step (WARP-174) sits between account
   // and discovery — skip it so the polling-bounds tests can land on the
   // discovery surface they exercise. Flush once for InternetStep's

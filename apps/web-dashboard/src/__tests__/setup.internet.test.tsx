@@ -79,6 +79,10 @@ async function advanceToInternet() {
     await Promise.resolve();
     await Promise.resolve();
   });
+  // PR #375 — TwoFactor step → skip to reach Internet.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
   // Let the Internet step's fetchDuckDnsStatus effect resolve.
   await act(async () => {
     await Promise.resolve();
