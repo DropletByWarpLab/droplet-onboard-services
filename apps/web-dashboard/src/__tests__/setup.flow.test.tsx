@@ -32,6 +32,16 @@ vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
   patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  // PR #373 — claim slots before account; the Claim step calls these.
+  fetchApplianceContract: vi.fn(async () => ({
+    appliance_id: "droplet-appliance-test",
+    compute: { label: "Compute", value: "Local AI compute", online: true },
+    storage: { label: "Storage", value: "Encrypted at rest", online: true },
+    network: { label: "Network", value: "Local network", online: true },
+    display: { label: "Display", value: "PyPortal lid display", online: true },
+    supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
+  })),
+  postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
@@ -81,6 +91,24 @@ describe("setup flow → done state", () => {
 
     // Welcome screen → click Get Started.
     fireEvent.click(screen.getByRole("button", { name: /get started/i }));
+
+    // PR #373 — Claim step (welcome → claim → account). Let the contract fetch
+    // resolve, enter a code, claim → advance to account.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    fireEvent.change(screen.getByPlaceholderText(/DRPL/i), {
+      target: { value: "DRPL-7K2Q-9F4M" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /claim this droplet/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
 
     // Account form. Fill required fields and submit.
     fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
