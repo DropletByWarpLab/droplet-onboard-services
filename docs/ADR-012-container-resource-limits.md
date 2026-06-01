@@ -89,6 +89,7 @@ Host/kernel reserve target: ~1 GB. Default-profile budget fits within ~6 GB.
 | redis-pm | pm | 256 MB | Plane Redis |
 | pm-api | pm | 768 MB | Plane Django backend |
 | pm-worker | pm | 512 MB | Plane Celery worker |
+| pm-migrator | pm | 512 MB | Plane one-shot Django migrator — runs `migrate` then exits. `restart: "no"`, so it never hot-loops; `mem_reservation: 256m` keeps it off the OOM-eviction shortlist during its run (pm-api/pm-worker gate on its success). |
 | pm-web | pm | 384 MB | Plane Next.js frontend |
 | pm-health | pm | 128 MB | Droplet health sidecar |
 | ollama | single-box | 4 GB | ROCm LLM inference — biggest single consumer |
