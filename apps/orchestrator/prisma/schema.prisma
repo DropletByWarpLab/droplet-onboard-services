@@ -105,14 +105,14 @@ enum ContextPinKind {
 /// `active` is a soft-disable flag so users can pause a fact without
 /// deleting the row (preserving evidence chain).
 model MemoryFact {
-  id              String              @id @default(uuid())
-  category        MemoryFactCategory
-  fact            String
-  addedBy         String
-  evidenceChatId  String?
-  active          Boolean             @default(true)
-  addedAt         DateTime            @default(now())
-  updatedAt       DateTime            @default(now()) @updatedAt
+  id             String             @id @default(uuid())
+  category       MemoryFactCategory
+  fact           String
+  addedBy        String
+  evidenceChatId String?
+  active         Boolean            @default(true)
+  addedAt        DateTime           @default(now())
+  updatedAt      DateTime           @default(now()) @updatedAt
 
   @@index([category, active])
   @@index([active, addedAt(sort: Desc)])
@@ -141,9 +141,9 @@ enum MemoryFactCategory {
 /// briefly burst > 2³¹. Retention: a nightly cron prunes rows
 /// older than 30 days alongside the existing daily-purge.
 model NetworkThroughputSample {
-  ts          DateTime @id @default(now())
-  wanDownBps  BigInt
-  wanUpBps    BigInt
+  ts         DateTime @id @default(now())
+  wanDownBps BigInt
+  wanUpBps   BigInt
 
   @@index([ts(sort: Desc)])
 }
@@ -179,9 +179,9 @@ model NetworkThroughputSample {
 /// turns do not carry reasoning content (small models, tool-only turns,
 /// system messages).
 model ChatMessage {
-  id          String      @id @default(uuid())
+  id          String            @id @default(uuid())
   sessionId   String
-  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session     ChatSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   role        String
   content     String
   toolCalls   Json?
@@ -190,7 +190,7 @@ model ChatMessage {
   status      ChatMessageStatus @default(completed)
   completedAt DateTime?
   reasoning   String?
-  createdAt   DateTime    @default(now())
+  createdAt   DateTime          @default(now())
 
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
@@ -619,20 +619,20 @@ model NetworkDevice {
 // NetworkDevice — a device can be in multiple groups (e.g. "Living Room"
 // and "Media"). Seeded with 5 default rooms by the migration.
 model DeviceGroup {
-  id        String             @id @default(cuid())
-  name      String             @unique
-  color     String?
-  icon      String?
+  id             String             @id @default(cuid())
+  name           String             @unique
+  color          String?
+  icon           String?
   // WARP-613: when true AND the master toggle
   // (WorkspaceSetting `network.block_phone_home_enabled`) is on, every device
   // in this group gets a phone-home WAN-egress block (NTP + local DNS still
   // allowed). Enforced by the egress reconciler.
-  blockPhoneHome Boolean        @default(false)
-  devices   NetworkDevice[]    @relation("DeviceGroups")
-  schedules Schedule[]         @relation("GroupSchedules")
-  overrides ScheduleOverride[] @relation("GroupOverrides")
-  createdAt DateTime           @default(now())
-  updatedAt DateTime           @updatedAt
+  blockPhoneHome Boolean            @default(false)
+  devices        NetworkDevice[]    @relation("DeviceGroups")
+  schedules      Schedule[]         @relation("GroupSchedules")
+  overrides      ScheduleOverride[] @relation("GroupOverrides")
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 }
 
 // Daily presence roll-up — one row per (device, calendar day) with the
@@ -985,12 +985,12 @@ enum ApDeviceStatus {
 // keeping the column lets the dashboard render the "Local" vs "OCS"
 // affordance without a schema migration when mirroring lands.
 model User {
-  id          String   @id @default(uuid())
+  id                String   @id @default(uuid())
   // Login handle. Unique across the directory. For Nextcloud-mirror
   // rows this matches the OCS user id so `req.user.username` from the
   // auth middleware resolves directly to this row.
-  username    String   @unique
-  displayName String
+  username          String   @unique
+  displayName       String
   // ADR-013: email is the stable directory login key — the Aurora login
   // (PR #370) sends "Work email" as the identifier and POST /auth/login
   // resolves the row by email before the argon2id verify. Unique so two
@@ -998,7 +998,7 @@ model User {
   // Still nullable: service-only principals and locally-minted rows that
   // predate ADR-013 may have no email; the login route fails closed when
   // email or passwordHash is null.
-  email       String?  @unique
+  email             String?  @unique
   // ADR-013: argon2id PHC hash — the built-in directory is the auth
   // source of truth (Nextcloud is demoted to downstream WebDAV
   // provisioning). Written at account-creation (/auth/setup, invite
@@ -1006,7 +1006,7 @@ model User {
   // contains plaintext; NEVER logged. Nullable because service-only
   // principals and pre-first-login invitees may not have one yet — the
   // login route fails closed (no enumeration leak) when it's null.
-  passwordHash String?
+  passwordHash      String?
   // WARP-485: stable mapping key from the Nextcloud OCS user id
   // (`ocs.data.id`, e.g. `stefan-cruceru`) to this row's UUID. The auth
   // middleware looks up `User` by `nextcloudUsername` on the OCS
@@ -1019,20 +1019,20 @@ model User {
   // from `username` to keep the local display handle decoupled from the
   // OCS-mapping key — they often match today but the dashboard may
   // edit `username` in the future without breaking OCS resolution.
-  nextcloudUsername String? @unique
-  role        Role     @default(family)
+  nextcloudUsername String?  @unique
+  role              Role     @default(family)
   // Locally provisioned vs. mirrored from Nextcloud. Today every row
   // is local — the dashboard's People surface is the only writer. The
   // delete handler refuses when isLocal=false to keep OCS-owned
   // identities off-limits.
-  isLocal     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isLocal           Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   // Many-to-many to Group via GroupMembership (explicit join model
   // so future per-membership metadata — joinedAt, addedBy — has a
   // place to land).
-  memberships GroupMembership[]
+  memberships   GroupMembership[]
   // Per-user scope bindings — controls which scopes this user can
   // act inside via requireScope() (see src/middleware/scope.ts).
   scopeBindings ScopeBinding[]
@@ -1040,9 +1040,83 @@ model User {
   // guest with an expiry; the nightly `guest-expiry-sweep` cron walks
   // GuestExpiry rows directly (no IS-NULL guessing — status is an
   // explicit enum on GuestExpiry).
-  guestExpiry GuestExpiry?
+  guestExpiry   GuestExpiry?
+  // ADR-013 (SSO OIDC): external-IdP identities (Google / Entra) linked
+  // to this local user. A user may have several (e.g. both Google and
+  // Entra resolve to the same work email → both link to one local row).
+  // The link preserves this row's UUID — SSO never mints a second local
+  // User for an email that already has one.
+  ssoIdentities SsoIdentity[]
 
   @@index([role])
+}
+
+/// ADR-013 (SSO OIDC) — maps an external IdP identity to a LOCAL User.
+///
+/// `subject` is the IdP's stable `sub` claim (NOT the email — emails can
+/// be reassigned at the IdP, `sub` cannot). `(provider, subject)` is
+/// unique so one IdP identity resolves to exactly one local user; a
+/// second local row claiming the same identity would be an auth
+/// ambiguity. `userId` FKs to `User` so the link is referential and the
+/// existing `User.id` UUID is preserved (consistent with WARP-485 —
+/// JWT.sub / Redis keys stay on the UUID).
+///
+/// Account-linking policy (route): on callback we resolve the validated
+/// `sub` here first; on a hit we sign in that user. On a miss we look up
+/// the local User by NORMALIZED email (#374 trim+lowercase) — if one
+/// exists we LINK (create this row pointing at it), else we CREATE the
+/// local User per the directory model and link. We never create a
+/// login-unable row.
+model SsoIdentity {
+  id        String   @id @default(uuid())
+  userId    String
+  provider  String // "google" | "entra"
+  subject   String // IdP 'sub' claim
+  // Email seen at link time (already normalized). Audit/debug only — the
+  // login key on User.email remains authoritative; this is not a second
+  // source of truth.
+  email     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([userId])
+}
+
+/// ADR-013 (SSO OIDC) — server-side, single-use, time-bound login state.
+///
+/// The OIDC `state` (CSRF) + `nonce` (ID-token replay) + PKCE
+/// `codeVerifier` are minted at /sso/oidc/authorize and persisted HERE,
+/// not in the redirect or a client-readable cookie. The browser only
+/// carries the opaque `state` (in the authorize redirect and matched back
+/// at /callback), so a tampered or replayed callback can't smuggle its
+/// own nonce/verifier.
+///
+/// Single-use: `consumedAt` is stamped the moment the callback claims the
+/// row (same idiom as UserInvite.acceptedAt — the established single-use
+/// pattern in this codebase). A second callback with the same `state`
+/// finds `consumedAt` already set and is rejected. Time-bound:
+/// `expiresAt` (short, ~10 min) bounds the authorize→callback window so
+/// an abandoned flow can't be resumed later. A periodic sweep can delete
+/// expired rows; correctness does not depend on the sweep (the callback
+/// re-checks `expiresAt`).
+model SsoLoginState {
+  id           String    @id @default(uuid())
+  state        String    @unique
+  nonce        String
+  codeVerifier String
+  provider     String // "google" | "entra"
+  // Where to send the browser after a successful sign-in (defaults to
+  // "/"). Validated to a same-origin relative path at issue time so it
+  // can't become an open redirect.
+  returnTo     String    @default("/")
+  consumedAt   DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  @@index([expiresAt])
 }
 
 // User-curated grouping (households, family branches, work cohorts).
@@ -1060,12 +1134,12 @@ model Group {
 // listed twice in the same group. `joinedAt` lets the dashboard show
 // "added X days ago" without a separate audit query.
 model GroupMembership {
-  id        String   @id @default(uuid())
-  userId    String
-  groupId   String
-  joinedAt  DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  id       String   @id @default(uuid())
+  userId   String
+  groupId  String
+  joinedAt DateTime @default(now())
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@unique([userId, groupId])
   @@index([userId])
@@ -1140,19 +1214,19 @@ model ScopeBinding {
 // only "expired" once the cron has actually denylisted their session).
 // WARP-218's BrainMemoryItemStatus is the canonical precedent.
 model GuestExpiry {
-  id        String              @id @default(uuid())
-  userId    String              @unique
+  id        String            @id @default(uuid())
+  userId    String            @unique
   // When the guest's session should be revoked. The cron sweep
   // compares this against `now()` and flips status when it's past.
   expiresAt DateTime
-  status    GuestExpiryStatus   @default(ACTIVE)
+  status    GuestExpiryStatus @default(ACTIVE)
   // When the cron actually flipped the row to EXPIRED. Non-null
   // only when status = EXPIRED. Useful for the dashboard's
   // "expired N hours ago" copy without re-querying ActivityRow.
   expiredAt DateTime?
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
-  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
   @@index([status, expiresAt])
@@ -1378,27 +1452,27 @@ enum SettingType {
 /// CLAUDE.md no-derived-state rule: connectivity state is a column,
 /// not an IS NULL.
 model EmailAccount {
-  id            String              @id @default(uuid())
-  userId        String?
-  displayName   String
-  address       String              @unique
-  imapHost      String
-  imapPort      Int                 @default(993)
-  imapTls       Boolean             @default(true)
-  smtpHost      String
-  smtpPort      Int                 @default(465)
-  smtpTls       Boolean             @default(true)
-  username      String
-  passwordEnc   String
-  imapStatus    EmailImapStatus     @default(paused)
-  lastIdleAt    DateTime?
-  lastErrorAt   DateTime?
-  lastError     String?
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  threads       EmailThread[]
-  messages      EmailMessage[]
-  drafts        EmailDraft[]
+  id          String          @id @default(uuid())
+  userId      String?
+  displayName String
+  address     String          @unique
+  imapHost    String
+  imapPort    Int             @default(993)
+  imapTls     Boolean         @default(true)
+  smtpHost    String
+  smtpPort    Int             @default(465)
+  smtpTls     Boolean         @default(true)
+  username    String
+  passwordEnc String
+  imapStatus  EmailImapStatus @default(paused)
+  lastIdleAt  DateTime?
+  lastErrorAt DateTime?
+  lastError   String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  threads     EmailThread[]
+  messages    EmailMessage[]
+  drafts      EmailDraft[]
 
   @@index([userId, address])
 }
@@ -1412,21 +1486,21 @@ model EmailAccount {
 /// dashboard can render the right tab badge without joining the
 /// messages.
 model EmailThread {
-  id            String              @id @default(uuid())
-  accountId     String
-  account       EmailAccount        @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  threadKey     String
-  subject       String
-  lastSender    String?
-  snippet       String?
-  messageCount  Int                 @default(0)
-  triageStatus  EmailTriageStatus   @default(inbox)
-  draftedByDroplet Boolean          @default(false)
-  lastMessageAt DateTime
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  messages      EmailMessage[]
-  drafts        EmailDraft[]
+  id               String            @id @default(uuid())
+  accountId        String
+  account          EmailAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadKey        String
+  subject          String
+  lastSender       String?
+  snippet          String?
+  messageCount     Int               @default(0)
+  triageStatus     EmailTriageStatus @default(inbox)
+  draftedByDroplet Boolean           @default(false)
+  lastMessageAt    DateTime
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  messages         EmailMessage[]
+  drafts           EmailDraft[]
 
   @@unique([accountId, threadKey])
   @@index([accountId, triageStatus, lastMessageAt(sort: Desc)])
@@ -1440,22 +1514,22 @@ model EmailThread {
 /// present. Both are nullable — multipart messages may carry one or
 /// the other.
 model EmailMessage {
-  id           String       @id @default(uuid())
-  accountId    String
-  account      EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  threadId     String
-  thread       EmailThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  messageId    String
-  inReplyTo    String?
-  fromAddr     String
-  fromName     String?
-  toAddrs      Json
-  ccAddrs      Json?
-  subject      String
-  bodyText     String?
-  bodyHtml     String?
-  receivedAt   DateTime
-  createdAt    DateTime     @default(now())
+  id         String       @id @default(uuid())
+  accountId  String
+  account    EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId   String
+  thread     EmailThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  messageId  String
+  inReplyTo  String?
+  fromAddr   String
+  fromName   String?
+  toAddrs    Json
+  ccAddrs    Json?
+  subject    String
+  bodyText   String?
+  bodyHtml   String?
+  receivedAt DateTime
+  createdAt  DateTime     @default(now())
 
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
@@ -1469,22 +1543,22 @@ model EmailMessage {
 /// `status` is the send lifecycle: `draft | queued | sent | failed`.
 /// `sentAt` is set on `sent`, `error` on `failed`.
 model EmailDraft {
-  id              String           @id @default(uuid())
-  accountId       String
-  account         EmailAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  threadId        String?
-  thread          EmailThread?     @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  toAddrs         Json
-  ccAddrs         Json?
-  bccAddrs        Json?
-  subject         String
-  body            String           @default("")
-  draftedByDroplet Boolean         @default(false)
-  status          EmailDraftStatus @default(draft)
-  sentAt          DateTime?
-  error           String?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  id               String           @id @default(uuid())
+  accountId        String
+  account          EmailAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId         String?
+  thread           EmailThread?     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  toAddrs          Json
+  ccAddrs          Json?
+  bccAddrs         Json?
+  subject          String
+  body             String           @default("")
+  draftedByDroplet Boolean          @default(false)
+  status           EmailDraftStatus @default(draft)
+  sentAt           DateTime?
+  error            String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   @@index([accountId, status, updatedAt(sort: Desc)])
 }
@@ -1536,20 +1610,20 @@ enum EmailDraftStatus {
 /// otherwise. Together (writes && !reversible) gates a confirm_action
 /// card before run-now (handled in route layer + C2 scheduler).
 model ToolSpec {
-  id          String          @id @default(uuid())
-  slug        String          @unique
+  id          String         @id @default(uuid())
+  slug        String         @unique
   name        String
   category    String?
   description String?
-  version     Int             @default(1)
-  status      ToolSpecStatus  @default(draft)
+  version     Int            @default(1)
+  status      ToolSpecStatus @default(draft)
   ownerId     String?
   share       String?
-  safety      Int             @default(1)
-  writes      Boolean         @default(false)
-  reversible  Boolean         @default(true)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  safety      Int            @default(1)
+  writes      Boolean        @default(false)
+  reversible  Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
   steps       ToolStep[]
   runs        ToolRun[]
   schedules   ToolSchedule[]
@@ -1565,12 +1639,12 @@ model ToolSpec {
 /// idx is the explicit ordering column; the imperative walker
 /// (services/tool-spec-runner.service.ts) walks ascending.
 model ToolStep {
-  id      String   @id @default(uuid())
-  specId  String
-  spec    ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
-  idx     Int
-  kind    String   @default("call")
-  args    Json
+  id     String   @id @default(uuid())
+  specId String
+  spec   ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  idx    Int
+  kind   String   @default("call")
+  args   Json
 
   @@index([specId, idx])
 }
@@ -1585,15 +1659,15 @@ model ToolStep {
 /// `failed` runs; null otherwise. `trace` captures per-step results so
 /// the dashboard's run-detail drawer can show "step 2 of 5 failed: ...".
 model ToolRun {
-  id        String        @id @default(uuid())
-  specId    String
-  spec      ToolSpec      @relation(fields: [specId], references: [id], onDelete: Cascade)
+  id          String        @id @default(uuid())
+  specId      String
+  spec        ToolSpec      @relation(fields: [specId], references: [id], onDelete: Cascade)
   triggeredBy String?
-  startedAt DateTime      @default(now())
-  endedAt   DateTime?
-  status    ToolRunStatus @default(pending)
-  error     String?
-  trace     Json?
+  startedAt   DateTime      @default(now())
+  endedAt     DateTime?
+  status      ToolRunStatus @default(pending)
+  error       String?
+  trace       Json?
 
   @@index([specId, startedAt(sort: Desc)])
 }
@@ -1604,14 +1678,14 @@ model ToolRun {
 /// the §7 example carrier-delay spec has both a 09:00 weekday cron
 /// and an ad-hoc "high-priority client" trigger.
 model ToolSchedule {
-  id          String   @id @default(uuid())
-  specId      String
-  spec        ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
-  rrule       String
-  nextFireAt  DateTime
-  enabled     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(uuid())
+  specId     String
+  spec       ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  rrule      String
+  nextFireAt DateTime
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   @@index([nextFireAt])
   @@index([specId])
@@ -1671,9 +1745,9 @@ model Scene {
 /// `sendMatterCommand` — see matter.service.ts for the per-command
 /// shape (e.g. on/off has no args, levelControl wants `level`).
 model SceneAction {
-  id           String   @id @default(uuid())
+  id           String @id @default(uuid())
   sceneId      String
-  scene        Scene    @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  scene        Scene  @relation(fields: [sceneId], references: [id], onDelete: Cascade)
   idx          Int
   deviceNodeId String
   command      String
@@ -1699,12 +1773,12 @@ model SceneAction {
 /// expedition. Per ADR-005, off-LAN channels are sovereignty surface —
 /// changes are owner+admin only.
 model OffLanAllowlistChannel {
-  key             OffLanChannelKey @id
-  enabled         Boolean
-  requiresAdmin   Boolean          @default(true)
-  lastChangedBy   String?
-  lastChangedAt   DateTime         @default(now())
-  reason          String?
+  key           OffLanChannelKey @id
+  enabled       Boolean
+  requiresAdmin Boolean          @default(true)
+  lastChangedBy String?
+  lastChangedAt DateTime         @default(now())
+  reason        String?
 }
 
 /// WARP-467 — closed set of off-LAN egress channels. Extending the
@@ -1766,9 +1840,9 @@ model FileCitation {
 /// to monthly billing windows; 90 d covers a quarter-on-quarter
 /// review without bloating the table.
 model OffLanEgressSample {
-  ts        DateTime         @default(now())
-  channel   OffLanChannelKey
-  bytes     BigInt
+  ts      DateTime         @default(now())
+  channel OffLanChannelKey
+  bytes   BigInt
 
   @@id([ts, channel])
   @@index([channel, ts(sort: Desc)])
@@ -1793,15 +1867,15 @@ enum WorkspaceType {
 model Workspace {
   // Singleton — exactly one row per Droplet. id = 1 lets every CRUD
   // path use a fixed primary key + prisma upsert without inventing one.
-  id          Int            @id @default(1)
-  type        WorkspaceType  @default(HOME)
+  id          Int           @id @default(1)
+  type        WorkspaceType @default(HOME)
   /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
   /// Surfaced in the chrome workspace pill + setup wizard.
   displayName String?
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
   setBy       String?
-  setAt       DateTime       @default(now())
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  setAt       DateTime      @default(now())
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 }
