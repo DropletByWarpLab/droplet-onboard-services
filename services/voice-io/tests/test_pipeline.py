@@ -145,6 +145,22 @@ class _RaisingDetector(WakeWordDetector):
         raise RuntimeError("predict failed (test)")
 
 
+class _ResetCountingDetector(_ScriptedDetector):
+    """A scripted detector that also records reset() calls. Used to pin
+    the contract that the pipeline resets the wake detector when it
+    returns to 'listening' after a transcription cycle — so a stateful
+    recognizer (Vosk's KaldiRecognizer) doesn't carry a stale utterance
+    across the STT excursion. (WARP-154 review item 1)
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reset_calls = 0
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
 # ────────────────────────────────────────────────────────────────────
 # Construction + idle state
 # ────────────────────────────────────────────────────────────────────
@@ -758,6 +774,51 @@ class TestTranscribingFlow:
         time.sleep(0.1)
         # Read-time decay flips it back to listening
         assert pipe.status().state == "listening"
+
+    def test_detector_reset_on_resume_to_listening_after_transcription(self):
+        # WARP-154 review item 1: a stateful recognizer (Vosk) carries
+        # decoder state across calls. After a wake fires, frames are routed
+        # to STT and the recognizer is starved; when we return to 'listening'
+        # the next AcceptWaveform would otherwise continue the STALE
+        # utterance. The pipeline must reset() the detector on the
+        # transcription → listening transition so each turn starts fresh.
+        det = _ResetCountingDetector([{"hey_jarvis": 0.9}])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=0.01,
+            visual_decay_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake → wake_detected
+        pipe._on_frame(_silence_frame())  # begin transcription
+        time.sleep(0.05)
+        pipe._on_frame(_silence_frame())  # finish → transcript_ready
+        assert pipe.status().state == "transcript_ready"
+        assert det.reset_calls == 0       # not yet — still in the wake cycle
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())  # decays to listening → reset fires
+        assert pipe.status().state == "listening"
+        assert det.reset_calls == 1, "detector not reset on resume to listening"
+
+    def test_detector_not_reset_while_merely_listening(self):
+        # The reset is tied to the transcription → listening transition, not
+        # to every frame. A detector that's just listening (no wake, no STT
+        # excursion) must never be reset — that would throw away in-progress
+        # partial recognition mid-phrase. (WARP-154 review item 1)
+        det = _ResetCountingDetector([{"hey_jarvis": 0.1}])
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+        )
+        pipe._set_state("listening")
+        for _ in range(5):
+            pipe._on_frame(_silence_frame())  # all below threshold, no wake
+        assert det.reset_calls == 0
 
     def test_transcript_callback_fires_with_text(self):
         captured: list[str] = []

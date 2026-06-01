@@ -61,6 +61,21 @@ WAKE_SAMPLE_RATE = 16_000
 # name. Overridable via the VOSK_MODEL_PATH env var.
 VOSK_DEFAULT_MODEL_DIRNAME = "vosk-model-small-en-us"
 
+# Score assigned to a Vosk wake match when we have NO per-word confidence
+# evidence to compute a real score from — i.e. a fire on a partial
+# hypothesis (partials carry no `result` conf array) or a final Result that
+# omits the per-word array. We deliberately do NOT default to 1.0 here: a
+# max score would make the configured WAKE_THRESHOLD silently
+# un-enforceable on those matches (it could never gate them). Instead we
+# return a fixed, conservative value:
+#   * strictly < 1.0, so an operator who raises WAKE_THRESHOLD above it can
+#     suppress these evidence-free matches — the threshold stays a real gate;
+#   * >= the shipped WAKE_THRESHOLD default (0.3), so "hey droplet" still
+#     wakes out of the box on a default install.
+# 0.5 also matches the documented "reasonable floor" for the grammar-
+# constrained vosk engine in the README/compose. (WARP-154 review item 2)
+VOSK_NO_CONFIDENCE_SCORE = 0.5
+
 
 @dataclasses.dataclass(frozen=True)
 class WakeEvent:
@@ -95,6 +110,19 @@ class WakeWordDetector(ABC):
         `audio_frame` is int16 mono at 16 kHz, length WAKE_FRAME_SAMPLES.
         Implementations should be thread-safe for sequential calls — the
         pipeline serialises predicts on its own thread.
+        """
+
+    def reset(self) -> None:
+        """Discard any in-progress recognition state and start fresh.
+
+        Stateful backends (Vosk's KaldiRecognizer carries decoder state
+        across frames) override this. The pipeline calls it when it returns
+        to the `listening` state after a transcription excursion — during
+        which the detector was starved of frames — so the next utterance
+        starts from a clean slate instead of continuing a stale one.
+
+        Default is a no-op: stateless detectors (openWakeWord scores each
+        frame independently; the mock/disabled stubs) need nothing here.
         """
 
 
@@ -379,10 +407,13 @@ class VoskWakeWordDetector(WakeWordDetector):
                 logger.info("vosk: heard %r (no wake match)", text)
             return {}
 
-        # Matched the wake phrase. A final Result carries per-word
-        # confidences (SetWords); a partial does not, so use a high
-        # constant that clears any sane threshold.
-        score = 1.0
+        # Matched the wake phrase. Score it from per-word confidences when
+        # we have them; otherwise fall back to the conservative
+        # VOSK_NO_CONFIDENCE_SCORE so the configured WAKE_THRESHOLD stays
+        # enforceable (see the constant's docstring). A final Result carries
+        # per-word confidences (SetWords(True)); a partial hypothesis never
+        # does, so a partial fire always takes the conservative default.
+        score = VOSK_NO_CONFIDENCE_SCORE
         if is_final:
             words = res.get("result") or []
             phrase_tokens = set(self._phrase.split())
@@ -393,19 +424,35 @@ class VoskWakeWordDetector(WakeWordDetector):
             ]
             if confs:
                 score = sum(confs) / len(confs)
-        else:
-            score = 0.9
         logger.info(
             "vosk: WAKE match on %r (score=%.2f, final=%s)", text, score, is_final,
         )
         # Reset so the matched phrase doesn't linger in the next partial
         # and re-fire every subsequent frame (the pipeline debounce is a
-        # second guard).
-        try:
-            self._rec.Reset()
-        except Exception:
-            pass
+        # second guard). The pipeline also resets us on resume-to-listening
+        # after the STT excursion — see reset() below.
+        self.reset()
         return {self._wake_word: score}
+
+    def reset(self) -> None:
+        """Reset the KaldiRecognizer's decoder state.
+
+        Vosk's recognizer accumulates acoustic state across AcceptWaveform
+        calls. Without a reset, the next call after a fire (or after the
+        recognizer was starved while the pipeline routed frames to STT)
+        continues the STALE utterance rather than starting a fresh one —
+        so a second "hey droplet" might be heard as a continuation of the
+        first. `Reset()` restarts decoding from scratch without re-creating
+        the (expensive) Model. Safe to call when not yet loaded — it's a
+        no-op then. (WARP-154 review item 1)
+        """
+        rec = self._rec
+        if rec is None:
+            return
+        try:
+            rec.Reset()
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("vosk: recognizer reset failed: %s", exc)
 
 
 # ────────────────────────────────────────────────────────────────────

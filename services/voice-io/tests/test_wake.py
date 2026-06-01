@@ -23,7 +23,9 @@ import json
 
 import numpy as np
 
+from voice.pipeline import DEFAULT_THRESHOLD
 from voice.wake import (
+    VOSK_NO_CONFIDENCE_SCORE,
     WAKE_FRAME_SAMPLES,
     DisabledWakeWordDetector,
     MockWakeWordDetector,
@@ -404,7 +406,12 @@ class TestVoskWakeWordDetector:
         )
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
         scores = det.predict(_silence_frame())
-        assert scores == {"hey_droplet": 0.9}   # partials carry no conf → 0.9
+        # Partials carry NO per-word confidence, so we can't compute a real
+        # score — default to the conservative VOSK_NO_CONFIDENCE_SCORE so the
+        # configured WAKE_THRESHOLD stays enforceable (a strict threshold can
+        # suppress no-confidence matches) while still clearing the shipped
+        # 0.3 default so "hey droplet" wakes out of the box. (WARP-154)
+        assert scores == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
         assert state["resets"] == 1              # recognizer reset after a match
 
     def test_recognizes_phrase_and_scores_mean_confidence(self, monkeypatch, tmp_path):
@@ -440,16 +447,32 @@ class TestVoskWakeWordDetector:
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
         assert det.predict(_silence_frame()) == {}
 
-    def test_scores_default_one_when_no_word_confidences(self, monkeypatch, tmp_path):
-        # Some configs omit the per-word `result` array; a clean text
-        # match should still fire, defaulting the score to 1.0.
+    def test_scores_conservative_when_no_word_confidences(self, monkeypatch, tmp_path):
+        # A final Result whose text matches but carries NO per-word `result`
+        # confidence array must NOT fire at the max (1.0) — that would make
+        # WAKE_THRESHOLD silently un-enforceable on configs that omit conf
+        # data. We default such matches to the conservative
+        # VOSK_NO_CONFIDENCE_SCORE: high enough to clear the shipped 0.3
+        # default (so the box still wakes out of the box) but low enough that
+        # an operator who raises WAKE_THRESHOLD above it can suppress these
+        # evidence-free matches. (WARP-154 review item 2)
         self._install_fake_vosk(
             monkeypatch,
             accept_seq=[True],
             result_obj={"text": "hey droplet"},
         )
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
-        assert det.predict(_silence_frame()) == {"hey_droplet": 1.0}
+        assert det.predict(_silence_frame()) == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
+
+    def test_no_confidence_score_is_threshold_enforceable(self, monkeypatch, tmp_path):
+        # The whole point of the conservative default: it sits strictly below
+        # 1.0 so the configured threshold remains a real gate. The pipeline
+        # owns the threshold compare; here we pin the contract that a
+        # no-confidence match scores a fixed value < 1.0 that a strict
+        # threshold could reject. (WARP-154 review item 2)
+        assert 0.0 < VOSK_NO_CONFIDENCE_SCORE < 1.0
+        # And it must clear the shipped default so the default box wakes.
+        assert VOSK_NO_CONFIDENCE_SCORE >= DEFAULT_THRESHOLD
 
     def test_predict_empty_and_unloaded_when_model_dir_missing(self):
         # No fake vosk installed + a nonexistent dir → the cheap dir

@@ -760,7 +760,15 @@ class WakePipeline:
         of state matches what callers see via the API. Without this,
         a frame could route to wake_detected even though status() would
         have decayed it back to listening 5 seconds ago.
+
+        When a decay actually returns us to `listening` after a wake /
+        transcription excursion, reset the wake detector so a stateful
+        recognizer (Vosk) doesn't carry a stale, half-decoded utterance
+        into the next turn (WARP-154 review item 1). The reset is done
+        OUTSIDE the lock — Vosk's Reset() is cheap but we don't hold the
+        status lock across detector calls.
         """
+        decayed_to_listening = False
         with self._lock:
             state = self._state
             now = time.time()
@@ -770,12 +778,25 @@ class WakePipeline:
                 and now - self._last_wake_at > self._visual_decay_s
             ):
                 self._state = "listening"
+                decayed_to_listening = True
             elif (
                 state == "transcript_ready"
                 and self._last_transcript_at is not None
                 and now - self._last_transcript_at > self._visual_decay_s
             ):
                 self._state = "listening"
+                decayed_to_listening = True
+        if decayed_to_listening:
+            self._reset_detector()
+
+    def _reset_detector(self) -> None:
+        """Reset the wake detector's recognition state. Tolerates a
+        detector whose reset() raises so a flaky backend can't crash the
+        wake loop on a state transition."""
+        try:
+            self._detector.reset()
+        except Exception:
+            logger.exception("wake detector reset() raised")
 
     def _run_wake_detect(self, frame: np.ndarray) -> None:
         """Wake-word path: predict, threshold-check, debounce, fire."""
