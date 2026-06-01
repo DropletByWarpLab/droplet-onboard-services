@@ -367,14 +367,20 @@ fi
 # makeplane/plane-worker:* does not exist on Docker Hub (404). Plane runs the
 # Celery worker from the backend image with an explicit command. This guard
 # prevents the 404 image name from re-entering compose files, docs, or scripts.
+#
+# Match only an actual YAML `image:` pin (`image: makeplane/plane-worker:...`),
+# not every mention of the string. Launch-readiness docs legitimately name the
+# image in prose when describing the bug that was fixed; flagging that prose
+# would self-trip the guard on a clean checkout. A real config regression always
+# appears as an `image:` line, so that is what we scan for.
 
-plane_worker_hits=$(grep -rn 'makeplane/plane-worker' \
+plane_worker_hits=$(grep -rEn 'image:[[:space:]]*["'"'"']?makeplane/plane-worker' \
   "$REPO_ROOT/docker/" "$REPO_ROOT/docs/" "$REPO_ROOT/scripts/" \
   --exclude="test-security.sh" \
   2>/dev/null || true)
 
 if [ -z "$plane_worker_hits" ]; then
-  pass "no makeplane/plane-worker references in docker/, docs/, scripts/"
+  pass "no makeplane/plane-worker image pin in docker/, docs/, scripts/"
 else
   fail "makeplane/plane-worker found — image does not exist on Docker Hub (WARP-575)"
   printf "${_RED}%s${_RESET}\n" "$plane_worker_hits" >&2
