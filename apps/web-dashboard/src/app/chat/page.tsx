@@ -140,6 +140,13 @@ export default function ChatPage() {
   }, [models, selectedModel]);
 
   // If the home-page hero handed off a prompt, send it once a model is ready.
+  //
+  // DASH-02: only consume the hero prompt for a genuinely fresh chat. If the
+  // user landed on a deep-linked thread (`/chat?c=<id>`) — or any conversation
+  // already has messages — a stale `pendingPrompt` left in sessionStorage from
+  // an earlier, interrupted hero hand-off must NOT be appended to that existing
+  // conversation. We still clear the stored prompt so it can't fire later, but
+  // we drop it instead of sending it into a non-empty / deep-linked thread.
   useEffect(() => {
     if (!selectedModel) return;
     let pending: string | null = null;
@@ -149,11 +156,15 @@ export default function ChatPage() {
       pending = null;
     }
     if (!pending) return;
+    // One-shot: always remove it so a stale hero prompt can't resurface.
     try {
       window.sessionStorage.removeItem("droplet.pendingPrompt");
     } catch {
       /* ignore */
     }
+    // Gate the auto-send on a fresh chat: no `?c=` deep link in the URL and no
+    // messages already present (a loaded/hydrated thread). Otherwise discard.
+    if (urlConversationId || messages.length > 0) return;
     sendMessage(pending, selectedModel, systemPrompt || undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
