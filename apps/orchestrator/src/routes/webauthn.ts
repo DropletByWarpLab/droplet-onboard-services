@@ -394,6 +394,22 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         return;
       }
 
+      // ORCH-02 — a user the directory deactivated (Okta SCIM `active:false`
+      // → `directoryStatus = DEACTIVATED`, a SOFT disable that retains the
+      // row AND its registered passkeys) must not sign in via WebAuthn
+      // either. This is the third login path; `/auth/login` (auth.ts) and
+      // SSO (sso.ts) already fail closed on DEACTIVATED — close the parity
+      // gap so a previously-enrolled passkey can't defeat offboarding. Same
+      // posture/wording as the other paths (no enumeration signal).
+      if (dbUser.directoryStatus === "DEACTIVATED") {
+        logger.warn(
+          { userId: dbUser.id },
+          "WebAuthn sign-in rejected: directory user is deactivated",
+        );
+        res.status(401).json({ error: "Invalid credentials" });
+        return;
+      }
+
       await recordActivity({
         kind: "auth",
         severity: "ok",
