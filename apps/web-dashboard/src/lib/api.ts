@@ -570,8 +570,13 @@ export async function acceptInvite(
  * and keeps the local-first password path standing (SSO is purely additive).
  */
 export async function getEnabledSsoProviders(): Promise<string[]> {
+  // Bound the request so a *hung* orchestrator (not just a rejected one) still
+  // falls back to the password-only path instead of leaving discovery pending
+  // forever. AbortSignal.timeout fires a TimeoutError → the caller's .catch
+  // treats it as "no SSO" (review follow-up on #403).
   const res = await fetch(`${BASE}/api/sso/oidc/providers`, {
     credentials: "same-origin",
+    signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) {
     throw new Error(`Failed to fetch SSO providers: ${res.status}`);
