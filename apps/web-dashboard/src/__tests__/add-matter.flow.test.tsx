@@ -92,7 +92,7 @@ describe("AddMatterDevicePage — three-state flow", () => {
     await waitFor(() =>
       expect(screen.getByRole("alert")).toBeInTheDocument(),
     );
-    expect(screen.getByRole("alert")).toHaveTextContent(/PASE failed/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/couldn't reach that device/i);
     // Scanner is back so the user can retry
     expect(screen.getByLabelText(/enter the pairing code/i)).toBeInTheDocument();
   });

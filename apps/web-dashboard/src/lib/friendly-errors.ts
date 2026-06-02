@@ -227,6 +227,7 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
     NOT_FOUND: "We couldn't find that device on your network anymore.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   vpn: {
     NETWORK:

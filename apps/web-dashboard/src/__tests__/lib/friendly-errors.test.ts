@@ -220,6 +220,18 @@ describe("translateError — network / vpn / camera / device domains (WARP-646)"
     const result = translateError({ code: "AUTH_REQUIRED" }, "camera");
     expect(result.toLowerCase()).toMatch(/username|password|credential/);
   });
+
+  // network was the odd domain out: inferCodeFromMessage returns "TIMEOUT"
+  // for timeout-like messages, but the network CODES table only had
+  // NETWORK / NOT_FOUND, so a network-op timeout silently fell through to
+  // the domain fallback. The TIMEOUT entry restores parity with
+  // device / chat / generic.
+  it("maps a network-domain timeout message to the TIMEOUT copy, not the fallback", () => {
+    const result = translateError({ message: "request timed out" }, "network");
+    const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "network");
+    expect(result.toLowerCase()).toMatch(/took too long/);
+    expect(result).not.toBe(fallback);
+  });
 });
 
 describe("translateError — auth domain two-factor codes (WARP-646)", () => {
