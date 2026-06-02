@@ -32,6 +32,8 @@ from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
     UbusError,
+    UBUS_STATUS_NOT_FOUND,
+    UBUS_STATUS_NO_DATA,
     get_network_summary,
     describe_network_for_llm,
 )
@@ -725,37 +727,58 @@ def create_vlan(req: CreateVlanRequest):
 
 @app.get("/network/subnets/cameras")
 def get_camera_subnet():
-    """Get camera subnet configuration status."""
+    """Get camera subnet configuration status.
+
+    NET-13: distinguish "camera subnet legitimately not configured" from a
+    genuine router fault. Only a ubus NOT_FOUND/NO_DATA on the `cameras`
+    section means "not configured" → `{"enabled": False}`. Any other
+    UbusError (e.g. PERMISSION_DENIED, METHOD_NOT_FOUND) and every
+    ConnectionLost propagate to `handle_router_error`, so the dashboard
+    can tell "no camera subnet" apart from "router unreachable / token
+    wrong" instead of mis-rendering both as not-configured. Mirrors the
+    `_read_duckdns` / `interface_exists` discipline.
+    """
     try:
         r = get_router()
-        # Check if the cameras interface exists
+        # Check if the cameras interface exists. A NOT_FOUND/NO_DATA here is
+        # the only signal that means "not configured"; let anything else
+        # bubble to the outer (ConnectionLost, UbusError) handler.
         try:
             iface = r.uci.get("network", "cameras")
-            zone = None
-            # Find the cameras firewall zone
-            fw_config = r.uci.get("firewall")
-            if isinstance(fw_config, dict):
-                for name, section in fw_config.items():
-                    if isinstance(section, dict) and section.get("name") == "cameras":
-                        zone = section
-                        break
-            # Check DHCP pool
-            dhcp_pool = None
-            try:
-                dhcp_pool = r.uci.get("dhcp", "cameras")
-            except Exception:
-                pass
-
-            return {
-                "enabled": True,
-                "interface": iface if isinstance(iface, dict) else {},
-                "firewall_zone": zone,
-                "dhcp_pool": dhcp_pool if isinstance(dhcp_pool, dict) else None,
-                "subnet": iface.get("ipaddr", "192.168.100.1") if isinstance(iface, dict) else None,
-                "netmask": iface.get("netmask", "255.255.255.0") if isinstance(iface, dict) else None,
-            }
-        except Exception:
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return {"enabled": False}
+            raise
+        # An empty/non-dict section also means the interface isn't set up.
+        if not isinstance(iface, dict) or not iface:
             return {"enabled": False}
+
+        zone = None
+        # Find the cameras firewall zone
+        fw_config = r.uci.get("firewall")
+        if isinstance(fw_config, dict):
+            for name, section in fw_config.items():
+                if isinstance(section, dict) and section.get("name") == "cameras":
+                    zone = section
+                    break
+        # Check DHCP pool. A missing pool (NOT_FOUND/NO_DATA) is benign —
+        # the subnet can exist without a DHCP section — so swallow only
+        # that class; a real fault still propagates.
+        dhcp_pool = None
+        try:
+            dhcp_pool = r.uci.get("dhcp", "cameras")
+        except UbusError as exc:
+            if exc.code not in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                raise
+
+        return {
+            "enabled": True,
+            "interface": iface,
+            "firewall_zone": zone,
+            "dhcp_pool": dhcp_pool if isinstance(dhcp_pool, dict) else None,
+            "subnet": iface.get("ipaddr", "192.168.100.1"),
+            "netmask": iface.get("netmask", "255.255.255.0"),
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
