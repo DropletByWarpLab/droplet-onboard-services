@@ -9,6 +9,7 @@ the sensitive text stays server-side (logged).
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -57,6 +58,62 @@ class TestHttpProviderErrorDisclosure:
         assert "sk-LEAKED" not in detail
         assert "Upstream provider error" in detail
         assert "ref:" in detail
+
+    async def test_chat_releases_slot_on_cancelled_error(self):
+        """GW-06 finding 1: CancelledError (a BaseException) out of the awaited
+        chat() must still release the scheduler slot — pre-fix the bare
+        `except Exception` missed it and the gateway deadlocked at
+        max_concurrent=1."""
+        from schemas import ChatRequest
+        from scheduler import InferenceScheduler
+
+        sched = InferenceScheduler(max_concurrent=1)
+        await sched.start()
+        main.inference_scheduler = sched
+        req = ChatRequest(
+            model="llama3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=False,
+        )
+        try:
+            with patch.object(main, "provider_router") as pr:
+                pr.chat = AsyncMock(side_effect=asyncio.CancelledError())
+                with pytest.raises(asyncio.CancelledError):
+                    await main.chat(req, x_request_priority=0)
+            # Slot released (back to 0), not leaked.
+            assert sched.active_requests == 0
+        finally:
+            await sched.stop()
+
+    async def test_chat_uses_provider_error_detail(self):
+        """GW-08 regression guard: a provider Exception from chat() surfaces as
+        a 502 carrying only the opaque correlation-id'd detail — never the raw
+        upstream text."""
+        from fastapi import HTTPException
+        from schemas import ChatRequest
+        from scheduler import InferenceScheduler
+
+        sched = InferenceScheduler(max_concurrent=1)
+        await sched.start()
+        main.inference_scheduler = sched
+        req = ChatRequest(
+            model="llama3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=False,
+        )
+        try:
+            with patch.object(main, "provider_router") as pr:
+                pr.chat = AsyncMock(side_effect=RuntimeError(_SECRET))
+                with pytest.raises(HTTPException) as ei:
+                    await main.chat(req, x_request_priority=0)
+            assert ei.value.status_code == 502
+            assert _SECRET not in str(ei.value.detail)
+            assert "sk-LEAKED" not in str(ei.value.detail)
+            assert "Upstream provider error" in str(ei.value.detail)
+            # The error path also releases the slot.
+            assert sched.active_requests == 0
+        finally:
+            await sched.stop()
 
     async def test_session_chat_does_not_leak_provider_error(
         self, client_with_sessions

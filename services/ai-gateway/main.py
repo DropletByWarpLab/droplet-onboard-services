@@ -243,22 +243,59 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             headers={"Retry-After": str(e.retry_after)},
         )
 
+    # The scheduler slot is now held. It MUST stay held until the work is
+    # actually done — and for a streaming response the work isn't done when
+    # provider_router.chat() returns (it hands back an async generator that
+    # hasn't touched the model yet). Releasing here would let the scheduler
+    # admit the next request while N streams are still flowing against the
+    # model, defeating max_concurrent for streaming (GW-06). So:
+    #   - non-streaming: release as soon as chat() returns (work is complete).
+    #   - streaming: hand the slot's release to a wrapper that fires it when
+    #     the generator is exhausted OR closed (client disconnect / error /
+    #     GC). Exactly one release per acquired slot, in both paths.
+    released = False
+
+    async def _release_once() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            await inference_scheduler.release()
+
     try:
         result = await provider_router.chat(request)
     except ValueError as e:
+        await _release_once()
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        # GW-08: don't echo the upstream/LiteLLM error text to the client.
-        raise HTTPException(
-            status_code=502, detail=_provider_error_detail(e, "Chat error")
-        )
-    finally:
-        await inference_scheduler.release()
+    except BaseException as e:
+        # GW-06: release the held slot on ANY exit from the awaited chat() —
+        # including asyncio.CancelledError (a BaseException, raised when the
+        # client disconnects mid-await), which a bare `except Exception` would
+        # miss, leaking the slot and eventually deadlocking the scheduler at
+        # max_concurrent=1. _release_once is idempotent. There is deliberately
+        # NO `finally` here: on the streaming SUCCESS path the slot must stay
+        # held until the stream drains (released by _slot_held_stream below),
+        # so a finally would free it too early.
+        await _release_once()
+        if isinstance(e, Exception):
+            # GW-08: don't echo upstream/LiteLLM error text to the client.
+            raise HTTPException(
+                status_code=502, detail=_provider_error_detail(e, "Chat error")
+            )
+        raise  # re-raise CancelledError / KeyboardInterrupt after releasing
 
-    # Streaming response
+    # Streaming response — hold the slot for the lifetime of the stream.
     if request.stream:
+        async def _slot_held_stream():
+            try:
+                async for chunk in result:
+                    yield chunk
+            finally:
+                # Fires when the generator is exhausted, or when Starlette
+                # calls aclose() on client disconnect / mid-stream error.
+                await _release_once()
+
         return StreamingResponse(
-            result,
+            _slot_held_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -267,7 +304,8 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             },
         )
 
-    # Non-streaming response
+    # Non-streaming response — work is complete, release the slot now.
+    await _release_once()
     return result
 
 
