@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   __setRedisForTesting,
+  cacheSetNx,
   invalidatePrefix,
   withSwrCache,
 } from "./cache.service.js";
@@ -40,8 +41,17 @@ function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" } = {}) {
         v: string,
         _mode?: string,
         ttl?: number,
+        nx?: string,
       ) => {
         if (opts.errorOn === "set") throw new Error("boom-set");
+        // Honor `SET … NX`: when the key already exists, redis replies null
+        // and does not overwrite. This is what makes cacheSetNx atomic.
+        if (nx === "NX") {
+          const existing = store.get(k);
+          const live =
+            existing && (!existing.expiresAt || Date.now() <= existing.expiresAt);
+          if (live) return null;
+        }
         store.set(k, {
           value: v,
           expiresAt: ttl ? Date.now() + ttl * 1000 : 0,
@@ -163,6 +173,56 @@ describe("cache.service (WARP-90)", () => {
       const value2 = await withSwrCache("k", 5, producer);
       expect(value2).toEqual({ ok: true });
       expect(producer).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("cacheSetNx (ORCH-03 atomic claim)", () => {
+    it("grants the claim once and refuses every subsequent claim on the same key", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      const first = await cacheSetNx("jwt:rotate:tok", true, 30);
+      const second = await cacheSetNx("jwt:rotate:tok", true, 30);
+      const third = await cacheSetNx("jwt:rotate:tok", true, 30);
+
+      expect(first).toBe(true);
+      expect(second).toBe(false);
+      expect(third).toBe(false);
+      // Issued as a single SET … EX … NX round-trip (atomic), not GET+SET.
+      expect(fake.set).toHaveBeenCalledWith(
+        "jwt:rotate:tok",
+        JSON.stringify(true),
+        "EX",
+        30,
+        "NX",
+      );
+    });
+
+    it("lets exactly ONE of many concurrent claims win the same token (TOCTOU proof)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      // Fire 12 claims for the same key concurrently. With a non-atomic
+      // GET-then-SET, several would observe "absent" and all win; the atomic
+      // NX write guarantees a single winner — the property ORCH-03 requires.
+      const results = await Promise.all(
+        Array.from({ length: 12 }, () =>
+          cacheSetNx("jwt:rotate:concurrent", true, 30),
+        ),
+      );
+      expect(results.filter((r) => r === true)).toHaveLength(1);
+      expect(results.filter((r) => r === false)).toHaveLength(11);
+    });
+
+    it("returns false (fail-closed) on a Redis SET error", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis({ errorOn: "set" });
+      __setRedisForTesting(fake as any);
+
+      const won = await cacheSetNx("jwt:rotate:err", true, 30);
+      expect(won).toBe(false);
     });
   });
 

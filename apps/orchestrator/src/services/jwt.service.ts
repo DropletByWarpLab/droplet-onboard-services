@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { config } from "../config.js";
-import { cacheGet, cacheSet } from "./cache.service.js";
+import { cacheGet, cacheSet, cacheSetNx } from "./cache.service.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
@@ -221,20 +221,24 @@ export async function denyRefreshToken(token: string): Promise<void> {
  * Prevents concurrent /auth/refresh calls (e.g. a browser double-submit on
  * flaky networks) from both issuing new token pairs.
  *
- * Implementation: writes a short-TTL entry into the same denylist namespace
- * so subsequent `verifyRefreshToken` calls treat the token as revoked. The
- * caller that wins the claim should still call `denyRefreshToken` to write
- * the full-lifetime entry, ensuring the rotated token stays revoked past
- * this short TTL.
+ * Implementation: a single atomic `SET key … NX EX 30` into the same denylist
+ * namespace so subsequent `verifyRefreshToken` calls treat the token as
+ * revoked. The atomic NX write is what makes the claim race-safe — a previous
+ * non-atomic GET-then-SET let two concurrent /auth/refresh calls both observe
+ * "absent" and both win, forking the token into two live session lineages
+ * (ORCH-03). The caller that wins the claim should still call
+ * `denyRefreshToken` to write the full-lifetime entry, ensuring the rotated
+ * token stays revoked past this short TTL.
+ *
+ * Fails CLOSED: `cacheSetNx` returns false on any Redis error, so a Redis
+ * outage rejects the rotation rather than allowing unbounded concurrent
+ * rotation of the same token.
  */
 export async function claimRefreshRotation(token: string): Promise<boolean> {
   const key = REFRESH_DENYLIST_PREFIX + tokenHash(token);
-  const existing = await cacheGet<boolean>(key);
-  if (existing) return false;
   // 30s is long enough to cover the in-flight refresh call; denyRefreshToken
   // will overwrite this with the full remaining token lifetime.
-  await cacheSet(key, true, 30);
-  return true;
+  return cacheSetNx(key, true, 30);
 }
 
 /**
