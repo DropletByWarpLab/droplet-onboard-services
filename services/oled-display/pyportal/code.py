@@ -29,11 +29,15 @@ Lifecycle screens (WARP-624) — modal, not in the swipe carousel:
             live UI once it's ready (or after its readiness timeout).
   shutdown  Dimmed mark + "Shutting down" + optional reason; phase=="halted"
             shows "Safe to power off". Pushed by the host's systemd ExecStop.
+  claim     Onboarding claim screen (WARP-632): big centered claim code + the
+            setup URL. Host-driven by the orchestrator while the box is
+            unclaimed; cleared (host navigates away) once claimed.
 
 Host → display (one JSON per line, unchanged for back-compat)
   {"mode":"idle"|"stats"|"qr"|"logo"|"home"}    # logo/home map to idle/stats
   {"mode":"boot",   "data":{stage,detail,pct}}     # pct optional (indeterminate)
   {"mode":"shutdown","data":{reason,phase}}        # phase: stopping|halted
+  {"mode":"claim",  "data":{code, setup_url}}       # onboarding claim code
   {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now}}
   {"mode":"wifi",   "data":{networks, connected_to, adapter, state, ssid,
                              clients, channel, band, key_ttl_seconds}}
@@ -383,7 +387,9 @@ SCREENS = ("stats", "qr")
 # still believes it's showing the boot splash). They aren't in SCREENS, so
 # swipe is already a no-op on them. NB: "message" is intentionally NOT here —
 # it keeps its existing behaviour of dropping back to idle after the timeout.
-LIFECYCLE_SCREENS = ("boot", "shutdown")
+# "claim" (WARP-632) IS modal: while the box is unclaimed the host wants the
+# code on the lid continuously, so it must not self-drop to idle either.
+LIFECYCLE_SCREENS = ("boot", "shutdown", "claim")
 IDLE_TIMEOUT_S = 30.0
 # Brightness holds steady at 70 % whether the logo screensaver is up or a
 # live screen is — the panel is already pretty dim at 70 %, dropping it
@@ -419,6 +425,8 @@ state = {
     # Lifecycle screens (WARP-624). Modal — not in the SCREENS carousel.
     "boot": {"stage": "Starting up", "detail": "", "pct": None},
     "shutdown": {"reason": "", "phase": "stopping"},
+    # Onboarding claim screen (WARP-632). Modal, host-driven.
+    "claim": {"code": "", "setup_url": ""},
     # Rolling sparkline history for the gauges. Each list is a ring buffer
     # capped at _SPARK_LEN; _record_sparks appends on every stats push.
     "sparks": {"cpu": [], "mem": [], "disk": [], "temp": []},
@@ -1324,6 +1332,57 @@ def render_shutdown():
     board.DISPLAY.root_group = g
 
 
+def render_claim():
+    """Onboarding claim screen (WARP-632): the claim code is the hero — large,
+    centered, on a raised card — with a short instruction and the setup URL.
+    Mirrors host display.py render_claim(). Modal + host-driven (not in the
+    SCREENS carousel); the host navigates away once the box is claimed.
+    """
+    global touch_regions
+    touch_regions = []
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+
+    claim = state.get("claim") or {}
+    code = str(claim.get("code") or "").strip()
+    setup_url = str(claim.get("setup_url") or "").strip()
+
+    # Brand mark up top (smaller than boot so the code owns the middle band).
+    mark_size = 56
+    mark_x = (DISPLAY_W - int(mark_size * 52 / 60)) // 2
+    mark_y = 18
+    _mark_poly(g, mark_size, mark_x, mark_y)
+
+    # Title + instruction.
+    g.append(_text("Claim your Droplet", x=DISPLAY_W // 2, y=mark_y + mark_size + 12,
+                   scale=2, color=TEXT, anchor=(0.5, 0.5)))
+    g.append(_text("Enter this code to finish setup",
+                   x=DISPLAY_W // 2, y=mark_y + mark_size + 34,
+                   scale=1, color=LABEL_2, anchor=(0.5, 0.5)))
+
+    # The CODE — hero on a raised card with an accent border. terminalio
+    # scale=4 is ~24 px/char; size the card from the string length so it never
+    # overflows the panel (cap at the display width minus a margin).
+    code_text = code or "----  ----"
+    code_scale = 4
+    char_w = 6 * code_scale  # terminalio glyph cell width at this scale
+    code_px = len(code_text) * char_w
+    card_w = min(DISPLAY_W - 24, code_px + 48)
+    card_h = 64
+    card_x = (DISPLAY_W - card_w) // 2
+    card_y = mark_y + mark_size + 52
+    _rounded_rect(g, card_x, card_y, card_w, card_h, 12, SURFACE_2)
+    g.append(_text(code_text, x=DISPLAY_W // 2, y=card_y + card_h // 2,
+                   scale=code_scale, color=ACCENT_LIGHT, anchor=(0.5, 0.5)))
+
+    # Setup URL at the foot — where to point the phone.
+    if setup_url:
+        g.append(_text(setup_url[:40], x=DISPLAY_W // 2, y=DISPLAY_H - 22,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
+
+    board.DISPLAY.root_group = g
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -1335,6 +1394,7 @@ RENDERERS = {
     "message":  render_message,
     "boot":     render_boot,
     "shutdown": render_shutdown,
+    "claim":    render_claim,
 }
 
 # Back-compat aliases so the old bridge's bare-mode pushes still route.
@@ -1544,6 +1604,12 @@ def handle(msg):
             if k in data:
                 state["shutdown"][k] = data[k]
         set_screen("shutdown")
+    elif mode == "claim":
+        # WARP-632: merge so a partial push (e.g. just the code) keeps the URL.
+        for k in ("code", "setup_url"):
+            if k in data:
+                state["claim"][k] = data[k]
+        set_screen("claim")
     elif mode == "brightness":
         set_brightness(msg.get("value", ACTIVE_BRIGHTNESS))
     elif mode == "ping":
