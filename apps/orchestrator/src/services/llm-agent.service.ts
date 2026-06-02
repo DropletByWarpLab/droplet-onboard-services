@@ -353,6 +353,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       parameters: t.inputSchema as Record<string, unknown>,
     },
   }));
+  // WARP-642 — the exact set of tool names the model was advertised this
+  // turn. Used to catch hallucinated tool names (e.g. gpt-oss:20b inventing
+  // `knowledge_base_search` instead of the real `search_content`) BEFORE we
+  // dispatch them to the MCP child. The MCP server already rejects unknown
+  // names with `{"error":"Unknown tool: X"}`, but that envelope never tells
+  // the model which names ARE valid, so it tends to guess a second wrong
+  // name rather than self-correct (the knowledge-retrieval failure mode in
+  // WARP-642). We intercept here and feed back an error that LISTS the
+  // available tools so the model can recover within the same loop, on the
+  // remaining iterations, without a round-trip to the MCP child.
+  const advertisedNames = new Set(tools.map((t) => t.function.name));
+  const availableToolList = tools.map((t) => t.function.name).join(", ");
 
   for (let iter = 0; iter < maxIter; iter++) {
     const gw = await deps.aiGateway.chat({
@@ -433,6 +445,51 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     for (const call of asst.tool_calls) {
       const args = safeParseArgs(call);
       emit({ type: "tool_call", id: call.id, name: call.function.name, args });
+
+      // WARP-642 — hallucinated-tool guard. If the model named a tool that
+      // was NOT advertised this turn, don't round-trip it to the MCP child
+      // (which would answer with a bare "Unknown tool: X" that gives the
+      // model no recovery signal). Instead, feed back an error that lists
+      // the valid tool names so the model can re-issue the correct call on
+      // a later iteration. This is what lets a model that guessed
+      // `knowledge_base_search` self-correct to `search_content` instead of
+      // wandering to a second unrelated tool. `tool_choice="none"` already
+      // sends zero tools, so this branch never fires on greeting-style
+      // turns (the model is given nothing to mis-name).
+      if (!advertisedNames.has(call.function.name)) {
+        const guardError = {
+          status: "error" as const,
+          error: {
+            code: "UNKNOWN_TOOL",
+            message:
+              `Unknown tool: '${call.function.name}'. ` +
+              (availableToolList
+                ? `Call one of the available tools instead: ${availableToolList}.`
+                : "No tools are available for this request."),
+          },
+        };
+        const guardText = JSON.stringify(guardError);
+        trace.push({
+          tool_call_id: call.id,
+          tool: call.function.name,
+          args,
+          result: guardError,
+        });
+        emit({
+          type: "tool_result",
+          id: call.id,
+          ok: false,
+          data: guardError,
+        });
+        // Feed the same envelope back to the model as the tool's reply so
+        // the next iteration sees the valid-tool list and can self-correct.
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: guardText,
+        });
+        continue;
+      }
 
       // WARP-437 — adaptive routing. For `search_content` calls we
       // classify the query, derive a per-class preset, pre-compute any

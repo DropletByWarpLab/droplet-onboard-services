@@ -203,6 +203,125 @@ describe("runAgent", () => {
     if (done && done.type === "done") expect(done.stop_reason).toBe("error");
   });
 
+  // WARP-642 — hallucinated tool-name guard. When the model invents a
+  // tool name that wasn't advertised (e.g. gpt-oss:20b guessing
+  // `knowledge_base_search` instead of the real `search_content`), the
+  // agent loop must NOT round-trip it to the MCP child. Instead it feeds
+  // back an UNKNOWN_TOOL error that lists the available tools so the model
+  // can self-correct on the next iteration.
+  it("intercepts an unadvertised tool name and feeds back the valid-tool list", async () => {
+    const callTool = vi.fn().mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ data: { results: [] } }) }],
+      isError: false,
+    });
+    const chat = vi
+      .fn()
+      // 1st turn: model hallucinates `knowledge_base_search`.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c-bad",
+                    type: "function",
+                    function: {
+                      name: "knowledge_base_search",
+                      arguments: JSON.stringify({ query: "vacation policy" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      // 2nd turn: model self-corrects to the real `search_content`.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c-good",
+                    type: "function",
+                    function: {
+                      name: "search_content",
+                      arguments: JSON.stringify({ query: "vacation policy" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      // 3rd turn: model answers.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "Here is what I found." } }],
+        }),
+      });
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          {
+            name: "search_content",
+            description: "Hybrid search over docs + brain items.",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" } },
+            },
+          },
+        ]),
+        callTool,
+      } as never,
+      aiGateway: { chat } as never,
+      onEvent: (e: SSEEvent) => events.push(e),
+    };
+    const result = await runAgent(deps, {
+      model: "ollama/gpt-oss:20b",
+      messages: [{ role: "user", content: "search the knowledge base for vacation policy" }],
+    });
+
+    // The hallucinated name was NEVER dispatched to the MCP child; only the
+    // corrected `search_content` call reached it.
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(callTool.mock.calls[0][0]).toBe("search_content");
+
+    // A tool_result with ok=false was emitted for the bad call, carrying the
+    // UNKNOWN_TOOL code and the valid-tool list so the model can recover.
+    const badResult = events.find(
+      (e) => e.type === "tool_result" && e.id === "c-bad",
+    );
+    expect(badResult).toBeDefined();
+    if (badResult && badResult.type === "tool_result") {
+      expect(badResult.ok).toBe(false);
+      const data = badResult.data as { error?: { code?: string; message?: string } };
+      expect(data.error?.code).toBe("UNKNOWN_TOOL");
+      expect(data.error?.message).toContain("search_content");
+    }
+
+    // The guard message was fed back as a role="tool" reply so the model
+    // saw the valid-tool list on its next turn — the trace records the bad
+    // call too, then the real one.
+    expect(result.stop_reason).toBe("model_done");
+    expect(result.trace.map((t) => t.tool)).toEqual([
+      "knowledge_base_search",
+      "search_content",
+    ]);
+  });
+
   // WARP-104 reviewer follow-up: verify the per-call session context
   // (ncToken) is plumbed verbatim through every callTool invocation.
   it("forwards req.toolCallContext to mcp.callTool on every dispatch", async () => {
