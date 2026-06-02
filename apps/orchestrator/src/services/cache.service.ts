@@ -70,6 +70,41 @@ export async function cacheSet(
   }
 }
 
+/**
+ * Atomic set-if-not-exists. Writes `value` only when `key` does not already
+ * exist, with a TTL, in a single Redis round-trip (`SET … NX EX`). Returns
+ * `true` when the caller created the key (won the race), `false` when the key
+ * already existed (lost the race).
+ *
+ * Unlike `cacheGet`/`cacheSet`, this is a correctness primitive, not an
+ * optimization: it backs the refresh-token rotation claim (jwt.service), where
+ * a non-atomic check-then-set lets two concurrent callers both "win". For that
+ * reason it fails CLOSED — any Redis error (or a missing client) returns
+ * `false` (claim not granted) rather than silently succeeding. A caller that
+ * gets `false` must reject the operation it was guarding.
+ */
+export async function cacheSetNx(
+  key: string,
+  value: unknown,
+  ttlSeconds: number = 60,
+): Promise<boolean> {
+  try {
+    const reply = await getRedis().set(
+      key,
+      JSON.stringify(value),
+      "EX",
+      ttlSeconds,
+      "NX",
+    );
+    // ioredis returns "OK" when the key was set, null when NX prevented it.
+    return reply === "OK";
+  } catch {
+    // Fail closed: a security primitive must not grant the claim on a Redis
+    // outage. Returning false makes the guarded caller reject.
+    return false;
+  }
+}
+
 export async function cacheDel(key: string): Promise<void> {
   try {
     await getRedis().del(key);
