@@ -1587,7 +1587,7 @@ export function createProtectedAuthRouter(
           res.status(400).json({ error: "Password does not meet policy requirements", code: "WEAK_PASSWORD" });
           return;
         }
-        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST", details: parsed.error.flatten() });
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
@@ -1626,6 +1626,13 @@ export function createProtectedAuthRouter(
       // taken.
       const username = await deriveUniqueUserId(prisma, email);
 
+      // ADR-013: the directory is the auth source of truth. Hash the
+      // plaintext BEFORE the upsert so the stored row carries an
+      // argon2id PHC string, never the plaintext. Without this, the
+      // login route (which checks passwordHash for null / DEACTIVATED)
+      // would unconditionally deny the newly-created user.
+      const passwordHash = await hashPassword(password);
+
       // Romain PR #279 round 2: idempotent upsert FIRST, ncCreateUser
       // SECOND. Without this ordering, a transient failure between
       // the two writes produces a misleading 409 on retry:
@@ -1654,12 +1661,17 @@ export function createProtectedAuthRouter(
       // purge via the standard delete-user flow.
       await prisma.user.upsert({
         where: { nextcloudUsername: username },
-        update: { displayName: displayName || username },
+        update: {
+          displayName: displayName || username,
+          email,
+          passwordHash,
+        },
         create: {
           username,
           displayName: displayName || username,
           email,
           nextcloudUsername: username,
+          passwordHash,
           role: "family" as any,
         },
       });

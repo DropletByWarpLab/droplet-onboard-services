@@ -80,6 +80,13 @@ vi.mock("../services/jwt.service.js", async () => {
   };
 });
 
+const hashPassword = vi.fn(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
+vi.mock("../services/password.service.js", () => ({
+  hashPassword: (...args: unknown[]) => hashPassword(...(args as [string])),
+  verifyPassword: vi.fn().mockResolvedValue(true),
+  verifyDummyPassword: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
@@ -152,6 +159,9 @@ beforeEach(() => {
   // Reset ncCreateUser to the default success implementation so a
   // mockRejectedValue set in one test doesn't bleed into the next.
   (nc.ncCreateUser as any).mockResolvedValue(undefined);
+  // Reset hashPassword to the default fixed argon2id PHC string so a
+  // per-test override doesn't bleed into subsequent tests.
+  hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
 });
 
 describe("POST /api/auth/users — email-based user creation with derived userid", () => {
@@ -266,5 +276,19 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       .send({ email: "admin-created@warp.test", password: "Admin-secret123" });
 
     expect(res.status).toBe(201);
+  });
+
+  it("writes the argon2id passwordHash so the user can log in (never the plaintext)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({ email: "kid@warp.test", password: "Kid-secret123" });
+
+    expect(res.status).toBe(201);
+    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    expect(row.passwordHash).toMatch(/^\$argon2id\$/);
+    expect(JSON.stringify(row)).not.toContain("Kid-secret123");
   });
 });
