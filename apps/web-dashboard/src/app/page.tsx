@@ -550,13 +550,13 @@ function KpiStrip({
           icon: Users,
           label: "People",
           value: "—",
-          hint: "Multi-user lands in Phase 3",
+          hint: "Multi-user access coming soon",
         },
         {
           icon: Activity,
           label: "Admin actions",
           value: "—",
-          hint: "audit feed lands in Phase 3",
+          hint: "Audit feed coming soon",
         },
         {
           icon: HardDrive,
@@ -807,9 +807,8 @@ function RecentActivityCard() {
         </Link>
       </div>
       <p className="type-footnote text-label-tertiary italic">
-        Activity feed lands in Phase 2 once the orchestrator audit-log
-        endpoint goes live. For now you can view AI tool calls in the
-        Activity page.
+        Your activity history will appear here soon. For now you can view
+        AI tool calls in the Activity page.
       </p>
     </section>
   );
@@ -915,7 +914,7 @@ function PlanTileCard() {
         </Link>
       </div>
       <p className="type-footnote text-label-tertiary italic">
-        Lease detail + storage upgrade + payment management land in Phase 3.
+        Plan details, storage upgrades, and payment management are coming soon.
       </p>
     </section>
   );
@@ -995,7 +994,7 @@ function SecurityPostureCard() {
           icon={UserPlus}
           label="Invite key rotation"
           state="neutral"
-          detail="Manual — automation lands in Phase 3"
+          detail="Rotated manually — automated rotation coming soon"
         />
       </ul>
     </section>
