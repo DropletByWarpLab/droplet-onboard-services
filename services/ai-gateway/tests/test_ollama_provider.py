@@ -10,7 +10,12 @@ import httpx
 import pytest
 import respx
 
-from providers.ollama_local import OllamaLocalProvider, _LimitsCache, prettify_ollama_name
+from providers.ollama_local import (
+    _MAX_CONNECTIONS,
+    OllamaLocalProvider,
+    _LimitsCache,
+    prettify_ollama_name,
+)
 from schemas import ChatMessage, ToolDefinition, ToolFunction
 
 
@@ -78,6 +83,38 @@ async def provider():
     p = OllamaLocalProvider(base_url=TEST_BASE_URL)
     yield p
     await p.close()
+
+
+# ---------------------------------------------------------------------------
+# Connection pool sizing (GW-13)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionPoolSizing:
+    """The httpx pool must NOT be pinned to construction-time num_parallel (1).
+
+    GW-13: the pool used to be built with max_connections=num_parallel, which is
+    1 before the first /health refresh. A later scale-up resized the in-flight
+    semaphore but left the pool serializing every chat through one connection.
+    The pool is now sized to a generous fixed cap; the semaphore is the real
+    concurrency gate.
+    """
+
+    @staticmethod
+    def _pool_max_connections(provider: OllamaLocalProvider) -> int | None:
+        # httpx AsyncClient → AsyncHTTPTransport → httpcore AsyncConnectionPool.
+        pool = provider.client._transport._pool  # type: ignore[attr-defined]
+        return getattr(pool, "_max_connections", None)
+
+    async def test_pool_not_pinned_to_num_parallel(self):
+        provider = OllamaLocalProvider(base_url="http://test-ollama:11434")
+        try:
+            # num_parallel starts at 1; the pool must be larger than that.
+            assert provider._limits.num_parallel == 1
+            assert self._pool_max_connections(provider) == _MAX_CONNECTIONS
+            assert _MAX_CONNECTIONS > 1
+        finally:
+            await provider.close()
 
 
 # ---------------------------------------------------------------------------
