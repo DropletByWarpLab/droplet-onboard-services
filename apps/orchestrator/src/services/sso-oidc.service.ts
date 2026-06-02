@@ -151,6 +151,18 @@ export interface ValidatedIdentity {
   /** Email claim, RAW (the route normalizes via #374 trim+lowercase). May
    *  be undefined if the IdP didn't return one. */
   email?: string;
+  /**
+   * ORCH-01 — the OIDC `email_verified` claim, normalized to a strict
+   * boolean. TRUE only when the IdP asserts the address belongs to the
+   * bearer; FALSE when the claim is absent, false, or any non-affirmative
+   * value. Account-linking by email (ensureLinkedUser) MUST gate on this:
+   * `entra`/`okta` let a user present an arbitrary, unverified `email`
+   * profile claim, so linking an unverified email to an existing local row
+   * is an account-takeover vector. The cryptographic ID-token checks prove
+   * the token is authentic; they do NOT prove the email belongs to the
+   * caller — only `email_verified` does.
+   */
+  emailVerified: boolean;
   /** Display name claim, if present. */
   name?: string;
 }
@@ -198,5 +210,14 @@ export async function exchangeCodeAndValidate(
   const email = typeof claims?.email === "string" ? claims.email : undefined;
   const name = typeof claims?.name === "string" ? claims.name : undefined;
 
-  return { sub, email, name };
+  // ORCH-01 — normalize `email_verified` to a STRICT boolean. The OIDC core
+  // spec types it as a boolean, but some IdPs serialize it as the string
+  // "true"/"false"; accept either spelling of an affirmative, treat anything
+  // else (absent, false, "false", null, 0, …) as NOT verified. Fail closed:
+  // an unknown shape is unverified.
+  const rawVerified = (claims as { email_verified?: unknown } | undefined)
+    ?.email_verified;
+  const emailVerified = rawVerified === true || rawVerified === "true";
+
+  return { sub, email, emailVerified, name };
 }
