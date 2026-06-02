@@ -28,9 +28,12 @@ the EXISTING `Role` enum (`owner|admin|family|guest|service`), not the
 ## Okta SSO (reuses #378)
 
 `DROPLET_SSO_OKTA_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` in `config.ts`.
-All four set → the Okta button on the Aurora login goes live
-(`ONB_SSO_PROVIDERS_LIVE.okta = true`); otherwise it stays the disabled "Soon"
-pill (no dead button). Account-link by normalized email, preserving `User.id`
+All four set → the Okta button shows on the Aurora login; otherwise it is not
+rendered at all (no dead button, no "Soon" pill). Which buttons appear is
+decided at runtime from what the box has configured — the login reads
+`GET /api/sso/oidc/providers` (WARP-629,
+[`ONBOARDING_SSO_RUNTIME_DISCOVERY.md`](ONBOARDING_SSO_RUNTIME_DISCOVERY.md)),
+not a build-time flag. Account-link by normalized email, preserving `User.id`
 (identical policy to Google/Entra). Issuer-derived — no host hardcoded.
 
 ## SCIM 2.0 server (`/scim/v2/*`)

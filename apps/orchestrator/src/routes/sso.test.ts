@@ -44,6 +44,10 @@ vi.mock("../config.js", () => ({
 const buildAuthorizeRequest = vi.fn();
 const exchangeCodeAndValidate = vi.fn();
 const getOidcProviderConfig = vi.fn();
+// WARP-629: the public discovery route reads which providers are configured
+// from this service function. Mocked here so the test drives the env-derived
+// answer directly (the env→config plumbing is the service's own unit concern).
+const enabledSsoProviders = vi.fn();
 vi.mock("../services/sso-oidc.service.js", async () => {
   const actual = await vi.importActual<typeof import("../services/sso-oidc.service.js")>(
     "../services/sso-oidc.service.js",
@@ -53,6 +57,7 @@ vi.mock("../services/sso-oidc.service.js", async () => {
     buildAuthorizeRequest: (...a: unknown[]) => buildAuthorizeRequest(...a),
     exchangeCodeAndValidate: (...a: unknown[]) => exchangeCodeAndValidate(...a),
     getOidcProviderConfig: (...a: unknown[]) => getOidcProviderConfig(...a),
+    enabledSsoProviders: (...a: unknown[]) => enabledSsoProviders(...a),
   };
 });
 
@@ -221,6 +226,8 @@ beforeEach(() => {
     expiresAt: new Date(Date.now() + 600_000),
     createdAt: new Date(),
   }));
+  // WARP-629: discovery defaults to "nothing configured" unless a test sets it.
+  enabledSsoProviders.mockReturnValue([]);
 });
 
 describe("POST /api/sso/oidc/authorize", () => {
@@ -288,6 +295,67 @@ describe("POST /api/sso/oidc/authorize", () => {
       .send({ provider: "google" });
     expect(res.status).toBe(400);
     expect(buildAuthorizeRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/sso/oidc/providers — runtime discovery (WARP-629)", () => {
+  it("returns { providers: [] } when no provider is configured", async () => {
+    enabledSsoProviders.mockReturnValue([]);
+    const res = await request(buildApp(createPrismaMock())).get("/api/sso/oidc/providers");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ providers: [] });
+  });
+
+  it("returns only the fully-configured providers (google) ", async () => {
+    enabledSsoProviders.mockReturnValue(["google"]);
+    const res = await request(buildApp(createPrismaMock())).get("/api/sso/oidc/providers");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ providers: ["google"] });
+    // entra/okta are NOT advertised when their env is absent.
+    expect(res.body.providers).not.toContain("entra");
+    expect(res.body.providers).not.toContain("okta");
+  });
+
+  it("sets Cache-Control: no-store so an operator's .env edit isn't served stale", async () => {
+    enabledSsoProviders.mockReturnValue(["google"]);
+    const res = await request(buildApp(createPrismaMock())).get("/api/sso/oidc/providers");
+    expect(res.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("resolves WITHOUT an auth cookie (public, pre-session)", async () => {
+    enabledSsoProviders.mockReturnValue([]);
+    // No Cookie header at all — the login page has no session yet.
+    const res = await request(buildApp(createPrismaMock())).get("/api/sso/oidc/providers");
+    expect(res.status).toBe(200);
+  });
+
+  it("answers even when prisma is NOT wired (discovery reads env, not the DB)", async () => {
+    enabledSsoProviders.mockReturnValue(["google"]);
+    const app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    // createSsoRouter() with no prisma — authorize/callback 500, discovery must not.
+    app.use("/api", createSsoRouter());
+    const res = await request(app).get("/api/sso/oidc/providers");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ providers: ["google"] });
+  });
+
+  it("payload carries only provider IDs — never an issuer / client-id / secret / redirect", async () => {
+    enabledSsoProviders.mockReturnValue(["google"]);
+    const res = await request(buildApp(createPrismaMock())).get("/api/sso/oidc/providers");
+    const body = JSON.stringify(res.body);
+    // The shape is exactly { providers: string[] } — no config object leaks.
+    expect(Object.keys(res.body)).toEqual(["providers"]);
+    for (const p of res.body.providers) {
+      expect(typeof p).toBe("string");
+    }
+    // Defensive substring sweep against the default mock-config secret material.
+    expect(body).not.toContain("client_secret");
+    expect(body).not.toContain("clientSecret");
+    expect(body).not.toContain("issuer");
+    expect(body).not.toContain("accounts.google.com");
+    expect(body).not.toContain("redirect");
   });
 });
 

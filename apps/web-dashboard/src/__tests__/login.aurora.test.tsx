@@ -11,6 +11,15 @@ const setUserMock = vi.fn();
 const pushMock = vi.fn();
 let searchString = "";
 
+// WARP-629: the login page discovers configured SSO providers at runtime via
+// this helper (GET /api/sso/oidc/providers). Mock it so each test controls the
+// advertised set without standing up a network/IdP. Default: nothing
+// configured (a password-only appliance) — tests override per case.
+const getEnabledSsoProvidersMock = vi.fn<[], Promise<string[]>>();
+vi.mock("@/lib/api", () => ({
+  getEnabledSsoProviders: () => getEnabledSsoProvidersMock(),
+}));
+
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ login: loginMock, setUserFromPasskey: setUserMock }),
 }));
@@ -42,6 +51,9 @@ describe("Aurora LoginPage", () => {
   beforeEach(() => {
     loginMock.mockReset();
     pushMock.mockReset();
+    getEnabledSsoProvidersMock.mockReset();
+    // Default: no SSO configured. Discovery-specific tests override this.
+    getEnabledSsoProvidersMock.mockResolvedValue([]);
     searchString = "";
   });
 
@@ -56,26 +68,73 @@ describe("Aurora LoginPage", () => {
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
   });
 
-  it("renders the SSO providers as LIVE and passkey as disabled until its backend ships", () => {
-    // ADR-013: Google + Entra went live in #378; Okta in #379 (this branch).
-    // All three are enabled form-POST buttons now; passkey stays disabled
-    // until WebAuthn ships (ONB_AUTH_FLAGS.passkey === false).
+  // WARP-629: SSO buttons are RUNTIME-DISCOVERED. An appliance that has
+  // configured Google (and only Google) shows a single live Google button —
+  // no Microsoft/Okta, no "Soon" pill.
+  it("renders only the discovered SSO providers (google) as live buttons", async () => {
+    getEnabledSsoProvidersMock.mockResolvedValue(["google"]);
     render(<LoginPage />);
+
+    const google = await screen.findByRole("button", {
+      name: /continue with google/i,
+    });
+    expect(google).toBeEnabled();
     expect(
-      screen.getByRole("button", { name: /continue with google/i }),
-    ).toBeEnabled();
+      screen.queryByRole("button", { name: /continue with microsoft/i }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /continue with microsoft/i }),
-    ).toBeEnabled();
+      screen.queryByRole("button", { name: /continue with okta/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/soon/i)).not.toBeInTheDocument();
+  });
+
+  // WARP-629: local-first. With nothing configured, the login is password-only
+  // — no SSO buttons and no "OR USE YOUR DIRECTORY ACCOUNT" divider.
+  it("renders no SSO buttons or divider when discovery returns an empty list", async () => {
+    getEnabledSsoProvidersMock.mockResolvedValue([]);
+    render(<LoginPage />);
+
+    // Wait a tick for the discovery effect to settle, then assert absence.
+    await waitFor(() => expect(getEnabledSsoProvidersMock).toHaveBeenCalled());
     expect(
-      screen.getByRole("button", { name: /continue with okta/i }),
-    ).toBeEnabled();
+      screen.queryByRole("button", { name: /continue with/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/or use your directory account/i),
+    ).not.toBeInTheDocument();
+    // Password form is present and usable.
+    expect(screen.getByLabelText("Work email")).toBeInTheDocument();
+  });
+
+  // WARP-629: discovery is purely additive. If it errors/times out, the
+  // email/password form still renders AND submits — SSO never gates login.
+  it("keeps password login working when SSO discovery rejects", async () => {
+    getEnabledSsoProvidersMock.mockRejectedValue(new Error("discovery timed out"));
+    loginMock.mockResolvedValueOnce(undefined);
+    render(<LoginPage />);
+
+    // No SSO buttons surfaced from a failed probe, but the form is fully live.
+    await waitFor(() => expect(getEnabledSsoProvidersMock).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: /continue with/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Work email"), {
+      target: { value: "stefan@acme.co" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Password"), {
+      target: { value: "hunter2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+    await waitFor(() =>
+      expect(loginMock).toHaveBeenCalledWith("stefan@acme.co", "hunter2"),
+    );
+    expect(pushMock).toHaveBeenCalledWith("/");
   });
 
   // PR #377 ships the WebAuthn backend, so the passkey affordance flips from a
   // disabled "Soon" placeholder to the single live "Sign in with a passkey"
-  // action (rendered by SignInForm via onPasskey). All three SSO providers
-  // (Google + Entra from #378, Okta from #379) are live alongside it.
+  // action (rendered by SignInForm via onPasskey).
   it("renders exactly one passkey action and it is enabled", () => {
     render(<LoginPage />);
     const passkeyButtons = screen.getAllByRole("button", { name: /passkey/i });

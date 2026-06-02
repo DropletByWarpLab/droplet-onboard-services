@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { Lock, Mail, Eye, EyeOff, KeyRound, ArrowRight } from "lucide-react";
-import { ONB_AUTH_FLAGS, ONB_SSO_PROVIDERS_LIVE, type OnbSsoProviderId } from "./flags";
+import { ONB_AUTH_FLAGS } from "./flags";
 
 /* ── Brand glyphs (mock marks, not official logos) ───────────────── */
 function GoogleGlyph() {
@@ -35,16 +35,20 @@ function OktaGlyph() {
  * `providerId` is the wire value sent to /api/sso/oidc/authorize and MUST
  * match the orchestrator's SsoProvider union. Note "Continue with Microsoft"
  * maps to the `entra` provider id (Microsoft Entra is the IdP).
+ *
+ * This is the CANONICAL catalog (and render order): the login renders a subset
+ * of these — exactly the providers runtime discovery reports as configured
+ * (WARP-629) — by filtering this list, so order is always google → entra →
+ * okta regardless of the discovery response order, and an unknown id from the
+ * wire simply has no entry here and is skipped.
  */
-const SSO_PROVIDERS: ReadonlyArray<{
-  providerId: OnbSsoProviderId;
-  label: string;
-  glyph: ReactNode;
-}> = [
+const SSO_PROVIDER_CATALOG = [
   { providerId: "google", label: "Continue with Google", glyph: <GoogleGlyph /> },
   { providerId: "entra", label: "Continue with Microsoft", glyph: <MicrosoftGlyph /> },
   { providerId: "okta", label: "Continue with Okta", glyph: <OktaGlyph /> },
-];
+] as const;
+
+type SsoProviderId = (typeof SSO_PROVIDER_CATALOG)[number]["providerId"];
 
 /** A method whose backend hasn't shipped yet: visible, disabled, no-op. */
 function ComingSoon({
@@ -88,7 +92,7 @@ function SsoProviderButton({
   glyph,
   returnTo,
 }: {
-  providerId: OnbSsoProviderId;
+  providerId: SsoProviderId;
   label: string;
   glyph: ReactNode;
   returnTo?: string;
@@ -118,6 +122,14 @@ export type SignInFormProps = {
   onSubmit: () => void;
   error: string | null;
   submitting: boolean;
+  /**
+   * WARP-629 — the SSO provider IDs this appliance has configured, discovered
+   * at runtime (GET /api/sso/oidc/providers) and passed down by the login page.
+   * The form renders one live button per ID that maps to a known provider, in
+   * canonical order, and nothing for the rest. Empty/absent → no SSO section
+   * and no directory divider (local-first, password-only).
+   */
+  ssoProviders?: readonly string[];
   /** Same-origin path to land on after a successful SSO sign-in (the login
    *  page's `?next=`). Omitted → the orchestrator defaults to "/". */
   returnTo?: string;
@@ -141,41 +153,50 @@ export function SignInForm({
   onSubmit,
   error,
   submitting,
+  ssoProviders = [],
   returnTo,
   onPasskey,
   passkeyBusy = false,
 }: SignInFormProps) {
+  // WARP-629: render exactly the configured providers, in canonical order, by
+  // filtering the catalog against the runtime-discovered set. Filtering the
+  // catalog (not mapping the wire list) gives canonical order for free and
+  // drops any unknown id the wire might carry.
+  const discovered = new Set(ssoProviders);
+  const visibleProviders = SSO_PROVIDER_CATALOG.filter((p) =>
+    discovered.has(p.providerId),
+  );
+
   return (
     <div className="flex flex-col gap-3">
-      {/* SSO — each provider is LIVE once its OIDC backend ships (ADR-013,
-          PR #378: Google + Entra). Providers without a backend yet stay a
-          disabled "Soon" pill rather than a dead button. */}
-      <div className="flex flex-col gap-2">
-        {SSO_PROVIDERS.map((p) =>
-          ONB_AUTH_FLAGS.sso && ONB_SSO_PROVIDERS_LIVE[p.providerId] ? (
-            <SsoProviderButton
-              key={p.providerId}
-              providerId={p.providerId}
-              label={p.label}
-              glyph={p.glyph}
-              returnTo={returnTo}
-            />
-          ) : (
-            <ComingSoon key={p.providerId}>
-              {p.glyph}
-              {p.label}
-            </ComingSoon>
-          ),
-        )}
-      </div>
+      {/* SSO — local-first / SSO-optional (WARP-629). The login shows ONLY the
+          identity providers this appliance has actually configured, discovered
+          at runtime. No configured providers → no SSO section and no directory
+          divider; the password path stands alone. There is no disabled "Soon"
+          pill and no button that can POST to an unconfigured provider. */}
+      {visibleProviders.length > 0 && (
+        <>
+          <div className="flex flex-col gap-2">
+            {visibleProviders.map((p) => (
+              <SsoProviderButton
+                key={p.providerId}
+                providerId={p.providerId}
+                label={p.label}
+                glyph={p.glyph}
+                returnTo={returnTo}
+              />
+            ))}
+          </div>
 
-      <div className="flex items-center gap-3 my-1">
-        <span className="flex-1 h-px bg-separator" />
-        <span className="type-caption-2 text-label-tertiary font-medium">
-          OR USE YOUR DIRECTORY ACCOUNT
-        </span>
-        <span className="flex-1 h-px bg-separator" />
-      </div>
+          <div className="flex items-center gap-3 my-1">
+            <span className="flex-1 h-px bg-separator" />
+            <span className="type-caption-2 text-label-tertiary font-medium">
+              OR USE YOUR DIRECTORY ACCOUNT
+            </span>
+            <span className="flex-1 h-px bg-separator" />
+          </div>
+        </>
+      )}
 
       {/* Work email */}
       <div>

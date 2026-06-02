@@ -10,6 +10,9 @@ import { AuroraPanel } from "@/components/auth/AuroraPanel";
 import { SignInForm } from "@/components/auth/SignInForm";
 // PR #377: passwordless passkey sign-in helpers.
 import { isPasskeySupported, signInWithPasskey } from "@/lib/webauthn";
+// WARP-629: runtime SSO discovery — the login shows only the IdPs this box has
+// actually configured (local-first, SSO optional).
+import { getEnabledSsoProviders } from "@/lib/api";
 
 /**
  * Resolve a `?next=` redirect to a same-origin path, or fall back to "/".
@@ -66,9 +69,29 @@ export default function LoginPage() {
   // mount, so SSR renders nothing and we don't flash an unusable button).
   const [passkeyReady, setPasskeyReady] = useState(false);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
+  // WARP-629: which IdP buttons to show is decided at runtime from what the
+  // appliance has configured (not a build-time flag). Fetched after mount,
+  // mirroring the passkey-capability probe below. Starts empty so SSR /
+  // first paint is password-only; SSO is purely additive once discovered.
+  const [ssoProviders, setSsoProviders] = useState<string[]>([]);
 
   useEffect(() => {
     setPasskeyReady(isPasskeySupported());
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    getEnabledSsoProviders()
+      .then((providers) => {
+        if (alive) setSsoProviders(providers);
+      })
+      .catch(() => {
+        // Local-first: a failed/timed-out discovery must never block the
+        // password path. Leave the SSO list empty and carry on.
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   async function handleLogin() {
@@ -150,6 +173,9 @@ export default function LoginPage() {
             onSubmit={handleLogin}
             error={error}
             submitting={isSubmitting}
+            // WARP-629: only the providers this appliance has configured,
+            // discovered at runtime. Empty → password-only login.
+            ssoProviders={ssoProviders}
             // ADR-013 (PR #378): SSO sign-in lands back on the originally
             // requested page. Reuse the same same-origin guard as the
             // password path so a crafted `?next=` can't redirect off-origin.
@@ -158,8 +184,13 @@ export default function LoginPage() {
             passkeyBusy={passkeyBusy}
           />
 
+          {/* WARP-629: the local-first promise is true for the password path,
+              but an SSO sign-in federates to an external IdP — so the copy is
+              caveated whenever an SSO button is shown to stay accurate. */}
           <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">
-            Sign-in happens on your local network — nothing leaves the box.
+            {ssoProviders.length > 0
+              ? "Password sign-in happens on your local network. Single sign-on redirects to your provider."
+              : "Sign-in happens on your local network — nothing leaves the box."}
           </p>
         </div>
       </div>

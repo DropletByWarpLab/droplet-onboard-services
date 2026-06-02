@@ -582,6 +582,35 @@ export async function acceptInvite(
   return res.json();
 }
 
+/**
+ * WARP-629 — runtime SSO discovery. Returns the provider IDs this appliance
+ * has actually configured (e.g. `["google"]`), so the login page renders only
+ * usable IdP buttons instead of a fixed build-time set. PUBLIC + pre-session
+ * (the login page has no cookie yet), so a bare `fetch` — no authFetch refresh
+ * dance, like checkSetupRequired / fetchSystemHealth.
+ *
+ * The body is provider IDs ONLY (no issuer/client-id/secret/redirect). Throws
+ * on any non-2xx or malformed body; the caller treats a rejection as "no SSO"
+ * and keeps the local-first password path standing (SSO is purely additive).
+ */
+export async function getEnabledSsoProviders(): Promise<string[]> {
+  // Bound the request so a *hung* orchestrator (not just a rejected one) still
+  // falls back to the password-only path instead of leaving discovery pending
+  // forever. AbortSignal.timeout fires a TimeoutError → the caller's .catch
+  // treats it as "no SSO" (review follow-up on #403).
+  const res = await fetch(`${BASE}/api/sso/oidc/providers`, {
+    credentials: "same-origin",
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch SSO providers: ${res.status}`);
+  }
+  const data = (await res.json()) as { providers?: unknown };
+  // Defensive: only trust a string[] under `providers`. Anything else → [].
+  if (!Array.isArray(data.providers)) return [];
+  return data.providers.filter((p): p is string => typeof p === "string");
+}
+
 // --- WARP-225: per-user context-meter ---
 
 import type {

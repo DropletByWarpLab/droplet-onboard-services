@@ -29,6 +29,7 @@ import {
   getOidcProviderConfig,
   buildAuthorizeRequest,
   exchangeCodeAndValidate,
+  enabledSsoProviders,
   type SsoProvider,
 } from "../services/sso-oidc.service.js";
 import {
@@ -225,6 +226,24 @@ function isHttps(req: Request): boolean {
 
 export function createSsoRouter(prisma?: PrismaClient): Router {
   const router = Router();
+
+  // ── Runtime SSO discovery (WARP-629) ──
+  // The Aurora login is LOCAL-FIRST, SSO OPTIONAL: it must render only the
+  // identity providers THIS appliance has actually configured, instead of a
+  // fixed build-time set baked identically into every image. This is the
+  // single source of truth the login page reads.
+  //
+  // PUBLIC (before authMiddleware, like /authorize + /callback) — the login
+  // page has no session yet. Reads env-derived config only (no `prisma`, no
+  // session), so it answers even with no directory wired or mid-migration.
+  // Body is provider IDs ONLY — never issuer / client-id / client-secret /
+  // redirect-uri (the IDs are the same information the rendered buttons
+  // already reveal; nothing sensitive crosses the wire). `no-store` so an
+  // operator's `.env` edit + restart isn't served from a stale cache.
+  router.get("/sso/oidc/providers", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ providers: enabledSsoProviders() });
+  });
 
   // ── Begin SSO: redirect to the IdP authorize URL ──
   router.post("/sso/oidc/authorize", async (req, res, next) => {

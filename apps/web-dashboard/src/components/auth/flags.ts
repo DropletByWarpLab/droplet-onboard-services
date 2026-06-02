@@ -17,17 +17,17 @@
  * This is a build-time constant, not runtime config — the dashboard has no
  * env-flag mechanism and these gate UI affordances, not security decisions.
  *
- * ADR-013: SSO is wired PER PROVIDER, not as one boolean. The orchestrator's
- * /api/sso/oidc/authorize endpoint shipped Google + Entra in PR #378 and Okta
- * in PR #379 (this branch — Okta is plain OIDC, reusing the same RP path).
- * `ssoProviders` below marks which providers are LIVE so a provider whose
- * backend hasn't shipped keeps rendering the disabled "Soon" pill (no dead
- * button). The legacy `sso` boolean is kept (true once any provider is live)
- * for any consumer that only needs "is SSO available at all".
+ * WARP-629: SSO is NOT gated here. Which IdP buttons the login shows is decided
+ * at RUNTIME from what the appliance has actually configured — the login page
+ * fetches GET /api/sso/oidc/providers (via `getEnabledSsoProviders`, lib/api.ts)
+ * and renders only those. There is no per-provider build-time flag anymore (the
+ * old `ONB_SSO_PROVIDERS_LIVE` constant is gone); a box with no `DROPLET_SSO_*`
+ * env shows a password-only login. See docs/ONBOARDING_SSO_RUNTIME_DISCOVERY.md.
  */
 export const ONB_AUTH_FLAGS = {
-  // ADR-013 (PR #378): SSO is live — see ONB_SSO_PROVIDERS_LIVE for which
-  // providers have shipped a backend (Google + Entra).
+  // Kept for any consumer that only needs "is SSO available at all". The
+  // actual per-provider visibility is runtime-discovered (WARP-629), so this
+  // no longer gates the login buttons.
   sso: true,
   // Flipped by PR #377 — the WebAuthn backend (register + passwordless
   // authenticate) ships in this PR, so the passkey affordance goes live.
@@ -37,17 +37,3 @@ export const ONB_AUTH_FLAGS = {
 } as const;
 
 export type OnbAuthFlag = keyof typeof ONB_AUTH_FLAGS;
-
-/**
- * Which SSO providers have a live backend on /api/sso/oidc/authorize. The
- * key is the dashboard's wire id (the value sent as the `provider` form
- * field, which must match the orchestrator's SsoProvider union). Flip a
- * provider to `true` in the same PR that ships its backend.
- */
-export const ONB_SSO_PROVIDERS_LIVE = {
-  google: true,
-  entra: true,
-  okta: true,
-} as const;
-
-export type OnbSsoProviderId = keyof typeof ONB_SSO_PROVIDERS_LIVE;
