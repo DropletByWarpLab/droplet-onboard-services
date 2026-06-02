@@ -44,6 +44,34 @@ OPENWRT_PASS      = os.environ.get("OPENWRT_PASS", "")
 OPENWRT_IFACE     = os.environ.get("OPENWRT_IFACE", "wlan0")
 SSH_TIMEOUT       = int(os.environ.get("SSH_CONNECT_TIMEOUT", "4"))
 
+# Access-point credentials source for the pairing QR. The two shipping
+# deployment shapes broadcast the AP differently:
+#
+#   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI
+#              (`wireless.*`). We read SSID+PSK over SSH (the historical
+#              path). This is the back-compat default.
+#   hostapd  — single-box: the host runs a raw hostapd AP via the
+#              `droplet-openwrt-attach` script (no UCI), so we read the
+#              creds from DROPLET_AP_SSID/DROPLET_AP_PSK (set by that
+#              script) and fall back to parsing /etc/hostapd.conf inside
+#              the droplet-openwrt container.
+#   auto     — pick `hostapd` when DROPLET_AP_SSID is set OR when UCI
+#              wireless is empty/unreachable; otherwise `uci`. Lets a
+#              single image serve both shapes without per-box env edits.
+#
+# Defaulting to `uci` keeps every existing multi-box install behaving
+# exactly as before; single-box installs set DROPLET_AP_MODE=hostapd in
+# /etc/droplet/device-bridge.env.
+AP_MODE           = os.environ.get("DROPLET_AP_MODE", "uci").strip().lower()
+AP_SSID           = os.environ.get("DROPLET_AP_SSID", "").strip()
+AP_PSK            = os.environ.get("DROPLET_AP_PSK", "")
+# Container that runs the single-box hostapd AP. Its /etc/hostapd.conf is
+# the fallback creds source when DROPLET_AP_SSID isn't set in the env.
+AP_HOSTAPD_CONTAINER = os.environ.get(
+    "DROPLET_AP_CONTAINER", "droplet-openwrt").strip()
+AP_HOSTAPD_CONF_PATH = os.environ.get(
+    "DROPLET_AP_HOSTAPD_CONF", "/etc/hostapd.conf").strip()
+
 FRIGATE_URL       = os.environ.get("FRIGATE_URL", "http://127.0.0.1:5000")
 ORCHESTRATOR_URL  = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
 FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
@@ -282,6 +310,122 @@ def _openwrt_connected_ssid():
 
 
 # ---------------------------------------------------------------------------
+# Single-box hostapd AP credentials
+# ---------------------------------------------------------------------------
+# The single-box deployment shape runs a raw hostapd AP on the host (via the
+# droplet-openwrt-attach script) instead of OpenWrt/UCI. There's no router to
+# SSH into and `uci show wireless` is empty, so the multi-box creds lookup
+# returns "no active AP" and the pairing QR comes back blank (WARP-654).
+#
+# Creds come from DROPLET_AP_SSID / DROPLET_AP_PSK (the host env the attach
+# script already sets). When those aren't set we parse /etc/hostapd.conf out
+# of the droplet-openwrt container, which is hostapd's own source of truth.
+
+def _parse_hostapd_conf(text):
+    """Parse SSID + WPA passphrase from a hostapd.conf body.
+
+    hostapd.conf is a flat `key=value` file. We only need `ssid` and
+    `wpa_passphrase`. Values may be quoted and/or carry surrounding
+    whitespace; both are stripped. Returns (creds, err) mirroring
+    openwrt_wifi_credentials() so the QR builder treats both shapes the
+    same. The encryption is reported as "psk2" (WPA2-PSK) — the mode the
+    attach script configures — so the shared QR/security plumbing keys off
+    a WPA marker, identical to the UCI path.
+    """
+    ssid = key = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"')
+        if k == "ssid" and ssid is None:
+            ssid = v
+        elif k == "wpa_passphrase" and key is None:
+            key = v
+    if not ssid:
+        return None, "no ssid in hostapd.conf"
+    return ({
+        "ssid": ssid,
+        "key": key or "",
+        "encryption": "psk2",
+        "hidden": False,
+        "disabled": False,
+    }, None)
+
+
+def _read_hostapd_conf_creds():
+    """Read the hostapd AP creds from the droplet-openwrt container.
+
+    `docker exec <container> cat /etc/hostapd.conf` then parse. Read-only —
+    never mutates the container. Returns (creds, err)."""
+    rc, out, err = _run(
+        ["docker", "exec", AP_HOSTAPD_CONTAINER, "cat", AP_HOSTAPD_CONF_PATH],
+        timeout=8)
+    if rc != 0:
+        return None, (err.strip() or "hostapd.conf unreadable")
+    return _parse_hostapd_conf(out)
+
+
+def hostapd_wifi_credentials():
+    """Return the single-box hostapd AP's SSID + PSK.
+
+    Source order: the host env (DROPLET_AP_SSID/DROPLET_AP_PSK — cleanest,
+    set by droplet-openwrt-attach) first, then /etc/hostapd.conf inside the
+    droplet-openwrt container. Returns (creds, err) with the same dict shape
+    as openwrt_wifi_credentials()."""
+    if AP_SSID:
+        return ({
+            "ssid": AP_SSID,
+            "key": AP_PSK or "",
+            "encryption": "psk2",
+            "hidden": False,
+            "disabled": False,
+        }, None)
+    return _read_hostapd_conf_creds()
+
+
+def _hostapd_wifi_payload(ssid, key):
+    """Format the WiFi QR payload for a WPA hostapd AP.
+
+    hostapd's single-box AP is always WPA2-PSK, so the security type is a
+    fixed `WPA`. Field order is T;S;P (the order the single-box pairing
+    flow + PyPortal firmware expect). Escapes the WiFi-QR metacharacters
+    (\\, ;, ,, :, ") per the de-facto standard so an SSID/PSK containing
+    them still scans correctly.
+    """
+    def esc(s):
+        return (s or "").replace("\\", "\\\\").replace(";", "\\;") \
+                        .replace(",", "\\,").replace(":", "\\:") \
+                        .replace('"', '\\"')
+
+    return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
+
+
+def _use_hostapd_mode():
+    """Decide whether to source the QR creds from hostapd vs. UCI.
+
+    - hostapd  -> always hostapd.
+    - uci      -> always UCI/SSH (back-compat default).
+    - auto     -> hostapd when a DROPLET_AP_SSID is configured (a clear
+                  single-box signal) OR when UCI wireless is empty/
+                  unreachable; otherwise UCI.
+    """
+    if AP_MODE == "hostapd":
+        return True
+    if AP_MODE == "auto":
+        if AP_SSID:
+            return True
+        # No explicit single-box signal — probe UCI. If the router answers
+        # with a live AP, stay on the multi-box path; otherwise fall through
+        # to hostapd (covers a single-box host where uci is empty).
+        creds, _err = openwrt_wifi_credentials()
+        return creds is None
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Jetson-local nmcli fallback
 # ---------------------------------------------------------------------------
 
@@ -401,26 +545,50 @@ def _qr_encode(text):
 
 
 def qr_snapshot():
-    """Fetch OpenWrt wifi creds and return a QR-matrix + payload.
+    """Fetch the live AP wifi creds and return a QR-matrix + payload.
 
-    TTL/interval fields are only populated when rotation is enabled; with
-    rotation off (the production default) the UI hides the countdown chip
-    because the password never expires.
+    Sources creds from whichever deployment shape this box is (DROPLET_AP_MODE):
+    the single-box hostapd AP or the multi-box OpenWrt/UCI router. The returned
+    dict shape is identical for both so the PyPortal client is shape-agnostic.
+
+    TTL/interval fields: rotation is only available on the UCI/SSH path, so
+    `ttl_seconds` is populated (and `rotation_interval_seconds` added) only
+    when rotation is enabled there. In hostapd mode rotation is always
+    disabled — there's no UCI to push a new PSK to — so `rotation_enabled` is
+    forced false and `ttl_seconds` is 0; the PyPortal gates its Rotate pill on
+    `rotation_enabled` and the countdown chip on a non-zero TTL.
     """
+    hostapd = _use_hostapd_mode()
+    rotation_enabled = False if hostapd else ROTATION_ENABLED
     out = {
         "ok": False, "ssid": None, "security": None, "hidden": False,
         "disabled": False, "payload": None, "matrix": None,
         "version": None, "error": None,
-        "rotation_enabled": ROTATION_ENABLED,
+        "rotation_enabled": rotation_enabled,
+        # Always present so the client never has to branch on its absence;
+        # 0 means "no expiry" (the production posture in both shapes unless
+        # UCI-mode rotation is explicitly enabled).
+        "ttl_seconds": 0,
     }
-    if ROTATION_ENABLED:
+    if rotation_enabled:
         out["ttl_seconds"] = _key_ttl_seconds()
         out["rotation_interval_seconds"] = ROTATION_INTERVAL_S
-    creds, err = openwrt_wifi_credentials()
+
+    if hostapd:
+        creds, err = hostapd_wifi_credentials()
+    else:
+        creds, err = openwrt_wifi_credentials()
     if creds is None:
-        out["error"] = err or "router unreachable"
+        out["error"] = err or ("hostapd AP unavailable" if hostapd
+                               else "router unreachable")
         return out
-    payload = _wifi_payload(creds["ssid"], creds["key"], creds["encryption"])
+
+    if hostapd:
+        # Single-box hostapd AP is WPA2-PSK; use the fixed-security T;S;P
+        # payload the single-box pairing flow expects.
+        payload = _hostapd_wifi_payload(creds["ssid"], creds["key"])
+    else:
+        payload = _wifi_payload(creds["ssid"], creds["key"], creds["encryption"])
     try:
         matrix, ver = _qr_encode(payload)
     except Exception as e:                                           # noqa: BLE001
@@ -428,7 +596,8 @@ def qr_snapshot():
         return out
     out.update({
         "ok": True, "ssid": creds["ssid"],
-        "security": creds["encryption"], "hidden": creds["hidden"],
+        "security": "WPA" if hostapd else creds["encryption"],
+        "hidden": creds["hidden"],
         "disabled": creds["disabled"], "payload": payload,
         # Cleartext key is already inside `payload` (the phone QR scanner
         # reads it from there), so exposing it as a dedicated field costs
