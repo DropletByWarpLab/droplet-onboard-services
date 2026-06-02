@@ -90,7 +90,10 @@ export interface CronRuntimeTx {
   $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T>;
 }
 export interface CronRuntimePrisma extends CronRuntimeTx {
-  $transaction<T>(fn: (tx: CronRuntimeTx) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    fn: (tx: CronRuntimeTx) => Promise<T>,
+    opts?: { timeout?: number },
+  ): Promise<T>;
 }
 
 export interface CronScheduleOpts {
@@ -155,28 +158,31 @@ export function createCronRuntime(
       return;
     }
 
-    await prisma.$transaction(async (tx) => {
-      // `pg_try_advisory_xact_lock(bigint)` returns boolean and holds the
-      // lock for the life of THIS transaction only. hashtext() maps the
-      // arbitrary string key to int4; the implicit cast to int8 is
-      // accepted by Postgres for the single-arg form.
-      const rows = (await tx.$queryRawUnsafe<Array<{ locked: boolean }>>(
-        'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS "locked"',
-        key,
-      )) as Array<{ locked: boolean }>;
-      const acquired = Array.isArray(rows) && rows[0]?.locked === true;
-      if (!acquired) {
-        logger.debug?.(
-          { lockKey: key },
-          "cron handler skipped — advisory lock held by another instance",
-        );
-        return;
-      }
+    await prisma.$transaction(
+      async (tx) => {
+        // `pg_try_advisory_xact_lock(bigint)` returns boolean and holds the
+        // lock for the life of THIS transaction only. hashtext() maps the
+        // arbitrary string key to int4; the implicit cast to int8 is
+        // accepted by Postgres for the single-arg form.
+        const rows = (await tx.$queryRawUnsafe<Array<{ locked: boolean }>>(
+          'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS "locked"',
+          key,
+        )) as Array<{ locked: boolean }>;
+        const acquired = Array.isArray(rows) && rows[0]?.locked === true;
+        if (!acquired) {
+          logger.debug?.(
+            { lockKey: key },
+            "cron handler skipped — advisory lock held by another instance",
+          );
+          return;
+        }
 
-      // Handler runs INSIDE the transaction so the xact lock is held for
-      // its full duration and released atomically at commit/rollback.
-      await handler();
-    });
+        // Handler runs INSIDE the transaction so the xact lock is held for
+        // its full duration and released atomically at commit/rollback.
+        await handler();
+      },
+      { timeout: 60_000 },
+    );
   }
 
   async function safeRun(
