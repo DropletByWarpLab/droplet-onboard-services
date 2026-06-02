@@ -30,6 +30,7 @@ Design notes preserved from Phase 2:
 """
 from __future__ import annotations
 
+import contextlib
 import email as stdlib_email
 import email.policy
 import logging
@@ -271,8 +272,20 @@ def _extract_msg(path: str, depth: int, parent_email_id: Optional[str]) -> Extra
     """Outlook .msg via extract-msg (MAPI binary container)."""
     import extract_msg  # local import — module is heavy
 
+    # IDX-10: extract_msg.Message holds the underlying OLE container open
+    # until GC. Close it explicitly so a re-index sweep / a tar full of .msg
+    # members doesn't leak file handles. `try/finally` covers every return.
     m = extract_msg.Message(str(path))
+    try:
+        return _extract_msg_inner(m, path, depth, parent_email_id)
+    finally:
+        with contextlib.suppress(Exception):
+            m.close()
 
+
+def _extract_msg_inner(
+    m, path: str, depth: int, parent_email_id: Optional[str]
+) -> ExtractedDoc:
     # Build a synthetic Message-ID for .msg — MAPI rarely exposes a clean
     # RFC822 Message-ID. Use the file path hash for stability.
     raw_id = getattr(m, "messageId", None)

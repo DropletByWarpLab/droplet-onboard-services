@@ -335,7 +335,7 @@ def wifi_snapshot():
     out = {
         "networks": [], "source": None, "adapter": None,
         "connected_to": None, "state": "unknown",
-        "scanned_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scanned_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "error": None,
     }
     networks, err = scan_via_openwrt()
@@ -666,7 +666,7 @@ def files_snapshot():
             for m, n, sz in recent
         ],
         "orchestrator": sync_state,
-        "snapshot_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _files_cache["snapshot"] = snap
     _files_cache["at"] = now
@@ -972,7 +972,7 @@ def drives_snapshot(invalidate=False):
     snap = {
         "drives": mounts,
         "count": len(mounts),
-        "snapshot_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _drives_cache["snap"] = snap
     _drives_cache["at"] = now
@@ -1068,7 +1068,7 @@ def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
         "source": None, "error": None,
-        "snapshot_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     # Try Frigate first — it's the source of truth for motion/object events.
     try:

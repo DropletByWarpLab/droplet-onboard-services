@@ -397,41 +397,46 @@ def _extract_tar(path: Path, depth: int) -> ExtractedDoc:
                     warnings.append(f"path_traversal_rejected:{m.name}")
                     continue
 
-                f = tf.extractfile(m)
-                if f is None:
+                extracted = tf.extractfile(m)
+                if extracted is None:
                     continue
 
-                head = f.read(_MIME_PROBE_BYTES)
-                mime_guess = _detect_mime(head, m.name)
+                # IDX-10: close each member handle explicitly. tarfile's
+                # ExtractFile objects accumulate open until the outer `tf`
+                # closes; on a large tar that's a peak-fd spike. `with` also
+                # closes on the early `continue`/`return` cap-exceeded paths.
+                with extracted as f:
+                    head = f.read(_MIME_PROBE_BYTES)
+                    mime_guess = _detect_mime(head, m.name)
 
-                from extractors import registry as _registry
+                    from extractors import registry as _registry
 
-                cap = _registry._cap_for_mime(mime_guess)
-                if m.size > cap:
-                    warnings.append(f"member_size_cap_exceeded:{m.name}")
-                    continue
+                    cap = _registry._cap_for_mime(mime_guess)
+                    if m.size > cap:
+                        warnings.append(f"member_size_cap_exceeded:{m.name}")
+                        continue
 
-                chunks: list[bytes] = [head]
-                cumulative += len(head)
-                if cumulative > MAX_ARCHIVE_TOTAL_BYTES:
-                    warnings.append("decompressed_size_cap_exceeded")
-                    return _doc(
-                        "tar", spans, warnings,
-                        chain=member_chains[0] if member_chains else None,
-                    )
-                while True:
-                    b = f.read(_READ_CHUNK)
-                    if not b:
-                        break
-                    cumulative += len(b)
+                    chunks: list[bytes] = [head]
+                    cumulative += len(head)
                     if cumulative > MAX_ARCHIVE_TOTAL_BYTES:
                         warnings.append("decompressed_size_cap_exceeded")
                         return _doc(
                             "tar", spans, warnings,
                             chain=member_chains[0] if member_chains else None,
                         )
-                    chunks.append(b)
-                member_bytes = b"".join(chunks)
+                    while True:
+                        b = f.read(_READ_CHUNK)
+                        if not b:
+                            break
+                        cumulative += len(b)
+                        if cumulative > MAX_ARCHIVE_TOTAL_BYTES:
+                            warnings.append("decompressed_size_cap_exceeded")
+                            return _doc(
+                                "tar", spans, warnings,
+                                chain=member_chains[0] if member_chains else None,
+                            )
+                        chunks.append(b)
+                    member_bytes = b"".join(chunks)
 
                 member_spans, member_warnings, chain = _process_member_bytes(
                     m.name,
