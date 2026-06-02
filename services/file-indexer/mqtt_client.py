@@ -43,6 +43,27 @@ def _on_message(_client, _userdata, msg) -> None:
         logger.exception("Handler for %s raised", msg.topic)
 
 
+def _on_connect(client, _userdata, _flags, _reason_code, _properties=None) -> None:
+    """paho callback — (re)subscribe every registered topic on each connect.
+
+    paho's broker subscriptions are session state: they're lost on a broker
+    restart / disconnect, and paho does NOT replay them on auto-reconnect.
+    Without this, after any broker blip the file-indexer permanently stops
+    receiving `droplet/files/brain/uploaded` (chat-attached file indexing) and
+    `droplet/transcription/run-one` (transcribe-now), silently. Re-subscribing
+    here also makes `subscribe()` order-independent: a handler registered
+    before `connect()` is wired on the first connect. (WARP-203 / IDX-06.)
+    """
+    if not _handlers:
+        return
+    for topic in _handlers:
+        client.subscribe(topic)
+    logger.info(
+        "MQTT (re)connected — re-subscribed %d topic(s): %s",
+        len(_handlers), ", ".join(sorted(_handlers)),
+    )
+
+
 def connect() -> None:
     global _client
     parsed = urlparse(MQTT_BROKER)
@@ -55,6 +76,9 @@ def connect() -> None:
     if username:
         _client.username_pw_set(username, password)
     _client.on_message = _on_message
+    # Re-subscribe on every (re)connect — paho drops subscriptions across a
+    # broker disconnect and doesn't replay them (IDX-06).
+    _client.on_connect = _on_connect
     _client.connect(host, port, keepalive=60)
     _client.loop_start()
     logger.info("Connected to MQTT broker at %s:%d", host, port)
@@ -71,10 +95,13 @@ def subscribe(topic: str, handler: Callable[[dict], None]) -> None:
     """Register a handler for `topic` and tell the broker to deliver it.
 
     Re-registering replaces the previous handler. Safe to call before
-    `connect()` — the topic is queued and the broker subscribe will
-    fire after `connect()` runs.
+    `connect()`: the handler is recorded in `_handlers` and the `_on_connect`
+    callback subscribes every registered topic on the next (re)connect, so the
+    broker subscribe fires regardless of call order. When called after the
+    client is already connected, we also subscribe immediately so the topic
+    takes effect without waiting for a reconnect.
     """
     _handlers[topic] = handler
-    if _client is not None:
+    if _client is not None and _client.is_connected():
         _client.subscribe(topic)
         logger.info("Subscribed to MQTT topic %s", topic)
