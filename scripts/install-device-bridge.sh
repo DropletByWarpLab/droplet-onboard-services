@@ -9,9 +9,10 @@
 #   /etc/systemd/system/droplet-wifi-rotate.timer
 #   /etc/droplet/device-bridge.env            (0600, root:root)
 #
-# Populates BRIDGE_AUTH_TOKEN and OPENWRT_PASS from the repo .env if they
-# aren't already set in the target env file. Idempotent — safe to re-run
-# after a git pull.
+# Populates BRIDGE_AUTH_TOKEN, OPENWRT_PASS, and (single-box) DROPLET_AP_MODE
+# from the repo .env if they aren't already set in the target env file, and
+# ensures the host python3 can import qrcode for the pairing-QR render.
+# Idempotent — safe to re-run after a git pull.
 #
 # Usage:
 #   sudo ./scripts/install-device-bridge.sh
@@ -135,6 +136,17 @@ if [[ -f "$REPO_ENV" ]]; then
   if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
     set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
   fi
+
+  # Pairing-QR AP source (WARP-654). setup.sh --single-box records
+  # DROPLET_AP_MODE=hostapd in the repo .env (scripts/lib/single-box.sh) because
+  # the single-box host runs the Wi-Fi AP via hostapd, not a Pi-5 UCI router.
+  # Mirror it into the bridge env so device-bridge.py reads the hostapd creds
+  # instead of an empty `uci show wireless`. set_env_if_blank never clobbers an
+  # operator override; multi-box installs leave the key unset in .env, so the
+  # bridge keeps its built-in `uci` default.
+  if [[ -n "${DROPLET_AP_MODE:-}" ]]; then
+    set_env_if_blank "DROPLET_AP_MODE" "$DROPLET_AP_MODE"
+  fi
 fi
 
 # If still blank after mirroring, mint a random token so the bridge isn't
@@ -145,16 +157,49 @@ if ! grep -qE '^BRIDGE_AUTH_TOKEN=..+' "$ENV_FILE"; then
   log "generated random BRIDGE_AUTH_TOKEN"
 fi
 
+# --- 2b) Provision the host Python dep the pairing-QR render needs ---
+# droplet-device-bridge.service runs the host's /usr/bin/python3 (see the unit's
+# ExecStart) — NOT the oled-display container venv that gets requirements.txt.
+# device-bridge.py lazily `import qrcode` inside the /openwrt/qr render path (the
+# pairing QR the front panel paints) on BOTH the single-box (hostapd) and
+# multi-box (uci) shapes. Without the module on the host, GET /openwrt/qr fails
+# with "qr encode failed: No module named 'qrcode'" and a fresh box can't show a
+# pairing code. Provision it from the distro: python3-qrcode lands in
+# /usr/lib/python3/dist-packages, importable by /usr/bin/python3.
+# Defensive — this must NOT abort the whole bridge install under `set -e` if the
+# package index is briefly unreachable; the rest of the bridge works without the
+# QR endpoint, so we warn and carry on.
+BRIDGE_PY=/usr/bin/python3
+if "$BRIDGE_PY" -c 'import qrcode' >/dev/null 2>&1; then
+  log "qrcode: already importable by $BRIDGE_PY"
+else
+  log "qrcode: installing python3-qrcode for the pairing-QR render"
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y python3-qrcode; then
+    # Stale index on a fresh box — refresh once, then retry.
+    apt-get update -y >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-qrcode || true
+  fi
+  if "$BRIDGE_PY" -c 'import qrcode' >/dev/null 2>&1; then
+    log "qrcode: installed and importable"
+  else
+    log "WARNING: qrcode still not importable by $BRIDGE_PY — GET /openwrt/qr"
+    log "  will fail until it is. Remediate on the host with:"
+    log "    sudo apt-get install -y python3-qrcode"
+  fi
+fi
+
 # --- 3) Activate ---
 systemctl daemon-reload
 
-# The bridge entrypoint (device-bridge.py) is pure stdlib — it serves over
-# http.server.ThreadingHTTPServer and has NO third-party runtime deps. (qrcode
-# is imported lazily only inside the QR-render path; its absence degrades that
-# one endpoint, not startup.) So there are no host pip deps to gate on — enable
-# it unconditionally. Guard the enable so that under `set -e` a transient start
-# failure can't abort this script before the shutdown screen below is wired up.
-# The front-panel shutdown screen is likewise dependency-free and always enabled.
+# The bridge entrypoint (device-bridge.py) serves over
+# http.server.ThreadingHTTPServer and needs no third-party deps to START — its
+# only host dependency, qrcode, is imported lazily inside the /openwrt/qr path
+# and is provisioned in step 2b above. So startup never gates on a dependency:
+# enable the bridge unconditionally, and if qrcode is somehow still missing only
+# the QR endpoint degrades, not the service. Guard the enable so that under
+# `set -e` a transient start failure can't abort this script before the shutdown
+# screen below is wired up. The front-panel shutdown screen needs no deps and is
+# likewise always enabled.
 if systemctl enable --now droplet-device-bridge.service; then
   log "device-bridge: enabled"
 else

@@ -353,8 +353,10 @@ main() {
     # systemd hook (pushes "Shutting down" / "Safe to power off" on teardown)
     # plus the device-bridge. Non-fatal — the dashboard and the oled-display
     # container still run without it. install-device-bridge.sh is idempotent,
-    # self-elevates with sudo, and skips enabling the bridge when the host
-    # lacks its Python deps (the shutdown screen needs none). NOTE: this does
+    # self-elevates with sudo, auto-provisions the host pairing-QR dep
+    # (python3-qrcode) plus the single-box DROPLET_AP_MODE=hostapd knob, and
+    # enables the bridge unconditionally (the shutdown screen needs no deps).
+    # NOTE: this does
     # NOT flash the board's CircuitPython firmware — that is a deliberate
     # ./scripts/flash-pyportal.sh step (a write-locked board needs a physical
     # UF2/safe-mode flash, so it must not run unattended here).
