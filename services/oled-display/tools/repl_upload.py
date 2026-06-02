@@ -91,10 +91,14 @@ def push_file(ser, src: str, dest: str, chunk: int = 256) -> None:
     with open(src, "rb") as fh:
         data = fh.read()
     # Make the filesystem writable from the REPL side. CircuitPython blocks
-    # code/REPL writes while the CIRCUITPY drive is visible to the host
-    # (concurrent-write protection) — which is why a plain remount stays
-    # read-only here. The host is NOT touching the mount during this REPL
-    # session, so disabling that guard for the duration of the write is safe.
+    # code/REPL writes while the CIRCUITPY drive is mounted by the host
+    # (concurrent-write protection), so a plain remount stays read-only here.
+    # disable_concurrent_write_protection lifts that guard so the write can go
+    # through while USB-MSC is still enumerated — which is ONLY safe because the
+    # host is not writing the FAT concurrently. The caller (flash-pyportal.sh)
+    # guarantees this by unmounting the host's CIRCUITPY view before invoking
+    # this tool; run standalone, ensure CIRCUITPY is NOT mounted read-write on
+    # the host first, or you risk FAT corruption.
     exec_raw(
         ser,
         b"import storage\nstorage.remount('/', readonly=False, disable_concurrent_write_protection=True)",
@@ -117,7 +121,7 @@ def main() -> int:
                     help="file to upload; repeatable")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--no-reboot", action="store_true", help="do not soft-reboot after upload")
-    ap.add_argument("--list", action="store_true", help="just list the board's root dir and exit (handshake check)")
+    ap.add_argument("--list", action="store_true", help="list the board's root dir and exit WITHOUT uploading (handshake check)")
     args = ap.parse_args()
 
     pushes = []
@@ -133,6 +137,12 @@ def main() -> int:
             # on the board before any write.
             listing = exec_raw(ser, b"import os\nprint(os.listdir('/'))")
             print("board /:", listing.decode("utf-8", "replace").strip())
+            if args.list:
+                # Read-only handshake check: we've proven the REPL responds and
+                # shown the root dir. Stop here WITHOUT writing anything. (We
+                # still soft-reboot below so the interrupted code.py resumes —
+                # a frozen REPL would leave the screen stuck.)
+                pushes = []
             for src, dest in pushes:
                 push_file(ser, src, dest)
         finally:

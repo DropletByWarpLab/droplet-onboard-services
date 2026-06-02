@@ -148,20 +148,17 @@ fi
 # --- 3) Activate ---
 systemctl daemon-reload
 
-# The bridge is a host Python service (FastAPI + uvicorn). On a host without
-# those modules it exits immediately and Restart=on-failure crash-loops it —
-# and under `set -e` an `enable --now` whose start fails would abort this
-# script before the shutdown-screen below is wired up. So only enable the
-# bridge when its deps import; otherwise install the unit but leave it
-# disabled with a clear pointer. The front-panel shutdown screen needs none of
-# these deps and is always enabled.
-if python3 -c 'import fastapi, uvicorn' >/dev/null 2>&1; then
-  systemctl enable --now droplet-device-bridge.service
+# The bridge entrypoint (device-bridge.py) is pure stdlib — it serves over
+# http.server.ThreadingHTTPServer and has NO third-party runtime deps. (qrcode
+# is imported lazily only inside the QR-render path; its absence degrades that
+# one endpoint, not startup.) So there are no host pip deps to gate on — enable
+# it unconditionally. Guard the enable so that under `set -e` a transient start
+# failure can't abort this script before the shutdown screen below is wired up.
+# The front-panel shutdown screen is likewise dependency-free and always enabled.
+if systemctl enable --now droplet-device-bridge.service; then
   log "device-bridge: enabled"
 else
-  systemctl disable droplet-device-bridge.service >/dev/null 2>&1 || true
-  log "device-bridge: host python lacks fastapi/uvicorn — unit installed but NOT enabled"
-  log "  (to enable: python3 -m pip install fastapi uvicorn && sudo systemctl enable --now droplet-device-bridge.service)"
+  log "device-bridge: enable failed — inspect 'systemctl status droplet-device-bridge.service'"
 fi
 
 # Shutdown-screen oneshot. enable so it's wired into multi-user.target; --now

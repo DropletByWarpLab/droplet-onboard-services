@@ -102,6 +102,16 @@ flash_repl() {
   [ -e "$PORT" ] || { echo "flash-pyportal: $PORT not present" >&2; exit 1; }
   [ -f "$TOOL" ] || { echo "flash-pyportal: missing uploader $TOOL" >&2; exit 1; }
   stop_container
+  # The kernel/udev can auto-mount CIRCUITPY (read-only) even though the board's
+  # boot.py holds the write lock — and stopping the container does NOT clear that
+  # mount. Detach it so the host's USB-MSC view is fully gone before CircuitPython
+  # writes the FAT over the REPL, closing any host/CP concurrent-access window
+  # (repl_upload.py disables CircuitPython's concurrent-write protection for the
+  # write, which is only safe once the host is no longer touching the drive).
+  if cp_mnt="$(findmnt -rno TARGET -S LABEL=CIRCUITPY 2>/dev/null)" && [ -n "$cp_mnt" ]; then
+    echo "flash-pyportal: detaching host CIRCUITPY auto-mount at $cp_mnt"
+    sudo umount "$cp_mnt" 2>/dev/null || true
+  fi
   echo "flash-pyportal: pushing code.py + boot.py over REPL $PORT ..."
   sudo python3 "$TOOL" --port "$PORT" --push "$FW/code.py:code.py" --push "$FW/boot.py:boot.py"
   echo "flash-pyportal: done (repl) — board soft-rebooted."
