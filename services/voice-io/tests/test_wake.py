@@ -414,6 +414,28 @@ class TestVoskWakeWordDetector:
         assert scores == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
         assert state["resets"] == 1              # recognizer reset after a match
 
+    def test_does_not_fire_on_substring_only_match(self, monkeypatch, tmp_path):
+        # Whole-word match (review item 6): "hey droplets" contains the
+        # phrase as a substring but NOT as whole tokens — must NOT fire.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={"text": "hey droplets", "result": []},
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {}
+
+    def test_fires_on_phrase_with_surrounding_tokens(self, monkeypatch, tmp_path):
+        # The phrase as a contiguous token run amid other tokens (e.g. a
+        # leading "[unk]") still fires (whole-word, not anchored-to-start).
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={"text": "[unk] hey droplet", "result": []},
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
+
     def test_recognizes_phrase_and_scores_mean_confidence(self, monkeypatch, tmp_path):
         # First frame buffers (AcceptWaveform False), second hits the
         # endpoint (True) → Result() text matches → fire with mean conf.
