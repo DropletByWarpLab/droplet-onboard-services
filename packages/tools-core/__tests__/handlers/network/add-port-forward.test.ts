@@ -89,14 +89,40 @@ describe("add_port_forward", () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  it("accepts a valid IPv6 dest_ip", async () => {
+  it("rejects IPv6 dest_ip (routing service only accepts IPv4)", async () => {
+    const post = vi.fn();
+    for (const dest_ip of ["fd00::1", "::1", "2001:db8::1"]) {
+      const r = await addPortForward.handler(
+        { name: "n", src_port: "22", dest_ip, dest_port: "22" },
+        ctxWithPost(post),
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
+    }
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("accepts lo-hi port ranges for src_port and dest_port", async () => {
     const post = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     const r = await addPortForward.handler(
-      { name: "n", src_port: "22", dest_ip: "fd00::1", dest_port: "22" },
+      { name: "range-fwd", src_port: "8000-8100", dest_ip: "10.0.0.5", dest_port: "8000-8100", proto: "tcp" },
       ctxWithPost(post),
     );
     expect(r.ok).toBe(true);
     expect(post).toHaveBeenCalled();
+  });
+
+  it("rejects malformed port ranges", async () => {
+    const post = vi.fn();
+    for (const src_port of ["0-100", "80-70", "abc-def", "8000-70000"]) {
+      const r = await addPortForward.handler(
+        { name: "n", src_port, dest_ip: "10.0.0.5", dest_port: "22" },
+        ctxWithPost(post),
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
+    }
+    expect(post).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown proto", async () => {

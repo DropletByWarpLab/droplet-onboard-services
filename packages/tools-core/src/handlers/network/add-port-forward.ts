@@ -7,9 +7,9 @@ const inputSchema = {
   type: "object",
   properties: {
     name: { type: "string", description: "Friendly name for the port forward rule." },
-    src_port: { type: "string", description: "External port number to forward (1-65535)." },
-    dest_ip: { type: "string", description: "Internal IPv4/IPv6 address of the destination device." },
-    dest_port: { type: "string", description: "Internal port on the destination device (1-65535)." },
+    src_port: { type: "string", description: "External port number to forward (1-65535 or a lo-hi range e.g. '8000-8100')." },
+    dest_ip: { type: "string", description: "Internal IPv4 address of the destination device." },
+    dest_port: { type: "string", description: "Internal port on the destination device (1-65535 or a lo-hi range e.g. '8000-8100')." },
     proto: {
       type: "string",
       enum: PROTOS,
@@ -20,30 +20,32 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
-/** A TCP/UDP port is an integer 1-65535 (port 0 is reserved/invalid for a
- *  forward). Accept the canonical decimal form only — no leading zeros,
- *  signs, or whitespace — so we don't forward something OpenWrt's uci layer
- *  would silently coerce. */
+/** A TCP/UDP port: integer 1-65535 or a lo-hi range (e.g. "8000-8100") as
+ *  accepted by the routing service's PortForwardRequest schema. Accept
+ *  canonical decimal form only — no leading zeros, signs, or whitespace. */
 function isValidPort(v: string): boolean {
-  if (!/^[1-9][0-9]*$/.test(v)) return false;
-  const n = Number(v);
-  return Number.isInteger(n) && n >= 1 && n <= 65535;
+  const isInt = (s: string): boolean => {
+    if (!/^[1-9][0-9]*$/.test(s)) return false;
+    const n = Number(s);
+    return Number.isInteger(n) && n >= 1 && n <= 65535;
+  };
+  const dash = v.indexOf("-");
+  if (dash !== -1) {
+    const lo = v.slice(0, dash);
+    const hi = v.slice(dash + 1);
+    return isInt(lo) && isInt(hi) && Number(lo) <= Number(hi);
+  }
+  return isInt(v);
 }
 
-/** Minimal IPv4/IPv6 literal check. IPv4: four 0-255 octets. IPv6: a hextet
- *  form (full or `::`-compressed). This is a boundary fail-fast guard — the
- *  routing service remains the authority — so we keep it permissive enough
- *  to accept any real address but reject obvious garbage / hostnames. */
+/** IPv4 literal check: four 0-255 octets. The routing service's
+ *  PortForwardRequest constrains dest_ip to IPv4 only; IPv6 inputs would
+ *  pass this guard but receive an opaque 422 downstream — reject them here
+ *  with a clean INVALID_ARGS instead. */
 function isValidIp(v: string): boolean {
-  // IPv4
   const v4 = v.split(".");
-  if (v4.length === 4) {
-    return v4.every((o) => /^[0-9]{1,3}$/.test(o) && Number(o) <= 255);
-  }
-  // IPv6 (incl. ::-compression and optional IPv4-mapped tail). Conservative.
-  return /^(([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|:(:[0-9a-fA-F]{1,4}){1,7}|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|::)$/.test(
-    v,
-  );
+  if (v4.length !== 4) return false;
+  return v4.every((o) => /^[0-9]{1,3}$/.test(o) && Number(o) <= 255);
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -63,13 +65,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // Fail fast on malformed inputs rather than forwarding garbage to the
   // routing service's uci layer for it to reject opaquely.
   if (!isValidPort(args.src_port as string)) {
-    return invalid("src_port must be an integer between 1 and 65535");
+    return invalid("src_port must be an integer 1-65535 or a lo-hi range (e.g. '8000-8100')");
   }
   if (!isValidPort(args.dest_port as string)) {
-    return invalid("dest_port must be an integer between 1 and 65535");
+    return invalid("dest_port must be an integer 1-65535 or a lo-hi range (e.g. '8000-8100')");
   }
   if (!isValidIp(args.dest_ip as string)) {
-    return invalid("dest_ip must be a valid IPv4 or IPv6 address");
+    return invalid("dest_ip must be a valid IPv4 address");
   }
   const proto = args.proto === undefined ? "tcp" : args.proto;
   if (typeof proto !== "string" || !(PROTOS as readonly string[]).includes(proto)) {
