@@ -237,6 +237,26 @@ describe("POST /auth/totp/enroll", () => {
     expect(prisma._totp[0].secretEnc).toBe("ENC(BASE32SECRET)");
   });
 
+  it("clears stale recovery codes from a prior confirmed-then-disabled factor (ORCH-07)", async () => {
+    // A user who previously confirmed TOTP (and got recovery codes) then had
+    // it disabled would leave RecoveryCode rows behind. Starting a fresh
+    // enrollment must purge them so the invariant "codes exist iff a
+    // confirmed factor exists" holds before verify re-mints.
+    const prisma = createPrismaMock({
+      recovery: [
+        { id: "r1", userId: "u-1", codeHash: "stale-1", usedAt: null },
+        { id: "r2", userId: "u-1", codeHash: "stale-2", usedAt: null },
+      ],
+    });
+    const res = await request(buildApp(prisma)).post("/api/auth/totp/enroll").send({});
+
+    expect(res.status).toBe(200);
+    expect(prisma.recoveryCode.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-1" } });
+    // No codes survive the re-enroll; enroll does NOT mint new ones (verify does).
+    expect(prisma._recovery()).toHaveLength(0);
+    expect(generateRecoveryCodes).not.toHaveBeenCalled();
+  });
+
   it("409s when TOTP is already enabled (no silent secret rotation)", async () => {
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "OLD", confirmedAt: new Date() }],
