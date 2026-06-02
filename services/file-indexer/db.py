@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Optional
 
 import psycopg2
@@ -16,12 +17,37 @@ logger = logging.getLogger(__name__)
 
 _conn: Optional[psycopg2.extensions.connection] = None
 
+# IDX-01: a single module-global psycopg2 connection is shared across several
+# threads — the watcher's per-file ``threading.Timer`` workers, the paho MQTT
+# network thread (brain-ingest), the apscheduler thread (daily ASR pass), and
+# the uvicorn ``/reindex`` request thread. A psycopg2 connection is NOT safe
+# for concurrent use: two threads issuing ``execute`` on the same connection
+# corrupt its protocol state ("another command is already in progress"), which
+# under concurrent uploads manifests as dropped/failed indexing.
+#
+# We serialise *every* access to the shared connection — both the helpers that
+# fetch it via ``get_conn()`` internally and the ``conn``-parameter helpers
+# that callers invoke with ``get_conn()`` (transcription_worker) — behind this
+# lock. It is an ``RLock`` because some operations are nested
+# (``prune_excess_chunks`` → ``delete_chunks_for_file``).
+#
+# Scope note: this guards only the shared module connection. Paths that open
+# their *own* private connection (``reindex_one`` in brain_ingest) are
+# unaffected and never contend on this lock. Throughput here is low (indexing),
+# so coarse serialisation is the right trade-off over a connection pool.
+_db_lock = threading.RLock()
+
 
 def get_conn() -> psycopg2.extensions.connection:
     """Get the module-level DB connection, reconnecting if needed.
 
     Auto-reconnects on broken connections (e.g. PG restart) so a transient
     failure doesn't permanently break the daemon.
+
+    IDX-01: callers MUST hold ``_db_lock`` while using the returned connection.
+    Every helper in this module does so; the liveness probe + reconnect below
+    also runs under the lock (callers already hold it) so a reconnect can't
+    race a concurrent ``execute`` on the old connection.
     """
     global _conn
     if _conn is not None:
@@ -78,8 +104,9 @@ def upsert_chunk(
     dict without needing a schema change.
     """
     metadata_value = json.dumps(metadata) if metadata is not None else None
-    conn = get_conn()
-    with conn.cursor() as cur:
+    # IDX-01: hold _db_lock for the cursor's lifetime so concurrent threads
+    # never execute on the shared connection at once.
+    with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             """
             INSERT INTO "FileContentChunk"
@@ -124,8 +151,7 @@ def delete_chunks_for_brain_item(brain_item_id: str) -> None:
     use ncFileId as a stable identity, so we can't lean on the existing
     unique constraint for upsert).
     """
-    conn = get_conn()
-    with conn.cursor() as cur:
+    with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             'DELETE FROM "FileContentChunk" WHERE "brainItemId" = %s',
             (brain_item_id,),
@@ -161,9 +187,8 @@ def mark_brain_item_indexed(
       200 chars to match ``update_item_status``), extractorWarnings
       replaced. Retry-window left alone — claim_attempt owns those.
     """
-    conn = get_conn()
     if status == "ready":
-        with conn.cursor() as cur:
+        with _db_lock, get_conn().cursor() as cur:
             cur.execute(
                 """
                 UPDATE "BrainMemoryItem"
@@ -178,7 +203,7 @@ def mark_brain_item_indexed(
                 (warnings or [], brain_item_id),
             )
     elif status == "failed":
-        with conn.cursor() as cur:
+        with _db_lock, get_conn().cursor() as cur:
             cur.execute(
                 """
                 UPDATE "BrainMemoryItem"
@@ -206,8 +231,7 @@ def mark_brain_item_indexed(
 
 def delete_chunks_for_file(nc_file_id: int) -> None:
     """Remove all chunks for a file (e.g. when it's deleted or re-indexed)."""
-    conn = get_conn()
-    with conn.cursor() as cur:
+    with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             'DELETE FROM "FileContentChunk" WHERE "ncFileId" = %s',
             (nc_file_id,),
@@ -227,8 +251,14 @@ def delete_chunks_for_file(nc_file_id: int) -> None:
 def select_queued_items(conn, *, limit: int = 50) -> list[dict]:
     """Return BrainMemoryItem rows with status='queued_for_transcription',
     oldest-first by uploadedAt. Each dict has id, userId, storagePath, mimeType.
+
+    IDX-01: the ``conn``-parameter helpers run against the same shared
+    connection the worker obtains from ``get_conn()``, so they take ``_db_lock``
+    too. For multi-statement helpers (``claim_attempt``, ``update_item_status``,
+    ``reconcile_stuck_items``) the lock is held across the SELECT/UPDATE +
+    ``commit()`` so the read-modify-write stays atomic against other threads.
     """
-    with conn.cursor() as cur:
+    with _db_lock, conn.cursor() as cur:
         cur.execute(
             """
             SELECT "id", "userId", "storagePath", "mimeType"
@@ -262,44 +292,46 @@ def update_item_status(
       - status='failed' → failureReason set
       - other transitions → just status (no side effects)
     """
-    if status == "ready":
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE "BrainMemoryItem"
-                   SET "status" = %s,
-                       "indexedAt" = NOW(),
-                       "failureReason" = NULL,
-                       "recentAttemptCount" = 0,
-                       "recentAttemptWindowStartedAt" = NULL
-                 WHERE "id" = %s
-                """,
-                (status, item_id),
-            )
-    elif status == "failed":
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE "BrainMemoryItem"
-                   SET "status" = %s,
-                       "failureReason" = %s
-                 WHERE "id" = %s
-                """,
-                (status, (failure_reason or "")[:200], item_id),
-            )
-    else:
-        with conn.cursor() as cur:
-            cur.execute(
-                'UPDATE "BrainMemoryItem" SET "status" = %s WHERE "id" = %s',
-                (status, item_id),
-            )
-    # The module-level `_conn` is autocommit (see get_conn), so commit is a
-    # no-op there. Calling it explicitly stays correct for fresh
-    # non-autocommit connections too.
-    try:
-        conn.commit()
-    except Exception:
-        pass
+    # IDX-01: hold _db_lock across the UPDATE + commit (see select_queued_items).
+    with _db_lock:
+        if status == "ready":
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE "BrainMemoryItem"
+                       SET "status" = %s,
+                           "indexedAt" = NOW(),
+                           "failureReason" = NULL,
+                           "recentAttemptCount" = 0,
+                           "recentAttemptWindowStartedAt" = NULL
+                     WHERE "id" = %s
+                    """,
+                    (status, item_id),
+                )
+        elif status == "failed":
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE "BrainMemoryItem"
+                       SET "status" = %s,
+                           "failureReason" = %s
+                     WHERE "id" = %s
+                    """,
+                    (status, (failure_reason or "")[:200], item_id),
+                )
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'UPDATE "BrainMemoryItem" SET "status" = %s WHERE "id" = %s',
+                    (status, item_id),
+                )
+        # The module-level `_conn` is autocommit (see get_conn), so commit is a
+        # no-op there. Calling it explicitly stays correct for fresh
+        # non-autocommit connections too.
+        try:
+            conn.commit()
+        except Exception:
+            pass
 
 
 def claim_attempt(conn, *, item_id: str) -> bool:
@@ -309,7 +341,9 @@ def claim_attempt(conn, *, item_id: str) -> bool:
     """
     from datetime import datetime, timedelta, timezone
 
-    with conn.cursor() as cur:
+    # IDX-01: hold _db_lock for the whole SELECT→decide→UPDATE→commit so the
+    # rolling-hour counter can't race another thread's interleaved write.
+    with _db_lock, conn.cursor() as cur:
         cur.execute(
             """
             SELECT "recentAttemptWindowStartedAt", "recentAttemptCount"
@@ -369,21 +403,23 @@ def reconcile_stuck_items(conn, *, stuck_after_hours: int = 6) -> int:
     back to 'queued_for_transcription' so the next run picks them up.
     Returns the number of rows updated.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE "BrainMemoryItem"
-               SET "status" = 'queued_for_transcription'
-             WHERE "status" = 'indexing'
-               AND "lastAttemptedAt" < NOW() - (%s || ' hours')::interval
-            """,
-            (str(stuck_after_hours),),
-        )
-        n = cur.rowcount
-    try:
-        conn.commit()
-    except Exception:
-        pass
+    # IDX-01: hold _db_lock across the UPDATE + rowcount read + commit.
+    with _db_lock:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE "BrainMemoryItem"
+                   SET "status" = 'queued_for_transcription'
+                 WHERE "status" = 'indexing'
+                   AND "lastAttemptedAt" < NOW() - (%s || ' hours')::interval
+                """,
+                (str(stuck_after_hours),),
+            )
+            n = cur.rowcount
+        try:
+            conn.commit()
+        except Exception:
+            pass
     return n
 
 
@@ -393,7 +429,7 @@ def fetch_item(conn, *, item_id: str) -> Optional[dict]:
     Mirrors the projection returned by select_queued_items so callers
     can treat both as the same shape.
     """
-    with conn.cursor() as cur:
+    with _db_lock, conn.cursor() as cur:
         cur.execute(
             """
             SELECT "id", "userId", "storagePath", "mimeType"
@@ -423,8 +459,7 @@ def prune_excess_chunks(nc_file_id: int, max_chunk_idx: int) -> None:
     if max_chunk_idx < 0:
         delete_chunks_for_file(nc_file_id)
         return
-    conn = get_conn()
-    with conn.cursor() as cur:
+    with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             'DELETE FROM "FileContentChunk" WHERE "ncFileId" = %s AND "chunkIdx" > %s',
             (nc_file_id, max_chunk_idx),
