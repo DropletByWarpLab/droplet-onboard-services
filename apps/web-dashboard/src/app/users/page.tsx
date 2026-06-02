@@ -24,7 +24,8 @@ import {
   listInvites,
   revokeInvite as apiRevokeInvite,
 } from "@/lib/api";
-import { isValidEmail } from "@droplet/auth-policy";
+import { isValidEmail, validatePassword } from "@droplet/auth-policy";
+import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import type {
   AuthUser,
   InviteListItem,
@@ -313,8 +314,8 @@ export default function UsersPage() {
       patch.displayName = editDisplayName.trim();
     }
     if (editPassword.trim()) {
-      if (editPassword.length < 8) {
-        setError("Password must be at least 8 characters");
+      if (!validatePassword(editPassword).ok) {
+        setError("Password doesn't meet the requirements yet.");
         return;
       }
       patch.password = editPassword;
@@ -720,6 +721,9 @@ export default function UsersPage() {
                   className="dp-input"
                   placeholder="••••••••"
                 />
+                {editPassword && (
+                  <PasswordRulesChecklist password={editPassword} />
+                )}
               </div>
             </div>
             <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">

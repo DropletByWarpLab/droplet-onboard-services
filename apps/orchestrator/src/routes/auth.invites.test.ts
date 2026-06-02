@@ -151,6 +151,22 @@ function createPrismaMock() {
       // username is already taken. Return null (not taken) so the first
       // base candidate derived from the email local-part is always used.
       findFirst: vi.fn().mockResolvedValue(null),
+      // PUT /auth/users/:username writes the directory row (email/passwordHash)
+      // via updateMany keyed on nextcloudUsername (ADR-013).
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        let count = 0;
+        for (let i = 0; i < userRows.length; i += 1) {
+          const u = userRows[i];
+          const match =
+            (where?.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
+            (where?.username !== undefined && u.username === where.username);
+          if (match) {
+            userRows[i] = { ...u, ...data, updatedAt: new Date() };
+            count += 1;
+          }
+        }
+        return { count };
+      }),
     },
     userInvite: {
       create: vi.fn(async ({ data }: any) => {
@@ -714,8 +730,22 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
 });
 
 describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () => {
-  it("forwards a trim+lowercased email to Nextcloud (updateUserSchema boundary)", async () => {
+  it("forwards a trim+lowercased email to Nextcloud AND the local directory row", async () => {
     const prisma = createPrismaMock();
+    // ADR-013: the edit route now writes the local directory row, so the
+    // edited user must exist locally (else 404). Seed it.
+    prisma.userRows.push({
+      id: "u-alice",
+      username: "alice",
+      nextcloudUsername: "alice",
+      displayName: "Alice",
+      email: "alice@old.test",
+      passwordHash: "$argon2id$OLD",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
     const app = buildApp(prisma);
 
     const res = await request(app)
@@ -729,5 +759,7 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
       "email",
       "alice@example.com",
     );
+    // The normalized email is also written to the local row (the login key).
+    expect(prisma.userRows[0].email).toBe("alice@example.com");
   });
 });

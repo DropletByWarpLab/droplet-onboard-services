@@ -226,7 +226,8 @@ const updateUserSchema = z
     email: emailField.optional(),
     // Accept either a byte count (1073741824) or a human string ("5 GB", "none").
     quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
-    password: z.string().min(8).max(128).optional(),
+    // ADR-013: same shared policy the setup/add-user/invite paths enforce.
+    password: passwordZod.optional(),
   })
   .refine(
     (d) =>
@@ -1703,25 +1704,79 @@ export function createProtectedAuthRouter(
       }
       const parsed = updateUserSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({
-          error: "Invalid user update",
-          details: parsed.error.flatten(),
-        });
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.email?.length) {
+          res.status(400).json({ error: "Invalid email address", code: "INVALID_EMAIL" });
+          return;
+        }
+        if (fieldErrors.password?.length) {
+          res.status(400).json({ error: "Password does not meet policy requirements", code: "WEAK_PASSWORD" });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
       const { username } = req.params;
-      if (parsed.data.displayName !== undefined) {
-        await ncUpdateUser(token, username, "displayname", parsed.data.displayName);
+      const { displayName, email, quota, password } = parsed.data;
+
+      // ADR-013: the built-in directory is the auth source of truth and
+      // /auth/login verifies the LOCAL passwordHash by email. An email or
+      // password edit that only touches Nextcloud has NO effect on login, so
+      // those edits MUST land on the local row. Fail CLOSED if the directory
+      // isn't wired (the legacy createAuthRouter() shim) rather than silently
+      // updating only Nextcloud. (displayName/quota are NC-side attributes and
+      // don't gate login, so they don't require the directory.)
+      const touchesDirectory = email !== undefined || password !== undefined;
+      if (touchesDirectory && !prisma) {
+        logger.error(
+          { username },
+          "update-user: prisma not wired into protected auth router; refusing to change directory email/password without the local mirror",
+        );
+        res.status(500).json({
+          error: "Server misconfigured: local user database not wired",
+          code: "USERS_NO_PRISMA",
+        });
+        return;
       }
-      if (parsed.data.email !== undefined) {
-        await ncUpdateUser(token, username, "email", parsed.data.email);
+
+      // Write the local directory row FIRST (idempotent; source of truth).
+      // `email` is already trim+lowercased by emailField; the plaintext
+      // password is hashed here and NEVER written to the row.
+      if (prisma) {
+        const data: Record<string, unknown> = {};
+        if (displayName !== undefined) data.displayName = displayName;
+        if (email !== undefined) data.email = email;
+        if (password !== undefined) data.passwordHash = await hashPassword(password);
+        if (Object.keys(data).length > 0) {
+          const updated = await prisma.user.updateMany({
+            where: { nextcloudUsername: username },
+            data,
+          });
+          // A credential change against a username with no directory row is
+          // meaningless for login — surface it instead of half-applying it to
+          // Nextcloud only.
+          if (updated.count === 0 && touchesDirectory) {
+            res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+            return;
+          }
+        }
       }
-      if (parsed.data.quota !== undefined) {
-        await ncUpdateUser(token, username, "quota", String(parsed.data.quota));
+
+      // Mirror the changes to Nextcloud (the WebDAV account + NC-side
+      // attributes). One OCS PUT per field; the plaintext password is sent
+      // here so the user's Files/WebDAV login keeps working.
+      if (displayName !== undefined) {
+        await ncUpdateUser(token, username, "displayname", displayName);
       }
-      if (parsed.data.password !== undefined) {
-        await ncUpdateUser(token, username, "password", parsed.data.password);
+      if (email !== undefined) {
+        await ncUpdateUser(token, username, "email", email);
+      }
+      if (quota !== undefined) {
+        await ncUpdateUser(token, username, "quota", String(quota));
+      }
+      if (password !== undefined) {
+        await ncUpdateUser(token, username, "password", password);
       }
       res.json({ status: "ok", username });
     } catch (err: any) {
