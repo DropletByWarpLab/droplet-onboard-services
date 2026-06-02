@@ -54,6 +54,9 @@ def _on_connect(client, _userdata, _flags, _reason_code, _properties=None) -> No
     here also makes `subscribe()` order-independent: a handler registered
     before `connect()` is wired on the first connect. (WARP-203 / IDX-06.)
     """
+    if _reason_code != 0:
+        logger.warning("MQTT connect refused: %s", _reason_code)
+        return
     if not _handlers:
         return
     for topic in _handlers:
