@@ -4,16 +4,18 @@
 > bring-your-own-IdP per customer + a Setup-wizard provisioning step** as the v1
 > fleet model, with the **central hosted relay (Option C) explicitly deferred**.
 > The open decision is A vs C. Tracked by **WARP-630**. Builds on ADR-013
-> (built-in directory), the runtime-discovery work in WARP-629 / PR #403, and
-> [`ONBOARDING_SSO_OIDC.md`](ONBOARDING_SSO_OIDC.md).
+> (built-in directory) and the per-box OIDC config in
+> [`ONBOARDING_SSO_OIDC.md`](ONBOARDING_SSO_OIDC.md); the runtime provider
+> discovery it assumes is the **in-flight WARP-629 (PR #403, in review)**.
 
 ## Context
 
 External-IdP SSO (Google / Entra / Okta) shipped in #378 / #396 and is wired
 **per box via env**: `DROPLET_SSO_<P>_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}`
 (`config.ts`), resolved by `getOidcProviderConfig()` and surfaced by
-`enabledSsoProviders()` (`services/sso-oidc.service.ts`). WARP-629 made the login
-render only the providers a given box has configured. None of this answers the
+`enabledSsoProviders()` (`services/sso-oidc.service.ts`). WARP-629 (in flight, PR
+#403) makes the login render only the providers a given box has configured. None
+of this answers the
 fleet question: **does SSO work for every Droplet as it comes online?**
 
 It does not, for one load-bearing reason — the **OIDC redirect URI**:
@@ -21,8 +23,9 @@ It does not, for one load-bearing reason — the **OIDC redirect URI**:
 - On `/authorize`, the box sends the IdP `redirect_uri = https://<box>/api/sso/oidc/callback`
   (`buildAuthorizeRequest`, from the env value). The IdP **only honours a
   redirect URI that is pre-registered** on the OAuth client; anything else is
-  rejected (`redirect_uri_mismatch`). `ONBOARDING_SSO_OIDC.md` states this:
-  *"REDIRECT_URI must exactly match the redirect registered at the IdP."*
+  rejected (`redirect_uri_mismatch`). `config.ts` documents this in the
+  `DROPLET_SSO_*` block: *"REDIRECT_URI must exactly match the redirect
+  registered at the IdP."*
 - **Google specifically** forbids, on the registered URI: wildcards
   (`https://*.warp-lab.com/...`), raw IP addresses, and non-public hosts
   (`.local`, private ranges). It must be a fully-qualified HTTPS URL on a public
@@ -62,10 +65,10 @@ v1 fleet model:
 - A **Setup-wizard step "Connect your identity provider"** (WARP-630) captures
   issuer / client-id / client-secret + the box's external hostname, **derives the
   exact `REDIRECT_URI`**, shows the operator what to register at the IdP, writes
-  `DROPLET_SSO_<P>_*` to `.env` (secrets stay in env — no DB model, per the
-  secrets-only-via-`.env` ADR and `ONBOARDING_SSO_OIDC.md`), and restarts the
-  orchestrator. Runtime discovery (WARP-629) then lights the button on that box
-  only.
+  `DROPLET_SSO_<P>_*` to `.env`, and restarts the orchestrator once to load them.
+  Runtime discovery (WARP-629, in flight) then lights the button on that box
+  only. (Why a write-through + restart is acceptable here — and not in conflict
+  with the WireGuard-endpoint ruling — is spelled out below.)
 - **Prerequisite, enforced:** a real public hostname + trusted HTTPS. The wizard
   validates this and, on a raw-IP / `.local` box, **hides the IdP step** with a
   clear "SSO needs a public hostname" message rather than offering a flow that
@@ -74,6 +77,26 @@ v1 fleet model:
   its path is the built-in argon2id directory password login (ADR-013) +
   passkeys (#377), which is fully self-contained and air-gap-safe. The business
   shape offers the IdP step.
+
+**On `.env` write-through + restart (vs the WireGuard-endpoint ruling).** The
+Setup-wizard addendum rated "write-through to `.env` + restart" a **"Hard no"**
+for the WireGuard endpoint host, choosing a restart-free runtime fallback
+instead. That ruling stands and is **not** contradicted here; the cases differ on
+the two points that drove it:
+
+- **SSO config is secret.** `CLIENT_SECRET` must live in `.env` per the
+  secrets-only-via-`.env` rule (no DB/Settings model for secrets); the WireGuard
+  endpoint host is non-secret.
+- **No runtime-derivable source.** The WireGuard endpoint could be derived live
+  from DuckDNS state with zero writes; a customer-pasted issuer / client-id /
+  secret has no equivalent source — it must be persisted from operator input.
+- **One-time provisioning, not a recurring toggle.** This is a single setup-time
+  write + restart per box, not a settings surface flipped repeatedly, so the
+  "worst UX" objection (a restart on *every* settings change) does not apply.
+
+If the addendum's generic `Settings`-overlay (its option (b)) later lands, SSO's
+*non-secret* fields could move onto it; the secret stays in `.env` regardless.
+Follow-up, not a v1 blocker.
 
 **Central hosted relay (Option C) is deferred**, not adopted. Revisit only if a
 **managed / zero-touch SSO tier** is pursued, as its own ADR.
@@ -129,9 +152,9 @@ v1 fleet model:
 
 ## References
 
-- [`ONBOARDING_SSO_OIDC.md`](ONBOARDING_SSO_OIDC.md),
-  [`ONBOARDING_SSO_RUNTIME_DISCOVERY.md`](ONBOARDING_SSO_RUNTIME_DISCOVERY.md)
-- ADR-013 (built-in directory); WARP-629 / PR #403 (runtime discovery); WARP-630
-  (this ADR's implementation).
+- [`ONBOARDING_SSO_OIDC.md`](ONBOARDING_SSO_OIDC.md) — per-box OIDC config + the
+  redirect-URI rule (quoted above from `config.ts`).
+- ADR-013 (built-in directory); WARP-629 / PR #403 — runtime provider discovery
+  (**in flight, in review**); WARP-630 (this ADR's implementation).
 - `apps/orchestrator/src/services/sso-oidc.service.ts`,
   `apps/orchestrator/src/routes/sso.ts`, `apps/orchestrator/src/config.ts`.
