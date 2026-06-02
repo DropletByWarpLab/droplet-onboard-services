@@ -93,3 +93,39 @@ def test_reseal_nonce_is_single_use(backend, servicer):
     ctx = MagicMock()
     servicer.Reseal(pb.ResealRequest(operator_auth_nonce=nonce), ctx)
     ctx.set_code.assert_called_once_with(grpc.StatusCode.UNAUTHENTICATED)
+
+
+def test_nonce_table_bounded_when_never_consumed(backend, servicer):
+    """IDX-08 — nonces issued but never redeemed must not grow without bound.
+    The table is capped at _MAX_RESEAL_NONCES regardless of issue volume."""
+    from grpc_server import _MAX_RESEAL_NONCES
+
+    for _ in range(_MAX_RESEAL_NONCES + 50):
+        servicer.issue_reseal_nonce()
+    assert len(servicer._reseal_nonces) <= _MAX_RESEAL_NONCES
+
+
+def test_issue_sweeps_expired_nonces(backend, servicer, monkeypatch):
+    """An expired nonce is swept on the next issue (previously only swept on
+    consume, so an unredeemed-then-expired nonce lingered)."""
+    import grpc_server
+
+    t = [1000.0]
+    monkeypatch.setattr(grpc_server.time, "time", lambda: t[0])
+
+    stale = servicer.issue_reseal_nonce()
+    assert stale in servicer._reseal_nonces
+    # Advance past the TTL, then issue a fresh nonce → stale one is swept.
+    t[0] += grpc_server.RESEAL_NONCE_TTL_SEC + 1
+    servicer.issue_reseal_nonce()
+    assert stale not in servicer._reseal_nonces
+
+
+def test_newly_issued_nonce_survives_cap_eviction(backend, servicer):
+    """The cap evicts the OLDEST entry, never the nonce just minted."""
+    from grpc_server import _MAX_RESEAL_NONCES
+
+    for _ in range(_MAX_RESEAL_NONCES):
+        servicer.issue_reseal_nonce()
+    fresh = servicer.issue_reseal_nonce()
+    assert fresh in servicer._reseal_nonces
