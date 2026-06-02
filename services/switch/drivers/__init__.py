@@ -32,6 +32,10 @@ def create_driver() -> SwitchDriver:
         port = int(os.environ.get("SWITCH_PORT", "443"))
         username = os.environ.get("SWITCH_USERNAME", "admin")
         password = os.environ.get("SWITCH_PASSWORD", "")
+        # NET-07: optional CA bundle / cert path enabling TLS verification of
+        # the switch. Empty/unset → driver keeps the insecure self-signed
+        # default (with a warning). Honoured in LantronixDriver.connect().
+        ca_cert = os.environ.get("SWITCH_CA_CERT", "").strip() or None
 
         if not password:
             logger.warning("SWITCH_PASSWORD not set — switch auth may fail")
@@ -44,6 +48,7 @@ def create_driver() -> SwitchDriver:
             port=port,
             username=username,
             password=password,
+            ca_cert=ca_cert,
         )
 
     # Future: custom ASIC driver

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 import time
 from typing import Any
@@ -80,11 +81,22 @@ class LantronixDriver(SwitchDriver):
       — it calls `_request()`, which does.
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        ca_cert: str | None = None,
+    ):
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        # Optional CA bundle / cert path for TLS verification of the switch
+        # (SWITCH_CA_CERT). When None, verification stays disabled with a
+        # warning (self-signed embedded cert) — NET-07.
+        self._ca_cert = ca_cert
         self._client: httpx.AsyncClient | None = None
         self._auth_lock = asyncio.Lock()
         self._keepalive_task: asyncio.Task | None = None
@@ -94,14 +106,36 @@ class LantronixDriver(SwitchDriver):
     # --- Lifecycle ---
 
     async def connect(self) -> None:
-        logger.warning(
-            "TLS certificate verification disabled for switch at %s:%d "
-            "(self-signed cert expected). Set SWITCH_CA_CERT to enable verification.",
-            self._host, self._port,
-        )
+        # NET-07: honour SWITCH_CA_CERT. When the operator points it at a CA
+        # bundle / cert, pass that path to httpx `verify=` so the TLS session
+        # to the switch is actually verified. Without it, fall back to the
+        # historical insecure behaviour (self-signed embedded cert) with a
+        # warning. A configured-but-unreadable cert fails closed rather than
+        # silently downgrading to verify=False — silent downgrade is the very
+        # false-assurance trap this fix removes.
+        if self._ca_cert:
+            if not os.path.isfile(self._ca_cert):
+                raise ValueError(
+                    f"SWITCH_CA_CERT is set to '{self._ca_cert}' but no such file "
+                    f"exists; refusing to fall back to unverified TLS. Fix the path "
+                    f"or unset SWITCH_CA_CERT to use the (insecure) self-signed default."
+                )
+            verify: bool | str = self._ca_cert
+            logger.info(
+                "TLS certificate verification ENABLED for switch at %s:%d "
+                "(CA cert: %s).",
+                self._host, self._port, self._ca_cert,
+            )
+        else:
+            verify = False  # Self-signed cert on embedded switch
+            logger.warning(
+                "TLS certificate verification disabled for switch at %s:%d "
+                "(self-signed cert expected). Set SWITCH_CA_CERT to enable verification.",
+                self._host, self._port,
+            )
         self._client = httpx.AsyncClient(
             base_url=f"https://{self._host}:{self._port}",
-            verify=False,  # Self-signed cert on embedded switch
+            verify=verify,
             timeout=15.0,
             follow_redirects=False,
         )
