@@ -9,6 +9,13 @@ vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn(async (key: string) => cacheStore.get(key) ?? null),
   cacheSet: vi.fn(async (key: string, value: unknown) => { cacheStore.set(key, value); }),
   cacheDel: vi.fn(async (key: string) => { cacheStore.delete(key); }),
+  // NX semantics: set only if absent. Mirrors the real Redis `SET … NX EX`
+  // (true when the key was claimed, false when it already existed).
+  cacheSetNx: vi.fn(async (key: string, value: unknown) => {
+    if (cacheStore.has(key)) return false;
+    cacheStore.set(key, value);
+    return true;
+  }),
 }));
 
 import {
