@@ -25,6 +25,7 @@ import type { PrivateEnhancement } from "@droplet/tools-core";
 import type {
   McpCallContext,
   McpClientService,
+  ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
 import type { ChatMessage, ChatResponse, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
@@ -450,11 +451,33 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       }
 
-      const result = await deps.mcp.callTool(
-        call.function.name,
-        args,
-        toolContext,
-      );
+      // ORCH-05 — a *thrown* tool dispatch (stdio hiccup, child-process
+      // blip, or a handler that throws instead of returning
+      // `{isError:true}`) must NOT abort the whole turn. Catch it, feed a
+      // bounded structured error back to the model as a normal tool
+      // result, and let the loop continue so the model can recover or
+      // finalize. The `maxIter` cap still bounds a persistently-failing
+      // tool. Tool-*reported* failures (`result.isError`) already flow
+      // through the normal path below — this only adds the throw path.
+      let result: McpToolCallResult;
+      try {
+        result = await deps.mcp.callTool(call.function.name, args, toolContext);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result = {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: "tool_dispatch_failed",
+                tool: call.function.name,
+                message: message.slice(0, 500),
+              }),
+            },
+          ],
+        };
+      }
       const text = result.content[0]?.text ?? "{}";
       let parsed: unknown;
       try {

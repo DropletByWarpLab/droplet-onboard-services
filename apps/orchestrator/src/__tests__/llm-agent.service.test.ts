@@ -180,6 +180,78 @@ describe("runAgent", () => {
     }
   });
 
+  // ORCH-05 — a thrown tool dispatch must not abort the turn. The loop
+  // should feed a structured error back to the model and continue so the
+  // model can recover or finalize.
+  it("does not kill the turn when a tool dispatch throws", async () => {
+    const callTool = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("stdio pipe closed"));
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c1",
+                    type: "function",
+                    function: { name: "list_files", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            { message: { role: "assistant", content: "sorry, that tool failed" } },
+          ],
+        }),
+      });
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          { name: "list_files", description: "...", inputSchema: { type: "object", properties: {} } },
+        ]),
+        callTool,
+      } as never,
+      aiGateway: { chat } as never,
+      onEvent: (e: SSEEvent) => events.push(e),
+    };
+    const result = await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "list my files" }],
+    });
+
+    // The turn completed normally — the throw did NOT reject runAgent.
+    expect(result.stop_reason).toBe("model_done");
+    expect(result.message.content).toBe("sorry, that tool failed");
+    // The failing dispatch surfaced as a non-OK tool_result chip.
+    const toolResultEvt = events.find((e) => e.type === "tool_result");
+    expect(toolResultEvt).toBeDefined();
+    if (toolResultEvt && toolResultEvt.type === "tool_result") {
+      expect(toolResultEvt.ok).toBe(false);
+    }
+    // The structured error was recorded in the trace and fed back to the
+    // model (a second ai-gateway turn happened).
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(result.trace).toHaveLength(1);
+    expect(result.trace[0].result).toMatchObject({
+      error: "tool_dispatch_failed",
+      tool: "list_files",
+    });
+  });
+
   it("returns error stop_reason when the ai-gateway responds non-OK", async () => {
     const events: SSEEvent[] = [];
     const deps: AgentDeps = {
