@@ -24,7 +24,7 @@ from config import NEXTCLOUD_DATA_ROOT
 from extractors.registry import dispatch
 from chunker import chunk_spans, format_chunk_with_header
 from embedder import embed_texts
-from db import upsert_chunk, delete_chunks_for_file, prune_excess_chunks
+from db import upsert_chunk, delete_chunks_for_file, delete_chunks_for_path, prune_excess_chunks
 from mqtt_client import publish
 
 logger = logging.getLogger(__name__)
@@ -143,6 +143,24 @@ class IndexHandler(FileSystemEventHandler):
                 delete_chunks_for_file(file_id)
                 publish(f"droplet/index/{user}/deleted", {"path": relpath, "ncFileId": file_id})
                 logger.info("Deleted index for %s/%s (fileId=%d)", user, relpath, file_id)
+            else:
+                # IDX-09: Nextcloud may purge the oc_filecache row before/at the
+                # same time as the inotify delete reaches us, so the fileId is
+                # unresolvable. Without a fallback the file's chunks are never
+                # deleted → orphaned vectors keep surfacing in search. Delete by
+                # the (userId, path) the watcher stored ("/<relpath>") instead.
+                deleted = delete_chunks_for_path(user, f"/{relpath}")
+                if deleted:
+                    publish(f"droplet/index/{user}/deleted", {"path": relpath, "ncFileId": None})
+                    logger.info(
+                        "Deleted index for %s/%s by path (no fileId; %d chunk(s))",
+                        user, relpath, deleted,
+                    )
+                else:
+                    logger.debug(
+                        "on_deleted: no fileId and no chunks by path for %s/%s",
+                        user, relpath,
+                    )
         except Exception as e:
             logger.warning("on_deleted error for %s: %s", event.src_path, e)
 

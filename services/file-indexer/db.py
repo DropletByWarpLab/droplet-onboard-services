@@ -214,6 +214,24 @@ def delete_chunks_for_file(nc_file_id: int) -> None:
         )
 
 
+def delete_chunks_for_path(user_id: str, path: str) -> int:
+    """Remove all chunks for a (userId, path) pair; returns rows deleted.
+
+    IDX-09 fallback for deletes where the Nextcloud `oc_filecache` row has
+    already been purged (so `ncFileId` can't be resolved). The watcher stores
+    `path` as `"/<relpath>"` and `userId` as the Nextcloud user, so a delete
+    keyed on those drops the orphaned vectors that would otherwise linger in
+    search. Scoped to a single user's own path — never a cross-user wildcard.
+    """
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            'DELETE FROM "FileContentChunk" WHERE "userId" = %s AND "path" = %s',
+            (user_id, path),
+        )
+        return cur.rowcount
+
+
 # ── WARP-218: BrainMemoryItem status helpers ──
 #
 # These helpers run plain psycopg parametrised SQL — same style as
