@@ -186,7 +186,7 @@ export default function SettingsPage() {
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="Password (min. 8 characters)"
+              placeholder="Create a password"
               className="dp-input"
               onKeyDown={(e) => e.key === "Enter" && handleCreateUser()}
             />

@@ -488,7 +488,9 @@ export async function createInvite(
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Failed to create invite");
+    const err = new Error(data.error || "Failed to create invite") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
   return res.json();
 }
