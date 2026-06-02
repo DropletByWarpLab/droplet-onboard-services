@@ -299,6 +299,15 @@ describe("runAgent", () => {
     expect(callTool).toHaveBeenCalledTimes(1);
     expect(callTool.mock.calls[0][0]).toBe("search_content");
 
+    // FINDING 2 — no misleading tool_call chip is rendered for the
+    // guard-rejected hallucinated name (the tool_call event must fire only
+    // for calls that pass the guard and actually dispatch).
+    expect(
+      events.find(
+        (e) => e.type === "tool_call" && e.name === "knowledge_base_search",
+      ),
+    ).toBeUndefined();
+
     // A tool_result with ok=false was emitted for the bad call, carrying the
     // UNKNOWN_TOOL code and the valid-tool list so the model can recover.
     const badResult = events.find(
@@ -312,6 +321,13 @@ describe("runAgent", () => {
       expect(data.error?.message).toContain("search_content");
     }
 
+    // FINDING 4 — the role="tool" recovery message MUST actually be
+    // delivered to the model's next chat() call, carrying the bad call's
+    // tool_call_id so the OpenAI protocol pairs it with the assistant turn.
+    expect(chat.mock.calls[1][0].messages).toContainEqual(
+      expect.objectContaining({ role: "tool", tool_call_id: "c-bad" }),
+    );
+
     // The guard message was fed back as a role="tool" reply so the model
     // saw the valid-tool list on its next turn — the trace records the bad
     // call too, then the real one.
@@ -320,6 +336,79 @@ describe("runAgent", () => {
       "knowledge_base_search",
       "search_content",
     ]);
+  });
+
+  // WARP-642 review (FINDING 1) — consecutive-guard-hit circuit breaker.
+  // If the model keeps naming an unknown tool every turn (ignoring the
+  // UNKNOWN_TOOL recovery message), the loop must NOT silently exhaust
+  // maxIter and return a blank reply. After MAX_CONSECUTIVE_GUARD_HITS (3)
+  // guard-only iterations it breaks early with stop_reason "error".
+  it("circuit-breaks when the model repeatedly calls an unknown tool", async () => {
+    const callTool = vi.fn();
+    const badTurn = {
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "c-bad",
+                  type: "function",
+                  function: {
+                    name: "knowledge_base_search",
+                    arguments: JSON.stringify({ query: "vacation policy" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    };
+    // Same hallucinated call on every iteration — enough times that a
+    // non-breaking loop would run all maxIter iterations.
+    const chat = vi
+      .fn()
+      .mockResolvedValue(badTurn);
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          {
+            name: "search_content",
+            description: "Hybrid search over docs + brain items.",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" } },
+            },
+          },
+        ]),
+        callTool,
+      } as never,
+      aiGateway: { chat } as never,
+      onEvent: (e: SSEEvent) => events.push(e),
+    };
+    const result = await runAgent(deps, {
+      model: "ollama/gpt-oss:20b",
+      messages: [{ role: "user", content: "search the knowledge base" }],
+    });
+
+    // Never dispatched to the MCP child.
+    expect(callTool).not.toHaveBeenCalled();
+    // Stopped EARLY — exactly MAX_CONSECUTIVE_GUARD_HITS (3) chat turns,
+    // not the full maxIter.
+    expect(chat).toHaveBeenCalledTimes(3);
+    // Ends with an error explaining the repeated unknown tool.
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toContain("knowledge_base_search");
+    const done = events.find((e) => e.type === "done");
+    expect(done).toBeDefined();
+    if (done && done.type === "done") {
+      expect(done.stop_reason).toBe("error");
+    }
   });
 
   // WARP-104 reviewer follow-up: verify the per-call session context

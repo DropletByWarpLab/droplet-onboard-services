@@ -366,6 +366,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   const advertisedNames = new Set(tools.map((t) => t.function.name));
   const availableToolList = tools.map((t) => t.function.name).join(", ");
 
+  // WARP-642 review (FINDING 1) — `advertisedNames` never changes between
+  // iterations, so a model that keeps naming an unknown tool every turn
+  // (ignoring the UNKNOWN_TOOL recovery message) would otherwise run the
+  // loop all the way to maxIter and return a blank reply with
+  // stop_reason "iteration_limit" — the dashboard shows an empty message
+  // with no explanation. We count iterations that ONLY hit the guard
+  // (dispatched zero real tools) and break early once the model has
+  // ignored the recovery path MAX_CONSECUTIVE_GUARD_HITS times in a row,
+  // surfacing a real error instead.
+  const MAX_CONSECUTIVE_GUARD_HITS = 3;
+  let consecutiveGuardHits = 0;
+  let lastBadToolName = "";
+
   for (let iter = 0; iter < maxIter; iter++) {
     const gw = await deps.aiGateway.chat({
       model: req.model,
@@ -442,9 +455,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // (required by the OpenAI protocol so role="tool" messages have a
     // parent), then dispatch every requested tool and feed results back.
     messages.push(asst);
+    // Per-iteration tallies feeding the FINDING 1 circuit breaker: how many
+    // calls this turn only hit the guard vs. actually dispatched a real tool.
+    let iterGuardHits = 0;
+    let iterRealDispatches = 0;
     for (const call of asst.tool_calls) {
       const args = safeParseArgs(call);
-      emit({ type: "tool_call", id: call.id, name: call.function.name, args });
 
       // WARP-642 — hallucinated-tool guard. If the model named a tool that
       // was NOT advertised this turn, don't round-trip it to the MCP child
@@ -457,12 +473,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // sends zero tools, so this branch never fires on greeting-style
       // turns (the model is given nothing to mis-name).
       if (!advertisedNames.has(call.function.name)) {
+        // FINDING 3 (security) — `call.function.name` is model-controlled
+        // (steerable via prompt injection) and a degenerate huge name could
+        // bloat history. Sanitize before reflecting it into the
+        // role="tool" reply, which the model reads next turn as trusted
+        // tool output. The raw name stays in the operator-facing SSE
+        // emit / trace below (not model-facing).
+        const safeName = call.function.name.slice(0, 64).replace(/[^\w:.\-]/g, "_");
+        lastBadToolName = safeName;
         const guardError = {
           status: "error" as const,
           error: {
             code: "UNKNOWN_TOOL",
             message:
-              `Unknown tool: '${call.function.name}'. ` +
+              `Unknown tool: '${safeName}'. ` +
               (availableToolList
                 ? `Call one of the available tools instead: ${availableToolList}.`
                 : "No tools are available for this request."),
@@ -488,8 +512,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           tool_call_id: call.id,
           content: guardText,
         });
+        iterGuardHits++;
         continue;
       }
+
+      // FINDING 2 — emit the tool_call chip only AFTER the guard passes, so
+      // guard-rejected (never-dispatched) calls don't render a misleading
+      // chip on the dashboard. Guard hits still surface via their own
+      // tool_result with ok=false above.
+      iterRealDispatches++;
+      emit({ type: "tool_call", id: call.id, name: call.function.name, args });
 
       // WARP-437 — adaptive routing. For `search_content` calls we
       // classify the query, derive a per-class preset, pre-compute any
@@ -562,6 +594,29 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         tool_call_id: call.id,
         content: text.slice(0, 8000),
       });
+    }
+
+    // FINDING 1 — circuit breaker. A turn that only hit the hallucinated-tool
+    // guard (zero real dispatches) means the model ignored the recovery
+    // message; count those consecutively. Any real dispatch means the model
+    // is making progress, so reset. Once the model has wasted
+    // MAX_CONSECUTIVE_GUARD_HITS turns in a row, stop early with an error
+    // rather than silently burning the rest of maxIter and returning blank.
+    if (iterGuardHits > 0 && iterRealDispatches === 0) {
+      consecutiveGuardHits++;
+    } else if (iterRealDispatches > 0) {
+      consecutiveGuardHits = 0;
+    }
+    if (consecutiveGuardHits >= MAX_CONSECUTIVE_GUARD_HITS) {
+      const error = `model repeatedly called unknown tool: ${lastBadToolName}`;
+      emit({ type: "done", iterations: iter + 1, stop_reason: "error", error });
+      return {
+        message: { role: "assistant", content: "" },
+        trace,
+        iterations: iter + 1,
+        stop_reason: "error",
+        error,
+      };
     }
   }
 
