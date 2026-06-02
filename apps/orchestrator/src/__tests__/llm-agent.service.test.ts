@@ -411,6 +411,133 @@ describe("runAgent", () => {
     }
   });
 
+  // WARP-642 review (FINDING 1 reset path) — a turn that dispatches a real
+  // tool MUST reset the consecutive-guard-hit counter, so an occasional
+  // hallucinated name interleaved with real progress can never accumulate to
+  // a false circuit-break. Sequence: guard-only, guard-only (counter → 2),
+  // mixed bad+good (real dispatch RESETS counter → 0), guard-only
+  // (counter → 1), then the model answers. Without the reset the final
+  // guard-only turn would tip the counter to 3 and stop with "error", so
+  // stop_reason "model_done" is what proves the reset fired.
+  it("resets the guard-hit circuit breaker after a real dispatch (mixed turn)", async () => {
+    const callTool = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: JSON.stringify({ data: { results: [] } }) }],
+      isError: false,
+    });
+    const badTurn = (id: string) => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id,
+                  type: "function",
+                  function: { name: "knowledge_base_search", arguments: "{}" },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+    // One turn carrying BOTH a hallucinated name and the real tool.
+    const mixedTurn = (bad: string, good: string) => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: bad,
+                  type: "function",
+                  function: { name: "knowledge_base_search", arguments: "{}" },
+                },
+                {
+                  id: good,
+                  type: "function",
+                  function: {
+                    name: "search_content",
+                    arguments: JSON.stringify({ query: "vacation policy" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce(badTurn("c-bad1"))
+      .mockResolvedValueOnce(badTurn("c-bad2"))
+      .mockResolvedValueOnce(mixedTurn("c-bad3", "c-good3"))
+      .mockResolvedValueOnce(badTurn("c-bad4"))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "Here is what I found." } }],
+        }),
+      });
+    const events: SSEEvent[] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          {
+            name: "search_content",
+            description: "Hybrid search over docs + brain items.",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" } },
+            },
+          },
+        ]),
+        callTool,
+      } as never,
+      aiGateway: { chat } as never,
+      onEvent: (e: SSEEvent) => events.push(e),
+    };
+    const result = await runAgent(deps, {
+      model: "ollama/gpt-oss:20b",
+      max_iter: 8,
+      messages: [{ role: "user", content: "search the knowledge base for vacation policy" }],
+    });
+
+    // The valid tool was dispatched exactly once (the mixed turn); the
+    // hallucinated name never reached the MCP child.
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(callTool.mock.calls[0][0]).toBe("search_content");
+
+    // The real dispatch reset the consecutive-guard-hit counter, so the
+    // trailing guard-only turn did NOT trip the breaker — the loop reached
+    // the model's final answer instead of erroring.
+    expect(result.stop_reason).toBe("model_done");
+    expect(result.error).toBeUndefined();
+    expect(chat).toHaveBeenCalledTimes(5);
+
+    // FINDING 2 — exactly one tool_call chip, for the single real dispatch;
+    // never for a guard-rejected hallucinated name.
+    expect(events.filter((e) => e.type === "tool_call").length).toBe(1);
+    expect(
+      events.find((e) => e.type === "tool_call" && e.name === "knowledge_base_search"),
+    ).toBeUndefined();
+
+    // Both the guard reply and the real tool reply from the mixed turn are
+    // delivered to the model on the following chat() call.
+    expect(chat.mock.calls[3][0].messages).toContainEqual(
+      expect.objectContaining({ role: "tool", tool_call_id: "c-bad3" }),
+    );
+    expect(chat.mock.calls[3][0].messages).toContainEqual(
+      expect.objectContaining({ role: "tool", tool_call_id: "c-good3" }),
+    );
+  });
+
   // WARP-104 reviewer follow-up: verify the per-call session context
   // (ncToken) is plumbed verbatim through every callTool invocation.
   it("forwards req.toolCallContext to mcp.callTool on every dispatch", async () => {

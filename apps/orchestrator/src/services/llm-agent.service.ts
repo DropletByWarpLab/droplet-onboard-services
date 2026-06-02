@@ -507,10 +507,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         });
         // Feed the same envelope back to the model as the tool's reply so
         // the next iteration sees the valid-tool list and can self-correct.
+        // Bound it with the same 8000-char cap as real tool results (below)
+        // so a large advertised-tool list can't inflate next-turn context.
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: guardText,
+          content: guardText.slice(0, 8000),
         });
         iterGuardHits++;
         continue;
