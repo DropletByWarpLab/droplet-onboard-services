@@ -41,4 +41,11 @@ describe("DASH-09 themeColor is driven from the accent token", () => {
     expect(layout).toMatch(/themeColor:\s*THEME_COLOR/);
     expect(layout).not.toMatch(/themeColor:\s*["']#/);
   });
+
+  it("manifest.json theme_color matches ACCENT_HEX (installed PWA chrome color)", () => {
+    const manifest = JSON.parse(
+      readFileSync(resolve(SRC_ROOT, "..", "public", "manifest.json"), "utf8"),
+    ) as { theme_color?: string };
+    expect(manifest.theme_color?.toLowerCase()).toBe(ACCENT_HEX.toLowerCase());
+  });
 });
