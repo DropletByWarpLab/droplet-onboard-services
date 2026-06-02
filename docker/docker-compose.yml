@@ -1197,6 +1197,46 @@ services:
     cpus: ${REDIS_PM_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
+  pm-migrator:
+    # One-shot Django migration runner. Plane's backend image splits work across
+    # bin/ entrypoints: pm-api runs `wait_for_migrations` (it BLOCKS until the
+    # schema is applied, it never migrates) and pm-worker assumes a migrated DB.
+    # `migrate` itself only runs from docker-entrypoint-migrator.sh — so a fresh
+    # postgres-pm volume needs this to complete first or pm-api hangs on
+    # wait_for_migrations and any query hits missing tables. Same backend pin as
+    # pm-api/pm-worker (Test 11 single-pin posture) → no extra image download.
+    # restart "no": it runs `wait_for_db` + `migrate`, then exits 0; pm-api and
+    # pm-worker gate on it via service_completed_successfully. (WARP-496)
+    image: makeplane/plane-backend:v0.24.1
+    command: ["./bin/docker-entrypoint-migrator.sh"]
+    container_name: droplet-pm-migrator
+    profiles: ["pm"]
+    restart: "no"
+    depends_on:
+      postgres-pm:
+        condition: service_healthy
+      redis-pm:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      # Plane's settings module reads SECRET_KEY at import time, so even the
+      # migrate command needs it set (DATABASE_URL/REDIS_URL drive the actual
+      # connection). WEB_URL is link-rendering only — not needed to migrate.
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+    mem_limit: ${PM_MIGRATOR_MEM_LIMIT:-512m}
+    # Soft floor so the migrator isn't the first OOM-eviction target when the
+    # rest of the stack is under memory pressure during its run — a kill here
+    # exits non-zero and blocks pm-api/pm-worker (they gate on its success).
+    # Mirrors postgres-pm. (Note: this protects against contention, not against
+    # a migration batch exceeding the 512m mem_limit — 512m is ample for migrate.)
+    mem_reservation: ${PM_MIGRATOR_MEM_RESERVATION:-256m}
+    cpus: ${PM_MIGRATOR_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
   pm-api:
     # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
     # per-Droplet-release decision; do not bump without spec update.
@@ -1209,6 +1249,8 @@ services:
         condition: service_healthy
       redis-pm:
         condition: service_healthy
+      pm-migrator:
+        condition: service_completed_successfully
     env_file:
       - path: ../.env
         required: false
@@ -1234,6 +1276,8 @@ services:
     depends_on:
       pm-api:
         condition: service_started
+      pm-migrator:
+        condition: service_completed_successfully
     env_file:
       - path: ../.env
         required: false

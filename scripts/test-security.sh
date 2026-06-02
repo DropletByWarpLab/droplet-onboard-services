@@ -569,6 +569,84 @@ else
 fi
 
 # =============================================================================
+# Test 15: WARP-496 — pm-migrator one-shot applies Plane migrations before
+#          pm-api / pm-worker start
+# =============================================================================
+# Plane's backend image splits responsibilities across bin/ entrypoints:
+# docker-entrypoint-api.sh runs `wait_for_migrations` (it BLOCKS until schema is
+# applied, it does NOT migrate) and docker-entrypoint-worker.sh likewise assumes
+# a migrated DB. The migration itself only runs from
+# docker-entrypoint-migrator.sh. So a fresh postgres-pm volume needs a one-shot
+# migrator to complete BEFORE pm-api/pm-worker, or they hang / hit missing
+# tables. This guard locks in that topology:
+#   1. a pm-migrator service exists,
+#   2. it shares pm-api's plane-backend pin (single-pin posture, cf. Test 11),
+#   3. restart: "no" (one-shot, must not loop),
+#   4. it runs the migrator entrypoint,
+#   5. pm-api AND pm-worker gate on it via service_completed_successfully.
+
+# Whole pm-migrator service block (start at its 2-space key, stop at the next
+# top-level service key). Mirrors the awk block-scoping used by Test 11/12.
+pm_migrator_block=$(awk '
+  /^  pm-migrator:[[:space:]]*$/ { in_svc = 1 }
+  in_svc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && $0 !~ /pm-migrator/ { in_svc = 0 }
+  in_svc { print }
+' "$COMPOSE_FILE")
+
+# Does service $1's depends_on include pm-migrator with the
+# service_completed_successfully condition? (long-form depends_on only)
+pm_dep_on_migrator() {
+  awk -v svc="$1" '
+    $0 ~ "^  " svc ":[[:space:]]*$" { in_svc = 1; next }
+    in_svc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { in_svc = 0 }
+    in_svc && /^    depends_on:[[:space:]]*$/ { in_dep = 1; next }
+    in_dep && /^    [A-Za-z]/ { in_dep = 0 }
+    in_dep && /^      pm-migrator:[[:space:]]*$/ { seen = 1; next }
+    in_dep && seen && /^        condition:[[:space:]]*service_completed_successfully[[:space:]]*$/ { ok = 1 }
+    in_dep && seen && /^      [A-Za-z0-9_-]+:[[:space:]]*$/ { seen = 0 }
+    END { print (ok ? "yes" : "no") }
+  ' "$COMPOSE_FILE"
+}
+
+if [ -z "$pm_migrator_block" ]; then
+  fail "pm-migrator service is missing — Plane migrations never run (WARP-496)"
+  printf "    Add a one-shot pm-migrator (makeplane/plane-backend:<pin>,\n" >&2
+  printf "    command ./bin/docker-entrypoint-migrator.sh, restart \"no\") and\n" >&2
+  printf "    gate pm-api/pm-worker on it via service_completed_successfully.\n\n" >&2
+else
+  pm_migrator_pin=$(extract_pm_image_pin "pm-migrator")
+  if [ -n "$pm_api_pin" ] && [ "$pm_migrator_pin" = "$pm_api_pin" ]; then
+    pass "pm-migrator shares pm-api's plane-backend pin ($pm_migrator_pin)"
+  else
+    fail "pm-migrator pin ($pm_migrator_pin) does not match pm-api ($pm_api_pin) (WARP-496)"
+  fi
+
+  if printf '%s\n' "$pm_migrator_block" | grep -qE '^[[:space:]]+restart:[[:space:]]*"?no"?[[:space:]]*$'; then
+    pass "pm-migrator is a one-shot (restart: \"no\")"
+  else
+    fail "pm-migrator must set restart: \"no\" so it runs once, not in a loop (WARP-496)"
+  fi
+
+  if printf '%s\n' "$pm_migrator_block" | grep -q 'docker-entrypoint-migrator.sh'; then
+    pass "pm-migrator runs the Plane migrator entrypoint"
+  else
+    fail "pm-migrator must run ./bin/docker-entrypoint-migrator.sh (WARP-496)"
+  fi
+
+  if [ "$(pm_dep_on_migrator pm-api)" = "yes" ]; then
+    pass "pm-api waits for pm-migrator (service_completed_successfully)"
+  else
+    fail "pm-api must depend_on pm-migrator: condition service_completed_successfully (WARP-496)"
+  fi
+
+  if [ "$(pm_dep_on_migrator pm-worker)" = "yes" ]; then
+    pass "pm-worker waits for pm-migrator (service_completed_successfully)"
+  else
+    fail "pm-worker must depend_on pm-migrator: condition service_completed_successfully (WARP-496)"
+  fi
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

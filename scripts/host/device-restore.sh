@@ -218,7 +218,37 @@ fi
 # --- Restart affected services -------------------------------------------
 if [ "${SKIP_SERVICE_RESTART:-0}" != "1" ]; then
   log_info "Restarting affected services..."
-  for svc in "$DB_SERVICE" "$PM_SERVICE" orchestrator nextcloud pm-api pm-worker pm-beat pm-web; do
+
+  # Datastores + non-PM services: a plain restart picks up the restored volumes.
+  for svc in "$DB_SERVICE" "$PM_SERVICE" orchestrator nextcloud; do
+    if dc ps --services 2>/dev/null | grep -qx "$svc"; then
+      dc restart "$svc" >/dev/null 2>&1 || true
+    fi
+  done
+
+  # Plane PM services need the one-shot pm-migrator re-run against the restored
+  # postgres-pm volume. `docker compose restart` does NOT re-evaluate
+  # depends_on, so it would skip the migrator — and a cross-version restore
+  # (older schema in the restored volume, newer Plane image) would then leave
+  # pm-api blocked on `wait_for_migrations`. Force-recreate the migrator so it
+  # actually re-runs (it waits for postgres-pm/redis-pm health via its own
+  # depends_on); Django `migrate` is idempotent, so a same-version restore is a
+  # safe no-op.
+  #
+  # This run is LOAD-BEARING (unlike the plain restarts above): if migrations
+  # don't apply, pm-api hangs forever inside `wait_for_migrations`. So — unlike
+  # the cosmetic restarts — we do NOT swallow its output, and we block on the
+  # one-shot's exit code via `dc wait` (when the Compose build supports it) so a
+  # failed migration is surfaced in the restore log instead of leaving the
+  # operator with a silent hang and a misleading "Restore complete." (WARP-496)
+  if dc ps --services 2>/dev/null | grep -qx "pm-api"; then
+    if ! dc up -d --force-recreate pm-migrator; then
+      log_warn "pm-migrator failed to start — PM stack may hang on wait_for_migrations"
+    elif dc wait --help >/dev/null 2>&1 && ! dc wait pm-migrator >/dev/null; then
+      log_warn "pm-migrator exited non-zero — migrations may be incomplete; check 'docker logs droplet-pm-migrator'"
+    fi
+  fi
+  for svc in pm-api pm-worker pm-beat pm-web; do
     if dc ps --services 2>/dev/null | grep -qx "$svc"; then
       dc restart "$svc" >/dev/null 2>&1 || true
     fi
