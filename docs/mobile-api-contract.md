@@ -39,8 +39,8 @@ Refresh token is stored separately and only sent to `/api/auth/refresh`.
 | POST | `/auth/logout` | Bearer | — | `{ status: "ok" }` |
 | GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role }` |
 | POST | `/auth/totp/enroll` | Bearer | — | `{ otpauthUri, qrDataUrl, issuer }` |
-| POST | `/auth/totp/verify` | Bearer | `{ totp }` | `{ enabled: true, recoveryCodes? }` |
-| POST | `/auth/recovery` | none | `{ email, password, recoveryCode }` | `{ ok: true, remaining }` |
+| POST | `/auth/totp/verify` | Bearer | `{ code }` (6-digit) | `{ enabled: true, recoveryCodes? }` |
+| POST | `/auth/recovery` | Bearer | `{ code }` | `{ ok: true, remaining }` |
 
 **Auth model (ADR-013 directory).** Login authenticates an **email +
 password (argon2id)** against the local directory — *not* Nextcloud
@@ -55,6 +55,12 @@ clients MUST persist the new `refreshToken` from `/auth/refresh`.
 `recoveryCode`) is included in the login body. The successful access
 token carries an MFA stamp used by `require-recent-mfa` routes. WebAuthn
 is not part of the app login path.
+
+**Recovery-code step-up.** `/auth/recovery` is a **Bearer-authenticated**
+step-up that consumes one unused recovery code for an already-signed-in
+session (body `{ code }` → `{ ok, remaining }`, six-digit `/auth/totp/verify`
+is the same shape). It is **not** a pre-login account-recovery endpoint —
+pre-login recovery is the `recoveryCode` field on `/auth/login` above.
 
 ### Health (`/api/orchestrator/health`)
 
@@ -80,9 +86,11 @@ status pill in the chrome.
 | POST | `/devices/push/test` | Bearer | — | dispatch result |
 
 **Push status:** only **WebPush (VAPID)** subscribe exists today. A native
-**APNs/FCM token-registration endpoint is NOT yet implemented** (ADR-008
-Phase 6 — push delivery is scaffolded only). Mobile real-time push is
-pending; until then native clients poll `/notifications`.
+**APNs/FCM token-registration endpoint is NOT yet implemented** — native
+push delivery (direct-APNs on iOS, FCM on Android) is scaffolded only: the
+subscribe + VAPID endpoints above exist, but the orchestrator-side fan-out
+sidecar that actually delivers pushes is not yet built. Mobile real-time
+push is pending; until then native clients poll `/notifications`.
 
 **Auth vs pairing (corrected 2026-06-01).** `claim` is NOT a login.
 Authentication is always `/auth/login`; pairing is an optional,
