@@ -39,8 +39,10 @@
 #   * No reachable separate inference host on the LAN — if
 #     `192.168.50.197:11434` answers `/api/version`, this host is the
 #     intelligence layer in a multi-box deploy, not a single-box.
-#   * Has dGPU silicon — lspci shows AMD/NVIDIA VGA controller (not just
-#     integrated graphics). Belt-and-suspenders confirmation.
+#   * Has AMD/NVIDIA GPU silicon — lspci shows an AMD/NVIDIA VGA/3D/Display
+#     controller. NB this matches a discrete dGPU AND an integrated AMD/NVIDIA
+#     APU (the vendor filter can't distinguish them); the render_count >= 2
+#     gate is the real discriminator, so an iGPU-only box isn't misclassified.
 #
 # Returns 0 if single-box detected, 1 otherwise. Sets SINGLE_BOX_DETECTION_REASON.
 detect_single_box_mode() {
@@ -90,10 +92,17 @@ detect_single_box_mode() {
     fi
   fi
 
-  # Signal 3: dGPU silicon present?
+  # Signal 3: AMD/NVIDIA GPU silicon present? (has_dgpu is really "AMD/NVIDIA GPU
+  # present, discrete OR integrated" — the vendor filter below can't tell an
+  # APU's iGPU from a dGPU; render_count >= 2 above is the real discriminator.)
+  # NB: lspci labels GPUs "VGA compatible controller" (and "3D controller" /
+  # "Display controller"), so the class match must allow the optional
+  # " compatible" word — a bare "VGA controller" never appears and silently
+  # set has_dgpu=0, which made single-box auto-detect decline on real dGPU
+  # boxes (e.g. the AMD single-box: "VGA compatible controller ... [AMD/ATI]").
   local has_dgpu=0
   if command -v lspci >/dev/null 2>&1; then
-    if lspci 2>/dev/null | grep -iE '(VGA|3D|Display) controller' \
+    if lspci 2>/dev/null | grep -iE '(VGA|3D|Display)( compatible)? controller' \
         | grep -iE '(AMD|Advanced Micro|NVIDIA|Radeon)' >/dev/null 2>&1; then
       has_dgpu=1
     fi
