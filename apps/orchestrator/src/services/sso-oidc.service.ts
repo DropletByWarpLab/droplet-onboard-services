@@ -45,10 +45,32 @@ export interface OidcProviderConfig {
   redirectUri: string;
 }
 
-/** Type guard — only "google" / "entra" are valid providers. */
+/** Type guard — accepts any value in SSO_PROVIDERS (google / entra / okta). */
 export function isSsoProvider(value: unknown): value is SsoProvider {
   return typeof value === "string" && (SSO_PROVIDERS as readonly string[]).includes(value);
 }
+
+/**
+ * ORCH-01 / WARP-639 — per-provider policy for what an ABSENT `email_verified`
+ * claim means at account-link time. An EXPLICIT table (never derived from
+ * claim absence) per CLAUDE.md's "no guessing" rule.
+ *
+ *  - `google` reliably emits `email_verified`, and consumer Google accounts
+ *    CAN hold an unverified address — so it fails closed: absent ⇒ unverified.
+ *  - `entra` / `okta` are the configured tenant's directory of record; the
+ *    `email` in the ID token IS that user's tenant identity (the pinned
+ *    issuer/aud already constrain sign-in to this tenant), and both IdPs
+ *    frequently OMIT `email_verified` entirely. Failing closed there locks out
+ *    EVERY new such user (the #424 regression), so an absent claim ⇒ verified.
+ *
+ * An EXPLICIT `email_verified: false` from ANY provider always wins and blocks
+ * email-linking — this table only governs the absent/unknown case.
+ */
+const TRUST_EMAIL_WHEN_VERIFIED_CLAIM_ABSENT: Record<SsoProvider, boolean> = {
+  google: false,
+  entra: true,
+  okta: true,
+};
 
 /**
  * Resolve a provider's config from env. Returns null when ANY of the four
@@ -152,15 +174,17 @@ export interface ValidatedIdentity {
    *  be undefined if the IdP didn't return one. */
   email?: string;
   /**
-   * ORCH-01 — the OIDC `email_verified` claim, normalized to a strict
-   * boolean. TRUE only when the IdP asserts the address belongs to the
-   * bearer; FALSE when the claim is absent, false, or any non-affirmative
-   * value. Account-linking by email (ensureLinkedUser) MUST gate on this:
-   * `entra`/`okta` let a user present an arbitrary, unverified `email`
-   * profile claim, so linking an unverified email to an existing local row
-   * is an account-takeover vector. The cryptographic ID-token checks prove
-   * the token is authentic; they do NOT prove the email belongs to the
-   * caller — only `email_verified` does.
+   * ORCH-01 / WARP-639 — the OIDC `email_verified` claim, normalized to a
+   * strict boolean. TRUE on an affirmative claim; FALSE on an explicit denial.
+   * For an ABSENT claim the result is PER-PROVIDER (see
+   * TRUST_EMAIL_WHEN_VERIFIED_CLAIM_ABSENT): Google fails closed (absent ⇒
+   * false), while Entra/Okta trust the pinned tenant directory's email
+   * (absent ⇒ true) so first-time users of those IdPs — which routinely omit
+   * the claim — aren't locked out. Account-linking by email (ensureLinkedUser)
+   * MUST gate on this: linking an unverified email to an existing local row is
+   * an account-takeover vector. The cryptographic ID-token checks prove the
+   * token is authentic; they do NOT prove the email belongs to the caller —
+   * only this normalized flag does.
    */
   emailVerified: boolean;
   /** Display name claim, if present. */
@@ -210,14 +234,26 @@ export async function exchangeCodeAndValidate(
   const email = typeof claims?.email === "string" ? claims.email : undefined;
   const name = typeof claims?.name === "string" ? claims.name : undefined;
 
-  // ORCH-01 — normalize `email_verified` to a STRICT boolean. The OIDC core
-  // spec types it as a boolean, but some IdPs serialize it as the string
-  // "true"/"false"; accept either spelling of an affirmative, treat anything
-  // else (absent, false, "false", null, 0, …) as NOT verified. Fail closed:
-  // an unknown shape is unverified.
+  // ORCH-01 / WARP-639 — normalize `email_verified` to a STRICT boolean, with
+  // a PER-PROVIDER policy for the absent-claim case (see
+  // TRUST_EMAIL_WHEN_VERIFIED_CLAIM_ABSENT). The OIDC core spec types the claim
+  // as a boolean, but some IdPs serialize it as the string "true"/"false" —
+  // accept either spelling:
+  //   - affirmative ("true" / true)       → verified
+  //   - explicit denial ("false" / false) → NOT verified (always wins)
+  //   - absent / any other shape          → per-provider default (Google fails
+  //                                          closed; Entra/Okta trust the
+  //                                          tenant directory's email)
   const rawVerified = (claims as { email_verified?: unknown } | undefined)
     ?.email_verified;
-  const emailVerified = rawVerified === true || rawVerified === "true";
+  let emailVerified: boolean;
+  if (rawVerified === true || rawVerified === "true") {
+    emailVerified = true;
+  } else if (rawVerified === false || rawVerified === "false") {
+    emailVerified = false;
+  } else {
+    emailVerified = TRUST_EMAIL_WHEN_VERIFIED_CLAIM_ABSENT[provider];
+  }
 
   return { sub, email, emailVerified, name };
 }

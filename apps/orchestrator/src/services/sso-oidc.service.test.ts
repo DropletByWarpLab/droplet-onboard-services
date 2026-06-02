@@ -243,6 +243,41 @@ describe("exchangeCodeAndValidate — delegates ID-token validation, pins nonce"
     expect(result.emailVerified).toBe(expected);
   });
 
+  // ORCH-01 / WARP-639 — the absent/unknown email_verified case is PER-PROVIDER.
+  // Entra & Okta routinely OMIT the claim; failing closed there locked out
+  // every first-time user (#424). Google stays fail-closed. An explicit denial
+  // always blocks, for every provider.
+  it.each([
+    // [provider, claimValue, expected]
+    ["entra", undefined, true], // #424 regression — Entra omits the claim
+    ["okta", undefined, true],
+    ["google", undefined, false], // Google fails closed
+    ["entra", 1, true], // non-affirmative, non-denial junk → per-provider default
+    ["entra", false, false], // explicit denial wins even for entra
+    ['entra "false"', "false", false],
+    ["okta", false, false],
+    ["entra", true, true],
+    ["okta", "true", true],
+  ])(
+    "per-provider absent-claim policy: %s email_verified=%s → %s",
+    async (label, claimValue, expected) => {
+      const provider = String(label).split(" ")[0] as (typeof SSO_PROVIDERS)[number];
+      authorizationCodeGrant.mockResolvedValue({
+        claims: () => ({
+          sub: "sub-x",
+          email: "x@y.com",
+          ...(claimValue === undefined ? {} : { email_verified: claimValue }),
+        }),
+      });
+      const result = await exchangeCodeAndValidate(
+        provider,
+        new URL("https://droplet.local/api/sso/oidc/callback?code=abc"),
+        { expectedNonce: "n", codeVerifier: "v", expectedState: "s" },
+      );
+      expect(result.emailVerified).toBe(expected);
+    },
+  );
+
   it("propagates a validation failure (does NOT swallow into success)", async () => {
     authorizationCodeGrant.mockRejectedValue(new Error("unexpected JWT alg / nonce mismatch"));
     await expect(
