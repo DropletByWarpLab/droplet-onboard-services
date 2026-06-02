@@ -600,7 +600,21 @@ def reindex_one(nc_file_id: str) -> dict:
                 zip(chunks, prefixed_chunks, vectors)
             ):
                 chunk_metadata = dict(doc_metadata or {})
-                chunk_metadata["anchor"] = chunk.anchor.model_dump()
+                # WARP-287: a malformed anchor must not abort the whole
+                # re-index transaction — fall back to null + warn so the
+                # chunk still lands (searchable, just without a deep-link
+                # target). Mirrors handle_brain_uploaded and the watcher path.
+                try:
+                    chunk_metadata["anchor"] = chunk.anchor.model_dump()
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning(
+                        "reindex_one: anchor serialize failed for %s chunk %d: %s",
+                        nc_file_id,
+                        idx,
+                        e,
+                    )
+                    chunk_metadata["anchor"] = None
+                    warnings.append("malformed_anchor")
                 # WARP-435: persist the section breadcrumb alongside the
                 # anchor, matching the primary ingest paths.
                 chunk_metadata["sectionPath"] = list(chunk.section_path)

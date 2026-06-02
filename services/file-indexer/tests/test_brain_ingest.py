@@ -643,3 +643,75 @@ def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
     #    (the embedder saw exactly what we persisted).
     stored_texts = [params[4] for params in inserts]
     assert stored_texts == embed_inputs[0]
+
+
+def test_reindex_one_malformed_anchor_falls_back_to_null(monkeypatch, tmp_path):
+    """IDX-05: a chunk whose ``anchor.model_dump()`` raises must NOT abort the
+    whole re-index transaction (which would roll back and drop every chunk for
+    the file). The chunk still lands with ``anchor=null`` and a
+    ``malformed_anchor`` warning — parity with handle_brain_uploaded (WARP-287).
+    """
+    import brain_ingest
+    import db as db_mod
+
+    item_dir = tmp_path / "alice" / "bmi-bad-anchor"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    target = item_dir / "original.txt"
+    target.write_text(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        db_mod,
+        "fetch_item",
+        lambda conn, *, item_id: {
+            "id": item_id,
+            "userId": "alice",
+            "storagePath": str(target),
+            "mimeType": "text/plain",
+        },
+    )
+    monkeypatch.setattr(db_mod, "get_conn", lambda: object())
+    monkeypatch.setattr(db_mod, "mark_brain_item_indexed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brain_ingest, "embed_texts", lambda texts: [[0.0] * 384 for _ in texts]
+    )
+
+    # Force a chunk whose anchor serialization blows up.
+    class _BadAnchor:
+        def model_dump(self):
+            raise ValueError("boom")
+
+    class _FakeChunk:
+        text = "alpha beta gamma delta"
+        section_path = ("Intro",)
+        anchor = _BadAnchor()
+
+    monkeypatch.setattr(
+        brain_ingest, "_chunk_spans_from_doc", lambda doc: [_FakeChunk()]
+    )
+
+    executed: list[tuple] = []
+    import psycopg2 as _p2
+
+    monkeypatch.setattr(_p2, "connect", lambda *a, **k: _FakeConn(executed))
+    import pgvector.psycopg2 as _pgv
+
+    monkeypatch.setattr(_pgv, "register_vector", lambda conn: None)
+
+    # Must NOT raise — the whole point of the guard.
+    result = brain_ingest.reindex_one("bmi-bad-anchor")
+    assert result["chunksWritten"] == 1
+
+    inserts = [
+        params
+        for (sql, params) in executed
+        if 'INSERT INTO "FileContentChunk"' in sql
+    ]
+    assert inserts, "no INSERT executed — the malformed anchor aborted the txn"
+    params = inserts[0]
+    # warnings column (index 9) carries the fallback marker.
+    assert "malformed_anchor" in params[9]
+    # metadata (index 10) stored anchor as null rather than crashing.
+    assert '"anchor": null' in params[10]
