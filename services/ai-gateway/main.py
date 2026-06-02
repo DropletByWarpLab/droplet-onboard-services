@@ -155,18 +155,31 @@ async def health():
 async def readiness():
     """Reflect the underlying appliance health for orchestration purposes.
 
-    Pulls /health from the Jetson appliance (ollama-manager) so the orchestrator
-    can decide whether to accept inference traffic. Distinct from /ai/health,
-    which only reports gateway-side liveness.
+    Pulls /health from ollama-manager (:8002) so the orchestrator can decide
+    whether to accept inference traffic. Distinct from /ai/health, which only
+    reports gateway-side liveness.
+
+    XR-05: /health lives on ollama-manager, not on Ollama (:11434). On the
+    direct chat path (single-box default) no manager is wired, so we report
+    "ok" with appliance=None instead of GETting a non-existent /health and
+    reporting a perpetual "degraded".
     """
     if provider_router is None:
         return {"status": "starting", "appliance": None}
-    provider = provider_router.ollama
+    health_url = provider_router.ollama._limits.health_url
+    if health_url is None:
+        # No ollama-manager configured (direct path). Gateway-side readiness is
+        # governed by /ai/health; nothing to probe here.
+        return {
+            "status": "ok",
+            "appliance": None,
+            "detail": "ollama-manager not configured (direct path); "
+            "set OLLAMA_MANAGER_URL to surface appliance health.",
+        }
     appliance: dict | None = None
     try:
         async with httpx.AsyncClient(timeout=3.0) as c:
-            root = provider.base_url.removesuffix("/proxy")
-            resp = await c.get(f"{root}/health")
+            resp = await c.get(health_url)
             if resp.status_code == 200:
                 appliance = resp.json()
     except Exception as e:

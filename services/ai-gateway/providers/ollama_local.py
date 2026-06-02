@@ -53,6 +53,34 @@ if os.getenv("JETSON_OLLAMA_URL") and not os.getenv("OLLAMA_URL"):
         "Setup.sh migrate_env will rename it on next run."
     )
 
+# XR-05: /health (the appliance limits + readiness contract) lives on
+# ollama-manager (:8002), NOT on Ollama (:11434). On the canonical DIRECT chat
+# path OLLAMA_URL points at :11434, so probing "{OLLAMA_URL}/health" 404s — the
+# limits never size (outbound concurrency stuck at 1) and /ai/readiness is
+# perpetually "degraded". OLLAMA_MANAGER_URL decouples the lifecycle/health
+# endpoint from the chat endpoint. When it's unset AND OLLAMA_URL isn't the
+# opt-in /proxy path (i.e. the manager isn't deployed — single-box today), we
+# skip the probe entirely and run with sane default limits rather than spamming
+# 404s. See droplet-local-LLM/services/ollama-manager (the /health owner).
+OLLAMA_MANAGER_URL = os.getenv("OLLAMA_MANAGER_URL") or None
+
+
+def _resolve_manager_health_url(base_url: str) -> str | None:
+    """Return the ollama-manager /health URL, or None if no manager is wired.
+
+    Precedence:
+      1. explicit OLLAMA_MANAGER_URL → ``{manager}/health``
+      2. OLLAMA_URL ending in ``/proxy`` (the opt-in manager chat path) →
+         strip ``/proxy`` and use that root's ``/health`` (preserves the prior
+         behavior for that specific deploy)
+      3. otherwise None — the manager isn't deployed; skip the probe.
+    """
+    if OLLAMA_MANAGER_URL:
+        return f"{OLLAMA_MANAGER_URL.rstrip('/')}/health"
+    if base_url.endswith("/proxy"):
+        return f"{base_url[: -len('/proxy')].rstrip('/')}/health"
+    return None
+
 # Cold-loading a large model can take 30-90s (e.g. 8B Q4 with partial GPU
 # offload), and long completions can stream for minutes. The previous flat
 # 60s timeout aborted the request mid-load, returning HTTP 499 to the user
@@ -115,6 +143,13 @@ class _LimitsCache:
         self.max_loaded_models = 1
         self._last_refresh = 0.0
         self._refresh_min_interval = 30.0  # seconds; debounce
+        # XR-05: the ollama-manager /health URL, or None when no manager is
+        # deployed (the direct :11434 path). None → skip the probe + keep
+        # default limits instead of 404-ing against Ollama.
+        self._manager_health_url: str | None = _resolve_manager_health_url(base_url)
+        # Logged-once flag so a no-manager deploy notes the skip a single time
+        # rather than on every refresh attempt.
+        self._logged_no_manager = False
         # Track the last observed schema version so we only log on each new
         # observation, not on every refresh while the version is "wrong".
         # Starts at a sentinel distinct from None so a missing version key
@@ -122,10 +157,9 @@ class _LimitsCache:
         self._last_seen_schema_version: object = self._SCHEMA_VERSION_UNOBSERVED
 
     @property
-    def health_url(self) -> str:
-        # base_url is the proxy URL; strip /proxy to hit /health on :8002 root.
-        root = self.base_url.removesuffix("/proxy")
-        return f"{root}/health"
+    def health_url(self) -> str | None:
+        """ollama-manager's /health URL, or None when no manager is wired."""
+        return self._manager_health_url
 
     def _check_schema_version(self, body: dict) -> None:
         """Compare the appliance's schema_version against what we know.
@@ -179,8 +213,26 @@ class _LimitsCache:
         if now - self._last_refresh < self._refresh_min_interval:
             return
         self._last_refresh = now
+        # XR-05: no ollama-manager wired (direct :11434 path) → don't probe a
+        # non-existent /health on Ollama. Keep the sane defaults and note it
+        # once. Marking _last_refresh above means _ensure_limits treats limits
+        # as "settled" (at defaults) and won't retry every call.
+        health_url = self.health_url
+        if health_url is None:
+            if not self._logged_no_manager:
+                self._logged_no_manager = True
+                logger.info(
+                    "appliance_limits_probe_skipped: no OLLAMA_MANAGER_URL and "
+                    "OLLAMA_URL is the direct path — using default limits "
+                    "(num_parallel=%d, max_queue=%d, max_loaded_models=%d). "
+                    "Set OLLAMA_MANAGER_URL to size outbound concurrency.",
+                    self.num_parallel,
+                    self.max_queue,
+                    self.max_loaded_models,
+                )
+            return
         try:
-            resp = await client.get(self.health_url, timeout=5.0)
+            resp = await client.get(health_url, timeout=5.0)
             if resp.status_code == 200:
                 body = resp.json()
                 self._check_schema_version(body)
