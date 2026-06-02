@@ -349,6 +349,19 @@ main() {
   # scripts/host/.
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     install_single_box_host_integration
+    # Front-panel (PyPortal Titano) host integration: the shutdown-screen
+    # systemd hook (pushes "Shutting down" / "Safe to power off" on teardown)
+    # plus the device-bridge. Non-fatal — the dashboard and the oled-display
+    # container still run without it. install-device-bridge.sh is idempotent,
+    # self-elevates with sudo, and skips enabling the bridge when the host
+    # lacks its Python deps (the shutdown screen needs none). NOTE: this does
+    # NOT flash the board's CircuitPython firmware — that is a deliberate
+    # ./scripts/flash-pyportal.sh step (a write-locked board needs a physical
+    # UF2/safe-mode flash, so it must not run unattended here).
+    if [ -x "$SCRIPT_DIR/install-device-bridge.sh" ]; then
+      "$SCRIPT_DIR/install-device-bridge.sh" \
+        || log_warn "front-panel host integration had issues (continuing)"
+    fi
   fi
 
   # --- Phase 5: Build ---

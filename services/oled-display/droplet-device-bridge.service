@@ -29,7 +29,13 @@ Environment=ORCHESTRATOR_URL=http://127.0.0.1
 Environment=BRIDGE_PORT=9090
 Environment=BRIDGE_BIND=127.0.0.1
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
-ExecStart=/usr/bin/python3 /home/droplet/Documents/droplet-onboard-services/services/oled-display/device-bridge.py
+# @REPO_ROOT@ is filled in with the real repo path by
+# scripts/install-device-bridge.sh at install time, so the unit is not pinned
+# to one clone location. The old hardcoded
+# /home/droplet/Documents/droplet-onboard-services path does not exist on the
+# shipping box (repo lives at /home/droplet/edge-platform), so the service
+# exited 2/INVALIDARGUMENT and crash-looped.
+ExecStart=/usr/bin/python3 @REPO_ROOT@/services/oled-display/device-bridge.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/var/log/droplet-device-bridge.log

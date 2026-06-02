@@ -44,7 +44,12 @@ for unit in droplet-device-bridge.service \
     log "missing source: $src"
     exit 1
   fi
-  install -m 0644 "$src" "$dst"
+  # Substitute the @REPO_ROOT@ placeholder (droplet-device-bridge.service's
+  # ExecStart) with this checkout's actual path; a harmless no-op for units
+  # that contain no placeholder. Using sed > file (not `install`) so the
+  # substitution lands; perms set explicitly after.
+  sed "s|@REPO_ROOT@|$REPO_ROOT|g" "$src" > "$dst"
+  chmod 0644 "$dst"
   log "installed $dst"
 done
 
@@ -142,11 +147,23 @@ fi
 
 # --- 3) Activate ---
 systemctl daemon-reload
-systemctl enable --now droplet-device-bridge.service
+
+# The bridge entrypoint (device-bridge.py) is pure stdlib — it serves over
+# http.server.ThreadingHTTPServer and has NO third-party runtime deps. (qrcode
+# is imported lazily only inside the QR-render path; its absence degrades that
+# one endpoint, not startup.) So there are no host pip deps to gate on — enable
+# it unconditionally. Guard the enable so that under `set -e` a transient start
+# failure can't abort this script before the shutdown screen below is wired up.
+# The front-panel shutdown screen is likewise dependency-free and always enabled.
+if systemctl enable --now droplet-device-bridge.service; then
+  log "device-bridge: enabled"
+else
+  log "device-bridge: enable failed — inspect 'systemctl status droplet-device-bridge.service'"
+fi
 
 # Shutdown-screen oneshot. enable so it's wired into multi-user.target; --now
 # starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
-# ExecStop fires on the next shutdown). Idempotent.
+# ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
 
 # Wi-Fi key rotation: off by default so saved credentials on phones keep
