@@ -16,6 +16,7 @@ import { VpnStep } from "@/components/setup/steps/VpnStep";
 import { AiStep } from "@/components/setup/steps/AiStep";
 import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
+import { STEPS, type Step } from "@/components/setup/wizard-steps";
 
 /**
  * Customer-facing first-run wizard.
@@ -41,53 +42,16 @@ import { DoneStep } from "@/components/setup/steps/DoneStep";
  * PR #384 — the visual frame is the aurora left-rail `StepShell` (rail on
  * `lg+`, compact progress header below). Each step renders its own
  * `StepShell`; this page no longer paints a centered card or progress
- * dots. The rail's step list is derived from the `STEPS` export below, so
- * the frame and this state machine can never drift. The state machine
- * (STEPS, resumeStepFrom, patchSetupStep) is unchanged.
+ * dots. The rail's step list is derived from the shared `STEPS` list
+ * (`components/setup/wizard-steps`), so the frame and this state machine
+ * can never drift. The state machine (STEPS, resumeStepFrom,
+ * patchSetupStep) is unchanged.
  */
-export type Step =
-  | "welcome"
-  | "claim"
-  | "account"
-  | "org"
-  | "twofactor"
-  | "internet"
-  | "storage"
-  | "discovery"
-  | "cameras"
-  | "vpn"
-  | "ai"
-  | "team"
-  | "done";
-// §1. PR #380 — `org` slots AFTER account (… → account → org → …), per the
-// #380 spec. `org` directly follows `account` to mirror the orchestrator
-// `SETUP_STEPS` order 1:1 for the PERSISTED steps, so a persisted `setupStep`
-// always maps to a step this wizard can render. PR #375's `twofactor` is a
-// client-only step (no `SetupStep` enum value / no backend `SETUP_STEPS`
-// entry — it skips straight to internet), so it sits after `org` without
-// disturbing that 1:1 mapping. PR #381 — `team` slots near the END, after `ai`
-// and before `done` (… → ai → team → done): once the box is set up, the owner
-// brings people in. It is a persisted `SETUP_STEPS` value, so the same 1:1
-// mapping holds and a resumed `setupStep === "team"` renders cleanly.
-//
-// PR #384 — `StepShell` derives its aurora rail from this exact array (order +
-// membership), keyed into `RAIL_LABELS` for the plain-language label + icon.
-// Exported so the rail can't drift from the state machine.
-export const STEPS: Step[] = [
-  "welcome",
-  "claim",
-  "account",
-  "org",
-  "twofactor",
-  "internet",
-  "storage",
-  "discovery",
-  "cameras",
-  "vpn",
-  "ai",
-  "team",
-  "done",
-];
+// The `Step` union and the canonical `STEPS` order now live in
+// `components/setup/wizard-steps.ts` (imported above). A Next.js App Router
+// `page` module may only export an allow-listed set of names, so exporting
+// `STEPS`/`Step` from here breaks `next build`. The list there stays the
+// single source of truth the aurora rail derives from.
 
 /**
  * PR #372 — the persisted `setupStep` comes from `/api/setup/state` via the
