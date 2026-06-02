@@ -157,9 +157,9 @@ const loginSchema = z
   });
 
 const createUserSchema = z.object({
-  username: usernameField,
-  password: z.string().min(8).max(128),
+  password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
+  email: emailField,
 });
 
 // PR #375 — TOTP verify / re-challenge body: exactly six decimal digits.
@@ -1578,9 +1578,20 @@ export function createProtectedAuthRouter(
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.email?.length) {
+          res.status(400).json({ error: "Invalid email address", code: "INVALID_EMAIL" });
+          return;
+        }
+        if (fieldErrors.password?.length) {
+          res.status(400).json({ error: "Password does not meet policy requirements", code: "WEAK_PASSWORD" });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST", details: parsed.error.flatten() });
         return;
       }
+
+      const { email, password, displayName } = parsed.data;
 
       const token = await resolveNcToken(req);
       if (!token) {
@@ -1597,7 +1608,7 @@ export function createProtectedAuthRouter(
       // createAuthRouter() shim.
       if (!prisma) {
         logger.error(
-          { username: parsed.data.username },
+          { email },
           "admin create-user: prisma not wired into protected auth router; refusing to create NC user without local mirror",
         );
         res.status(500).json({
@@ -1606,6 +1617,14 @@ export function createProtectedAuthRouter(
         });
         return;
       }
+
+      // Derive the unique userid from the email local-part (same
+      // algorithm used by /auth/setup). The resulting username is
+      // stable across retries because deriveUniqueUserId queries the
+      // live DB on every call, so a collision-resolved candidate
+      // (e.g. "kid-2") will only be returned when "kid" is already
+      // taken.
+      const username = await deriveUniqueUserId(prisma, email);
 
       // Romain PR #279 round 2: idempotent upsert FIRST, ncCreateUser
       // SECOND. Without this ordering, a transient failure between
@@ -1634,20 +1653,20 @@ export function createProtectedAuthRouter(
       // `User` if the admin abandons the username — operator can
       // purge via the standard delete-user flow.
       await prisma.user.upsert({
-        where: { nextcloudUsername: parsed.data.username },
-        update: { displayName: parsed.data.displayName || parsed.data.username },
+        where: { nextcloudUsername: username },
+        update: { displayName: displayName || username },
         create: {
-          username: parsed.data.username,
-          displayName: parsed.data.displayName || parsed.data.username,
-          email: null,
-          nextcloudUsername: parsed.data.username,
+          username,
+          displayName: displayName || username,
+          email,
+          nextcloudUsername: username,
           role: "family" as any,
         },
       });
 
-      await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
+      await ncCreateUser(token, username, password, displayName);
 
-      res.status(201).json({ status: "ok", username: parsed.data.username });
+      res.status(201).json({ status: "ok", username });
     } catch (err: any) {
       // Typed-error path mirrors the invite-accept route — detect the
       // OCS user-exists race (statuscode 102) by error class, not by
