@@ -98,6 +98,7 @@ This creates VLAN 100, assigns ports 1-8 as untagged access ports (cameras), and
 | `SWITCH_PORT` | `443` | Switch HTTPS port |
 | `SWITCH_USERNAME` | `admin` | Switch admin username |
 | `SWITCH_PASSWORD` | (required) | Switch admin password |
+| `SWITCH_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the switch. When set, the HTTPS session to the switch is verified against it. When unset, verification is disabled (the embedded switch ships a self-signed cert) and a warning is logged. A configured-but-missing path fails closed (the driver refuses to start) rather than silently downgrading to unverified TLS. |
 | `SWITCH_DRIVER` | `lantronix` | Driver implementation (`lantronix` or `asic`) |
 | `PORT` | `8081` | Service listen port |
 
