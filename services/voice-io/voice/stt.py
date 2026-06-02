@@ -228,6 +228,16 @@ class _WyomingSession(STTSession):
                         f"events but no final transcript"
                     )
                 event = _read_event(self._sock)
+                # Re-check deadline after _read_event returns: the recv can block
+                # for up to _transcript_timeout_s, so the deadline may have passed
+                # during the call.  Without this second check the actual worst-case
+                # block is total_deadline_s + transcript_timeout_s, not total_deadline_s.
+                if time.monotonic() >= deadline:
+                    raise STTUnavailable(
+                        f"transcript wall-clock deadline exceeded "
+                        f"({self._total_deadline_s:.1f} s) — server streamed "
+                        f"events but no final transcript"
+                    )
                 if event is None:
                     raise STTUnavailable("server closed connection before transcript")
                 header, _payload = event  # payload already drained by _read_event
