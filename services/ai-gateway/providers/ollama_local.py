@@ -106,6 +106,13 @@ _OLLAMA_TIMEOUT = httpx.Timeout(
 # once. Override for exotic deploys via OLLAMA_MAX_CONNECTIONS.
 _MAX_CONNECTIONS = int(os.getenv("OLLAMA_MAX_CONNECTIONS", "64"))
 
+# We ALWAYS talk to Ollama's OpenAI-compatible chat endpoint, never the native
+# `/api/chat`. This keeps the request/response shape identical to the cloud
+# providers (one code path in router.py) and is the canonical direct-to-:11434
+# contract. The body therefore uses OpenAI field names (top-level
+# `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
+_CHAT_PATH = "/v1/chat/completions"
+
 
 class _LimitsCache:
     """Tiny cache of the appliance's /health.limits — refreshed on 503 or on init.
@@ -386,7 +393,19 @@ class OllamaLocalProvider(BaseProvider):
         # When tools are present, default temperature=0 so tool-call output is stable.
         if has_tools and kwargs.get("temperature") is None:
             body["temperature"] = 0.0
-        # Pass through supported kwargs (caller's explicit value overrides our default).
+        # Pass through supported generation controls (caller's explicit value
+        # overrides our default).
+        #
+        # GW-12: these are OpenAI-compat field names — `temperature` and
+        # `max_tokens` at the TOP LEVEL — which is correct because we always
+        # POST to Ollama's OpenAI-compat `/v1/chat/completions` (see
+        # _CHAT_PATH and the direct-to-:11434 rule in this module's header).
+        # Ollama's NATIVE `/api/chat` ignores these top-level keys and instead
+        # reads `options.{temperature,num_predict}`, so `max_tokens` would
+        # silently become a no-op there. We deliberately do NOT support the
+        # native endpoint; if that ever changes, map max_tokens→
+        # options.num_predict and temperature→options.temperature here rather
+        # than dropping them.
         for k in ("temperature", "max_tokens"):
             if kwargs.get(k) is not None:
                 body[k] = kwargs[k]
@@ -399,7 +418,7 @@ class OllamaLocalProvider(BaseProvider):
         if not stream:
             assert self._sema is not None  # set by _ensure_limits
             async with self._sema:
-                resp = await self.client.post("/v1/chat/completions", json=body)
+                resp = await self.client.post(_CHAT_PATH, json=body)
             if resp.status_code == 503:
                 # Appliance overload (model_loading / circuit_open / queue full).
                 # Refresh limits + rebuild sema, then bubble up so the caller can
@@ -418,7 +437,7 @@ class OllamaLocalProvider(BaseProvider):
         assert self._sema is not None  # set by _ensure_limits in chat()
         async with self._sema:
             async with self.client.stream(
-                "POST", "/v1/chat/completions", json=body
+                "POST", _CHAT_PATH, json=body
             ) as resp:
                 if resp.status_code == 503:
                     # Same handler the non-streaming branch uses, so a scale-up
