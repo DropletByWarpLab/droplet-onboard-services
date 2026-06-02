@@ -1,41 +1,25 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, EyeOff, Lock, User } from "lucide-react";
+import { Eye, EyeOff, Lock, Mail } from "lucide-react";
 import { setupAdmin, loginUser } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
-
-const RESERVED_USERNAMES = ["admin", "root"];
+import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
+import { translateError } from "@/lib/friendly-errors";
+import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 
 /**
- * Create-admin step.
- *
- * Owns its own form state (username / display name / password / confirm)
- * and the submit lifecycle. On success, calls `setupAdmin` + `loginUser`
- * (auto-login so later steps can hit authenticated endpoints), then bubbles
- * the chosen display name up via `onComplete` so the wizard's final `done`
- * step can personalise the WelcomeFlourish ("Welcome, Robin").
- *
- * PR #372: the appliance is NOT claimed here — that would mark setup
- * complete mid-wizard and break resumability (a refresh would route to the
- * dashboard before the owner finished). The "ready" transition is fired at
- * the wizard's terminal `done` step (DoneStep → completeSetup).
- *
- * Wraps `StepShell` for chrome (title / subtitle / primary CTA) so the
- * layout matches the rest of the wizard's typed steps. The form fields
- * + inline error live inside `children`; the "Create Account" button is
- * StepShell's `primary` action.
- *
- * Validation rules are identical to the pre-refactor inline version —
- * tests assert on the exact error strings and the placeholder copy
- * (`your-username`, `Min. 8 characters`, `Repeat password`).
+ * Create-owner step. ADR-013: the directory login key is the work email;
+ * the username is derived server-side, so this form collects email +
+ * display name + password only. A live PasswordRulesChecklist mirrors the
+ * orchestrator's policy, and the CTA stays disabled until every rule passes.
  */
 export function AccountStep({
   onComplete,
 }: {
   onComplete: (displayName: string) => void;
 }) {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -43,46 +27,21 @@ export function AccountStep({
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const emailOk = isValidEmail(email);
+  const pwOk = validatePassword(password).ok;
+  const matchOk = password.length > 0 && password === confirmPassword;
+  const canSubmit = emailOk && pwOk && matchOk && !isSubmitting;
+
   async function handleCreateAccount() {
     setError(null);
-
-    if (!username.trim()) {
-      setError("Username is required");
-      return;
-    }
-    if (username.length < 2) {
-      setError("Username must be at least 2 characters");
-      return;
-    }
-    if (!/^[a-zA-Z0-9._-]+$/.test(username)) {
-      setError(
-        "Username can only contain letters, numbers, dots, hyphens, and underscores",
-      );
-      return;
-    }
-    if (RESERVED_USERNAMES.includes(username.toLowerCase())) {
-      setError("This username is reserved and cannot be used");
-      return;
-    }
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters");
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError("Passwords do not match");
-      return;
-    }
-
+    if (!canSubmit) return;
     setIsSubmitting(true);
     try {
-      await setupAdmin(username, password, displayName || undefined);
-      // Auto-login so we can call authenticated endpoints during discovery.
-      await loginUser(username, password);
+      await setupAdmin(email, password, displayName || undefined);
+      await loginUser(email, password); // auto-login for authed discovery steps
       onComplete(displayName);
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : "Setup failed. Please try again.";
-      setError(msg);
+      setError(translateError(err, "auth"));
     } finally {
       setIsSubmitting(false);
     }
@@ -98,23 +57,25 @@ export function AccountStep({
         loadingLabel: "Creating account...",
         onClick: handleCreateAccount,
         isLoading: isSubmitting,
+        disabled: !canSubmit,
       }}
     >
       <div className="space-y-4">
         <div>
           <label className="type-subheadline text-label-secondary block mb-1.5">
-            Username
+            Work email
           </label>
           <div className="relative">
-            <User
+            <Mail
               size={16}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
             />
             <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value.toLowerCase())}
-              placeholder="your-username"
+              type="email"
+              inputMode="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@company.com"
               autoComplete="username"
               className="dp-input pl-10"
               autoFocus
@@ -148,7 +109,7 @@ export function AccountStep({
               type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Min. 8 characters"
+              placeholder="Create a password"
               autoComplete="new-password"
               className="dp-input pl-10 pr-10"
             />
@@ -162,9 +123,6 @@ export function AccountStep({
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
           </div>
-          <p className="type-caption-1 text-label-quaternary mt-1.5">
-            Must be at least 8 characters
-          </p>
         </div>
 
         <div>
@@ -187,6 +145,8 @@ export function AccountStep({
             />
           </div>
         </div>
+
+        <PasswordRulesChecklist password={password} confirm={confirmPassword} />
 
         {error && (
           <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
