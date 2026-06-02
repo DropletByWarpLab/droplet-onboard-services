@@ -191,6 +191,45 @@ def test_render_standby_returns_full_frame(sim_display: TFTDisplay):
     assert img.size == (WIDTH, HEIGHT)
 
 
+# --- Claim screen (WARP-632 / ADR-017), py-v3 editorial render --------------
+#
+# The claim feature's mode/state/serial wiring is pinned in test_display.py;
+# these tests pin the py-v3 *visual* render specifically — that render_claim
+# produces a full editorial frame, the code is actually drawn (so the hero is
+# load-bearing, not a no-op), and the defensive empty-input path still renders.
+
+CLAIM_CODE = "DRPL-7K2Q-9F4M"
+CLAIM_URL = "https://192.168.1.87/setup"
+
+
+def test_render_claim_returns_full_pyv3_frame(sim_display: TFTDisplay):
+    img = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    assert isinstance(img, Image.Image)
+    assert img.size == (WIDTH, HEIGHT)
+
+
+def test_render_claim_draws_the_code(sim_display: TFTDisplay):
+    # The code is the hero — a different code must change the frame, proving the
+    # hero text is rendered (not dropped). Same URL so only the code varies.
+    a = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    b = sim_display.render_claim("DRPL-AB12-CD34", CLAIM_URL)
+    assert a.tobytes() != b.tobytes()
+
+
+def test_render_claim_url_is_rendered(sim_display: TFTDisplay):
+    # The setup URL appears at the foot — toggling it changes the frame.
+    with_url = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    without_url = sim_display.render_claim(CLAIM_CODE, "")
+    assert with_url.tobytes() != without_url.tobytes()
+
+
+def test_render_claim_tolerates_empty_inputs(sim_display: TFTDisplay):
+    # Host hasn't pushed a code yet: a defensive placeholder frame, never a
+    # crash. Mirrors the firmware's "----  ----" fallback.
+    img = sim_display.render_claim("", "")
+    assert img.size == (WIDTH, HEIGHT)
+
+
 # --- Backward-compat: existing boot/shutdown signatures still work ----------
 
 def test_render_boot_legacy_stage_signature_still_supported(sim_display: TFTDisplay):
