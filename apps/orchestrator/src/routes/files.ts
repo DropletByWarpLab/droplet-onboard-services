@@ -1176,7 +1176,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       try {
         const rows: Array<{ count: bigint; last: Date | null }> =
           await prisma.$queryRawUnsafe(
-            'SELECT COUNT(*)::bigint AS count, MAX("createdAt") AS last ' +
+            'SELECT COUNT(*)::bigint AS count, MAX("indexedAt") AS last ' +
               'FROM "FileContentChunk" WHERE "userId" = $1',
             user,
           );

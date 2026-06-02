@@ -187,6 +187,32 @@ describe("storage routes (WARP-174)", () => {
       expect(res.status).toBe(502);
       expect(res.body.drives).toEqual([]);
     });
+
+    // WARP-645: the device-bridge only runs with the OLED/display compose
+    // profile. On hosts without it the fetch throws ECONNREFUSED — an expected
+    // deployment shape, not an error. Degrade to 200 + reason rather than the
+    // raw "fetch failed" error string.
+    it("degrades cleanly when the bridge is not running (ECONNREFUSED)", async () => {
+      const connErr = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw connErr;
+        }),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/storage/drives");
+      expect(res.status).toBe(200);
+      expect(res.body.drives).toEqual([]);
+      expect(res.body.count).toBe(0);
+      expect(res.body.reason).toBe("bridge_unavailable");
+      // The raw error string must NOT leak through on this expected path.
+      expect(res.body.error).toBeUndefined();
+    });
   });
 
   describe("PATCH /api/storage/drives/:uuid", () => {
