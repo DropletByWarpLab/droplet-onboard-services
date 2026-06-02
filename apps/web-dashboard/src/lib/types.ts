@@ -290,9 +290,8 @@ export interface AuthUser {
 export type InviteRole = "user" | "admin";
 
 export interface InviteCreateRequest {
-  username: string;
+  email: string;
   displayName?: string;
-  email?: string;
   role?: InviteRole;
   ttlHours?: number;
 }

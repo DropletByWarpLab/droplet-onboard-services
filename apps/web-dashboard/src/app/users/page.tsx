@@ -24,6 +24,7 @@ import {
   listInvites,
   revokeInvite as apiRevokeInvite,
 } from "@/lib/api";
+import { isValidEmail } from "@droplet/auth-policy";
 import type {
   AuthUser,
   InviteListItem,
@@ -32,8 +33,6 @@ import type {
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
-
-const RESERVED_USERNAMES = ["admin", "root"];
 
 const TTL_OPTIONS: Array<{ label: string; hours: number }> = [
   { label: "24 hours", hours: 24 },
@@ -63,7 +62,7 @@ export default function UsersPage() {
   // Invite modal state — split into "form" and "share" phases.
   const [showInvite, setShowInvite] = useState(false);
   const [invitePhase, setInvitePhase] = useState<"form" | "share">("form");
-  const [inviteUsername, setInviteUsername] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
   const [inviteDisplay, setInviteDisplay] = useState("");
   const [inviteRole, setInviteRole] = useState<InviteRole>("user");
   const [inviteTtlHours, setInviteTtlHours] = useState<number>(72);
@@ -129,7 +128,7 @@ export default function UsersPage() {
   }, [reload]);
 
   const resetInviteForm = () => {
-    setInviteUsername("");
+    setInviteEmail("");
     setInviteDisplay("");
     setInviteRole("user");
     setInviteTtlHours(72);
@@ -160,23 +159,15 @@ export default function UsersPage() {
 
   const handleGenerateInvite = async () => {
     setError(null);
-    const username = inviteUsername.trim().toLowerCase();
-    if (!username) {
-      setError("Username is required");
-      return;
-    }
-    if (RESERVED_USERNAMES.includes(username)) {
-      setError("This username is reserved and cannot be used");
-      return;
-    }
-    if (!/^[a-z0-9._-]+$/.test(username)) {
-      setError("Username must contain only letters, numbers, dots, dashes, and underscores");
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email || !isValidEmail(email)) {
+      setError("Enter a valid email address.");
       return;
     }
     setInviteSubmitting(true);
     try {
       const result = await createInvite({
-        username,
+        email,
         displayName: inviteDisplay.trim() || undefined,
         role: inviteRole,
         ttlHours: inviteTtlHours,
@@ -551,13 +542,14 @@ export default function UsersPage() {
                 <div className="p-4 space-y-3">
                   <div>
                     <label className="type-caption-1 text-label-tertiary mb-1.5 block">
-                      Username
+                      Work email
                     </label>
                     <input
                       autoFocus
-                      value={inviteUsername}
-                      onChange={(e) => setInviteUsername(e.target.value.toLowerCase())}
-                      placeholder="Username"
+                      type="email"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      placeholder="you@company.com"
                       className="dp-input"
                     />
                   </div>
@@ -623,14 +615,14 @@ export default function UsersPage() {
             ) : (
               <div className="p-4 space-y-4">
                 <p className="type-subheadline text-label-secondary">
-                  Send this link to {inviteUsername || "the new user"}. They'll set their own
+                  Send this link to {inviteEmail || "the new user"}. They'll set their own
                   password and join automatically.
                 </p>
                 {inviteResult && (
                   <>
                     <div
                       role="img"
-                      aria-label={`QR code containing invite link for ${inviteUsername || "the new user"}`}
+                      aria-label={`QR code containing invite link for ${inviteEmail || "the new user"}`}
                       className="flex items-center justify-center bg-surface-secondary rounded-lg p-4"
                     >
                       <QRCodeSVG value={inviteResult.url} size={160} level="M" />
