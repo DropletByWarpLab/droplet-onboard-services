@@ -488,6 +488,10 @@ services:
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
       - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001
+      # GW-14: socket peers (your nginx edge) whose forwarded client-IP headers
+      # the rate limiter trusts. Empty default = trust nothing (key on the real
+      # socket peer). Set RATE_LIMIT_TRUSTED_PROXIES to nginx's IP/subnet.
+      - RATE_LIMIT_TRUSTED_PROXIES=${RATE_LIMIT_TRUSTED_PROXIES:-}
     volumes:
       - aikeys:/data/keys
     depends_on:
