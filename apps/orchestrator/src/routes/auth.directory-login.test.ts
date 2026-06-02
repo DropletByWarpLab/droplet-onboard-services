@@ -414,6 +414,39 @@ describe("ADR-013 — POST /auth/login validates locally against the directory",
     });
   });
 
+  it("authenticates when the identifier is sent in the `email` field", async () => {
+    // Regression: the login route resolves identity by email (ADR-013).
+    // Confirm a payload whose only identifier key is `email` produces a 200.
+    verifyPassword.mockResolvedValueOnce(true);
+    const owner: UserRow = {
+      id: "u-login",
+      username: "owner",
+      displayName: "Owner",
+      email: "owner@warp.test",
+      nextcloudUsername: "owner",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
+      role: "owner",
+      isLocal: true,
+      directoryStatus: "ACTIVE",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([owner]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "owner@warp.test", password: "Owner-secret123" });
+
+    expect(res.status).toBe(200);
+    // The lookup must have gone through the email branch of findUnique.
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { email: "owner@warp.test" },
+    });
+    expect(verifyPassword).toHaveBeenCalledWith(owner.passwordHash, "Owner-secret123");
+    expect(res.body.user.id).toBe("u-login");
+  });
+
   it("unknown-email and wrong-password branches are wire-indistinguishable", async () => {
     // Wrong password against an existing account.
     verifyPassword.mockResolvedValueOnce(false);
