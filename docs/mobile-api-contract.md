@@ -34,14 +34,33 @@ Refresh token is stored separately and only sent to `/api/auth/refresh`.
 
 | Method | Path | Auth | Body | Returns |
 |---|---|---|---|---|
-| POST | `/auth/login?return=body` | none | `{ username, password }` | `{ user, accessToken, refreshToken }` |
-| POST | `/auth/refresh` | refresh | `{ refreshToken }` | `{ accessToken }` |
-| POST | `/auth/logout` | Bearer | — | `{ ok: true }` |
+| POST | `/auth/login?return=body` | none | `{ email, password, totp?, recoveryCode? }` | `{ user, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
+| POST | `/auth/refresh` | refresh | `{ refreshToken }` | `{ accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
+| POST | `/auth/logout` | Bearer | — | `{ status: "ok" }` |
 | GET | `/auth/me` | Bearer | — | `{ id, username, displayName, role }` |
+| POST | `/auth/totp/enroll` | Bearer | — | `{ otpauthUri, qrDataUrl, issuer }` |
+| POST | `/auth/totp/verify` | Bearer | `{ code }` (6-digit) | `{ enabled: true, recoveryCodes? }` |
+| POST | `/auth/recovery` | Bearer | `{ code }` | `{ ok: true, remaining }` |
 
-**Note:** the existing browser flow uses `Set-Cookie` httpOnly. Mobile
-flow adds `?return=body` so the tokens come back in JSON. Backend
-change required (one-line) — see ADR-008 action item.
+**Auth model (ADR-013 directory).** Login authenticates an **email +
+password (argon2id)** against the local directory — *not* Nextcloud
+credentials. `username` is still accepted as a legacy alias for `email`.
+`?return=body` (shipped) returns the JWT pair in the body too (browsers
+also get httpOnly `Set-Cookie`). Tokens are HS256; **refresh rotates the
+refresh token on every call and denylists the previous one**, so native
+clients MUST persist the new `refreshToken` from `/auth/refresh`.
+
+**Second factor.** If the account has TOTP enabled, `/auth/login` returns
+`401 { error, code: "TOTP_REQUIRED" }` until a valid `totp` (or unused
+`recoveryCode`) is included in the login body. The successful access
+token carries an MFA stamp used by `require-recent-mfa` routes. WebAuthn
+is not part of the app login path.
+
+**Recovery-code step-up.** `/auth/recovery` is a **Bearer-authenticated**
+step-up that consumes one unused recovery code for an already-signed-in
+session (body `{ code }` → `{ ok, remaining }`, six-digit `/auth/totp/verify`
+is the same shape). It is **not** a pre-login account-recovery endpoint —
+pre-login recovery is the `recoveryCode` field on `/auth/login` above.
 
 ### Health (`/api/orchestrator/health`)
 
@@ -56,22 +75,44 @@ status pill in the chrome.
 
 | Method | Path | Auth | Body | Returns |
 |---|---|---|---|---|
-| POST | `/devices/pair` | Bearer (dashboard) | `{ displayName }` | `{ code, expiresAt }` |
-| GET | `/devices/pair/:code/status` | none | — | `{ status: "pending"\|"claimed"\|"expired" }` |
-| POST | `/devices/pair/claim` | none | `{ code, username, password }` | `{ accessToken, refreshToken, deviceId, displayName }` |
-| GET | `/devices/clients` | Bearer | — | `[{ id, displayName, platform, lastSeen, ... }]` |
-| DELETE | `/devices/clients/:id` | Bearer | — | `{ ok: true }` |
-| POST | `/devices/push` | Bearer | `{ token, platform: "ios"\|"android" }` | `{ ok: true }` |
-| DELETE | `/devices/push/:tokenHash` | Bearer | — | `{ ok: true }` |
-| GET | `/devices/push/vapid-public-key` | none | — | `{ key }` (WebPush only — not used by APNs/FCM) |
+| POST | `/devices/pair` | Bearer (dashboard) | `{ deviceName, deviceType: "desktop"\|"mobile", platform }` | `{ code, expiresAt, pairUrl }` |
+| GET | `/devices/pair/:code/status` | Bearer | — | `{ code, used, expired, expiresAt, claimedBy? }` |
+| POST | `/devices/pair/claim` | **Bearer** | `{ code, deviceName?, appVersion? }` | `{ deviceId, ncUsername, webdavUrl, appPassword }` |
+| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, lastSeen, status, createdAt }] }` |
+| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` |
+| GET | `/devices/push/vapid-public-key` | Bearer | — | `{ publicKey }` |
+| POST | `/devices/push/subscribe` | Bearer | `{ endpoint, keys: { p256dh, auth }, deviceClientId? }` | `{ id }` |
+| DELETE | `/devices/push/subscribe` | Bearer | `{ endpoint }` | 204 |
+| POST | `/devices/push/test` | Bearer | — | dispatch result |
 
-Pair-flow sequence:
-1. Dashboard POST `/devices/pair` → shows QR with `droplet://pair?server=<base>&code=<6-digit>`
-2. Phone scans QR → app opens, deep link parsed
-3. App shows login form pre-filled with `server`
-4. User taps Pair → phone POSTs `/devices/pair/claim` with `{ code, username, password }`
-5. Response stores access + refresh tokens in Keychain / EncryptedSharedPreferences
-6. App immediately POSTs `/devices/push` with APNs/FCM token
+**Push status:** only **WebPush (VAPID)** subscribe exists today. A native
+**APNs/FCM token-registration endpoint is NOT yet implemented** — native
+push delivery (direct-APNs on iOS, FCM on Android) is scaffolded only: the
+subscribe + VAPID endpoints above exist, but the orchestrator-side fan-out
+sidecar that actually delivers pushes is not yet built. Mobile real-time
+push is pending; until then native clients poll `/notifications`.
+
+**Auth vs pairing (corrected 2026-06-01).** `claim` is NOT a login.
+Authentication is always `/auth/login`; pairing is an optional,
+post-login, **Bearer-authenticated device-enrollment** step that mints a
+per-device Nextcloud WebDAV app-password (for the Files surface) and a
+`DeviceClient` row (for revocation + push targeting). A client can sign
+in with no pair code and still use the app — Files goes through
+`/api/files` with the JWT, not direct WebDAV.
+
+Sign-in + optional enrollment sequence:
+1. User enters the Droplet `server` URL + email + password. A scanned
+   `droplet://pair?server=<base>&code=<code>` QR pre-fills `server` (and `code`).
+2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
+   `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
+3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
+   with the **Bearer** + `{ code, deviceName? }` and stores the returned
+   `{ deviceId, ncUsername, webdavUrl, appPassword }`. The logged-in
+   account must match the code's owner (else `403`). Non-fatal on failure.
+4. Dashboard polls `/devices/pair/:code/status` until `used`.
+
+To GENERATE a code, the dashboard (already authenticated) POSTs
+`/devices/pair` and renders the QR from `pairUrl`.
 
 ### Cameras (`/api/cameras/*`)
 
