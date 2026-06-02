@@ -421,7 +421,8 @@ def wireless_status():
 
 
 @app.get("/wireless/scan")
-def wireless_scan(device: str = "wlan0"):
+def wireless_scan(device: Optional[str] = None):
+    # device=None → SDK resolves DROPLET_WIFI_SCAN_DEVICE (last-resort wlan0).
     try:
         return {"results": get_router().wireless.scan(device)}
     except (ConnectionLost, UbusError) as exc:
@@ -429,7 +430,8 @@ def wireless_scan(device: str = "wlan0"):
 
 
 @app.get("/wireless/clients")
-def wireless_clients(device: str = "wlan0"):
+def wireless_clients(device: Optional[str] = None):
+    # device=None → SDK resolves DROPLET_WIFI_SCAN_DEVICE (last-resort wlan0).
     try:
         return {"clients": get_router().wireless.connected_clients(device)}
     except (ConnectionLost, UbusError) as exc:
