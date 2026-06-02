@@ -391,25 +391,67 @@ async def session_chat(session_id: str, body: SessionChatRequest):
         raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
 
     if body.stream:
-        # For streaming, we collect tokens to save the full response afterward
+        # For streaming, we collect tokens to save the full response afterward.
+        #
+        # GW-07: the assistant turn is persisted in a `finally`, not only after
+        # the generator fully drains. A client disconnect (browser close, nginx
+        # timeout) closes the generator with GeneratorExit, and an upstream
+        # error raises mid-stream — in both cases the previous code never
+        # reached the save line, so the user turn was stored with NO assistant
+        # reply (silent history loss) and the partial text the user already saw
+        # was lost. We now save whatever was collected exactly once, whether the
+        # stream finished normally or was cut short.
         async def stream_and_save():
-            collected = []
-            async for chunk in result:
-                yield chunk
-                # Extract content from SSE data for persistence
-                if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
-                    try:
-                        import json
-                        parsed = json.loads(chunk[6:].strip())
-                        delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
-                        if delta:
-                            collected.append(delta)
-                    except (json.JSONDecodeError, IndexError, KeyError):
-                        pass
-            # Save the full assistant response
-            full_response = "".join(collected)
-            if full_response:
-                await session_store.add_message(session_id, "assistant", full_response)
+            collected: list[str] = []
+            completed = False
+            saved = False
+
+            async def _persist() -> None:
+                nonlocal saved
+                if saved:
+                    return
+                saved = True
+                full_response = "".join(collected)
+                if not full_response:
+                    return
+                if not completed:
+                    logger.warning(
+                        "session %s: stream ended early (client disconnect or "
+                        "upstream error) — persisting partial assistant reply "
+                        "(%d chars)",
+                        session_id,
+                        len(full_response),
+                    )
+                try:
+                    await session_store.add_message(
+                        session_id, "assistant", full_response
+                    )
+                except Exception:
+                    # Never let a cleanup-time store failure mask the original
+                    # disconnect/error; just log it.
+                    logger.exception(
+                        "session %s: failed to persist assistant reply", session_id
+                    )
+
+            try:
+                async for chunk in result:
+                    yield chunk
+                    # Extract content from SSE data for persistence
+                    if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
+                        try:
+                            import json
+                            parsed = json.loads(chunk[6:].strip())
+                            delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
+                            if delta:
+                                collected.append(delta)
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            pass
+                completed = True
+            finally:
+                # Runs on normal completion, on client disconnect (GeneratorExit),
+                # and on a mid-stream upstream error — so the assistant turn is
+                # never silently dropped.
+                await _persist()
 
         return StreamingResponse(
             stream_and_save(),
