@@ -98,7 +98,9 @@ def test_readiness_tick_flips_boot_when_ready(
     # First gated tick after the 2s cadence; readiness satisfied -> transition.
     sim_display._readiness_tick(now=1003.0)
     assert sim_display._boot_complete is True
-    assert sim_display._current_mode == TFTDisplay.STATS
+    # py-v3: the live UI is the combined System screen (bare "stats" wire frame
+    # still navigates the firmware; the host preview lands on SYSTEM).
+    assert sim_display._current_mode == TFTDisplay.SYSTEM
 
 
 def test_readiness_tick_times_out_to_live(
@@ -111,7 +113,7 @@ def test_readiness_tick_times_out_to_live(
     sim_display._boot_started_at = 1000.0
     sim_display._readiness_tick(now=1000.0 + 91)
     assert sim_display._boot_complete is True
-    assert sim_display._current_mode == TFTDisplay.STATS
+    assert sim_display._current_mode == TFTDisplay.SYSTEM
 
 
 def _spy_pyportal_send(
@@ -150,9 +152,11 @@ def test_complete_boot_emits_bare_stats_nav_frame(
     sim_display._readiness_tick(now=1003.0)
 
     assert sim_display._boot_complete is True
-    assert sim_display._current_mode == TFTDisplay.STATS
-    # A bare nav frame == (mode="stats", data is None). data-laden frames do
-    # NOT navigate the firmware, so they don't count.
+    # Host preview lands on the combined System screen (py-v3).
+    assert sim_display._current_mode == TFTDisplay.SYSTEM
+    # The WIRE frame stays a bare ("stats", None): the firmware aliases it to
+    # the system screen, so the navigation contract is unchanged. data-laden
+    # frames do NOT navigate the firmware, so they don't count.
     bare_stats = [m for (m, d) in sent if m == TFTDisplay.STATS and d is None]
     assert bare_stats, (
         f"expected a bare STATS nav frame on boot->stats; got {sent!r}"
