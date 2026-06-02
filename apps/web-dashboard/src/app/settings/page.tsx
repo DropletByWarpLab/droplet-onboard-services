@@ -8,7 +8,7 @@ import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
-import { validatePassword } from "@droplet/auth-policy";
+import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
 import {
@@ -19,15 +19,13 @@ import {
 } from "@/lib/api";
 import type { AuthUser } from "@/lib/types";
 
-const RESERVED_USERNAMES = ["admin", "root"];
-
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
-  const [newUsername, setNewUsername] = useState("");
+  const [newEmail, setNewEmail] = useState("");
   const [newDisplayName, setNewDisplayName] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [userError, setUserError] = useState<string | null>(null);
@@ -58,12 +56,12 @@ export default function SettingsPage() {
 
   const handleCreateUser = async () => {
     setUserError(null);
-    if (!newUsername.trim() || !newPassword.trim()) {
-      setUserError("Username and password are required");
+    if (!isValidEmail(newEmail)) {
+      setUserError("Enter a valid email address.");
       return;
     }
-    if (RESERVED_USERNAMES.includes(newUsername.trim().toLowerCase())) {
-      setUserError("This username is reserved and cannot be used");
+    if (!newPassword.trim()) {
+      setUserError("Password is required.");
       return;
     }
     if (!validatePassword(newPassword).ok) {
@@ -72,8 +70,8 @@ export default function SettingsPage() {
     }
 
     try {
-      await createUser(newUsername, newPassword, newDisplayName || undefined);
-      setNewUsername("");
+      await createUser(newEmail, newPassword, newDisplayName || undefined);
+      setNewEmail("");
       setNewDisplayName("");
       setNewPassword("");
       setShowAddUser(false);
@@ -169,9 +167,11 @@ export default function SettingsPage() {
             <p className="type-headline text-label-primary">New User</p>
             <div className="grid grid-cols-2 gap-3">
               <input
-                value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value.toLowerCase())}
-                placeholder="Username"
+                type="email"
+                inputMode="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                placeholder="you@company.com"
                 className="dp-input"
                 autoFocus
               />
