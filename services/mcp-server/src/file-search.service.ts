@@ -24,6 +24,30 @@ import type { PrismaClient } from "@prisma/client";
 
 export type FileContentSource = "nextcloud" | "brain";
 
+/**
+ * Defense-in-depth guard for the ONE string-interpolated fragment in these
+ * queries: the pgvector literal `'[...]'::vector` is built by joining the
+ * embedding array (everything else — query text, filename filter, limit —
+ * is parameterized). Today `vector` is always embedder-produced floats, so
+ * this is not currently attacker-controlled — but there is no compile-time
+ * guarantee that every element is finite. A `NaN`/`Infinity`/non-number
+ * slipping in from a malformed embedder response, or a future caller wiring
+ * a less-trusted source into the enhancement vectors, would land directly
+ * in raw SQL. Reject before we ever build the literal. (TOOLS-09)
+ */
+function assertFiniteVector(vec: number[], label = "vector"): void {
+  if (!Array.isArray(vec) || vec.length === 0) {
+    throw new Error(`file-search: ${label} must be a non-empty number[]`);
+  }
+  for (let i = 0; i < vec.length; i++) {
+    if (typeof vec[i] !== "number" || !Number.isFinite(vec[i])) {
+      throw new Error(
+        `file-search: ${label}[${i}] is not a finite number — refusing to interpolate into SQL`,
+      );
+    }
+  }
+}
+
 export interface SearchHit {
   source: FileContentSource;
   path: string;
@@ -61,6 +85,7 @@ export async function searchByVector(
   prisma: PrismaClient,
   params: SearchByVectorParams,
 ): Promise<SearchHit[]> {
+  assertFiniteVector(params.vector);
   const vec = `[${params.vector.join(",")}]`;
   const where: string[] = [`"userId" = $1`];
   const args: unknown[] = [params.userId];
@@ -365,6 +390,14 @@ export async function searchHybrid(
   // Length mismatch silently drops the HyDE term (CLAUDE.md "no guessing":
   // we don't pad/truncate behind the caller's back).
   const enhancement = params.queryEnhancement;
+  // TOOLS-09: validate the enhancement vectors at the boundary so a bad
+  // input fails with context here rather than deep inside searchByVector's
+  // SQL-literal build. (searchByVector also guards its own input as the
+  // load-bearing check, covering every other caller.)
+  if (enhancement?.hydeVector) assertFiniteVector(enhancement.hydeVector, "hydeVector");
+  (enhancement?.extraQueryVectors ?? []).forEach((v, i) =>
+    assertFiniteVector(v, `extraQueryVectors[${i}]`),
+  );
   const effectiveVector =
     enhancement?.hydeVector &&
     enhancement.hydeVector.length === params.vector.length
