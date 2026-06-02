@@ -469,8 +469,23 @@ class WirelessApi:
         self._r = router
 
     def status(self) -> dict:
-        """Get status of all wireless radios and interfaces."""
-        return self._r._call("network.wireless", "status")
+        """Get status of all wireless radios and interfaces.
+
+        Returns an empty dict when this box has no ``network.wireless`` ubus
+        object at all (the single-box shape: the containerised OpenWrt exposes
+        only ``network.interface.lan`` + ``loopback``). A whole missing object
+        surfaces as ``UbusError(-1, "Object not found")``; degrading it to ``{}``
+        instead of 500-ing mirrors how ``get_network_summary`` already treats the
+        same wireless section (ADR-011, shape-agnostic — a missing optional
+        surface is data, not a crash). Genuine faults (PERMISSION_DENIED,
+        transport ``ConnectionLost``, unrelated ubus errors) still propagate.
+        """
+        try:
+            return self._r._call("network.wireless", "status")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return {}
+            raise
 
     def up(self) -> dict:
         """Enable all wireless interfaces."""
@@ -481,8 +496,23 @@ class WirelessApi:
         return self._r._call("network.wireless", "down")
 
     def scan(self, device: str = "wlan0") -> list[dict]:
-        """Scan for nearby WiFi networks."""
-        result = self._r._call("iwinfo", "scan", {"device": device})
+        """Scan for nearby WiFi networks.
+
+        Returns an empty list when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default `wlan0` on a box whose
+        radio is named `wlp14s0`): a radio that isn't there can't scan and
+        shouldn't 500 the page (ADR-011, shape-agnostic). Mirrors
+        :meth:`connected_clients`.
+
+        ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
+        other code propagate, so a real fault is never masked as "no networks".
+        """
+        try:
+            result = self._r._call("iwinfo", "scan", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
         return result.get("results", [])
 
     def connected_clients(self, device: str = "wlan0") -> list[dict]:
@@ -508,8 +538,23 @@ class WirelessApi:
         return result.get("results", [])
 
     def radio_info(self, device: str = "wlan0") -> dict:
-        """Get radio information (frequency, txpower, channel, etc.)."""
-        return self._r._call("iwinfo", "info", {"device": device})
+        """Get radio information (frequency, txpower, channel, etc.).
+
+        Returns an empty dict when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default `wlan0` on a box whose
+        radio is named `wlp14s0`): an absent radio has no info and shouldn't
+        500 the page (ADR-011, shape-agnostic). Mirrors :meth:`connected_clients`.
+
+        ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
+        other code propagate, so a real fault is never masked as "no radio".
+        """
+        try:
+            result = self._r._call("iwinfo", "info", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return {}
+            raise
+        return result
 
     def set_ssid(self, radio: str, iface_section: str, ssid: str):
         """Change the SSID of a wireless interface."""
