@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
@@ -72,6 +73,22 @@ from scheduler import InferenceScheduler, QueueFullError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _provider_error_detail(exc: Exception, context: str) -> str:
+    """GW-08: log the full provider/LiteLLM exception server-side and return a
+    generic, non-leaky message to the client.
+
+    LiteLLM/provider exceptions frequently embed the upstream provider's raw
+    error body, request URL, and model names; echoing ``str(exc)`` to the
+    caller leaks internal endpoints and turns the gateway into a provider-state
+    oracle. We attach a short correlation id so an operator can tie the opaque
+    client message back to the detailed server-side log line.
+    """
+    correlation_id = uuid.uuid4().hex[:12]
+    logger.error("%s [correlation_id=%s]: %s", context, correlation_id, exc)
+    return f"Upstream provider error (ref: {correlation_id})"
+
 
 # Global instances
 provider_router: ProviderRouter | None = None
@@ -231,8 +248,10 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error("Chat error: %s", e)
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+        # GW-08: don't echo the upstream/LiteLLM error text to the client.
+        raise HTTPException(
+            status_code=502, detail=_provider_error_detail(e, "Chat error")
+        )
     finally:
         await inference_scheduler.release()
 
@@ -387,8 +406,10 @@ async def session_chat(session_id: str, body: SessionChatRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error("Session chat error: %s", e)
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+        # GW-08: generic message + correlation id; full error logged server-side.
+        raise HTTPException(
+            status_code=502, detail=_provider_error_detail(e, "Session chat error")
+        )
 
     if body.stream:
         # For streaming, we collect tokens to save the full response afterward.
