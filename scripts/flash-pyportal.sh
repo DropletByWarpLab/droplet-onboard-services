@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Flash the PyPortal Titano front-panel firmware (code.py + boot.py)
+# Flash the PyPortal Titano front-panel firmware
+# (code.py + boot.py + lib/fonts/Inter-Hero-66.bdf)
 # =============================================================================
 #
 # Pushes this repo's services/oled-display/pyportal/{code.py,boot.py} to the
-# connected board. The boot/shutdown lifecycle splash screens (WARP-624) live
-# in code.py, so the board needs this to render them.
+# connected board, plus the bundled hero numeral font
+# lib/fonts/Inter-Hero-66.bdf onto CIRCUITPY/lib/fonts/. The py-v3 editorial
+# idle clock + CPU hero load that font via adafruit_bitmap_font (with a
+# terminalio-scaled fallback if it's absent), so the board needs it for the
+# intended look.
 #
 # Two methods, selectable:
 #   1) DISK (default, preferred): on a stock CircuitPython board the host's
@@ -34,6 +38,7 @@ FW="$REPO_ROOT/services/oled-display/pyportal"
 TOOL="$REPO_ROOT/services/oled-display/tools/repl_upload.py"
 CONTAINER=droplet-oled-display-1
 MNT=/mnt/droplet-circuitpy
+FONT=Inter-Hero-66.bdf   # bundled hero numeral font -> CIRCUITPY/lib/fonts/
 
 MODE=disk
 PORT=/dev/ttyACM0
@@ -83,6 +88,16 @@ flash_disk() {
     sudo cp "$FW/$f" "$MNT/$f.new" && sudo sync && sudo mv -f "$MNT/$f.new" "$MNT/$f"
     echo "  wrote $f"
   done
+  # Hero numeral font -> CIRCUITPY/lib/fonts/. Optional: skip silently if the
+  # asset isn't present (the firmware falls back to terminalio heroes).
+  if [ -f "$FW/lib/fonts/$FONT" ]; then
+    sudo mkdir -p "$MNT/lib/fonts"
+    sudo cp "$FW/lib/fonts/$FONT" "$MNT/lib/fonts/$FONT.new" && sudo sync \
+      && sudo mv -f "$MNT/lib/fonts/$FONT.new" "$MNT/lib/fonts/$FONT"
+    echo "  wrote lib/fonts/$FONT"
+  else
+    echo "  (skip) lib/fonts/$FONT not in repo — firmware will use terminalio heroes"
+  fi
   sudo sync
   sudo umount "$MNT"
   # Verify by hash (re-mount read-only).
@@ -93,6 +108,12 @@ flash_disk() {
     rsum="$(sha256sum "$FW/$f" | awk '{print $1}')"
     if [ "$bsum" = "$rsum" ]; then echo "  verified $f"; else echo "  MISMATCH $f" >&2; ok=0; fi
   done
+  if [ -f "$FW/lib/fonts/$FONT" ]; then
+    bsum="$(sudo sha256sum "$MNT/lib/fonts/$FONT" | awk '{print $1}')"
+    rsum="$(sha256sum "$FW/lib/fonts/$FONT" | awk '{print $1}')"
+    if [ "$bsum" = "$rsum" ]; then echo "  verified lib/fonts/$FONT"; \
+      else echo "  MISMATCH lib/fonts/$FONT" >&2; ok=0; fi
+  fi
   sudo umount "$MNT"
   [ "$ok" = 1 ] || { echo "flash-pyportal: verification FAILED" >&2; exit 1; }
   echo "flash-pyportal: done (disk) — CircuitPython auto-reloads code.py on change."
@@ -112,8 +133,15 @@ flash_repl() {
     echo "flash-pyportal: detaching host CIRCUITPY auto-mount at $cp_mnt"
     sudo umount "$cp_mnt" 2>/dev/null || true
   fi
-  echo "flash-pyportal: pushing code.py + boot.py over REPL $PORT ..."
-  sudo python3 "$TOOL" --port "$PORT" --push "$FW/code.py:code.py" --push "$FW/boot.py:boot.py"
+  echo "flash-pyportal: pushing code.py + boot.py + hero font over REPL $PORT ..."
+  local font_arg=()
+  if [ -f "$FW/lib/fonts/$FONT" ]; then
+    font_arg=(--push "$FW/lib/fonts/$FONT:lib/fonts/$FONT")
+  else
+    echo "flash-pyportal: (skip) lib/fonts/$FONT not in repo — terminalio fallback"
+  fi
+  sudo python3 "$TOOL" --port "$PORT" \
+    --push "$FW/code.py:code.py" --push "$FW/boot.py:boot.py" "${font_arg[@]}"
   echo "flash-pyportal: done (repl) — board soft-rebooted."
 }
 

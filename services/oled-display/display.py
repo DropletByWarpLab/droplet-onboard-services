@@ -25,6 +25,7 @@ same tile / status-chip layout.
 """
 
 import os
+import ssl
 import time
 import json
 import socket
@@ -33,6 +34,7 @@ import threading
 import urllib.request
 import urllib.error
 from datetime import datetime
+from datetime import datetime as _dt_datetime
 from pathlib import Path
 from typing import Optional, List, Any, Callable, Tuple
 
@@ -115,6 +117,42 @@ TEMP_WARN        = STATUS_ORANGE
 TEMP_CRIT        = STATUS_RED
 
 # ---------------------------------------------------------------------------
+# py-v3 palette (design_handoff_pyportal_touchscreen/README.md "Design Tokens")
+# The redesigned idle / System+Wi-Fi / power-sequence screens use this token
+# set verbatim. Kept separate from the legacy dashboard-mirror tokens above so
+# the older home/chat/devices/settings renderers (still reachable for
+# back-compat) are untouched. Every value below maps 1:1 to a row in the
+# handoff token table; rgba tokens are flattened to the nearest solid.
+# ---------------------------------------------------------------------------
+V3_BG        = (0x05, 0x05, 0x07)   # #050507 screen background
+V3_PANEL     = (0x0D, 0x0D, 0x12)   # #0d0d12 alerts drawer background
+V3_SURFACE   = (0x14, 0x14, 0x20)   # #141420 chips, inactive pills
+V3_SURFACE2  = (0x1D, 0x1D, 0x2E)   # #1d1d2e alert rows, "Clear all"
+V3_SEP       = (0x2A, 0x2A, 0x38)   # #2a2a38 hairline dividers
+V3_SEP2      = (0x3A, 0x3A, 0x4A)   # #3a3a4a stronger borders
+V3_TEXT      = (0xFF, 0xFF, 0xFF)   # #ffffff primary numerics & values
+V3_LABEL2    = (0xC8, 0xC8, 0xD4)   # #c8c8d4 clock time, button labels
+V3_LABEL3    = (0x8B, 0x8B, 0x9C)   # #8b8b9c eyebrows / captions
+V3_LABEL4    = (0x54, 0x54, 0x66)   # #545466 faint / standby text
+V3_ACCENT    = (0x81, 0x8C, 0xF8)   # #818cf8 sparkline, rule, SSID, mark
+V3_ACCENT_DIM = (0x5B, 0x62, 0xC7)  # #5b62c7 seconds hairline
+V3_ACCENT_INK = (0xB4, 0xBA, 0xFF)  # #b4baff mark highlight, password text
+# accentSubtle rgba(129,140,248,0.18) over #050507 -> nearest solid fill for
+# the active toggle cell (0.18*accent + 0.82*bg, per-channel).
+V3_ACCENT_SUBTLE = (0x1B, 0x1D, 0x32)  # ~#1b1d32
+# rgba(255,159,10,0.18) over #050507 -> orange-tinted KEY-pill fill when <60s.
+V3_ORANGE_SUBTLE = (0x32, 0x21, 0x08)  # ~#322108
+V3_TRACK     = (0x1F, 0x1F, 0x30)   # #1f1f30 progress/seconds track
+V3_GREEN     = (0x30, 0xD1, 0x58)   # #30d158 OK status, cameras online
+V3_ORANGE    = (0xFF, 0x9F, 0x0A)   # #ff9f0a warnings, key-expiring
+V3_RED       = (0xFF, 0x45, 0x3A)   # #ff453a alerts, critical
+V3_WHITE     = (0xFF, 0xFF, 0xFF)   # #ffffff QR card
+# sparkline fill #818cf822 (accent @ ~13% alpha) over bg -> nearest solid.
+V3_SPARK_FILL = (0x16, 0x17, 0x27)  # ~#161727
+# CRT phosphor line on shutdown collapse (#eaeaff).
+V3_PHOSPHOR  = (0xEA, 0xEA, 0xFF)   # #eaeaff
+
+# ---------------------------------------------------------------------------
 # Assets + cycle timing
 # ---------------------------------------------------------------------------
 ASSETS_DIR = Path(__file__).parent / "assets"
@@ -126,7 +164,7 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 
 # ---------------------------------------------------------------------------
-# Boot readiness (WARP-624)
+# Boot readiness (WARP-624; redirect/TLS fix WARP-638)
 # ---------------------------------------------------------------------------
 # The panel opens on the boot screen at construction and stays there until
 # the system is healthy, then flips to the live UI. Health is probed against
@@ -136,8 +174,22 @@ AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 # UI anyway so a degraded stack still shows something instead of a stuck
 # splash. Both knobs are overridable; defaults stay on loopback so there are
 # no host-specific defaults baked in.
+#
+# WARP-638: nginx :80 issues `301 -> https://$host$request_uri`, and the HTTPS
+# vhost serves a SELF-SIGNED cert. urllib follows the redirect to
+# https://127.0.0.1/api/health and, with default verification, raises
+# SSLCertVerificationError — so the probe returned False on EVERY tick and the
+# splash sat for the full 90s on every (re)start. The probe now uses an
+# unverified SSL context (loopback to our own gateway's self-signed cert —
+# there's nothing to verify against), so a warm stack reads ready in ~1 probe.
 BOOT_READINESS_URL = os.environ.get(
     "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
+# Unverified context for the loopback HTTPS hop after the :80->:443 redirect.
+# Scoped to the readiness probe only; nothing else in this module makes TLS
+# calls (the bridge endpoints are plain-HTTP loopback).
+_READINESS_SSL_CTX = ssl.create_default_context()
+_READINESS_SSL_CTX.check_hostname = False
+_READINESS_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
 def _env_positive_int(name: str, default: int, raw: Optional[str] = None) -> int:
@@ -171,6 +223,13 @@ BOOT_MAX_SECONDS = _env_positive_int("BOOT_MAX_SECONDS", 90)
 # How often the cycle loop actually probes readiness. The loop ticks ~12.5x/s;
 # gating the probe to every 2s keeps it cheap.
 BOOT_READINESS_INTERVAL = float(os.environ.get("BOOT_READINESS_INTERVAL", "2.0"))
+# How often the cycle loop verifies the live PyPortal link (WARP-638): stat the
+# ttyACM node to spot a USB re-enumeration after a device reset. Same 2s cadence
+# as the readiness probe — cheap, but fast enough that a reset is noticed and
+# the port reopened within a couple seconds instead of the device sitting on
+# its boot screen against a stale host fd.
+LIVENESS_CHECK_INTERVAL = float(
+    os.environ.get("LIVENESS_CHECK_INTERVAL", "2.0"))
 LOGO_DURATION = 5
 STATS_DURATION = 10
 MESSAGE_HOLD = 30
@@ -178,16 +237,99 @@ MESSAGE_HOLD = 30
 MESSAGE_RETURN_HOME_AFTER = MESSAGE_HOLD
 
 
-def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    try:
-        variant = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-        for search in ["/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/"]:
-            path = Path(search) / variant
-            if path.exists():
-                return ImageFont.truetype(str(path), size)
-    except Exception:
-        pass
-    return ImageFont.load_default()
+# Font discovery for the sim. The handoff renders in Inter (weights 300-800)
+# and leans on heavy weights (800) for hero numerals. On the device this is a
+# bundled bitmap font; in the CPython sim we want a real proportional TTF so
+# the preview PNG reads like the design. We search a small candidate list per
+# weight class (Inter first if present, then a heavy platform default) and
+# cache the resolved FreeType faces by (size, weight). The sim font is purely
+# cosmetic — it does NOT affect what the device draws.
+_FONT_CACHE: dict = {}
+
+# Candidate face files, ordered best-first, per weight bucket. "heavy" backs
+# the 800-weight heroes; "bold" backs 700; "regular" backs 400-600.
+_FONT_CANDIDATES = {
+    "heavy": [
+        "Inter-ExtraBold.ttf", "Inter-Bold.ttf", "Inter_28pt-ExtraBold.ttf",
+        # Windows
+        "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf",
+        # Linux (container)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        # macOS
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ],
+    "bold": [
+        "Inter-Bold.ttf", "Inter-SemiBold.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ],
+    "regular": [
+        "Inter-Regular.ttf", "Inter-Medium.ttf",
+        "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ],
+}
+
+# Extra directories Inter might live in (bundled alongside the device font, or
+# dropped into the service dir during dev).
+_FONT_SEARCH_DIRS = [
+    Path(__file__).parent / "pyportal" / "lib" / "fonts",
+    Path(__file__).parent / "assets" / "fonts",
+    Path("/usr/share/fonts/truetype/inter"),
+    Path("/usr/share/fonts/opentype/inter"),
+    Path("C:/Windows/Fonts"),
+]
+
+
+def _resolve_font_file(name: str) -> Optional[str]:
+    p = Path(name)
+    if p.is_absolute():
+        return str(p) if p.exists() else None
+    for d in _FONT_SEARCH_DIRS:
+        cand = d / name
+        if cand.exists():
+            return str(cand)
+    # Bare DejaVu names resolve via the legacy /usr/share search too.
+    for search in ("/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/"):
+        cand = Path(search) / name
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+def _get_font(size: int, bold: bool = False,
+              weight: str = "") -> ImageFont.FreeTypeFont:
+    """Resolve a FreeType face for the sim at `size` px.
+
+    `weight` is one of "heavy" (800 heroes) / "bold" (700) / "regular";
+    `bold=True` is kept for back-compat and maps to the "bold" bucket. Falls
+    back to PIL's built-in bitmap font only if no TTF is found anywhere.
+    """
+    bucket = weight or ("bold" if bold else "regular")
+    if bucket not in _FONT_CANDIDATES:
+        bucket = "regular"
+    key = (size, bucket)
+    cached = _FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    face = None
+    for name in _FONT_CANDIDATES[bucket]:
+        resolved = _resolve_font_file(name)
+        if resolved:
+            try:
+                face = ImageFont.truetype(resolved, size)
+                break
+            except Exception:
+                continue
+    if face is None:
+        face = ImageFont.load_default()
+    _FONT_CACHE[key] = face
+    return face
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +365,94 @@ def draw_droplet_mark(
 
     draw.polygon([proj(p) for p in _MARK_LEFT], fill=primary)
     draw.polygon([proj(p) for p in _MARK_RIGHT], fill=highlight)
+
+
+def draw_droplet_mark_liquid(
+    img: Image.Image, draw: ImageDraw.ImageDraw,
+    x: int, y: int, size: int, frac: float,
+):
+    """Draw the mark as a vessel filled to `frac` (0..1) with accent liquid.
+
+    Used by the boot (fill) / shutdown (drain) power sequences. The empty
+    shell is a dim outline of MARK_LEFT; the liquid is the accent fill clipped
+    to the body silhouette. Mirrors preview.html drawMarkLiquid /
+    markSilhouette. `img` is the frame `draw` is bound to (PIL gives no public
+    way back from a Draw to its Image, so callers pass both).
+    """
+    vw, vh = _MARK_VIEWBOX
+    scale = size / vh
+    x_off = x + (size - int(vw * scale)) // 2
+    y_off = y
+
+    def proj(pt):
+        return (int(x_off + pt[0] * scale), int(y_off + pt[1] * scale))
+
+    body = [proj(p) for p in _MARK_LEFT]
+    # Empty shell — dim flat fill so the vessel reads before it fills.
+    draw.polygon(body, fill=(0x18, 0x18, 0x28))
+    frac = max(0.0, min(1.0, frac))
+    if frac <= 0.002:
+        return
+    # Liquid level rises from the bottom of the body (viewbox y=48) upward.
+    top = y_off
+    bottom = y_off + int(48 * scale)
+    level = bottom - int((bottom - top) * frac)
+    # Build a clip mask = body silhouette ∩ (everything at/below the level).
+    from PIL import ImageChops
+    body_mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(body_mask).polygon(body, fill=255)
+    level_mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(level_mask).rectangle(
+        [x_off - 4, level, x_off + int(vw * scale) + 4, bottom + 6], fill=255)
+    liquid = Image.new("RGB", img.size, V3_ACCENT)
+    img.paste(liquid, (0, 0), ImageChops.multiply(body_mask, level_mask))
+
+
+def _v3_text(draw: ImageDraw.ImageDraw, s: str, x: int, y: int, *,
+             font: ImageFont.FreeTypeFont, fill, anchor: str = "la",
+             tracking: float = 0.0):
+    """Draw text with optional per-character letter-spacing (tracking).
+
+    PIL has no tracking, so when `tracking != 0` we lay out glyphs manually.
+    `anchor` follows PIL's two-letter convention but we only special-case the
+    horizontal part for tracked text (l/m/r); vertical uses the PIL anchor.
+    Returns the total advance width drawn. Mirrors preview.html text()'s
+    letter-spacing handling. (design_handoff: eyebrow +1.2..+2, clock -6.)
+    """
+    if not tracking:
+        draw.text((x, y), s, font=font, fill=fill, anchor=anchor)
+        return int(draw.textlength(s, font=font))
+    # Manual tracked layout.
+    widths = [draw.textlength(ch, font=font) for ch in s]
+    total = sum(widths) + tracking * (len(s) - 1) if s else 0
+    halign = anchor[0] if anchor else "l"
+    if halign == "m":
+        cx = x - total / 2
+    elif halign == "r":
+        cx = x - total
+    else:
+        cx = x
+    vanchor = "l" + (anchor[1] if len(anchor) > 1 else "a")
+    for ch, w in zip(s, widths):
+        draw.text((cx, y), ch, font=font, fill=fill, anchor=vanchor)
+        cx += w + tracking
+    return int(total)
+
+
+def _v3_text_width(draw: ImageDraw.ImageDraw, s: str,
+                   font: ImageFont.FreeTypeFont, tracking: float = 0.0) -> float:
+    if not s:
+        return 0.0
+    w = sum(draw.textlength(ch, font=font) for ch in s)
+    return w + tracking * (len(s) - 1)
+
+
+def _rrect(draw: ImageDraw.ImageDraw, x, y, w, h, r, *, fill=None,
+           outline=None, width=1):
+    """Rounded rect convenience wrapper (clamps radius)."""
+    r = int(max(0, min(r, w / 2, h / 2)))
+    draw.rounded_rectangle([(x, y), (x + w, y + h)], radius=r,
+                           fill=fill, outline=outline, width=width)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +496,12 @@ class TFTDisplay:
     # Onboarding claim screen (WARP-632 / ADR-017) — modal, host-driven. Shown
     # while the box is unclaimed; the orchestrator mints the code and pushes it.
     CLAIM = "claim"
+    # py-v3 redesign live states. IDLE = editorial clock; SYSTEM = combined
+    # System+Wi-Fi (replaces the old separate stats + qr screens); STANDBY =
+    # powered-off "tap to power on". The device firmware mirrors these 1:1.
+    IDLE = "idle"
+    SYSTEM = "system"
+    STANDBY = "standby"
 
     def __init__(self):
         self._pyportal = None
@@ -279,6 +515,10 @@ class TFTDisplay:
         # fires. A periodic `os.path.exists(self._pyportal_path)` check is
         # the cheapest reliable way to spot a dead fd.
         self._pyportal_path: Optional[str] = None
+        # Throttle for the periodic liveness check (WARP-638). The cycle loop
+        # calls _check_pyportal_liveness() every tick (~12.5x/s) but the actual
+        # /dev stat only runs once per LIVENESS_CHECK_INTERVAL.
+        self._last_liveness_check = 0.0
         # Set by `_probe_pyportal` on every successful probe; cleared by the
         # cycle loop after it runs `_push_full_state`. Probe always discards
         # the firmware's pre-probe READY/REQUEST_STATE handshake (the probe
@@ -310,6 +550,12 @@ class TFTDisplay:
         self._boot_complete = False
         self._boot_started_at = time.time()
         self._last_readiness_check = 0.0
+        # WARP-638: set once a real stats frame has been ingested. On a WARM
+        # start the orchestrator is already up and pushing stats, so a live
+        # link + fresh data IS readiness — the warm-start short-circuit in
+        # _readiness_tick uses this to surface the UI in a few seconds instead
+        # of waiting on the HTTP probe (or, worse, the 90s timeout).
+        self._got_live_data = False
         self._current_image: Optional[Image.Image] = None
         self._custom_title: Optional[str] = None
         self._custom_lines: Optional[List[str]] = None
@@ -323,6 +569,27 @@ class TFTDisplay:
         # Touch regions for the current frame
         self._touch_regions: List[TouchRegion] = []
         self._touch_regions_lock = threading.Lock()
+
+        # --- py-v3 redesign live state (idle / System+Wi-Fi / alerts) -------
+        # 12/24 clock mode. Persisted on the device to /clock_mode.txt; in the
+        # host sim it lives in RAM (the sim has no device FS). Default '24'.
+        self._clock_mode = "24"
+        # Live data snapshot the redesigned screens render from, seeded with the
+        # handoff sample shape so a cold sim renders something sensible.
+        self._v3 = {
+            "cpu": 0, "mem": 0, "disk": 0, "temp": 0,
+            "ip": "-", "hostname": "droplet", "uptime": "-", "now": "",
+            "date": "",
+            "sparks_cpu": [],
+            "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
+                     "band": "", "key_ttl_seconds": 0, "password": ""},
+            "cameras": {"online": 0, "total": 0},
+            "wan_latency_ms": 0, "lan_clients": 0,
+        }
+        self._v3_spark_len = 48  # handoff: 48-sample CPU history
+        # Alerts drawer state — list of {type, title, detail, time, cleared}.
+        self._alerts: List[dict] = []
+        self._events_open = False
         # Live touch feedback: momentary highlight after a tap
         self._last_tap_region: Optional[str] = None
         self._last_tap_at: float = 0.0
@@ -416,7 +683,26 @@ class TFTDisplay:
             logger.debug("status display probe %s failed: %s", path, e)
             return False
 
+    def _mirror_to_v3(self, mode: str, data: Optional[dict]) -> None:
+        """Feed the host's own py-v3 preview from the SAME frames we send the
+        device, so the rendered PNG matches what the panel shows. Best-effort;
+        unknown modes are ignored."""
+        if not data:
+            return
+        try:
+            if mode == "stats":
+                self.update_stats(data)
+            elif mode == "wifi":
+                self.update_wifi(data)
+            elif mode == "cameras":
+                self.update_cameras(data)
+        except Exception as e:                                  # noqa: BLE001
+            logger.debug("v3 mirror (%s) failed: %s", mode, e)
+
     def _pyportal_send(self, mode: str, data: Optional[dict] = None):
+        # Mirror into the host preview store before the connection check so the
+        # sim preview stays live even when no physical panel is attached.
+        self._mirror_to_v3(mode, data)
         if self._pyportal is None:
             return
         payload: dict[str, Any] = {"mode": mode}
@@ -1097,181 +1383,692 @@ class TFTDisplay:
             y += 24
         return img
 
-    def render_boot(self, stage: str, detail: str = "",
-                    pct: Optional[int] = None) -> Image.Image:
-        """Cold-boot splash — mirrors the firmware's render_boot().
+    def render_boot(self, stage=None, detail: str = "",
+                    pct: Optional[int] = None, *,
+                    progress: Optional[float] = None) -> Image.Image:
+        """Boot power sequence — the droplet vessel fills with accent liquid.
 
-        Centered Droplet mark, "Starting Droplet" title, the current stage
-        as a caption (+ optional detail line), and a progress band. The band
-        is indeterminate (a short accent segment near the left) when `pct`
-        is None, otherwise it fills to `pct`%.
+        Two call shapes (one renderer, no derived state):
+          * ``render_boot(progress=0.0..1.0)`` — the py-v3 animated frame
+            driven by an explicit fill fraction (used by the animation/PNG
+            path).
+          * ``render_boot(stage, detail, pct)`` — the WARP-624 host call
+            (readiness/show_boot). ``pct`` (0..100) maps to the same fill
+            fraction; a 4-stage status line is derived from ``stage`` only
+            when ``progress`` is not given.
+
+        Layout from design_handoff README §4 / preview.html drawBootFrame:
+        116px vessel ~y=44, DROPLET wordmark, 4-stage status line, 184px
+        progress bar, ``Droplet OS · v2.4`` footer.
         """
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        if progress is None:
+            progress = (max(0, min(100, int(pct))) / 100.0) if pct is not None else 0.45
+        progress = max(0.0, min(1.0, progress))
+
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        mark_size = 92
-        mark_x = (WIDTH - mark_size) // 2
-        mark_y = 56
-        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
-                          primary=ACCENT_PRIMARY, highlight=ACCENT_LIGHT)
-
-        font_title = _get_font(26, bold=True)
-        title = "Starting Droplet"
-        bbox = draw.textbbox((0, 0), title, font=font_title)
-        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, mark_y + mark_size + 16),
-                  title, fill=TEXT_COLOR, font=font_title)
-
-        font_cap = _get_font(15)
-        caption = (stage or "Starting up")[:48]
-        bbox = draw.textbbox((0, 0), caption, font=font_cap)
-        cap_y = mark_y + mark_size + 54
-        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, cap_y),
-                  caption, fill=LABEL_SECONDARY, font=font_cap)
-        if detail:
-            font_detail = _get_font(12)
-            dtext = detail[:54]
-            bbox = draw.textbbox((0, 0), dtext, font=font_detail)
-            draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, cap_y + 22),
-                      dtext, fill=LABEL_TERTIARY, font=font_detail)
-
-        # Progress band
-        bar_w = 280
-        bar_h = 8
-        bar_x = (WIDTH - bar_w) // 2
-        bar_y = HEIGHT - 56
-        draw.rounded_rectangle(
-            [(bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h)],
-            radius=bar_h // 2, fill=SURFACE_SECONDARY,
-        )
-        if pct is None:
-            # Indeterminate: a short accent segment anchored to the left.
-            seg = bar_w // 3
-            draw.rounded_rectangle(
-                [(bar_x, bar_y), (bar_x + seg, bar_y + bar_h)],
-                radius=bar_h // 2, fill=ACCENT_COLOR,
-            )
+        size = 116
+        mx = (WIDTH - size) // 2
+        my = 44
+        mb = my + int(size * 48 / 60)
+        if progress >= 0.999:
+            draw_droplet_mark(draw, mx, my, size, primary=V3_ACCENT,
+                              highlight=V3_ACCENT_INK)
         else:
-            fill_w = int(bar_w * min(max(pct, 0), 100) / 100)
-            if fill_w > 0:
-                draw.rounded_rectangle(
-                    [(bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h)],
-                    radius=bar_h // 2, fill=ACCENT_COLOR,
-                )
+            draw_droplet_mark_liquid(img, draw, mx, my, size, progress)
+
+        font_word = _get_font(14, weight="heavy")
+        _v3_text(draw, "DROPLET", WIDTH // 2, mb + 22, font=font_word,
+                 fill=V3_TEXT, anchor="ma", tracking=5)
+
+        # 4-stage status line. If a host stage string was supplied and no
+        # explicit progress, surface that text; otherwise derive from fill.
+        stages = ["Mounting storage", "Starting network",
+                  "Loading models", "Ready"]
+        if stage and pct is not None:
+            status = str(stage)[:40]
+            done = pct is not None and pct >= 100
+        else:
+            si = min(len(stages) - 1, int(progress * len(stages)))
+            status = stages[si]
+            done = si == len(stages) - 1
+        font_status = _get_font(12, weight="regular")
+        _v3_text(draw, status, WIDTH // 2, mb + 46, font=font_status,
+                 fill=V3_GREEN if done else V3_LABEL3, anchor="ma", tracking=0.4)
+        if detail and not done:
+            font_detail = _get_font(11, weight="regular")
+            _v3_text(draw, str(detail)[:48], WIDTH // 2, mb + 62,
+                     font=font_detail, fill=V3_LABEL4, anchor="ma")
+
+        # 184px progress bar.
+        bw = 184
+        bx = (WIDTH - bw) // 2
+        byy = mb + 70
+        _rrect(draw, bx, byy, bw, 3, 1.5, fill=V3_TRACK)
+        fw = max(3, int(bw * progress))
+        _rrect(draw, bx, byy, fw, 3, 1.5,
+               fill=V3_GREEN if done else V3_ACCENT)
+
+        font_foot = _get_font(10, weight="regular")
+        _v3_text(draw, "Droplet OS · v2.4", WIDTH // 2, HEIGHT - 22,
+                 font=font_foot, fill=V3_LABEL4, anchor="ma", tracking=0.5)
         return img
 
-    def render_shutdown(self, reason: str = "",
-                        phase: str = "stopping") -> Image.Image:
-        """Shutdown splash — mirrors the firmware's render_shutdown().
+    def render_shutdown(self, reason: str = "", phase: str = "stopping", *,
+                        progress: Optional[float] = None) -> Image.Image:
+        """Shutdown power sequence — liquid drains, then a CRT collapse.
 
-        Dimmed Droplet mark, "Shutting down" (or "Safe to power off" once
-        `phase == 'halted'`), and an optional reason line.
+        Two call shapes (one renderer):
+          * ``render_shutdown(progress=0.0..1.0)`` — animated frame. The first
+            ~80% drains the vessel + shows the status line; the last ~20% is
+            the CRT collapse (content thins to a phosphor line, then a dot).
+          * ``render_shutdown(reason, phase)`` — WARP-624 host call. A bare
+            ``stopping`` shows the drain frame; ``halted`` shows the
+            fully-collapsed phosphor dot ("safe to power off").
+
+        Layout from design_handoff README §4 / preview.html drawShutdownFrame.
         """
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        if progress is None:
+            progress = 0.95 if phase == "halted" else 0.35
+        progress = max(0.0, min(1.0, progress))
+
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        halted = phase == "halted"
-        mark_size = 92
-        mark_x = (WIDTH - mark_size) // 2
-        mark_y = 64
-        # Dimmed mark: use the quaternary/separator-weight tones so it reads
-        # as powering-down rather than active.
-        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
-                          primary=ACCENT_SUBTLE, highlight=LABEL_QUATERNARY)
+        size = 116
+        mx = (WIDTH - size) // 2
+        my = 44
+        mb = my + int(size * 48 / 60)
+        # collapse phase begins at 80% of the sequence.
+        collapse_start = 0.80
+        if progress < collapse_start:
+            drain_p = 1.0 - (progress / collapse_start)
+            draw_droplet_mark_liquid(img, draw, mx, my, size, drain_p)
+            font_word = _get_font(14, weight="heavy")
+            _v3_text(draw, "DROPLET", WIDTH // 2, mb + 22, font=font_word,
+                     fill=V3_LABEL2, anchor="ma", tracking=5)
+            stages = ["Stopping services", "Unmounting storage", "Powering off"]
+            prog = progress / collapse_start
+            si = min(len(stages) - 1, int(prog * len(stages)))
+            font_status = _get_font(12, weight="regular")
+            _v3_text(draw, stages[si], WIDTH // 2, mb + 46, font=font_status,
+                     fill=V3_LABEL3, anchor="ma", tracking=0.4)
+        else:
+            cp = (progress - collapse_start) / (1.0 - collapse_start)
+            if cp < 0.55:
+                h = int((1 - cp / 0.55) * 9 + 2)
+                draw.rectangle([0, HEIGHT // 2 - h // 2, WIDTH,
+                                HEIGHT // 2 - h // 2 + h], fill=V3_PHOSPHOR)
+            elif cp < 0.93:
+                w = int((1 - (cp - 0.55) / 0.38) * WIDTH + 3)
+                w = max(3, w)
+                draw.rectangle([WIDTH // 2 - w // 2, HEIGHT // 2 - 1,
+                                WIDTH // 2 - w // 2 + w, HEIGHT // 2 + 1],
+                               fill=V3_PHOSPHOR)
+            # else: fully black (frame already V3_BG).
+        return img
 
-        font_title = _get_font(26, bold=True)
-        title = "Safe to power off" if halted else "Shutting down"
-        bbox = draw.textbbox((0, 0), title, font=font_title)
-        title_color = STATUS_GREEN if halted else TEXT_COLOR
-        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, mark_y + mark_size + 18),
-                  title, fill=title_color, font=font_title)
+    # ------------------------------------------------------------------
+    # py-v3 redesign renderers (idle / System+Wi-Fi / standby + alerts)
+    # Mirror services/oled-display/pyportal/code.py 1:1; coordinates &
+    # colors come from design_handoff README + preview.html.
+    # ------------------------------------------------------------------
 
-        sub = reason[:54] if (reason and not halted) else (
-            "You can unplug the device." if halted else "")
-        if sub:
-            font_sub = _get_font(14)
-            bbox = draw.textbbox((0, 0), sub, font=font_sub)
-            draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2,
-                       mark_y + mark_size + 56),
-                      sub, fill=LABEL_TERTIARY, font=font_sub)
+    @property
+    def clock_mode(self) -> str:
+        return self._clock_mode
+
+    def set_clock_mode(self, mode: str) -> None:
+        """Set 12/24 mode. Only '12'/'24' accepted (garbage is ignored)."""
+        if mode in ("12", "24"):
+            self._clock_mode = mode
+
+    def _fmt_clock_parts(self, now: Optional[_dt_datetime] = None) -> dict:
+        """Shared 12/24 clock formatter (idle hero + System header reuse it).
+
+        Mirrors preview.html fmtClock(): 12h drops the leading hour zero and
+        carries an AM/PM suffix; 24h pads the hour. Returns the pieces so the
+        caller can lay out the hero (colon blink, AM/PM placement) itself.
+        """
+        if now is None:
+            now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
+        is12 = self._clock_mode == "12"
+        h = now.hour
+        suffix = "PM" if h >= 12 else "AM"
+        if is12:
+            h = ((h + 11) % 12) + 1
+            hh = str(h)
+        else:
+            hh = "{:02d}".format(h)
+        mm = "{:02d}".format(now.minute)
+        return {"hh": hh, "mm": mm, "suffix": suffix if is12 else "",
+                "is12": is12, "second": now.second,
+                "str": hh + ":" + mm + ((" " + suffix) if is12 else "")}
+
+    # ----- alerts -------------------------------------------------------
+
+    def push_alert(self, alert: dict) -> None:
+        a = dict(alert)
+        a.setdefault("type", "sys")
+        a.setdefault("cleared", False)
+        a.setdefault("detail", "")
+        a.setdefault("time", "")
+        self._alerts.insert(0, a)
+        if len(self._alerts) > 20:
+            self._alerts = self._alerts[:20]
+
+    def _open_alerts_count(self) -> int:
+        return sum(1 for a in self._alerts if not a.get("cleared"))
+
+    # ----- live-data updates -------------------------------------------
+
+    def update_stats(self, data: dict) -> None:
+        # A real stats frame landed — mark live data present for the warm-start
+        # readiness short-circuit (WARP-638).
+        self._got_live_data = True
+        for k in ("cpu", "mem", "disk", "temp", "ip", "hostname", "uptime",
+                  "now", "date"):
+            if k in data and data[k] is not None:
+                self._v3[k] = data[k]
+        try:
+            self._v3["sparks_cpu"].append(float(self._v3.get("cpu") or 0))
+            if len(self._v3["sparks_cpu"]) > self._v3_spark_len:
+                self._v3["sparks_cpu"] = \
+                    self._v3["sparks_cpu"][-self._v3_spark_len:]
+        except (TypeError, ValueError):
+            pass
+
+    def update_wifi(self, data: dict) -> None:
+        for k, v in data.items():
+            self._v3["wifi"][k] = v
+
+    def update_cameras(self, data: dict) -> None:
+        self._v3["cameras"] = {"online": data.get("online", 0),
+                               "total": data.get("total", 0)}
+
+    def update_net(self, data: dict) -> None:
+        if "wan_latency_ms" in data:
+            self._v3["wan_latency_ms"] = data["wan_latency_ms"]
+        if "lan_clients" in data:
+            self._v3["lan_clients"] = data["lan_clients"]
+
+    def seed_cpu_history(self, value: float, n: Optional[int] = None) -> None:
+        """Fill the CPU sparkline buffer with jittered samples around `value`
+        so a freshly-seeded sim renders a believable sparkline (dev/PNG only)."""
+        import random
+        n = n or self._v3_spark_len
+        self._v3["sparks_cpu"] = [
+            max(3.0, min(92.0, value + random.uniform(-6, 6))) for _ in range(n)
+        ]
+
+    # ----- the redesigned frames ---------------------------------------
+
+    def render_idle(self, now: Optional[_dt_datetime] = None) -> Image.Image:
+        """Editorial hero clock (design_handoff §1 / preview.html drawIdle)."""
+        if now is None:
+            now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        # Brand bug — top-left mark + DROPLET eyebrow.
+        draw_droplet_mark(draw, 20, 18, 20, primary=V3_ACCENT,
+                          highlight=V3_ACCENT_INK)
+        _v3_text(draw, "DROPLET", 50, 24, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=2)
+
+        # 12/24 segmented toggle — top-right (two 38px cells, h26).
+        seg_w, seg_h, tg_y = 38, 26, 17
+        tg_x = WIDTH - 20 - seg_w * 2
+        _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, fill=V3_SURFACE)
+        _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, outline=V3_SEP, width=1)
+        for i, opt in enumerate(("12", "24")):
+            cx = tg_x + i * seg_w
+            on = self._clock_mode == opt
+            if on:
+                _rrect(draw, cx, tg_y, seg_w, seg_h, 8, fill=V3_ACCENT_SUBTLE)
+            _v3_text(draw, opt, cx + seg_w // 2, tg_y + seg_h // 2,
+                     font=_get_font(12, weight="heavy" if on else "regular"),
+                     fill=V3_ACCENT_INK if on else V3_LABEL4, anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "toggle_" + opt, cx, tg_y - 4, seg_w, seg_h + 8,
+                (lambda o=opt: self.set_clock_mode(o))))
+        # 1px divider between cells.
+        draw.rectangle([tg_x + seg_w, tg_y + 5, tg_x + seg_w,
+                        tg_y + seg_h - 5], fill=V3_SEP)
+
+        # Hero clock — 132px, weight 800, -6 tracking, colon blink.
+        parts = self._fmt_clock_parts(now)
+        colon = ":" if (parts["second"] % 2 == 0) else " "
+        time_str = parts["hh"] + colon + parts["mm"]
+        clock_y = 150
+        hero = _get_font(132, weight="heavy")
+        tw = _v3_text_width(draw, time_str, hero, tracking=-6)
+        suffix_gap = 14
+        suffix_font = _get_font(24, weight="heavy")
+        suffix_w = (_v3_text_width(draw, parts["suffix"], suffix_font, 1)
+                    + suffix_gap) if parts["is12"] else 0
+        cx_center = WIDTH / 2 - suffix_w / 2
+        _v3_text(draw, time_str, int(cx_center), clock_y, font=hero,
+                 fill=V3_TEXT, anchor="mm", tracking=-6)
+        if parts["is12"]:
+            right_edge = cx_center + tw / 2
+            _v3_text(draw, parts["suffix"], int(right_edge + suffix_gap),
+                     clock_y, font=suffix_font, fill=V3_ACCENT, anchor="lm",
+                     tracking=1)
+
+        # 56x3 accent rule under the clock at y=220.
+        rule_w = 56
+        _rrect(draw, WIDTH // 2 - rule_w // 2, clock_y + 70, rule_w, 3, 1.5,
+               fill=V3_ACCENT)
+
+        # Bottom-left date.
+        date_str = (self._v3.get("date") or
+                    now.strftime("%A, %b %d")).upper()
+        _v3_text(draw, date_str, 20, HEIGHT - 28,
+                 font=_get_font(11, weight="bold"), fill=V3_LABEL3, tracking=1.6)
+
+        # Bottom-right green dot + SSID.
+        ssid = str(self._v3["wifi"].get("ssid") or "Droplet-AI")
+        ssid_font = _get_font(11, weight="bold")
+        ssid_w = _v3_text_width(draw, ssid, ssid_font)
+        draw.ellipse([WIDTH - 20 - ssid_w - 14 - 3, HEIGHT - 23 - 3,
+                      WIDTH - 20 - ssid_w - 14 + 3, HEIGHT - 23 + 3],
+                     fill=V3_GREEN)
+        _v3_text(draw, ssid, WIDTH - 20, HEIGHT - 28, font=ssid_font,
+                 fill=V3_ACCENT, anchor="ra")
+
+        # Seconds progress hairline along the bottom edge.
+        sec_frac = parts["second"] / 60.0
+        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
+        draw.rectangle([0, HEIGHT - 2, max(2, int(WIDTH * sec_frac)), HEIGHT],
+                       fill=V3_ACCENT_DIM)
+
+        self._touch_regions.append(TouchRegion(
+            "idle_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
+        return img
+
+    def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
+        """Combined System + Wi-Fi screen (design_handoff §2 / drawStats)."""
+        if now is None:
+            now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+        v = self._v3
+        open_count = self._open_alerts_count()
+
+        # ---- header band ----
+        _v3_text(draw, "SYSTEM", 20, 12, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.6)
+        clk = self._fmt_clock_parts(now)["str"]
+        clk_font = _get_font(13, weight="bold")
+        _v3_text(draw, clk, WIDTH - 20, 9, font=clk_font, fill=V3_LABEL2,
+                 anchor="ra")
+        time_w = _v3_text_width(draw, clk, clk_font)
+        if open_count > 0:
+            br = 11
+            bx = int(WIDTH - 20 - time_w - 20 - br)
+            by = 17
+            draw.ellipse([bx - br, by - br, bx + br, by + br], fill=V3_RED)
+            _v3_text(draw, "!", bx, by, font=_get_font(15, weight="heavy"),
+                     fill=V3_WHITE, anchor="mm")
+            if open_count > 1:
+                cw, cch = 15, 12
+                _rrect(draw, bx + br - 5, by - br - 3, cw, cch, cch // 2,
+                       fill=V3_WHITE)
+                _v3_text(draw, str(open_count), bx + br - 5 + cw // 2,
+                         by - br - 3 + cch // 2,
+                         font=_get_font(8, weight="bold"), fill=V3_RED,
+                         anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "alert_badge", bx - br - 6, by - br - 7, br * 2 + 14,
+                br * 2 + 14, self._open_drawer))
+        else:
+            sxs = int(WIDTH - 20 - time_w - 16)
+            draw.ellipse([sxs - 4, 16 - 4, sxs + 4, 16 + 4], fill=V3_GREEN)
+            _v3_text(draw, "OK", sxs - 8, 16, font=_get_font(11, weight="bold"),
+                     fill=V3_GREEN, anchor="rm")
+        draw.rectangle([20, 32, WIDTH - 20, 32], fill=V3_SEP)
+
+        # ---- column divider at x=288 ----
+        DIV = 288
+        INW = DIV - 20 - 22
+        draw.rectangle([DIV, 46, DIV, HEIGHT - 24], fill=V3_SEP)
+
+        # ===== LEFT: system =====
+        _v3_text(draw, "CPU LOAD", 20, 46, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.6)
+        _v3_text(draw, "{}%".format(int(v.get("cpu") or 0)), 20, 58,
+                 font=_get_font(52, weight="heavy"), fill=V3_TEXT, tracking=-2)
+
+        # sparkline (48-sample CPU history).
+        sp = v.get("sparks_cpu") or []
+        sx, sy, sw, sh = 20, 120, INW, 40
+        draw.rectangle([sx, sy + sh - 1, sx + sw, sy + sh - 1], fill=V3_SEP)
+        if len(sp) >= 2:
+            lo, hi = min(sp), max(sp)
+            span = max(1.0, hi - lo)
+            pts = [(sx + (i / (len(sp) - 1)) * sw,
+                    sy + sh - ((val - lo) / span) * sh)
+                   for i, val in enumerate(sp)]
+            # filled area under the line.
+            draw.polygon(pts + [(sx + sw, sy + sh), (sx, sy + sh)],
+                         fill=V3_SPARK_FILL)
+            draw.line(pts, fill=V3_ACCENT, width=2, joint="curve")
+
+        draw.rectangle([20, 172, 20 + INW, 172], fill=V3_SEP)
+
+        # tabular metrics row (MEM / DISK / TEMP / CAM).
+        cams = v.get("cameras") or {}
+        cols = [
+            ("MEM", "{}%".format(int(v.get("mem") or 0)), V3_TEXT),
+            ("DISK", "{}%".format(int(v.get("disk") or 0)), V3_TEXT),
+            ("TEMP", "{}°".format(int(v.get("temp") or 0)), V3_TEXT),
+            ("CAM", "{}/{}".format(cams.get("online", 0),
+                                   cams.get("total", 0)), V3_GREEN),
+        ]
+        col_w = INW / 4
+        for i, (lbl, val, col) in enumerate(cols):
+            x = int(20 + i * col_w)
+            _v3_text(draw, lbl, x, 182, font=_get_font(9, weight="bold"),
+                     fill=V3_LABEL3, tracking=1.2)
+            _v3_text(draw, val, x, 196, font=_get_font(22, weight="heavy"),
+                     fill=col)
+
+        # detail line.
+        _v3_text(draw, "WAN {}ms   ·   UP {}   ·   LAN {}".format(
+                     v.get("wan_latency_ms", 0), v.get("uptime", "-"),
+                     v.get("lan_clients", 0)),
+                 20, 244, font=_get_font(10, weight="regular"), fill=V3_LABEL3)
+
+        # bottom strip.
+        _v3_text(draw, "{} · {}".format(v.get("hostname", "-"),
+                                              v.get("ip", "-")),
+                 20, HEIGHT - 24, font=_get_font(10, weight="regular"),
+                 fill=V3_LABEL3)
+
+        # ===== RIGHT: Wi-Fi pairing =====
+        RX = 300
+        RW = WIDTH - 20 - RX  # 160
+        _v3_text(draw, "PAIR · WI-FI", RX, 46,
+                 font=_get_font(9, weight="bold"), fill=V3_ACCENT, tracking=1.6)
+
+        # QR card (132x132, white, radius 12) + droplet mark inset center.
+        card_w = 132
+        card_x = RX + (RW - card_w) // 2
+        card_y = 60
+        _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
+        wifi = v.get("wifi") or {}
+        payload = "WIFI:T:WPA;S:{};P:{};;".format(
+            wifi.get("ssid") or "Droplet-AI", wifi.get("password") or "")
+        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18, payload)
+        mc = 26
+        mcx = card_x + 9 + (card_w - 18) // 2 - mc // 2
+        mcy = card_y + 9 + (card_w - 18) // 2 - mc // 2
+        _rrect(draw, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, fill=V3_WHITE)
+        draw_droplet_mark(draw, mcx, mcy, mc, primary=V3_ACCENT,
+                          highlight=V3_ACCENT_INK)
+
+        yy = card_y + card_w + 14
+        _v3_text(draw, "NETWORK", RX, yy, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.2)
+        _v3_text(draw, str(wifi.get("ssid") or "Droplet-AI"), RX, yy + 12,
+                 font=_get_font(14, weight="bold"), fill=V3_TEXT)
+        _v3_text(draw, "PASSWORD", RX, yy + 34, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.2)
+        _v3_text(draw, str(wifi.get("password") or ""), RX, yy + 46,
+                 font=_get_font(13, weight="regular"), fill=V3_ACCENT_INK)
+
+        # KEY rotate pill + TTL chip — ONLY when key rotation is enabled.
+        # WARP-638: mirrors the firmware. The box default is rotation OFF (the
+        # bridge's qr_snapshot returns rotation_enabled=False), and tapping the
+        # pill in that state drove a fresh-QR re-render that OOMed the SAMD51.
+        # When rotation is disabled we draw NO pill and register NO tap region,
+        # so the host preview matches the panel and there's no rotate affordance.
+        if bool(wifi.get("rotation_enabled")):
+            secs = int(wifi.get("key_ttl_seconds") or 0)
+            warn = secs < 60
+            pill_y = yy + 68
+            pill_h = 26
+            _rrect(draw, RX, pill_y, RW, pill_h, 8,
+                   fill=V3_ORANGE_SUBTLE if warn else V3_SURFACE)
+            _rrect(draw, RX, pill_y, RW, pill_h, 8,
+                   outline=V3_ORANGE if warn else V3_SEP2, width=1)
+            # U+21BB (↻) reads as the handoff's ⟳ rotate glyph and, unlike ⟳
+            # (U+27F3), is present in Inter — so the sim PNG shows a real arrow,
+            # not tofu.
+            _v3_text(draw, "↻  KEY {}:{:02d}".format(secs // 60, secs % 60),
+                     RX + RW // 2, pill_y + pill_h // 2,
+                     font=_get_font(11, weight="bold"),
+                     fill=V3_ORANGE if warn else V3_LABEL2, anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "key_rotate", RX, pill_y - 3, RW, pill_h + 6,
+                self._rotate_key))
+
+        # Alerts drawer overlay.
+        if self._events_open:
+            self._render_alerts_drawer(draw)
+        return img
+
+    def _draw_qr(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                 x: int, y: int, size: int, payload: str) -> None:
+        """Render a real Wi-Fi join QR into the white card.
+
+        Uses the `qrcode` package (already a service dep) when available;
+        falls back to a deterministic pseudo-matrix purely so the sim/PNG
+        still shows a card if qrcode is missing. On the device the host
+        supplies the matrix over serial — this on-host render is for the
+        preview PNG only.
+        """
+        matrix = None
+        try:
+            import qrcode
+            qr = qrcode.QRCode(border=0,
+                               error_correction=qrcode.constants.ERROR_CORRECT_M)
+            qr.add_data(payload)
+            qr.make(fit=True)
+            matrix = qr.get_matrix()
+        except Exception:
+            matrix = None
+        if not matrix:
+            # Deterministic pseudo-matrix (layout only).
+            n = 25
+            matrix = [[((i * 73856093) ^ (j * 19349663)) >> 8 & 1
+                       for j in range(n)] for i in range(n)]
+        n = len(matrix)
+        cell = size / n
+        for i, row in enumerate(matrix):
+            for j, val in enumerate(row):
+                if val:
+                    px = x + j * cell
+                    py = y + i * cell
+                    draw.rectangle([px, py, px + cell + 0.6, py + cell + 0.6],
+                                   fill=(0x0A, 0x0A, 0x1E))
+
+    def _render_alerts_drawer(self, draw: ImageDraw.ImageDraw) -> None:
+        """300px right drawer over the System screen (design_handoff §3)."""
+        # Dim — emulate rgba(0,0,0,0.55) with a flat dark wash (sim has no
+        # alpha-composite here; the device dims via a solid black overlay too).
+        dim = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 140))
+        # Paint dim onto the frame the caller is drawing into.
+        # (draw is bound to the system image; reuse it via blend.)
+        # Simpler: draw a near-black flat over everything.
+        draw.rectangle([0, 0, WIDTH, HEIGHT], fill=(2, 2, 3))
+        _ = dim  # documented intent; flat fill is the device-faithful path
+        dw = 300
+        dx = WIDTH - dw
+        draw.rectangle([dx, 0, WIDTH, HEIGHT], fill=V3_PANEL)
+        draw.rectangle([dx, 0, dx, HEIGHT], fill=V3_SEP)
+
+        _v3_text(draw, "ALERTS", dx + 14, 16, font=_get_font(11, weight="bold"),
+                 fill=V3_LABEL2, tracking=1.4)
+        n = self._open_alerts_count()
+        # Close control on the far right; the "n open" count is right-aligned
+        # just left of it with clearance so the two never collide. U+00D7 (×)
+        # reads as a close glyph and renders in Inter (unlike ✕ / U+2715).
+        _v3_text(draw, "×", dx + dw - 16, 14,
+                 font=_get_font(20, weight="regular"), fill=V3_LABEL2,
+                 anchor="ma")
+        _v3_text(draw, "{} open".format(n), dx + dw - 36, 16,
+                 font=_get_font(10, weight="regular"), fill=V3_LABEL3,
+                 anchor="ra")
+        self._touch_regions.append(TouchRegion(
+            "drawer_close", dx + dw - 32, 6, 28, 28, self._close_drawer))
+
+        y = 44
+        row_h = 58
+        visible = self._alerts[:4]
+        if not visible:
+            _v3_text(draw, "No alerts.", dx + dw // 2, HEIGHT // 2,
+                     font=_get_font(14, weight="regular"), fill=V3_LABEL3,
+                     anchor="mm")
+        else:
+            for i, a in enumerate(visible):
+                cleared = a.get("cleared")
+                _rrect(draw, dx + 10, y, dw - 20, row_h - 6, 8,
+                       fill=V3_SURFACE if cleared else V3_SURFACE2)
+                _rrect(draw, dx + 10, y, dw - 20, row_h - 6, 8,
+                       outline=V3_SEP, width=1)
+                icon = (V3_LABEL3 if cleared else
+                        (V3_RED if a.get("type") == "cam" else V3_ORANGE))
+                draw.ellipse([dx + 24 - 5, y + 24 - 5, dx + 24 + 5, y + 24 + 5],
+                             fill=icon)
+                _v3_text(draw, str(a.get("title") or "")[:26], dx + 40, y + 10,
+                         font=_get_font(12, weight="bold"),
+                         fill=V3_LABEL3 if cleared else V3_TEXT)
+                _v3_text(draw, str(a.get("detail") or "")[:30], dx + 40, y + 26,
+                         font=_get_font(10, weight="regular"), fill=V3_LABEL3)
+                _v3_text(draw, str(a.get("time") or "")[:16], dx + 40, y + 40,
+                         font=_get_font(9, weight="regular"), fill=V3_LABEL4)
+                if not cleared:
+                    _v3_text(draw, "×", dx + dw - 22, y + 26,
+                             font=_get_font(18, weight="regular"),
+                             fill=V3_LABEL3, anchor="mm")
+                    self._touch_regions.append(TouchRegion(
+                        "drawer_clear_{}".format(i), dx + dw - 36, y + 4, 30,
+                        row_h - 12, (lambda ii=i: self._clear_alert(ii))))
+                y += row_h
+
+        cbtn_y = HEIGHT - 52
+        _rrect(draw, dx + 14, cbtn_y, dw - 28, 40, 12, fill=V3_SURFACE2)
+        _rrect(draw, dx + 14, cbtn_y, dw - 28, 40, 12, outline=V3_SEP2, width=1)
+        _v3_text(draw, "Clear all", dx + dw // 2, cbtn_y + 20,
+                 font=_get_font(13, weight="regular"), fill=V3_LABEL2,
+                 anchor="mm")
+        self._touch_regions.append(TouchRegion(
+            "drawer_clear_all", dx + 14, cbtn_y, dw - 28, 40,
+            self._clear_all_alerts))
+
+    def render_standby(self) -> Image.Image:
+        """Powered-off standby screen (design_handoff §4 Standby)."""
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+        size = 78
+        mx = (WIDTH - size) // 2
+        my = HEIGHT // 2 - int(size * 0.55)
+        mb = my + int(size * 48 / 60)
+        draw_droplet_mark(draw, mx, my, size, primary=(0x14, 0x14, 0x22),
+                          highlight=(0x1A, 0x1A, 0x30))
+        _v3_text(draw, "STANDBY", WIDTH // 2, mb + 20,
+                 font=_get_font(10, weight="bold"), fill=V3_LABEL4, anchor="ma",
+                 tracking=3)
+        _v3_text(draw, "tap to power on", WIDTH // 2, mb + 38,
+                 font=_get_font(11, weight="regular"), fill=V3_LABEL3,
+                 anchor="ma")
+        self._touch_regions.append(TouchRegion(
+            "standby_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
         return img
 
     def render_claim(self, code: str, setup_url: str) -> Image.Image:
-        """Onboarding claim screen — mirrors the firmware's render_claim().
+        """Onboarding claim screen (WARP-632 / ADR-017), py-v3 editorial style.
 
-        The CODE is the hero: a large, centered, monospace-ish string the
-        customer reads off the lid and types into the setup wizard. Below it,
-        a short instruction + the setup URL so they know where to point their
-        phone. Brand mark up top to match the boot/shutdown lifecycle screens.
+        The claim CODE is the hero — same heavy-weight numeral face the idle
+        clock / CPU load use (``_get_font(weight="heavy")``), centred on a
+        raised card with an accent border so it reads as the one thing to copy
+        off the lid. Above it a tracked ``CLAIM THIS DROPLET`` eyebrow + a brand
+        mark; below it a short instruction and the setup URL. Tokens, mark and
+        spacing match the boot/idle/System screens. Mirrors the firmware's
+        render_claim() 1:1.
+
+        Modal + host-driven: the orchestrator mints the code and pushes it while
+        the box is unclaimed; the host navigates away once it's claimed.
 
         QR on the lid is intentionally OMITTED here (text-only) — see ADR-017
-        consequences / the WARP-632 follow-up note: a QR could reuse the
-        existing wifi-QR matrix path but the code itself is short and meant to
-        be typed, so text keeps the screen unambiguous. QR is a clean follow-up.
+        consequences / the WARP-632 follow-up note: the code is short and meant
+        to be typed, so text keeps the screen unambiguous. QR is a clean
+        follow-up (it would reuse the existing wifi-QR matrix path).
         """
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        # Brand mark, smaller than boot so the code gets the vertical space.
-        mark_size = 56
-        mark_x = (WIDTH - mark_size) // 2
-        mark_y = 22
+        # Brand mark up top — sized between idle (big) and the System header
+        # (tiny) so the code owns the middle band.
+        mark_size = 52
+        mark_w = int(mark_size * 52 / 60)
+        mark_x = (WIDTH - mark_w) // 2
+        mark_y = 26
         draw_droplet_mark(draw, mark_x, mark_y, mark_size,
-                          primary=ACCENT_PRIMARY, highlight=ACCENT_LIGHT)
+                          primary=V3_ACCENT, highlight=V3_ACCENT_INK)
+        mark_b = mark_y + int(mark_size * 48 / 60)
 
-        # Title — what this screen is for.
-        font_title = _get_font(20, bold=True)
-        title = "Claim your Droplet"
-        bbox = draw.textbbox((0, 0), title, font=font_title)
-        title_y = mark_y + mark_size + 12
-        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, title_y),
-                  title, fill=TEXT_COLOR, font=font_title)
+        # Eyebrow — what this screen is. Tracked caps, like SYSTEM / CPU LOAD.
+        font_eyebrow = _get_font(11, weight="bold")
+        eyebrow_y = mark_b + 20
+        _v3_text(draw, "CLAIM THIS DROPLET", WIDTH // 2, eyebrow_y,
+                 font=font_eyebrow, fill=V3_LABEL3, anchor="ma", tracking=2)
 
-        # Instruction line above the code.
-        font_label = _get_font(13)
-        hint = "Enter this code to finish setup"
-        bbox = draw.textbbox((0, 0), hint, font=font_label)
-        hint_y = title_y + 30
-        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, hint_y),
-                  hint, fill=LABEL_SECONDARY, font=font_label)
-
-        # The CODE — hero, on a raised card so it reads as the thing to copy.
-        code_text = code or "— — — —"
-        font_code = _get_font(40, bold=True)
-        cbbox = draw.textbbox((0, 0), code_text, font=font_code)
-        code_w = cbbox[2] - cbbox[0]
-        code_h = cbbox[3] - cbbox[1]
+        # The CODE — hero on a raised card. Size the heavy face down from 48px
+        # until it (with card padding) fits the panel width, so a long code
+        # never overflows. Mirrors the firmware's terminalio-scale clamp.
+        code_text = (code or "").strip() or "— — — —"
         card_pad_x = 26
         card_pad_y = 16
-        card_w = min(WIDTH - 24, code_w + card_pad_x * 2)
+        max_card_w = WIDTH - 32
+        code_size = 48
+        while code_size > 22:
+            font_code = _get_font(code_size, weight="heavy")
+            cbbox = draw.textbbox((0, 0), code_text, font=font_code)
+            code_w = cbbox[2] - cbbox[0]
+            if code_w + card_pad_x * 2 <= max_card_w:
+                break
+            code_size -= 2
+        code_h = cbbox[3] - cbbox[1]
+        card_w = min(max_card_w, max(180, code_w + card_pad_x * 2))
         card_h = code_h + card_pad_y * 2
         card_x = (WIDTH - card_w) // 2
-        card_y = hint_y + 26
-        draw.rounded_rectangle(
-            [(card_x, card_y), (card_x + card_w, card_y + card_h)],
-            radius=14, fill=SURFACE_RAISED,
-        )
-        draw.rounded_rectangle(
-            [(card_x, card_y), (card_x + card_w, card_y + card_h)],
-            radius=14, outline=ACCENT_COLOR, width=1,
-        )
-        # Center the code in the card (account for the font's top bearing).
+        card_y = eyebrow_y + 22
+        _rrect(draw, card_x, card_y, card_w, card_h, 14, fill=V3_SURFACE)
+        _rrect(draw, card_x, card_y, card_w, card_h, 14,
+               outline=V3_ACCENT, width=1)
+        # Center the code in the card (account for the face's top bearing).
         draw.text((card_x + (card_w - code_w) // 2,
                    card_y + (card_h - code_h) // 2 - cbbox[1]),
-                  code_text, fill=ACCENT_LIGHT, font=font_code)
+                  code_text, fill=V3_ACCENT_INK, font=font_code)
+
+        # Instruction line under the card.
+        font_hint = _get_font(12, weight="regular")
+        _v3_text(draw, "Enter this code to finish setup",
+                 WIDTH // 2, card_y + card_h + 18,
+                 font=font_hint, fill=V3_LABEL3, anchor="ma", tracking=0.4)
 
         # Setup URL at the foot — where to point the phone.
-        font_url = _get_font(14)
-        url_text = (setup_url or "")[:54]
+        url_text = (setup_url or "").strip()[:54]
         if url_text:
-            ubbox = draw.textbbox((0, 0), url_text, font=font_url)
-            draw.text(((WIDTH - (ubbox[2] - ubbox[0])) // 2, HEIGHT - 34),
-                      url_text, fill=LABEL_TERTIARY, font=font_url)
+            font_url = _get_font(12, weight="regular")
+            _v3_text(draw, url_text, WIDTH // 2, HEIGHT - 22,
+                     font=font_url, fill=V3_LABEL4, anchor="ma", tracking=0.4)
         return img
 
     @staticmethod
@@ -1494,6 +2291,54 @@ class TFTDisplay:
     def _go_settings(self):
         self._set_mode(self.SETTINGS)
 
+    # --- py-v3 nav + alert actions (bound to the redesigned touch regions) --
+    def _go_idle(self):
+        self._set_mode(self.IDLE, pause_cycle=False)
+
+    def _go_system(self):
+        self._events_open = False
+        self._set_mode(self.SYSTEM)
+
+    def _open_drawer(self):
+        self._events_open = True
+        with self._lock:
+            self._render_current_locked()
+
+    def _close_drawer(self):
+        self._events_open = False
+        with self._lock:
+            self._render_current_locked()
+
+    def _clear_alert(self, idx: int):
+        if 0 <= idx < len(self._alerts):
+            self._alerts[idx]["cleared"] = True
+        with self._lock:
+            self._render_current_locked()
+
+    def _clear_all_alerts(self):
+        self._alerts = []
+        self._events_open = False
+        with self._lock:
+            self._render_current_locked()
+
+    def _rotate_key(self):
+        """KEY-pill tap: roll the Wi-Fi key via the bridge + push a fresh QR.
+
+        Reuses the same bridge round-trip as the firmware's ROTATE_KEY line so
+        the host behavior is identical whether the tap originates on the device
+        or in the sim. Optimistically resets the local TTL so the pill updates
+        immediately; the next /openwrt/qr push corrects it.
+        """
+        self._v3["wifi"]["key_ttl_seconds"] = 60 * 60
+        self.push_alert({"type": "sys", "title": "Wi-Fi key rotated",
+                         "detail": "Droplet-AI · scan new QR", "time": "just now"})
+        try:
+            self.rotate_wifi_key()
+        except Exception as e:                                  # noqa: BLE001
+            logger.debug("rotate_key bridge call failed: %s", e)
+        with self._lock:
+            self._render_current_locked()
+
     def _toggle_cycle(self):
         if self._cycle_running and self._cycle_paused_until < time.time():
             self.stop_cycle()
@@ -1520,6 +2365,12 @@ class TFTDisplay:
                                        self._shutdown_phase)
         elif mode == self.CLAIM:
             img = self.render_claim(self._claim_code, self._claim_setup_url)
+        elif mode == self.IDLE:
+            img = self.render_idle()
+        elif mode == self.SYSTEM:
+            img = self.render_system()
+        elif mode == self.STANDBY:
+            img = self.render_standby()
         elif mode == self.LOGO:
             img = self.render_logo()
         elif mode == self.STATS:
@@ -1725,16 +2576,66 @@ class TFTDisplay:
 
     # ----- Boot readiness ----------------------------------------------
 
+    def _check_pyportal_liveness(self, now: Optional[float] = None) -> bool:
+        """Verify the live PyPortal link is still real; drop a stale fd.
+
+        WARP-638: when the PyPortal is reset its USB CDC re-enumerates. The
+        kernel renumbers ttyACM* and the old node disappears, but our open fd
+        to it doesn't fail — writes silently succeed-with-no-effect and reads
+        return zero bytes, so the reconnect-on-IOError path in `_pyportal_send`
+        never fires and the device sits on its boot screen forever against a
+        dead host fd. The cheapest reliable signal is `os.path.exists()` on the
+        node we opened: if it's gone, drop the fd and fall back to sim so the
+        cycle loop's promotion block re-probes whatever ttyACM* is now live
+        (which sets `_needs_resync`, so the firmware refills on reconnect).
+
+        Returns True if it dropped the link this call (the caller should re-probe
+        immediately), else False. Throttled to LIVENESS_CHECK_INTERVAL so it
+        doesn't stat /dev on every ~80ms cycle tick. `now` is injectable for
+        deterministic tests.
+        """
+        if self._backend != "pyportal" or not self._pyportal_path:
+            return False
+        if now is None:
+            now = time.time()
+        if now - self._last_liveness_check < LIVENESS_CHECK_INTERVAL:
+            return False
+        self._last_liveness_check = now
+        if os.path.exists(self._pyportal_path):
+            return False
+        logger.warning(
+            "status display %s vanished (USB re-enumeration?) — dropping fd "
+            "and re-probing", self._pyportal_path)
+        try:
+            with self._pyportal_lock:
+                try:
+                    if self._pyportal is not None:
+                        self._pyportal.close()
+                except Exception:
+                    pass
+                self._pyportal = None
+                self._pyportal_path = None
+                self._backend = "sim"
+        except Exception:
+            pass
+        return True
+
     def _check_readiness(self) -> bool:
         """Probe the readiness URL; True only on a 2xx.
 
         Cheap and fail-safe: any connection error / non-2xx reads as "not
         ready yet" (returns False, never raises) so a still-starting stack
         doesn't crash the cycle loop.
+
+        WARP-638: passes an unverified SSL context so urllib can follow nginx's
+        :80 -> :443 redirect onto the self-signed loopback cert instead of
+        dying on cert verification (the 90s-every-boot root cause). For a
+        plain-HTTP URL the context is simply unused.
         """
         try:
             req = urllib.request.Request(BOOT_READINESS_URL, method="GET")
-            with urllib.request.urlopen(req, timeout=2.0) as r:
+            with urllib.request.urlopen(
+                    req, timeout=2.0, context=_READINESS_SSL_CTX) as r:
                 return 200 <= getattr(r, "status", 0) < 300
         except Exception as e:                                       # noqa: BLE001
             logger.debug("readiness probe failed: %s", e)
@@ -1761,6 +2662,16 @@ class TFTDisplay:
                 BOOT_MAX_SECONDS)
             self._complete_boot()
             return
+        # WARP-638 warm-start short-circuit: if the firmware link is live AND a
+        # real stats frame has already been ingested, the stack is plainly up —
+        # surface the UI now instead of waiting on the HTTP probe (let alone the
+        # 90s timeout). This is the common (re)start case: the orchestrator was
+        # never down, it's already pushing stats. Cold boot (sim backend / no
+        # data yet) falls through to the probe below, preserving the cold path.
+        if self._backend == "pyportal" and self._got_live_data:
+            logger.info("warm start — live link + fresh stats; surfacing UI")
+            self._complete_boot()
+            return
         if now - self._last_readiness_check < BOOT_READINESS_INTERVAL:
             return
         self._last_readiness_check = now
@@ -1769,20 +2680,22 @@ class TFTDisplay:
             self._complete_boot()
 
     def _complete_boot(self) -> None:
-        """Mark boot done and drop to the live UI (stats).
+        """Mark boot done and drop to the live UI (combined System screen).
 
         Emit a BARE stats frame ({"mode":"stats"}, no data) so the firmware
-        actually navigates off the boot splash: code.py:1473 only calls
-        set_screen() on a bare-mode message, while a data-laden stats push
-        re-renders *iff already on stats* (code.py:1497). Without this, the
-        host flips its own state to STATS but the PyPortal stays frozen on
-        "Starting Droplet" forever. _set_mode() alone only writes the sim
-        preview PNG and never touches the serial channel. (WARP-624 / B1)
+        navigates off the boot splash: code.py's handle() only calls
+        set_screen() on a bare-mode message, while a data-laden push merely
+        updates state. The firmware aliases bare "stats" -> the combined
+        "system" screen (py-v3), so the WIRE frame stays "stats" — the
+        navigation contract is unchanged — while the host's own preview
+        renders the new SYSTEM screen. Without the bare frame the real
+        PyPortal would stay frozen on the boot sequence forever. (WARP-624/B1)
         """
         self._boot_complete = True
+        # Bare nav frame on the wire (firmware aliases stats -> system).
         self._pyportal_send(self.STATS)
-        # Don't pin the cycle: the live UI should resume its normal cadence.
-        self._set_mode(self.STATS, pause_cycle=False)
+        # Host-side preview lands on the combined System+Wi-Fi screen.
+        self._set_mode(self.SYSTEM, pause_cycle=False)
 
     # ----- Auto-cycle / interactive loop -------------------------------
 
@@ -1825,40 +2738,17 @@ class TFTDisplay:
         last_files_push = 0.0
         last_cams_push = 0.0
         last_backend_retry = 0.0
-        last_liveness_check = 0.0
         serial_buf = b""
         while self._cycle_running:
-            # Liveness check: detect a stale status display serial fd left
-            # behind by a USB re-enumeration. The kernel renumbers ttyACM*
-            # on firmware reset / replug / hub reset, but our open fd to
-            # the old node doesn't fail — writes silently succeed-with-
-            # no-effect and reads return zero bytes, so the existing
-            # reconnect-on-IOError path in `_pyportal_send` never triggers.
-            # If our path has vanished from /dev, drop the fd and let the
-            # promotion block below re-probe whatever ttyACM* is now live.
-            if (self._backend == "pyportal" and self._pyportal_path
-                    and time.time() - last_liveness_check > 2.0):
-                last_liveness_check = time.time()
-                if not os.path.exists(self._pyportal_path):
-                    logger.warning(
-                        "status display %s vanished (USB re-enumeration?) "
-                        "— dropping fd and re-probing",
-                        self._pyportal_path)
-                    try:
-                        with self._pyportal_lock:
-                            try:
-                                if self._pyportal is not None:
-                                    self._pyportal.close()
-                            except Exception:
-                                pass
-                            self._pyportal = None
-                            self._pyportal_path = None
-                            self._backend = "sim"
-                    except Exception:
-                        pass
-                    # Force the next iteration's promotion block to retry
-                    # immediately rather than waiting out a fresh 5s window.
-                    last_backend_retry = 0.0
+            # Liveness check (WARP-638): detect a stale status display serial fd
+            # left behind by a USB re-enumeration (firmware reset / replug / hub
+            # reset). If the node we opened has vanished from /dev, the helper
+            # drops the fd and falls back to sim; we then force the promotion
+            # block below to re-probe immediately (which sets _needs_resync, so
+            # the firmware refills on reconnect) instead of waiting out a fresh
+            # 5s window. Throttled internally to LIVENESS_CHECK_INTERVAL.
+            if self._check_pyportal_liveness():
+                last_backend_retry = 0.0
 
             # If we started on sim because USB enumeration hadn't finished
             # yet, keep probing every 5s and promote to pyportal once it
@@ -1916,8 +2806,10 @@ class TFTDisplay:
                 self._message_clear_at = 0
                 self._go_home()
 
-            # Live re-render of time-sensitive screens
-            live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS))
+            # Live re-render of time-sensitive screens (incl. the py-v3 idle
+            # clock + combined System screen so the preview stays current).
+            live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS,
+                                           self.IDLE, self.SYSTEM))
             if live and (now - last_full_render) > 1.0:
                 with self._lock:
                     self._render_current_locked()
