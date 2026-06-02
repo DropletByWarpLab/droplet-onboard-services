@@ -101,6 +101,51 @@ def test_shutdown_halted_phase(client: TestClient):
     assert main.display._shutdown_phase == "halted"
 
 
+# --- /display/claim (WARP-632 / ADR-017) ------------------------------------
+
+def test_claim_requires_auth(client: TestClient):
+    r = client.post(
+        "/display/claim",
+        json={"code": "DRPL-7K2Q-9F4M", "setup_url": "https://192.168.1.87/setup"},
+    )
+    assert r.status_code == 401
+
+
+def test_claim_ok_with_bearer(client: TestClient):
+    r = client.post(
+        "/display/claim",
+        json={"code": "DRPL-7K2Q-9F4M", "setup_url": "https://192.168.1.87/setup"},
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["mode"] == "claim"
+    assert main.display._current_mode == main.display.CLAIM
+    assert main.display._claim_code == "DRPL-7K2Q-9F4M"
+    assert main.display._claim_setup_url == "https://192.168.1.87/setup"
+
+
+def test_claim_rejects_missing_code(client: TestClient):
+    # `code` is required (min_length=1) — an empty/absent code is a 422, never
+    # a blank claim screen.
+    r = client.post(
+        "/display/claim",
+        json={"setup_url": "https://192.168.1.87/setup"},
+        headers=AUTH,
+    )
+    assert r.status_code == 422
+
+
+def test_claim_rejects_empty_code(client: TestClient):
+    r = client.post(
+        "/display/claim",
+        json={"code": "", "setup_url": "https://192.168.1.87/setup"},
+        headers=AUTH,
+    )
+    assert r.status_code == 422
+
+
 # --- Lifespan shutdown fallback (M1) ----------------------------------------
 
 def test_lifespan_shutdown_renders_shutdown_frame():
