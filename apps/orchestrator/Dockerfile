@@ -36,6 +36,7 @@ COPY services/mcp-server/package.json ./services/mcp-server/package.json
 COPY packages/tools-core/package.json ./packages/tools-core/package.json
 COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
 COPY packages/shared-types/package.json ./packages/shared-types/package.json
+COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 
 # Targeted install: only the orchestrator workspace and its in-repo
 # dependencies (tools-core + mcp-server + fips-selftest + shared-types).
@@ -46,12 +47,14 @@ RUN npm ci \
     -w @droplet/mcp-server \
     -w @droplet/fips-selftest \
     -w @droplet/shared-types \
+    -w @droplet/auth-policy \
     --include-workspace-root
 
 # Copy sources for the workspaces this image builds.
 COPY packages/tools-core ./packages/tools-core
 COPY packages/fips-selftest ./packages/fips-selftest
 COPY packages/shared-types ./packages/shared-types
+COPY packages/auth-policy ./packages/auth-policy
 COPY services/mcp-server ./services/mcp-server
 COPY apps/orchestrator ./apps/orchestrator
 
@@ -62,6 +65,7 @@ RUN npm run -w @droplet/orchestrator db:generate
 
 # Build in dependency order.
 RUN npm run -w @droplet/shared-types build
+RUN npm run -w @droplet/auth-policy build
 RUN npm run -w @droplet/tools-core build
 RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/mcp-server build
@@ -131,6 +135,8 @@ COPY --from=builder /app/packages/fips-selftest/package.json ./packages/fips-sel
 COPY --from=builder /app/packages/fips-selftest/dist ./packages/fips-selftest/dist
 COPY --from=builder /app/packages/shared-types/package.json ./packages/shared-types/package.json
 COPY --from=builder /app/packages/shared-types/dist ./packages/shared-types/dist
+COPY --from=builder /app/packages/auth-policy/package.json ./packages/auth-policy/package.json
+COPY --from=builder /app/packages/auth-policy/dist ./packages/auth-policy/dist
 COPY --from=builder /app/services/mcp-server/package.json ./services/mcp-server/package.json
 COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
 COPY --from=builder /app/apps/orchestrator/package.json ./apps/orchestrator/package.json

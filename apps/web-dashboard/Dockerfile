@@ -20,13 +20,18 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web-dashboard/package.json ./apps/web-dashboard/package.json
 COPY packages/shared-types/package.json ./packages/shared-types/package.json
+COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 
 # Targeted install: only the web-dashboard workspace and its in-repo
-# dependency (shared-types).
-RUN npm ci -w @droplet/web-dashboard -w @droplet/shared-types --include-workspace-root
+# dependencies (shared-types is type-only; auth-policy ships runtime code
+# that next.config transpiles — see transpilePackages).
+RUN npm ci -w @droplet/web-dashboard -w @droplet/shared-types -w @droplet/auth-policy --include-workspace-root
 
-# Sources for the workspaces this image builds.
+# Sources for the workspaces this image builds. auth-policy's source is
+# required (not just its package.json): next build transpiles it from .ts
+# via transpilePackages, so the .ts sources must be present in the context.
 COPY packages/shared-types ./packages/shared-types
+COPY packages/auth-policy ./packages/auth-policy
 COPY apps/web-dashboard ./apps/web-dashboard
 
 # shared-types is type-only for web-dashboard, but build it so the
