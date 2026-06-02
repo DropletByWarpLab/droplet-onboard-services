@@ -154,6 +154,19 @@ Streaming uses SSE (`Content-Type: text/event-stream`). Native clients
 should use a streaming HTTP client (URLSession `bytes(for:)` on iOS,
 OkHttp streaming on Android) to render token-by-token.
 
+On success, every chat turn returns two response headers the client must read:
+
+- `X-Conversation-Id: <uuid>` — the session id (new or existing). When you omit
+  `conversationId` to start a new conversation, this header is the **only** way
+  to learn the server-assigned id; capture it and send it back as
+  `conversationId` on the next turn to continue the thread.
+- `X-Assistant-Message-Id: <uuid>` — the assistant message row id (WARP-329),
+  used to match the MQTT `turn-completed` event to the streamed row.
+
+Both headers are set on streaming **and** non-streaming responses. They are
+omitted only for ephemeral turns (`ephemeral: true`, e.g. the setup-wizard
+sample prompt), which are not persisted.
+
 ### Files (`/api/files/*`)
 
 | Method | Path | Auth | Returns / body |
