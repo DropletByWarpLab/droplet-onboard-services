@@ -49,6 +49,25 @@ class SetDnsRequest(BaseModel):
 # normalizing on the way in avoids duplicate-section edge cases.
 _HOSTNAME_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
 _IPV4_PATTERN = r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$"
+# A single TCP/UDP port or a `lo-hi` range. The pattern bounds the shape
+# (1-5 digits, optional `-range`); the field_validator below enforces the
+# numeric 1-65535 bounds and lo<=hi that a regex can't express cleanly.
+_PORT_OR_RANGE_PATTERN = r"^\d{1,5}(-\d{1,5})?$"
+
+
+def _validate_port_or_range(value: str) -> str:
+    """Enforce that each port in a single-port or `lo-hi` range is 1-65535
+    and (for ranges) lo <= hi. Raises ValueError → pydantic 422."""
+    parts = value.split("-")
+    nums = []
+    for p in parts:
+        n = int(p)  # pattern already guarantees digits
+        if not (1 <= n <= 65535):
+            raise ValueError(f"port {n} out of range (1-65535)")
+        nums.append(n)
+    if len(nums) == 2 and nums[0] > nums[1]:
+        raise ValueError(f"port range start {nums[0]} > end {nums[1]}")
+    return value
 
 
 class DnsHostnameRequest(BaseModel):
@@ -74,11 +93,43 @@ class UnblockDeviceRequest(BaseModel):
 
 
 class PortForwardRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Rule name")
-    src_port: str = Field(..., description="External port")
-    dest_ip: str = Field(..., description="Internal destination IP")
-    dest_port: str = Field(..., description="Internal destination port")
+    """NET-09: validate the only previously-unvalidated network mutator.
+
+    Port-forwarding exposes WAN ingress, so loose validation here is the
+    riskiest place to skip it. `dest_ip` must be a literal IPv4 (reusing
+    the same `_IPV4_PATTERN` as DnsHostnameRequest), and the port fields
+    must be a single port or a `lo-hi` range with each endpoint in
+    1-65535 — rejecting hostnames, CIDRs, whitespace, and garbage with a
+    clean 422 instead of silently writing a broken/never-matching DNAT
+    rule into UCI. This is validation only; no port forward is created.
+    """
+
+    name: str = Field(..., min_length=1, max_length=63, description="Rule name")
+    src_port: str = Field(
+        ..., pattern=_PORT_OR_RANGE_PATTERN,
+        description="External port or 'lo-hi' range (1-65535)",
+    )
+    dest_ip: str = Field(
+        ..., pattern=_IPV4_PATTERN, description="Internal destination IPv4"
+    )
+    dest_port: str = Field(
+        ..., pattern=_PORT_OR_RANGE_PATTERN,
+        description="Internal destination port or 'lo-hi' range (1-65535)",
+    )
     proto: str = Field(default="tcp", description="Protocol (tcp, udp, tcpudp)")
+
+    @field_validator("src_port", "dest_port")
+    @classmethod
+    def _check_port_bounds(cls, v: str) -> str:
+        return _validate_port_or_range(v)
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: str) -> str:
+        allowed = {"tcp", "udp", "tcpudp"}
+        if v not in allowed:
+            raise ValueError(f"proto must be one of {sorted(allowed)}")
+        return v
 
 
 # WARP-613: phone-home egress control.
