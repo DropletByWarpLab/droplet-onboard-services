@@ -5,6 +5,10 @@ import { PrismaClient } from "@prisma/client";
 // no-op once the canonical defaults are in place, and operator-edited
 // values are never overwritten.
 import { seedWorkspaceSettings } from "../src/services/workspace-settings.service.js";
+// WARP-637: claim-code seeder. Idempotent — seeds the HASH of the code
+// only when CLAIM_CODE is set; re-running is a no-op if the hash already
+// exists. The plaintext never touches the DB.
+import { seedClaimCode } from "../src/services/setup-claim.service.js";
 
 const prisma = new PrismaClient();
 
@@ -59,6 +63,20 @@ async function main() {
     "Workspace settings: %d inserted (steady-state = 0 after first boot)",
     settingsResult.inserted,
   );
+
+  // WARP-637: seed a first-run claim code from the CLAIM_CODE env var.
+  // This is the opt-in provisioning path for headless/no-PyPortal devices:
+  // set CLAIM_CODE in .env (or the environment) and the hash is seeded here
+  // so POST /api/setup/claim can verify it out-of-box. When unset, behavior
+  // is unchanged — the orchestrator's ensureClaimCode() mints a code at
+  // runtime once the display service requests it (WARP-632 / ADR-017).
+  // The plaintext is never logged or persisted; only its HMAC-SHA256 hash
+  // (keyed by DEVICE_SECRET) reaches the DB.
+  const claimCode = (process.env.CLAIM_CODE ?? "").trim();
+  if (claimCode) {
+    const seeded = await seedClaimCode(prisma, claimCode);
+    console.log("Claim code seeded from CLAIM_CODE (new=%s)", seeded);
+  }
 }
 
 main()
