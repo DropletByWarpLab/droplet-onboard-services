@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from middleware.rate_limit import _InMemoryBackend, _client_ip
+import middleware.rate_limit as rl
+from middleware.rate_limit import _InMemoryBackend, _client_ip, _parse_trusted_proxies
 
 
 class TestInMemoryRateLimiter:
@@ -57,13 +59,29 @@ class TestInMemoryRateLimiter:
 
 
 class TestClientIpExtraction:
-    """Test X-Forwarded-For parsing — must not be spoofable."""
+    """Test X-Forwarded-For / X-Real-IP parsing.
+
+    GW-14: forwarding headers are only trusted when the DIRECT socket peer is a
+    configured trusted proxy. The trusted-proxy peer used throughout is
+    10.0.0.1 (set via the autouse fixture below). A non-trusted peer must have
+    its headers ignored entirely.
+    """
+
+    TRUSTED_PEER = "10.0.0.1"
+
+    @pytest.fixture(autouse=True)
+    def _trust_the_test_peer(self, monkeypatch):
+        # Treat the default test peer as the nginx edge so the header-trust
+        # paths are exercised. Untrusted-peer tests override req.client.host.
+        monkeypatch.setattr(
+            rl, "TRUSTED_PROXIES", [ipaddress.ip_network("10.0.0.1/32")]
+        )
 
     def _make_request(
         self,
         xff: str | None = None,
         real_ip: str | None = None,
-        peer: str = "10.0.0.1",
+        peer: str = TRUSTED_PEER,
     ):
         req = MagicMock()
         headers_map = {}
@@ -98,8 +116,8 @@ class TestClientIpExtraction:
         assert _client_ip(req) == "192.168.1.100"
 
     def test_falls_back_to_peer_when_no_xff(self):
-        req = self._make_request(None, peer="10.0.0.5")
-        assert _client_ip(req) == "10.0.0.5"
+        req = self._make_request(None, peer="10.0.0.1")
+        assert _client_ip(req) == "10.0.0.1"
 
     def test_handles_whitespace(self):
         req = self._make_request("  1.2.3.4  ,  5.6.7.8  ")
@@ -118,6 +136,50 @@ class TestClientIpExtraction:
         assert _client_ip(req1) == shared_real_ip
         assert _client_ip(req2) == shared_real_ip
         assert _client_ip(req3) == shared_real_ip
+
+    # --- GW-14: untrusted peer must NOT be able to spoof its bucket ---
+
+    def test_untrusted_peer_headers_ignored(self):
+        """A direct (non-proxy) caller's X-Real-IP / XFF are ignored; we key on
+        the socket peer instead."""
+        req = self._make_request(
+            xff="9.9.9.9", real_ip="8.8.8.8", peer="172.30.0.42"
+        )
+        assert _client_ip(req) == "172.30.0.42"
+
+    def test_untrusted_peer_cannot_rotate_buckets(self):
+        """The core bypass: a compose-network container rotating X-Real-IP must
+        still be keyed on its real (single) socket peer."""
+        attacker_peer = "172.30.0.42"
+        req1 = self._make_request(real_ip="fake-1", peer=attacker_peer)
+        req2 = self._make_request(real_ip="fake-2", peer=attacker_peer)
+        req3 = self._make_request(real_ip="fake-3", peer=attacker_peer)
+        assert _client_ip(req1) == attacker_peer
+        assert _client_ip(req2) == attacker_peer
+        assert _client_ip(req3) == attacker_peer
+
+    def test_no_trusted_proxies_configured_uses_peer(self, monkeypatch):
+        """Default posture (empty TRUSTED_PROXIES): always key on the socket peer."""
+        monkeypatch.setattr(rl, "TRUSTED_PROXIES", [])
+        req = self._make_request(real_ip="8.8.8.8", peer="10.0.0.1")
+        assert _client_ip(req) == "10.0.0.1"
+
+
+class TestTrustedProxyParsing:
+    """GW-14: RATE_LIMIT_TRUSTED_PROXIES parsing."""
+
+    def test_parses_ips_and_cidrs(self):
+        nets = _parse_trusted_proxies("172.18.0.5, 10.0.0.0/8")
+        assert ipaddress.ip_address("172.18.0.5") in nets[0]
+        assert ipaddress.ip_address("10.1.2.3") in nets[1]
+
+    def test_skips_malformed_entries(self):
+        nets = _parse_trusted_proxies("not-an-ip, 10.0.0.0/8, , garbage")
+        assert len(nets) == 1
+        assert ipaddress.ip_address("10.255.255.255") in nets[0]
+
+    def test_empty_string_yields_no_proxies(self):
+        assert _parse_trusted_proxies("") == []
 
 
 class TestRateLimitEndpoint:

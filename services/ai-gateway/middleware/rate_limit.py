@@ -10,6 +10,7 @@ rate-limit infrastructure is degraded. Logged at ERROR level so ops notices.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -36,6 +37,37 @@ def _int_env(name: str, default: int) -> int:
 RATE_LIMIT_RPM = _int_env("RATE_LIMIT_RPM", 60)
 RATE_LIMIT_BURST = _int_env("RATE_LIMIT_BURST", 10)
 REDIS_URL = os.getenv("REDIS_URL", "")
+
+
+def _parse_trusted_proxies(raw: str) -> list[ipaddress._BaseNetwork]:
+    """Parse a comma-separated list of trusted-proxy IPs/CIDRs.
+
+    Bare IPs are treated as /32 (or /128). Malformed entries are skipped with a
+    warning rather than crashing the import.
+    """
+    nets: list[ipaddress._BaseNetwork] = []
+    for entry in (e.strip() for e in raw.split(",")):
+        if not entry:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("Ignoring malformed RATE_LIMIT_TRUSTED_PROXIES entry %r", entry)
+    return nets
+
+
+# Proxy peers whose forwarding headers (X-Real-IP / X-Forwarded-For) we trust.
+#
+# SECURITY (GW-14): the gateway has no app-level auth and is reachable directly
+# by any peer on the compose network, so an arbitrary container could send a
+# forged X-Real-IP and get its own per-fake-IP rate-limit bucket — trivially
+# bypassing the limit. We therefore only honour forwarding headers when the
+# DIRECT socket peer is a configured trusted proxy (your nginx edge). Default is
+# empty → trust nothing → always key on the real socket peer, which is the
+# safe-by-default behaviour. Set RATE_LIMIT_TRUSTED_PROXIES to nginx's address
+# or subnet (e.g. "172.18.0.0/16" or the nginx container IP) to restore
+# header-based client identification through the proxy.
+TRUSTED_PROXIES = _parse_trusted_proxies(os.getenv("RATE_LIMIT_TRUSTED_PROXIES", ""))
 
 # Window sizes (seconds)
 _WINDOW_SECONDS = 60
@@ -89,33 +121,50 @@ def _is_rate_limited_path(path: str) -> bool:
     return False
 
 
-def _client_ip(request: Request) -> str:
-    """Extract client IP, preferring the trusted X-Real-IP header from nginx.
+def _peer_is_trusted_proxy(peer: str | None) -> bool:
+    """Whether the direct socket peer is in the configured trusted-proxy set."""
+    if not peer or not TRUSTED_PROXIES:
+        return False
+    try:
+        ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(ip in net for net in TRUSTED_PROXIES)
 
-    SECURITY:
-    1. X-Real-IP is set by our nginx upstream as `$remote_addr` — the direct
-       peer of nginx. It cannot be spoofed by a client because nginx overwrites
-       (not appends) this header. This is the preferred source.
+
+def _client_ip(request: Request) -> str:
+    """Extract the client IP used to key rate-limit buckets.
+
+    SECURITY (GW-14): forwarding headers are only honoured when the DIRECT
+    socket peer is a configured trusted proxy (TRUSTED_PROXIES — your nginx
+    edge). Otherwise we ignore the headers entirely and key on the socket peer,
+    because the gateway has no app-level auth and any container on the compose
+    network could forge X-Real-IP / X-Forwarded-For to mint its own rate-limit
+    bucket. With no trusted proxies configured (the default), this always keys
+    on the socket peer — safe by default.
+
+    When the peer IS a trusted proxy:
+    1. X-Real-IP is set by nginx as `$remote_addr` (overwritten, not appended),
+       so it's the preferred source.
     2. X-Forwarded-For is APPENDED by nginx (via $proxy_add_x_forwarded_for),
        so the LEFT-most entries are client-supplied. We take the RIGHT-most
-       entry (nginx's appended value) as a fallback if X-Real-IP is missing.
-    3. If no proxy headers are present, falls back to the direct connection
-       peer (for direct-to-gateway traffic outside the proxy chain).
-
-    Taking `split(",")[0]` would allow trivial rate-limit bypass by sending
-    `X-Forwarded-For: rotating-fake-ip` on every request.
+       entry (nginx's appended value). Taking `split(",")[0]` would allow
+       trivial bypass via `X-Forwarded-For: rotating-fake-ip`.
     """
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
+    peer = request.client.host if request.client else None
 
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
-        if parts:
-            return parts[-1]
+    if _peer_is_trusted_proxy(peer):
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip()
 
-    return request.client.host if request.client else "unknown"
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if parts:
+                return parts[-1]
+
+    return peer if peer else "unknown"
 
 
 class _InMemoryBackend:
