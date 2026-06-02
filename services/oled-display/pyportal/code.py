@@ -70,13 +70,16 @@ Host → display (one JSON per line, contract UNCHANGED for back-compat)
   {"mode":"brightness","value":0..255}
   {"mode":"ping"}
 
-Display → Host  (lines UNCHANGED)
+Display → Host  (lines UNCHANGED, plus MEM: added in WARP-638)
   READY / OK / ERR:<reason> / REQUEST_STATE / REQUEST_QR
   TOUCH:<x>,<y>,<p> / TOUCH:release
   TAP:<screen>:<region>
   SWIPE:<left|right>:<from-screen>
   NAV:<screen>
   ROTATE_KEY
+  MEM:<free-bytes>            # emitted on {"mode":"ping"} — free heap after a
+                             # gc.collect(), so on-device headroom is
+                             # verifiable from the host after flashing.
 """
 
 import gc
@@ -156,13 +159,11 @@ RED           = 0xFF453A   # alerts, critical
 WHITE         = 0xFFFFFF   # QR card
 PHOSPHOR      = 0xEAEAFF   # CRT-collapse line on shutdown
 
-# Back-compat aliases — a few helpers (the bitmap-mark cache, the old donut)
-# still reference these names. ACCENT_PRI/ACCENT_LIGHT now point at the new
-# accent so the mark renders in the py-v3 indigo. GAUGE_TRACK is unused by the
-# redesign but kept so the legacy _half_donut/_dial helpers still import.
+# Accent aliases for the vector droplet mark (_mark_poly). ACCENT_PRI is the
+# body fill, ACCENT_LIGHT the inner highlight — both point at the py-v3 indigo
+# so the mark reads on every screen.
 ACCENT_PRI    = ACCENT
 ACCENT_LIGHT  = ACCENT_INK
-GAUGE_TRACK   = TRACK
 
 DISPLAY_W = board.DISPLAY.width
 DISPLAY_H = board.DISPLAY.height
@@ -270,141 +271,16 @@ def _rounded_rect(g, x, y, w, h, r, color):
     g.append(_circle(x + w - r, y + h - r, r, color))
 
 
-# vectorio has no arc primitive, so half-donuts are drawn as a 2*N-vertex
-# Polygon (outer sweep + inner sweep back). Circle end-caps round the tips
-# for the "rounded half donut" look requested — cheap heap-wise because
-# vectorio stores just the vertex list, not a rasterised bitmap.
-def _half_donut(g, cx, cy, r_outer, thickness, pct, fill_color,
-                track_color=GAUGE_TRACK, segments=28):
-    """Draw a 180° half-donut gauge, flat edge facing down.
-
-    Args:
-        cx, cy: center of the flat edge (the donut curves *up* from here)
-        r_outer: outer radius
-        thickness: band thickness; inner radius = r_outer - thickness
-        pct: 0..100 fill percentage (fills left-to-right along the arc)
-        fill_color, track_color: palette entries
-        segments: polygon tessellation — 28 reads smooth at r=40
-    """
-    r_inner = max(2, r_outer - thickness)
-    pct = max(0.0, min(100.0, float(pct)))
-
-    def arc_ring(start_frac, end_frac):
-        # Build a polygon ring between start_frac..end_frac of the 180° sweep.
-        # 0 = left (angle pi), 1 = right (angle 0).
-        pts = []
-        n = max(2, int(segments * abs(end_frac - start_frac) + 0.5))
-        # Outer: start -> end
-        for i in range(n + 1):
-            frac = start_frac + (end_frac - start_frac) * (i / n)
-            a = math.pi * (1.0 - frac)
-            pts.append((int(cx + r_outer * math.cos(a)),
-                        int(cy - r_outer * math.sin(a))))
-        # Inner: end -> start (reverse)
-        for i in range(n + 1):
-            frac = end_frac - (end_frac - start_frac) * (i / n)
-            a = math.pi * (1.0 - frac)
-            pts.append((int(cx + r_inner * math.cos(a)),
-                        int(cy - r_inner * math.sin(a))))
-        return pts
-
-    # Track (full 180°)
-    g.append(vectorio.Polygon(
-        pixel_shader=_palette(track_color),
-        points=arc_ring(0.0, 1.0),
-        x=0, y=0,
-    ))
-    # Rounded caps on the track ends
-    cap_r = thickness // 2
-    g.append(_circle(cx - (r_outer + r_inner) // 2, cy, cap_r, track_color))
-    g.append(_circle(cx + (r_outer + r_inner) // 2, cy, cap_r, track_color))
-
-    if pct <= 0.5:
-        return
-
-    # Fill (0..pct of 180°)
-    end_frac = pct / 100.0
-    g.append(vectorio.Polygon(
-        pixel_shader=_palette(fill_color),
-        points=arc_ring(0.0, end_frac),
-        x=0, y=0,
-    ))
-    # Rounded caps on fill: left start + head of the fill arc
-    g.append(_circle(cx - (r_outer + r_inner) // 2, cy, cap_r, fill_color))
-    ang = math.pi * (1.0 - end_frac)
-    head_r = (r_outer + r_inner) // 2
-    g.append(_circle(int(cx + head_r * math.cos(ang)),
-                     int(cy - head_r * math.sin(ang)),
-                     cap_r, fill_color))
-
-
 # ---------------------------------------------------------------------------
-# Droplet mark (scanline-filled polygon, geometry from DropletMark.tsx)
+# Droplet mark (vectorio polygon, geometry from DropletMark.tsx)
 # ---------------------------------------------------------------------------
 
-def _make_mark_bmp(size):
-    w = int(size * 52 / 60)
-    h = size
-    bmp = displayio.Bitmap(w, h, 3)
-    pal = displayio.Palette(3)
-    pal[0] = BG
-    pal[1] = ACCENT_PRI
-    pal[2] = ACCENT_LIGHT
-    pal.make_transparent(0)
-
-    def sx(px): return int(px / 52 * w)
-    def sy(py): return int(py / 60 * h)
-
-    def fill_poly(pts, idx):
-        ys = [p[1] for p in pts]
-        y0 = max(0, sy(min(ys)))
-        y1 = min(h - 1, sy(max(ys)))
-        n = len(pts)
-        for yy in range(y0, y1 + 1):
-            xmin = xmax = None
-            for i in range(n):
-                ax, ay = pts[i]
-                bx, by = pts[(i + 1) % n]
-                ax, ay = sx(ax), sy(ay)
-                bx, by = sx(bx), sy(by)
-                if ay == by:
-                    continue
-                if min(ay, by) <= yy <= max(ay, by):
-                    t = (yy - ay) / (by - ay)
-                    x = int(ax + t * (bx - ax))
-                    if xmin is None or x < xmin:
-                        xmin = x
-                    if xmax is None or x > xmax:
-                        xmax = x
-            if xmin is None:
-                continue
-            for xx in range(max(0, xmin), min(w - 1, xmax) + 1):
-                bmp[xx, yy] = idx
-
-    fill_poly([(26, 0), (44, 28), (36, 48), (16, 48), (8, 28)], 1)
-    fill_poly([(26, 0), (44, 28), (26, 36)], 2)
-    return bmp, pal
-
-
-_MARK_SMALL = _make_mark_bmp(26)
-_MARK_MED   = _make_mark_bmp(52)
-_MARK_LARGE = _make_mark_bmp(160)
-
-
-def _mark_tg(size, x, y):
-    if size >= 140:
-        bmp, pal = _MARK_LARGE
-    elif size >= 48:
-        bmp, pal = _MARK_MED
-    else:
-        bmp, pal = _MARK_SMALL
-    return displayio.TileGrid(bmp, pixel_shader=pal, x=x, y=y)
-
-
-# Vector version of the mark — cheap for any size, no bitmap cache. Used
-# when we want a hero-scale logo (idle screen) without paying the
-# bitmap-rasterisation heap cost at init. Geometry mirrors
-# _make_mark_bmp exactly (52x60 source coordinate space).
+# The mark is drawn as two vectorio Polygons (body + inner highlight) at any
+# size — cheap heap-wise (vectorio stores just the vertex list). The old
+# bitmap path (_make_mark_bmp / the _MARK_SMALL/_MARK_MED/_MARK_LARGE caches /
+# _mark_tg) was removed in WARP-638: the 160px _MARK_LARGE alone pinned several
+# KB of bitmap for the whole process lifetime, and every mark on every screen
+# now goes through this vector path (52x60 source coordinate space).
 def _mark_poly(g, size, x, y):
     w = int(size * 52 / 60)
     h = size
@@ -466,15 +342,28 @@ _HERO_FONT_TRIED = False
 _HERO_FONT_PATH = "/lib/fonts/Inter-Hero-66.bdf"
 
 
+# Glyphs actually drawn in the hero face, so load_glyphs preloads ONLY what
+# renders (WARP-638). Hero draw sites:
+#   * idle clock  — digits + ":" + " " (the colon blinks to a space)
+#   * CPU hero    — digits + "%"
+#   * claim code  — A-Z + digits + "-"  (e.g. DRPL-7K2Q-9F4M)
+# AM/PM and the TEMP "°" are drawn in terminalio, NOT the hero face, so "°"
+# (U+00B0) is intentionally NOT preloaded — it was dead weight in the cache.
+# The bundled BDF (tools/make_hero_font.py) still carries every glyph; this
+# just narrows what gets rasterised into the live glyph cache.
+_HERO_GLYPHS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-: %"
+
+
 def _hero_font():
     """Return the bundled hero bitmap font, or None to fall back to terminalio.
 
-    Loaded lazily so a missing/oversized/corrupt asset costs nothing until the
-    first hero is drawn, and never raises into a render path. glyphs() preloads
-    the subset so the first idle/claim frame doesn't pay per-glyph
-    rasterisation cost mid-draw. The set covers the clock/CPU heroes (digits,
-    ":", " ", "%", "°", AM/PM) AND the claim-code hero (A-Z + "-"); the bundled
-    BDF is rasterised from the same glyph set (tools/make_hero_font.py).
+    Loaded ONCE on first use and cached in the module-level ``_HERO_FONT``;
+    every subsequent call (and every render) returns the same object — the
+    BDF is never re-read or re-rasterised. ``_HERO_FONT_TRIED`` guards the
+    load so a missing/corrupt asset is probed at most once and never raises
+    into a render path. ``load_glyphs`` runs exactly once here over
+    ``_HERO_GLYPHS`` so the first idle/claim/CPU frame doesn't pay per-glyph
+    rasterisation cost mid-draw.
     """
     global _HERO_FONT, _HERO_FONT_TRIED
     if _HERO_FONT_TRIED:
@@ -485,7 +374,7 @@ def _hero_font():
     try:
         f = bitmap_font.load_font(_HERO_FONT_PATH)
         try:
-            f.load_glyphs(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-: %\xb0")
+            f.load_glyphs(_HERO_GLYPHS)
         except Exception:
             pass
         _HERO_FONT = f
@@ -817,7 +706,7 @@ def _v3_qr_card(g, x, y, size):
     mcx = x + size // 2 - mc // 2
     mcy = y + size // 2 - mc // 2
     _rounded_rect(g, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, WHITE)
-    g.append(_mark_tg(26, mcx, mcy))
+    _mark_poly(g, 26, mcx, mcy)
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +716,14 @@ def _v3_qr_card(g, x, y, size):
 def render_system():
     global touch_regions
     touch_regions = []
+    # Release the previous frame's display tree (which holds the prior QR
+    # bitmap) BEFORE building the new one, then gc — so we never hold two
+    # full-matrix QR bitmaps alive at once. This is the peak that OOMed on the
+    # rotate / REQUEST_QR re-render (WARP-638): without it, the old root_group
+    # stays referenced until the new `g` is assigned at the end of this
+    # function, doubling the QR heap for the duration of the build.
+    board.DISPLAY.root_group = None
+    gc.collect()
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
 
@@ -901,23 +798,37 @@ def render_system():
     g.append(_text(str(wifi.get("password") or "")[:20], x=RX, y=yy + 50,
                    scale=1, color=ACCENT_INK))
 
-    # KEY rotate pill.
-    secs = wifi.get("key_ttl_seconds") or 0
-    try:
-        secs = int(secs)
-    except (TypeError, ValueError):
-        secs = 0
-    warn = secs < 60
-    pill_y = yy + 68
-    pill_h = 26
-    g.append(_rect(RX, pill_y, RW, pill_h, ORANGE_SUBTLE if warn else SURFACE))
-    g.append(_stroked_rect(RX, pill_y, RW, pill_h,
-                           ORANGE if warn else SEPARATOR_2, 1))
-    # ASCII-safe rotate marker on the bitmap-less terminalio font.
-    g.append(_text("KEY {}".format(_fmt_short_ttl(secs)),
-                   x=RX + RW // 2, y=pill_y + pill_h // 2, scale=1,
-                   color=ORANGE if warn else LABEL_2, anchor=(0.5, 0.5)))
-    _region("key_rotate", RX, pill_y - 3, RW, pill_h + 6, _rotate_key)
+    # KEY rotate pill + TTL chip — ONLY when key rotation is enabled.
+    # WARP-638: the box default is rotation OFF (the bridge's qr_snapshot
+    # returns rotation_enabled=False; a rotate attempt comes back
+    # "rotation_disabled"). Tapping the pill in that state fired ROTATE_KEY ->
+    # a fresh-QR re-render that OOMed the SAMD51. So when rotation is disabled
+    # we draw NO pill and register NO tap region — there is simply no way to
+    # trigger the rotate path. The TTL is meaningless without rotation too, so
+    # the whole chip is gated together. rotation_enabled is sourced from the
+    # host-supplied QR data (state["qr"]); absent/false => hidden.
+    qr = state.get("qr") or {}
+    rotation_enabled = bool(qr.get("rotation_enabled"))
+    if rotation_enabled:
+        secs = wifi.get("key_ttl_seconds")
+        if secs is None:
+            secs = qr.get("ttl_seconds") or 0
+        try:
+            secs = int(secs)
+        except (TypeError, ValueError):
+            secs = 0
+        warn = secs < 60
+        pill_y = yy + 68
+        pill_h = 26
+        g.append(_rect(RX, pill_y, RW, pill_h,
+                       ORANGE_SUBTLE if warn else SURFACE))
+        g.append(_stroked_rect(RX, pill_y, RW, pill_h,
+                               ORANGE if warn else SEPARATOR_2, 1))
+        # ASCII-safe rotate marker on the bitmap-less terminalio font.
+        g.append(_text("KEY {}".format(_fmt_short_ttl(secs)),
+                       x=RX + RW // 2, y=pill_y + pill_h // 2, scale=1,
+                       color=ORANGE if warn else LABEL_2, anchor=(0.5, 0.5)))
+        _region("key_rotate", RX, pill_y - 3, RW, pill_h + 6, _rotate_key)
 
     # Alerts drawer overlay.
     if state.get("events_open"):
@@ -1033,7 +944,7 @@ def render_idle():
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
 
     # Brand bug top-left.
-    g.append(_mark_tg(26, 20, 14))
+    _mark_poly(g, 26, 20, 14)
     _tracked(g, "DROPLET", x=50, y=24, scale=1, color=LABEL_3, tracking=2)
 
     # 12/24 segmented toggle top-right (two 38px cells, h26).
@@ -1132,24 +1043,37 @@ def _render_qr_matrix_plain(g, matrix, ox, oy, module_px):
     """Paint the host-supplied QR matrix as black modules — NO card/frame.
 
     The white card + droplet-mark inset are drawn by _v3_qr_card; this just
-    fills the dark modules. One Bitmap per row keeps heap bounded (the same
-    pattern the old renderer used). The matrix is ALWAYS host-supplied (the
-    firmware never encodes a QR on-device — contract).
+    fills the dark modules. The matrix is ALWAYS host-supplied (the firmware
+    never encodes a QR on-device — contract).
+
+    WARP-638 (the main OOM fix): the whole matrix is drawn into a SINGLE
+    ``displayio.Bitmap`` (size*module_px square) backed by one 2-colour
+    palette and carried by one TileGrid. The previous renderer allocated one
+    Bitmap + one Palette + one TileGrid PER ROW (3*N objects for an N-row
+    matrix, e.g. ~75+ objects for a 25-row v2 QR) — the re-render on rotate /
+    REQUEST_QR is exactly the path that OOMed the SAMD51 (`ERR:oom:system`).
+    One contiguous bitmap is both far fewer heap objects and a single
+    allocation the GC can place/track cheaply.
     """
     size = len(matrix)
+    if size <= 0:
+        return
     module_color = 0x0A0A1E   # very dark indigo; ~19:1 on white, scans as black
+    dim = size * module_px
+    bmp = displayio.Bitmap(dim, dim, 2)
+    pal = displayio.Palette(2)
+    pal[0] = WHITE
+    pal[1] = module_color
     for row_idx, row in enumerate(matrix):
-        bmp = displayio.Bitmap(size * module_px, module_px, 2)
-        pal = displayio.Palette(2)
-        pal[0] = WHITE
-        pal[1] = module_color
+        y0 = row_idx * module_px
         for col_idx, v in enumerate(row):
             if v:
-                for dx in range(module_px):
-                    for dy in range(module_px):
-                        bmp[col_idx * module_px + dx, dy] = 1
-        g.append(displayio.TileGrid(bmp, pixel_shader=pal,
-                                    x=ox, y=oy + row_idx * module_px))
+                x0 = col_idx * module_px
+                for dy in range(module_px):
+                    yy = y0 + dy
+                    for dx in range(module_px):
+                        bmp[x0 + dx, yy] = 1
+    g.append(displayio.TileGrid(bmp, pixel_shader=pal, x=ox, y=oy))
 
 
 def _request_qr():
@@ -1178,7 +1102,7 @@ def render_message():
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
     # Minimal py-v3 header: mark + title eyebrow + hairline.
-    g.append(_mark_tg(26, 20, 12))
+    _mark_poly(g, 26, 20, 12)
     title = str(state.get("msg_title") or "Message")[:24]
     g.append(_text(title, x=52, y=20, scale=2, color=TEXT, anchor=(0.0, 0.5)))
     _hairline(g, 20, 44, DISPLAY_W - 40, SEPARATOR)
@@ -1713,7 +1637,14 @@ def handle(msg):
     elif mode == "brightness":
         set_brightness(msg.get("value", ACTIVE_BRIGHTNESS))
     elif mode == "ping":
-        pass
+        # WARP-638: report free heap so on-device headroom is verifiable from
+        # the host after flashing (you can't read gc.mem_free() off the
+        # SAMD51 otherwise). gc.collect() first so the number is reclaimed-
+        # free, i.e. the real ceiling a render has to fit under vs the 18 KB
+        # _HEAP_PANIC_BYTES floor. Emitted as a side-channel line in addition
+        # to the OK ack so the existing ping liveness check is unaffected.
+        gc.collect()
+        _send("MEM:{}".format(gc.mem_free()))
     else:
         return "ERR:unknown_mode:{}".format(mode)
     return "OK"
