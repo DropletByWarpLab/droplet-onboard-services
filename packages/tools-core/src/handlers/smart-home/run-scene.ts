@@ -11,6 +11,7 @@
  * resolved id so a follow-up call can disambiguate).
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { confirmationRequired } from "../../confirmation.js";
 
 interface SceneRunResult {
   sceneId: string;
@@ -47,6 +48,21 @@ const inputSchema = {
 } as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The scenes route signals "needs confirmation" with HTTP 409 +
+ * `{ error: "confirmation_required", … }` (see `routes/scenes.ts`),
+ * NOT the 202 shape the shared `isConfirmationResponse` keys on. Detect
+ * that specific response without consuming the body of any other
+ * response (success/other-error paths still read `res.json()` below).
+ */
+async function isSceneConfirmationRequired(res: Response): Promise<boolean> {
+  if (res.status !== 409) return false;
+  const body = (await res.clone().json().catch(() => null)) as
+    | { error?: string }
+    | null;
+  return body?.error === "confirmation_required";
+}
 
 async function resolveSceneId(
   ctx: ToolContext,
@@ -90,17 +106,27 @@ async function handler(
     };
   }
 
-  // `?confirm=true` is the server-side mirror of `requiresConfirmation:
-  // true` on the tool definition. The agent loop has already shown the
-  // user a confirm card by the time we get here; flagging the request
-  // satisfies the orchestrator route's gate. Without this every
-  // run_scene call would 409 confirmation_required and the agent loop
-  // would think the scene failed to run.
+  // Do NOT hard-code `?confirm=true`. A scene can batch Tier-2 device
+  // actions (locks, thermostat), so it must honor the orchestrator's
+  // server-side confirmation gate the same way every other write tool
+  // does — never pre-satisfy it from inside the handler (TOOLS-01).
+  // The scenes route (`routes/scenes.ts`) replies 409
+  // `{ error: "confirmation_required", … }` on the unconfirmed call;
+  // relay that as a `confirmation_required` ToolResult so the agent
+  // loop renders a "needs approval" chip (identical posture to
+  // `control_device` / `add_port_forward`). The agent loop re-issues
+  // with the user's approval; the tool itself never forges it.
   const res = await ctx.http.orchestrator.post(
-    `/api/scenes/${sceneId}/run?confirm=true`,
+    `/api/scenes/${sceneId}/run`,
     {},
     { headers: { Accept: "application/json" } },
   );
+  if (await isSceneConfirmationRequired(res)) {
+    return confirmationRequired(
+      "Running this scene requires user confirmation in the Droplet dashboard.",
+      { type: "scene_run", sceneId },
+    );
+  }
   if (!res.ok) {
     return {
       ok: false,
