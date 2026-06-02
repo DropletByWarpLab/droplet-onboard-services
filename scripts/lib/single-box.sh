@@ -340,6 +340,11 @@ configure_single_box_env() {
 #   OPENSSL_CONF/FIPS/TPM consumer x86 has no FIPS OpenSSL / TPM 2.0
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
 #   OPENWRT_*            bundled openwrt container at 127.0.0.1:8181
+#   DROPLET_AP_MODE      hostapd — the single-box host runs the Wi-Fi AP via
+#                        hostapd (not a Pi-5 UCI router), so the device-bridge
+#                        reads pairing-QR creds in hostapd mode. Mirrored into
+#                        /etc/droplet/device-bridge.env by
+#                        install-device-bridge.sh (WARP-654).
 # ============================================================================
 EOF
   fi
@@ -355,6 +360,11 @@ EOF
   upsert_env OPENWRT_PORT        8181
   upsert_env OPENWRT_USERNAME    root
   upsert_env ROUTING_MODE        real
+  # device-bridge pairing-QR source: the single-box AP is a host hostapd, not
+  # a UCI router, so the bridge must read creds in hostapd mode (it defaults to
+  # uci). install-device-bridge.sh mirrors this knob into the bridge env so a
+  # fresh box renders a pairing QR without a manual step (WARP-654).
+  upsert_env DROPLET_AP_MODE     hostapd
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b)"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd)"
 }
