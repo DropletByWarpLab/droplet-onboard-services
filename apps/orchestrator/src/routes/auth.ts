@@ -69,6 +69,12 @@ import QRCode from "qrcode";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import {
+  passwordZod,
+  baseUserIdFromEmail,
+  nthUserIdCandidate,
+  isReservedUserId,
+} from "@droplet/auth-policy";
 
 /** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
  *  (set by the nginx gateway in production), falls back to req.ip. */
@@ -82,15 +88,13 @@ function callerIpFromReq(req: Request): string | undefined {
 
 const logger = pino({ name: "auth-route" });
 
-const RESERVED_USERNAMES = ["admin", "root"];
-
 const usernameField = z
   .string()
   .min(2)
   .max(64)
   .regex(/^[a-zA-Z0-9._-]+$/, "Username must be alphanumeric")
   .refine(
-    (val) => !RESERVED_USERNAMES.includes(val.toLowerCase()),
+    (val) => !isReservedUserId(val),
     "This username is reserved and cannot be used",
   );
 
@@ -113,16 +117,10 @@ const emailField = z
   .max(200);
 
 const setupSchema = z.object({
-  username: usernameField,
-  password: z.string().min(8).max(128),
+  password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-013 (PR #374 N2): email is the directory login key and is now
-  // REQUIRED on the first-owner bootstrap. ADR-013 removed the Nextcloud
-  // auth fallback, so an owner row written without an email can never sign
-  // in (the email-keyed /auth/login lookup has nothing to match) — a
-  // permanent lockout recoverable only by a DB edit. Requiring it here
-  // makes a login-unable owner unrepresentable. Normalized (trim+lowercase)
-  // via emailField so the stored value matches the login lookup.
+  // ADR-013: email is the directory login key and the sole user-facing
+  // identifier. Username is derived server-side (deriveUniqueUserId).
   email: emailField,
 });
 
@@ -157,9 +155,9 @@ const loginSchema = z
   });
 
 const createUserSchema = z.object({
-  username: usernameField,
-  password: z.string().min(8).max(128),
+  password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
+  email: emailField,
 });
 
 // PR #375 — TOTP verify / re-challenge body: exactly six decimal digits.
@@ -188,20 +186,17 @@ const inviteRoleField = z.preprocess(
 );
 
 const createInviteSchema = z.object({
-  username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-013 (PR #374): normalized — the invite email becomes the invitee's
-  // directory login key on accept (written to User.email at accept time),
-  // so it must already be trim+lowercased to stay consistent with the
-  // email-keyed login lookup and the case-sensitive unique index.
-  email: emailField.optional(),
+  // ADR-013: the invite email is the invitee's directory login key on
+  // accept and the basis for the derived userid. Required.
+  email: emailField,
   role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
 });
 
 const acceptInviteSchema = z.object({
-  password: z.string().min(8).max(128),
+  password: passwordZod,
 });
 
 // WARP-171: the legacy `isAdmin(req)` helper was inlined-and-removed
@@ -229,7 +224,8 @@ const updateUserSchema = z
     email: emailField.optional(),
     // Accept either a byte count (1073741824) or a human string ("5 GB", "none").
     quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
-    password: z.string().min(8).max(128).optional(),
+    // ADR-013: same shared policy the setup/add-user/invite paths enforce.
+    password: passwordZod.optional(),
   })
   .refine(
     (d) =>
@@ -299,6 +295,28 @@ function resolveToken(req: import("express").Request): string | null {
 // credential for an unrelated NC user could otherwise mint a default-
 // `family`-role local row.
 // ────────────────────────────────────────────────────────────────
+
+/**
+ * Derive a unique, Nextcloud-safe userid from an email. Walks suffix
+ * candidates (base, base-2, base-3, …), skipping reserved ids and any value
+ * already used as `username` OR `nextcloudUsername` (both are @unique).
+ */
+async function deriveUniqueUserId(
+  prisma: import("@prisma/client").PrismaClient,
+  email: string,
+): Promise<string> {
+  const base = baseUserIdFromEmail(email);
+  for (let n = 1; n < 100000; n += 1) {
+    const candidate = nthUserIdCandidate(base, n);
+    if (isReservedUserId(candidate)) continue;
+    const taken = await prisma.user.findFirst({
+      where: { OR: [{ username: candidate }, { nextcloudUsername: candidate }] },
+    });
+    if (!taken) return candidate;
+  }
+  throw new Error("deriveUniqueUserId: exhausted candidate space");
+}
+
 export function createPublicAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
 ): Router {
@@ -319,11 +337,23 @@ export function createPublicAuthRouter(
     try {
       const parsed = setupSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        const fields = parsed.error.flatten().fieldErrors;
+        if (fields.email) {
+          res.status(400).json({ error: "Enter a valid email address.", code: "INVALID_EMAIL" });
+          return;
+        }
+        if (fields.password) {
+          res.status(400).json({
+            error: "That password doesn't meet the requirements.",
+            code: "WEAK_PASSWORD",
+          });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
-      const { username, password, displayName, email } = parsed.data;
+      const { password, displayName, email } = parsed.data;
 
       // WARP-485 follow-up (Romain PR #279 review): the local User
       // mirror is a HARD precondition for setup, not a best-effort
@@ -335,7 +365,7 @@ export function createPublicAuthRouter(
       // createAuthRouter() shim that wires this router without prisma.
       if (!prisma) {
         logger.error(
-          { username },
+          { email },
           "setup: prisma client not wired into public auth router; refusing to create NC admin without local mirror",
         );
         res.status(500).json({
@@ -361,7 +391,7 @@ export function createPublicAuthRouter(
       });
       if (existingOwners > 0) {
         logger.warn(
-          { username },
+          { email },
           "setup: refused — an owner already exists (N1 owner-already-exists guard, PR #374)",
         );
         res.status(409).json({
@@ -396,6 +426,7 @@ export function createPublicAuthRouter(
       // same plaintext so its WebDAV account works, but it no longer
       // authenticates anyone. The plaintext is hashed before it touches
       // the row and is never logged.
+      const username = await deriveUniqueUserId(prisma, email);
       const passwordHash = await hashPassword(password);
       // `email` is guaranteed present + normalized (N2 makes it required on
       // this path; emailField trim+lowercased it). Write it directly so the
@@ -1030,7 +1061,7 @@ export function createPublicAuthRouter(
       const parsed = acceptInviteSchema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({
-          error: "Password must be at least 8 characters",
+          error: "That password doesn't meet the requirements.",
           code: "INVALID_PASSWORD",
         });
         return;
@@ -1151,6 +1182,8 @@ export function createPublicAuthRouter(
       // normalizes new invites, but re-normalize here as defense in depth so
       // a stale (pre-fix) or hand-edited invite row can't plant a row whose
       // email casing breaks the email-keyed /auth/login lookup.
+      // An invite predating the email-normalization fix may carry email: null,
+      // which the email-keyed /auth/login cannot match (operator remediation: re-invite).
       const inviteEmail = invite.email
         ? invite.email.trim().toLowerCase()
         : null;
@@ -1172,7 +1205,10 @@ export function createPublicAuthRouter(
           // but possible under retry). Refresh `displayName` from the
           // invite in case the operator updated it, and refresh the
           // credential so a retry never leaves a stale or absent hash.
+          // Also refresh `email` (the email-keyed login key) so a
+          // re-acceptance always lands the correct login identifier.
           displayName: invite.displayName || invite.username,
+          email: inviteEmail,
           passwordHash,
         },
         create: {
@@ -1543,9 +1579,20 @@ export function createProtectedAuthRouter(
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.email?.length) {
+          res.status(400).json({ error: "Invalid email address", code: "INVALID_EMAIL" });
+          return;
+        }
+        if (fieldErrors.password?.length) {
+          res.status(400).json({ error: "Password does not meet policy requirements", code: "WEAK_PASSWORD" });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
+
+      const { email, password, displayName } = parsed.data;
 
       const token = await resolveNcToken(req);
       if (!token) {
@@ -1562,7 +1609,7 @@ export function createProtectedAuthRouter(
       // createAuthRouter() shim.
       if (!prisma) {
         logger.error(
-          { username: parsed.data.username },
+          { email },
           "admin create-user: prisma not wired into protected auth router; refusing to create NC user without local mirror",
         );
         res.status(500).json({
@@ -1571,6 +1618,21 @@ export function createProtectedAuthRouter(
         });
         return;
       }
+
+      // Derive the unique userid from the email local-part (same
+      // algorithm used by /auth/setup). The resulting username is
+      // stable across retries because deriveUniqueUserId queries the
+      // live DB on every call, so a collision-resolved candidate
+      // (e.g. "kid-2") will only be returned when "kid" is already
+      // taken.
+      const username = await deriveUniqueUserId(prisma, email);
+
+      // ADR-013: the directory is the auth source of truth. Hash the
+      // plaintext BEFORE the upsert so the stored row carries an
+      // argon2id PHC string, never the plaintext. Without this, the
+      // login route (which checks passwordHash for null / DEACTIVATED)
+      // would unconditionally deny the newly-created user.
+      const passwordHash = await hashPassword(password);
 
       // Romain PR #279 round 2: idempotent upsert FIRST, ncCreateUser
       // SECOND. Without this ordering, a transient failure between
@@ -1599,20 +1661,25 @@ export function createProtectedAuthRouter(
       // `User` if the admin abandons the username — operator can
       // purge via the standard delete-user flow.
       await prisma.user.upsert({
-        where: { nextcloudUsername: parsed.data.username },
-        update: { displayName: parsed.data.displayName || parsed.data.username },
+        where: { nextcloudUsername: username },
+        update: {
+          displayName: displayName || username,
+          email,
+          passwordHash,
+        },
         create: {
-          username: parsed.data.username,
-          displayName: parsed.data.displayName || parsed.data.username,
-          email: null,
-          nextcloudUsername: parsed.data.username,
+          username,
+          displayName: displayName || username,
+          email,
+          nextcloudUsername: username,
+          passwordHash,
           role: "family" as any,
         },
       });
 
-      await ncCreateUser(token, parsed.data.username, parsed.data.password, parsed.data.displayName);
+      await ncCreateUser(token, username, password, displayName);
 
-      res.status(201).json({ status: "ok", username: parsed.data.username });
+      res.status(201).json({ status: "ok", username });
     } catch (err: any) {
       // Typed-error path mirrors the invite-accept route — detect the
       // OCS user-exists race (statuscode 102) by error class, not by
@@ -1640,25 +1707,79 @@ export function createProtectedAuthRouter(
       }
       const parsed = updateUserSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({
-          error: "Invalid user update",
-          details: parsed.error.flatten(),
-        });
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.email?.length) {
+          res.status(400).json({ error: "Invalid email address", code: "INVALID_EMAIL" });
+          return;
+        }
+        if (fieldErrors.password?.length) {
+          res.status(400).json({ error: "Password does not meet policy requirements", code: "WEAK_PASSWORD" });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
       const { username } = req.params;
-      if (parsed.data.displayName !== undefined) {
-        await ncUpdateUser(token, username, "displayname", parsed.data.displayName);
+      const { displayName, email, quota, password } = parsed.data;
+
+      // ADR-013: the built-in directory is the auth source of truth and
+      // /auth/login verifies the LOCAL passwordHash by email. An email or
+      // password edit that only touches Nextcloud has NO effect on login, so
+      // those edits MUST land on the local row. Fail CLOSED if the directory
+      // isn't wired (the legacy createAuthRouter() shim) rather than silently
+      // updating only Nextcloud. (displayName/quota are NC-side attributes and
+      // don't gate login, so they don't require the directory.)
+      const touchesDirectory = email !== undefined || password !== undefined;
+      if (touchesDirectory && !prisma) {
+        logger.error(
+          { username },
+          "update-user: prisma not wired into protected auth router; refusing to change directory email/password without the local mirror",
+        );
+        res.status(500).json({
+          error: "Server misconfigured: local user database not wired",
+          code: "USERS_NO_PRISMA",
+        });
+        return;
       }
-      if (parsed.data.email !== undefined) {
-        await ncUpdateUser(token, username, "email", parsed.data.email);
+
+      // Write the local directory row FIRST (idempotent; source of truth).
+      // `email` is already trim+lowercased by emailField; the plaintext
+      // password is hashed here and NEVER written to the row.
+      if (prisma) {
+        const data: Record<string, unknown> = {};
+        if (displayName !== undefined) data.displayName = displayName;
+        if (email !== undefined) data.email = email;
+        if (password !== undefined) data.passwordHash = await hashPassword(password);
+        if (Object.keys(data).length > 0) {
+          const updated = await prisma.user.updateMany({
+            where: { nextcloudUsername: username },
+            data,
+          });
+          // A credential change against a username with no directory row is
+          // meaningless for login — surface it instead of half-applying it to
+          // Nextcloud only.
+          if (updated.count === 0 && touchesDirectory) {
+            res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+            return;
+          }
+        }
       }
-      if (parsed.data.quota !== undefined) {
-        await ncUpdateUser(token, username, "quota", String(parsed.data.quota));
+
+      // Mirror the changes to Nextcloud (the WebDAV account + NC-side
+      // attributes). One OCS PUT per field; the plaintext password is sent
+      // here so the user's Files/WebDAV login keeps working.
+      if (displayName !== undefined) {
+        await ncUpdateUser(token, username, "displayname", displayName);
       }
-      if (parsed.data.password !== undefined) {
-        await ncUpdateUser(token, username, "password", parsed.data.password);
+      if (email !== undefined) {
+        await ncUpdateUser(token, username, "email", email);
+      }
+      if (quota !== undefined) {
+        await ncUpdateUser(token, username, "quota", String(quota));
+      }
+      if (password !== undefined) {
+        await ncUpdateUser(token, username, "password", password);
       }
       res.json({ status: "ok", username });
     } catch (err: any) {
@@ -1796,7 +1917,12 @@ export function createProtectedAuthRouter(
       }
       const parsed = createInviteSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.email?.length) {
+          res.status(400).json({ error: "Enter a valid email address.", code: "INVALID_EMAIL" });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
@@ -1817,6 +1943,11 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // Derive the unique userid from the email local-part. The derived
+      // username is stored on the invite row and used at accept time
+      // (the invitee never chooses their own username).
+      const username = await deriveUniqueUserId(prisma, parsed.data.email);
+
       const ttlHours = parsed.data.ttlHours ?? 72;
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
       const token = generateInviteToken();
@@ -1824,9 +1955,9 @@ export function createProtectedAuthRouter(
       const created = await prisma.userInvite.create({
         data: {
           token,
-          username: parsed.data.username,
+          username,
           displayName: parsed.data.displayName ?? null,
-          email: parsed.data.email ?? null,
+          email: parsed.data.email,
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
           expiresAt,
@@ -1835,7 +1966,7 @@ export function createProtectedAuthRouter(
 
       logger.info(
         {
-          username: parsed.data.username,
+          username,
           role: parsed.data.role,
           createdBy: req.user?.username,
           expiresAt,

@@ -130,18 +130,20 @@ export async function checkSetupRequired(): Promise<SetupStatus> {
 }
 
 export async function setupAdmin(
-  username: string,
+  email: string,
   password: string,
   displayName?: string
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/setup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, displayName }),
+    body: JSON.stringify({ email, password, displayName }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Setup failed");
+    const err = new Error(data.error || "Setup failed") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
 }
 
@@ -371,13 +373,13 @@ export async function postTeamInvite(
 }
 
 export async function loginUser(
-  username: string,
+  email: string,
   password: string
 ): Promise<{ user: AuthUser }> {
   const res = await authFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -399,18 +401,20 @@ export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
 }
 
 export async function createUser(
-  username: string,
+  email: string,
   password: string,
   displayName?: string
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, displayName }),
+    body: JSON.stringify({ email, password, displayName }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Failed to create user");
+    const err = new Error(data.error || "Failed to create user") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
 }
 
@@ -484,7 +488,9 @@ export async function createInvite(
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Failed to create invite");
+    const err = new Error(data.error || "Failed to create invite") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
   return res.json();
 }

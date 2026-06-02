@@ -110,6 +110,7 @@ function createPrismaMock(seed: any[] = []) {
   const self: any = {};
   self.user = {
     findUnique: vi.fn(async () => null),
+    findFirst: vi.fn(async () => null),
     // Mirrors the people.ts owner-count idiom — the N1 guard counts
     // existing owners before allowing /auth/setup to (re)write one.
     count: vi.fn(async ({ where }: any = {}) => {
@@ -185,14 +186,13 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
     const res = await request(app)
       .post("/api/auth/setup")
       .send({
-        username: "owner1",
-        password: "super-secret-pw",
+        password: "Super-secret-pw1",
         displayName: "The Owner",
         email: "owner@warp.test",
       });
 
     expect(res.status).toBe(200);
-    expect(hashPassword).toHaveBeenCalledWith("super-secret-pw");
+    expect(hashPassword).toHaveBeenCalledWith("Super-secret-pw1");
 
     const row = prisma._users[0];
     expect(row).toBeDefined();
@@ -201,8 +201,8 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
     // plaintext. The mock returns a fixed PHC-shaped string that does NOT
     // echo the plaintext, so we can assert the plaintext never lands.
     expect(row.passwordHash).toMatch(/^\$argon2id\$/);
-    expect(row.passwordHash).not.toContain("super-secret-pw");
-    expect(JSON.stringify(row)).not.toContain("super-secret-pw");
+    expect(row.passwordHash).not.toContain("Super-secret-pw1");
+    expect(JSON.stringify(row)).not.toContain("Super-secret-pw1");
   });
 
   it("persists the email as the stable login key when provided", async () => {
@@ -212,8 +212,7 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
     await request(app)
       .post("/api/auth/setup")
       .send({
-        username: "owner2",
-        password: "another-secret",
+        password: "Another-secret1",
         email: "owner2@warp.test",
       });
 
@@ -230,12 +229,12 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
 
     const res = await request(app)
       .post("/api/auth/setup")
-      .send({ username: "owner3", password: "third-secret", email: "owner3@warp.test" });
+      .send({ password: "Third-secret123", email: "owner3@warp.test" });
 
     expect(res.status).toBe(200);
     expect(nc.ncInstallAndCreateAdmin).toHaveBeenCalledWith(
       "owner3",
-      "third-secret",
+      "Third-secret123",
       undefined,
     );
     // Idempotent local write lands BEFORE the one-shot NC provisioning.
@@ -251,8 +250,7 @@ describe("BLOCKER — /auth/setup normalizes the email login key (trim + lowerca
     const res = await request(app)
       .post("/api/auth/setup")
       .send({
-        username: "ownerMixed",
-        password: "super-secret-pw",
+        password: "Super-secret-pw1",
         email: "  Foo@X.com  ",
       });
 
@@ -288,8 +286,7 @@ describe("BLOCKER — /auth/setup normalizes the email login key (trim + lowerca
     const res = await request(app)
       .post("/api/auth/setup")
       .send({
-        username: "newowner",
-        password: "another-secret",
+        password: "Another-secret1",
         email: "Owner@X.com",
       });
 
@@ -322,8 +319,7 @@ describe("N1 — /auth/setup refuses to rewrite/duplicate an existing owner", ()
     const res = await request(app)
       .post("/api/auth/setup")
       .send({
-        username: "attacker",
-        password: "takeover-attempt",
+        password: "Takeover-attempt1",
         email: "attacker@warp.test",
       });
 
@@ -344,8 +340,7 @@ describe("N1 — /auth/setup refuses to rewrite/duplicate an existing owner", ()
     const res = await request(app)
       .post("/api/auth/setup")
       .send({
-        username: "firstowner",
-        password: "first-secret",
+        password: "First-secret123",
         email: "first@warp.test",
       });
 
@@ -362,12 +357,41 @@ describe("N2 — first owner cannot be created login-unable (email required at s
 
     const res = await request(app)
       .post("/api/auth/setup")
-      .send({ username: "noemail", password: "no-email-secret" });
+      .send({ password: "No-email-secret1" });
 
     expect(res.status).toBe(400);
     // The owner-creating write must not happen — a login-unable owner is
     // exactly the lockout ADR-013 forbids (no NC auth fallback).
     expect(prisma.user.upsert).not.toHaveBeenCalled();
     expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
+  });
+
+  it("rejects a setup whose password is below the policy with WEAK_PASSWORD", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "weak@warp.test", password: "short1A" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("WEAK_PASSWORD");
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it("derives a unique userid when the base is already taken", async () => {
+    const prisma = createPrismaMock([
+      { id: "u1", username: "owner", nextcloudUsername: "owner", email: "x@y.z", role: "family" },
+    ]);
+    prisma.user.findFirst = vi.fn(async ({ where }: any) => {
+      const c = where.OR?.[0]?.username;
+      return prisma._users.find((u: any) => u.username === c || u.nextcloudUsername === c) ?? null;
+    });
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Owner-secret123" });
+    expect(res.status).toBe(200);
+    const created = prisma._users.find((u: any) => u.email === "owner@warp.test");
+    expect(created.username).toBe("owner-2");
+    expect(created.nextcloudUsername).toBe("owner-2");
   });
 });

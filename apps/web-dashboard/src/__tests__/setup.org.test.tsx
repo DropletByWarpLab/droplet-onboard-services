@@ -68,17 +68,17 @@ async function advanceToOrg() {
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
   await passClaimStep();
   // Account form.
-  fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
-    target: { value: "owner" },
+  fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+    target: { value: "owner@warp.test" },
   });
   fireEvent.change(screen.getByPlaceholderText(/your name/i), {
     target: { value: "Robin" },
   });
-  fireEvent.change(screen.getByPlaceholderText(/min\. 8 characters/i), {
-    target: { value: "longenoughpw" },
+  fireEvent.change(screen.getByPlaceholderText(/create a password/i), {
+    target: { value: "Abcdefghijk1" },
   });
   fireEvent.change(screen.getByPlaceholderText(/repeat password/i), {
-    target: { value: "longenoughpw" },
+    target: { value: "Abcdefghijk1" },
   });
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /create account/i }));

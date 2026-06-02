@@ -101,6 +101,10 @@ function createPrismaMock() {
   // by `nextcloudUsername` before signing the JWT, so the prismaMock
   // needs a minimal `user` surface for the upsert path. Other invite
   // tests don't touch `user`, so the mock stays small.
+  //
+  // deriveUniqueUserId (called at invite-create time) queries
+  // user.findFirst to check username uniqueness — return null so the
+  // first base candidate is always available.
   const userRows: any[] = [];
   let userCounter = 0;
   let counter = 0;
@@ -142,6 +146,26 @@ function createPrismaMock() {
         if (where?.id !== undefined) return userRows.find((u) => u.id === where.id) ?? null;
         if (where?.username !== undefined) return userRows.find((u) => u.username === where.username) ?? null;
         return null;
+      }),
+      // deriveUniqueUserId uses findFirst to check whether a candidate
+      // username is already taken. Return null (not taken) so the first
+      // base candidate derived from the email local-part is always used.
+      findFirst: vi.fn().mockResolvedValue(null),
+      // PUT /auth/users/:username writes the directory row (email/passwordHash)
+      // via updateMany keyed on nextcloudUsername (ADR-013).
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        let count = 0;
+        for (let i = 0; i < userRows.length; i += 1) {
+          const u = userRows[i];
+          const match =
+            (where?.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
+            (where?.username !== undefined && u.username === where.username);
+          if (match) {
+            userRows[i] = { ...u, ...data, updatedAt: new Date() };
+            count += 1;
+          }
+        }
+        return { count };
       }),
     },
     userInvite: {
@@ -243,13 +267,17 @@ describe("POST /api/auth/invites — create", () => {
       // zod preprocessor and coerced to the canonical Role enum value
       // "family" before it lands in the DB. Existing dashboard builds
       // that haven't updated to send the canonical name keep working.
-      .send({ username: "alice", displayName: "Alice", role: "user" });
+      // ADR-013: email is now required; username is derived server-side
+      // from the email local-part via deriveUniqueUserId.
+      .send({ email: "alice@warp.test", displayName: "Alice", role: "user" });
     expect(res.status).toBe(200);
     expect(res.body.token).toMatch(/^[A-Za-z0-9_-]{40,}$/);
     expect(res.body.url).toContain(`/invite/${res.body.token}`);
     expect(new Date(res.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
     expect(prisma.rows[0].createdBy).toBe("admin-issuer");
     expect(prisma.rows[0].role).toBe("family");
+    // Username is derived server-side from the email local-part.
+    expect(prisma.rows[0].username).toBe("alice");
   });
 
   it("admin can create an invite with the canonical Role enum value (WARP-171)", async () => {
@@ -257,9 +285,11 @@ describe("POST /api/auth/invites — create", () => {
     const app = buildApp(prisma);
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice", displayName: "Alice", role: "family" });
+      .send({ email: "alice@warp.test", displayName: "Alice", role: "family" });
     expect(res.status).toBe(200);
     expect(prisma.rows[0].role).toBe("family");
+    // Username is derived server-side from the email local-part.
+    expect(prisma.rows[0].username).toBe("alice");
   });
 
   it("non-admin gets 403", async () => {
@@ -267,19 +297,31 @@ describe("POST /api/auth/invites — create", () => {
     const app = buildApp(prisma, familyUser());
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice", role: "user" });
+      .send({ email: "alice@warp.test", role: "user" });
     expect(res.status).toBe(403);
   });
 
-  it("rejects reserved usernames (admin, root)", async () => {
+  it("rejects a missing email with 400 INVALID_EMAIL", async () => {
+    // ADR-013: email is the only accepted invite field for identity;
+    // the handler returns INVALID_EMAIL when it is absent.
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    for (const u of ["admin", "root", "ROOT"]) {
-      const res = await request(app)
-        .post("/api/auth/invites")
-        .send({ username: u, role: "user" });
-      expect(res.status).toBe(400);
-    }
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({ role: "user" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_EMAIL");
+  });
+
+  it("rejects a malformed email with 400 INVALID_EMAIL", async () => {
+    // A value that is not a valid RFC email must also produce INVALID_EMAIL.
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({ email: "not-an-email", role: "user" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_EMAIL");
   });
 
   it("rejects invalid role values", async () => {
@@ -287,7 +329,7 @@ describe("POST /api/auth/invites — create", () => {
     const app = buildApp(prisma);
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice", role: "superuser" });
+      .send({ email: "alice@warp.test", role: "superuser" });
     expect(res.status).toBe(400);
   });
 
@@ -297,7 +339,7 @@ describe("POST /api/auth/invites — create", () => {
     const before = Date.now();
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice" });
+      .send({ email: "alice@warp.test" });
     expect(res.status).toBe(200);
     const expiry = new Date(res.body.expiresAt).getTime();
     const expected = before + 72 * 60 * 60 * 1000;
@@ -305,27 +347,21 @@ describe("POST /api/auth/invites — create", () => {
     expect(Math.abs(expiry - expected)).toBeLessThan(5_000);
   });
 
-  it("rejects username failing the regex", async () => {
-    const prisma = createPrismaMock();
-    const app = buildApp(prisma);
-    const res = await request(app)
-      .post("/api/auth/invites")
-      .send({ username: "has spaces", role: "user" });
-    expect(res.status).toBe(400);
-  });
-
   it("normalizes the invite email to trim+lowercase before persisting (BLOCKER)", async () => {
     // createInviteSchema is one of the email boundaries: the email stored
     // on the invite becomes the invitee's directory login key on accept,
     // so it must already be normalized to stay consistent with the
-    // email-keyed login lookup.
+    // email-keyed login lookup. The derived username also comes from the
+    // normalized local-part.
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice", email: "  Alice@Example.COM  " });
+      .send({ email: "  Alice@Example.COM  " });
     expect(res.status).toBe(200);
     expect(prisma.rows[0].email).toBe("alice@example.com");
+    // Username is derived from the normalized email local-part.
+    expect(prisma.rows[0].username).toBe("alice");
   });
 });
 
@@ -333,10 +369,11 @@ describe("GET /api/auth/invites — list", () => {
   it("admin can list invites", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    await request(app).post("/api/auth/invites").send({ username: "alice" });
+    await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const res = await request(app).get("/api/auth/invites");
     expect(res.status).toBe(200);
     expect(res.body.invites).toHaveLength(1);
+    // Username is derived server-side from the email local-part.
     expect(res.body.invites[0].username).toBe("alice");
   });
 
@@ -352,7 +389,7 @@ describe("DELETE /api/auth/invites/:token — revoke", () => {
   it("admin can revoke; subsequent public GET returns 404", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     const del = await request(app).delete(`/api/auth/invites/${token}`);
@@ -366,7 +403,7 @@ describe("DELETE /api/auth/invites/:token — revoke", () => {
   it("non-admin cannot revoke", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     const otherApp = buildApp(prisma, familyUser());
@@ -388,7 +425,8 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     const app = buildApp(prisma);
     const create = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice", displayName: "Alice", role: "user" });
+      // ADR-013: email required; username derived server-side.
+      .send({ email: "alice@warp.test", displayName: "Alice", role: "user" });
     const token = create.body.token;
 
     // Public app — no req.user
@@ -397,6 +435,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     expect(res.status).toBe(200);
     // WARP-171: the persisted role is the canonical Role enum value
     // (the preprocessor coerced "user" to "family" at create time).
+    // Username is derived from the email local-part server-side.
     expect(res.body).toMatchObject({
       username: "alice",
       displayName: "Alice",
@@ -417,7 +456,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
   it("410 GONE with code=EXPIRED when past expiresAt", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     // Force expiry by reaching into the in-memory store.
@@ -432,7 +471,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
   it("410 GONE with code=USED when already accepted", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
     prisma.rows[0].acceptedAt = new Date();
 
@@ -445,7 +484,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
   it("404 when revoked (treated as unknown)", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
     prisma.rows[0].revokedAt = new Date();
 
@@ -459,15 +498,17 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
   it("creates the Nextcloud user, marks the invite accepted, sets cookies, returns user", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
+    // ADR-013: email required; username ("alice") is derived server-side.
     const create = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "alice", displayName: "Alice Smith", role: "user" });
+      .send({ email: "alice@warp.test", displayName: "Alice Smith", role: "user" });
     const token = create.body.token;
 
     const publicApp = buildApp(prisma, null);
+    // Password must satisfy the policy: ≥12 chars + ≥3 character classes.
     const res = await request(publicApp)
       .post(`/api/auth/invites/accept/${token}`)
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
     expect(res.status).toBe(200);
     expect(res.body.user).toMatchObject({
       username: "alice",
@@ -477,8 +518,9 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     // Nextcloud create called with no admin group for "user" role.
     expect(nc.ncCreateUser).toHaveBeenCalledTimes(1);
     const callArgs = (nc.ncCreateUser as any).mock.calls[0];
+    // The derived username is stored on the invite row and passed to NC.
     expect(callArgs[1]).toBe("alice");
-    expect(callArgs[2]).toBe("longenoughpw");
+    expect(callArgs[2]).toBe("Accept-secret123");
     expect(callArgs[3]).toBe("Alice Smith");
     // Groups arg: empty array OR ["users"] — but NOT including "admin".
     const groups = callArgs[4] ?? [];
@@ -496,15 +538,16 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
   it("creates an admin invitee in the admin group", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
+    // ADR-013: email required; username ("carla") is derived server-side.
     const create = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "carla", role: "admin" });
+      .send({ email: "carla@warp.test", role: "admin" });
     const token = create.body.token;
 
     const publicApp = buildApp(prisma, null);
     const res = await request(publicApp)
       .post(`/api/auth/invites/accept/${token}`)
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
     expect(res.status).toBe(200);
 
     const callArgs = (nc.ncCreateUser as any).mock.calls[0];
@@ -512,10 +555,12 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     expect(groups).toContain("admin");
   });
 
-  it("rejects password shorter than 8 chars", async () => {
+  it("rejects a password that doesn't meet the policy", async () => {
+    // Policy: ≥12 chars AND ≥3 character classes (lower, upper, digit, symbol).
+    // A short all-lowercase password fails both rules.
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     const publicApp = buildApp(prisma, null);
@@ -529,24 +574,28 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
   it("re-accepting the same token returns 410 USED", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     const publicApp = buildApp(prisma, null);
     const first = await request(publicApp)
       .post(`/api/auth/invites/accept/${token}`)
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
     expect(first.status).toBe(200);
 
     const second = await request(publicApp)
       .post(`/api/auth/invites/accept/${token}`)
-      .send({ password: "anotherpw" });
+      .send({ password: "Accept-secret123" });
     expect(second.status).toBe(410);
     expect(second.body.code).toBe("USED");
   });
 
   it("re-validates reserved usernames at accept time (defense in depth)", async () => {
-    // Inject a row that bypassed creation validation somehow.
+    // Inject a row that bypassed creation validation somehow (e.g. a
+    // hand-edited or pre-migration row). The accept handler still runs
+    // usernameField.safeParse on the stored username and rejects invalid
+    // values before any NC or DB write.
+    // Use a policy-compliant password so the password gate is not what trips.
     const prisma = createPrismaMock();
     prisma.rows.push({
       id: "inv-bad",
@@ -565,8 +614,9 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     const app = buildApp(prisma, null);
     const res = await request(app)
       .post(`/api/auth/invites/accept/${"x".repeat(43)}`)
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
     expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid username/i);
     expect(nc.ncCreateUser).not.toHaveBeenCalled();
   });
 
@@ -575,14 +625,15 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     const app = buildApp(prisma, null);
     const res = await request(app)
       .post("/api/auth/invites/accept/totally-not-real")
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
     expect(res.status).toBe(404);
   });
 
   it("password-too-short response carries code=INVALID_PASSWORD", async () => {
+    // Policy-failing password → 400 INVALID_PASSWORD before any invite lookup.
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     const publicApp = buildApp(prisma, null);
@@ -596,7 +647,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
   it("translates ncCreateUser user-exists indicator to 409 with friendly copy", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const create = await request(app).post("/api/auth/invites").send({ username: "alice" });
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
 
     // Simulate the user-exists path — ncCreateUser throws a typed error
@@ -609,7 +660,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     const publicApp = buildApp(prisma, null);
     const res = await request(publicApp)
       .post(`/api/auth/invites/accept/${token}`)
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/already exists/i);
   });
@@ -617,6 +668,8 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
 
 describe("POST /api/auth/users — admin createUser typed user-exists detection", () => {
   it("returns 409 with friendly copy when ncCreateUser throws NextcloudUserExistsError", async () => {
+    // ADR-013: email is the required body field; username is derived server-side.
+    // Password must satisfy the policy (≥12 chars + ≥3 classes).
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
 
@@ -628,8 +681,8 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
     const res = await request(app)
       .post("/api/auth/users")
       .send({
-        username: "alice",
-        password: "longenoughpw",
+        email: "alice@warp.test",
+        password: "Accept-secret123",
         displayName: "Alice",
       });
     expect(res.status).toBe(409);
@@ -650,8 +703,8 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
     const res = await request(app)
       .post("/api/auth/users")
       .send({
-        username: "alice",
-        password: "longenoughpw",
+        email: "alice@warp.test",
+        password: "Accept-secret123",
         displayName: "Alice",
       });
     // Falls through to the next() handler → default 500.
@@ -659,6 +712,7 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
   });
 
   it("happy path returns 201 status=ok", async () => {
+    // Username is derived server-side from the email local-part.
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
     (nc.ncCreateUser as any).mockResolvedValueOnce(undefined);
@@ -666,8 +720,8 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
     const res = await request(app)
       .post("/api/auth/users")
       .send({
-        username: "alice",
-        password: "longenoughpw",
+        email: "alice@warp.test",
+        password: "Accept-secret123",
         displayName: "Alice",
       });
     expect(res.status).toBe(201);
@@ -676,8 +730,22 @@ describe("POST /api/auth/users — admin createUser typed user-exists detection"
 });
 
 describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () => {
-  it("forwards a trim+lowercased email to Nextcloud (updateUserSchema boundary)", async () => {
+  it("forwards a trim+lowercased email to Nextcloud AND the local directory row", async () => {
     const prisma = createPrismaMock();
+    // ADR-013: the edit route now writes the local directory row, so the
+    // edited user must exist locally (else 404). Seed it.
+    prisma.userRows.push({
+      id: "u-alice",
+      username: "alice",
+      nextcloudUsername: "alice",
+      displayName: "Alice",
+      email: "alice@old.test",
+      passwordHash: "$argon2id$OLD",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
     const app = buildApp(prisma);
 
     const res = await request(app)
@@ -691,5 +759,7 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
       "email",
       "alice@example.com",
     );
+    // The normalized email is also written to the local row (the login key).
+    expect(prisma.userRows[0].email).toBe("alice@example.com");
   });
 });

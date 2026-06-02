@@ -7,6 +7,8 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
+import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
 import {
@@ -17,15 +19,13 @@ import {
 } from "@/lib/api";
 import type { AuthUser } from "@/lib/types";
 
-const RESERVED_USERNAMES = ["admin", "root"];
-
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
-  const [newUsername, setNewUsername] = useState("");
+  const [newEmail, setNewEmail] = useState("");
   const [newDisplayName, setNewDisplayName] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [userError, setUserError] = useState<string | null>(null);
@@ -56,22 +56,22 @@ export default function SettingsPage() {
 
   const handleCreateUser = async () => {
     setUserError(null);
-    if (!newUsername.trim() || !newPassword.trim()) {
-      setUserError("Username and password are required");
+    if (!isValidEmail(newEmail)) {
+      setUserError("Enter a valid email address.");
       return;
     }
-    if (RESERVED_USERNAMES.includes(newUsername.trim().toLowerCase())) {
-      setUserError("This username is reserved and cannot be used");
+    if (!newPassword.trim()) {
+      setUserError("Password is required.");
       return;
     }
-    if (newPassword.length < 8) {
-      setUserError("Password must be at least 8 characters");
+    if (!validatePassword(newPassword).ok) {
+      setUserError("Password doesn't meet the requirements yet.");
       return;
     }
 
     try {
-      await createUser(newUsername, newPassword, newDisplayName || undefined);
-      setNewUsername("");
+      await createUser(newEmail, newPassword, newDisplayName || undefined);
+      setNewEmail("");
       setNewDisplayName("");
       setNewPassword("");
       setShowAddUser(false);
@@ -167,9 +167,11 @@ export default function SettingsPage() {
             <p className="type-headline text-label-primary">New User</p>
             <div className="grid grid-cols-2 gap-3">
               <input
-                value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value.toLowerCase())}
-                placeholder="Username"
+                type="email"
+                inputMode="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                placeholder="you@company.com"
                 className="dp-input"
                 autoFocus
               />
@@ -184,10 +186,11 @@ export default function SettingsPage() {
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="Password (min. 8 characters)"
+              placeholder="Create a password"
               className="dp-input"
               onKeyDown={(e) => e.key === "Enter" && handleCreateUser()}
             />
+            <PasswordRulesChecklist password={newPassword} />
             <div className="flex items-center gap-2 pt-1">
               <button onClick={handleCreateUser} className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5">
                 Create

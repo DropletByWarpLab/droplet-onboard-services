@@ -3,11 +3,26 @@ const path = require("path");
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  transpilePackages: ["@droplet/auth-policy"],
   // Monorepo: tell Next where the workspace root is so the standalone
   // file-trace walks up to the hoisted node_modules instead of stopping
   // at apps/web-dashboard. In Next 14.2 this lives under `experimental`.
   experimental: {
     outputFileTracingRoot: path.join(__dirname, "../../"),
+  },
+  webpack: (config) => {
+    // `@droplet/auth-policy` is authored for NodeNext (the orchestrator
+    // consumes it), so its barrel uses explicit `.js` import extensions
+    // (`./password.js`, `./userid.js`, …). vitest/tsx resolve those to the
+    // `.ts` sources natively, but `next build`'s webpack does not and fails
+    // with "Can't resolve './password.zod.js'". Map `.js` → `.ts`/`.tsx`
+    // first so the transpiled package resolves. (transpilePackages above
+    // tells Next to compile the package's TS sources at all.)
+    config.resolve.extensionAlias = {
+      ...(config.resolve.extensionAlias || {}),
+      ".js": [".ts", ".tsx", ".js"],
+    };
+    return config;
   },
   async rewrites() {
     // In dev mode (outside Docker), proxy API calls to local services.

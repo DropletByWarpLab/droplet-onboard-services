@@ -171,6 +171,20 @@ function createPrismaMock() {
         return users.find((u) => u.username === where.username) ?? null;
       return null;
     }),
+    // deriveUniqueUserId queries findFirst to check username uniqueness.
+    findFirst: vi.fn(async ({ where }: any) => {
+      const orClauses = where?.OR ?? [];
+      return (
+        users.find((u) =>
+          orClauses.some(
+            (clause: any) =>
+              (clause.username !== undefined && u.username === clause.username) ||
+              (clause.nextcloudUsername !== undefined &&
+                u.nextcloudUsername === clause.nextcloudUsername),
+          ),
+        ) ?? null
+      );
+    }),
   };
   self.userInvite = {
     create: vi.fn(async ({ data }: any) => {
@@ -283,12 +297,12 @@ function sessionJwt(res: request.Response) {
 }
 
 const INVITE = {
-  username: "alice",
   displayName: "Alice Smith",
   email: "alice@warp.test",
   role: "family",
 } as const;
-const INVITE_PASSWORD = "invite-secret-pw"; // ≥ 8 chars (acceptInviteSchema)
+// Policy-compliant: ≥12 chars, 3-of-4 classes (lower, upper, digit, symbol).
+const INVITE_PASSWORD = "Accept-secret123";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -363,5 +377,71 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
     expect(login.status).toBe(401);
     expect(login.body.error).toBe("Invalid credentials");
     expect(login.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("rejects a weak accept password with 400 INVALID_PASSWORD", async () => {
+    // A password that is long enough (≥8 chars) but fails the 3-of-4 class
+    // policy must return 400 with code INVALID_PASSWORD so the dashboard
+    // can surface the policy hint.
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), { ...INVITE });
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: "weakpassword" }); // all-lowercase, no digits/symbols
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_PASSWORD");
+  });
+});
+
+describe("Fix B — invite-accept upsert refreshes email on the UPDATE path (re-acceptance)", () => {
+  it("overwrites a stale email on re-acceptance so the email-keyed login still resolves", async () => {
+    const prisma = createPrismaMock();
+
+    // Issue an invite with the fresh email.
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Bob Re-accept",
+      email: "fresh@warp.test",
+      role: "family",
+    });
+
+    // The invite derives the username from the email prefix: "fresh@warp.test"
+    // → nextcloudUsername "fresh". Seed an existing User row with a STALE
+    // email under that same nextcloudUsername so the upsert hits the UPDATE path.
+    const existingRow = {
+      id: "u-existing-fresh",
+      username: "fresh",
+      nextcloudUsername: "fresh",
+      displayName: "Fresh Old",
+      email: "stale@old.test",
+      passwordHash: "$argon2id$STALE-HASH",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    prisma._users.push(existingRow);
+
+    // ncLoginWithCredentials is called after a successful accept.
+    (nc.ncLoginWithCredentials as any).mockResolvedValue({
+      token: "nc-app-password",
+      loginName: "fresh",
+    });
+
+    const publicApp = buildApp(prisma, null);
+    const accept = await request(publicApp)
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+
+    // The UPDATE path must have refreshed the email column — the row should
+    // now carry the invite's fresh email, not the stale one.
+    const row = prisma._users.find((u: any) => u.nextcloudUsername === "fresh");
+    expect(row).toBeDefined();
+    expect(row.email).toBe("fresh@warp.test");
+    // Verify that the old stale email is gone.
+    expect(row.email).not.toBe("stale@old.test");
   });
 });

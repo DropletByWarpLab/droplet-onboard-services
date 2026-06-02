@@ -497,9 +497,11 @@ describe("WARP-485 round 2 — JWT invite-accept path", () => {
     });
 
     const app = buildApp(prisma);
+    // Password must satisfy the policy: ≥12 chars + ≥3 character classes
+    // (lowercase, uppercase, digit, symbol). "longenoughpw" fails — only 1 class.
     const res = await request(app)
       .post(`/api/auth/invites/accept/${token}`)
-      .send({ password: "longenoughpw" });
+      .send({ password: "Accept-secret123" });
 
     expect(res.status).toBe(200);
 

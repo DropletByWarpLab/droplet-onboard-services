@@ -249,17 +249,17 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     expect(postClaimMock).toHaveBeenCalledWith("DRPL-7K2Q-9F4M");
 
     // 3. Account → fill + submit.
-    fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
-      target: { value: "owner" },
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "owner@warp.test" },
     });
     fireEvent.change(screen.getByPlaceholderText(/your name/i), {
       target: { value: "Robin" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/min\. 8 characters/i), {
-      target: { value: "longenoughpw" },
+    fireEvent.change(screen.getByPlaceholderText(/create a password/i), {
+      target: { value: "Abcdefghijk1" },
     });
     fireEvent.change(screen.getByPlaceholderText(/repeat password/i), {
-      target: { value: "longenoughpw" },
+      target: { value: "Abcdefghijk1" },
     });
     await act(async () => {
       fireEvent.click(
@@ -269,8 +269,8 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(setupAdminMock).toHaveBeenCalledWith("owner", "longenoughpw", "Robin");
-    expect(loginUserMock).toHaveBeenCalledWith("owner", "longenoughpw");
+    expect(setupAdminMock).toHaveBeenCalledWith("owner@warp.test", "Abcdefghijk1", "Robin");
+    expect(loginUserMock).toHaveBeenCalledWith("owner@warp.test", "Abcdefghijk1");
 
     // 3b. Org (PR #380) → name the workspace + reserve the slug → continue.
     // Org slots directly after account (account → org → twofactor → internet).
