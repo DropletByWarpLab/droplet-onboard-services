@@ -65,6 +65,9 @@ class RerankerSingleton:
     _instance: Optional["RerankerSingleton"] = None
     # WARP-644: remembers a failed init so we don't re-attempt (and re-log)
     # the heavy import/load on every Rerank call once it's known-broken.
+    # Intentionally never reset at runtime — a fixed optimum/onnxruntime
+    # install requires a container restart to recover (correct for a
+    # process-lifetime singleton cache).
     _unavailable_reason: Optional[str] = None
 
     def __init__(self) -> None:
