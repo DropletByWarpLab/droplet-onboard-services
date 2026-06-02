@@ -51,8 +51,10 @@ def _fetch_item_status(item_id: str) -> str | None:
     """
     import db
 
-    conn = db.get_conn()
-    with conn.cursor() as cur:
+    # IDX-01: this raw-cursor read runs on the shared module connection, so it
+    # must take the same lock db.py's helpers use to avoid concurrent execute()
+    # on one psycopg2 connection.
+    with db._db_lock, db.get_conn().cursor() as cur:
         cur.execute(
             'SELECT "status" FROM "BrainMemoryItem" WHERE "id" = %s',
             (item_id,),
