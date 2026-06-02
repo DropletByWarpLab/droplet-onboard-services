@@ -114,7 +114,7 @@ services/ai-gateway/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLLAMA_URL` | `http://host.docker.internal:8002/proxy` | ollama-manager chat-proxy URL on the Jetson side. Provides tool-call observability + JSON repair + circuit breaker; exposes `/health.limits` so ai-gateway can size outbound concurrency. |
+| `OLLAMA_URL` | `http://host.docker.internal:11434` | **Direct** to Ollama's OpenAI-compat `/v1/chat/completions`. Do **not** point this at ollama-manager's `:8002/proxy` for chat — that path has a 120 s read leg (`TIMEOUT_PROXY`) that breaks the agent loop on cold/CPU model loads (see repo `CLAUDE.md` → "Ollama call path"). The `:8002/proxy` URL is an explicit opt-in for tool-call observability + JSON repair + circuit breaker only; lifecycle + `/health.limits` live on ollama-manager `:8002`, **not** in the chat path. |
 | `OLLAMA_READ_TIMEOUT` | `300` | Read timeout (s) for Ollama HTTP calls. Cold-loading a model on the Jetson can take 30-90s; long completions stream for minutes. Bump if a larger model on slower hardware times out during load. |
 | `REDIS_URL` | `redis://localhost:6379` | Response caching |
 | `MQTT_BROKER` | `mqtt://localhost:1883` | Event bus |

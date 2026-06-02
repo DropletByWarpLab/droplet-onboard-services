@@ -4,7 +4,7 @@ get back the assistant's reply.
 This is the glue layer that closes the voice loop. The voice path
 mic → wake → STT → text now hands that text to the orchestrator's
 `/api/llm/chat` route; the orchestrator runs the full ReAct agent loop
-(MCP tool dispatch, ai-gateway → ollama-manager :8002 → Ollama) and
+(MCP tool dispatch, ai-gateway → Ollama :11434 direct) and
 returns the final assistant text. The pipeline then feeds that through
 TTS to the speaker.
 
@@ -22,8 +22,10 @@ Why we call the orchestrator (not ai-gateway directly) — per shared_brain
     orchestrator. There is no path to MCP that bypasses the
     orchestrator's agent loop.
   * So: voice → orchestrator `/api/llm/chat` → agent loop →
-    ai-gateway → ollama-manager → Ollama, with `mcpClient.callTool()`
-    fan-out for tool_calls. Single, canonical path.
+    ai-gateway → Ollama `:11434` (direct), with `mcpClient.callTool()`
+    fan-out for tool_calls. Single, canonical path. (Lifecycle/health
+    live on ollama-manager `:8002`; its `/proxy` is an opt-in that is
+    NOT in the chat path — see repo `CLAUDE.md` "Ollama call path".)
 
 Auth — the orchestrator's `/api/llm/chat` requires a verified
 principal. Voice doesn't have a human session, so it uses a
