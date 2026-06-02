@@ -128,7 +128,10 @@ class ModelsResponse(BaseModel):
 
 
 class ApiKeyRequest(BaseModel):
-    api_key: str
+    # Upper bound guards the unauthenticated-reachable key endpoint: without it
+    # a multi-megabyte body is PBKDF2'd (480k iterations) and written to disk on
+    # every store/get. Real provider keys are well under 512 chars.
+    api_key: str = Field(..., max_length=512)
 
 
 class KeyStatusResponse(BaseModel):

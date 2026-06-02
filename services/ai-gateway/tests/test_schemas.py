@@ -163,6 +163,16 @@ class TestApiKeyRequest:
         req = ApiKeyRequest(api_key="sk-ant-abc123")
         assert req.api_key == "sk-ant-abc123"
 
+    def test_oversized_key_rejected(self):
+        # GW-10: an unbounded body would be PBKDF2'd (480k iters) and written to
+        # disk on the unauthenticated key endpoint. Cap it at the schema edge.
+        with pytest.raises(ValidationError):
+            ApiKeyRequest(api_key="x" * 513)
+
+    def test_key_at_max_length_allowed(self):
+        req = ApiKeyRequest(api_key="x" * 512)
+        assert len(req.api_key) == 512
+
 
 class TestKeyStatusResponse:
     def test_empty_providers(self):

@@ -14,11 +14,20 @@ MIN_KEY_LENGTHS = {
     "openai": 20,
 }
 
+# Upper bound on any accepted key. Real provider keys are ~100-200 chars; a
+# body beyond this is junk/abuse. Bounding here (in addition to
+# ApiKeyRequest.max_length) keeps the limit enforced for any direct caller of
+# save_api_key, not just the HTTP route, so an oversized blob is never PBKDF2'd
+# and written to disk. See GW-10.
+MAX_KEY_LENGTH = 512
+
 
 async def validate_key_format(provider: str, api_key: str) -> bool:
     """Basic validation that an API key looks reasonable."""
     min_length = MIN_KEY_LENGTHS.get(provider, 10)
     if len(api_key) < min_length:
+        return False
+    if len(api_key) > MAX_KEY_LENGTH:
         return False
     if " " in api_key:
         return False

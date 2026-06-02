@@ -15,6 +15,13 @@ class TestValidateKeyFormat:
     async def test_too_short_key(self):
         assert await validate_key_format("anthropic", "short") is False
 
+    async def test_too_long_key(self):
+        # GW-10: reject an oversized key before it's PBKDF2'd + written to disk.
+        assert await validate_key_format("anthropic", "x" * 513) is False
+
+    async def test_key_at_max_length_ok(self):
+        assert await validate_key_format("anthropic", "x" * 512) is True
+
     async def test_key_with_spaces(self):
         assert await validate_key_format("openai", "sk-proj with spaces") is False
 
