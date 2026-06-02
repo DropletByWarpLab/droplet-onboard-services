@@ -32,6 +32,13 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+# IDX-08 — cap the in-memory history so it can't grow unbounded. The hourly
+# cron would otherwise add ~8,760 RunRecords/year with no eviction, despite the
+# "bounded history" docstring. The filesystem (results-*.json) stays
+# authoritative for older runs, so trimming the in-memory tail only costs a
+# filesystem re-read for a run older than the last `_MAX_RECORDS`.
+_MAX_RECORDS = 256
+
 
 class RunStatus(str, Enum):
     """Explicit run lifecycle states. `unknown` is a first-class value
@@ -77,9 +84,10 @@ class RunStateStore:
         self._lock = threading.Lock()
         self._busy = False
         self._current_run_id: Optional[str] = None
-        # Keep a bounded history so GET /runs/{id} can answer for runs
-        # that finished since the last restart without re-reading the
-        # filesystem. The filesystem remains authoritative for older runs.
+        # Keep a bounded history (capped at `_MAX_RECORDS`, evicted oldest-first
+        # in `_evict_locked`) so GET /runs/{id} can answer for recent runs
+        # without re-reading the filesystem. The filesystem remains
+        # authoritative for older/evicted runs.
         self._records: dict[str, RunRecord] = {}
 
     @staticmethod
@@ -107,7 +115,26 @@ class RunStateStore:
                 started_at=self._now(),
                 runs_total=runs_total,
             )
+            self._evict_locked()
             return True, None
+
+    def _evict_locked(self) -> None:
+        """Trim oldest records down to `_MAX_RECORDS` (caller holds `_lock`).
+
+        dict is insertion-ordered, so the oldest run_ids come first. The
+        current in-flight run is never evicted, even if it sorts oldest, so a
+        long-running bootstrap can't lose its own status record.
+        """
+        overflow = len(self._records) - _MAX_RECORDS
+        if overflow <= 0:
+            return
+        for run_id in list(self._records.keys()):
+            if overflow <= 0:
+                break
+            if run_id == self._current_run_id:
+                continue
+            del self._records[run_id]
+            overflow -= 1
 
     def mark_bootstrap_progress(self, run_id: str, runs_done: int) -> None:
         with self._lock:
