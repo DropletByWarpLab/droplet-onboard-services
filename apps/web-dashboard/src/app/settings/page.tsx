@@ -7,6 +7,8 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
+import { validatePassword } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useAuth } from "@/lib/auth";
 import {
@@ -64,8 +66,8 @@ export default function SettingsPage() {
       setUserError("This username is reserved and cannot be used");
       return;
     }
-    if (newPassword.length < 8) {
-      setUserError("Password must be at least 8 characters");
+    if (!validatePassword(newPassword).ok) {
+      setUserError("Password doesn't meet the requirements yet.");
       return;
     }
 
@@ -188,6 +190,7 @@ export default function SettingsPage() {
               className="dp-input"
               onKeyDown={(e) => e.key === "Enter" && handleCreateUser()}
             />
+            <PasswordRulesChecklist password={newPassword} />
             <div className="flex items-center gap-2 pt-1">
               <button onClick={handleCreateUser} className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5">
                 Create
