@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from pathlib import Path
 
 import grpc
@@ -25,6 +26,19 @@ from scheduler import InferenceScheduler, QueueFullError
 logger = logging.getLogger(__name__)
 
 GRPC_PORT = 50051
+
+
+def _provider_error_detail(exc: Exception, context: str) -> str:
+    """GW-08: log the full provider/LiteLLM exception server-side and return a
+    generic, non-leaky detail string for ``context.set_details``.
+
+    Mirrors the HTTP path in ``main.py`` so the gRPC surface doesn't echo
+    upstream provider error bodies/URLs/model names to callers. A short
+    correlation id ties the opaque client message to the server-side log.
+    """
+    correlation_id = uuid.uuid4().hex[:12]
+    logger.error("%s [correlation_id=%s]: %s", context, correlation_id, exc)
+    return f"Upstream provider error (ref: {correlation_id})"
 
 
 class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
@@ -87,9 +101,9 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 finish_reason=choice.get("finish_reason", "stop"),
             )
         except Exception as e:
-            logger.error("gRPC Chat error: %s", e)
+            # GW-08: don't echo upstream/LiteLLM error text to the caller.
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Inference error: {str(e)}")
+            context.set_details(_provider_error_detail(e, "gRPC Chat error"))
             return inference_pb2.ChatResponse()
         finally:
             await self._scheduler.release()
@@ -139,9 +153,9 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 except (json.JSONDecodeError, IndexError, KeyError):
                     continue
         except Exception as e:
-            logger.error("gRPC StreamChat error: %s", e)
+            # GW-08: generic message + correlation id; full error logged server-side.
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Streaming error: {str(e)}")
+            context.set_details(_provider_error_detail(e, "gRPC StreamChat error"))
         finally:
             await self._scheduler.release()
 
