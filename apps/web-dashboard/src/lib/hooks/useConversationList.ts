@@ -17,6 +17,7 @@ import {
   groupConversationsByDate,
   type ConversationGroup,
 } from "@/lib/group-conversations-by-date";
+import { translateError } from "@/lib/friendly-errors";
 
 type ConversationGroupRow = ConversationGroup<ConversationSummary>;
 
@@ -73,7 +74,7 @@ export function useConversationList(): {
         setHasMore(page.length === PAGE_SIZE);
       } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load conversations");
+        setError(translateError(err, "chat"));
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -97,7 +98,7 @@ export function useConversationList(): {
       setHasMore(next.length === PAGE_SIZE);
     } catch (err) {
       if (!isMountedRef.current) return;
-      setError(err instanceof Error ? err.message : "Failed to load more");
+      setError(translateError(err, "chat"));
     } finally {
       inFlightRef.current = false;
     }

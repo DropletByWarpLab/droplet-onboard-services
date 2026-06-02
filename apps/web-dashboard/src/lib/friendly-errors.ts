@@ -44,6 +44,10 @@ export type ErrorDomain =
   | "push"
   | "knowledge"
   | "media"
+  | "network"
+  | "vpn"
+  | "camera"
+  | "device"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -66,6 +70,14 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't load your recently indexed files right now. Try again in a moment.",
   media:
     "We couldn't play that recording. Try a different segment, or reload the page.",
+  network:
+    "We couldn't update your network settings right now. Try again in a moment.",
+  vpn:
+    "We couldn't update remote access right now. Try again in a moment.",
+  camera:
+    "We couldn't add that camera right now. Check it's powered on and connected, then try again.",
+  device:
+    "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -85,6 +97,18 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That email address doesn't look right. Check it and try again.",
     INVALID_REQUEST:
       "Some of those details weren't valid. Check the form and try again.",
+    // Two-factor (TOTP) verify / enrollment — codes emitted by
+    // apps/orchestrator/src/routes/auth.ts. The plain "auth" fallback
+    // talks about username/password, which is wrong for a 2FA code, so
+    // map these explicitly.
+    TOTP_INVALID:
+      "That code didn't match. Check your authenticator app and try again.",
+    RECOVERY_INVALID:
+      "That recovery code didn't match. Try another one of your saved codes.",
+    TOTP_NOT_ENROLLED:
+      "Two-factor setup hasn't started yet. Begin again to get a fresh code.",
+    TOTP_ALREADY_ENABLED:
+      "Two-factor is already turned on for this account.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",
@@ -198,6 +222,29 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We had trouble streaming that recording. Check the connection and try again.",
     UNSUPPORTED:
       "This browser doesn't support HLS playback. Try Safari or a recent Chrome / Edge / Firefox.",
+  },
+  network: {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    NOT_FOUND: "We couldn't find that device on your network anymore.",
+  },
+  vpn: {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    NOT_FOUND: "That remote-access profile is no longer available.",
+  },
+  camera: {
+    NETWORK:
+      "We couldn't reach that camera. Check it's powered on and connected, then try again.",
+    AUTH_REQUIRED:
+      "That camera needs a username and password. Check the credentials and try again.",
+    NOT_FOUND: "We couldn't find that camera on your network.",
+  },
+  device: {
+    NETWORK:
+      "We couldn't reach that device. Check it's powered on and nearby, then try again.",
+    NOT_FOUND: "We couldn't find that device.",
+    TIMEOUT: "That device took too long to respond. Try again in a moment.",
   },
   generic: {
     NETWORK:

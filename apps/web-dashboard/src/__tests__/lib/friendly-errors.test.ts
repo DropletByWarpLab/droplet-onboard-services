@@ -33,6 +33,10 @@ const DOMAINS: ErrorDomain[] = [
   "push",
   "knowledge",
   "media",
+  "network",
+  "vpn",
+  "camera",
+  "device",
   "generic",
 ];
 
@@ -186,5 +190,46 @@ describe("translateError — invite domain (parity with /invite/[token])", () =>
     expect(translateError({ code: "USED" }, "invite").toLowerCase()).toMatch(/used|already/);
     expect(translateError({ code: "EXPIRED" }, "invite").toLowerCase()).toMatch(/expired|fresh/);
     expect(translateError({ code: "INVALID_PASSWORD" }, "invite").toLowerCase()).toMatch(/password/);
+  });
+});
+
+// WARP-646 — domains added so the ~46 raw-`err.message` toasts across the
+// dashboard (files, network, remote-access, device pairing, cameras, …)
+// route through the translator instead of leaking orchestrator strings.
+describe("translateError — network / vpn / camera / device domains (WARP-646)", () => {
+  it("returns a friendly fallback for every new domain and never leaks the raw message", () => {
+    const raw = "ECONNREFUSED 127.0.0.1:3000";
+    for (const domain of ["network", "vpn", "camera", "device"] as ErrorDomain[]) {
+      const result = translateError({ message: raw }, domain);
+      expect(result.length, `domain=${domain}`).toBeGreaterThan(0);
+      expect(result, `domain=${domain}`).not.toContain("ECONNREFUSED");
+      expect(result, `domain=${domain}`).not.toContain("3000");
+    }
+  });
+
+  it("maps a NETWORK substring to a connection-aware string per domain", () => {
+    for (const domain of ["network", "vpn", "camera", "device"] as ErrorDomain[]) {
+      const result = translateError({ message: "Failed to fetch" }, domain);
+      expect(result.toLowerCase(), `domain=${domain}`).toMatch(
+        /connection|reach|powered|connected|moment/,
+      );
+    }
+  });
+
+  it("camera AUTH_REQUIRED mentions credentials", () => {
+    const result = translateError({ code: "AUTH_REQUIRED" }, "camera");
+    expect(result.toLowerCase()).toMatch(/username|password|credential/);
+  });
+});
+
+describe("translateError — auth domain two-factor codes (WARP-646)", () => {
+  it("maps TOTP_INVALID to a code-mismatch string, not a username/password one", () => {
+    const result = translateError({ code: "TOTP_INVALID" }, "auth");
+    expect(result.toLowerCase()).toMatch(/code|authenticator/);
+  });
+
+  it("maps RECOVERY_INVALID to a recovery-code string", () => {
+    const result = translateError({ code: "RECOVERY_INVALID" }, "auth");
+    expect(result.toLowerCase()).toMatch(/recovery|code/);
   });
 });

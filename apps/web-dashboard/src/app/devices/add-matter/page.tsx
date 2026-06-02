@@ -25,6 +25,7 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Lightbulb, Loader2 } from "lucide-react";
 import { commissionMatterDevice } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 
 // WARP-102: lazy-load the QR scanner. `@zxing/browser` + `@zxing/library`
 // are ~200 KB minified each and not tree-shakeable (the decoder pulls a
@@ -74,7 +75,7 @@ export default function AddMatterDevicePage() {
       const result = await commissionMatterDevice(pairingCode);
       setState({ phase: "done", nodeId: result.nodeId });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Commissioning failed";
+      const msg = translateError(err, "device");
       // Keep customer's manually-entered code in mind for retry — but
       // the textbox lives inside MatterQrScanner so we can't repopulate
       // without lifting state. For now, restart at scan with the error.
