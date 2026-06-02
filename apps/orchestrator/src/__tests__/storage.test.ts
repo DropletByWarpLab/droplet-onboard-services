@@ -351,6 +351,29 @@ describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
       expect(res.body.ok).toBe(false);
     });
 
+    // WARP-645: a connection error (bridge not running) must degrade with a
+    // typed reason instead of leaking the raw "fetch failed" string.
+    it("degrades with 503 + reason when the bridge is not running (ECONNREFUSED)", async () => {
+      const connErr = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw connErr;
+        }),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(503);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.reason).toBe("bridge_unavailable");
+      // The raw error string must NOT leak through on this expected path.
+      expect(res.body.error).not.toMatch(/fetch failed/i);
+    });
+
     it("forbids non-admins", async () => {
       const app = express();
       app.use(express.json());
@@ -443,6 +466,31 @@ describe("storage routes — SMART + eject (WARP-612)", () => {
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string> }];
       expect(String(url)).toMatch(/\/drives\/U1\/eject$/);
       expect(init.headers["X-Droplet-Auth"]).toBe("secret-token");
+      vi.unstubAllEnvs();
+    });
+
+    // WARP-645: a connection error (bridge not running) must degrade with a
+    // typed reason instead of leaking the raw "fetch failed" string.
+    it("degrades with 503 + reason when the bridge is not running (ECONNREFUSED)", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+      const connErr = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw connErr;
+        }),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(503);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.reason).toBe("bridge_unavailable");
+      // The raw error string must NOT leak through on this expected path.
+      expect(res.body.error).not.toMatch(/fetch failed/i);
       vi.unstubAllEnvs();
     });
 

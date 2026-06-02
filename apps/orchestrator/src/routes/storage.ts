@@ -327,6 +327,17 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       return res.json({ ok: true });
     } catch (err) {
+      // The device-bridge is optional (OLED/display profile only). A connection
+      // refusal means it simply isn't running on this host — degrade cleanly
+      // with a typed reason instead of leaking the raw "fetch failed" string.
+      if (isBridgeConnectionError(err)) {
+        logger.warn({ err }, "device-bridge not reachable (bridge_unavailable)");
+        return res.status(503).json({
+          ok: false,
+          reason: "bridge_unavailable",
+          error: "The storage service isn't reachable right now.",
+        });
+      }
       logger.warn({ err }, "Failed to trigger drive rescan");
       return res
         .status(502)
@@ -387,6 +398,17 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       return res.json({ ok: true });
     } catch (err) {
+      // The device-bridge is optional (OLED/display profile only). A connection
+      // refusal means it simply isn't running on this host — degrade cleanly
+      // with a typed reason instead of leaking the raw "fetch failed" string.
+      if (isBridgeConnectionError(err)) {
+        logger.warn({ err, uuid }, "device-bridge not reachable (bridge_unavailable)");
+        return res.status(503).json({
+          ok: false,
+          reason: "bridge_unavailable",
+          error: "The storage service isn't reachable right now.",
+        });
+      }
       logger.warn({ err, uuid }, "Failed to eject drive");
       return res
         .status(502)
