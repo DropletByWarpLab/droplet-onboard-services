@@ -100,6 +100,50 @@ class ConnectionLost(Exception):
     pass
 
 
+def _ubus_object_absent(exc: UbusError) -> bool:
+    """True when a UbusError means "this object isn't present on this deployment".
+
+    Two shapes map to the same "not on this build" meaning (ADR-011):
+
+    * A **per-object** miss reports a numeric ``NOT_FOUND``/``NO_DATA`` code —
+      same class `get_all_interface_statuses()` already degrades on.
+    * A **whole missing ubus object** (no ``network.wireless`` / ``dhcp`` /
+      ``firewall`` registered at all) surfaces as a top-level JSON-RPC error,
+      which the low-level client raises as ``UbusError(-1, "Object not found")``
+      (code -1, status ``UNKNOWN(-1)``). This is the exact 500 root-caused on the
+      single-box. Matched by message so an unrelated -1 (e.g. "Empty result")
+      stays a real fault.
+
+    Everything else — ``PERMISSION_DENIED`` (auth), ``INVALID_ARGUMENT`` (caller
+    bug), any other code — is NOT absence and must propagate.
+    """
+    if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+        return True
+    return exc.code == -1 and "not found" in str(exc).lower()
+
+
+def _section_or(call, fallback):
+    """Run an optional network-summary section, degrading a missing ubus object
+    to ``fallback`` instead of 500-ing the whole summary (ADR-011 — a missing
+    optional surface is data, not a crash). Mirrors `interface_stub(present=False)`.
+
+    Only the "object not present on this deployment" class (see
+    :func:`_ubus_object_absent`) degrades; genuine ubus faults and a total
+    transport loss (`ConnectionLost`) propagate so real problems still surface.
+    The ``fallback`` is passed by the caller (never shared/mutated here).
+    """
+    try:
+        return call()
+    except UbusError as exc:
+        if _ubus_object_absent(exc):
+            logger.warning(
+                "ubus object absent on this deployment (%s); degrading section "
+                "to empty for shape-agnostic summary", exc,
+            )
+            return fallback
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Core JSON-RPC client
 # ---------------------------------------------------------------------------
@@ -344,9 +388,15 @@ class NetworkApi:
         contract so a single interface never 500s the whole Network overview
         (ADR-011):
 
-        * **Not configured on this box** (ubus ``NOT_FOUND``) — e.g. a single-box
-          where WAN is handled by the host, not the containerised OpenWrt —
-          reported as an explicit ``present: False`` stub.
+        * **Not present on this box** — e.g. a single-box where WAN is handled by
+          the host, not the containerised OpenWrt — reported as an explicit
+          ``present: False`` stub. Covers BOTH shapes of "absent" via
+          :func:`_ubus_object_absent`: a configured-but-missing interface (numeric
+          ubus ``NOT_FOUND``/``NO_DATA``) AND a whole missing ubus object, which
+          the low-level client surfaces as ``UbusError(-1, "Object not found")``
+          (the live single-box case — `network.interface.wan` simply isn't
+          registered, so `ubus call` returns a top-level JSON-RPC error, not a
+          numeric code).
         * **Transient read failure** of a configured interface (ubus
           ``TIMEOUT``) — reported as ``present: True, up: False`` and a warning
           logged, so a blip on one interface degrades to "down" and self-heals
@@ -368,7 +418,7 @@ class NetworkApi:
                 status["present"] = True
                 out[name] = status
             except UbusError as exc:
-                if exc.code == UBUS_STATUS_NOT_FOUND:
+                if _ubus_object_absent(exc):
                     out[name] = interface_stub(present=False)
                 elif exc.code == UBUS_STATUS_TIMEOUT:
                     logger.warning(
@@ -1512,18 +1562,22 @@ def get_network_summary(router: DropletRouter) -> dict:
     Returns a dict with interfaces, wireless, DHCP leases, and system info
     that can be fed into the LLM's context window.
     """
-    # Shape-agnostic (ADR-011): on a box without `wan` the per-interface
-    # NOT_FOUND degrades to a present:False stub instead of raising and breaking
-    # the whole LLM summary.
+    # Shape-agnostic (ADR-011): a minimal deployment may not expose every
+    # optional ubus object. The interface path already degrades a missing `wan`
+    # to a present:False stub; each independent optional section below degrades
+    # the same way (a missing object is data, not a crash) so the whole summary
+    # never 500s and the dashboard doesn't read the router as offline. `system`
+    # (board_info) is intentionally NOT degraded — it's a core object on every
+    # build, so its absence is a genuinely broken router, which should surface.
     interfaces = router.network.get_all_interface_statuses()
     return {
         "system": router.system.board_info(),
-        "resources": router.system.resource_info(),
+        "resources": _section_or(router.system.resource_info, {}),
         "lan": interfaces.get("lan", interface_stub(present=False)),
         "wan": interfaces.get("wan", interface_stub(present=False)),
-        "wireless": router.wireless.status(),
-        "dhcp_leases": router.dhcp.active_leases(),
-        "firewall_zones": router.firewall.get_zones(),
+        "wireless": _section_or(router.wireless.status, {}),
+        "dhcp_leases": _section_or(router.dhcp.active_leases, []),
+        "firewall_zones": _section_or(router.firewall.get_zones, {}),
     }
 
 
