@@ -507,6 +507,35 @@ export function createSetupRouter(prisma: PrismaClient): Router {
   // NEVER sent off it (FEATURES.md §10). This handler makes no outbound call.
   router.post("/setup/org", async (req: Request, res, next) => {
     try {
+      // ORCH-04 — this route is on the public allow-list (no authMiddleware),
+      // and `persistOrg` does an UNCONDITIONAL upsert of the Workspace
+      // singleton (clearing optional fields with `?? null` each call). Gate
+      // it the same way the lifecycle-mutating `appliance:"ready"` PATCH is
+      // gated above: a write is allowed when EITHER
+      //   (a) the request carries a valid dashboard session cookie (the
+      //       wizard's account step authenticated the owner before the org
+      //       step, so the org POST rides that cookie — verified inline
+      //       because this router mounts before authMiddleware), OR
+      //   (b) setup is not yet finished (`appliance !== "ready"`), i.e.
+      //       genuine first-run/unclaimed onboarding, which must stay open.
+      // Once the appliance is claimed (`appliance:"ready"`), an anonymous LAN
+      // client must NOT be able to silently rename the workspace, change its
+      // tz/logo, or re-reserve its slug — so we require a session then. This
+      // also closes the unauthenticated slug-uniqueness probe oracle on a
+      // set-up box.
+      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+      if (!session) {
+        const { appliance } = await getSetupState(prisma);
+        if (appliance === "ready") {
+          res.status(401).json({
+            error: "Editing the workspace requires an authenticated session.",
+            code: "ORG_AUTH_REQUIRED",
+          });
+          return;
+        }
+      }
+
       const parsed = orgSchema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({

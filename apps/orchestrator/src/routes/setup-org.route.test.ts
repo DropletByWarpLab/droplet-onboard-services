@@ -37,6 +37,9 @@ function createPrismaMock() {
     _seedWorkspace: (w: Record<string, unknown> | null) => {
       workspace = w;
     },
+    _seedSetup: (s: Record<string, unknown> | null) => {
+      setup = s;
+    },
     _workspace: () => workspace,
     _setupStep: () => setup?.setupStep ?? null,
     workspace: {
@@ -184,5 +187,70 @@ describe("POST /api/setup/org (PR #380)", () => {
     const ws = prisma._workspace()!;
     expect(ws.industry ?? null).toBeNull();
     expect(ws.size ?? null).toBeNull();
+  });
+
+  // ── ORCH-04: auth gate on a claimed appliance ──────────────────────────
+  describe("ORCH-04 — auth gate once the appliance is claimed", () => {
+    it("rejects an unauthenticated POST once the appliance is `ready` (401, no write)", async () => {
+      // Appliance already claimed/set up + a workspace already persisted.
+      prisma._seedSetup({
+        id: "singleton",
+        state: "ready",
+        setupStep: "done",
+        userTourCompleted: true,
+      });
+      prisma._seedWorkspace({
+        id: 1,
+        slug: "acme",
+        displayName: "Acme HQ",
+        orgConfigured: true,
+      });
+
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .send({ ...VALID_BODY, name: "Evil Rename", slug: "evil" });
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("ORG_AUTH_REQUIRED");
+      // The live workspace singleton was NOT overwritten.
+      const ws = prisma._workspace()!;
+      expect(ws.displayName).toBe("Acme HQ");
+      expect(ws.slug).toBe("acme");
+    });
+
+    it("allows an AUTHENTICATED owner to edit the workspace on a claimed appliance", async () => {
+      prisma._seedSetup({
+        id: "singleton",
+        state: "ready",
+        setupStep: "done",
+        userTourCompleted: true,
+      });
+      prisma._seedWorkspace({
+        id: 1,
+        slug: "acme",
+        displayName: "Acme HQ",
+        orgConfigured: true,
+      });
+
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .set("Cookie", "droplet_session=valid-session")
+        .send({ ...VALID_BODY, name: "Acme Renamed", slug: "acme-2" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.slug).toBe("acme-2");
+      expect(prisma._workspace()!.displayName).toBe("Acme Renamed");
+    });
+
+    it("still allows first-run (unclaimed) setup WITHOUT a session — no regression", async () => {
+      // No setup row seeded → appliance defaults to "unclaimed" (first run).
+      const res = await request(buildApp(prisma))
+        .post("/api/setup/org")
+        .send(VALID_BODY);
+
+      expect(res.status).toBe(200);
+      expect(res.body.slug).toBe("acme");
+      expect(prisma._workspace()!.orgConfigured).toBe(true);
+    });
   });
 });
