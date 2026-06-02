@@ -20,7 +20,61 @@ from cryptography.hazmat.primitives import hashes
 logger = logging.getLogger(__name__)
 
 KEYS_DIR = Path(os.getenv("KEYS_DIR", "/data/keys"))
-DEVICE_SECRET = os.getenv("DEVICE_SECRET", "dev-secret-change-in-production")
+
+# The literal fallback used when DEVICE_SECRET is unset. Every device that
+# boots without setup.sh's per-device secret would otherwise derive its Fernet
+# key from this single public string — i.e. encrypt its cloud BYOK keys under a
+# key whose entropy is zero and known to anyone with the source. We keep the
+# constant named so we can detect when it's active and refuse to ship with it.
+_DEV_DEFAULT_SECRET = "dev-secret-change-in-production"
+DEVICE_SECRET = os.getenv("DEVICE_SECRET", _DEV_DEFAULT_SECRET)
+
+
+def _is_production() -> bool:
+    """Whether we're running in a non-dev deployment.
+
+    Mirrors the FIPS boot self-test gating in main.py (DROPLET_FIPS_REQUIRED):
+    an explicit production signal opts into fail-closed behaviour, while dev/CI
+    (no signal) stays permissive so the local default keeps working. We treat
+    either ``DROPLET_ENV in {production, prod}`` or ``DROPLET_FIPS_REQUIRED``
+    being truthy as "this is a shipping box".
+    """
+    env = (os.getenv("DROPLET_ENV") or "").strip().lower()
+    if env in ("production", "prod"):
+        return True
+    fips = (os.getenv("DROPLET_FIPS_REQUIRED") or "").strip().lower()
+    return fips in ("true", "1", "yes")
+
+
+def _assert_device_secret_safe() -> None:
+    """Refuse to use the public dev default for real key material.
+
+    Fail-closed in production (raise at import, before the app serves a
+    request — same posture as the FIPS self-test). In dev/CI, log an ERROR so
+    the weak default is at least visible. A device that encrypts BYOK keys
+    under the dev default and later receives a real DEVICE_SECRET silently
+    loses every stored key (InvalidToken → None), so surfacing this early is
+    the cheapest way to avoid a baffling "key not configured" later.
+    """
+    if DEVICE_SECRET and DEVICE_SECRET != _DEV_DEFAULT_SECRET:
+        return  # a real per-device secret is in use — nothing to warn about
+    if _is_production():
+        raise RuntimeError(
+            "DEVICE_SECRET is unset or equal to the public dev default in a "
+            "production deployment. BYOK keys would be encrypted under a known "
+            "key. Set a per-device DEVICE_SECRET (setup.sh generates one) "
+            "before booting. Refusing to start."
+        )
+    logger.error(
+        "DEVICE_SECRET is unset or equal to the public dev default "
+        "(%r). BYOK API keys will be encrypted under a known, zero-entropy "
+        "key — acceptable only for dev/test. Set a per-device DEVICE_SECRET "
+        "for any real deployment.",
+        _DEV_DEFAULT_SECRET,
+    )
+
+
+_assert_device_secret_safe()
 
 _SALT_FILE = KEYS_DIR / ".salt"
 _KDF_ITERATIONS = 480_000  # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
