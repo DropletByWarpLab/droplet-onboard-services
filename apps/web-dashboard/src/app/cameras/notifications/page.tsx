@@ -183,7 +183,7 @@ export default function NotificationsPage() {
       <PushSubscriptionCard />
 
       {dirtyCount > 0 && (
-        <div className="dp-card p-3 mb-3 bg-system-yellow/10 text-label-primary flex items-center gap-2">
+        <div className="dp-card p-3 mb-3 bg-system-yellow/10 text-label-primary border-l-2 border-system-yellow flex items-center gap-2">
           <Bell size={14} />
           <span className="type-caption-1">
             {dirtyCount} unsaved row{dirtyCount === 1 ? "" : "s"} — use the

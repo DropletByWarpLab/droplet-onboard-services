@@ -500,7 +500,7 @@
   font-size: 1em;
 }
 .chat-markdown blockquote {
-  background: var(--color-surface-secondary);
+  background: color-mix(in srgb, var(--color-label-primary) 6%, transparent);
   padding: 0.6em 0.9em;
   border-radius: 8px;
   margin: 0.5em 0;
