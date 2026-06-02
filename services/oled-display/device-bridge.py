@@ -1356,6 +1356,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
+            if _use_hostapd_mode():
+                # Single-box / hostapd mode: no Pi-5 router to SSH into —
+                # return the same rotation_disabled sentinel as qr_snapshot()
+                # so callers (PyPortal UI, scheduled timer) gracefully no-op.
+                return self._send(410, {
+                    "ok": False, "error": "rotation_disabled",
+                    "hint": "Rotation is disabled in hostapd (single-box) mode.",
+                })
             if not ROTATION_ENABLED:
                 # 410 Gone signals "this route exists in code but is not
                 # operational in this deployment" — callers (the status
