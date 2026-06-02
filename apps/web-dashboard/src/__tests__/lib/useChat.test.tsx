@@ -297,10 +297,12 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     });
   });
 
-  it("done event with stop_reason='error' AFTER partial content marks the turn interrupted (so the FailureChip + retry render)", async () => {
+  it("done event with stop_reason='error' AFTER partial content keeps content + sets error (failed), not failureKind", async () => {
     // Backend fails mid-turn: some content already streamed, then `done`
-    // arrives with stop_reason="error". Previously this returned the
-    // message unchanged → a silently truncated answer with no retry.
+    // arrives with stop_reason="error". The live path sets `error` (the
+    // FailureChip derives "failed" → live retry copy) and must NOT set
+    // `failureKind`, which per the types.ts contract is populated
+    // exclusively by loadConversation (DASH-03). Partial content is kept.
     mockSendChat.mockResolvedValueOnce(
       sseResponse([
         `event: content_delta\ndata: ${JSON.stringify({ text: "Here is the start of the ans" })}\n\n`,
@@ -323,8 +325,8 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
       expect(last?.role).toBe("assistant");
       // Partial content is preserved verbatim.
       expect(last?.content).toBe("Here is the start of the ans");
-      // failureKind drives the partial-ellipsis + FailureChip render.
-      expect(last?.failureKind).toBe("interrupted");
+      // Live turns never set failureKind — it derives to "failed" from error.
+      expect(last?.failureKind).toBeUndefined();
       // error carries the retryPrompt so the chip's "Try again" re-sends.
       expect(last?.error).toBeDefined();
       expect(last?.error?.retryPrompt).toBe("write me a summary");

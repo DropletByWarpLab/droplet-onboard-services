@@ -1150,14 +1150,15 @@ function applyEvent(
           const updated = [...prev];
           updated[idx] = {
             ...last,
-            // When partial content already streamed before the backend
-            // failed mid-turn, also mark the message `interrupted` so the
-            // existing partial-ellipsis + FailureChip render (with a retry
-            // affordance) instead of leaving a silently-truncated answer
-            // and a vanishing cursor. Mirrors the loaded-from-history
-            // "server died mid-stream" treatment. The empty-content path
-            // relies on `error` alone (FailureChip derives "failed").
-            ...(last.content ? { failureKind: "interrupted" as const } : {}),
+            // DASH-03: do NOT set `failureKind` on a live turn. Per the
+            // types.ts contract `failureKind` is populated exclusively by
+            // loadConversation; setting "interrupted" here would win the
+            // FailureChip precedence (`failureKind ?? (error ? "failed" : …)`)
+            // and show the generic "Interrupted — the reply didn't finish."
+            // copy instead of this live retry message. Setting `error` alone
+            // derives "failed", whose chip renders this message + a retry,
+            // and any partial content that already streamed still shows via
+            // the `message.content &&` render guard.
             error: {
               message:
                 "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",
