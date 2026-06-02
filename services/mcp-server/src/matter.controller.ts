@@ -50,8 +50,12 @@
  *      role (WRITE_TOOLS) before any dispatch;
  *   2. the mcp-server re-checks `canCallTool` at `tools/call` (RBAC + JWT);
  *   3. the orchestrator route enforces `requireRole` again — and the mcp
- *      hop presents the `service` principal (see the Auth note above), so
- *      a service-token call is itself constrained by that gate.
+ *      hop presents the `service` principal (see the Auth note above).
+ *      `requireRole("owner","admin","family")` does NOT include `service`,
+ *      so every Matter WRITE call from the MCP/voice path returns 403 today.
+ *      Matter write tools (commission, control-device, decommission) are
+ *      therefore non-functional via MCP until this gap is resolved
+ *      (tracked as WARP-339).
  * (Earlier revisions of this comment claimed the routes were
  * unauthenticated — that is no longer true; corrected per TOOLS-06.)
  */
