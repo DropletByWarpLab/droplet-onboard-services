@@ -510,3 +510,208 @@ def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
         "droplet/files/alice/brain/indexed",
         {"itemId": "item-pdf", "status": "ready"},
     ) in fake_io["published"]
+
+
+# ── IDX-05: admin re-index must apply the WARP-435 contextual header ──
+#
+# `reindex_one` (the orchestrator's /api/admin/files/:id/reindex target)
+# historically embedded + stored the RAW chunk text, dropping the WARP-435
+# "Document: {name} / Section: {a > b}" header that all three primary
+# ingest paths (handle_brain_uploaded, watcher, transcription_worker)
+# apply. That silently produced different embeddings AND different stored
+# text for an admin-re-indexed file vs a watcher-indexed one, degrading
+# retrieval and breaking cross-path consistency. This test pins the parity:
+# the embedder must see the prefixed text, the stored `text` column must be
+# the prefixed text, and metadata must carry `sectionPath`.
+
+
+class _FakeCursor:
+    """Captures execute() args; supports the `with conn.cursor() as cur` form."""
+
+    def __init__(self, store):
+        self._store = store
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._store.append((sql, params))
+
+
+class _FakeConn:
+    def __init__(self, store):
+        self._store = store
+        self.autocommit = True
+        self.committed = False
+
+    def cursor(self):
+        return _FakeCursor(self._store)
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):  # pragma: no cover - not exercised in happy path
+        pass
+
+    def close(self):
+        pass
+
+
+def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
+    import brain_ingest
+    import db as db_mod
+
+    # Real text file so the production chunker runs and yields real chunks.
+    item_dir = tmp_path / "alice" / "bmi-reindex"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    target = item_dir / "original.txt"
+    target.write_text(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        encoding="utf-8",
+    )
+
+    # fetch_item / get_conn are re-imported from `db` inside reindex_one.
+    monkeypatch.setattr(
+        db_mod,
+        "fetch_item",
+        lambda conn, *, item_id: {
+            "id": item_id,
+            "userId": "alice",
+            "storagePath": str(target),
+            "mimeType": "text/plain",
+        },
+    )
+    monkeypatch.setattr(db_mod, "get_conn", lambda: object())
+    monkeypatch.setattr(
+        db_mod, "mark_brain_item_indexed", lambda *a, **k: None
+    )
+
+    # Capture what the embedder is handed (must be the PREFIXED text).
+    embed_inputs: list[list[str]] = []
+
+    def _embed(texts):
+        embed_inputs.append(list(texts))
+        return [[float(i)] * 384 for i in range(len(texts))]
+
+    monkeypatch.setattr(brain_ingest, "embed_texts", _embed)
+
+    # Capture the INSERT rows via a fake psycopg2 connection. reindex_one
+    # does a *function-local* `import psycopg2`, so we patch connect() on
+    # the real module object in sys.modules (a module-attr on brain_ingest
+    # would be ignored by the local import).
+    executed: list[tuple] = []
+    import psycopg2 as _p2
+
+    monkeypatch.setattr(
+        _p2, "connect", lambda *a, **k: _FakeConn(executed)
+    )
+    # register_vector is imported as `from pgvector.psycopg2 import
+    # register_vector` inside the function — stub the module attr.
+    import pgvector.psycopg2 as _pgv
+
+    monkeypatch.setattr(_pgv, "register_vector", lambda conn: None)
+
+    result = brain_ingest.reindex_one("bmi-reindex")
+
+    assert result["chunksWritten"] >= 1
+
+    # 1) The embedder saw the prefixed text on every chunk.
+    assert embed_inputs, "embed_texts was never called"
+    for txt in embed_inputs[0]:
+        assert txt.startswith("Document: original.txt"), txt[:80]
+
+    # 2) Stored `text` column carries the prefix, and metadata has
+    #    sectionPath — parity with the primary ingest paths.
+    inserts = [
+        params
+        for (sql, params) in executed
+        if 'INSERT INTO "FileContentChunk"' in sql
+    ]
+    assert inserts, "no INSERT executed"
+    for params in inserts:
+        # Column order: userId, ncFileId, path, chunkIdx, text, embedding,
+        # source, brainItemId, pageNumber, warnings, metadata(json str).
+        stored_text = params[4]
+        metadata_json = params[10]
+        assert stored_text.startswith("Document: original.txt"), stored_text[:80]
+        assert '"sectionPath"' in metadata_json, metadata_json
+
+    # 3) The embedded strings and the stored strings are identical
+    #    (the embedder saw exactly what we persisted).
+    stored_texts = [params[4] for params in inserts]
+    assert stored_texts == embed_inputs[0]
+
+
+def test_reindex_one_malformed_anchor_falls_back_to_null(monkeypatch, tmp_path):
+    """IDX-05: a chunk whose ``anchor.model_dump()`` raises must NOT abort the
+    whole re-index transaction (which would roll back and drop every chunk for
+    the file). The chunk still lands with ``anchor=null`` and a
+    ``malformed_anchor`` warning — parity with handle_brain_uploaded (WARP-287).
+    """
+    import brain_ingest
+    import db as db_mod
+
+    item_dir = tmp_path / "alice" / "bmi-bad-anchor"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    target = item_dir / "original.txt"
+    target.write_text(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        db_mod,
+        "fetch_item",
+        lambda conn, *, item_id: {
+            "id": item_id,
+            "userId": "alice",
+            "storagePath": str(target),
+            "mimeType": "text/plain",
+        },
+    )
+    monkeypatch.setattr(db_mod, "get_conn", lambda: object())
+    monkeypatch.setattr(db_mod, "mark_brain_item_indexed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brain_ingest, "embed_texts", lambda texts: [[0.0] * 384 for _ in texts]
+    )
+
+    # Force a chunk whose anchor serialization blows up.
+    class _BadAnchor:
+        def model_dump(self):
+            raise ValueError("boom")
+
+    class _FakeChunk:
+        text = "alpha beta gamma delta"
+        section_path = ("Intro",)
+        anchor = _BadAnchor()
+
+    monkeypatch.setattr(
+        brain_ingest, "_chunk_spans_from_doc", lambda doc: [_FakeChunk()]
+    )
+
+    executed: list[tuple] = []
+    import psycopg2 as _p2
+
+    monkeypatch.setattr(_p2, "connect", lambda *a, **k: _FakeConn(executed))
+    import pgvector.psycopg2 as _pgv
+
+    monkeypatch.setattr(_pgv, "register_vector", lambda conn: None)
+
+    # Must NOT raise — the whole point of the guard.
+    result = brain_ingest.reindex_one("bmi-bad-anchor")
+    assert result["chunksWritten"] == 1
+
+    inserts = [
+        params
+        for (sql, params) in executed
+        if 'INSERT INTO "FileContentChunk"' in sql
+    ]
+    assert inserts, "no INSERT executed — the malformed anchor aborted the txn"
+    params = inserts[0]
+    # warnings column (index 9) carries the fallback marker.
+    assert "malformed_anchor" in params[9]
+    # metadata (index 10) stored anchor as null rather than crashing.
+    assert '"anchor": null' in params[10]
