@@ -122,11 +122,15 @@ class _DeviceError(Exception):
 # caught before the next deploy.
 
 _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # Greetings and check-ins — whole utterance only. The optional
-    # wake-word prefix ("hey jarvis", "hey droplet") matches the way
-    # users naturally re-trigger after the wake fires.
+    # Greetings and check-ins — whole utterance only. A bare greeting
+    # may stand alone or take an optional "there" suffix ("hi there",
+    # "hello there", "hey there") — applied uniformly to all three so a
+    # new greeting word can't be added on one branch but forgotten on
+    # the other. The optional wake-word prefix ("hey jarvis", "hey
+    # droplet") matches the way users naturally re-trigger after the
+    # wake fires.
     re.compile(
-        r"^\s*(hi|hello|hey|hey there|hi there|yo|sup|"
+        r"^\s*((hi|hello|hey)(\s+there)?|yo|sup|"
         r"hey\s+(jarvis|droplet|assistant)|"
         r"hello\s+(jarvis|droplet|assistant))"
         r"[\s!.,?]*$",
