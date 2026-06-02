@@ -2,7 +2,7 @@
 
 - **Date:** 2026-06-01
 - **Status:** Approved (pending spec review)
-- **Tracking:** WARP-___ (to be assigned — "email-identity auth consistency")
+- **Tracking:** [WARP-635](https://warp-lab.atlassian.net/browse/WARP-635) — email-identity auth consistency
 - **Related:** ADR-013 (directory auth, email is login key), PR #370/#374 (Aurora login,
   email-required setup), PR #384 (Aurora setup wizard re-skin)
 

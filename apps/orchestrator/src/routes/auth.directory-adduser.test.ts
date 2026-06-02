@@ -1,6 +1,6 @@
 /**
  * Admin add-user (POST /auth/users) — email-based user creation with derived
- * userid and password policy enforcement (WARP-___).
+ * userid and password policy enforcement (WARP-635).
  *
  * After this task the admin creates household/family users by email; the
  * userid is derived server-side (no username field in the request body) and
