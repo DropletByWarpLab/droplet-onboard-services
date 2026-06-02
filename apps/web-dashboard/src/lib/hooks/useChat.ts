@@ -1164,12 +1164,21 @@ function applyEvent(
         return updated;
       }
       case "done": {
-        if (evt.stop_reason === "error" && !last.content) {
+        if (evt.stop_reason === "error") {
           // eslint-disable-next-line no-console
           console.error("[chat] agent loop ended with error:", evt.error);
           const updated = [...prev];
           updated[idx] = {
             ...last,
+            // DASH-03: do NOT set `failureKind` on a live turn. Per the
+            // types.ts contract `failureKind` is populated exclusively by
+            // loadConversation; setting "interrupted" here would win the
+            // FailureChip precedence (`failureKind ?? (error ? "failed" : …)`)
+            // and show the generic "Interrupted — the reply didn't finish."
+            // copy instead of this live retry message. Setting `error` alone
+            // derives "failed", whose chip renders this message + a retry,
+            // and any partial content that already streamed still shows via
+            // the `message.content &&` render guard.
             error: {
               message:
                 "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",
