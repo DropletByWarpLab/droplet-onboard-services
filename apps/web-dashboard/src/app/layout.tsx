@@ -6,6 +6,7 @@ import { WorkspaceProvider } from "@/lib/workspace";
 import { AuthGate } from "@/components/AuthGate";
 import { ToastProvider } from "@/components/Toast";
 import { NotificationToaster } from "@/components/NotificationToaster";
+import { THEME_COLOR } from "@/lib/brand";
 import "./globals.css";
 
 const inter = Inter({
@@ -34,7 +35,9 @@ export const metadata: Metadata = {
   openGraph: {
     images: [{ url: "/og-image.png", width: 1200, height: 630 }],
   },
-  themeColor: "#6d28d9",
+  // DASH-09: driven from the brand accent token (see lib/brand.ts) so this
+  // PWA chrome color can't silently drift from the design system's accent.
+  themeColor: THEME_COLOR,
 };
 
 // Inline script to prevent flash of wrong theme (FOUC)
