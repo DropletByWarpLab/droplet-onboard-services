@@ -85,30 +85,38 @@ async def _fetch_and_ingest(
     ingests so the caller can log a summary."""
     success = 0
     for uid in uids:
-        # `(UID RFC822)` returns the raw bytes; aioimaplib delivers them
-        # as a list where index 1 is the literal we want.
-        resp = await imap.uid("fetch", uid, "(RFC822)")
-        if resp.result != "OK" or len(resp.lines) < 2:
-            logger.warning("uid %s fetch failed: %s", uid, resp.result)
+        # One poison message (malformed MIME/headers, a parser edge case, a
+        # transient ingest error) must be skipped without aborting the rest of
+        # the batch — otherwise a persistently-bad UID at the front of the
+        # batch wedges progress every cycle (IDX-07). Each UID is isolated.
+        try:
+            # `(UID RFC822)` returns the raw bytes; aioimaplib delivers them
+            # as a list where index 1 is the literal we want.
+            resp = await imap.uid("fetch", uid, "(RFC822)")
+            if resp.result != "OK" or len(resp.lines) < 2:
+                logger.warning("uid %s fetch failed: %s", uid, resp.result)
+                continue
+            raw = resp.lines[1]
+            if not isinstance(raw, (bytes, bytearray)):
+                continue
+            # Pass the account's own address so BCC-only deliveries (To:
+            # missing) don't fail the orchestrator's `toAddrs.min(1)` schema
+            # and get permanently lost.
+            parsed = parse_message(bytes(raw), account_address=account.address)
+            if parsed is None:
+                logger.debug("uid %s parse returned None — skipping", uid)
+                continue
+            ok = await deps.ingest(account.id, dict(parsed))
+            if ok:
+                success += 1
+                # The orchestrator's ingest response carries threadId but
+                # we don't decode it here — MQTT consumers re-query for
+                # the row they care about. Pass the messageId so the
+                # dashboard can dedupe the refresh.
+                deps.publish_new_mail(account.id, "", parsed["messageId"])
+        except Exception as exc:  # noqa: BLE001 — isolate one bad UID, keep the batch
+            logger.warning("uid %s skipped (ingest error): %s", uid, exc)
             continue
-        raw = resp.lines[1]
-        if not isinstance(raw, (bytes, bytearray)):
-            continue
-        # Pass the account's own address so BCC-only deliveries (To:
-        # missing) don't fail the orchestrator's `toAddrs.min(1)` schema
-        # and get permanently lost.
-        parsed = parse_message(bytes(raw), account_address=account.address)
-        if parsed is None:
-            logger.debug("uid %s parse returned None — skipping", uid)
-            continue
-        ok = await deps.ingest(account.id, dict(parsed))
-        if ok:
-            success += 1
-            # The orchestrator's ingest response carries threadId but
-            # we don't decode it here — MQTT consumers re-query for
-            # the row they care about. Pass the messageId so the
-            # dashboard can dedupe the refresh.
-            deps.publish_new_mail(account.id, "", parsed["messageId"])
     return success
 
 
