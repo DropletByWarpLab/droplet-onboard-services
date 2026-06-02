@@ -1144,12 +1144,20 @@ function applyEvent(
         return updated;
       }
       case "done": {
-        if (evt.stop_reason === "error" && !last.content) {
+        if (evt.stop_reason === "error") {
           // eslint-disable-next-line no-console
           console.error("[chat] agent loop ended with error:", evt.error);
           const updated = [...prev];
           updated[idx] = {
             ...last,
+            // When partial content already streamed before the backend
+            // failed mid-turn, also mark the message `interrupted` so the
+            // existing partial-ellipsis + FailureChip render (with a retry
+            // affordance) instead of leaving a silently-truncated answer
+            // and a vanishing cursor. Mirrors the loaded-from-history
+            // "server died mid-stream" treatment. The empty-content path
+            // relies on `error` alone (FailureChip derives "failed").
+            ...(last.content ? { failureKind: "interrupted" as const } : {}),
             error: {
               message:
                 "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",

@@ -297,6 +297,43 @@ describe("useChat (MCP-backed /api/llm/chat)", () => {
     });
   });
 
+  it("done event with stop_reason='error' AFTER partial content marks the turn interrupted (so the FailureChip + retry render)", async () => {
+    // Backend fails mid-turn: some content already streamed, then `done`
+    // arrives with stop_reason="error". Previously this returned the
+    // message unchanged → a silently truncated answer with no retry.
+    mockSendChat.mockResolvedValueOnce(
+      sseResponse([
+        `event: content_delta\ndata: ${JSON.stringify({ text: "Here is the start of the ans" })}\n\n`,
+        `event: done\ndata: ${JSON.stringify({
+          iterations: 3,
+          stop_reason: "error",
+          error: "ai-gateway 503",
+        })}\n\n`,
+      ]),
+    );
+
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.sendMessage("write me a summary", "llama3:8b");
+    });
+
+    await waitFor(() => {
+      const last = value!.messages.at(-1);
+      expect(last?.role).toBe("assistant");
+      // Partial content is preserved verbatim.
+      expect(last?.content).toBe("Here is the start of the ans");
+      // failureKind drives the partial-ellipsis + FailureChip render.
+      expect(last?.failureKind).toBe("interrupted");
+      // error carries the retryPrompt so the chip's "Try again" re-sends.
+      expect(last?.error).toBeDefined();
+      expect(last?.error?.retryPrompt).toBe("write me a summary");
+      // Friendly copy, never the raw backend string.
+      expect(last?.error?.message).not.toMatch(/503|ai-gateway/);
+    });
+    expect(value!.isStreaming).toBe(false);
+  });
+
   it("clearMessages wipes the rolling thread", async () => {
     mockSendChat.mockResolvedValueOnce(
       sseResponse([
