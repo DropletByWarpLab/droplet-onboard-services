@@ -553,7 +553,14 @@ class TestLoopIntegration:
         assert fake_sd.opened_with["channels"] == 1
         assert fake_sd.opened_with["dtype"] == "int16"
 
-    def test_loop_records_error_when_stream_raises(self):
+    def test_loop_treats_open_oserror_as_recoverable_no_mic(self):
+        # CONTRACT CHANGE (fix/voice-wake-loop-resilience): an OSError /
+        # PortAudioError raised by InputStream() open is a RECOVERABLE
+        # device error (the reSpeaker re-enumerated, the card index
+        # shifted, PortAudio's cached device went invalid) — NOT a fatal
+        # 'error'. The loop must pin state='no_mic' and keep retrying
+        # with bounded backoff rather than exit. A device that NEVER
+        # comes back keeps the loop alive in 'no_mic' until _shutdown.
         class _ExplodingSd:
             def InputStream(self, **kwargs):  # noqa: N802
                 raise OSError("PortAudio: device disappeared")
@@ -562,11 +569,378 @@ class TestLoopIntegration:
             detector=MockWakeWordDetector(),
             input_device_index=0,
             sd_module=_ExplodingSd(),
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
         )
+        # Stop the supervising retry after a couple of failed attempts so
+        # the synchronous _loop() call returns instead of looping forever
+        # on a permanently-absent mic.
+        calls = {"n": 0}
+        real_wait = pipe._shutdown.wait
+
+        def _wait(timeout=None):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                pipe._shutdown.set()
+            return real_wait(0)
+
+        pipe._shutdown.wait = _wait  # type: ignore[assignment]
         pipe._loop()
         s = pipe.status()
+        # Recoverable: ended parked in no_mic, NOT in fatal error.
+        assert s.state == "no_mic"
+        assert s.error_message is None
+        # It actually retried (didn't just give up after one open).
+        assert calls["n"] >= 2
+
+
+# ────────────────────────────────────────────────────────────────────
+# Device-disconnect self-heal (fix/voice-wake-loop-resilience)
+# ────────────────────────────────────────────────────────────────────
+#
+# The reSpeaker XVF3800 USB mic re-enumerates under Docker: the open
+# InputStream goes invalid and stream.read() raises PortAudioError, OR a
+# subsequent open raises. The wake loop must self-heal — refresh
+# PortAudio's enumeration, re-resolve the (possibly shifted) device
+# index, reopen, and return to 'listening' — instead of exiting the
+# worker thread permanently. These tests pin that recovery contract with
+# a fully-mocked sounddevice (CI-importable; the real device is not).
+
+
+class _PortAudioError(Exception):
+    """Stand-in for sounddevice.PortAudioError for the mocked module."""
+
+
+class _RecoveringStream:
+    """A single InputStream 'session'. Reads scripted frames; a frame of
+    the sentinel value RAISE makes .read() raise the supplied device
+    error (simulating a mid-stream re-enumeration). When frames run out
+    it sets the pipeline shutdown event so a synchronous _loop() returns.
+    """
+
+    RAISE = object()
+
+    def __init__(self, frames, shutdown_event, error_factory):
+        self._frames = list(frames)
+        self._shutdown = shutdown_event
+        self._error_factory = error_factory
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def read(self, n):
+        if not self._frames:
+            self._shutdown.set()
+            return _silence_frame().reshape(-1, 1), False
+        item = self._frames.pop(0)
+        if item is self.RAISE:
+            raise self._error_factory()
+        return item.reshape(-1, 1), False
+
+
+class _RecoveringSoundDevice:
+    """Mock sounddevice whose InputStream() yields a NEW _RecoveringStream
+    per open, driven by a scripted list of 'sessions'. Each session is
+    either a list of frames (possibly containing _RecoveringStream.RAISE)
+    or an exception instance to raise from the open call itself.
+
+    Records every device index it was opened with (to assert
+    re-resolution picks up a shifted index) and counts _terminate /
+    _initialize calls (to assert the enumeration cache was refreshed
+    before re-resolving).
+    """
+
+    PortAudioError = _PortAudioError
+
+    def __init__(self, sessions, shutdown_event):
+        self._sessions = list(sessions)
+        self._shutdown = shutdown_event
+        self.opened_devices: list = []
+        self.streams: list = []
+        self.terminate_calls = 0
+        self.initialize_calls = 0
+
+    # PortAudio re-enumeration hooks the pipeline calls defensively.
+    def _terminate(self):
+        self.terminate_calls += 1
+
+    def _initialize(self):
+        self.initialize_calls += 1
+
+    def query_devices(self, index=None):
+        # 1-channel mono device — keeps the downmix path identical to a
+        # healthy run.
+        return {"max_input_channels": 1}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        self.opened_devices.append(kwargs.get("device"))
+        if not self._sessions:
+            # No more scripted sessions — wind the loop down cleanly.
+            self._shutdown.set()
+            return _RecoveringStream([], self._shutdown, _PortAudioError)
+        session = self._sessions.pop(0)
+        if isinstance(session, BaseException):
+            raise session
+        stream = _RecoveringStream(session, self._shutdown, _PortAudioError)
+        self.streams.append(stream)
+        return stream
+
+
+class TestLoopDeviceRecovery:
+    """Self-heal contract for audio-device disconnects."""
+
+    def _wake_script(self, n_low: int):
+        # n_low quiet frames then a wake-strength frame.
+        return _ScriptedDetector(
+            [{"hey_jarvis": 0.05}] * n_low + [{"hey_jarvis": 0.9}],
+        )
+
+    def test_read_portaudioerror_recovers_and_resumes_dispatch(self):
+        # Session 1: two quiet frames, then read() raises PortAudioError.
+        # Session 2 (after recovery): a wake-strength frame → fires, then
+        # runs dry. Asserts: loop does NOT exit, state goes
+        # listening → no_mic → listening, frames dispatch again, worker
+        # thread stays alive.
+        shutdown = threading.Event()
+        S = _RecoveringStream.RAISE
+        sessions = [
+            [_silence_frame(), _silence_frame(), S],  # then disconnect
+            [_silence_frame()],                        # reopened → wake frame
+        ]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        det = self._wake_script(2)  # 2 quiet then wake on the 3rd predict
+        fires: list[WakeEvent] = []
+        seen_states: list[str] = []
+
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=4,
+            threshold=0.5,
+            on_wake=fires.append,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+
+        # Observe the state the moment we sit in the recovery wait.
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            seen_states.append(pipe.status().state)
+            return real_wait(0)
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+
+        t = threading.Thread(target=pipe._loop, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive(), "worker thread must not hang"
+        # Recovered far enough to reopen and fire the post-recovery wake.
+        assert len(fires) == 1
+        # While recovering, we reported no_mic.
+        assert "no_mic" in seen_states
+        # Reopened the stream (two opens: original + recovery).
+        assert len(fake_sd.opened_devices) >= 2
+        # Both stream sessions were entered/exited (proves we returned to
+        # active listening after the disconnect).
+        assert fake_sd.streams[0].closed is True
+
+    def test_open_error_backs_off_then_recovers(self):
+        # InputStream() open raises for the first 3 attempts, then the
+        # 4th open succeeds and yields a frame. Asserts bounded backoff +
+        # recovery, and that state is no_mic while retrying.
+        shutdown = threading.Event()
+        sessions = [
+            _PortAudioError("open failed 1"),
+            _PortAudioError("open failed 2"),
+            OSError("open failed 3"),
+            [_silence_frame()],  # 4th open succeeds
+        ]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        waits: list[float] = []
+        states_during_wait: list[str] = []
+
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=0.01,
+            recover_backoff_max_s=0.04,
+        )
+        pipe._shutdown = shutdown
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            waits.append(timeout)
+            states_during_wait.append(pipe.status().state)
+            return real_wait(0)  # don't actually sleep in the test
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+
+        pipe._loop()
+
+        # 4 opens total (3 failed + 1 success).
+        assert len(fake_sd.opened_devices) == 4
+        # 3 backoff waits between the failures.
+        assert len(waits) == 3
+        # Bounded + capped exponential: 0.01, 0.02, 0.04 (<= max).
+        assert waits[0] == pytest.approx(0.01)
+        assert waits[1] == pytest.approx(0.02)
+        assert waits[2] == pytest.approx(0.04)
+        assert all(w <= 0.04 for w in waits)
+        # State was no_mic throughout the retry window.
+        assert states_during_wait and all(s == "no_mic" for s in states_during_wait)
+
+    def test_reopen_uses_newly_resolved_index_after_card_shift(self):
+        # The card index shifts on re-enumeration. The re-resolution hook
+        # returns a DIFFERENT index; assert the reopen uses the new one
+        # (proves we re-resolve via the injected path, not the stale
+        # constructor value).
+        shutdown = threading.Event()
+        S = _RecoveringStream.RAISE
+        sessions = [
+            [_silence_frame(), S],  # disconnect after one frame
+            [_silence_frame()],     # reopened on the new index
+        ]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        resolutions = iter([11])  # next resolve() returns the shifted idx
+
+        def _resolve_input():
+            return next(resolutions, 11)
+
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=10,  # original index
+            sd_module=fake_sd,
+            resolve_input_device=_resolve_input,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+        pipe._loop()
+
+        # First open used the original index, the reopen used the
+        # re-resolved (shifted) index.
+        assert fake_sd.opened_devices[0] == 10
+        assert fake_sd.opened_devices[1] == 11
+        # PortAudio enumeration was refreshed before re-resolving.
+        assert fake_sd.terminate_calls >= 1
+        assert fake_sd.initialize_calls >= 1
+
+    def test_reresolution_to_none_stays_no_mic(self):
+        # If re-resolution finds no device at all (mic genuinely gone),
+        # the loop parks in no_mic and keeps retrying — it must not crash
+        # or fall through to opening device=None.
+        shutdown = threading.Event()
+        S = _RecoveringStream.RAISE
+        sessions = [[_silence_frame(), S]]  # disconnect, no further session
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+
+        def _resolve_input():
+            return None  # nothing to pick now
+
+        waits = {"n": 0}
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=3,
+            sd_module=fake_sd,
+            resolve_input_device=_resolve_input,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            waits["n"] += 1
+            if waits["n"] >= 2:
+                shutdown.set()
+            return real_wait(0)
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+        pipe._loop()
+
+        assert pipe.status().state == "no_mic"
+        # Only the original device was ever opened; we never tried to open
+        # device=None after re-resolution returned nothing.
+        assert fake_sd.opened_devices == [3]
+        assert waits["n"] >= 2
+
+    def test_backoff_exits_promptly_on_shutdown_mid_wait(self):
+        # A genuinely-absent mic must not hot-loop, and must drop out the
+        # instant _shutdown is set — even mid-backoff. We assert the loop
+        # uses the interruptible _shutdown.wait (not time.sleep) for its
+        # delay, and returns as soon as shutdown fires.
+        shutdown = threading.Event()
+        # Every open fails → permanently-absent mic.
+        sessions = [OSError("gone") for _ in range(50)]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+
+        used_shutdown_wait = {"v": False}
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            used_shutdown_wait["v"] = True
+            shutdown.set()  # simulate stop() landing mid-backoff
+            return real_wait(timeout if timeout else 0)
+
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=30.0,  # would hang if not interruptible
+            recover_backoff_max_s=30.0,
+        )
+        pipe._shutdown = shutdown
+        shutdown.wait = _wait  # type: ignore[assignment]
+
+        t = threading.Thread(target=pipe._loop, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive(), "loop must exit promptly on _shutdown mid-backoff"
+        assert used_shutdown_wait["v"], "backoff must use interruptible _shutdown.wait"
+        # We bailed after the first failed open — didn't burn all 50.
+        assert len(fake_sd.opened_devices) <= 2
+
+    def test_non_device_exception_surfaces_as_error_not_retried(self):
+        # A bug in the frame-handling path (here: detector.predict raises
+        # a non-device error) must surface as 'error' and be logged — NOT
+        # silently retried forever. The device-recovery scope is tight: it
+        # only catches PortAudio/OS device errors around open + read.
+        shutdown = threading.Event()
+        sessions = [[_silence_frame(), _silence_frame()]]  # healthy stream
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+
+        pipe = WakePipeline(
+            detector=_RaisingDetector(),  # predict() raises RuntimeError
+            input_device_index=0,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+
+        t = threading.Thread(target=pipe._loop, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive()
+        s = pipe.status()
+        # _RaisingDetector errors are caught inside _run_wake_detect and
+        # routed to 'error' (existing contract). The recovery supervisor
+        # must NOT convert that into a no_mic retry loop.
         assert s.state == "error"
-        assert "PortAudio" in (s.error_message or "")
+        assert "predict failed" in (s.error_message or "")
+        # Did not reopen the stream chasing a non-device error.
+        assert len(fake_sd.opened_devices) == 1
 
 
 # ────────────────────────────────────────────────────────────────────

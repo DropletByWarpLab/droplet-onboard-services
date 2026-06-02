@@ -107,6 +107,29 @@ def _resolve() -> DeviceResolution:
     return _resolution
 
 
+def _reresolve_input_index() -> Optional[int]:
+    """Force a fresh device resolution and return the picked input index
+    (or None if no mic is present now).
+
+    Wired into WakePipeline as its `resolve_input_device` hook so the wake
+    loop can recompute the input index after the mic re-enumerates — the
+    reSpeaker XVF3800's ALSA card index shifts under Docker, so the index
+    captured at startup goes stale. Reuses the same `resolve_devices()`
+    scoring path used at boot (voice/devices.py stays authoritative); we
+    only invalidate the cache so it actually re-enumerates. Runs on the
+    pipeline worker thread on a device disconnect — a benign race with a
+    concurrent /audio/devices?refresh=1 at worst repeats an idempotent
+    resolve."""
+    global _resolution
+    _resolution = None  # drop the cached pick so _resolve() re-enumerates
+    try:
+        r = _resolve()
+    except Exception:  # pragma: no cover — defensive; resolve is best-effort
+        logger.exception("voice re-resolution failed")
+        return None
+    return r.input_device.index if r.input_device else None
+
+
 @app.on_event("startup")
 async def startup() -> None:
     # Resolve audio devices on boot so the first /health hit is cheap.
@@ -149,6 +172,10 @@ async def startup() -> None:
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
             post_speak_cooldown_s=POST_SPEAK_COOLDOWN_S,
+            # Self-heal hook: recompute the input index after the mic
+            # re-enumerates (reSpeaker card-index shift under Docker) so
+            # the wake loop reopens the right device instead of dying.
+            resolve_input_device=_reresolve_input_index,
         )
         await asyncio.to_thread(_pipeline.start)
     except Exception as exc:
