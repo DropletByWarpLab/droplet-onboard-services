@@ -974,7 +974,10 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
 
 export type NetworkOperation = {
   id: string;
-  state: "pending" | "applied" | "rolled_back";
+  // DASH-07: "unknown" is a distinct, non-success terminal state used when the
+  // orchestrator can't account for the operation (404). It must NOT be treated
+  // as "applied" — see fetchNetworkOperation.
+  state: "pending" | "applied" | "rolled_back" | "unknown";
   startedAt: number;
   finishedAt: number | null;
   reason: string | null;
@@ -1002,15 +1005,19 @@ export async function confirmNetworkCommand(
 export async function fetchNetworkOperation(id: string): Promise<NetworkOperation> {
   const res = await authFetch(`${BASE}/api/network/operations/${encodeURIComponent(id)}`);
   if (res.status === 404) {
-    // Orchestrator surfaces 404 for unknown / expired ops. Treat as applied so
-    // the UI isn't stuck in pending — a terminal record is either too old to
-    // track or the dashboard lost the flow (e.g. after refresh).
+    // DASH-07: the orchestrator returns 404 for an operation it can't account
+    // for. That's genuinely indeterminate — the op may have expired after a
+    // refresh, never applied, been rolled back, or the id was wrong. We must
+    // NOT report "applied" (a false success that could tell the operator a
+    // firewall/port-forward change took effect when it may not have). Surface a
+    // distinct terminal "unknown" state so the UI can ask the user to re-check
+    // the device list rather than asserting success.
     return {
       id,
-      state: "applied",
+      state: "unknown",
       startedAt: 0,
       finishedAt: null,
-      reason: "Operation record expired",
+      reason: "We couldn't confirm this change — re-check the device list.",
     };
   }
   if (!res.ok) throw new Error(`Failed to fetch operation: ${res.status}`);
