@@ -6,8 +6,8 @@
  * (`countRealNextcloudUsers`, the WiFi-QR fetch, `pushCustomImage`)
  * are NOT tested here; they belong to integration tests on the POC.
  */
-import { describe, expect, it } from "vitest";
-import { decideScreenQR } from "./screen-qr.service.js";
+import { describe, expect, it, vi } from "vitest";
+import { decideScreenQR, decideClaimScreen } from "./screen-qr.service.js";
 
 const wifiOk = async () => ({ payload: "WIFI:S:droplet-ap;T:WPA;P:secret;;", ssid: "droplet-ap" });
 const wifiDown = async () => null;
@@ -123,5 +123,100 @@ describe("decideScreenQR — signature stability", () => {
       1, { config: "x", createdAt: t2, name: "p" }, Date.now(), wifiOk,
     );
     expect(a.signature).not.toBe(b.signature);
+  });
+});
+
+describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", () => {
+  // The claim screen is the HIGHEST-priority branch of the refresh path: while
+  // the box is unclaimed we render the minted claim code on the lid and SKIP
+  // the QR image push entirely. Once claimed we hand back to the QR/peer/wifi
+  // logic. `decideClaimScreen` takes its side-effecting collaborators as deps
+  // (isClaimed/ensureClaimCode/pushClaimCode/setupUrl) so it's unit-testable
+  // with no DB and no network. The `prisma` arg is opaque here.
+  const fakePrisma = {} as never;
+
+  it("when NOT claimed and a code is minted: pushes the claim screen and reports handled", async () => {
+    const ensureClaimCode = vi.fn(async () => "DRPL-7K2Q-9F4M");
+    const pushClaimCode = vi.fn(async () => true);
+    const setupUrl = () => "https://192.168.1.87/setup";
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => false,
+      ensureClaimCode,
+      pushClaimCode,
+      setupUrl,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(ensureClaimCode).toHaveBeenCalledOnce();
+    expect(pushClaimCode).toHaveBeenCalledWith("DRPL-7K2Q-9F4M", "https://192.168.1.87/setup");
+    // Signature is claim-scoped + changes only when the code changes, so the
+    // poller won't re-push the same code every 30 s tick.
+    expect(result.signature?.startsWith("claim:")).toBe(true);
+  });
+
+  it("when CLAIMED: does NOT mint or push, and reports not handled (falls through to QR)", async () => {
+    const ensureClaimCode = vi.fn(async () => null);
+    const pushClaimCode = vi.fn(async () => true);
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => true,
+      ensureClaimCode,
+      pushClaimCode,
+      setupUrl: () => "https://host/setup",
+    });
+
+    expect(result.handled).toBe(false);
+    expect(ensureClaimCode).not.toHaveBeenCalled();
+    expect(pushClaimCode).not.toHaveBeenCalled();
+  });
+
+  it("when not claimed but ensureClaimCode returns null (race: just claimed): not handled, no push", async () => {
+    // isClaimed said false, but between that read and the mint the box got
+    // claimed, so ensureClaimCode returns null. We must NOT push a stale claim
+    // screen — fall through.
+    const pushClaimCode = vi.fn(async () => true);
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => false,
+      ensureClaimCode: async () => null,
+      pushClaimCode,
+      setupUrl: () => "https://host/setup",
+    });
+
+    expect(result.handled).toBe(false);
+    expect(pushClaimCode).not.toHaveBeenCalled();
+  });
+
+  it("signature is stable for the same code and changes when the code rotates", async () => {
+    const mk = (code: string) =>
+      decideClaimScreen(fakePrisma, {
+        isClaimed: async () => false,
+        ensureClaimCode: async () => code,
+        pushClaimCode: async () => true,
+        setupUrl: () => "https://host/setup",
+      });
+
+    const a = await mk("DRPL-7K2Q-9F4M");
+    const b = await mk("DRPL-7K2Q-9F4M");
+    const c = await mk("DRPL-AAAA-BBBB");
+
+    expect(a.signature).toBe(b.signature);
+    expect(a.signature).not.toBe(c.signature);
+  });
+
+  it("reports handled even if the push fails, so we still skip the QR image this tick", async () => {
+    // A display outage shouldn't make us fall through to the WiFi QR while the
+    // box is unclaimed — the claim screen still owns the tick; we retry next
+    // tick (the signature isn't recorded by the caller on a failed push).
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => false,
+      ensureClaimCode: async () => "DRPL-7K2Q-9F4M",
+      pushClaimCode: async () => false,
+      setupUrl: () => "https://host/setup",
+    });
+
+    expect(result.handled).toBe(true);
+    expect(result.pushed).toBe(false);
   });
 });

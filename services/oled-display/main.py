@@ -146,6 +146,16 @@ class ShutdownRequest(BaseModel):
         description="'stopping' (in progress) or 'halted' (safe to power off)")
 
 
+class ClaimRequest(BaseModel):
+    # WARP-632 / ADR-017: the orchestrator mints the claim code and pushes it
+    # here while the box is unclaimed. `code` is the DRPL-XXXX-XXXX plaintext
+    # (already grouped for the lid); `setup_url` is where the customer points
+    # their phone. Bounds are generous but cap obvious abuse on this LAN-only,
+    # SERVICE_SECRET-guarded endpoint.
+    code: str = Field(..., min_length=1, max_length=32, description="Claim code")
+    setup_url: str = Field(..., max_length=200, description="Setup wizard URL")
+
+
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
 # Cap decoded pixel count to prevent PIL decompression-bomb DoS — an 8 MB
 # PNG/TIFF can balloon to multi-GB on decode and OOM the container. 24 MP
@@ -235,6 +245,22 @@ async def show_shutdown(req: ShutdownRequest):
         raise HTTPException(503, "Display not initialized")
     display.show_shutdown(req.reason, req.phase)
     return {"ok": True, "mode": "shutdown"}
+
+
+@app.post("/display/claim")
+async def show_claim(req: ClaimRequest):
+    """Show the onboarding claim screen (WARP-632 / ADR-017).
+
+    Driven by the orchestrator's screen-qr service while the box is unclaimed:
+    it mints the claim code and pushes it here. We render a dedicated `claim`
+    mode on the PyPortal (large code + setup URL) — NOT the preview-only
+    /display/custom image path. SERVICE_SECRET-guarded like the other display
+    routes (the middleware enforces the bearer).
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_claim(req.code, req.setup_url)
+    return {"ok": True, "mode": "claim"}
 
 
 @app.post("/display/custom")

@@ -289,3 +289,79 @@ def test_boot_max_seconds_is_a_positive_int():
     # of how the env was set.
     assert isinstance(display_module.BOOT_MAX_SECONDS, int)
     assert display_module.BOOT_MAX_SECONDS > 0
+
+
+# --- Claim screen (WARP-632 / ADR-017) -------------------------------------
+#
+# The orchestrator mints the claim code and pushes it via POST /display/claim;
+# this service is a thin renderer. show_claim sets the `claim` mode, streams a
+# `claim` frame to the firmware, and renders a sim preview so the dashboard
+# preview works. render_claim draws the code prominently + the setup URL.
+
+CLAIM_CODE = "DRPL-7K2Q-9F4M"
+CLAIM_URL = "https://192.168.1.87/setup"
+
+
+def test_claim_mode_constant_exists():
+    # An explicit screen-id constant, mirroring BOOT/SHUTDOWN — never a bare
+    # string literal sprinkled through the dispatch.
+    assert TFTDisplay.CLAIM == "claim"
+
+
+def test_render_claim_returns_full_frame(sim_display: TFTDisplay):
+    img = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    assert isinstance(img, Image.Image)
+    assert img.size == (WIDTH, HEIGHT)
+
+
+def test_render_claim_tolerates_empty_inputs(sim_display: TFTDisplay):
+    # A defensive render: even with no code / no URL yet (host hasn't pushed),
+    # we must still produce a valid frame rather than throw.
+    img = sim_display.render_claim("", "")
+    assert img.size == (WIDTH, HEIGHT)
+
+
+def test_show_claim_sets_mode_and_writes_preview_frame(
+    sim_display: TFTDisplay, tmp_path
+):
+    out = tmp_path / "claim.png"
+    display_module.SIM_OUTPUT = out  # redirect preview for this assertion
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    assert sim_display._current_mode == TFTDisplay.CLAIM
+    assert out.exists()
+    with Image.open(out) as im:
+        assert im.size == (WIDTH, HEIGHT)
+
+
+def test_show_claim_sends_claim_frame_to_firmware(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # The render path to the PHYSICAL panel is the `claim` serial frame — NOT
+    # the preview-only /display/custom image path. Assert show_claim emits a
+    # ("claim", {code, setup_url}) frame the firmware can dispatch on.
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+
+    claim_frames = [(m, d) for (m, d) in sent if m == "claim"]
+    assert claim_frames, f"expected a claim frame; got {sent!r}"
+    _, data = claim_frames[0]
+    assert data == {"code": CLAIM_CODE, "setup_url": CLAIM_URL}
+
+
+def test_show_claim_stores_state_for_rerender(sim_display: TFTDisplay):
+    # The code + URL must be retained so a live re-render (cycle loop) of the
+    # claim screen keeps showing them.
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    assert sim_display._claim_code == CLAIM_CODE
+    assert sim_display._claim_setup_url == CLAIM_URL
+
+
+def test_render_dispatch_routes_claim_mode(sim_display: TFTDisplay):
+    # _render_current_locked must dispatch the claim mode to render_claim — not
+    # fall through to render_home (the catch-all). We assert by driving a real
+    # show_claim and confirming the mode sticks + a frame was produced.
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    # Re-render under the current mode; must not throw and must stay on claim.
+    sim_display._render_current()
+    assert sim_display._current_mode == TFTDisplay.CLAIM

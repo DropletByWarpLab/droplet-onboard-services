@@ -35,13 +35,21 @@ account, #371 handoff §1) and is **not skippable**.
 
 ## Claim-code provisioning — SCOPE
 
-**MINTING / ROTATION is OUT of scope for this PR.** It belongs to the PyPortal
-display-service (Adafruit PyPortal, USB vendor `239a`), which is a separate PR
-and **must not** be a hand-rolled script that bypasses `setup.sh`. For now a
-code is **seeded via env/fixture** (`CLAIM_CODE`, or a test fixture) and only
-**verified** here. `seedClaimCode()` materializes the hash idempotently;
-`ClaimCode.expiresAt` is carried so the rotation owner can expire codes later
-without another migration.
+> **Update (WARP-632 / ADR-017):** minting/rotation now lives in the
+> **orchestrator**, not the display-service. See
+> `docs/ADR-017-claim-code-mint-and-render.md` — the orchestrator mints the
+> code, seeds only its hash via `seedClaimCode()`, decides when to show it, and
+> pushes it to the PyPortal (`claim` mode); `oled-display` + firmware are thin
+> renderers. ADR-017 supersedes the "display-service owns mint/rotate"
+> follow-up note that used to live here and below.
+
+This PR (#373) shipped the **verify** half only. A code is hashed at rest via
+`hashClaimCode` and verified by `POST /api/setup/claim`; `seedClaimCode()`
+materializes the hash idempotently and `ClaimCode.expiresAt` is carried so the
+mint owner can expire codes. The mint half — `claim-code.service.ts`
+(`generateClaimCode` / `ensureClaimCode`) wired into `screen-qr.service.ts` —
+landed in WARP-632 per ADR-017. `CLAIM_CODE` remains a provisioning override
+(seed that exact code instead of minting).
 
 ## Data model (Prisma)
 
@@ -85,8 +93,15 @@ tokens only (aurora badge via `aurora-bg`/`aurora-ring` — the login PR's
 
 ## Follow-ups
 
-- PyPortal display-service: mint + rotate the claim code, render it on the lid
-  (rotation invalidates the previous code). Separate PR.
+- ~~PyPortal display-service: mint + rotate the claim code, render it on the
+  lid.~~ **DONE in WARP-632, but the OWNER changed** — the **orchestrator**
+  mints + rotates + decides-when-to-show and pushes to the PyPortal; the
+  display-service + firmware are thin renderers. See
+  `docs/ADR-017-claim-code-mint-and-render.md`.
+- Claim-screen **QR** on the lid: WARP-632 ships text-only (code + setup URL).
+  A QR (reusing the existing wifi-QR matrix path) is a clean follow-up.
+- Firmware `claim` render is **device-verified** on the physical PyPortal
+  (`pyportal/code.py` is CircuitPython, not CI-importable).
 - Wire the real per-field sources into `GET /api/setup/appliance`
   (device-bridge drives, model-readiness compute, PyPortal display status,
   device-identity `appliance_id`).

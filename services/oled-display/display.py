@@ -263,6 +263,9 @@ class TFTDisplay:
     # Lifecycle overlays (WARP-624) — modal, not part of the touch carousel.
     BOOT = "boot"
     SHUTDOWN = "shutdown"
+    # Onboarding claim screen (WARP-632 / ADR-017) — modal, host-driven. Shown
+    # while the box is unclaimed; the orchestrator mints the code and pushes it.
+    CLAIM = "claim"
 
     def __init__(self):
         self._pyportal = None
@@ -296,6 +299,11 @@ class TFTDisplay:
         self._boot_pct: Optional[int] = None
         self._shutdown_reason = ""
         self._shutdown_phase = "stopping"
+        # Claim screen state (WARP-632). Set by show_claim from the
+        # orchestrator's minted code; retained so a live re-render keeps showing
+        # the same code + setup URL.
+        self._claim_code = ""
+        self._claim_setup_url = ""
         # Readiness transition state. `_boot_complete` is an explicit flag —
         # we never infer "done" from the absence of something. `_boot_started_at`
         # anchors the timeout; `_last_readiness_check` gates the probe cadence.
@@ -1191,6 +1199,81 @@ class TFTDisplay:
                       sub, fill=LABEL_TERTIARY, font=font_sub)
         return img
 
+    def render_claim(self, code: str, setup_url: str) -> Image.Image:
+        """Onboarding claim screen — mirrors the firmware's render_claim().
+
+        The CODE is the hero: a large, centered, monospace-ish string the
+        customer reads off the lid and types into the setup wizard. Below it,
+        a short instruction + the setup URL so they know where to point their
+        phone. Brand mark up top to match the boot/shutdown lifecycle screens.
+
+        QR on the lid is intentionally OMITTED here (text-only) — see ADR-017
+        consequences / the WARP-632 follow-up note: a QR could reuse the
+        existing wifi-QR matrix path but the code itself is short and meant to
+        be typed, so text keeps the screen unambiguous. QR is a clean follow-up.
+        """
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        # Brand mark, smaller than boot so the code gets the vertical space.
+        mark_size = 56
+        mark_x = (WIDTH - mark_size) // 2
+        mark_y = 22
+        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
+                          primary=ACCENT_PRIMARY, highlight=ACCENT_LIGHT)
+
+        # Title — what this screen is for.
+        font_title = _get_font(20, bold=True)
+        title = "Claim your Droplet"
+        bbox = draw.textbbox((0, 0), title, font=font_title)
+        title_y = mark_y + mark_size + 12
+        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, title_y),
+                  title, fill=TEXT_COLOR, font=font_title)
+
+        # Instruction line above the code.
+        font_label = _get_font(13)
+        hint = "Enter this code to finish setup"
+        bbox = draw.textbbox((0, 0), hint, font=font_label)
+        hint_y = title_y + 30
+        draw.text(((WIDTH - (bbox[2] - bbox[0])) // 2, hint_y),
+                  hint, fill=LABEL_SECONDARY, font=font_label)
+
+        # The CODE — hero, on a raised card so it reads as the thing to copy.
+        code_text = code or "— — — —"
+        font_code = _get_font(40, bold=True)
+        cbbox = draw.textbbox((0, 0), code_text, font=font_code)
+        code_w = cbbox[2] - cbbox[0]
+        code_h = cbbox[3] - cbbox[1]
+        card_pad_x = 26
+        card_pad_y = 16
+        card_w = min(WIDTH - 24, code_w + card_pad_x * 2)
+        card_h = code_h + card_pad_y * 2
+        card_x = (WIDTH - card_w) // 2
+        card_y = hint_y + 26
+        draw.rounded_rectangle(
+            [(card_x, card_y), (card_x + card_w, card_y + card_h)],
+            radius=14, fill=SURFACE_RAISED,
+        )
+        draw.rounded_rectangle(
+            [(card_x, card_y), (card_x + card_w, card_y + card_h)],
+            radius=14, outline=ACCENT_COLOR, width=1,
+        )
+        # Center the code in the card (account for the font's top bearing).
+        draw.text((card_x + (card_w - code_w) // 2,
+                   card_y + (card_h - code_h) // 2 - cbbox[1]),
+                  code_text, fill=ACCENT_LIGHT, font=font_code)
+
+        # Setup URL at the foot — where to point the phone.
+        font_url = _get_font(14)
+        url_text = (setup_url or "")[:54]
+        if url_text:
+            ubbox = draw.textbbox((0, 0), url_text, font=font_url)
+            draw.text(((WIDTH - (ubbox[2] - ubbox[0])) // 2, HEIGHT - 34),
+                      url_text, fill=LABEL_TERTIARY, font=font_url)
+        return img
+
     @staticmethod
     def _draw_metric_card(draw, x, y, w, h, label, value, pct,
                           font_label, font_value, font_sm, danger_thresh=(80, 95)):
@@ -1345,6 +1428,24 @@ class TFTDisplay:
             })
             self._render_current_locked()
 
+    def show_claim(self, code: str, setup_url: str):
+        """Show the onboarding claim screen (WARP-632 / ADR-017).
+
+        Host-driven: the orchestrator mints the claim code and POSTs it to
+        /display/claim while the box is unclaimed. We set the `claim` mode,
+        stream a `claim` frame to the firmware (the render path to the PHYSICAL
+        panel — NOT the preview-only /display/custom image path), and render a
+        sim preview frame so the dashboard preview works too.
+        """
+        with self._lock:
+            self._current_mode = self.CLAIM
+            self._claim_code = code
+            self._claim_setup_url = setup_url
+            self._pyportal_send("claim", {
+                "code": code, "setup_url": setup_url,
+            })
+            self._render_current_locked()
+
     def show_custom_image(self, image: Image.Image):
         with self._lock:
             self._current_mode = "custom"
@@ -1417,6 +1518,8 @@ class TFTDisplay:
         elif mode == self.SHUTDOWN:
             img = self.render_shutdown(self._shutdown_reason,
                                        self._shutdown_phase)
+        elif mode == self.CLAIM:
+            img = self.render_claim(self._claim_code, self._claim_setup_url)
         elif mode == self.LOGO:
             img = self.render_logo()
         elif mode == self.STATS:
