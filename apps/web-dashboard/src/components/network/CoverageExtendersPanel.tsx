@@ -409,6 +409,17 @@ export function CoverageExtendersPanel() {
             reason: op.reason,
           });
           await mutate("/api/aps");
+        } else if (op.state === "unknown") {
+          // DASH-07: 404 from the orchestrator — indeterminate, not a success.
+          // Present as unconfirmed (rolled_back banner) and re-check the AP
+          // list rather than reporting the change as applied.
+          setOpStatus({
+            state: "rolled_back",
+            id: op.id,
+            mac: opStatus.mac,
+            reason: op.reason ?? "We couldn't confirm this change — re-check the device list.",
+          });
+          await mutate("/api/aps");
         } else if (Date.now() - startedAt > 70_000) {
           setOpStatus({
             state: "rolled_back",

@@ -12,6 +12,7 @@ import {
   saveProviderKey,
   listProviderKeys,
   deleteProviderKey,
+  fetchNetworkOperation,
 } from "@/lib/api";
 
 describe("API client", () => {
@@ -111,6 +112,49 @@ describe("API client", () => {
       expect(mockFetch).toHaveBeenCalledWith(
         "/api/llm/keys/openai",
         expect.objectContaining({ method: "DELETE" })
+      );
+    });
+  });
+
+  describe("fetchNetworkOperation", () => {
+    it("passes a 200 operation record through unchanged", async () => {
+      const op = {
+        id: "op-1",
+        state: "applied",
+        startedAt: 1,
+        finishedAt: 2,
+        reason: null,
+      };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(op),
+      });
+
+      const result = await fetchNetworkOperation("op-1");
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/network/operations/op-1",
+        expect.objectContaining({ credentials: "same-origin" }),
+      );
+      expect(result).toEqual(op);
+    });
+
+    it("DASH-07: maps a 404 to a distinct 'unknown' state, never 'applied'", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+
+      const result = await fetchNetworkOperation("op-gone");
+      // The bug was reporting a 404 as success ("applied"). A 404 is
+      // indeterminate — assert we never claim the change applied.
+      expect(result.state).toBe("unknown");
+      expect(result.state).not.toBe("applied");
+      // Reason is a re-check prompt, not a success message.
+      expect(result.reason).toMatch(/couldn't confirm/i);
+    });
+
+    it("throws on a non-404 error response", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+      await expect(fetchNetworkOperation("op-err")).rejects.toThrow(
+        "Failed to fetch operation: 500",
       );
     });
   });
