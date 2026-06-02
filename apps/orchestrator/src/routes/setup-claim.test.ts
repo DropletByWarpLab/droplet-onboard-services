@@ -28,12 +28,41 @@ import cookieParser from "cookie-parser";
 
 vi.unmock("@prisma/client");
 
-// Deterministic rate-limit budget: drive cacheGet to simulate "budget left"
-// (low/zero count → allowed) vs "budget exhausted" (>= max → 429).
-vi.mock("../services/cache.service.js", () => ({
-  cacheGet: vi.fn().mockResolvedValue(null),
-  cacheSet: vi.fn().mockResolvedValue(undefined),
-}));
+// WARP-631 — deterministic, per-key in-memory cache so the progressive-backoff
+// rate limiter is testable end-to-end. The route keys two values per IP:
+//   ratelimit:setup-claim:fails:<ip>  — running wrong-code count
+//   ratelimit:setup-claim:lock:<ip>   — locked-until epoch ms
+// A real store (not a single fixed return) lets a sequence of wrong codes
+// actually accumulate, so we can assert the 4th wrong code locks (AC#1) and the
+// lock escalates (AC#2). `__store` / `__failNext` are test hooks.
+vi.mock("../services/cache.service.js", () => {
+  const store = new Map<string, unknown>();
+  let failNext = false;
+  return {
+    __store: store,
+    /** Force the NEXT cache op to throw, to exercise the fail-OPEN paths. */
+    __failNext: () => {
+      failNext = true;
+    },
+    cacheGet: vi.fn(async (key: string) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("redis down");
+      }
+      return store.has(key) ? store.get(key) : null;
+    }),
+    cacheSet: vi.fn(async (key: string, value: unknown) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("redis down");
+      }
+      store.set(key, value);
+    }),
+    cacheDel: vi.fn(async (key: string) => {
+      store.delete(key);
+    }),
+  };
+});
 
 // The appliance contract best-effort enriches `network` from the routing
 // service. In a unit test there's no router, and the real client would retry +
@@ -43,11 +72,17 @@ vi.mock("../services/openwrt.client.js", () => ({
   fetchNetworkSummary: vi.fn().mockRejectedValue(new Error("router offline")),
 }));
 
-import { cacheGet } from "../services/cache.service.js";
+import * as cacheService from "../services/cache.service.js";
 import { createSetupRouter } from "./setup.js";
 import { hashClaimCode } from "../services/setup-claim.service.js";
 
-const mockCacheGet = vi.mocked(cacheGet);
+// The per-key store + fail hook installed by the mock factory above.
+const cacheStore = (cacheService as unknown as { __store: Map<string, unknown> })
+  .__store;
+const failNextCacheOp = (cacheService as unknown as { __failNext: () => void })
+  .__failNext;
+const FAILS_KEY = (ip: string) => `ratelimit:setup-claim:fails:${ip}`;
+const LOCK_KEY = (ip: string) => `ratelimit:setup-claim:lock:${ip}`;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -143,10 +178,11 @@ function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
 describe("GET /api/setup/appliance (PR #373 — documented stub)", () => {
   beforeEach(() => {
     process.env.DEVICE_SECRET = "test-device-secret";
-    mockCacheGet.mockResolvedValue(null);
+    cacheStore.clear();
   });
   afterEach(() => {
     delete process.env.DEVICE_SECRET;
+    cacheStore.clear();
     vi.clearAllMocks();
   });
 
@@ -182,10 +218,11 @@ describe("GET /api/setup/appliance (PR #373 — documented stub)", () => {
 describe("POST /api/setup/claim (PR #373)", () => {
   beforeEach(() => {
     process.env.DEVICE_SECRET = "test-device-secret";
-    mockCacheGet.mockResolvedValue(null); // budget available
+    cacheStore.clear(); // no failures / no lock to start
   });
   afterEach(() => {
     delete process.env.DEVICE_SECRET;
+    cacheStore.clear();
     vi.clearAllMocks();
   });
 
@@ -245,17 +282,24 @@ describe("POST /api/setup/claim (PR #373)", () => {
     expect(res.body.next_step).toBe("account");
   });
 
-  it("returns 429 when the rate-limit budget is exhausted, without touching the DB", async () => {
-    mockCacheGet.mockResolvedValue(999); // way over budget
+  it("returns 429 while an active lock holds, without touching the DB (WARP-631)", async () => {
+    // Simulate an active lock: locked-until 20s in the future.
+    cacheStore.set(LOCK_KEY("::ffff:127.0.0.1"), Date.now() + 20_000);
+    cacheStore.set(LOCK_KEY("127.0.0.1"), Date.now() + 20_000);
     const prisma = createPrismaMock();
     prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
     const findSpy = vi.spyOn(prisma.claimCode, "findFirst");
 
     const res = await request(buildApp(prisma))
       .post("/api/setup/claim")
-      .send({ code: "DRPL-7K2Q-9F4M" });
+      .send({ code: "DRPL-7K2Q-9F4M" }); // even a CORRECT code is held off
 
     expect(res.status).toBe(429);
+    expect(res.body.code).toBe("CLAIM_RATE_LIMITED");
+    expect(res.body.retryAfterSeconds).toBeGreaterThan(0);
+    expect(res.body.retryAfterSeconds).toBeLessThanOrEqual(20);
+    expect(res.headers["retry-after"]).toBeDefined();
+    // The lock is enforced BEFORE any DB read.
     expect(findSpy).not.toHaveBeenCalled();
   });
 
@@ -264,5 +308,136 @@ describe("POST /api/setup/claim (PR #373)", () => {
       .post("/api/setup/claim")
       .send({});
     expect(res.status).toBe(400);
+  });
+
+  // ── WARP-631 — progressive backoff ───────────────────────────────
+
+  it("forgives 3 wrong codes (400) then locks the 4th with 429 + Retry-After≈15 (AC#1)", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+    const app = buildApp(prisma);
+    const wrong = () =>
+      request(app).post("/api/setup/claim").send({ code: "WRON-GGGG-GGGG" });
+
+    // First three wrong codes → inline 400 CLAIM_CODE_INVALID, no lock.
+    for (let i = 1; i <= 3; i += 1) {
+      const r = await wrong();
+      expect(r.status, `attempt ${i}`).toBe(400);
+      expect(r.body.code).toBe("CLAIM_CODE_INVALID");
+    }
+
+    // The 4th wrong code → 429 with retryAfterSeconds ≈ 15 + a Retry-After header.
+    const fourth = await wrong();
+    expect(fourth.status).toBe(429);
+    expect(fourth.body.code).toBe("CLAIM_RATE_LIMITED");
+    expect(fourth.body.retryAfterSeconds).toBeGreaterThan(0);
+    expect(fourth.body.retryAfterSeconds).toBeLessThanOrEqual(15);
+    expect(fourth.headers["retry-after"]).toBe(String(fourth.body.retryAfterSeconds));
+    // The real code is still untouched — it was never consumed.
+    expect(prisma.claimCode._rows()[0].state).toBe("available");
+  });
+
+  it("escalates the lock 15 → 30 on successive lockouts (AC#2)", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+    const app = buildApp(prisma);
+    // supertest connects over loopback, so the route sees this as req.ip.
+    const ip = "::ffff:127.0.0.1";
+
+    // Drive failures by writing the counter directly, then asserting the lock
+    // duration the NEXT wrong code applies (so we don't have to wait out a real
+    // lock between assertions). After 4 fails → 15s; after 5 fails → 30s.
+    const wrong = () =>
+      request(app).post("/api/setup/claim").send({ code: "WRON-GGGG-GGGG" });
+
+    // Seed the counter at 3 so the next wrong code is the 4th (first lock=15s),
+    // and clear any lock so the request isn't held off first.
+    cacheStore.set(FAILS_KEY(ip), 3);
+    cacheStore.delete(LOCK_KEY(ip));
+    let r = await wrong();
+    expect(r.status).toBe(429);
+    expect(r.body.retryAfterSeconds).toBeLessThanOrEqual(15);
+    expect(r.body.retryAfterSeconds).toBeGreaterThan(10);
+
+    // Now seed at 4 and clear the lock → next wrong code is the 5th (30s).
+    cacheStore.set(FAILS_KEY(ip), 4);
+    cacheStore.delete(LOCK_KEY(ip));
+    r = await wrong();
+    expect(r.status).toBe(429);
+    expect(r.body.retryAfterSeconds).toBeLessThanOrEqual(30);
+    expect(r.body.retryAfterSeconds).toBeGreaterThan(15);
+  });
+
+  it("a correct code while unlocked clears the failure + lock counters (AC#3)", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+    const app = buildApp(prisma);
+
+    // Two wrong codes accrue a non-zero counter (still within the free tier).
+    await request(app).post("/api/setup/claim").send({ code: "WRON-GGGG-GGGG" });
+    await request(app).post("/api/setup/claim").send({ code: "WRON-GGGG-GGGG" });
+    // Some fails key now exists.
+    expect([...cacheStore.keys()].some((k) => k.includes(":fails:"))).toBe(true);
+
+    // Correct code → 200 and the rate state is wiped.
+    const ok = await request(app)
+      .post("/api/setup/claim")
+      .send({ code: "DRPL-7K2Q-9F4M" });
+    expect(ok.status).toBe(200);
+    expect(ok.body.claimed).toBe(true);
+    expect([...cacheStore.keys()].some((k) => k.includes(":fails:"))).toBe(false);
+    expect([...cacheStore.keys()].some((k) => k.includes(":lock:"))).toBe(false);
+  });
+
+  it("an already-claimed re-run also clears the rate state (WARP-631)", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({
+      codeHash: hashClaimCode("DRPL-7K2Q-9F4M"),
+      state: "consumed",
+      usedAt: new Date(),
+    });
+    const app = buildApp(prisma);
+    // Pre-seed a stale failure counter (e.g. earlier fat-fingering).
+    await request(app).post("/api/setup/claim").send({ code: "WRON-GGGG-GGGG" });
+
+    const ok = await request(app)
+      .post("/api/setup/claim")
+      .send({ code: "DRPL-7K2Q-9F4M" });
+    expect(ok.status).toBe(200);
+    expect(ok.body.already_claimed).toBe(true);
+    expect([...cacheStore.keys()].some((k) => k.includes(":fails:"))).toBe(false);
+  });
+
+  it("fails OPEN — a wrong code is NOT locked when the cache read throws (AC#4)", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+    const app = buildApp(prisma);
+
+    // Force the lock-check cacheGet to throw → checkClaimLock must fail OPEN
+    // (treat as not-locked) and the request proceeds to the DB, returning the
+    // ordinary inline 400 for a wrong code rather than a false 429.
+    failNextCacheOp();
+    const r = await request(app)
+      .post("/api/setup/claim")
+      .send({ code: "WRON-GGGG-GGGG" });
+
+    // Not a 429 — fail-open means no false lockout.
+    expect(r.status).not.toBe(429);
+    expect([400, 200]).toContain(r.status);
+  });
+
+  it("fails OPEN — a correct code still binds when the cache read throws (AC#4)", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+    const app = buildApp(prisma);
+
+    // A down cache on the lock-check path must never block a legitimate claim.
+    failNextCacheOp();
+    const r = await request(app)
+      .post("/api/setup/claim")
+      .send({ code: "DRPL-7K2Q-9F4M" });
+
+    expect(r.status).toBe(200);
+    expect(r.body.claimed).toBe(true);
   });
 });
