@@ -98,6 +98,6 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 
 ## Counts
 
-- Registered: 79 tools. (5 from WARP-100 + 51 in WARP-102, then memory ×2 [WARP-461], email ×5 [WARP-466], `network_summary` [WARP-470], `run_scene` [WARP-474], and PM ×9 [WARP-508 reads + WARP-509 writes].) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
+- Registered: 79 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 14 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×1 other] + 9 this PR [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] = 79.) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
 - Deferred: 2 tools.
 - Reconciled / collapsed: 4 (`block_device`, `unblock_device`, `get_cameras`, `get_camera_events`/`list_recent_camera_events`, `get_wifi_info`, `list_devices`/`get_connected_devices`) — all merged into the canonical names listed above.
