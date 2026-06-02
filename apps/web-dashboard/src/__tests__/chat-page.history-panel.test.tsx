@@ -16,6 +16,21 @@ vi.mock("@/lib/api", async () => {
   };
 });
 
+// DASH-04: the chat page reads useAuth().user to gate the chat WS bridge.
+// Preserve the real module (api.ts imports authFetch/patchSetupReady from it)
+// and only override useAuth to report a logged-in user so the page renders.
+vi.mock("@/lib/auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/auth")>(
+    "@/lib/auth",
+  );
+  return {
+    ...actual,
+    useAuth: () => ({
+      user: { id: "u1", username: "alice", displayName: "Alice" },
+    }),
+  };
+});
+
 // Mock useModels directly so the Try-again integration test can guarantee
 // `selectedModel` is populated synchronously (the SWR pathway through
 // fetchModels can lag the first render and leave selectedModel empty,

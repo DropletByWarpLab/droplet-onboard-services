@@ -279,6 +279,16 @@ export interface UseChatOptions {
    * new conversation, and `applyTurnCompleted` when turn-completed fires.
    */
   historyHandleRef?: MutableRefObject<ChatHistoryPanelHandle | null>;
+  /**
+   * DASH-04: whether an authenticated user is present. The chat WS bridge
+   * (`/api/ws/events`) is only opened when this is true, so we don't
+   * connect — and then reconnect-with-backoff forever — on an
+   * unauthenticated or expired session before auth resolves. Mirrors the
+   * `if (!user) return` gate `NotificationToaster` already applies to the
+   * same endpoint. Defaults to `true` so callers that don't pass it (and
+   * unit tests) keep the prior always-connect behavior.
+   */
+  authReady?: boolean;
 }
 
 /**
@@ -373,8 +383,18 @@ export function useChat(options: UseChatOptions = {}) {
   // socket here (rather than inside ChatInput) keeps the chip state in
   // a single owner — the hook — so the Composer can render N chips
   // from the same source without duplicating the subscription.
+  //
+  // DASH-04: only open the socket once an authenticated user is present.
+  // Without this gate the effect connected on mount (deps `[]`) even on an
+  // unauthenticated / expired session and then reconnected with backoff
+  // indefinitely against a `/api/ws/events` endpoint that just closes the
+  // upgrade. Gating on `authReady` (and listing it in the deps) means the
+  // socket opens exactly once auth resolves — same `if (!user) return`
+  // treatment NotificationToaster applies to the same endpoint.
+  const authReady = options.authReady ?? true;
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!authReady) return;
     let ws: WebSocket | null = null;
     let closed = false;
     let attempt = 0;
@@ -551,7 +571,7 @@ export function useChat(options: UseChatOptions = {}) {
         }
       }
     };
-  }, []);
+  }, [authReady]);
 
   const sendMessage = useCallback(
     async (content: string, model: string, systemPrompt?: string) => {
