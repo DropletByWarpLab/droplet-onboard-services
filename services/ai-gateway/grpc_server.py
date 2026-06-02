@@ -175,9 +175,9 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 ]
             )
         except Exception as e:
-            logger.error("gRPC ListModels error: %s", e)
+            # GW-08: don't echo upstream/provider error text to the caller.
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
+            context.set_details(_provider_error_detail(e, "gRPC ListModels error"))
             return inference_pb2.ModelList()
 
     async def EmbedText(self, request, context):
@@ -211,9 +211,9 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 ]
             )
         except Exception as e:
-            logger.error("gRPC EmbedText error: %s", e)
+            # GW-08: don't echo upstream/provider error text to the caller.
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Embedding error: {str(e)}")
+            context.set_details(_provider_error_detail(e, "gRPC EmbedText error"))
             return inference_pb2.EmbedResponse()
 
     async def Rerank(self, request, context):
@@ -247,9 +247,9 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             )
             return inference_pb2.RerankResponse(scores=scores)
         except Exception as e:
-            logger.error("gRPC Rerank error: %s", e)
+            # GW-08: don't echo upstream/provider error text to the caller.
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Rerank error: {str(e)}")
+            context.set_details(_provider_error_detail(e, "gRPC Rerank error"))
             return inference_pb2.RerankResponse()
 
     async def ClassifyQuery(self, request, context):
@@ -275,9 +275,9 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 "confidence": result.confidence,
             })
         except Exception as e:
-            logger.exception("gRPC ClassifyQuery error")
+            # GW-08: don't echo upstream/provider error text to the caller.
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Classify error: {str(e)}")
+            context.set_details(_provider_error_detail(e, "gRPC ClassifyQuery error"))
             return inference_pb2.ClassifyQueryResponse(**{"class": "unknown", "confidence": 0.0})
 
 
