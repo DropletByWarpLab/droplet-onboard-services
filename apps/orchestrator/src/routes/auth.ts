@@ -88,15 +88,13 @@ function callerIpFromReq(req: Request): string | undefined {
 
 const logger = pino({ name: "auth-route" });
 
-const RESERVED_USERNAMES = ["admin", "root"];
-
 const usernameField = z
   .string()
   .min(2)
   .max(64)
   .regex(/^[a-zA-Z0-9._-]+$/, "Username must be alphanumeric")
   .refine(
-    (val) => !RESERVED_USERNAMES.includes(val.toLowerCase()),
+    (val) => !isReservedUserId(val),
     "This username is reserved and cannot be used",
   );
 
@@ -1184,6 +1182,8 @@ export function createPublicAuthRouter(
       // normalizes new invites, but re-normalize here as defense in depth so
       // a stale (pre-fix) or hand-edited invite row can't plant a row whose
       // email casing breaks the email-keyed /auth/login lookup.
+      // An invite predating the email-normalization fix may carry email: null,
+      // which the email-keyed /auth/login cannot match (operator remediation: re-invite).
       const inviteEmail = invite.email
         ? invite.email.trim().toLowerCase()
         : null;
@@ -1205,7 +1205,10 @@ export function createPublicAuthRouter(
           // but possible under retry). Refresh `displayName` from the
           // invite in case the operator updated it, and refresh the
           // credential so a retry never leaves a stale or absent hash.
+          // Also refresh `email` (the email-keyed login key) so a
+          // re-acceptance always lands the correct login identifier.
           displayName: invite.displayName || invite.username,
+          email: inviteEmail,
           passwordHash,
         },
         create: {

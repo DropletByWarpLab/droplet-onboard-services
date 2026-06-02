@@ -394,3 +394,54 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
     expect(res.body.code).toBe("INVALID_PASSWORD");
   });
 });
+
+describe("Fix B — invite-accept upsert refreshes email on the UPDATE path (re-acceptance)", () => {
+  it("overwrites a stale email on re-acceptance so the email-keyed login still resolves", async () => {
+    const prisma = createPrismaMock();
+
+    // Issue an invite with the fresh email.
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Bob Re-accept",
+      email: "fresh@warp.test",
+      role: "family",
+    });
+
+    // The invite derives the username from the email prefix: "fresh@warp.test"
+    // → nextcloudUsername "fresh". Seed an existing User row with a STALE
+    // email under that same nextcloudUsername so the upsert hits the UPDATE path.
+    const existingRow = {
+      id: "u-existing-fresh",
+      username: "fresh",
+      nextcloudUsername: "fresh",
+      displayName: "Fresh Old",
+      email: "stale@old.test",
+      passwordHash: "$argon2id$STALE-HASH",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    prisma._users.push(existingRow);
+
+    // ncLoginWithCredentials is called after a successful accept.
+    (nc.ncLoginWithCredentials as any).mockResolvedValue({
+      token: "nc-app-password",
+      loginName: "fresh",
+    });
+
+    const publicApp = buildApp(prisma, null);
+    const accept = await request(publicApp)
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+
+    expect(accept.status).toBe(200);
+
+    // The UPDATE path must have refreshed the email column — the row should
+    // now carry the invite's fresh email, not the stale one.
+    const row = prisma._users.find((u: any) => u.nextcloudUsername === "fresh");
+    expect(row).toBeDefined();
+    expect(row.email).toBe("fresh@warp.test");
+    // Verify that the old stale email is gone.
+    expect(row.email).not.toBe("stale@old.test");
+  });
+});
