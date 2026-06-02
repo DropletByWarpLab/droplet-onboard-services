@@ -223,8 +223,7 @@ def delete_chunks_for_path(user_id: str, path: str) -> int:
     keyed on those drops the orphaned vectors that would otherwise linger in
     search. Scoped to a single user's own path — never a cross-user wildcard.
     """
-    conn = get_conn()
-    with conn.cursor() as cur:
+    with _db_lock, get_conn().cursor() as cur:
         cur.execute(
             'DELETE FROM "FileContentChunk" WHERE "userId" = %s AND "path" = %s',
             (user_id, path),
