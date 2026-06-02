@@ -432,11 +432,23 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(res.body.error).toBe("Invalid credentials");
     // No session minted…
     expect(res.headers["set-cookie"]).toBeUndefined();
-    // …and no success activity recorded for a denied sign-in.
-    expect(recordActivity).not.toHaveBeenCalled();
-    // Counter was advanced by the (verified) assertion before the gate; the
-    // gate denies the SESSION, which is the security property under test.
-    expect(credentials[0]!.counter).toBe(6);
+    // …a warn-level denial IS recorded (audit parity with the password
+    // path's denyInvalid — a deactivated user probing via passkey must leave
+    // the same trail), but never a success activity.
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        refs: expect.objectContaining({
+          outcome: "invalid_credentials",
+          method: "webauthn",
+        }),
+      }),
+    );
+    // Counter is NOT advanced — the credential update is deferred until after
+    // the deactivation gate, so a blocked attempt leaves state untouched
+    // (parity with the clone-rejection path). Starts and stays at 5.
+    expect(credentials[0]!.counter).toBe(5);
   });
 
   it("verify: counter regression (clone) → 401 and the stored counter is NOT advanced", async () => {

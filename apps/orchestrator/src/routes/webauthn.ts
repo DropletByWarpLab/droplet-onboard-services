@@ -375,17 +375,10 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         return;
       }
 
-      // Advance the signature counter to the verified value (clone detection
-      // on the NEXT assertion) and stamp last-used.
-      await prisma.webAuthnCredential.update({
-        where: { id: dbCred.id },
-        data: {
-          counter: verification.authenticationInfo.newCounter,
-          lastUsedAt: new Date(),
-        },
-      });
-
-      // Resolve the owning directory user and issue the session.
+      // Resolve the owning directory user FIRST. The signature-counter
+      // advance + lastUsedAt stamp are deferred until after the deactivation
+      // gate below, so a blocked attempt leaves the credential untouched
+      // (parity with the clone-rejection path, which also doesn't advance).
       const dbUser = await prisma.user.findUnique({ where: { id: dbCred.userId } });
       if (!dbUser) {
         // Credential outlived its user (should be impossible — FK cascade).
@@ -406,9 +399,38 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
           { userId: dbUser.id },
           "WebAuthn sign-in rejected: directory user is deactivated",
         );
+        // Audit parity with auth.ts denyInvalid: record a warn-level denial so
+        // a deactivated user probing via passkey leaves the same trail the
+        // password path produces. The counter is intentionally NOT advanced —
+        // we return before the credential update below.
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Passkey sign-in blocked for a deactivated account",
+          sub: `${dbUser.username} • ${callerIp(req) ?? "unknown"}`,
+          refs: {
+            outcome: "invalid_credentials",
+            method: "webauthn",
+            userId: dbUser.id,
+            username: dbUser.username,
+            ip: callerIp(req) ?? null,
+          },
+        });
         res.status(401).json({ error: "Invalid credentials" });
         return;
       }
+
+      // Advance the signature counter to the verified value (clone detection
+      // on the NEXT assertion) and stamp last-used — only now that the user is
+      // verified AND active, so a blocked attempt never mutates state.
+      await prisma.webAuthnCredential.update({
+        where: { id: dbCred.id },
+        data: {
+          counter: verification.authenticationInfo.newCounter,
+          lastUsedAt: new Date(),
+        },
+      });
 
       await recordActivity({
         kind: "auth",
