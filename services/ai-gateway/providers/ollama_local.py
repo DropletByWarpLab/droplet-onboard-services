@@ -66,6 +66,18 @@ _OLLAMA_TIMEOUT = httpx.Timeout(
     pool=10.0,
 )
 
+# Upper bound on the httpx connection pool. The REAL concurrency gate is the
+# in-flight semaphore (`_sema`), which is sized from the appliance's
+# `num_parallel` and resized on a 503 scale-up. The connection pool only has to
+# stay at-or-above whatever the semaphore admits, so we size it to a generous
+# fixed cap rather than pinning it at construction-time `num_parallel` (which is
+# 1 before the first /health refresh — the GW-13 bug, where a later scale-up
+# resized the semaphore but left the pool serializing every chat through one
+# connection). Connection reuse to a single Ollama host is cheap; an over-large
+# cap costs nothing because the semaphore never lets that many requests run at
+# once. Override for exotic deploys via OLLAMA_MAX_CONNECTIONS.
+_MAX_CONNECTIONS = int(os.getenv("OLLAMA_MAX_CONNECTIONS", "64"))
+
 
 class _LimitsCache:
     """Tiny cache of the appliance's /health.limits — refreshed on 503 or on init.
@@ -239,12 +251,16 @@ class OllamaLocalProvider(BaseProvider):
         # not the original size), which can't be relied on for resize decisions
         # mid-flight or across Python versions. We keep our own copy.
         self._sema_size: int = 0
-        # Outbound connection cap matches the appliance's parallel slot count.
-        # Refreshed on first chat via _ensure_limits.
+        # Connection pool is sized to a generous fixed cap, NOT to
+        # `num_parallel`. The in-flight semaphore (`_sema`, resized on scale-up)
+        # is the authoritative concurrency limit; the pool just has to stay at
+        # or above it. Pinning the pool at construction-time `num_parallel` (1,
+        # pre-first-refresh) was GW-13: a later semaphore resize was defeated
+        # because httpx still serialized every chat through a single connection.
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=_OLLAMA_TIMEOUT,
-            limits=httpx.Limits(max_connections=self._limits.num_parallel),
+            limits=httpx.Limits(max_connections=_MAX_CONNECTIONS),
         )
 
     def _build_sema(self, num_parallel: int) -> None:
