@@ -351,6 +351,67 @@ describe("setup Claim step — rate-limit countdown (WARP-631)", () => {
     ).not.toBeDisabled();
   });
 
+  it("announces the lockout ONCE: sr-only live region is set once while the visible m:ss ticks (a11y)", async () => {
+    await rejectWithRateLimit(15);
+
+    // The visually-hidden polite live region is announced a single time when
+    // the lockout starts — phrased in whole seconds so it never rewrites.
+    const live = screen.getByTestId("claim-lockout-announcement");
+    expect(live).toHaveAttribute("aria-live", "polite");
+    expect(live).toHaveClass("sr-only");
+    const announcedAtStart = live.textContent;
+    expect(announcedAtStart).toMatch(/too many attempts/i);
+    expect(announcedAtStart).toMatch(/about 15 seconds/i);
+
+    // The visible countdown shows the ticking m:ss (a separate, non-live node).
+    expect(screen.getByText(/try again in 0:15/i)).toBeInTheDocument();
+
+    // Advance a few seconds: the VISIBLE countdown must change…
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(screen.getByText(/try again in 0:12/i)).toBeInTheDocument();
+    // …but the live-region text must NOT (announced once, not per tick).
+    expect(screen.getByTestId("claim-lockout-announcement").textContent).toBe(
+      announcedAtStart,
+    );
+
+    // One more tick to be sure the live region stays frozen.
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText(/try again in 0:11/i)).toBeInTheDocument();
+    expect(screen.getByTestId("claim-lockout-announcement").textContent).toBe(
+      announcedAtStart,
+    );
+  });
+
+  it("the visible countdown container is NOT role=alert (only the sr-only region is live) (a11y)", async () => {
+    await rejectWithRateLimit(15);
+
+    // The ticking m:ss line is purely visual — it must not carry an alert role
+    // (which, paired with per-tick text changes, would re-announce every second).
+    const visibleCountdown = screen.getByText(/try again in 0:15/i);
+    expect(visibleCountdown.closest('[role="alert"]')).toBeNull();
+  });
+
+  it("clears the sr-only announcement when the lockout elapses (a11y)", async () => {
+    await rejectWithRateLimit(2);
+    expect(
+      screen.getByTestId("claim-lockout-announcement").textContent,
+    ).toMatch(/too many attempts/i);
+
+    // Run out the clock — the announcement is cleared so it isn't left in the
+    // live region after the lockout ends.
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.queryByText(/try again in/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("claim-lockout-announcement").textContent,
+    ).toBe("");
+  });
+
   it("does NOT start a countdown for an ordinary wrong-code 400 (no retryAfter)", async () => {
     const { ClaimError } = await vi.importActual<typeof import("@/lib/api")>(
       "@/lib/api",

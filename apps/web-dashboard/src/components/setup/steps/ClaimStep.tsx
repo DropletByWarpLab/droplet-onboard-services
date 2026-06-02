@@ -94,14 +94,22 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
   // WARP-631 — live retry countdown on a rate-limited (429) claim. `> 0` means
   // we're locked out: the form is disabled and the inline message shows m:ss.
   const [secondsLeft, setSecondsLeft] = useState(0);
+  // WARP-631 (a11y) — one-shot screen-reader announcement of the lockout. The
+  // visible countdown ticks every second and is purely visual; this string is
+  // written ONCE when the lockout starts and cleared when it ends, so a polite
+  // live region announces "too many attempts" a single time instead of
+  // re-reading the whole line on every tick.
+  const [lockoutAnnouncement, setLockoutAnnouncement] = useState("");
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  /** Stop any running countdown interval (idempotent). */
+  /** Stop any running countdown interval (idempotent). Also clears the one-shot
+   *  SR announcement so it isn't left in the live region after the lockout. */
   const stopCountdown = useCallback(() => {
     if (countdownRef.current !== null) {
       clearInterval(countdownRef.current);
       countdownRef.current = null;
     }
+    setLockoutAnnouncement("");
   }, []);
 
   /** Start (or restart) the 1s retry countdown from `seconds`. At zero it
@@ -111,6 +119,12 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
     (seconds: number) => {
       stopCountdown();
       setSecondsLeft(seconds);
+      // Write the SR announcement ONCE for this lockout. Phrased in whole
+      // seconds (not the ticking m:ss) precisely so it never needs rewriting —
+      // the visible countdown carries the live digits, this carries the alert.
+      setLockoutAnnouncement(
+        `Too many attempts. Try again in about ${Math.max(0, Math.floor(seconds))} seconds.`,
+      );
       countdownRef.current = setInterval(() => {
         setSecondsLeft((prev) => {
           if (prev <= 1) {
@@ -308,17 +322,19 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
         </span>
       </label>
 
-      {/* WARP-631 — while rate-limited, the inline slot shows a calm live retry
-          countdown (m:ss) instead of the wrong-code error. Same alert slot, so
-          there's no layout jump between the two states. */}
+      {/* WARP-631 — while rate-limited, the inline slot shows a calm retry
+          countdown (m:ss) instead of the wrong-code error. Same slot, so
+          there's no layout jump between the two states.
+          a11y: this visible block is PURELY VISUAL — its m:ss text ticks every
+          second, so it must NOT be a live region (a screen reader would
+          re-announce the whole line on every tick). The one-shot announcement
+          lives in the sr-only polite region rendered alongside it below. */}
       {secondsLeft > 0 ? (
-        <div
-          role="alert"
-          aria-live="polite"
-          className="mt-3 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
-        >
+        <div className="mt-3 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
           <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-          <span>
+          {/* tabular-nums on the line so the m:ss digits don't twitch each tick.
+              Kept as one text node so the countdown copy stays greppable. */}
+          <span className="tabular-nums">
             Too many attempts — try again in {formatCountdown(secondsLeft)}
           </span>
         </div>
@@ -333,6 +349,20 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
           </div>
         )
       )}
+
+      {/* WARP-631 (a11y) — visually-hidden polite live region that announces the
+          lockout ONCE. Its text is set a single time when the countdown starts
+          and cleared when it ends, so the screen reader speaks "too many
+          attempts" once per lockout rather than on every visible-countdown
+          tick. Always mounted so the announcement fires on text change. */}
+      <span
+        className="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="claim-lockout-announcement"
+      >
+        {lockoutAnnouncement}
+      </span>
 
       {/* Supply-chain reassurance chip */}
       <div className="mt-4 flex items-center gap-2 rounded-sm bg-system-green/10 px-3.5 py-3 type-footnote text-system-green">
