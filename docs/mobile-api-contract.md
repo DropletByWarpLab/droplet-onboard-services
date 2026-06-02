@@ -1,7 +1,7 @@
 # Mobile API Contract
 
 **Status:** Living document (mirror of the orchestrator routes that mobile clients consume)
-**Date:** 2026-05-18
+**Date:** 2026-05-18 (chat route + SSE wire corrected 2026-06-01 — XR-01/XR-02)
 **Companion to:** ADR-008 (Native Mobile — Design System + API Contract)
 
 This document is the source-of-truth contract that the iOS + Android
@@ -140,12 +140,32 @@ Stream URL is short-lived (signed); fetch fresh on every player open.
 | GET | `/llm/conversations` | Bearer | `[{ id, title, updatedAt, model }]` |
 | GET | `/llm/conversations/:id` | Bearer | `{ id, title, messages: [...] }` |
 | POST | `/llm/conversations` | Bearer | `{ title?, model? }` → `{ id }` |
-| POST | `/llm/conversations/:id/chat` | Bearer | `{ message, stream?: true }` → SSE stream OR JSON |
+| POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
+
+Chat sends go to the single `POST /api/llm/chat` route (there is **no**
+per-conversation `/llm/conversations/:id/chat` endpoint). The conversation
+id is carried in the request **body** as `conversationId` (a UUID), not in
+the path; omit it to start a new conversation. The body is OpenAI-style:
+`messages` is the full turn array (`role` ∈ `system|user|assistant|tool`,
+plus `content`), and `stream: true` selects the SSE response below.
 
 Streaming uses SSE (`Content-Type: text/event-stream`). Native clients
 should use a streaming HTTP client (URLSession `bytes(for:)` on iOS,
 OkHttp streaming on Android) to render token-by-token.
+
+On success, every chat turn returns two response headers the client must read:
+
+- `X-Conversation-Id: <uuid>` — the session id (new or existing). When you omit
+  `conversationId` to start a new conversation, this header is the **only** way
+  to learn the server-assigned id; capture it and send it back as
+  `conversationId` on the next turn to continue the thread.
+- `X-Assistant-Message-Id: <uuid>` — the assistant message row id (WARP-329),
+  used to match the MQTT `turn-completed` event to the streamed row.
+
+Both headers are set on streaming **and** non-streaming responses. They are
+omitted only for ephemeral turns (`ephemeral: true`, e.g. the setup-wizard
+sample prompt), which are not persisted.
 
 ### Files (`/api/files/*`)
 
@@ -237,20 +257,39 @@ Native error mapping (subset):
 
 ## SSE / streaming reads
 
-Chat streaming responses look like:
+Each SSE frame is `event: <type>\ndata: <json>\n\n` (orchestrator
+`encodeSSE`, `apps/orchestrator/src/types/sse-events.ts`). The token text
+arrives on `event: content_delta` (NOT `token`), and the stream terminates
+on `event: done` carrying `stop_reason` (NOT `finishReason`):
+
 ```
-event: token
+event: content_delta
 data: {"text": "Hello"}
 
-event: token
+event: content_delta
 data: {"text": " world"}
 
 event: done
-data: {"finishReason": "stop"}
+data: {"iterations": 1, "stop_reason": "model_done"}
 ```
 
-Native clients buffer until `event: done`, append text to the active
-message bubble per-token.
+`stop_reason` ∈ `model_done | iteration_limit | error` (an `error` frame
+also carries an `error` string). The agent loop also emits these event
+types on the same stream — render or ignore as needed:
+
+| `event:` | `data` payload | Meaning |
+|---|---|---|
+| `content_delta` | `{ text }` | One token/text chunk — append to the active bubble |
+| `tool_call` | `{ id, name, args }` | The model invoked an MCP tool |
+| `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
+| `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
+| `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
+
+Native clients should detect end-of-stream on `event: done` /
+`stop_reason` (the v1 clients keyed on `finishReason`, which never arrives,
+so they terminate only on socket EOF — see XR-02). Routing by `event:`
+name is the robust approach; a `data.text`-only parser silently drops the
+`tool_call`/`tool_result`/`reasoning_step` frames.
 
 ## Schema migration policy
 
