@@ -140,6 +140,38 @@ export async function pushCustomImage(
   }
 }
 
+/**
+ * Push the CLAIM screen to the status display via the display service's
+ * `POST /display/claim` endpoint (WARP-632 / ADR-017).
+ *
+ * This is the orchestrator → display half of the claim-code render path:
+ * `screen-qr.service.ts` calls this with the freshly-minted code + the setup
+ * URL while the box is unclaimed; the display service renders a dedicated
+ * `claim` mode on the PyPortal (large code + setup URL) rather than going
+ * through the preview-only `/display/custom` image path.
+ *
+ * `code` is the plaintext DRPL-XXXX-XXXX (already grouped for the lid);
+ * `setupUrl` is where the customer points their phone (e.g. https://<ip>/setup).
+ *
+ * Returns true on 2xx, false on any non-2xx or thrown error — surface the
+ * failure via the caller's signature/metrics rather than throw, mirroring the
+ * other helpers in this file. 5s ceiling so a stalled display service can't
+ * pin the orchestrator's event loop on this push (same bound as
+ * `pushCustomImage`).
+ */
+export async function pushClaimCode(code: string, setupUrl: string): Promise<boolean> {
+  try {
+    const res = await displayFetch("/display/claim", {
+      method: "POST",
+      body: JSON.stringify({ code, setup_url: setupUrl }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function setBrightness(value: number): Promise<boolean> {
   try {
     const res = await displayFetch("/display/brightness", {

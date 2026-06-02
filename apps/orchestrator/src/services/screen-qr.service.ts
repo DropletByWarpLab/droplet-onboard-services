@@ -30,10 +30,13 @@
  *   - Poller stop()s cleanly on app shutdown so test suites can run
  *     the whole orchestrator without leaking timers.
  */
+import { createHash } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import pino from "pino";
+import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
-import { pushCustomImage } from "./display.client.js";
+import { pushClaimCode, pushCustomImage } from "./display.client.js";
+import { ensureClaimCode, isClaimed } from "./claim-code.service.js";
 import { renderQRToScreenPng } from "./qr-render.js";
 
 const logger = pino({ name: "screen-qr" });
@@ -97,6 +100,22 @@ interface PeerEvent {
 
 /** In-memory peer-event state. Cleared on restart. */
 let lastPeerEvent: PeerEvent | null = null;
+
+/**
+ * Prisma handle for the claim-screen branch. Set by `startScreenQRPoller`
+ * (which receives it from app.ts, same as the reminders poller). Null until
+ * the poller starts; the claim branch is skipped while null so unit tests of
+ * the QR logic don't need a DB.
+ */
+let prismaRef: PrismaClient | null = null;
+
+/** Production collaborators for `decideClaimScreen`. Real DB + display client. */
+const claimScreenDeps: ClaimScreenDeps = {
+  isClaimed,
+  ensureClaimCode,
+  pushClaimCode,
+  setupUrl,
+};
 
 /** The signature of whatever's currently on screen (avoids re-pushes). */
 let activeSignature = "";
@@ -200,6 +219,70 @@ export async function decideScreenQR(
 }
 
 /**
+ * Collaborators `decideClaimScreen` needs, injected so the decision is
+ * unit-testable with no DB and no network (AC6). Production wiring passes the
+ * real claim-code service + display client + setupUrl.
+ */
+export interface ClaimScreenDeps {
+  isClaimed: (prisma: PrismaClient) => Promise<boolean>;
+  ensureClaimCode: (prisma: PrismaClient) => Promise<string | null>;
+  pushClaimCode: (code: string, setupUrl: string) => Promise<boolean>;
+  setupUrl: () => string;
+}
+
+export interface ClaimScreenResult {
+  /** True if the claim screen owns this tick — the caller MUST skip the QR
+   *  image push. False means "fall through to the QR/peer/wifi logic". */
+  handled: boolean;
+  /** Set only when handled: the push outcome (false = display outage). */
+  pushed?: boolean;
+  /** Set only when handled: claim-scoped, changes only when the code rotates,
+   *  so the poller can skip re-pushing the same code every tick. */
+  signature?: string;
+}
+
+/** Short, stable signature fragment for a claim code (8 hex chars of its
+ *  hash). We never put the plaintext code in the signature/log. */
+function claimSignature(code: string): string {
+  const h = createHash("sha256").update(code).digest("hex").slice(0, 8);
+  return `claim:${h}`;
+}
+
+/**
+ * HIGHEST-priority branch of the refresh path (WARP-632 / ADR-017): while the
+ * box is NOT claimed, render the minted claim code on the lid and SKIP the QR
+ * image push for this tick. Once claimed, hand back to the QR/peer/wifi logic.
+ *
+ * Single owner: the orchestrator already owns the first-boot PyPortal screen
+ * via this service, so the claim screen lives here too (no second pusher racing
+ * the display). The mint + seed is a write to the orchestrator's own Prisma DB
+ * (`ensureClaimCode`), so this is the natural home.
+ *
+ * Returns `{ handled: false }` when claimed, or when a race means the code was
+ * just consumed (ensureClaimCode → null) — both fall through to the QR logic.
+ * When a code is minted we push it and return `{ handled: true, pushed, signature }`.
+ * We report `handled: true` even on a failed push so we don't briefly show the
+ * WiFi QR on a display blip while the box is still unclaimed; the caller only
+ * records the signature on a successful push, so the next tick retries.
+ */
+export async function decideClaimScreen(
+  prisma: PrismaClient,
+  deps: ClaimScreenDeps,
+): Promise<ClaimScreenResult> {
+  if (await deps.isClaimed(prisma)) {
+    return { handled: false };
+  }
+  const code = await deps.ensureClaimCode(prisma);
+  if (!code) {
+    // Race: isClaimed said false but the code was just consumed. Don't push a
+    // stale claim screen — fall through.
+    return { handled: false };
+  }
+  const pushed = await deps.pushClaimCode(code, deps.setupUrl());
+  return { handled: true, pushed, signature: claimSignature(code) };
+}
+
+/**
  * Build the setup URL for a freshly-flashed box. Returns
  * `https://<lan-ip>/setup` using the first non-loopback IPv4 we find;
  * falls back to the box's hostname if no IP can be resolved.
@@ -281,6 +364,30 @@ async function refreshNow(): Promise<ScreenQRDecision | null> {
   refreshInFlight = true;
 
   try {
+    // Priority 0 (WARP-632 / ADR-017): while the box is NOT claimed, the claim
+    // code owns the lid. Mint + push it and skip the QR image push entirely.
+    // Only when claimed do we fall through to the setup/peer/wifi QR logic.
+    if (prismaRef) {
+      try {
+        const claim = await decideClaimScreen(prismaRef, claimScreenDeps);
+        if (claim.handled) {
+          // Record the signature only on a successful push so a display blip
+          // is retried next tick rather than silently latched.
+          if (claim.pushed && claim.signature) {
+            if (claim.signature !== activeSignature) {
+              activeSignature = claim.signature;
+              logger.info("screen-qr: pushed claim screen");
+            }
+          }
+          return null;
+        }
+      } catch (err) {
+        // A claim-branch failure (DB down, etc.) must not blank the screen or
+        // crash the poller — log and fall through to the QR logic.
+        logger.warn({ err }, "screen-qr: claim branch failed; falling through to QR");
+      }
+    }
+
     const userCount = await countRealNextcloudUsers().catch((err) => {
       // Treat "Nextcloud unreachable" as "first boot, still" — better
       // to default to the setup-URL QR (which is the safe initial state)
@@ -338,10 +445,11 @@ let started = false;
 
 /**
  * Boot the poller. Idempotent — calling twice replaces the handle.
- * `app.ts` calls this once during boot. Doesn't need Prisma (user
- * count goes through Nextcloud's OCS API).
+ * `app.ts` calls this once during boot. `prisma` is used by the claim-screen
+ * branch (WARP-632); the user-count leg still goes through Nextcloud's OCS API.
  */
-export function startScreenQRPoller(): void {
+export function startScreenQRPoller(prisma: PrismaClient): void {
+  prismaRef = prisma;
   started = true;
   if (pollerInterval) {
     clearInterval(pollerInterval);
@@ -367,6 +475,7 @@ export function stopScreenQRPoller(): void {
     pollerInterval = null;
   }
   started = false;
+  prismaRef = null;
 }
 
 /**
@@ -376,6 +485,7 @@ export function stopScreenQRPoller(): void {
 export function _resetForTests(): void {
   lastPeerEvent = null;
   activeSignature = "";
+  prismaRef = null;
   if (pollerInterval) {
     clearInterval(pollerInterval);
     pollerInterval = null;

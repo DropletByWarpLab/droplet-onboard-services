@@ -364,11 +364,14 @@ export function createApp(prisma: PrismaClient) {
   // to dispatch due-time notifications and re-sync calendar sources.
   startRemindersPoller(prisma);
 
-  // Status display screen QR — context-switched display (setup URL on first
-  // boot, last-generated WireGuard peer for ~60 s after creation, WiFi-hotspot
-  // QR otherwise). 30 s poller; calls into Nextcloud + device-bridge.
-  // Failures in any leg leave the screen alone rather than blanking it.
-  startScreenQRPoller();
+  // Status display screen QR — context-switched display. WARP-632/ADR-017
+  // adds the highest-priority claim-screen branch (mint + render the claim
+  // code on the PyPortal while the box is unclaimed); once claimed it falls
+  // through to setup URL on first boot, last-generated WireGuard peer for
+  // ~60 s after creation, WiFi-hotspot QR otherwise. 30 s poller; calls into
+  // Prisma + Nextcloud + device-bridge. Failures in any leg leave the screen
+  // alone rather than blanking it.
+  startScreenQRPoller(prisma);
 
   // Web Push — initialise VAPID + log keys at startup. Idempotent;
   // safe to call before any subscribe/push attempt.
