@@ -557,8 +557,21 @@ def reindex_one(nc_file_id: str) -> dict:
     chunks = _chunk_spans_from_doc(doc)
     if not chunks:
         raise RuntimeError(f"reindex_one: chunker produced 0 chunks for {path}")
-    chunk_texts = [c.text for c in chunks]
-    vectors = embed_texts(chunk_texts)
+    # WARP-435: embed (and below, persist) the *prefixed* chunk text — the
+    # contextual "Document: {name} / Section: {a > b}" header — exactly like
+    # the three primary ingest paths (handle_brain_uploaded, watcher,
+    # transcription_worker). Re-indexing must produce the same embeddings
+    # and stored text as a normal ingest, otherwise admin re-index silently
+    # diverges from watcher-indexed rows for identical content. fetch_item
+    # carries no friendly filename, so fall back to the storage-path
+    # basename (the same fallback the other paths use when no payload
+    # filename is present).
+    display_filename = os.path.basename(path) or "document"
+    prefixed_chunks = [
+        format_chunk_with_header(chunk.text, display_filename, chunk.section_path)
+        for chunk in chunks
+    ]
+    vectors = embed_texts(prefixed_chunks)
     if len(vectors) != len(chunks):
         raise RuntimeError(
             f"reindex_one: embedding count mismatch ({len(vectors)} vs {len(chunks)})"
@@ -583,9 +596,14 @@ def reindex_one(nc_file_id: str) -> dict:
                 'DELETE FROM "FileContentChunk" WHERE "brainItemId" = %s',
                 (nc_file_id,),
             )
-            for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+            for idx, (chunk, prefixed_text, vec) in enumerate(
+                zip(chunks, prefixed_chunks, vectors)
+            ):
                 chunk_metadata = dict(doc_metadata or {})
                 chunk_metadata["anchor"] = chunk.anchor.model_dump()
+                # WARP-435: persist the section breadcrumb alongside the
+                # anchor, matching the primary ingest paths.
+                chunk_metadata["sectionPath"] = list(chunk.section_path)
                 cur.execute(
                     """
                     INSERT INTO "FileContentChunk"
@@ -600,7 +618,11 @@ def reindex_one(nc_file_id: str) -> dict:
                         synthetic_nc_file_id,
                         path,
                         idx,
-                        chunk.text,
+                        # WARP-435: store the prefixed text — the exact
+                        # string the embedder saw — so searchHybrid's
+                        # lexical arm and the citation surface both reflect
+                        # the contextual header (parity with normal ingest).
+                        prefixed_text,
                         vec,
                         "brain",
                         nc_file_id,
