@@ -79,6 +79,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That username or password didn't match. Try again.",
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
+    WEAK_PASSWORD:
+      "That password doesn't meet the requirements. Use at least 12 characters with a mix of letters, numbers, and symbols.",
+    INVALID_EMAIL:
+      "That email address doesn't look right. Check it and try again.",
+    INVALID_REQUEST:
+      "Some of those details weren't valid. Check the form and try again.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",
@@ -111,7 +117,9 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     USED: "This invite has already been used. Please ask for a fresh link.",
     EXPIRED: "This invite has expired. Please ask for a fresh link.",
     INVALID_PASSWORD:
-      "That password didn't meet the requirements. It must be at least 8 characters.",
+      "That password didn't meet the requirements. Use at least 12 characters with a mix of letters, numbers, and symbols.",
+    WEAK_PASSWORD:
+      "That password didn't meet the requirements. Use at least 12 characters with a mix of letters, numbers, and symbols.",
     NOT_FOUND:
       "We couldn't find this invite. It may have been revoked or the link copied incorrectly.",
   },
