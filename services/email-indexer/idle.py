@@ -25,6 +25,7 @@ after boot) are picked up by the periodic refresh in main.py.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -115,6 +116,12 @@ async def _fetch_and_ingest(
                 # dashboard can dedupe the refresh.
                 deps.publish_new_mail(account.id, "", parsed["messageId"])
         except Exception as exc:  # noqa: BLE001 — isolate one bad UID, keep the batch
+            # Connection-level exceptions (IMAP socket drop, timeout) must
+            # propagate so run_idle_session's outer handler returns False and
+            # backoff.on_failure() fires. Only swallow message-level errors
+            # (parse/ingest failures for a single bad UID).
+            if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+                raise
             logger.warning("uid %s skipped (ingest error): %s", uid, exc)
             continue
     return success
