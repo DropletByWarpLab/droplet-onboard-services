@@ -37,14 +37,14 @@ vi.mock("../services/cache.service.js", () => ({
 import { createProtectedAuthRouter } from "../routes/auth.js";
 import type { Role } from "../services/jwt.service.js";
 
-/** Prisma stub exposing just the `userInvite.create` the create route calls. */
+/** Prisma stub exposing `userInvite.create` and `user.findFirst` (for deriveUniqueUserId). */
 function createPrismaMock() {
   const create = vi.fn(
-    async ({ data }: { data: { role: string; username: string } }) => ({
+    async ({ data }: { data: { role: string; username: string; email?: string | null } }) => ({
       token: "tok-abc",
       username: data.username,
       displayName: null,
-      email: null,
+      email: data.email ?? null,
       role: data.role,
       createdBy: "inviter",
       createdAt: new Date("2026-06-01T00:00:00Z"),
@@ -53,7 +53,10 @@ function createPrismaMock() {
       revokedAt: null,
     }),
   );
-  return { create, prisma: { userInvite: { create } } as any };
+  // deriveUniqueUserId queries user.findFirst to check username uniqueness.
+  // Return null (candidate not taken) so the first base candidate is used.
+  const findFirst = vi.fn().mockResolvedValue(null);
+  return { create, findFirst, prisma: { userInvite: { create }, user: { findFirst } } as any };
 }
 
 /** Mount the real protected auth router behind a synthetic req.user. */
@@ -86,7 +89,7 @@ describe("POST /api/auth/invites — inviter rank cap (privilege escalation)", (
 
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "neo", role: "owner" });
+      .send({ email: "neo@warp.test", role: "owner" });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("ROLE_RANK_EXCEEDED");
@@ -94,54 +97,72 @@ describe("POST /api/auth/invites — inviter rank cap (privilege escalation)", (
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("allows owner → owner with 200 and persists role=owner", async () => {
+  it("allows owner → owner with 200, derives username from email, and persists role=owner", async () => {
     const { create, prisma } = createPrismaMock();
     const app = buildApp(prisma, "owner");
 
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "trinity", role: "owner" });
+      .send({ email: "trinity@warp.test", role: "owner" });
 
     expect(res.status).toBe(200);
     expect(res.body.token).toBeDefined();
     expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0][0].data.role).toBe("owner");
+    // Username is derived server-side from the email local-part.
+    expect(create.mock.calls[0][0].data.username).toBe("trinity");
   });
 
-  it("allows admin → admin (equal rank) with 200", async () => {
+  it("allows admin → admin (equal rank) with 200 and derives username from email", async () => {
     const { create, prisma } = createPrismaMock();
     const app = buildApp(prisma, "admin");
 
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "morpheus", role: "admin" });
+      .send({ email: "morpheus@warp.test", role: "admin" });
 
     expect(res.status).toBe(200);
     expect(create.mock.calls[0][0].data.role).toBe("admin");
+    expect(create.mock.calls[0][0].data.username).toBe("morpheus");
   });
 
-  it("allows admin → family (below rank) with 200", async () => {
+  it("allows admin → family (below rank) with 200 and derives username from email", async () => {
     const { create, prisma } = createPrismaMock();
     const app = buildApp(prisma, "admin");
 
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "dozer", role: "family" });
+      .send({ email: "dozer@warp.test", role: "family" });
 
     expect(res.status).toBe(200);
     expect(create.mock.calls[0][0].data.role).toBe("family");
+    expect(create.mock.calls[0][0].data.username).toBe("dozer");
   });
 
-  it("allows owner → admin (below rank) with 200", async () => {
+  it("allows owner → admin (below rank) with 200 and derives username from email", async () => {
     const { create, prisma } = createPrismaMock();
     const app = buildApp(prisma, "owner");
 
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "tank", role: "admin" });
+      .send({ email: "tank@warp.test", role: "admin" });
 
     expect(res.status).toBe(200);
     expect(create.mock.calls[0][0].data.role).toBe("admin");
+    expect(create.mock.calls[0][0].data.username).toBe("tank");
+  });
+
+  it("400s when email is missing (required field)", async () => {
+    const { create, prisma } = createPrismaMock();
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .send({ role: "family" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_EMAIL");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("still 400s on an unknown role before the rank check (zod precedence)", async () => {
@@ -152,7 +173,7 @@ describe("POST /api/auth/invites — inviter rank cap (privilege escalation)", (
 
     const res = await request(app)
       .post("/api/auth/invites")
-      .send({ username: "cypher", role: "superuser" });
+      .send({ email: "cypher@warp.test", role: "superuser" });
 
     expect(res.status).toBe(400);
     expect(create).not.toHaveBeenCalled();

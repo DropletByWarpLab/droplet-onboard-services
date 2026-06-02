@@ -171,6 +171,20 @@ function createPrismaMock() {
         return users.find((u) => u.username === where.username) ?? null;
       return null;
     }),
+    // deriveUniqueUserId queries findFirst to check username uniqueness.
+    findFirst: vi.fn(async ({ where }: any) => {
+      const orClauses = where?.OR ?? [];
+      return (
+        users.find((u) =>
+          orClauses.some(
+            (clause: any) =>
+              (clause.username !== undefined && u.username === clause.username) ||
+              (clause.nextcloudUsername !== undefined &&
+                u.nextcloudUsername === clause.nextcloudUsername),
+          ),
+        ) ?? null
+      );
+    }),
   };
   self.userInvite = {
     create: vi.fn(async ({ data }: any) => {
@@ -283,12 +297,12 @@ function sessionJwt(res: request.Response) {
 }
 
 const INVITE = {
-  username: "alice",
   displayName: "Alice Smith",
   email: "alice@warp.test",
   role: "family",
 } as const;
-const INVITE_PASSWORD = "invite-secret-pw"; // ≥ 8 chars (acceptInviteSchema)
+// Policy-compliant: ≥12 chars, 3-of-4 classes (lower, upper, digit, symbol).
+const INVITE_PASSWORD = "Accept-secret123";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -363,5 +377,20 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
     expect(login.status).toBe(401);
     expect(login.body.error).toBe("Invalid credentials");
     expect(login.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("rejects a weak accept password with 400 INVALID_PASSWORD", async () => {
+    // A password that is long enough (≥8 chars) but fails the 3-of-4 class
+    // policy must return 400 with code INVALID_PASSWORD so the dashboard
+    // can surface the policy hint.
+    const prisma = createPrismaMock();
+    const token = await issueInvite(buildApp(prisma), { ...INVITE });
+
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: "weakpassword" }); // all-lowercase, no digits/symbols
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_PASSWORD");
   });
 });

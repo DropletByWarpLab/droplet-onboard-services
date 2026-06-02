@@ -188,20 +188,17 @@ const inviteRoleField = z.preprocess(
 );
 
 const createInviteSchema = z.object({
-  username: usernameField,
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-013 (PR #374): normalized — the invite email becomes the invitee's
-  // directory login key on accept (written to User.email at accept time),
-  // so it must already be trim+lowercased to stay consistent with the
-  // email-keyed login lookup and the case-sensitive unique index.
-  email: emailField.optional(),
+  // ADR-013: the invite email is the invitee's directory login key on
+  // accept and the basis for the derived userid. Required.
+  email: emailField,
   role: inviteRoleField.default("family"),
   // Acceptance window in hours (1h–30d). Default 72h.
   ttlHours: z.number().int().min(1).max(720).optional(),
 });
 
 const acceptInviteSchema = z.object({
-  password: z.string().min(8).max(128),
+  password: passwordZod,
 });
 
 // WARP-171: the legacy `isAdmin(req)` helper was inlined-and-removed
@@ -1065,7 +1062,7 @@ export function createPublicAuthRouter(
       const parsed = acceptInviteSchema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({
-          error: "Password must be at least 8 characters",
+          error: "That password doesn't meet the requirements.",
           code: "INVALID_PASSWORD",
         });
         return;
@@ -1862,7 +1859,12 @@ export function createProtectedAuthRouter(
       }
       const parsed = createInviteSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.email?.length) {
+          res.status(400).json({ error: "Enter a valid email address.", code: "INVALID_EMAIL" });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
@@ -1883,6 +1885,11 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // Derive the unique userid from the email local-part. The derived
+      // username is stored on the invite row and used at accept time
+      // (the invitee never chooses their own username).
+      const username = await deriveUniqueUserId(prisma, parsed.data.email);
+
       const ttlHours = parsed.data.ttlHours ?? 72;
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
       const token = generateInviteToken();
@@ -1890,9 +1897,9 @@ export function createProtectedAuthRouter(
       const created = await prisma.userInvite.create({
         data: {
           token,
-          username: parsed.data.username,
+          username,
           displayName: parsed.data.displayName ?? null,
-          email: parsed.data.email ?? null,
+          email: parsed.data.email,
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
           expiresAt,
@@ -1901,7 +1908,7 @@ export function createProtectedAuthRouter(
 
       logger.info(
         {
-          username: parsed.data.username,
+          username,
           role: parsed.data.role,
           createdBy: req.user?.username,
           expiresAt,
