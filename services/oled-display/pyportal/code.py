@@ -83,7 +83,6 @@ Display → Host  (lines UNCHANGED, plus MEM: added in WARP-638)
 """
 
 import gc
-import math
 import os
 import time
 import json
