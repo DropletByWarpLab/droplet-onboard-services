@@ -15,26 +15,41 @@ function makeLogger() {
 }
 
 /**
- * Minimal Prisma stub that mimics `$queryRawUnsafe` behavior for the two
- * advisory-lock statements the runtime issues. Pass `{ lockAcquired: true }`
- * (default) for the "we got the lock" path, or `false` for the "another
- * instance has it" path.
+ * Minimal Prisma stub modelling the transaction-scoped advisory lock
+ * (`pg_try_advisory_xact_lock`). The runtime acquires the lock inside a
+ * `$transaction`; the lock is released implicitly when that transaction
+ * settles, so there is NO explicit unlock statement. The stub records
+ * transaction begin/end so a test can assert connection-safe release.
+ *
+ * Pass `{ lockAcquired: true }` (default) for the "we got the lock" path,
+ * or `false` for the "another instance has it" path. `onTxSettle` fires
+ * once per `$transaction` callback completion (commit OR rollback) — the
+ * point at which Postgres would auto-release the xact lock.
  */
 function makePrismaStub(
-  opts: { lockAcquired?: boolean; onUnlock?: () => void } = {},
+  opts: { lockAcquired?: boolean; onTxSettle?: (committed: boolean) => void } = {},
 ): CronRuntimePrisma & { $queryRawUnsafe: ReturnType<typeof vi.fn> } {
   const acquired = opts.lockAcquired ?? true;
   const $queryRawUnsafe = vi.fn(async (sql: string, ..._args: unknown[]) => {
-    if (sql.includes("pg_try_advisory_lock")) {
+    if (sql.includes("pg_try_advisory_xact_lock")) {
       return [{ locked: acquired }];
-    }
-    if (sql.includes("pg_advisory_unlock")) {
-      opts.onUnlock?.();
-      return [{ pg_advisory_unlock: true }];
     }
     return [];
   });
-  return { $queryRawUnsafe } as any;
+  const $transaction = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+    // All lock statements + the handler run on the SAME tx handle — this
+    // is what guarantees acquire and (implicit) release share a backend.
+    try {
+      const out = await fn({ $queryRawUnsafe });
+      opts.onTxSettle?.(true);
+      return out;
+    } catch (err) {
+      // Rollback path — Postgres still releases the xact lock here.
+      opts.onTxSettle?.(false);
+      throw err;
+    }
+  });
+  return { $queryRawUnsafe, $transaction } as any;
 }
 
 describe("cron-runtime.service", () => {
@@ -134,7 +149,7 @@ describe("cron-runtime.service", () => {
 
   // ── Critical fix #1: advisory-lock path ──
 
-  it("runs handler when advisory lock is acquired", async () => {
+  it("runs handler when advisory lock is acquired, inside a single transaction", async () => {
     const prisma = makePrismaStub({ lockAcquired: true });
     const logger = makeLogger();
     const rt = createCronRuntime(prisma, logger);
@@ -144,10 +159,13 @@ describe("cron-runtime.service", () => {
     await vi.advanceTimersByTimeAsync(1500);
     expect(handler).toHaveBeenCalledTimes(1);
 
-    // Both the try-lock and the unlock queries should have been issued.
+    // The transaction-scoped try-lock should have been issued; the lock is
+    // released implicitly at txn end, so there is NO explicit unlock.
     const sqls = prisma.$queryRawUnsafe.mock.calls.map((c) => c[0] as string);
-    expect(sqls.some((s) => s.includes("pg_try_advisory_lock"))).toBe(true);
-    expect(sqls.some((s) => s.includes("pg_advisory_unlock"))).toBe(true);
+    expect(sqls.some((s) => s.includes("pg_try_advisory_xact_lock"))).toBe(true);
+    expect(sqls.some((s) => s.includes("pg_advisory_unlock"))).toBe(false);
+    // Acquire + handler ran inside exactly one $transaction.
+    expect((prisma as any).$transaction).toHaveBeenCalledTimes(1);
 
     rt.stop();
   });
@@ -164,20 +182,18 @@ describe("cron-runtime.service", () => {
 
     // Debug log should have fired for the skip.
     expect(logger.debug).toHaveBeenCalled();
-
-    // Unlock should NOT be called if we never acquired.
-    const sqls = prisma.$queryRawUnsafe.mock.calls.map((c) => c[0] as string);
-    expect(sqls.some((s) => s.includes("pg_advisory_unlock"))).toBe(false);
+    // The transaction still opened to attempt the lock.
+    expect((prisma as any).$transaction).toHaveBeenCalledTimes(1);
 
     rt.stop();
   });
 
-  it("releases advisory lock after handler completes successfully", async () => {
-    let unlocked = false;
+  it("releases advisory lock (commits the txn) after handler completes successfully", async () => {
+    let committed: boolean | undefined;
     const prisma = makePrismaStub({
       lockAcquired: true,
-      onUnlock: () => {
-        unlocked = true;
+      onTxSettle: (ok) => {
+        committed = ok;
       },
     });
     const rt = createCronRuntime(prisma);
@@ -186,17 +202,18 @@ describe("cron-runtime.service", () => {
 
     await vi.advanceTimersByTimeAsync(1500);
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(unlocked).toBe(true);
+    // Transaction committed → Postgres auto-releases the xact lock.
+    expect(committed).toBe(true);
 
     rt.stop();
   });
 
-  it("releases advisory lock even when handler throws", async () => {
-    let unlocked = false;
+  it("releases advisory lock even when handler throws (txn rolls back)", async () => {
+    let committed: boolean | undefined;
     const prisma = makePrismaStub({
       lockAcquired: true,
-      onUnlock: () => {
-        unlocked = true;
+      onTxSettle: (ok) => {
+        committed = ok;
       },
     });
     const logger = makeLogger();
@@ -206,9 +223,9 @@ describe("cron-runtime.service", () => {
 
     await vi.advanceTimersByTimeAsync(1500);
     expect(handler).toHaveBeenCalledTimes(1);
-    // Even though handler threw, finally-block ran and released the lock.
-    expect(unlocked).toBe(true);
-    // And the error was logged.
+    // Handler threw → transaction rolled back, which still releases the
+    // xact lock (no leak path), and safeRun logged the error.
+    expect(committed).toBe(false);
     expect(logger.error).toHaveBeenCalled();
 
     rt.stop();
