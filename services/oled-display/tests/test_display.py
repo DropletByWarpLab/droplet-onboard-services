@@ -260,6 +260,277 @@ def test_readiness_url_defaults_to_loopback():
     assert display_module.BOOT_READINESS_URL.startswith("http://127.0.0.1")
 
 
+# --- Readiness probe survives the nginx http->https redirect (WARP-638) ------
+#
+# The 90s-every-boot timeout root cause: nginx :80 issues `301 -> https://$host`
+# and the HTTPS vhost uses a self-signed cert. urllib follows the redirect to
+# https://127.0.0.1/... and dies on certificate verification, so the probe
+# returned False forever and the splash sat for the full BOOT_MAX_SECONDS on
+# every (re)start. The probe must tolerate the self-signed loopback cert.
+
+def test_check_readiness_passes_unverified_ssl_context(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import ssl
+
+    d = TFTDisplay()
+    seen = {}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _capture(req, *a, **k):
+        seen["context"] = k.get("context")
+        return _Resp()
+
+    monkeypatch.setattr(display_module.urllib.request, "urlopen", _capture)
+    assert d._check_readiness() is True
+    ctx = seen.get("context")
+    assert isinstance(ctx, ssl.SSLContext), (
+        "readiness probe must pass an SSL context so the self-signed "
+        "loopback HTTPS redirect doesn't fail cert verification")
+    # Verification must be OFF — it's loopback to our own gateway's
+    # self-signed cert, there is nothing to verify against.
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+
+
+def test_check_readiness_true_when_redirect_lands_on_2xx(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Simulate urllib having followed the 301 to HTTPS and returned a 2xx
+    # (i.e. the cert no longer blocks it). Probe reads ready.
+    d = TFTDisplay()
+
+    class _Resp:
+        status = 204  # any 2xx
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        display_module.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert d._check_readiness() is True
+
+
+def test_check_readiness_false_on_ssl_error_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import ssl
+
+    d = TFTDisplay()
+
+    def _boom(*a, **k):
+        raise ssl.SSLError("CERTIFICATE_VERIFY_FAILED")
+
+    monkeypatch.setattr(display_module.urllib.request, "urlopen", _boom)
+    # Even an SSL error must read as "not ready", never escape.
+    assert d._check_readiness() is False
+
+
+# --- Warm-start short-circuit (WARP-638) ------------------------------------
+#
+# On a warm start the whole stack is already up; the panel should surface the
+# live UI within a few seconds instead of waiting on the probe / timeout. If
+# the firmware link is live AND we've already received live stats, that IS
+# readiness — complete boot without needing the HTTP probe to pass.
+
+def test_readiness_tick_short_circuits_when_link_live_and_data_fresh(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # Pretend the firmware link is up and a stats frame has landed.
+    monkeypatch.setattr(sim_display, "_backend", "pyportal")
+    sim_display.update_stats({"cpu": 12, "now": "14:08"})
+    # The HTTP probe would say "not ready" — but the warm-start path should
+    # still surface the UI quickly and NOT depend on it.
+    probed = {"n": 0}
+
+    def _never_ready():
+        probed["n"] += 1
+        return False
+
+    monkeypatch.setattr(sim_display, "_check_readiness", _never_ready)
+    sim_display._boot_started_at = 1000.0
+    # A few seconds in — well under BOOT_MAX_SECONDS.
+    sim_display._readiness_tick(now=1004.0)
+    assert sim_display._boot_complete is True
+    assert sim_display._current_mode == TFTDisplay.SYSTEM
+
+
+def test_readiness_tick_warm_start_does_not_apply_without_live_data(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # Cold boot: link not yet promoted + no stats. The short-circuit must NOT
+    # fire — we still wait on the real readiness probe (which is False here).
+    monkeypatch.setattr(sim_display, "_backend", "sim")
+    monkeypatch.setattr(sim_display, "_check_readiness", lambda: False)
+    sim_display._boot_started_at = 1000.0
+    sim_display._readiness_tick(now=1004.0)
+    assert sim_display._boot_complete is False
+    assert sim_display._current_mode == TFTDisplay.BOOT
+
+
+# --- Host reconnect-on-reset (WARP-638) -------------------------------------
+#
+# When the PyPortal is reset its USB CDC re-enumerates; the host's open fd goes
+# stale (writes silently no-op, the path may vanish/reappear). The host must
+# detect this, REOPEN the port, and resync full state — not keep writing to a
+# dead fd while the device sits on its boot screen.
+
+class _FakeSerial:
+    """Minimal pyserial stand-in. `fail_write` flips writes to raise (the
+    re-enumeration symptom); `closed` records that the stale fd was closed."""
+
+    def __init__(self):
+        self.written = []
+        self.fail_write = False
+        self.closed = False
+        self.in_waiting = 0
+
+    def write(self, data):
+        if self.fail_write:
+            raise OSError("device reports readiness... no — write failed")
+        self.written.append(data)
+        return len(data)
+
+    def flush(self):
+        if self.fail_write:
+            raise OSError("flush on dead fd")
+
+    def read(self, n):
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+def test_pyportal_send_reopens_on_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A write that raises (CDC re-enumerated) must drop the stale fd and
+    # attempt a reconnect via _try_pyportal — not silently swallow forever.
+    d = TFTDisplay()
+    dead = _FakeSerial()
+    dead.fail_write = True
+    d._pyportal = dead
+    d._pyportal_path = "/dev/ttyACM1"
+    d._backend = "pyportal"
+
+    reconnect = {"n": 0}
+
+    def _fake_reconnect():
+        reconnect["n"] += 1
+        # Simulate a successful reopen onto a fresh, healthy fd.
+        d._pyportal = _FakeSerial()
+        d._pyportal_path = "/dev/ttyACM1"
+        d._backend = "pyportal"
+        d._needs_resync = True
+        return True
+
+    monkeypatch.setattr(d, "_try_pyportal", _fake_reconnect)
+    d._pyportal_send("stats", {"cpu": 1})
+    assert dead.closed is True, "stale fd must be closed on write failure"
+    assert reconnect["n"] == 1, "must attempt exactly one reconnect"
+    # Reconnect requests a full-state resync so the firmware refills.
+    assert d._needs_resync is True
+
+
+def test_check_pyportal_liveness_drops_fd_when_path_vanishes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A reset can renumber ttyACM*; the old node disappears while our fd stays
+    # silently open. The liveness check must notice the path is gone, close the
+    # fd, and fall back so the promotion path re-probes whatever is now live.
+    d = TFTDisplay()
+    fd = _FakeSerial()
+    d._pyportal = fd
+    d._pyportal_path = "/dev/ttyACM1"
+    d._backend = "pyportal"
+
+    monkeypatch.setattr(display_module.os.path, "exists", lambda p: False)
+    changed = d._check_pyportal_liveness(now=1000.0)
+    assert changed is True, "liveness check should report a dropped link"
+    assert fd.closed is True
+    assert d._pyportal is None
+    assert d._backend != "pyportal"
+
+
+def test_check_pyportal_liveness_noop_when_path_present(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    d = TFTDisplay()
+    fd = _FakeSerial()
+    d._pyportal = fd
+    d._pyportal_path = "/dev/ttyACM1"
+    d._backend = "pyportal"
+    monkeypatch.setattr(display_module.os.path, "exists", lambda p: True)
+    # Within the throttle window the check is also a no-op; force it past.
+    d._last_liveness_check = 0.0
+    changed = d._check_pyportal_liveness(now=1000.0)
+    assert changed is False
+    assert fd.closed is False
+    assert d._backend == "pyportal"
+
+
+def test_check_pyportal_liveness_throttled(monkeypatch: pytest.MonkeyPatch):
+    # Don't stat /dev on every ~80ms tick — gate it.
+    d = TFTDisplay()
+    fd = _FakeSerial()
+    d._pyportal = fd
+    d._pyportal_path = "/dev/ttyACM1"
+    d._backend = "pyportal"
+    calls = {"n": 0}
+
+    def _exists(p):
+        calls["n"] += 1
+        return True
+
+    monkeypatch.setattr(display_module.os.path, "exists", _exists)
+    d._last_liveness_check = 999.5
+    d._check_pyportal_liveness(now=1000.0)  # < interval after last check
+    assert calls["n"] == 0, "liveness stat must be throttled"
+
+
+def test_reconnect_triggers_full_state_resync_via_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # On a fresh probe (the reconnect path), _probe_pyportal must set
+    # _needs_resync so the cycle loop pushes a full snapshot — otherwise the
+    # firmware renders empty fields after a reset until the slowest periodic
+    # push (30s).
+    d = TFTDisplay()
+    d._needs_resync = False
+
+    class _OkSerial(_FakeSerial):
+        def __init__(self):
+            super().__init__()
+            self._lines = [b"READY\n"]
+
+        def reset_input_buffer(self):
+            pass
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+    import sys as _sys
+    import types as _types
+    fake_serial_mod = _types.ModuleType("serial")
+    fake_serial_mod.Serial = lambda *a, **k: _OkSerial()
+    monkeypatch.setitem(_sys.modules, "serial", fake_serial_mod)
+
+    assert d._probe_pyportal("/dev/ttyACM1") is True
+    assert d._needs_resync is True
+
+
 # --- BOOT_MAX_SECONDS parsing (L1) ------------------------------------------
 
 def test_env_positive_int_parses_valid_value():

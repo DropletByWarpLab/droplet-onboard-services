@@ -25,6 +25,7 @@ same tile / status-chip layout.
 """
 
 import os
+import ssl
 import time
 import json
 import socket
@@ -163,7 +164,7 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 
 # ---------------------------------------------------------------------------
-# Boot readiness (WARP-624)
+# Boot readiness (WARP-624; redirect/TLS fix WARP-638)
 # ---------------------------------------------------------------------------
 # The panel opens on the boot screen at construction and stays there until
 # the system is healthy, then flips to the live UI. Health is probed against
@@ -173,8 +174,22 @@ AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
 # UI anyway so a degraded stack still shows something instead of a stuck
 # splash. Both knobs are overridable; defaults stay on loopback so there are
 # no host-specific defaults baked in.
+#
+# WARP-638: nginx :80 issues `301 -> https://$host$request_uri`, and the HTTPS
+# vhost serves a SELF-SIGNED cert. urllib follows the redirect to
+# https://127.0.0.1/api/health and, with default verification, raises
+# SSLCertVerificationError — so the probe returned False on EVERY tick and the
+# splash sat for the full 90s on every (re)start. The probe now uses an
+# unverified SSL context (loopback to our own gateway's self-signed cert —
+# there's nothing to verify against), so a warm stack reads ready in ~1 probe.
 BOOT_READINESS_URL = os.environ.get(
     "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
+# Unverified context for the loopback HTTPS hop after the :80->:443 redirect.
+# Scoped to the readiness probe only; nothing else in this module makes TLS
+# calls (the bridge endpoints are plain-HTTP loopback).
+_READINESS_SSL_CTX = ssl.create_default_context()
+_READINESS_SSL_CTX.check_hostname = False
+_READINESS_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
 def _env_positive_int(name: str, default: int, raw: Optional[str] = None) -> int:
@@ -208,6 +223,13 @@ BOOT_MAX_SECONDS = _env_positive_int("BOOT_MAX_SECONDS", 90)
 # How often the cycle loop actually probes readiness. The loop ticks ~12.5x/s;
 # gating the probe to every 2s keeps it cheap.
 BOOT_READINESS_INTERVAL = float(os.environ.get("BOOT_READINESS_INTERVAL", "2.0"))
+# How often the cycle loop verifies the live PyPortal link (WARP-638): stat the
+# ttyACM node to spot a USB re-enumeration after a device reset. Same 2s cadence
+# as the readiness probe — cheap, but fast enough that a reset is noticed and
+# the port reopened within a couple seconds instead of the device sitting on
+# its boot screen against a stale host fd.
+LIVENESS_CHECK_INTERVAL = float(
+    os.environ.get("LIVENESS_CHECK_INTERVAL", "2.0"))
 LOGO_DURATION = 5
 STATS_DURATION = 10
 MESSAGE_HOLD = 30
@@ -493,6 +515,10 @@ class TFTDisplay:
         # fires. A periodic `os.path.exists(self._pyportal_path)` check is
         # the cheapest reliable way to spot a dead fd.
         self._pyportal_path: Optional[str] = None
+        # Throttle for the periodic liveness check (WARP-638). The cycle loop
+        # calls _check_pyportal_liveness() every tick (~12.5x/s) but the actual
+        # /dev stat only runs once per LIVENESS_CHECK_INTERVAL.
+        self._last_liveness_check = 0.0
         # Set by `_probe_pyportal` on every successful probe; cleared by the
         # cycle loop after it runs `_push_full_state`. Probe always discards
         # the firmware's pre-probe READY/REQUEST_STATE handshake (the probe
@@ -524,6 +550,12 @@ class TFTDisplay:
         self._boot_complete = False
         self._boot_started_at = time.time()
         self._last_readiness_check = 0.0
+        # WARP-638: set once a real stats frame has been ingested. On a WARM
+        # start the orchestrator is already up and pushing stats, so a live
+        # link + fresh data IS readiness — the warm-start short-circuit in
+        # _readiness_tick uses this to surface the UI in a few seconds instead
+        # of waiting on the HTTP probe (or, worse, the 90s timeout).
+        self._got_live_data = False
         self._current_image: Optional[Image.Image] = None
         self._custom_title: Optional[str] = None
         self._custom_lines: Optional[List[str]] = None
@@ -1536,6 +1568,9 @@ class TFTDisplay:
     # ----- live-data updates -------------------------------------------
 
     def update_stats(self, data: dict) -> None:
+        # A real stats frame landed — mark live data present for the warm-start
+        # readiness short-circuit (WARP-638).
+        self._got_live_data = True
         for k in ("cpu", "mem", "disk", "temp", "ip", "hostname", "uptime",
                   "now", "date"):
             if k in data and data[k] is not None:
@@ -1792,23 +1827,31 @@ class TFTDisplay:
         _v3_text(draw, str(wifi.get("password") or ""), RX, yy + 46,
                  font=_get_font(13, weight="regular"), fill=V3_ACCENT_INK)
 
-        # KEY rotate pill.
-        secs = int(wifi.get("key_ttl_seconds") or 0)
-        warn = secs < 60
-        pill_y = yy + 68
-        pill_h = 26
-        _rrect(draw, RX, pill_y, RW, pill_h, 8,
-               fill=V3_ORANGE_SUBTLE if warn else V3_SURFACE)
-        _rrect(draw, RX, pill_y, RW, pill_h, 8,
-               outline=V3_ORANGE if warn else V3_SEP2, width=1)
-# U+21BB (↻) reads as the handoff's ⟳ rotate glyph and, unlike ⟳ (U+27F3),
-        # is present in Inter — so the sim PNG shows a real arrow, not tofu.
-        _v3_text(draw, "↻  KEY {}:{:02d}".format(secs // 60, secs % 60),
-                 RX + RW // 2, pill_y + pill_h // 2,
-                 font=_get_font(11, weight="bold"),
-                 fill=V3_ORANGE if warn else V3_LABEL2, anchor="mm")
-        self._touch_regions.append(TouchRegion(
-            "key_rotate", RX, pill_y - 3, RW, pill_h + 6, self._rotate_key))
+        # KEY rotate pill + TTL chip — ONLY when key rotation is enabled.
+        # WARP-638: mirrors the firmware. The box default is rotation OFF (the
+        # bridge's qr_snapshot returns rotation_enabled=False), and tapping the
+        # pill in that state drove a fresh-QR re-render that OOMed the SAMD51.
+        # When rotation is disabled we draw NO pill and register NO tap region,
+        # so the host preview matches the panel and there's no rotate affordance.
+        if bool(wifi.get("rotation_enabled")):
+            secs = int(wifi.get("key_ttl_seconds") or 0)
+            warn = secs < 60
+            pill_y = yy + 68
+            pill_h = 26
+            _rrect(draw, RX, pill_y, RW, pill_h, 8,
+                   fill=V3_ORANGE_SUBTLE if warn else V3_SURFACE)
+            _rrect(draw, RX, pill_y, RW, pill_h, 8,
+                   outline=V3_ORANGE if warn else V3_SEP2, width=1)
+            # U+21BB (↻) reads as the handoff's ⟳ rotate glyph and, unlike ⟳
+            # (U+27F3), is present in Inter — so the sim PNG shows a real arrow,
+            # not tofu.
+            _v3_text(draw, "↻  KEY {}:{:02d}".format(secs // 60, secs % 60),
+                     RX + RW // 2, pill_y + pill_h // 2,
+                     font=_get_font(11, weight="bold"),
+                     fill=V3_ORANGE if warn else V3_LABEL2, anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "key_rotate", RX, pill_y - 3, RW, pill_h + 6,
+                self._rotate_key))
 
         # Alerts drawer overlay.
         if self._events_open:
@@ -2533,16 +2576,66 @@ class TFTDisplay:
 
     # ----- Boot readiness ----------------------------------------------
 
+    def _check_pyportal_liveness(self, now: Optional[float] = None) -> bool:
+        """Verify the live PyPortal link is still real; drop a stale fd.
+
+        WARP-638: when the PyPortal is reset its USB CDC re-enumerates. The
+        kernel renumbers ttyACM* and the old node disappears, but our open fd
+        to it doesn't fail — writes silently succeed-with-no-effect and reads
+        return zero bytes, so the reconnect-on-IOError path in `_pyportal_send`
+        never fires and the device sits on its boot screen forever against a
+        dead host fd. The cheapest reliable signal is `os.path.exists()` on the
+        node we opened: if it's gone, drop the fd and fall back to sim so the
+        cycle loop's promotion block re-probes whatever ttyACM* is now live
+        (which sets `_needs_resync`, so the firmware refills on reconnect).
+
+        Returns True if it dropped the link this call (the caller should re-probe
+        immediately), else False. Throttled to LIVENESS_CHECK_INTERVAL so it
+        doesn't stat /dev on every ~80ms cycle tick. `now` is injectable for
+        deterministic tests.
+        """
+        if self._backend != "pyportal" or not self._pyportal_path:
+            return False
+        if now is None:
+            now = time.time()
+        if now - self._last_liveness_check < LIVENESS_CHECK_INTERVAL:
+            return False
+        self._last_liveness_check = now
+        if os.path.exists(self._pyportal_path):
+            return False
+        logger.warning(
+            "status display %s vanished (USB re-enumeration?) — dropping fd "
+            "and re-probing", self._pyportal_path)
+        try:
+            with self._pyportal_lock:
+                try:
+                    if self._pyportal is not None:
+                        self._pyportal.close()
+                except Exception:
+                    pass
+                self._pyportal = None
+                self._pyportal_path = None
+                self._backend = "sim"
+        except Exception:
+            pass
+        return True
+
     def _check_readiness(self) -> bool:
         """Probe the readiness URL; True only on a 2xx.
 
         Cheap and fail-safe: any connection error / non-2xx reads as "not
         ready yet" (returns False, never raises) so a still-starting stack
         doesn't crash the cycle loop.
+
+        WARP-638: passes an unverified SSL context so urllib can follow nginx's
+        :80 -> :443 redirect onto the self-signed loopback cert instead of
+        dying on cert verification (the 90s-every-boot root cause). For a
+        plain-HTTP URL the context is simply unused.
         """
         try:
             req = urllib.request.Request(BOOT_READINESS_URL, method="GET")
-            with urllib.request.urlopen(req, timeout=2.0) as r:
+            with urllib.request.urlopen(
+                    req, timeout=2.0, context=_READINESS_SSL_CTX) as r:
                 return 200 <= getattr(r, "status", 0) < 300
         except Exception as e:                                       # noqa: BLE001
             logger.debug("readiness probe failed: %s", e)
@@ -2567,6 +2660,16 @@ class TFTDisplay:
             logger.warning(
                 "boot readiness timed out after %ss — surfacing live UI",
                 BOOT_MAX_SECONDS)
+            self._complete_boot()
+            return
+        # WARP-638 warm-start short-circuit: if the firmware link is live AND a
+        # real stats frame has already been ingested, the stack is plainly up —
+        # surface the UI now instead of waiting on the HTTP probe (let alone the
+        # 90s timeout). This is the common (re)start case: the orchestrator was
+        # never down, it's already pushing stats. Cold boot (sim backend / no
+        # data yet) falls through to the probe below, preserving the cold path.
+        if self._backend == "pyportal" and self._got_live_data:
+            logger.info("warm start — live link + fresh stats; surfacing UI")
             self._complete_boot()
             return
         if now - self._last_readiness_check < BOOT_READINESS_INTERVAL:
@@ -2635,40 +2738,17 @@ class TFTDisplay:
         last_files_push = 0.0
         last_cams_push = 0.0
         last_backend_retry = 0.0
-        last_liveness_check = 0.0
         serial_buf = b""
         while self._cycle_running:
-            # Liveness check: detect a stale status display serial fd left
-            # behind by a USB re-enumeration. The kernel renumbers ttyACM*
-            # on firmware reset / replug / hub reset, but our open fd to
-            # the old node doesn't fail — writes silently succeed-with-
-            # no-effect and reads return zero bytes, so the existing
-            # reconnect-on-IOError path in `_pyportal_send` never triggers.
-            # If our path has vanished from /dev, drop the fd and let the
-            # promotion block below re-probe whatever ttyACM* is now live.
-            if (self._backend == "pyportal" and self._pyportal_path
-                    and time.time() - last_liveness_check > 2.0):
-                last_liveness_check = time.time()
-                if not os.path.exists(self._pyportal_path):
-                    logger.warning(
-                        "status display %s vanished (USB re-enumeration?) "
-                        "— dropping fd and re-probing",
-                        self._pyportal_path)
-                    try:
-                        with self._pyportal_lock:
-                            try:
-                                if self._pyportal is not None:
-                                    self._pyportal.close()
-                            except Exception:
-                                pass
-                            self._pyportal = None
-                            self._pyportal_path = None
-                            self._backend = "sim"
-                    except Exception:
-                        pass
-                    # Force the next iteration's promotion block to retry
-                    # immediately rather than waiting out a fresh 5s window.
-                    last_backend_retry = 0.0
+            # Liveness check (WARP-638): detect a stale status display serial fd
+            # left behind by a USB re-enumeration (firmware reset / replug / hub
+            # reset). If the node we opened has vanished from /dev, the helper
+            # drops the fd and falls back to sim; we then force the promotion
+            # block below to re-probe immediately (which sets _needs_resync, so
+            # the firmware refills on reconnect) instead of waiting out a fresh
+            # 5s window. Throttled internally to LIVENESS_CHECK_INTERVAL.
+            if self._check_pyportal_liveness():
+                last_backend_retry = 0.0
 
             # If we started on sim because USB enumeration hadn't finished
             # yet, keep probing every 5s and promote to pyportal once it

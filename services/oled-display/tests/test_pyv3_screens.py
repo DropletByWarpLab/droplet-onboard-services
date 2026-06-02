@@ -132,6 +132,40 @@ def test_render_system_honors_clock_mode(sim_display: TFTDisplay):
     assert a.tobytes() != b.tobytes()
 
 
+def test_system_rotate_region_absent_when_rotation_disabled(sim_display: TFTDisplay):
+    # WARP-638: rotation OFF is the box default (the bridge returns
+    # rotation_enabled=False). The sim mirror must NOT draw the KEY rotate pill
+    # or register its tap region in that state — same gating as the firmware,
+    # so the rendered preview matches the panel and there's no rotate affordance
+    # to tap into the OOM-able re-render path.
+    _seed(sim_display)
+    sim_display.update_wifi({"rotation_enabled": False})
+    sim_display.render_system()
+    names = [r.name for r in sim_display._touch_regions]
+    assert "key_rotate" not in names, (
+        f"rotate region must be absent when rotation disabled; got {names}")
+
+
+def test_system_rotate_region_present_when_rotation_enabled(sim_display: TFTDisplay):
+    _seed(sim_display)
+    sim_display.update_wifi({"rotation_enabled": True, "key_ttl_seconds": 1440})
+    sim_display.render_system()
+    names = [r.name for r in sim_display._touch_regions]
+    assert "key_rotate" in names
+
+
+def test_system_rotation_disabled_changes_frame(sim_display: TFTDisplay):
+    # The presence/absence of the pill is a visible difference, so the two
+    # frames must not be byte-identical (proves the pill is actually gated, not
+    # just the region).
+    _seed(sim_display)
+    sim_display.update_wifi({"rotation_enabled": True, "key_ttl_seconds": 1440})
+    enabled = sim_display.render_system()
+    sim_display.update_wifi({"rotation_enabled": False})
+    disabled = sim_display.render_system()
+    assert enabled.tobytes() != disabled.tobytes()
+
+
 def test_render_system_with_alerts_drawer(sim_display: TFTDisplay):
     _seed(sim_display)
     sim_display.push_alert({"type": "cam", "title": "driveway: person",

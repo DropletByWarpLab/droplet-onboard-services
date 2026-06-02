@@ -168,6 +168,32 @@ def test_qr_rerender_collects_previous_group(fw):
     assert first == second == 1
 
 
+def test_qr_object_count_is_constant_regardless_of_matrix_size(fw):
+    # Heap-reduction proof (WARP-638): the OLD renderer allocated one
+    # Bitmap + one Palette + one TileGrid PER ROW — i.e. 3*N displayio objects
+    # for an N-row matrix. The new single-bitmap renderer allocates a fixed
+    # 1 Bitmap + 1 TileGrid no matter the matrix size. Render a small AND a
+    # large (v2-class, 25-row) matrix and confirm the bitmap/tilegrid counts
+    # don't scale with N.
+    code, _ = fw
+
+    def _counts(n):
+        matrix = [[(r + c) % 2 for c in range(n)] for r in range(n)]
+        g = code.displayio.Group()
+        StubBitmap.instances.clear()
+        code._render_qr_matrix_plain(g, matrix, ox=0, oy=0, module_px=3)
+        tiles = [c for c in g if isinstance(c, code.displayio.TileGrid)]
+        return len(StubBitmap.instances), len(tiles)
+
+    small_b, small_t = _counts(5)
+    large_b, large_t = _counts(25)
+    assert small_b == large_b == 1, "bitmap count must not scale with matrix N"
+    assert small_t == large_t == 1, "tilegrid count must not scale with N"
+    # Sanity on the OLD cost we eliminated: a 25-row QR previously meant
+    # 25 bitmaps; now it's 1 (a 96% drop in QR bitmap objects for v2 QR).
+    assert 25 - large_b == 24
+
+
 # ---------------------------------------------------------------------------
 # Dead bitmap-mark path is gone (heap reclaim)
 # ---------------------------------------------------------------------------
