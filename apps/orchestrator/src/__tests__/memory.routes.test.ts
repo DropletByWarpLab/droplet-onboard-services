@@ -15,6 +15,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
+import type { AuthUser } from "../middleware/auth.js";
+import type { Role } from "../services/jwt.service.js";
 
 vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: false },
@@ -98,12 +100,19 @@ function createPrismaMock(seed: MockFact[] = []) {
 
 function buildApp(
   prismaMock: ReturnType<typeof createPrismaMock>,
-  asUser: { id?: string; username?: string; role?: string },
+  asUser: { id?: string; username?: string; displayName?: string; role?: Role },
 ) {
+  // Synthetic auth middleware injects a full AuthUser (mirrors rbac.test.ts).
+  const user: AuthUser = {
+    id: asUser.id ?? "u-stefan",
+    username: asUser.username ?? "stefan",
+    displayName: asUser.displayName ?? asUser.username ?? "stefan",
+    role: asUser.role ?? "family",
+  };
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { user?: typeof asUser }).user = asUser;
+    (req as Request & { user: AuthUser }).user = user;
     next();
   });
   app.use("/api", createMemoryRouter(prismaMock as unknown as import("@prisma/client").PrismaClient));
