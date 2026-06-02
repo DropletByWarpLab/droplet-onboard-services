@@ -69,6 +69,12 @@ import QRCode from "qrcode";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import {
+  passwordZod,
+  baseUserIdFromEmail,
+  nthUserIdCandidate,
+  isReservedUserId,
+} from "@droplet/auth-policy";
 
 /** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
  *  (set by the nginx gateway in production), falls back to req.ip. */
@@ -113,16 +119,10 @@ const emailField = z
   .max(200);
 
 const setupSchema = z.object({
-  username: usernameField,
-  password: z.string().min(8).max(128),
+  password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
-  // ADR-013 (PR #374 N2): email is the directory login key and is now
-  // REQUIRED on the first-owner bootstrap. ADR-013 removed the Nextcloud
-  // auth fallback, so an owner row written without an email can never sign
-  // in (the email-keyed /auth/login lookup has nothing to match) — a
-  // permanent lockout recoverable only by a DB edit. Requiring it here
-  // makes a login-unable owner unrepresentable. Normalized (trim+lowercase)
-  // via emailField so the stored value matches the login lookup.
+  // ADR-013: email is the directory login key and the sole user-facing
+  // identifier. Username is derived server-side (deriveUniqueUserId).
   email: emailField,
 });
 
@@ -299,6 +299,28 @@ function resolveToken(req: import("express").Request): string | null {
 // credential for an unrelated NC user could otherwise mint a default-
 // `family`-role local row.
 // ────────────────────────────────────────────────────────────────
+
+/**
+ * Derive a unique, Nextcloud-safe userid from an email. Walks suffix
+ * candidates (base, base-2, base-3, …), skipping reserved ids and any value
+ * already used as `username` OR `nextcloudUsername` (both are @unique).
+ */
+async function deriveUniqueUserId(
+  prisma: import("@prisma/client").PrismaClient,
+  email: string,
+): Promise<string> {
+  const base = baseUserIdFromEmail(email);
+  for (let n = 1; n < 100000; n += 1) {
+    const candidate = nthUserIdCandidate(base, n);
+    if (isReservedUserId(candidate)) continue;
+    const taken = await prisma.user.findFirst({
+      where: { OR: [{ username: candidate }, { nextcloudUsername: candidate }] },
+    });
+    if (!taken) return candidate;
+  }
+  throw new Error("deriveUniqueUserId: exhausted candidate space");
+}
+
 export function createPublicAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
 ): Router {
@@ -319,11 +341,23 @@ export function createPublicAuthRouter(
     try {
       const parsed = setupSchema.safeParse(req.body);
       if (!parsed.success) {
-        res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+        const fields = parsed.error.flatten().fieldErrors;
+        if (fields.email) {
+          res.status(400).json({ error: "Enter a valid email address.", code: "INVALID_EMAIL" });
+          return;
+        }
+        if (fields.password) {
+          res.status(400).json({
+            error: "That password doesn't meet the requirements.",
+            code: "WEAK_PASSWORD",
+          });
+          return;
+        }
+        res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
 
-      const { username, password, displayName, email } = parsed.data;
+      const { password, displayName, email } = parsed.data;
 
       // WARP-485 follow-up (Romain PR #279 review): the local User
       // mirror is a HARD precondition for setup, not a best-effort
@@ -335,7 +369,7 @@ export function createPublicAuthRouter(
       // createAuthRouter() shim that wires this router without prisma.
       if (!prisma) {
         logger.error(
-          { username },
+          { email },
           "setup: prisma client not wired into public auth router; refusing to create NC admin without local mirror",
         );
         res.status(500).json({
@@ -361,7 +395,7 @@ export function createPublicAuthRouter(
       });
       if (existingOwners > 0) {
         logger.warn(
-          { username },
+          { email },
           "setup: refused — an owner already exists (N1 owner-already-exists guard, PR #374)",
         );
         res.status(409).json({
@@ -396,6 +430,7 @@ export function createPublicAuthRouter(
       // same plaintext so its WebDAV account works, but it no longer
       // authenticates anyone. The plaintext is hashed before it touches
       // the row and is never logged.
+      const username = await deriveUniqueUserId(prisma, email);
       const passwordHash = await hashPassword(password);
       // `email` is guaranteed present + normalized (N2 makes it required on
       // this path; emailField trim+lowercased it). Write it directly so the
