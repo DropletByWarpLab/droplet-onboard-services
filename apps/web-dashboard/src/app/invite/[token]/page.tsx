@@ -21,6 +21,8 @@ import Link from "next/link";
 import { Lock, User as UserIcon, Eye, EyeOff, ShieldOff } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
 import { WelcomeFlourish } from "@/components/auth/WelcomeFlourish";
+import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
+import { validatePassword } from "@droplet/auth-policy";
 import { getInvite, acceptInvite } from "@/lib/api";
 import type { InvitePublicInfo } from "@/lib/types";
 
@@ -67,8 +69,8 @@ export default function InviteAcceptPage({ params }: PageProps) {
 
   const handleSubmit = async () => {
     setError(null);
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
+    if (!validatePassword(password).ok) {
+      setError("Password doesn't meet the requirements yet.");
       return;
     }
     if (password !== confirm) {
@@ -267,6 +269,8 @@ export default function InviteAcceptPage({ params }: PageProps) {
               />
             </div>
           </div>
+
+          <PasswordRulesChecklist password={password} confirm={confirm} />
 
           {error && (
             <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
