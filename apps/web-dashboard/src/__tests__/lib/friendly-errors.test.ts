@@ -90,6 +90,35 @@ describe("translateError — auth domain", () => {
     expect(result).not.toContain("OCS");
     expect(result).not.toContain("401");
   });
+
+  // The two-factor (TOTP) codes live in CODES.auth but had no coverage; the
+  // generic auth fallback talks about username/password, which is wrong for
+  // a 2FA flow, so these must map to their own dedicated strings.
+  it("maps the two-factor enrollment codes to 2FA-specific copy", () => {
+    const notEnrolled = translateError({ code: "TOTP_NOT_ENROLLED" }, "auth");
+    const alreadyEnabled = translateError({ code: "TOTP_ALREADY_ENABLED" }, "auth");
+    expect(notEnrolled.toLowerCase()).toContain("two-factor");
+    expect(notEnrolled.toLowerCase()).not.toMatch(/username|password/);
+    expect(alreadyEnabled.toLowerCase()).toContain("two-factor");
+    expect(alreadyEnabled.toLowerCase()).not.toMatch(/username|password/);
+  });
+});
+
+describe("translateError — vpn domain", () => {
+  // Parity gap fix (WARP-646 review): inferCodeFromMessage can infer TIMEOUT
+  // for a VPN op (e.g. addWireguardDevice hitting a network timeout), but the
+  // vpn domain previously had no TIMEOUT entry, so it silently fell through to
+  // the domain fallback. Assert TIMEOUT now resolves to its own string.
+  it("maps a TIMEOUT code (and an inferred timeout message) to the timeout string", () => {
+    const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "vpn");
+    const byCode = translateError({ code: "TIMEOUT" }, "vpn");
+    const byMessage = translateError({ message: "connection timed out" }, "vpn");
+    expect(byCode).not.toBe(fallback);
+    expect(byCode.toLowerCase()).toContain("too long");
+    // The message-inferred path lands on the same dedicated TIMEOUT copy,
+    // not the generic vpn fallback.
+    expect(byMessage).toBe(byCode);
+  });
 });
 
 describe("translateError — chat domain", () => {

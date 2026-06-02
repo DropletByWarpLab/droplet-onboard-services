@@ -233,6 +233,7 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
     NOT_FOUND: "That remote-access profile is no longer available.",
+    TIMEOUT: "That took too long. Try again in a moment.",
   },
   camera: {
     NETWORK:
