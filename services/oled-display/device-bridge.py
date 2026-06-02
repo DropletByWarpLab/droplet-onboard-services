@@ -661,7 +661,7 @@ def files_snapshot():
         "size_bytes": total_size,
         "recent": [
             {"name": n, "size": sz,
-             "modified": datetime.datetime.utcfromtimestamp(m)
+             "modified": datetime.datetime.fromtimestamp(m, tz=datetime.timezone.utc)
                                .strftime("%Y-%m-%dT%H:%M:%SZ")}
             for m, n, sz in recent
         ],
