@@ -43,19 +43,33 @@ _RESOURCES: dict[str, Any] = {
     "swap": {"total": 0, "free": 0},
 }
 
+# `present: True` mirrors the canonical presence flag the real SDK stamps on
+# every live interface in `get_all_interface_statuses()` (ADR-011). Without it
+# the deployment-topology detector (ADR-018) — which reads presence from that
+# exact flag — would treat the demo WAN as absent and report UNKNOWN.
 _LAN_STATUS: dict[str, Any] = {
     "up": True,
+    "present": True,
     "device": "br-lan",
     "proto": "static",
     "ipv4-address": [{"address": "10.0.0.1", "mask": 24}],
     "uptime": 12000,
 }
 
+# The mock models the single-box that motivated ADR-018: it sits DOWNSTREAM of a
+# home router, so its WAN carries a DHCP-assigned address AND an upstream
+# default-route gateway. The `route` entry is what the topology probe keys on to
+# detect the DOWNSTREAM_ROUTER posture.
 _WAN_STATUS: dict[str, Any] = {
     "up": True,
+    "present": True,
     "device": "eth1",
+    "l3_device": "eth1",
     "proto": "dhcp",
-    "ipv4-address": [{"address": "203.0.113.42", "mask": 24}],
+    "ipv4-address": [{"address": "192.168.1.87", "mask": 24}],
+    "route": [
+        {"target": "0.0.0.0", "mask": 0, "nexthop": "192.168.1.254", "source": ""},
+    ],
     "uptime": 11800,
 }
 

@@ -36,6 +36,7 @@ from droplet_openwrt_sdk import (
     UBUS_STATUS_NO_DATA,
     get_network_summary,
     describe_network_for_llm,
+    detect_deployment_topology,
 )
 from schemas import (
     HealthResponse,
@@ -205,6 +206,26 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to OpenWrt router: %s", exc)
         router_instance = None
 
+    # ADR-018: log the detected deployment-topology posture once on startup so
+    # operators can see it without polling /network/topology. Re-evaluation is
+    # event-driven — the /network/topology endpoint re-probes on every request
+    # (the request IS the event); there is deliberately NO busy loop / periodic
+    # tick here (rule 9), since the posture only needs a fresh read when the
+    # dashboard/orchestrator asks. Non-fatal: a probe failure must not stop the
+    # service from serving.
+    if router_instance is not None:
+        try:
+            topology = detect_deployment_topology(router_instance)
+            logger.info(
+                "deployment topology detected: posture=%s wan_present=%s "
+                "upstream_gateway=%s",
+                topology["posture"].value,
+                topology["evidence"]["wan_present"],
+                topology["evidence"]["upstream_gateway"],
+            )
+        except (ConnectionLost, UbusError) as exc:
+            logger.warning("deployment-topology probe failed at startup: %s", exc)
+
     # WARP-470: start the 60 s WAN throughput sampler once we have a
     # real router connection. Skipped in mock mode (the mock doesn't
     # carry traffic counters worth sampling). Failure to start is
@@ -371,6 +392,30 @@ def network_summary():
 def network_summary_text():
     try:
         return {"text": describe_network_for_llm(get_router())}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/network/topology")
+def network_topology():
+    """Report the explicit deployment-topology posture + the evidence behind it
+    (ADR-018 Decision 2).
+
+    Read-only: probes the WAN-facing interface for an upstream gateway by
+    reusing the SDK's `get_all_interface_statuses()` shape-detection — it never
+    mutates the router or the upstream network. Returns:
+
+        {"posture": "PRIMARY_ROUTER" | "DOWNSTREAM_ROUTER" | "UNKNOWN",
+         "evidence": {wan_interface, wan_present, wan_up, wan_device,
+                      upstream_gateway_present, upstream_gateway}}
+
+    The posture is an explicit enum value, never inferred from a null field
+    (rule 10). A genuine ubus fault while probing propagates as an error (so the
+    dashboard can tell "router unreachable / misconfigured" apart from a real
+    posture) rather than being flattened to UNKNOWN.
+    """
+    try:
+        return detect_deployment_topology(get_router())
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
