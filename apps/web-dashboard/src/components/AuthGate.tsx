@@ -100,7 +100,23 @@ export function AuthGate({ children }: { children: ReactNode }) {
     probeBlocked,
   ]);
 
-  // Loading state
+  // Public pages (login, setup) render WITHOUT being blocked by the
+  // session/setup-state probes. This MUST run before the `isLoading` gate
+  // below: AuthProvider.init() flips `isLoading` false only after its probes
+  // resolve, so gating /login on `isLoading` left the login form blank on a
+  // cold/slow/hung backend ("takes ~5 refreshes"). A public page has nothing
+  // to gate — it shows the same content whether or not auth has resolved — so
+  // it paints on first render. The redirect effect above still early-returns
+  // while `isLoading`, so an authenticated user already on /login isn't
+  // bounced before the probe settles; once it does, the `user && isPublicPage`
+  // branch routes them to the dashboard.
+  if (isPublicPage) {
+    return <>{children}</>;
+  }
+
+  // Loading state — protected surfaces only. We still hold protected content
+  // behind the spinner until auth resolves so we never flash a protected page
+  // (or its data) to an unauthenticated viewer.
   if (isLoading) {
     return (
       <div className="min-h-screen bg-surface-primary flex items-center justify-center">
@@ -145,11 +161,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </div>
       </div>
     );
-  }
-
-  // Public pages (setup, login) render without sidebar
-  if (isPublicPage) {
-    return <>{children}</>;
   }
 
   // Not authenticated — show nothing while redirecting
