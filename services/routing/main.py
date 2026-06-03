@@ -34,6 +34,7 @@ from droplet_openwrt_sdk import (
     UbusError,
     UBUS_STATUS_NOT_FOUND,
     UBUS_STATUS_NO_DATA,
+    _ubus_object_absent,
     get_network_summary,
     describe_network_for_llm,
     detect_deployment_topology,
@@ -223,8 +224,29 @@ async def lifespan(app: FastAPI):
                 topology["evidence"]["wan_present"],
                 topology["evidence"]["upstream_gateway"],
             )
-        except (ConnectionLost, UbusError) as exc:
+        except ConnectionLost as exc:
+            # Transient — the router dropped mid-probe. Benign at startup.
             logger.warning("deployment-topology probe failed at startup: %s", exc)
+        except UbusError as exc:
+            # Mirror the SDK's degrade-on-absence contract (ADR-011, same
+            # discipline as get_all_interface_statuses / get_camera_subnet and
+            # the /network/topology endpoint): a missing ubus object
+            # (NOT_FOUND/NO_DATA, or the -1 "object not found" shape) just means
+            # this deployment lacks it — benign. Any OTHER code
+            # (PERMISSION_DENIED, INVALID_ARGUMENT, …) is a real misconfiguration
+            # and must NOT be silently downgraded to a transient-looking warning.
+            # This lifespan probe is deliberately non-fatal (a probe must not stop
+            # the service from serving), so a genuine fault is surfaced at ERROR
+            # rather than re-raised (which would crash startup).
+            if _ubus_object_absent(exc):
+                logger.warning("deployment-topology probe (object absent): %s", exc)
+            else:
+                logger.error(
+                    "deployment-topology probe hit a real ubus fault "
+                    "(code=%s) — check the OpenWrt ACL / config: %s",
+                    exc.code,
+                    exc,
+                )
 
     # WARP-470: start the 60 s WAN throughput sampler once we have a
     # real router connection. Skipped in mock mode (the mock doesn't
