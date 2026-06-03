@@ -201,6 +201,19 @@ async def show_stats():
     return {"ok": True, "mode": "stats"}
 
 
+@app.post("/display/system")
+async def show_system():
+    """Navigate the panel to the combined System + Wi-Fi screen (py-v3).
+
+    Bare-nav endpoint the orchestrator's screen-qr poller calls once the box is
+    claimed, so the panel leaves the modal claim screen and shows the live UI.
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_system()
+    return {"ok": True, "mode": "system"}
+
+
 @app.post("/display/logo")
 async def show_logo():
     if not display:

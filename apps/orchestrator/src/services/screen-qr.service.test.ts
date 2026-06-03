@@ -220,3 +220,50 @@ describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", 
     expect(result.pushed).toBe(false);
   });
 });
+
+describe("decideScreenQR — a CLAIMED box navigates to the System screen (py-v3)", () => {
+  // Once the box is claimed, the panel must leave the modal claim screen and
+  // show the native py-v3 System screen (live stats + the built-in Wi-Fi QR).
+  // Two failure modes this guards against, both of which left the panel STUCK
+  // on the consumed claim code before the fix:
+  //   * the poll falling through to the setup-URL QR (claim precedes account,
+  //     so realUserCount is 0 at claim time), and
+  //   * the poll returning "none" (device-bridge WiFi QR down) which "leaves
+  //     the screen alone" — i.e. parked on the stale claim code forever.
+  it("claimed box with no account yet shows System, NOT the setup-URL QR", async () => {
+    const d = await decideScreenQR(0, null, Date.now(), wifiOk, true);
+    expect(d.mode).toBe("system");
+    expect(d.signature).toBe("system");
+  });
+
+  it("claimed box shows System even when the WiFi QR is unavailable (never freezes on claim)", async () => {
+    const d = await decideScreenQR(1, null, Date.now(), wifiDown, true);
+    // The critical assertion: NOT "none" — "none" would leave the panel parked
+    // on whatever it last showed, which after claim is the consumed claim code.
+    expect(d.mode).toBe("system");
+  });
+
+  it("claimed System signature is stable so the poller doesn't re-push every tick", async () => {
+    const a = await decideScreenQR(1, null, Date.now(), wifiDown, true);
+    const b = await decideScreenQR(0, null, Date.now() + 9_000, wifiOk, true);
+    expect(a.signature).toBe(b.signature);
+  });
+
+  it("unclaimed first boot is unchanged (still the setup-URL QR)", async () => {
+    const d = await decideScreenQR(0, null, Date.now(), wifiOk, false);
+    expect(d.mode).toBe("setup");
+  });
+
+  it("a freshly-created peer still wins on a claimed box (VPN trust mode preserved)", async () => {
+    const peerConf = "[Interface]\nPrivateKey = abc\n[Peer]\nPublicKey = def";
+    const d = await decideScreenQR(
+      1,
+      { config: peerConf, createdAt: Date.now() - 5_000, name: "phone" },
+      Date.now(),
+      wifiOk,
+      true,
+    );
+    expect(d.mode).toBe("peer");
+    expect(d.payload).toBe(peerConf);
+  });
+});
