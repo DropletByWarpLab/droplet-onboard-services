@@ -20,7 +20,7 @@
  * welcome → claim → account → org via the shared step helpers.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, cleanup } from "@testing-library/react";
 import React from "react";
 
 import { claimApiMocks, passClaimStep } from "./helpers/claim-step";
@@ -221,6 +221,121 @@ describe("setup Org step (PR #380)", () => {
     });
     expect(postOrgMock).not.toHaveBeenCalled();
     expect(screen.getByText(/create your workspace/i)).toBeInTheDocument();
+  });
+
+  // Live logo preview in the 68x68 tile (fix/setup-image-preview).
+  // jsdom ships no URL.createObjectURL/revokeObjectURL — stub them so we can
+  // both render the preview and assert the object-URL lifecycle.
+  describe("logo preview in the tile", () => {
+    let createObjectURL: ReturnType<typeof vi.fn<[Blob], string>>;
+    let revokeObjectURL: ReturnType<typeof vi.fn<[string], void>>;
+    let urlSeq: number;
+
+    beforeEach(() => {
+      urlSeq = 0;
+      createObjectURL = vi.fn<[Blob], string>(() => `blob:preview-${++urlSeq}`);
+      revokeObjectURL = vi.fn<[string], void>();
+      // URL.createObjectURL is absent in jsdom; define it on the global URL.
+      (URL as unknown as { createObjectURL: unknown }).createObjectURL =
+        createObjectURL;
+      (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL =
+        revokeObjectURL;
+    });
+
+    afterEach(() => {
+      // Unmount any still-mounted tree FIRST so its useEffect cleanup can revoke
+      // its object URL while the stubs are still installed — then remove them so
+      // the stubs don't leak to other test files (jsdom has no native impl).
+      cleanup();
+      delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+      delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    });
+
+    function validLogo(name = "logo.png") {
+      return new File([new Uint8Array(8)], name, { type: "image/png" });
+    }
+
+    it("renders a thumbnail preview and drops the placeholder icon after a valid select", async () => {
+      render(<SetupPage />);
+      await advanceToOrg();
+
+      // Placeholder present before any select: the "Logo" label is shown.
+      expect(screen.getByText(/^Logo$/)).toBeInTheDocument();
+
+      const input = screen.getByTestId("org-logo-input") as HTMLInputElement;
+      await act(async () => {
+        fireEvent.change(input, { target: { files: [validLogo()] } });
+        await Promise.resolve();
+      });
+
+      // The preview <img> renders with the object-URL src + sensible alt.
+      const preview = screen.getByAltText(/logo preview/i) as HTMLImageElement;
+      expect(preview).toBeInTheDocument();
+      expect(preview.getAttribute("src")).toBe("blob:preview-1");
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      // Placeholder "Logo" label is gone once the preview is showing.
+      expect(screen.queryByText(/^Logo$/)).not.toBeInTheDocument();
+    });
+
+    it("shows no preview and keeps the error path on an invalid (too-large) select", async () => {
+      render(<SetupPage />);
+      await advanceToOrg();
+
+      const bigFile = new File(
+        [new Uint8Array(6 * 1024 * 1024)],
+        "logo.png",
+        { type: "image/png" },
+      );
+      const input = screen.getByTestId("org-logo-input") as HTMLInputElement;
+      await act(async () => {
+        fireEvent.change(input, { target: { files: [bigFile] } });
+        await Promise.resolve();
+      });
+
+      // Error renders; no preview; placeholder stays.
+      expect(screen.getByText(/too large|under 5\s*MB/i)).toBeInTheDocument();
+      expect(screen.queryByAltText(/logo preview/i)).not.toBeInTheDocument();
+      expect(screen.getByText(/^Logo$/)).toBeInTheDocument();
+      expect(createObjectURL).not.toHaveBeenCalled();
+    });
+
+    it("revokes the previous object URL when the logo is replaced", async () => {
+      render(<SetupPage />);
+      await advanceToOrg();
+
+      const input = screen.getByTestId("org-logo-input") as HTMLInputElement;
+      await act(async () => {
+        fireEvent.change(input, { target: { files: [validLogo("a.png")] } });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        fireEvent.change(input, { target: { files: [validLogo("b.png")] } });
+        await Promise.resolve();
+      });
+
+      // Two creates, one revoke of the first URL; preview now shows the second.
+      expect(createObjectURL).toHaveBeenCalledTimes(2);
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
+      const preview = screen.getByAltText(/logo preview/i) as HTMLImageElement;
+      expect(preview.getAttribute("src")).toBe("blob:preview-2");
+    });
+
+    it("revokes the object URL on unmount (no leak)", async () => {
+      const { unmount } = render(<SetupPage />);
+      await advanceToOrg();
+
+      const input = screen.getByTestId("org-logo-input") as HTMLInputElement;
+      await act(async () => {
+        fireEvent.change(input, { target: { files: [validLogo()] } });
+        await Promise.resolve();
+      });
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+
+      await act(async () => {
+        unmount();
+      });
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
+    });
   });
 
   it("rejects a too-large logo with an inline error but keeps the logo optional", async () => {
