@@ -11,7 +11,7 @@
 
 ---
 
-## 1. How Droplet AP onboarding works today (ADR-005)
+## 1. How Droplet's mDNS-announced zero-touch AP onboarding works today
 
 Droplet does **not** use a vendor mesh protocol (no EasyMesh, no TR-069, no controller cloud). Coverage extension is built on the fact that **every Droplet AP runs the same OpenWrt image as the Droplet router**, and that image knows how to announce itself and accept configuration from the Droplet control plane.
 
@@ -90,7 +90,7 @@ Any AP whose hardware has **mature OpenWrt support including AP-mode Wi-Fi** can
 
 After step 4 the device is indistinguishable from a Tier-1 AP: it shows up in the dashboard, joins the same SSID/PSK, and band-steers.
 
-**Why not EasyMesh / TR-069?** (ADR-018 §Decision 5) A vendor mesh protocol would not configure a non-certified stock AP anyway, and adopting one would override ADR-005's deliberate `dawn` choice. The flash path reuses the onboarding flow Droplet already ships, with no second mechanism to maintain.
+**Why not EasyMesh / TR-069?** (the flash path reuses the `dawn` onboarding Droplet already ships rather than adopting a vendor mesh — see ADR-018 §Decision 5) A vendor mesh protocol would not configure a non-certified stock AP anyway, and adopting one would override ADR-005's deliberate `dawn` choice. The flash path reuses the onboarding flow Droplet already ships, with no second mechanism to maintain.
 
 ---
 
@@ -107,7 +107,7 @@ Evidence (checked 2026-06-03):
 | OpenWrt device techdata page `…/toh/hwdata/trendnet/trendnet_tew-932dap` | **404 — "This topic does not exist yet."** No device page exists. |
 | [OpenWrt Table of Hardware](https://openwrt.org/toh/start) (filtered on `TEW-932DAP`) | **No matching row.** Other TRENDnet models (TEW-732BR, TEW-691GR, [TEW-827DRU](https://forum.openwrt.org/t/adding-openwrt-support-for-a-trendnet-tew-827dru-v2/69591)) are listed; this one is not. |
 | OpenWrt forum (`site:forum.openwrt.org TEW-932DAP`) | **Zero threads** for this model (many other TRENDnet models have threads). |
-| [WikiDevi / DeviWiki](https://deviwiki.com/wiki/TRENDnet_TEW-821DAP_V2.0R) | **No entry** for the TEW-932DAP (other TEW-### models documented). |
+| [WikiDevi / DeviWiki search for `TEW-932DAP`](https://deviwiki.com/wiki/Special:Search?search=TEW-932DAP) | **No entry** — the search returns no TEW-932DAP page (other TEW-### models are documented). |
 | [TRENDnet product page](https://www.trendnet.com/products/product-detail?prod=130_TEW-932DAP) | Returns "Sorry, this product is not currently available" — no public spec/chipset sheet. |
 
 Because the device is absent from OpenWrt's supported-hardware list, there is **no OpenWrt factory image and no validated install method** for it. Without OpenWrt there is no Droplet AP overlay, no `_droplet-ap._tcp` announcement, and no `dawn` — so it cannot auto-onboard and cannot be band-steered with the rest of the household. Stock TEW-932DAP firmware does not speak Droplet's onboarding protocol.
