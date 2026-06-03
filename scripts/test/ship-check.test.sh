@@ -806,6 +806,73 @@ test_stale_repo_names_catches_inference_engine_reintro() {
 }
 
 # =============================================================================
+# Test: lifecycle-naming catches a NEW poc-style token in a user-facing
+# surface (ADR-018 action item 8, architecture-guard rule 17)
+# =============================================================================
+#
+# Bug class this guards (ADR-018 §13 / architecture-guard rule 17): every
+# Droplet box is the shipping product, so user-facing surfaces — compose
+# profile names, env-var names, CLI flags, service/file names, log strings —
+# must be named by what the deployment IS, not by its lifecycle stage. A new
+# `profiles: ["poc"]`, `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or a
+# `droplet-poc-*` service that ships to a customer is the exact drift rule 17
+# exists to stop. The repo already carries a KNOWN legacy `droplet-poc-host-net`
+# debt (slated for retirement by ADR-018 action item 3); the lifecycle-naming
+# check grandfathers that explicit set and FAILS only on NEW occurrences.
+#
+# This is the repo-wide net for rule 17. It is deliberately distinct from the
+# services/pm/-scoped rule-17 sub-check inside `pm-invariants` (that one stays
+# stricter — zero tolerance — because the Plane stack landed clean and must
+# stay clean). The two do not overlap: pm-invariants scans services/pm/;
+# lifecycle-naming scans docker-compose.yml + .env.example + top-level
+# scripts/*.sh + scripts/lib/*.sh.
+#
+# Synthetic regression: inject a NEW `profiles: ["poc"]` line into
+# docker/docker-compose.yml (a covered surface) — the precise AC demonstration
+# from the ticket: a new poc-named compose profile. The injected line is NOT
+# in the grandfather allowlist, so lifecycle-naming must FAIL. Restore via
+# `git checkout --` on RETURN.
+test_lifecycle_naming_catches_new_poc_token() {
+  local compose_rel="docker/docker-compose.yml"
+  local compose="$REPO_ROOT_REAL/$compose_rel"
+
+  if [ ! -f "$compose" ]; then
+    printf "    compose file missing: %s\n" "$compose" >&2
+    return 1
+  fi
+  if ! (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    %s already dirty — refusing to mutate\n" "$compose_rel" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2064  # capture path values at trap-set time
+  trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
+
+  # 1. Sanity: lifecycle-naming PASSES on the unmutated tree (the known
+  #    droplet-poc-host-net + comment debt is all grandfathered).
+  if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
+    printf "    baseline lifecycle-naming failed against unmodified real repo\n" >&2
+    printf "    (the grandfather allowlist is out of sync with the tree — update it)\n" >&2
+    return 1
+  fi
+
+  # 2. Apply regression: append a NEW poc-named compose profile at EOF. This
+  #    is the exact lifecycle-stage leak rule 17 forbids — `profiles: ["poc"]`
+  #    instead of `profiles: ["single-box"]`. The line+token pair is not in
+  #    the allowlist, so it is a NEW occurrence.
+  printf '\n# ADR-018 test mutation: do not commit.\n  profiles: ["poc"]\n' >> "$compose"
+
+  if (cd "$REPO_ROOT_REAL" && git diff --quiet -- "$compose_rel" 2>/dev/null); then
+    printf "    regression mutation no-op — compose file unchanged\n" >&2
+    return 1
+  fi
+
+  # 3. lifecycle-naming should now FAIL — the new poc token is beyond the
+  #    grandfather allowlist.
+  _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -841,6 +908,9 @@ _run_test "exec-bits catches chmod-stripped tracked script in openwrt/scripts/" 
 
 _run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)" \
   test_stale_repo_names_catches_inference_engine_reintro
+
+_run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
+  test_lifecycle_naming_catches_new_poc_token
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
