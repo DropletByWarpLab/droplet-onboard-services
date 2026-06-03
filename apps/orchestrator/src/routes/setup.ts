@@ -69,6 +69,7 @@ import { getApplianceContract } from "../services/appliance-contract.service.js"
 import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
 
 const logger = pino({ name: "setup-route" });
 
@@ -448,6 +449,11 @@ export function createSetupRouter(prisma: PrismaClient): Router {
             "Claim succeeded but persisting the post-claim step failed",
           );
         }
+        // Unstick the PyPortal: the box just got claimed, so kick the screen-qr
+        // poller to move the panel off the modal claim screen onto the live
+        // System screen now, instead of waiting up to POLL_INTERVAL_MS. Fire-
+        // and-forget — a display hiccup must not fail the (committed) claim.
+        kickScreenQRRefresh();
         res.json({ claimed: true, next_step: STEP_AFTER_CLAIM });
         return;
       }
@@ -456,6 +462,10 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         // Idempotent short-circuit — the box is already bound, move on. Clear
         // the rate state too so a prior partial-lock can't linger (WARP-631).
         await clearClaimRateState(ip).catch(() => {});
+        // Idempotent re-claim — still kick the panel off the claim screen in
+        // case a prior transition was missed (e.g. the display was down at the
+        // moment of the original claim).
+        kickScreenQRRefresh();
         res.json({
           claimed: true,
           already_claimed: true,

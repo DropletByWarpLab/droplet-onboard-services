@@ -2177,6 +2177,21 @@ class TFTDisplay:
             self._pyportal_send("stats", self._gather_stats())
             self._render_current_locked()
 
+    def show_system(self):
+        """Navigate the panel to the combined System + Wi-Fi screen (py-v3).
+
+        Sends a BARE {"mode":"system"} nav (no data) so the firmware leaves
+        whatever screen it is on — notably the modal claim screen once the box
+        is claimed — and renders the live System screen (stats + built-in Wi-Fi
+        pairing QR). Distinct from show_stats(), which streams a stats *data*
+        frame the firmware only re-renders when already on System; that path
+        does NOT navigate off the claim screen.
+        """
+        with self._lock:
+            self._current_mode = self.SYSTEM
+            self._pyportal_send("system")
+            self._render_current_locked()
+
     def show_message(self, title: str, lines: List[str]):
         with self._lock:
             self._current_mode = self.MESSAGE

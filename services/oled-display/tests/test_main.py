@@ -63,6 +63,24 @@ def test_boot_rejects_out_of_range_pct(client: TestClient):
     assert r.status_code == 422
 
 
+# --- /display/system --------------------------------------------------------
+
+def test_system_requires_auth(client: TestClient):
+    r = client.post("/display/system")
+    assert r.status_code == 401
+
+
+def test_system_ok_with_bearer(client: TestClient):
+    # The bare-nav endpoint the screen-qr poller calls once the box is claimed,
+    # to move the panel off the modal claim screen onto the live System screen.
+    r = client.post("/display/system", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["mode"] == "system"
+    assert main.display._current_mode == main.display.SYSTEM
+
+
 # --- /display/shutdown ------------------------------------------------------
 
 def test_shutdown_requires_auth(client: TestClient):

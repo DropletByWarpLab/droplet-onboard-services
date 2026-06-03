@@ -71,6 +71,25 @@ export async function showHome(): Promise<boolean> {
   }
 }
 
+/**
+ * Navigate the panel to the combined System + Wi-Fi screen (py-v3).
+ *
+ * Sends a BARE `{"mode":"system"}` nav (no data) via `POST /display/system`, so
+ * the firmware leaves whatever screen it is on — in particular the modal claim
+ * screen once the box is claimed — and renders the live System screen (stats +
+ * the built-in Wi-Fi pairing QR). Distinct from `showStats()`, which streams a
+ * stats *data* frame the firmware only re-renders when already on System (it
+ * does NOT navigate off the claim screen).
+ */
+export async function showSystem(): Promise<boolean> {
+  try {
+    const res = await displayFetch("/display/system", { method: "POST" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function showMessage(title: string, lines: string[]): Promise<boolean> {
   try {
     const res = await displayFetch("/display/message", {

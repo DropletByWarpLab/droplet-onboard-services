@@ -640,3 +640,34 @@ def test_render_dispatch_routes_claim_mode(sim_display: TFTDisplay):
     # Re-render under the current mode; must not throw and must stay on claim.
     sim_display._render_current()
     assert sim_display._current_mode == TFTDisplay.CLAIM
+
+
+def test_show_system_sets_mode(sim_display: TFTDisplay):
+    # py-v3 claim-screen exit: show_system navigates the panel to the combined
+    # System screen and renders a frame without error (sim backend).
+    sim_display.show_system()
+    assert sim_display._current_mode == TFTDisplay.SYSTEM
+
+
+def test_show_system_sends_bare_system_nav(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # The firmware leaves the modal claim screen only on a BARE mode nav (no
+    # data). show_system must emit ("system", None) — a stats *data* frame would
+    # NOT navigate the device off the claim screen.
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_system()
+    system_frames = [(m, d) for (m, d) in sent if m == "system"]
+    assert system_frames, f"expected a bare system nav; got {sent!r}"
+    _, data = system_frames[0]
+    assert data is None
+
+
+def test_show_system_transitions_off_claim(sim_display: TFTDisplay):
+    # The end-to-end bug this fixes: a box parked on the modal claim screen must
+    # transition to the live System screen once claimed. Drive claim → system and
+    # assert the panel actually left claim.
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    assert sim_display._current_mode == TFTDisplay.CLAIM
+    sim_display.show_system()
+    assert sim_display._current_mode == TFTDisplay.SYSTEM
