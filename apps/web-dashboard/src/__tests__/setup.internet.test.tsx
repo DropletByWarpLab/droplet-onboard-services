@@ -28,6 +28,11 @@ vi.mock("@/lib/auth", () => ({
 
 const fetchDuckDnsStatusMock = vi.fn();
 const setDuckDnsConfigMock = vi.fn();
+// WARP-657 — Home Wi-Fi section wired to the existing network endpoints.
+const setWifiSsidMock = vi.fn();
+const setWifiPasswordMock = vi.fn();
+const confirmNetworkCommandMock = vi.fn();
+const fetchNetworkOperationMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
@@ -56,6 +61,14 @@ vi.mock("@/lib/api", () => ({
   })),
   fetchDuckDnsStatus: () => fetchDuckDnsStatusMock(),
   setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
+  // WARP-657 — Home Wi-Fi clients (POST /api/network/wifi/{ssid,password},
+  // /command/confirm, /operations/:id). The password POST is Tier-2 and may
+  // resolve to a 202 `confirmation_required` body that the step auto-confirms.
+  setWifiSsid: (ssid: string) => setWifiSsidMock(ssid),
+  setWifiPassword: (password: string) => setWifiPasswordMock(password),
+  confirmNetworkCommand: (token: string, operation: string, entityId?: string) =>
+    confirmNetworkCommandMock(token, operation, entityId),
+  fetchNetworkOperation: (id: string) => fetchNetworkOperationMock(id),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
@@ -121,6 +134,14 @@ describe("setup Internet step (WARP-174)", () => {
   beforeEach(() => {
     fetchDuckDnsStatusMock.mockReset();
     setDuckDnsConfigMock.mockReset();
+    setWifiSsidMock.mockReset();
+    setWifiPasswordMock.mockReset();
+    confirmNetworkCommandMock.mockReset();
+    fetchNetworkOperationMock.mockReset();
+    // Sensible Tier-1 defaults so the DuckDNS-only cases don't have to wire
+    // the Wi-Fi mocks. Cases that exercise the Wi-Fi path override these.
+    setWifiSsidMock.mockResolvedValue({ status: "ok", tier: 1 });
+    setWifiPasswordMock.mockResolvedValue({ status: "ok", tier: 1 });
   });
 
   afterEach(() => {
@@ -247,7 +268,231 @@ describe("setup Internet step (WARP-174)", () => {
       token: "validtoken1234",
       enabled: true,
     });
+    // WARP-657 — the Wi-Fi section is optional; leaving SSID blank must not
+    // touch the network endpoints. Existing DuckDNS-only behavior unchanged.
+    expect(setWifiSsidMock).not.toHaveBeenCalled();
+    expect(setWifiPasswordMock).not.toHaveBeenCalled();
     // Advanced to discovery.
     expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-657 — the network step now ALSO configures the Home Wi-Fi the Droplet
+ * broadcasts (it's the home router). Section A = Home Wi-Fi (SSID + PSK), wired
+ * to POST /api/network/wifi/{ssid,password}; Section B = the existing DuckDNS
+ * inputs. Validation mirrors services/routing/schemas.py (SSID 1–32, PSK 8–63);
+ * the password POST is Tier-2 and may return a 202 `confirmation_required`
+ * body the step auto-confirms (the "Save and continue" click IS the consent).
+ */
+describe("setup network step — Home Wi-Fi (WARP-657)", () => {
+  beforeEach(() => {
+    fetchDuckDnsStatusMock.mockReset();
+    setDuckDnsConfigMock.mockReset();
+    setWifiSsidMock.mockReset();
+    setWifiPasswordMock.mockReset();
+    confirmNetworkCommandMock.mockReset();
+    fetchNetworkOperationMock.mockReset();
+    setWifiSsidMock.mockResolvedValue({ status: "ok", tier: 1 });
+    setWifiPasswordMock.mockResolvedValue({ status: "ok", tier: 1 });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders the two-section step with the Home Wi-Fi inputs and section labels", async () => {
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
+    render(<SetupPage />);
+    await advanceToInternet();
+
+    // New title + subtitle.
+    expect(screen.getByText(/set up your network/i)).toBeInTheDocument();
+    // Section A label + both Wi-Fi inputs.
+    expect(screen.getByText(/home wi-fi/i)).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(/network name|studio fotonia/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(/wi-fi password/i),
+    ).toBeInTheDocument();
+    // Section B label still present (DuckDNS).
+    expect(screen.getByText(/internet address/i)).toBeInTheDocument();
+    // DuckDNS inputs unchanged.
+    expect(screen.getByPlaceholderText(/yourstudio/i)).toBeInTheDocument();
+  });
+
+  it("rejects an SSID over 32 chars client-side without hitting the Wi-Fi API", async () => {
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
+    render(<SetupPage />);
+    await advanceToInternet();
+
+    fireEvent.change(
+      screen.getByPlaceholderText(/network name|studio fotonia/i),
+      { target: { value: "x".repeat(33) } },
+    );
+    fireEvent.change(screen.getByPlaceholderText(/wi-fi password/i), {
+      target: { value: "abcdefgh" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /save and continue/i }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByText(/must be 32 characters or fewer/i),
+    ).toBeInTheDocument();
+    expect(setWifiSsidMock).not.toHaveBeenCalled();
+    expect(setWifiPasswordMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Wi-Fi password under 8 chars client-side without hitting the API", async () => {
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
+    render(<SetupPage />);
+    await advanceToInternet();
+
+    fireEvent.change(
+      screen.getByPlaceholderText(/network name|studio fotonia/i),
+      { target: { value: "Studio Fotonia" } },
+    );
+    fireEvent.change(screen.getByPlaceholderText(/wi-fi password/i), {
+      target: { value: "short" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /save and continue/i }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByText(/wi-fi password must be at least 8 characters/i),
+    ).toBeInTheDocument();
+    expect(setWifiSsidMock).not.toHaveBeenCalled();
+    expect(setWifiPasswordMock).not.toHaveBeenCalled();
+  });
+
+  it("submits Wi-Fi (ssid then password) and then DuckDNS on a valid combined save", async () => {
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
+    setDuckDnsConfigMock.mockResolvedValue({
+      configured: true,
+      subdomain: "studiofotonia",
+      fullDomain: "studiofotonia.duckdns.org",
+      enabled: true,
+      tokenSet: true,
+    });
+    render(<SetupPage />);
+    await advanceToInternet();
+
+    fireEvent.change(
+      screen.getByPlaceholderText(/network name|studio fotonia/i),
+      { target: { value: "Studio Fotonia" } },
+    );
+    fireEvent.change(screen.getByPlaceholderText(/wi-fi password/i), {
+      target: { value: "supersecret" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/yourstudio/i), {
+      target: { value: "studiofotonia" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/paste your duckdns token/i), {
+      target: { value: "validtoken1234" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /save and continue/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(setWifiSsidMock).toHaveBeenCalledWith("Studio Fotonia");
+    expect(setWifiPasswordMock).toHaveBeenCalledWith("supersecret");
+    // SSID is submitted before the password.
+    expect(setWifiSsidMock.mock.invocationCallOrder[0]).toBeLessThan(
+      setWifiPasswordMock.mock.invocationCallOrder[0],
+    );
+    expect(setDuckDnsConfigMock).toHaveBeenCalledWith({
+      subdomain: "studiofotonia",
+      token: "validtoken1234",
+      enabled: true,
+    });
+    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+  });
+
+  it("auto-confirms + polls when the password POST returns 202 confirmation_required", async () => {
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
+    setDuckDnsConfigMock.mockResolvedValue({
+      configured: true,
+      subdomain: "studiofotonia",
+      fullDomain: "studiofotonia.duckdns.org",
+      enabled: true,
+      tokenSet: true,
+    });
+    // The Tier-2 202 body the orchestrator returns for set_wifi_password.
+    setWifiPasswordMock.mockResolvedValue({
+      status: "confirmation_required",
+      operation: "set_wifi_password",
+      tier: 2,
+      reason: "Changing the Wi-Fi password restarts the radio.",
+      confirmationToken: "tok-657",
+    });
+    confirmNetworkCommandMock.mockResolvedValue({ operationId: "op-657" });
+    fetchNetworkOperationMock.mockResolvedValue({
+      id: "op-657",
+      state: "applied",
+      startedAt: 0,
+      finishedAt: 1,
+      reason: null,
+    });
+    render(<SetupPage />);
+    await advanceToInternet();
+
+    fireEvent.change(
+      screen.getByPlaceholderText(/network name|studio fotonia/i),
+      { target: { value: "Studio Fotonia" } },
+    );
+    fireEvent.change(screen.getByPlaceholderText(/wi-fi password/i), {
+      target: { value: "supersecret" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /save and continue/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(setWifiPasswordMock).toHaveBeenCalledWith("supersecret");
+    // The step confirms with (token, operation) — same 2-arg shape as the
+    // network page; the optional entityId is left undefined.
+    expect(confirmNetworkCommandMock).toHaveBeenCalledWith(
+      "tok-657",
+      "set_wifi_password",
+      undefined,
+    );
+    expect(fetchNetworkOperationMock).toHaveBeenCalledWith("op-657");
+  });
+
+  it("shows the show/hide control for the Wi-Fi password", async () => {
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
+    render(<SetupPage />);
+    await advanceToInternet();
+
+    const pwInput = screen.getByPlaceholderText(
+      /wi-fi password/i,
+    ) as HTMLInputElement;
+    expect(pwInput.type).toBe("password");
+    // The reveal toggle is labelled for assistive tech.
+    const toggle = screen.getByRole("button", { name: /show.*password/i });
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+    expect(pwInput.type).toBe("text");
   });
 });

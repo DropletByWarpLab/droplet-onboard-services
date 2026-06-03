@@ -172,9 +172,10 @@ describe("setup VPN step (WARP-174)", () => {
       );
     });
 
-    // Internet step's title is back on screen.
+    // Internet step's title is back on screen. WARP-657 renamed the step from
+    // "Connect to the internet" to the two-section "Set up your network".
     expect(
-      screen.getByText(/connect to the internet/i),
+      screen.getByText(/set up your network/i),
     ).toBeInTheDocument();
   });
 
