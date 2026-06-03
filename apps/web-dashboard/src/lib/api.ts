@@ -1784,6 +1784,57 @@ export async function sendChat(
 }
 
 /**
+ * WARP-640 — outcome of a confirmed scene run, i.e. the 200 body from
+ * `POST /api/scenes/:id/run` once the single-use confirmation token has been
+ * accepted. `successCount < actionCount` means a partial run (some device
+ * actions failed); the per-action breakdown rides along in `results`.
+ */
+export interface SceneRunOutcome {
+  sceneId: string;
+  successCount: number;
+  actionCount: number;
+  results: Array<{
+    idx: number;
+    deviceNodeId: string;
+    command: string;
+    ok: boolean;
+    status?: string;
+    error?: string;
+  }>;
+}
+
+/**
+ * WARP-640 — complete an in-chat `run_scene` confirmation. The chat chip mints
+ * nothing itself: the orchestrator already replied `202 confirmation_required`
+ * with a single-use `confirmationToken`, which the "Approve & run" button
+ * echoes straight back here. The route consumes the token (replay-proof) and
+ * runs the scene server-side, so the dashboard never has to forge the
+ * `?confirm=true` gate the way an operator-initiated run would. A non-2xx
+ * (expired/replayed token → 403, pressure → 429, run failure → 5xx) throws so
+ * the chip can flip to its failed state and let the user re-ask.
+ */
+export async function runSceneConfirmed(
+  sceneId: string,
+  confirmationToken: string,
+): Promise<SceneRunOutcome> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(
+      data.error || data.message || `Failed to run scene (${res.status})`,
+    ) as Error & { code?: string; status?: number };
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
  * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
  * dashboard hydrates `useChat.messages` from this on page mount when the
  * URL carries a `?c=<id>` hash.
