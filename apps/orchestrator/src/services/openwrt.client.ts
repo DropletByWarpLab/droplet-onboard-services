@@ -67,7 +67,12 @@ const TOKEN = config.ROUTING_SERVICE_TOKEN;
  */
 export const ROUTER_COLDSTART_GRACE_MS = 120_000;
 
-/** Set true the first time a `routingFetch` gets a successful (`res.ok`) response. */
+/**
+ * Set true the first time OpenWrt is confirmed reachable this process lifetime.
+ * For regular `routingFetch` calls (DHCP, wireless, etc.) this flips on the
+ * first `res.ok`. For `/health`, which the routing service serves even while
+ * OpenWrt is still provisioning, the flag flips only when `data.connected === true`.
+ */
 let routerContacted = false;
 
 /** Process-start reference the grace window is measured against. */
@@ -135,6 +140,14 @@ type RoutingFetchInit = Omit<RequestInit, "headers"> & {
   label?: string;
   /** Override retry policy for a single call (e.g. health check, idempotent probes). */
   retry?: Partial<RetryPolicy>;
+  /**
+   * When true, a `res.ok` response does NOT flip `routerContacted`. Use for
+   * probes where HTTP 200 does not confirm OpenWrt itself is reachable — e.g.
+   * `/health`, which the routing service returns even while OpenWrt is still
+   * provisioning. The caller is responsible for setting `routerContacted` when
+   * it has confirmed genuine OpenWrt connectivity.
+   */
+  skipContactMark?: boolean;
 };
 
 export type RetryPolicy = {
@@ -181,9 +194,6 @@ async function singleAttempt(
   try {
     const res = await fetch(url, init);
     if (res.ok) {
-      // First successful contact this process lifetime — flips the cold-start
-      // grace off so subsequent UNREACHABLE errors escalate to `warn`.
-      routerContacted = true;
       return { kind: "success", res };
     }
     const err = routerErrorFromResponse(res, label);
@@ -212,7 +222,7 @@ async function singleAttempt(
  * Exported so tests and WARP-39 (typed RouterError) can compose on top.
  */
 export async function routingFetch(path: string, init: RoutingFetchInit = {}): Promise<Response> {
-  const { headers = {}, label, retry = {}, ...rest } = init;
+  const { headers = {}, label, retry = {}, skipContactMark = false, ...rest } = init;
   const policy: RetryPolicy = { ...DEFAULT_RETRY, ...retry };
   const sleep = policy.sleep ?? defaultSleep;
   const random = policy.random ?? Math.random;
@@ -236,6 +246,13 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   for (let attempt = 1; attempt <= policy.attempts; attempt++) {
     const outcome = await singleAttempt(url, fetchInit, displayLabel);
     if (outcome.kind === "success") {
+      // First confirmed contact this process lifetime — flips the cold-start
+      // grace off so subsequent UNREACHABLE errors escalate to `warn`.
+      // Skipped for callers that need to verify the payload before confirming
+      // reachability (e.g. /health, which returns 200 while OpenWrt provisions).
+      if (!skipContactMark) {
+        routerContacted = true;
+      }
       return outcome.res;
     }
     if (outcome.kind === "abort") {
@@ -810,14 +827,23 @@ export async function healthCheck(): Promise<boolean> {
     // /health is exempt from auth on the routing side (Docker healthcheck); send the
     // token anyway to keep the code path uniform. Retries are disabled — health
     // should be a cheap single probe, and the 3s AbortController cap is the SLO.
+    //
+    // skipContactMark=true: the routing service returns HTTP 200 even while
+    // OpenWrt is still provisioning (body: { connected: false }). We must not
+    // flip routerContacted until we've confirmed the payload says connected.
     const res = await routingFetch("/health", {
       signal: controller.signal,
       label: "Health",
       retry: { attempts: 1 },
+      skipContactMark: true,
     });
     clearTimeout(timeout);
     const data = await res.json();
-    return data.connected === true;
+    const connected = data.connected === true;
+    if (connected) {
+      routerContacted = true;
+    }
+    return connected;
   } catch {
     return false;
   }

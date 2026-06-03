@@ -28,6 +28,7 @@ import {
   fetchNetworkSummary,
   fetchOperation,
   blockDevice,
+  healthCheck,
   hasReachedRouter,
   routerErrorLogLevel,
   ROUTER_COLDSTART_GRACE_MS,
@@ -533,5 +534,31 @@ describe("openwrt.client cold-start log hygiene", () => {
 
   it("exposes the grace window as a plain const default of 120_000ms", () => {
     expect(ROUTER_COLDSTART_GRACE_MS).toBe(120_000);
+  });
+
+  // healthCheck must not prematurely flip routerContacted when the routing
+  // service returns HTTP 200 with connected:false (OpenWrt still provisioning).
+  it("healthCheck with connected:false does NOT flip hasReachedRouter()", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: true, status: 200, json: { connected: false } }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    expect(hasReachedRouter()).toBe(false);
+    const result = await healthCheck();
+    expect(result).toBe(false);
+    expect(hasReachedRouter()).toBe(false);
+  });
+
+  it("healthCheck with connected:true DOES flip hasReachedRouter()", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: true, status: 200, json: { connected: true } }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    expect(hasReachedRouter()).toBe(false);
+    const result = await healthCheck();
+    expect(result).toBe(true);
+    expect(hasReachedRouter()).toBe(true);
   });
 });
