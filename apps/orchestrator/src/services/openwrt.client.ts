@@ -39,6 +39,91 @@ const logger = pino({ name: "openwrt-client" });
 const BASE_URL = config.ROUTING_SERVICE_URL;
 const TOKEN = config.ROUTING_SERVICE_TOKEN;
 
+// ---------------------------------------------------------------------------
+// Cold-start log hygiene
+// ---------------------------------------------------------------------------
+//
+// On a fresh boot (factory-reset / reflash) the in-container OpenWrt is
+// unreachable for ~1 min while it provisions. During that window the
+// reconcile + AP-discovery pollers tick (~10s) and every call throws a
+// RouterError(code=UNREACHABLE). Logging those at `warn` produces a
+// stack-trace flood on EVERY boot for an entirely EXPECTED warmup state.
+//
+// We downgrade UNREACHABLE → `debug` only while BOTH hold:
+//   1. we have never had a single successful contact with the router, AND
+//   2. process uptime is still inside a bounded grace window.
+//
+// The flag is explicit (set true on the first `res.ok`); we never infer
+// "reachable" from the absence of an error. Once the grace expires a
+// genuinely-down router escalates back to `warn` so a real outage is never
+// silently hidden. Every other code (AUTH/TIMEOUT/…) and any non-RouterError
+// stays at `warn` — only the warmup case is quieted.
+
+/**
+ * Grace window (ms) after process start during which a never-yet-contacted
+ * router's UNREACHABLE errors are logged at `debug` instead of `warn`. Plain
+ * exported const (NOT an env var / config-schema key) so it stays a code-level
+ * tuning knob, per the ticket constraints.
+ */
+export const ROUTER_COLDSTART_GRACE_MS = 120_000;
+
+/** Set true the first time a `routingFetch` gets a successful (`res.ok`) response. */
+let routerContacted = false;
+
+/** Process-start reference the grace window is measured against. */
+let routerStartRef = Date.now();
+
+/** Whether the router has ever answered successfully this process lifetime. */
+export function hasReachedRouter(): boolean {
+  return routerContacted;
+}
+
+/**
+ * Test-only seam: reset the first-contact flag (and optionally pin the
+ * start reference) so cold-start behavior can be exercised deterministically.
+ * Not used by production code.
+ */
+export function _resetRouterContactForTests(opts?: { startRef?: number }): void {
+  routerContacted = false;
+  routerStartRef = opts?.startRef ?? Date.now();
+}
+
+/**
+ * Decide the log level for a routing-layer error. UNREACHABLE during the
+ * cold-start grace window (never-contacted + uptime < grace) is expected
+ * warmup → `debug`; everything else → `warn`. `now` is injectable for tests.
+ */
+export function routerErrorLogLevel(
+  err: unknown,
+  now: () => number = Date.now,
+): "warn" | "debug" {
+  if (err instanceof RouterError && err.code === "UNREACHABLE") {
+    const withinGrace = now() - routerStartRef < ROUTER_COLDSTART_GRACE_MS;
+    if (!routerContacted && withinGrace) {
+      return "debug";
+    }
+  }
+  return "warn";
+}
+
+/**
+ * Log a routing-layer error at the cold-start-aware level. Centralizes the
+ * `logger.debug` vs `logger.warn` branch so every noisy site stays consistent.
+ */
+export function logRouterError(
+  log: pino.Logger,
+  err: unknown,
+  msg: string,
+  ctx: Record<string, unknown> = {},
+): void {
+  const bindings = { ...ctx, err };
+  if (routerErrorLogLevel(err) === "debug") {
+    log.debug(bindings, msg);
+  } else {
+    log.warn(bindings, msg);
+  }
+}
+
 if (!TOKEN && process.env.NODE_ENV === "production") {
   logger.warn(
     "ROUTING_SERVICE_TOKEN is empty in production — routing service may reject requests",
@@ -96,6 +181,9 @@ async function singleAttempt(
   try {
     const res = await fetch(url, init);
     if (res.ok) {
+      // First successful contact this process lifetime — flips the cold-start
+      // grace off so subsequent UNREACHABLE errors escalate to `warn`.
+      routerContacted = true;
       return { kind: "success", res };
     }
     const err = routerErrorFromResponse(res, label);
@@ -159,18 +247,22 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
     }
     const baseDelay = policy.delaysMs[attempt - 1] ?? policy.delaysMs[policy.delaysMs.length - 1] ?? 0;
     const waitMs = jittered(baseDelay, random);
-    logger.warn(
-      {
-        path,
-        attempt,
-        maxAttempts: policy.attempts,
-        code: outcome.err.code,
-        status: outcome.err.status,
-        err: outcome.err.message,
-        waitMs,
-      },
-      "routing call failed, retrying",
-    );
+    // Cold-start hygiene: an UNREACHABLE retry during the boot grace window is
+    // expected warmup noise → `debug`; real failures / post-grace stay `warn`.
+    const retryBindings = {
+      path,
+      attempt,
+      maxAttempts: policy.attempts,
+      code: outcome.err.code,
+      status: outcome.err.status,
+      err: outcome.err.message,
+      waitMs,
+    };
+    if (routerErrorLogLevel(outcome.err) === "debug") {
+      logger.debug(retryBindings, "routing call failed, retrying");
+    } else {
+      logger.warn(retryBindings, "routing call failed, retrying");
+    }
     await sleep(waitMs);
   }
 

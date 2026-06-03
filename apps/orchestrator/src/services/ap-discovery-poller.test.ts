@@ -15,7 +15,7 @@
  * timers.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createApDiscoveryPoller,
   startApDiscoveryPoller,
@@ -23,6 +23,15 @@ import {
 } from "./ap-discovery-poller.js";
 import { RouterError } from "../types/router-error.js";
 import type { CronRuntime } from "./cron-runtime.service.js";
+
+// Spy on the shared cold-start-aware log helper so we can assert the poller's
+// catch routes its failure through it (the level decision is unit-tested in
+// openwrt.client.test.ts). Partial mock — every other export stays real.
+const { logRouterError } = vi.hoisted(() => ({ logRouterError: vi.fn() }));
+vi.mock("./openwrt.client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./openwrt.client.js")>();
+  return { ...actual, logRouterError };
+});
 
 function createPrismaMock() {
   const rows = new Map<string, any>();
@@ -72,6 +81,10 @@ function makeOpenwrt(
 }
 
 describe("ap-discovery-poller (WARP-446)", () => {
+  beforeEach(() => {
+    logRouterError.mockClear();
+  });
+
   it("happy path: upserts each observed AP into ApDevice via reconcileDiscovered", async () => {
     const prisma = createPrismaMock();
     const openwrt = makeOpenwrt({
@@ -120,6 +133,28 @@ describe("ap-discovery-poller (WARP-446)", () => {
     // No throw — same belt-and-suspenders contract as device-reconcile-poller.
     await expect(poller.pollOnce()).resolves.toBeUndefined();
     expect(prisma.apDevice.upsert).not.toHaveBeenCalled();
+  });
+
+  // Cold-start log hygiene: the pollOnce catch must route an UNREACHABLE
+  // through the shared cold-start-aware helper (debug-vs-warn decision) rather
+  // than logging at a hardcoded `warn` on every boot.
+  it("routes an UNREACHABLE failure through the cold-start-aware log helper", async () => {
+    const prisma = createPrismaMock();
+    const err = RouterError.unreachable("routing down");
+    const openwrt = makeOpenwrt({
+      listDiscoveredAps: async () => {
+        throw err;
+      },
+    });
+
+    const poller = createApDiscoveryPoller(prisma as any, openwrt);
+    await poller.pollOnce();
+
+    expect(logRouterError).toHaveBeenCalledWith(
+      expect.anything(),
+      err,
+      expect.stringContaining("ap-discovery"),
+    );
   });
 
   it("startApDiscoveryPoller registers a scheduleInterval handler whose tick drives reconcileDiscovered (AC #1 wiring)", async () => {
