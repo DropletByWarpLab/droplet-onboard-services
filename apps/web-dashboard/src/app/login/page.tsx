@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { Check } from "lucide-react";
@@ -53,7 +53,7 @@ function safeNext(next: string | null): string {
   }
 }
 
-export default function LoginPage() {
+function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { login, setUserFromPasskey } = useAuth();
@@ -195,5 +195,41 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The login surface reads `?next=` / `?from=` via `useSearchParams()`. In the
+ * App Router that requires a `<Suspense>` boundary — without one, Next opts the
+ * whole route into a client-side-rendering bailout, so the page ships blank and
+ * only paints after hydration (the "blank login until N refreshes" report, and
+ * the "content only after a refresh" on client-side navigation). The boundary
+ * lets the brand shell paint immediately while the search-param-dependent form
+ * resolves on the same tick. Fallback mirrors the static chrome so there's no
+ * spinner or flash on this public page.
+ */
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
+          <AuroraPanel className="hidden lg:flex" />
+          <div className="flex items-center justify-center p-6 sm:p-10">
+            <div className="w-full max-w-[380px]">
+              <div className="lg:hidden flex items-center gap-2 mb-8">
+                <DropletMark size={24} className="text-accent" />
+                <span className="type-headline text-label-primary">Droplet</span>
+              </div>
+              <h1 className="type-title-1 text-label-primary">Welcome back</h1>
+              <p className="type-subheadline text-label-secondary mt-1.5 mb-6">
+                Sign in to your Droplet workspace.
+              </p>
+            </div>
+          </div>
+        </div>
+      }
+    >
+      <LoginPageInner />
+    </Suspense>
   );
 }

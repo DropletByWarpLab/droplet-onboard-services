@@ -94,6 +94,29 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const USER_KEY = "droplet-auth-user";
 
 /**
+ * Upper bound on the first-run init probes. The two boot fetches
+ * (`GET /api/setup/state` + `GET /api/auth/me`) are raced against this so a
+ * cold/hung backend can't pin the app on the full-screen "Loading…" spinner
+ * forever — on timeout we settle into a usable (unauthenticated) state and let
+ * AuthGate route. Chosen to be comfortably longer than a warm round-trip yet
+ * short enough that a stuck endpoint doesn't read as a hang to the user.
+ */
+const AUTH_INIT_TIMEOUT_MS = 6_000;
+
+/**
+ * An AbortSignal that fires after `ms`, with a jsdom/older-runtime fallback for
+ * environments where `AbortSignal.timeout` isn't implemented (keeps unit tests
+ * from crashing on `AbortSignal.timeout is not a function`).
+ */
+function timeoutSignal(ms: number): AbortSignal {
+  const ctor = AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal };
+  if (typeof ctor.timeout === "function") return ctor.timeout(ms);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(new DOMException("TimeoutError", "TimeoutError")), ms);
+  return ctrl.signal;
+}
+
+/**
  * Credential-aware fetch wrapper.
  *
  * All API requests include `credentials: "same-origin"` so the browser
@@ -172,9 +195,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * success it clears the error and stores the state. Returns whether the
    * probe resolved, so init() (and the retry affordance) can branch on it.
    */
-  const probeSetupState = useCallback(async (): Promise<boolean> => {
+  const probeSetupState = useCallback(
+    async (signal?: AbortSignal): Promise<boolean> => {
     try {
-      const setupRes = await fetch("/api/setup/state");
+      const setupRes = await fetch("/api/setup/state", { signal });
       if (!setupRes.ok) {
         setSetupProbeError(
           `Couldn't read appliance setup state (HTTP ${setupRes.status}).`,
@@ -195,47 +219,74 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
       return false;
     }
+    },
+    [],
+  );
+
+  // Restore the session probe (`GET /api/auth/me`) — split out of init() so
+  // the boot path can run it CONCURRENTLY with the setup-state probe and bound
+  // it with the same timeout. Both probes were previously serialized AND
+  // un-timed, so a single slow/hung first response pinned `isLoading` true and
+  // AuthGate showed the full-screen spinner for the whole app (blank login +
+  // "needs a refresh" nav). This never throws — on timeout/network-error it
+  // falls back to the cached profile for optimistic display, mirroring the
+  // original behaviour.
+  const restoreSession = useCallback(async (signal?: AbortSignal) => {
+    try {
+      // The HTTP-only cookie is sent automatically; a valid cookie returns
+      // the user. authFetch handles a 401 → silent refresh → retry once.
+      const meRes = await authFetch("/api/auth/me", { signal });
+
+      if (meRes.ok) {
+        const userData: AuthUser = await meRes.json();
+        setUser(userData);
+        // Cache user profile for fast hydration on next visit
+        localStorage.setItem(USER_KEY, JSON.stringify(userData));
+      } else {
+        // Cookie absent or expired — clear stale local cache
+        localStorage.removeItem(USER_KEY);
+      }
+    } catch {
+      // API unreachable / timed out — try local cache for optimistic display.
+      const cached = localStorage.getItem(USER_KEY);
+      if (cached) {
+        try {
+          setUser(JSON.parse(cached));
+        } catch {
+          localStorage.removeItem(USER_KEY);
+        }
+      }
+    }
   }, []);
 
   // On mount, check stored auth and setup status
   useEffect(() => {
     async function init() {
-      // PR #372 — explicit, resumable setup state. M3: the probe records its
-      // own error/retry state; it never throws, so a failed probe doesn't
-      // short-circuit the session restore below.
-      await probeSetupState();
-
+      // Race both boot probes against a shared timeout. Running them
+      // CONCURRENTLY (not serialized) halves the cold-start wait. We pass the
+      // timeout's AbortSignal so a well-behaved fetch actually cancels the
+      // hung request AND we race the combined probes against a timeout that
+      // RESOLVES — so `isLoading` flips false even if the underlying transport
+      // ignores the abort. Either way the app settles into a usable state
+      // (login / unauthenticated) instead of an infinite spinner. Each probe
+      // swallows its own abort/error, so neither branch of the race rejects.
+      const signal = timeoutSignal(AUTH_INIT_TIMEOUT_MS);
+      const probes = Promise.all([
+        probeSetupState(signal),
+        restoreSession(signal),
+      ]);
+      const timedOut = new Promise<void>((resolve) =>
+        setTimeout(resolve, AUTH_INIT_TIMEOUT_MS),
+      );
       try {
-        // Try to restore session — the HTTP-only cookie is sent automatically.
-        // We call /api/auth/me; if the cookie is valid the server returns user info.
-        const meRes = await authFetch("/api/auth/me");
-
-        if (meRes.ok) {
-          const userData: AuthUser = await meRes.json();
-          setUser(userData);
-          // Cache user profile for fast hydration on next visit
-          localStorage.setItem(USER_KEY, JSON.stringify(userData));
-        } else {
-          // Cookie absent or expired — clear stale local cache
-          localStorage.removeItem(USER_KEY);
-        }
-      } catch {
-        // API unreachable — try local cache for optimistic display
-        const cached = localStorage.getItem(USER_KEY);
-        if (cached) {
-          try {
-            setUser(JSON.parse(cached));
-          } catch {
-            localStorage.removeItem(USER_KEY);
-          }
-        }
+        await Promise.race([probes, timedOut]);
       } finally {
         setIsLoading(false);
       }
     }
 
     init();
-  }, [probeSetupState]);
+  }, [probeSetupState, restoreSession]);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await fetch("/api/auth/login", {
