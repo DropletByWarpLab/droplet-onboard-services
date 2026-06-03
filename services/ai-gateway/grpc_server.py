@@ -238,12 +238,21 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
         if not passages:
             return inference_pb2.RerankResponse(scores=[])
         try:
-            from reranker import RerankerSingleton
+            from reranker import RerankerSingleton, RerankerUnavailable
+
+            try:
+                instance = RerankerSingleton.instance()
+            except RerankerUnavailable:
+                # WARP-644: model import/load is broken (already logged once
+                # at WARNING by the singleton). Degrade gracefully: return
+                # empty scores with OK status so the orchestrator falls back
+                # to unranked retrieval instead of getting a 500.
+                return inference_pb2.RerankResponse(scores=[])
 
             pairs = [[request.query, p] for p in passages]
             loop = asyncio.get_running_loop()
             scores = await loop.run_in_executor(
-                None, RerankerSingleton.instance().compute_score, pairs
+                None, instance.compute_score, pairs
             )
             return inference_pb2.RerankResponse(scores=scores)
         except Exception as e:
