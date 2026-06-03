@@ -10,6 +10,7 @@ import {
   evaluateStorageCommand,
   confirmStorageCommand,
 } from "../services/storage-safety.service.js";
+import { config } from "../config.js";
 
 // Drive labels are device-wide config that any user (incl. family
 // accounts) shares, so PATCH is admin-only — mirrors the gate around
@@ -23,11 +24,20 @@ function isAdmin(req: Request): boolean {
 const logger = pino({ name: "storage-route" });
 
 /**
- * The device-bridge runs on the Jetson host and exposes auto-mounted
- * USB drives at /drives. The orchestrator reads through so the
- * dashboard doesn't need to know about host-side plumbing.
+ * The device-bridge runs on the host and exposes auto-mounted USB drives at
+ * /drives. The orchestrator reads through so the dashboard doesn't need to
+ * know about host-side plumbing.
+ *
+ * URL comes from the shared `config.DEVICE_BRIDGE_URL` (default
+ * `http://host.docker.internal:9090`) — the SAME value screen-qr.service.ts
+ * uses. The previous hardcoded `172.17.0.1` (docker0 gateway) default could
+ * not reach the bridge on the single-box, whose orchestrator container is on
+ * the `droplet_default` bridge network (gateway 172.18.0.1) with docker0 down.
+ * `host.docker.internal` resolves via the orchestrator's
+ * `extra_hosts: host-gateway` mapping. `BRIDGE_URL` is still honored as a
+ * legacy env alias (see config.ts).
  */
-const BRIDGE_URL = process.env.BRIDGE_URL || "http://172.17.0.1:9090";
+const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 
 // WARP-612: shared secret the device-bridge requires on mutating routes
 // (eject). Mirrors the bridge's own env precedence. Read per-request (see the

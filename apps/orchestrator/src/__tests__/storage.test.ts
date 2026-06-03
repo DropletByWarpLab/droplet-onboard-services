@@ -285,6 +285,76 @@ describe("storage routes (WARP-174)", () => {
   });
 });
 
+describe("storage routes — device-bridge URL (WARP-660)", () => {
+  // Regression lock: the bridge URL default MUST be the host.docker.internal
+  // form, NOT the docker0 gateway (172.17.0.1). On the single-box deployment
+  // shape the orchestrator container is on the `droplet_default` bridge
+  // network (gateway 172.18.0.1) and docker0 is down, so a 172.17.0.1 default
+  // can never reach the host-side device-bridge — drives silently enumerate
+  // empty. host.docker.internal resolves via the orchestrator's
+  // `extra_hosts: host-gateway` mapping (same mechanism screen-qr already
+  // uses for /openwrt/qr), so it's the proven-reachable address.
+  it("fetches drives from host.docker.internal, not the docker0 gateway", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => fixtureSnapshot,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const url = String((fetchMock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toBe("http://host.docker.internal:9090/drives");
+    // Explicitly assert the buggy docker0 default is gone.
+    expect(url).not.toContain("172.17.0.1");
+  });
+
+  // Backward-compat: storage.ts historically read the `BRIDGE_URL` env var.
+  // The value now flows through `config.DEVICE_BRIDGE_URL`, which is resolved
+  // at module-load time (like every other *_SERVICE_URL in config.ts), so we
+  // assert the alias resolution against a fresh config load with the env set
+  // rather than a per-request stub (config snapshots env at import).
+  it("honors a legacy BRIDGE_URL env var via config (alias)", async () => {
+    vi.stubEnv("DEVICE_BRIDGE_URL", "");
+    vi.stubEnv("BRIDGE_URL", "http://192.0.2.10:9090");
+    vi.resetModules();
+    const { config } = await import("../config.js");
+    expect(config.DEVICE_BRIDGE_URL).toBe("http://192.0.2.10:9090");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("prefers DEVICE_BRIDGE_URL over the legacy BRIDGE_URL when both are set", async () => {
+    vi.stubEnv("DEVICE_BRIDGE_URL", "http://198.51.100.5:9090");
+    vi.stubEnv("BRIDGE_URL", "http://192.0.2.10:9090");
+    vi.resetModules();
+    const { config } = await import("../config.js");
+    expect(config.DEVICE_BRIDGE_URL).toBe("http://198.51.100.5:9090");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("targets host.docker.internal for the rescan cache-invalidation too", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    await request(app).post("/api/storage/drives/rescan");
+    const url = String((fetchMock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toBe("http://host.docker.internal:9090/drives/changed");
+  });
+
+  it("targets host.docker.internal for the eject path too", async () => {
+    vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    await request(app).post("/api/storage/drives/UUID-MAIN-DRIVE/eject");
+    const url = String((fetchMock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toBe("http://host.docker.internal:9090/drives/UUID-MAIN-DRIVE/eject");
+    vi.unstubAllEnvs();
+  });
+});
+
 describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
   it("falls back to a neutral bus class when the bridge omits it", async () => {
     // The bridge sends the real transport (it reads lsblk on the host). When
