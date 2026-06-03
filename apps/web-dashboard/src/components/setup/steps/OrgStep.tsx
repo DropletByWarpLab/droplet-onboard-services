@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ImageUp } from "lucide-react";
 import { postOrg, OrgError } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
@@ -142,7 +142,21 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
 
   const [logoName, setLogoName] = useState<string | null>(null);
   const [logoError, setLogoError] = useState<string | null>(null);
+  // Object URL for the chosen logo's live thumbnail. Kept in a ref too so the
+  // unmount cleanup can revoke the latest value without re-subscribing.
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const logoPreviewRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Revoke the outstanding object URL on unmount so a half-finished setup never
+  // leaks one. Replacement is revoked inline in handleLogoChange.
+  useEffect(() => {
+    return () => {
+      if (logoPreviewRef.current) {
+        URL.revokeObjectURL(logoPreviewRef.current);
+      }
+    };
+  }, []);
 
   const [slugError, setSlugError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -153,6 +167,17 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
   // input) — only trim + lowercase, same as the service.
   const normalizedSlug = useMemo(() => slug.trim().toLowerCase(), [slug]);
 
+  // Drop the current preview (revoke its object URL) and clear both the ref and
+  // the state. Used before showing a new preview and on every invalid select so
+  // a stale thumbnail never lingers behind an error.
+  const clearLogoPreview = useCallback(() => {
+    if (logoPreviewRef.current) {
+      URL.revokeObjectURL(logoPreviewRef.current);
+      logoPreviewRef.current = null;
+    }
+    setLogoPreview(null);
+  }, []);
+
   const handleLogoChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -160,17 +185,24 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
       if (!ACCEPTED_LOGO_TYPES.includes(file.type)) {
         setLogoError("That file type isn't supported. Use a PNG, JPG, SVG, or WebP.");
         setLogoName(null);
+        clearLogoPreview();
         return;
       }
       if (file.size > MAX_LOGO_BYTES) {
         setLogoError("That image is too large. Keep the logo under 5 MB.");
         setLogoName(null);
+        clearLogoPreview();
         return;
       }
       setLogoError(null);
       setLogoName(file.name);
+      // Swap in a fresh thumbnail, revoking the previous URL first.
+      clearLogoPreview();
+      const nextPreview = URL.createObjectURL(file);
+      logoPreviewRef.current = nextPreview;
+      setLogoPreview(nextPreview);
     },
-    [],
+    [clearLogoPreview],
   );
 
   const handleContinue = useCallback(async () => {
@@ -231,11 +263,30 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            aria-label="Upload workspace logo"
-            className="flex h-[68px] w-[68px] flex-col items-center justify-center gap-1 rounded-2xl border-2 border-dashed border-accent/40 bg-accent-subtle text-accent transition-colors duration-200 ease-smooth hover:bg-accent-subtle/70"
+            aria-label={
+              logoPreview && !logoError
+                ? "Change workspace logo"
+                : "Upload workspace logo"
+            }
+            className={[
+              "flex h-[68px] w-[68px] items-center justify-center overflow-hidden rounded-2xl transition duration-200 ease-smooth",
+              logoPreview && !logoError
+                ? "border border-separator hover:opacity-90"
+                : "flex-col gap-1 border-2 border-dashed border-accent/40 bg-accent-subtle text-accent hover:bg-accent-subtle/70",
+            ].join(" ")}
           >
-            <ImageUp size={18} />
-            <span className="type-caption-2 font-semibold">Logo</span>
+            {logoPreview && !logoError ? (
+              <img
+                src={logoPreview}
+                alt="Workspace logo preview"
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <>
+                <ImageUp size={18} />
+                <span className="type-caption-2 font-semibold">Logo</span>
+              </>
+            )}
           </button>
           <input
             ref={fileInputRef}
