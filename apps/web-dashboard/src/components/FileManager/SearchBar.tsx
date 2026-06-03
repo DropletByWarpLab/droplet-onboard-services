@@ -10,6 +10,7 @@ import {
   type SearchReadinessStatus,
 } from "@/lib/api";
 import { Thumbnail } from "./Thumbnail";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
 interface SearchBarProps {
@@ -90,7 +91,7 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
         if (!cancelled) setSemanticItems(results);
       } catch (err) {
         if (!cancelled) {
-          setSemanticError(err instanceof Error ? err.message : "Search failed");
+          setSemanticError(translateError(err, "files"));
           setSemanticItems([]);
         }
       } finally {

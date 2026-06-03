@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from typing import Optional
 
 import grpc
 
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 # nonce minted just after MFA can still be redeemed when the request
 # reaches the sidecar.
 RESEAL_NONCE_TTL_SEC = 60
+
+# IDX-08 — hard cap on the nonce table. Nonces were only swept inside
+# _consume_nonce, so nonces that are issued but never redeemed (a Reseal that
+# never arrives) accumulated forever. Sweeping on issue + a size cap keeps the
+# table bounded. The cap is generous relative to the 60s TTL — under any sane
+# issue rate it's never reached; it's a backstop, not a tuning knob.
+_MAX_RESEAL_NONCES = 1024
 
 
 class DeviceIdentityServicer(pb_grpc.DeviceIdentityServiceServicer):
@@ -36,17 +44,29 @@ class DeviceIdentityServicer(pb_grpc.DeviceIdentityServiceServicer):
         """Called out-of-band by the orchestrator after MFA re-auth.
         Returns a nonce the orchestrator passes to Reseal()."""
         nonce = secrets.token_urlsafe(32)
+        # Sweep on issue too (not just on consume) so unredeemed nonces don't
+        # accumulate, and bound the table as a backstop (IDX-08).
+        self._sweep_expired_nonces()
         self._reseal_nonces[nonce] = time.time() + RESEAL_NONCE_TTL_SEC
+        if len(self._reseal_nonces) > _MAX_RESEAL_NONCES:
+            # dict is insertion-ordered → drop the oldest. Never drops the
+            # nonce we just minted (it's newest).
+            oldest = next(iter(self._reseal_nonces))
+            del self._reseal_nonces[oldest]
         return nonce
+
+    def _sweep_expired_nonces(self, now: Optional[float] = None) -> None:
+        """Drop every nonce whose TTL has elapsed."""
+        now = time.time() if now is None else now
+        for k, exp in list(self._reseal_nonces.items()):
+            if exp < now:
+                del self._reseal_nonces[k]
 
     def _consume_nonce(self, nonce: str) -> bool:
         if not nonce:
             return False
         now = time.time()
-        # Expire stale nonces opportunistically
-        for k, exp in list(self._reseal_nonces.items()):
-            if exp < now:
-                del self._reseal_nonces[k]
+        self._sweep_expired_nonces(now)
         exp = self._reseal_nonces.pop(nonce, None)
         return exp is not None and exp >= now
 

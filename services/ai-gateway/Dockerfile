@@ -38,5 +38,14 @@ COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
 RUN python -c "from query_classifier import QueryClassifierSingleton; QueryClassifierSingleton.instance()" \
     || (echo "WARP-437: query_classifier prewarm FAILED — first runtime call will pay the model-download cost" >&2; true)
 
+# WARP-644: pre-warm + availability self-check for BGE-reranker-base. Uses
+# RerankerSingleton.available(), which fails closed (logs once at WARNING and
+# returns False) if the optimum/onnxruntime import or model load is broken,
+# so a regression surfaces in the build log instead of as silent empty-score
+# Rerank responses at runtime. Soft-fail like the classifier prewarm above —
+# the runtime handler already degrades gracefully.
+RUN python -c "from reranker import RerankerSingleton; raise SystemExit(0 if RerankerSingleton.available() else 1)" \
+    || (echo "WARP-644: reranker prewarm/self-check FAILED — Rerank will return empty scores until the optimum/onnxruntime import is repaired" >&2; true)
+
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

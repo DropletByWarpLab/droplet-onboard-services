@@ -8,6 +8,7 @@ import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useToast } from "@/components/Toast";
 import { getDownloadUrl, toggleFavorite } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
 export default function FavoritesPage() {
@@ -45,7 +46,7 @@ export default function FavoritesPage() {
       await toggleFavorite(file.path, false);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to unfavorite");
+      toast(translateError(err, "files"));
     }
   };
 

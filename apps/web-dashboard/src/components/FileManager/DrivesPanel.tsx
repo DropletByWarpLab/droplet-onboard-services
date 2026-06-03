@@ -6,6 +6,7 @@ import { useDrives } from "@/lib/hooks/useDrives";
 import { ejectDrive, rescanDrives } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 import type { DriveInfo } from "@/lib/types";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
@@ -92,7 +93,7 @@ export function DrivesPanel() {
       // toasting success — the next poll picks up new/removed drives.
       toast("Rescanning drives — the list refreshes shortly", "success");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't rescan drives", "error");
+      toast(translateError(err, "files"), "error");
     } finally {
       setRescanning(false);
     }
@@ -108,7 +109,7 @@ export function DrivesPanel() {
       toast(`${driveName(d)} ejected — safe to unplug`, "success");
       refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't eject the drive", "error");
+      toast(translateError(err, "files"), "error");
       throw err;
     } finally {
       setEjecting(null);

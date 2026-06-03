@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ShieldCheck, Copy, Check, KeyRound } from "lucide-react";
 import { enrollTotp, verifyTotp } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 import { StepShell } from "@/components/setup/StepShell";
 
 /**
@@ -59,7 +60,7 @@ export function TwoFactorStep({
       setQrDataUrl(res.qrDataUrl);
       setPhase("enroll");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start two-factor setup");
+      setError(translateError(err, "auth"));
     } finally {
       setIsBusy(false);
     }
@@ -77,7 +78,17 @@ export function TwoFactorStep({
       setRecoveryCodes(res.recoveryCodes ?? []);
       setPhase("codes");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "That code didn't match. Try again.");
+      // WARP-646: never surface the raw error. A typed orchestrator code
+      // (TOTP_INVALID / RECOVERY_INVALID / …) gets precise copy via the
+      // translator; everything else falls back to the dominant verify
+      // failure — a wrong or expired code — rather than the auth domain's
+      // username/password fallback, which would be misleading here.
+      const e = err as { code?: unknown };
+      setError(
+        typeof e?.code === "string"
+          ? translateError(err, "auth")
+          : "That code didn't match. Check your authenticator app and try again.",
+      );
     } finally {
       setIsBusy(false);
     }

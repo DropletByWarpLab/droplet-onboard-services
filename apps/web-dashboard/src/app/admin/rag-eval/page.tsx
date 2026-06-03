@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Layers, ShieldOff, AlertTriangle, RefreshCw } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
+import { translateError } from "@/lib/friendly-errors";
 
 const POLL_MS = 10_000;
 
@@ -107,7 +108,7 @@ export default function RagEvalPage() {
       setLoading(false);
     } catch (err) {
       if (cancelledRef.current) return;
-      setError(err instanceof Error ? err.message : "Failed to load runs");
+      setError(translateError(err, "knowledge"));
       setLoading(false);
     }
   }, []);

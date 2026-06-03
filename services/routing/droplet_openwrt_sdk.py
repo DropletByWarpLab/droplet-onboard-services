@@ -12,8 +12,9 @@ Usage:
     # Get network status
     status = router.network.interface_status("lan")
 
-    # Change WiFi SSID
-    router.wireless.set_ssid("radio0", "default_radio0", "My-New-SSID")
+    # Change WiFi SSID (radio / iface-section names are deployment-specific;
+    # the shipped Pi-5 router uses radio3 / default_radio3 — see schemas.py)
+    router.wireless.set_ssid("radio3", "default_radio3", "My-New-SSID")
     router.apply_changes("wireless")
 
     # Block a device
@@ -26,6 +27,7 @@ Usage:
 """
 
 import json
+import os
 import time
 import logging
 from contextlib import contextmanager
@@ -34,6 +36,20 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 logger = logging.getLogger("droplet.openwrt")
+
+
+# ---------------------------------------------------------------------------
+# Wireless scan/info device default is deployment-shape-specific.
+#
+# `wlan0` is the wrong NIC name on every current shape (the Pi-5 router's
+# MT7922 enumerates via its `radio3` sections; a single-box's radio is
+# `wlp14s0`/similar). Resolve from `DROPLET_WIFI_SCAN_DEVICE` so the shipped
+# compose can name the real interface; the literal is only a last-resort
+# fallback when the env is unset (NET-02). A future follow-up can derive the
+# active device from `wireless.status()` / `iwinfo` and drop the literal.
+# ---------------------------------------------------------------------------
+def _default_wifi_scan_device() -> str:
+    return os.environ.get("DROPLET_WIFI_SCAN_DEVICE", "wlan0")
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +485,23 @@ class WirelessApi:
         self._r = router
 
     def status(self) -> dict:
-        """Get status of all wireless radios and interfaces."""
-        return self._r._call("network.wireless", "status")
+        """Get status of all wireless radios and interfaces.
+
+        Returns an empty dict when this box has no ``network.wireless`` ubus
+        object at all (the single-box shape: the containerised OpenWrt exposes
+        only ``network.interface.lan`` + ``loopback``). A whole missing object
+        surfaces as ``UbusError(-1, "Object not found")``; degrading it to ``{}``
+        instead of 500-ing mirrors how ``get_network_summary`` already treats the
+        same wireless section (ADR-011, shape-agnostic — a missing optional
+        surface is data, not a crash). Genuine faults (PERMISSION_DENIED,
+        transport ``ConnectionLost``, unrelated ubus errors) still propagate.
+        """
+        try:
+            return self._r._call("network.wireless", "status")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return {}
+            raise
 
     def up(self) -> dict:
         """Enable all wireless interfaces."""
@@ -480,12 +511,31 @@ class WirelessApi:
         """Disable all wireless interfaces."""
         return self._r._call("network.wireless", "down")
 
-    def scan(self, device: str = "wlan0") -> list[dict]:
-        """Scan for nearby WiFi networks."""
-        result = self._r._call("iwinfo", "scan", {"device": device})
+    def scan(self, device: Optional[str] = None) -> list[dict]:
+        """Scan for nearby WiFi networks.
+
+        Returns an empty list when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default ``wlan0`` on a box whose
+        radio is named differently): a radio that isn't there can't scan and
+        shouldn't 500 the page (ADR-011, shape-agnostic). Mirrors
+        :meth:`connected_clients`.
+
+        ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
+        other code propagate, so a real fault is never masked as "no networks".
+
+        ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
+        ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
+        """
+        device = device or _default_wifi_scan_device()
+        try:
+            result = self._r._call("iwinfo", "scan", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
         return result.get("results", [])
 
-    def connected_clients(self, device: str = "wlan0") -> list[dict]:
+    def connected_clients(self, device: Optional[str] = None) -> list[dict]:
         """Get list of connected wireless clients for `device`.
 
         Returns an empty list when `device` isn't present on this box (ubus
@@ -495,10 +545,12 @@ class WirelessApi:
 
         ``INVALID_ARGUMENT`` is deliberately NOT swallowed — it signals a
         malformed `device` argument (a caller bug), so converting it to "zero
-        clients" would silently mask the error. It propagates instead. (The real
-        fix for this deployment is to derive the radio name rather than default
-        to `wlan0` — acknowledged follow-up.)
+        clients" would silently mask the error. It propagates instead.
+
+        ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
+        ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
         """
+        device = device or _default_wifi_scan_device()
         try:
             result = self._r._call("iwinfo", "assoclist", {"device": device})
         except UbusError as exc:
@@ -507,9 +559,28 @@ class WirelessApi:
             raise
         return result.get("results", [])
 
-    def radio_info(self, device: str = "wlan0") -> dict:
-        """Get radio information (frequency, txpower, channel, etc.)."""
-        return self._r._call("iwinfo", "info", {"device": device})
+    def radio_info(self, device: Optional[str] = None) -> dict:
+        """Get radio information (frequency, txpower, channel, etc.).
+
+        Returns an empty dict when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default ``wlan0`` on a box whose
+        radio is named differently): an absent radio has no info and shouldn't
+        500 the page (ADR-011, shape-agnostic). Mirrors :meth:`connected_clients`.
+
+        ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
+        other code propagate, so a real fault is never masked as "no radio".
+
+        ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
+        ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
+        """
+        device = device or _default_wifi_scan_device()
+        try:
+            result = self._r._call("iwinfo", "info", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return {}
+            raise
+        return result
 
     def set_ssid(self, radio: str, iface_section: str, ssid: str):
         """Change the SSID of a wireless interface."""

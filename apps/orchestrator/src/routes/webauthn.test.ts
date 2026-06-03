@@ -95,6 +95,8 @@ interface UserRow {
   displayName: string;
   email: string | null;
   role: string;
+  /** ORCH-02: SCIM soft-disable. Absent = ACTIVE (matches schema default). */
+  directoryStatus?: string;
 }
 
 function createPrismaMock(opts: { users?: UserRow[]; credentials?: CredentialRow[] } = {}) {
@@ -397,6 +399,56 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(res.status).toBe(401);
     expect(verifyAuthenticationResponse).not.toHaveBeenCalled();
     expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("verify: directory-DEACTIVATED user is rejected (401), no session, even with a valid passkey (ORCH-02)", async () => {
+    // Offboarded user: SCIM set active:false → directoryStatus DEACTIVATED, a
+    // SOFT disable that retains the row AND the registered passkey. The
+    // assertion verifies cleanly, but the deactivation gate must still deny —
+    // parity with /auth/login and SSO, closing the third-login-path hole.
+    const deactivated: UserRow = { ...stefan, directoryStatus: "DEACTIVATED" };
+    const { prisma, credentials } = createPrismaMock({
+      users: [deactivated],
+      credentials: [{ ...credential }],
+    });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: "mock-challenge-aaaaaaaaaaaaaaaaaaaaaa",
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({
+      verified: true,
+      authenticationInfo: { newCounter: 6 },
+    });
+
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("Invalid credentials");
+    // No session minted…
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    // …a warn-level denial IS recorded (audit parity with the password
+    // path's denyInvalid — a deactivated user probing via passkey must leave
+    // the same trail), but never a success activity.
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        refs: expect.objectContaining({
+          outcome: "invalid_credentials",
+          method: "webauthn",
+        }),
+      }),
+    );
+    // Counter is NOT advanced — the credential update is deferred until after
+    // the deactivation gate, so a blocked attempt leaves state untouched
+    // (parity with the clone-rejection path). Starts and stays at 5.
+    expect(credentials[0]!.counter).toBe(5);
   });
 
   it("verify: counter regression (clone) → 401 and the stored counter is NOT advanced", async () => {

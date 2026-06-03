@@ -411,6 +411,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     exchangeCodeAndValidate.mockResolvedValue({
       sub: "google-sub-1",
       email: "stefan@warp.test",
+      emailVerified: true,
       name: "Stefan Cruceru",
     });
     const prisma = createPrismaMock([stefan]);
@@ -438,6 +439,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     exchangeCodeAndValidate.mockResolvedValue({
       sub: "google-sub-new",
       email: "newhire@warp.test",
+      emailVerified: true,
       name: "New Hire",
     });
     const prisma = createPrismaMock([stefan]); // stefan exists, different email
@@ -485,6 +487,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     exchangeCodeAndValidate.mockResolvedValue({
       sub: "okta-sub-42",
       email: "stefan@warp.test",
+      emailVerified: true,
       name: "Stefan Cruceru",
     });
     const prisma = createPrismaMock([stefan]);
@@ -498,6 +501,77 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
     expect(linkData.provider).toBe("okta");
     expect(linkData.subject).toBe("okta-sub-42");
     expect(linkData.userId).toBe("u-uuid-stefan-7777");
+    const session = sessionFromRes(res);
+    expect(session?.sub).toBe("u-uuid-stefan-7777");
+  });
+
+  it("ORCH-01: REFUSES to link an UNVERIFIED email to an existing account (401, no link, no session)", async () => {
+    // Attack: register at the federated IdP with the owner's email and an
+    // UNVERIFIED profile (email_verified:false). Without the gate the
+    // callback would mint an SsoIdentity binding the attacker's sub to the
+    // existing owner row and issue owner cookies — full takeover. The gate
+    // must refuse: no link, no session.
+    primeValidState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "attacker-sub-1",
+      email: "stefan@warp.test", // the existing owner's email
+      emailVerified: false,
+      name: "Definitely Stefan",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_EMAIL_UNVERIFIED");
+    // Critically: the attacker's sub was NOT linked to the owner row.
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+    // And no account was minted from the unverified email either.
+    expect(prisma.user.create).not.toHaveBeenCalled();
+    expectNoSessionIssued(res);
+  });
+
+  it("ORCH-01: REFUSES to CREATE an account from an UNVERIFIED email (401, no create)", async () => {
+    primeValidState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "stranger-sub",
+      email: "stranger@warp.test", // no local user with this email
+      emailVerified: false,
+      name: "Stranger",
+    });
+    const prisma = createPrismaMock([stefan]);
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SSO_EMAIL_UNVERIFIED");
+    expect(prisma.user.create).not.toHaveBeenCalled();
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled();
+    expectNoSessionIssued(res);
+  });
+
+  it("ORCH-01: an ALREADY-LINKED (provider, sub) signs in even without email_verified (gate is link/create-only)", async () => {
+    // Branch 1 keys on the vetted sub, not email, so a missing/false
+    // email_verified must NOT regress an existing user's sign-in.
+    primeValidState();
+    exchangeCodeAndValidate.mockResolvedValue({
+      sub: "google-sub-1",
+      email: "stefan@warp.test",
+      emailVerified: false,
+      name: "Stefan",
+    });
+    const prisma = createPrismaMock(
+      [stefan],
+      [{ id: "i-1", userId: "u-uuid-stefan-7777", provider: "google", subject: "google-sub-1", email: "stefan@warp.test" }],
+    );
+    const res = await request(buildApp(prisma))
+      .get("/api/sso/oidc/callback?code=abc&state=st-123")
+      .set("Cookie", "droplet_sso_state=st-123");
+
+    expect(res.status).toBe(302);
+    expect(prisma.ssoIdentity.create).not.toHaveBeenCalled(); // already linked
     const session = sessionFromRes(res);
     expect(session?.sub).toBe("u-uuid-stefan-7777");
   });
@@ -524,7 +598,9 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
 
   it("DENIES a DEACTIVATED user resolved by email (401, no session, no link minted)", async () => {
     primeValidState();
-    exchangeCodeAndValidate.mockResolvedValue({ sub: "fresh-sub", email: "stefan@warp.test", name: "S" });
+    // emailVerified:true so this exercises the DEACTIVATION gate specifically
+    // (not the ORCH-01 unverified-email refusal, which is tested separately).
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "fresh-sub", email: "stefan@warp.test", emailVerified: true, name: "S" });
     const deactivated: UserRow = { ...stefan, directoryStatus: "DEACTIVATED" };
     const prisma = createPrismaMock([deactivated]);
     const res = await request(buildApp(prisma))
@@ -539,7 +615,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
 
   it("normalizes the IdP email (trim + lowercase) at the lookup boundary (#374)", async () => {
     primeValidState();
-    exchangeCodeAndValidate.mockResolvedValue({ sub: "g-sub-x", email: "  Stefan@Warp.TEST  ", name: "S" });
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "g-sub-x", email: "  Stefan@Warp.TEST  ", emailVerified: true, name: "S" });
     const prisma = createPrismaMock([stefan]);
     const res = await request(buildApp(prisma))
       .get("/api/sso/oidc/callback?code=abc&state=st-123")
@@ -582,7 +658,7 @@ describe("GET /api/sso/oidc/callback — account linking", () => {
 
   it("does not leak tokens/codes in the response body", async () => {
     primeValidState();
-    exchangeCodeAndValidate.mockResolvedValue({ sub: "google-sub-1", email: "stefan@warp.test", name: "S" });
+    exchangeCodeAndValidate.mockResolvedValue({ sub: "google-sub-1", email: "stefan@warp.test", emailVerified: true, name: "S" });
     const prisma = createPrismaMock([stefan]);
     const res = await request(buildApp(prisma))
       .get("/api/sso/oidc/callback?code=super-secret-code&state=st-123")

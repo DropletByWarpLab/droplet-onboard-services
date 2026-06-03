@@ -1345,6 +1345,15 @@ export function createProtectedAuthRouter(
         update: { secretEnc, confirmedAt: null },
       });
 
+      // Clear any recovery codes from a PRIOR confirmed-then-disabled TOTP
+      // credential. The invariant is "recovery codes exist iff a confirmed
+      // TOTP credential exists" — starting a fresh (re-)enrollment resets
+      // the factor to unconfirmed, so any leftover codes must not survive
+      // into the new enrollment window. verify() re-mints a fresh set on
+      // first confirmation (see :1414), so this never strands a usable
+      // factor. (ORCH-07)
+      await prisma.recoveryCode.deleteMany({ where: { userId } });
+
       const qrDataUrl = await QRCode.toDataURL(otpauthUri, {
         errorCorrectionLevel: "M",
         margin: 1,

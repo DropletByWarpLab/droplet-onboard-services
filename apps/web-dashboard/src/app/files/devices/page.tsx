@@ -9,6 +9,7 @@ import { ClientDetailPanel } from "@/components/ClientDetailPanel";
 import { PairDialog } from "@/components/PairDialog";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 import type { DeviceClientInfo } from "@/lib/types";
 
 export default function SyncDevicesPage() {
@@ -34,7 +35,7 @@ export default function SyncDevicesPage() {
       await refresh();
       setSelectedClient(null);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Revoke failed");
+      toast(translateError(err, "files"));
       throw err;
     }
   }

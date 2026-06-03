@@ -114,6 +114,11 @@ removes them.
 | `DISPLAY_TIMEZONE` | `America/Los_Angeles` | Timezone for the wall-clock pushed to the PyPortal |
 | `SERVICE_SECRET` | _(empty)_ | Bearer token required on all non-`/health` routes |
 | `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Token the container sends to `device-bridge` when calling `POST /openwrt/wifi/rotate` |
+| `DROPLET_AP_MODE` | `uci` | Pairing-QR creds source: `uci` (multi-box, read SSID/PSK over SSH), `hostapd` (single-box, read from env / `/etc/hostapd.conf`), or `auto` |
+| `DROPLET_AP_SSID` | _(empty)_ | hostapd-mode AP SSID. When set, used directly (and forces `auto` to hostapd) |
+| `DROPLET_AP_PSK` | _(empty)_ | hostapd-mode AP passphrase (paired with `DROPLET_AP_SSID`) |
+| `DROPLET_AP_CONTAINER` | `droplet-openwrt` | Container the hostapd.conf fallback reads via `docker exec` |
+| `DROPLET_AP_HOSTAPD_CONF` | `/etc/hostapd.conf` | hostapd.conf path inside that container |
 | `BOOT_READINESS_URL` | `http://127.0.0.1/api/health` | Health endpoint polled to leave the boot screen (loopback orchestrator behind the gateway) |
 | `BOOT_MAX_SECONDS` | `90` | Timeout fallback — surface the live UI even if readiness never reports healthy |
 | `SIM_OUTPUT` | `/tmp/tft_preview.png` | Simulated output path (also used as preview cache for PyPortal) |
@@ -130,6 +135,37 @@ The password is **static by default**. Rotating it would kick every
 joined station and break "auto-connect when I get home" on phones, so
 the default production posture is: set a memorable key once, let guests
 rejoin from saved credentials, done.
+
+### Deployment shapes: where the QR creds come from (`DROPLET_AP_MODE`)
+
+The two shipping deployment shapes broadcast the pairing AP differently,
+so the bridge sources the QR creds differently per `DROPLET_AP_MODE`:
+
+| Mode | Shape | Source |
+|------|-------|--------|
+| `uci` (default) | multi-box | OpenWrt router's UCI `wireless.*` over SSH (`OPENWRT_*`) |
+| `hostapd` | single-box | `DROPLET_AP_SSID` / `DROPLET_AP_PSK` from the bridge env; falls back to parsing `/etc/hostapd.conf` inside the `droplet-openwrt` container |
+| `auto` | either | hostapd when `DROPLET_AP_SSID` is set or UCI wireless is empty/unreachable; otherwise uci |
+
+The single-box shape runs a **raw hostapd AP on the host** (via the
+`droplet-openwrt-attach` script), not OpenWrt/UCI — so `uci show wireless`
+is empty there and the multi-box lookup returns "no active AP", leaving
+the pairing QR blank. Set `DROPLET_AP_MODE=hostapd` in
+`/etc/droplet/device-bridge.env` on a single-box install so `GET
+/openwrt/qr` builds the QR from the hostapd creds instead (WARP-654):
+
+```bash
+# /etc/droplet/device-bridge.env (single-box)
+DROPLET_AP_MODE=hostapd
+DROPLET_AP_SSID=Droplet          # or omit to read /etc/hostapd.conf
+DROPLET_AP_PSK=Droplet123!
+```
+
+**Rotation is always disabled in hostapd mode** (there's no UCI to push a
+new PSK to). `GET /openwrt/qr` returns `rotation_enabled: false` and
+`POST /openwrt/wifi/rotate` returns `rotation_disabled` as before, so the
+PyPortal hides the Rotate pill + TTL chip. The dict shape is otherwise
+identical to the multi-box path, so the PyPortal client is shape-agnostic.
 
 To change the password, SSH to the router and:
 ```bash

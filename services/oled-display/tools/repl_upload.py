@@ -103,6 +103,17 @@ def push_file(ser, src: str, dest: str, chunk: int = 256) -> None:
         ser,
         b"import storage\nstorage.remount('/', readonly=False, disable_concurrent_write_protection=True)",
     )
+    # Ensure the destination's parent dirs exist (CircuitPython os has mkdir
+    # but no makedirs), so a nested DEST like "lib/fonts/X.bdf" works on a
+    # board that doesn't have that tree yet. mkdir on an existing dir raises
+    # OSError(EEXIST), which we swallow per-component.
+    parent = dest.rsplit("/", 1)[0] if "/" in dest else ""
+    if parent:
+        parts = [p for p in parent.split("/") if p]
+        acc = ""
+        for p in parts:
+            acc = (acc + "/" + p) if acc else p
+            exec_raw(ser, b"import os\ntry:\n os.mkdir(%r)\nexcept OSError:\n pass" % acc)
     exec_raw(ser, b"f=open(%r,'wb')" % dest)
     for i in range(0, len(data), chunk):
         exec_raw(ser, b"f.write(%r)" % data[i : i + chunk])

@@ -550,7 +550,7 @@ function KpiStrip({
           icon: Users,
           label: "People",
           value: "—",
-          hint: "Multi-user support coming soon",
+          hint: "Multi-user access coming soon",
         },
         {
           icon: Activity,
@@ -807,9 +807,8 @@ function RecentActivityCard() {
         </Link>
       </div>
       <p className="type-footnote text-label-tertiary italic">
-        Activity feed coming soon, once the orchestrator audit-log
-        endpoint goes live. For now you can view AI tool calls in the
-        Activity page.
+        Your activity history will appear here soon. For now you can view
+        AI tool calls in the Activity page.
       </p>
     </section>
   );
@@ -915,7 +914,7 @@ function PlanTileCard() {
         </Link>
       </div>
       <p className="type-footnote text-label-tertiary italic">
-        Lease detail, storage upgrade, and payment management coming soon.
+        Plan details, storage upgrades, and payment management are coming soon.
       </p>
     </section>
   );
@@ -995,7 +994,7 @@ function SecurityPostureCard() {
           icon={UserPlus}
           label="Invite key rotation"
           state="neutral"
-          detail="Manual, automation coming soon"
+          detail="Rotated manually — automated rotation coming soon"
         />
       </ul>
     </section>

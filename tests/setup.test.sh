@@ -140,6 +140,103 @@ else
 fi
 
 # =============================================================================
+# Phase 3: single-box .env knobs — configure_single_box_env (WARP-654 follow-up)
+# =============================================================================
+echo "--- Phase 3: configure_single_box_env (single-box knobs) ---"
+
+# lib/single-box.sh is a sourceable lib (functions only; no top-level run).
+# logging.sh is already sourced above, and REPO_ROOT + a generated .env exist
+# from Phase 2 — so configure_single_box_env has everything it needs.
+# shellcheck source=../scripts/lib/single-box.sh
+source "$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+
+if configure_single_box_env >/dev/null 2>&1; then
+  pass "configure_single_box_env completed without error"
+else
+  fail "configure_single_box_env exited with an error"
+fi
+
+# The single-box shape runs the AP as a host hostapd (not a Pi-5 UCI router),
+# so the device-bridge must read pairing-QR creds in hostapd mode. The install
+# records that as a .env knob; install-device-bridge.sh mirrors it into
+# /etc/droplet/device-bridge.env, where device-bridge.py reads it (it defaults
+# to uci otherwise — multi-box). WARP-654 / PR #471 follow-up.
+AP_MODE_COUNT=$(grep -cE '^DROPLET_AP_MODE=hostapd$' "$TMP_ROOT/.env" || true)
+if [ "$AP_MODE_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets DROPLET_AP_MODE=hostapd (single occurrence)"
+else
+  fail "expected exactly one 'DROPLET_AP_MODE=hostapd' in .env, found ${AP_MODE_COUNT}"
+fi
+
+# Sanity: the knob block ran (COMPOSE_PROFILES merged to include single-box).
+if grep -E '^COMPOSE_PROFILES=' "$TMP_ROOT/.env" | tail -1 | grep -q 'single-box'; then
+  pass "COMPOSE_PROFILES includes single-box"
+else
+  fail "COMPOSE_PROFILES does not include single-box after configure_single_box_env"
+fi
+
+# Idempotent — a second call must not duplicate the AP-mode knob.
+configure_single_box_env >/dev/null 2>&1 || true
+AP_MODE_COUNT2=$(grep -cE '^DROPLET_AP_MODE=hostapd$' "$TMP_ROOT/.env" || true)
+if [ "$AP_MODE_COUNT2" = "1" ]; then
+  pass "configure_single_box_env is idempotent for DROPLET_AP_MODE (no duplicate)"
+else
+  fail "DROPLET_AP_MODE duplicated/changed on second call (found ${AP_MODE_COUNT2})"
+fi
+
+# =============================================================================
+# Phase 4: install-device-bridge.sh provisions host pairing-QR deps (WARP-654)
+# =============================================================================
+echo "--- Phase 4: install-device-bridge.sh host deps + AP mode ---"
+
+BRIDGE_INSTALL="$REPO_ROOT_REAL/scripts/install-device-bridge.sh"
+
+# Privileged linear script — not executed in unit tests, but its syntax must
+# be valid and its provisioning intent must be present (Phase-1-style static
+# assertions; behavioural coverage of the env write lives in Phase 3 above).
+if bash -n "$BRIDGE_INSTALL" 2>/dev/null; then
+  pass "install-device-bridge.sh passes bash -n syntax check"
+else
+  fail "install-device-bridge.sh has a bash syntax error"
+fi
+
+# (1) The host /usr/bin/python3 that runs droplet-device-bridge.service must be
+# able to import qrcode for the pairing-QR render (device-bridge.py imports it
+# lazily in the /openwrt/qr path). The installer must provision python3-qrcode.
+if grep -q 'python3-qrcode' "$BRIDGE_INSTALL"; then
+  pass "install-device-bridge.sh provisions python3-qrcode for the host bridge"
+else
+  fail "install-device-bridge.sh does not provision python3-qrcode (GET /openwrt/qr -> 'No module named qrcode')"
+fi
+
+# (2) It must verify qrcode is importable by the bridge's python so a fresh box
+# surfaces a clear failure instead of a silently broken QR endpoint.
+if grep -qE 'import qrcode' "$BRIDGE_INSTALL"; then
+  pass "install-device-bridge.sh verifies qrcode is importable"
+else
+  fail "install-device-bridge.sh does not verify qrcode importability"
+fi
+
+# (3) Single-box uses hostapd, not a UCI router. The installer must mirror
+# DROPLET_AP_MODE from the repo .env into the bridge env via set_env_if_blank
+# (never clobbering an operator override). Multi-box leaves it unset, so the
+# bridge keeps its uci default.
+if grep -qE 'set_env_if_blank "DROPLET_AP_MODE"' "$BRIDGE_INSTALL"; then
+  pass "install-device-bridge.sh mirrors DROPLET_AP_MODE into the bridge env"
+else
+  fail "install-device-bridge.sh does not mirror DROPLET_AP_MODE from .env"
+fi
+
+# (4) The old 'no host pip deps to gate on' claim is untrue now that the
+# pairing-QR render is a shipping feature with a host dep; the comment must not
+# assert there are zero host deps (guard rule 12 — no untruthful docstrings).
+if grep -q 'no host pip deps to gate on' "$BRIDGE_INSTALL"; then
+  fail "install-device-bridge.sh still claims 'no host pip deps to gate on' (stale after WARP-654 QR feature)"
+else
+  pass "install-device-bridge.sh comment no longer claims zero host pip deps"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""

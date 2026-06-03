@@ -5,6 +5,7 @@ import { Plus } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { useConversationList } from "@/lib/hooks/useConversationList";
+import { translateError } from "@/lib/friendly-errors";
 import type { ConversationSummary } from "@/lib/api";
 import { ChatHistoryRow } from "./ChatHistoryRow";
 
@@ -85,7 +86,7 @@ export function ChatHistoryPanel({
         onNewChat();
       }
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed");
+      toast(translateError(err, "chat"));
     }
   };
 
@@ -93,7 +94,7 @@ export function ChatHistoryPanel({
     try {
       await rename(id, title);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Rename failed");
+      toast(translateError(err, "chat"));
     }
   };
 

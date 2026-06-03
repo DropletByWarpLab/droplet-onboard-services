@@ -158,3 +158,28 @@ class TestParseMessage:
         parsed = parse_message(raw)
         assert parsed is not None
         assert parsed["ccAddrs"] == ["dup@x.com", "ops@y.com"]
+
+
+class TestMalformedDateTolerance:
+    """IDX-07 — a malformed `Date:` header must not raise (which would abort
+    the whole IDLE batch). It is treated as "no timestamp" → parse_message
+    returns None, same as a missing Date, and the caller skips just that UID."""
+
+    @pytest.mark.parametrize(
+        "bad_date",
+        [
+            "garbage",
+            "not a date at all",
+            "Mon, 32 Foo 2026 99:99:99 +9999",  # parseable-shaped but out of range
+            "Tue, 29 Feb 2026 10:00:00 +0000",  # day out of range for month
+        ],
+    )
+    def test_malformed_date_returns_none_not_raises(self, bad_date):
+        raw = _make_raw(date=bad_date)
+        # The pre-fix code let parsedate_to_datetime raise here.
+        assert parse_message(raw) is None
+
+    def test_valid_date_still_parses(self):
+        parsed = parse_message(_make_raw(date="Wed, 27 May 2026 10:00:00 +0000"))
+        assert parsed is not None
+        assert parsed["receivedAt"].startswith("2026-05-27T10:00:00")

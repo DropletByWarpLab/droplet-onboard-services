@@ -1,44 +1,16 @@
 import jwt from "jsonwebtoken";
 import type { Role } from "@droplet/tools-core";
 
-/**
- * Mint a short-lived service JWT the mcp-server presents to the
- * orchestrator's REST API when a tool handler needs to fetch data via
- * HTTP (matter.controller.ts:listDevices et al). Claims match the shape
- * `apps/orchestrator/src/services/jwt.service.ts:signAccessToken` emits
- * — same JWT_SECRET (HS256) signs both, so the orchestrator's auth
- * middleware accepts this exactly like a user access token.
- *
- * sub:          stable identity for the service principal
- * username:     mirrors sub — orchestrator's AuthUser.id+username
- * displayName:  what shows up in audit logs as the actor
- * role:         "owner" — handlers need broad read access; voice's
- *               actual capability ceiling is enforced upstream at the
- *               /api/llm/chat layer (caller is role=service there, so
- *               write tools are filtered out of the LLM's tool list
- *               before any dispatch happens). The mcp-server-to-
- *               orchestrator hop is service-to-service infrastructure
- *               auth, not user RBAC — the orchestrator's RBAC for the
- *               outer chat call already settled what the LLM can ask
- *               for.
- * type:         "access" — verifyAccessToken rejects any other value.
- *
- * 60-second expiry: tokens are minted per request so a fresh one always
- * has plenty of clock skew margin; we don't store them.
- */
-export function mintInternalToken(secret: string): string {
-  return jwt.sign(
-    {
-      sub: "service:mcp-server",
-      username: "service:mcp-server",
-      displayName: "MCP Server",
-      role: "owner" as Role,
-      type: "access",
-    },
-    secret,
-    { expiresIn: 60 },
-  );
-}
+// NOTE (TOOLS-05): a `mintInternalToken` helper that minted a
+// `role: "owner"` service JWT used to live here. It had zero call sites —
+// the real mcp→orchestrator client uses the static `ORCHESTRATOR_TOKEN`
+// env, which `matchServiceToken` maps to `role: "service"`. The dead
+// helper was a latent IDOR footgun: wiring it onto the HTTP client would
+// have silently upgraded every service-to-service hop from `service` to
+// `owner`, bypassing the orchestrator's `isPrivileged`/ownership checks
+// (matter/email/etc.). Removed. If a deliberate service token is ever
+// needed, mint `role: "service"` to match the existing principal — never
+// `owner`.
 
 /**
  * Subset of JWT claims the MCP server cares about. All other claims

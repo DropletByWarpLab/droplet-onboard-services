@@ -742,8 +742,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- Trigger a discovery scan ---
   router.post("/cameras/scan", requireRole("owner", "admin", "family"), async (_req, res) => {
     try {
+      // NET-05: camera-discovery now gates /scan behind DEVICE_SECRET.
+      // Forward it like /drivers/fix below, else this proxied call 403s and
+      // the manual-scan button breaks.
+      const headers: Record<string, string> = {};
+      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
+      if (deviceSecret) {
+        headers["Authorization"] = `Bearer ${deviceSecret}`;
+      }
       const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/scan`, {
         method: "POST",
+        headers,
         signal: AbortSignal.timeout(30_000),
       });
       if (!resp.ok) {
@@ -1231,7 +1240,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- Driver status (proxied from camera-discovery service) ---
   router.get("/cameras/drivers", async (_req, res) => {
     try {
+      // NET-05: /drivers is now auth-gated on camera-discovery. Forward
+      // DEVICE_SECRET (same pattern as /drivers/fix) so the driver status
+      // panel doesn't 403.
+      const headers: Record<string, string> = {};
+      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
+      if (deviceSecret) {
+        headers["Authorization"] = `Bearer ${deviceSecret}`;
+      }
       const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/drivers`, {
+        headers,
         signal: AbortSignal.timeout(5000),
       });
       if (!resp.ok) {

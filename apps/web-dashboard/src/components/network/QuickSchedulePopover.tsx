@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useScheduleMutations } from "@/lib/hooks/useScheduleMutations";
 import { ScheduleEditorModal } from "./ScheduleEditorModal";
 import { presetById } from "./schedule-presets";
+import { translateError } from "@/lib/friendly-errors";
 
 /**
  * Compact popover that one-click applies the "Bedtime" preset to a device or
@@ -78,9 +79,7 @@ export function QuickSchedulePopover({ subject, onClose }: Props) {
       });
       onClose();
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Could not apply Bedtime schedule";
-      setToast(msg);
+      setToast(translateError(err, "network"));
     } finally {
       setSaving(false);
     }

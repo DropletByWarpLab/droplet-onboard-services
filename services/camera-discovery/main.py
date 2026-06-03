@@ -697,20 +697,36 @@ async def health():
 
 
 @app.get("/cameras/discovered")
-async def get_discovered():
-    """Return pending (not yet added to Frigate) cameras."""
+async def get_discovered(request: Request):
+    """Return pending (not yet added to Frigate) cameras.
+
+    Gated by DEVICE_SECRET (NET-05): pending records carry the discovered
+    RTSP URL, which for default-credential cameras embeds ``user:pass@`` —
+    reconnaissance-grade data that must not be readable by any LAN peer.
+    """
+    _require_auth(request)
     return list(pending_cameras.values())
 
 
 @app.get("/cameras/known")
-async def get_known():
-    """Return all known (active in Frigate) cameras."""
+async def get_known(request: Request):
+    """Return all known (active in Frigate) cameras.
+
+    Gated by DEVICE_SECRET (NET-05): leaks camera inventory, RTSP URLs
+    (may embed ``user:pass@``), MACs and models otherwise.
+    """
+    _require_auth(request)
     return list(known_cameras.values())
 
 
 @app.post("/cameras/discovered/{mac}/accept")
-async def accept_camera(mac: str):
-    """Accept a pending camera — add it to Frigate."""
+async def accept_camera(mac: str, request: Request):
+    """Accept a pending camera — add it to Frigate.
+
+    Gated by DEVICE_SECRET (NET-05): pushing an arbitrary pending camera
+    into Frigate is a privileged write, not a public action.
+    """
+    _require_auth(request)
     camera = pending_cameras.pop(mac, None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found in pending list")
@@ -734,8 +750,13 @@ async def accept_camera(mac: str):
 
 
 @app.post("/cameras/discovered/{mac}/reject")
-async def reject_camera(mac: str):
-    """Reject a discovered camera — won't be discovered again."""
+async def reject_camera(mac: str, request: Request):
+    """Reject a discovered camera — won't be discovered again.
+
+    Gated by DEVICE_SECRET (NET-05): mutates the rejected-MAC set, a
+    privileged write.
+    """
+    _require_auth(request)
     camera = pending_cameras.pop(mac, None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -745,8 +766,14 @@ async def reject_camera(mac: str):
 
 
 @app.post("/scan")
-async def trigger_scan():
-    """Manually trigger a discovery scan."""
+async def trigger_scan(request: Request):
+    """Manually trigger a discovery scan.
+
+    Gated by DEVICE_SECRET (NET-05): an on-demand subnet sweep +
+    RTSP/ONVIF/default-credential probe is a privileged, resource-intensive
+    action — an unauthenticated LAN peer must not be able to launch it.
+    """
+    _require_auth(request)
     await scan_and_discover()
     return {
         "status": "scan_complete",
@@ -834,8 +861,13 @@ async def camera_initialize(ip: str, request: Request):
 
 
 @app.get("/subnet/status")
-async def subnet_status():
-    """Report which subnet is being scanned for cameras."""
+async def subnet_status(request: Request):
+    """Report which subnet is being scanned for cameras.
+
+    Gated by DEVICE_SECRET (NET-05): exposes the camera subnet/CIDR and
+    isolation state — network-topology reconnaissance.
+    """
+    _require_auth(request)
     return {
         "camera_subnet": CAMERA_SUBNET or "all_private",
         "isolation_active": _camera_network is not None,
@@ -847,8 +879,13 @@ async def subnet_status():
 
 
 @app.get("/drivers")
-async def get_driver_status():
-    """Get full camera driver status report."""
+async def get_driver_status(request: Request):
+    """Get full camera driver status report.
+
+    Gated by DEVICE_SECRET (NET-05): matches the existing ``/drivers/fix``
+    gate — the read leaks host kernel-module / driver state.
+    """
+    _require_auth(request)
     return full_driver_report()
 
 

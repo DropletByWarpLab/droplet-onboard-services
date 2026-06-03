@@ -137,6 +137,17 @@ export default function NetworkPage() {
         } else if (op.state === "rolled_back") {
           setOpStatus({ state: "rolled_back", id: op.id, reason: op.reason });
           refresh();
+        } else if (op.state === "unknown") {
+          // DASH-07: the orchestrator can't account for this op (404). It's
+          // indeterminate, not a success — present it as unconfirmed (reusing
+          // the rolled_back banner, our "don't trust the change" surface) and
+          // re-check the device list rather than reporting "applied".
+          setOpStatus({
+            state: "rolled_back",
+            id: op.id,
+            reason: op.reason ?? "We couldn't confirm this change — re-check the device list.",
+          });
+          refresh();
         } else if (Date.now() - startedAt > 70_000) {
           // Router or operation record is gone. Present as rolled back so the
           // user doesn't trust a change we can't confirm.

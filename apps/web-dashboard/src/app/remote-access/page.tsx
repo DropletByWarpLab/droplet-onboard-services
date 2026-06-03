@@ -34,6 +34,7 @@ import type {
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -68,7 +69,7 @@ export default function RemoteAccessPage() {
       setStatus(s);
       setPeers(p.peers || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Remote Access");
+      setError(translateError(err, "vpn"));
     } finally {
       setLoading(false);
     }
@@ -86,7 +87,7 @@ export default function RemoteAccessPage() {
       setRevokeTarget(null);
       await reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Revoke failed", "error");
+      toast(translateError(err, "vpn"), "error");
       throw err;
     }
   };
@@ -242,7 +243,7 @@ function DuckDnsCard() {
       if (msg.startsWith("403")) {
         setAdminVisible(false);
       } else {
-        setErr(msg);
+        setErr(translateError(e, "vpn"));
       }
     }
   }, []);
@@ -266,7 +267,7 @@ function DuckDnsCard() {
       setToken("");
       setEditing(false);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to save");
+      setErr(translateError(e, "vpn"));
     } finally {
       setSaving(false);
     }
@@ -507,7 +508,7 @@ function AddDeviceDialog({
       setStep("ready");
       onAdded();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add device");
+      setError(translateError(err, "vpn"));
     } finally {
       setSubmitting(false);
     }

@@ -127,21 +127,45 @@ interface ResolvedUser {
 }
 
 /**
+ * ORCH-01 — thrown when the IdP asserts an email we could otherwise act on
+ * (link to / create a local account from) but does NOT assert
+ * `email_verified === true`. We refuse rather than bind the caller's `sub` to
+ * a row chosen by an unverified, attacker-controllable email claim. The
+ * callback maps this to a distinct 401 so the failure is legible (vs the
+ * "no usable email" null path).
+ */
+class SsoEmailUnverifiedError extends Error {
+  readonly code = "SSO_EMAIL_UNVERIFIED";
+  constructor() {
+    super("SSO sign-in refused: the identity provider did not verify this email address.");
+    this.name = "SsoEmailUnverifiedError";
+  }
+}
+
+/**
  * Account-linking policy (the AC contract):
  *   1. Resolve by (provider, sub) via SsoIdentity → sign in that user
  *      (preserves User.id; emails can be reassigned at the IdP, sub can't).
- *   2. Else look up the local User by NORMALIZED email:
+ *   2. Else look up the local User by NORMALIZED email — but ONLY when the
+ *      IdP asserted `email_verified === true` (ORCH-01). An unverified email
+ *      is attacker-controllable on providers like entra/okta, so binding a
+ *      `sub` to a row chosen by it is an account-takeover vector; we throw
+ *      SsoEmailUnverifiedError instead. When verified:
  *        - found  → LINK (create an SsoIdentity pointing at it). Preserves
  *          the existing User.id; an owner who set up with a password keeps
  *          the same row and can now also SSO.
  *        - none   → CREATE a local User (role family / least privilege,
  *          isLocal, NO passwordHash — SSO-only) and link.
  *   3. No usable email → return null. We never create a login-unable row.
+ *
+ * NOTE: branch 1 (an already-linked (provider, sub)) is intentionally NOT
+ * gated on email_verified — that link was vetted when it was first created,
+ * and `sub` (not email) is its key.
  */
 async function ensureLinkedUser(
   prisma: PrismaClient,
   provider: SsoProvider,
-  identity: { sub: string; email?: string; name?: string },
+  identity: { sub: string; email?: string; emailVerified: boolean; name?: string },
 ): Promise<ResolvedUser | null> {
   // 1. Existing IdP identity → that user.
   const existing = await prisma.ssoIdentity.findUnique({
@@ -173,6 +197,17 @@ async function ensureLinkedUser(
   const email = normalizeEmail(identity.email);
   if (!email) {
     return null;
+  }
+
+  // ORCH-01 — email is the linking/creation key from here on. Refuse unless
+  // the IdP VERIFIED it: an unverified `email` claim is attacker-controllable
+  // (e.g. self-asserted at an entra/okta tenant), so acting on it would let a
+  // caller bind their `sub` to — or mint a new account on — an address they
+  // don't own. Gate BOTH the link (2a) and create (2b) branches. The cookie
+  // checks proved the token is authentic; only email_verified proves the
+  // address belongs to the bearer.
+  if (!identity.emailVerified) {
+    throw new SsoEmailUnverifiedError();
   }
 
   // 2a. Link to an existing local user with this email.
@@ -347,7 +382,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
       // Exchange + validate the ID token (signature/iss/aud/exp + nonce +
       // state + PKCE). Any failure throws → 401, no session.
-      let identity: { sub: string; email?: string; name?: string };
+      let identity: { sub: string; email?: string; emailVerified: boolean; name?: string };
       try {
         identity = await exchangeCodeAndValidate(provider, currentUrl, {
           expectedNonce: loginState.nonce,
@@ -361,7 +396,23 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         return;
       }
 
-      const user = await ensureLinkedUser(prisma, provider, identity);
+      let user: ResolvedUser | null;
+      try {
+        user = await ensureLinkedUser(prisma, provider, identity);
+      } catch (err) {
+        // ORCH-01 — the IdP returned an email we won't act on because it
+        // isn't verified. Refuse with a distinct code rather than linking
+        // the caller's sub to an account chosen by an unverified email.
+        if (err instanceof SsoEmailUnverifiedError) {
+          logger.warn(
+            { provider },
+            "SSO sign-in refused: IdP did not assert email_verified for a linkable email",
+          );
+          res.status(401).json({ error: "SSO sign-in failed", code: err.code });
+          return;
+        }
+        throw err;
+      }
       if (!user) {
         // No usable email in a valid token → we won't mint a login-unable row.
         logger.warn({ provider }, "SSO sign-in rejected: ID token had no usable email");

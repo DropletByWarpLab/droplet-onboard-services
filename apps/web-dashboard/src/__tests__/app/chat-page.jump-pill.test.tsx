@@ -52,8 +52,13 @@ vi.mock("@/lib/hooks/useStickyScroll", () => ({
 }));
 
 // SessionHeader does an authFetch; stub it so we don't fight network.
+// The page also reads useAuth().user (DASH-04: it gates the chat WS on an
+// authenticated user); return a logged-in user so the page renders.
 vi.mock("@/lib/auth", () => ({
   authFetch: vi.fn(),
+  useAuth: () => ({
+    user: { id: "u1", username: "alice", displayName: "Alice" },
+  }),
 }));
 
 import ChatPage from "@/app/chat/page";

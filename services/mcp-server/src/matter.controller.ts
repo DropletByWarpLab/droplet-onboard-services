@@ -2,25 +2,21 @@
  * MatterController implementation that proxies to the orchestrator's
  * `/api/matter/*` REST API.
  *
- * AUTH GAP (WARP-339 follow-up — surfaced during POC deploy 2026-05-15)
- * -------------------------------------------------------------------
- * The orchestrator's `/api/*` routes require an authenticated user
- * (session cookie OR Bearer JWT — see middleware/auth.ts). When the
- * mcp-server calls these from the LLM tool-dispatch path, there is
- * NO session — voice and chat both reach mcp-server via service-to-
- * service paths.
+ * Auth (the HTTP hop is authenticated as the `service` principal)
+ * ---------------------------------------------------------------
+ * The orchestrator's `/api/*` routes require an authenticated principal
+ * (session cookie OR Bearer JWT — see middleware/auth.ts). The
+ * mcp-server's `createHttpClient("orchestrator")` injects the static
+ * `ORCHESTRATOR_TOKEN` (= `SERVICE_TOKEN_MCP`) as a Bearer, which
+ * `matchServiceToken` maps to `role: "service"` (id `_service:mcp`). So
+ * every request below authenticates as that read-only service principal
+ * — NOT as `owner`. (A dead `mintInternalToken` helper that minted
+ * `role: "owner"` was removed in TOOLS-05; service-to-service must never
+ * carry owner.)
  *
- * Today this means: chat tool calls go through the orchestrator's
- * in-process agent loop (no HTTP round-trip; session flows naturally
- * from the dashboard cookie). Voice tool calls (VOICE_TOOLS_ENABLED=1)
- * and any future direct MCP client would fail with 401 until a
- * service-auth path is added.
- *
- * Next step: mint a service JWT in mcp-server signed with the shared
- * JWT_SECRET (claims: { sub: "service:mcp-server", role: "owner" }),
- * attached as Authorization: Bearer on every request below. Then
- * orchestrator's verifyAccessToken accepts it like any user JWT.
- * Tracked separately; not in this commit.
+ * Chat tool calls additionally have the in-process agent-loop path where
+ * the real user's RBAC has already narrowed the tool list before any
+ * dispatch (`routes/llm.ts` WRITE_TOOLS).
  *
  * Background (WARP-102)
  * ---------------------
@@ -44,15 +40,24 @@
  * — we just need to pass the orchestrator's JSON bodies through
  * unchanged.
  *
- * Auth posture
- * ------------
- * The orchestrator's `/api/matter/*` routes do not enforce per-user auth
- * today — anything that can reach `orchestrator:3000` inside the
- * compose network can issue commands. The trust boundary is the
- * mcp-server's tools/call dispatch (RBAC + JWT). When the orchestrator
- * adds proper auth, this client gets a `Authorization` header from
- * `userId` / `role` context (which already flows through via
- * `ToolContext`).
+ * Auth posture (layered)
+ * ----------------------
+ * The orchestrator's `/api/matter/*` WRITE routes ARE role-gated:
+ * `requireRole("owner","admin","family")` on commission, command,
+ * decommission (`apps/orchestrator/src/routes/matter.ts:233,286,368,428`).
+ * The effective model is three layers:
+ *   1. `routes/llm.ts` narrows the LLM's tool list by the chat user's
+ *      role (WRITE_TOOLS) before any dispatch;
+ *   2. the mcp-server re-checks `canCallTool` at `tools/call` (RBAC + JWT);
+ *   3. the orchestrator route enforces `requireRole` again — and the mcp
+ *      hop presents the `service` principal (see the Auth note above).
+ *      `requireRole("owner","admin","family")` does NOT include `service`,
+ *      so every Matter WRITE call from the MCP/voice path returns 403 today.
+ *      Matter write tools (commission, control-device, decommission) are
+ *      therefore non-functional via MCP until this gap is resolved
+ *      (tracked as WARP-339).
+ * (Earlier revisions of this comment claimed the routes were
+ * unauthenticated — that is no longer true; corrected per TOOLS-06.)
  */
 import type { HttpClient, MatterController } from "@droplet/tools-core";
 

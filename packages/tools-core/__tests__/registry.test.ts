@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { TOOLS } from "../src/index.js";
+import { TOOLS, TOOL_CATALOG } from "../src/index.js";
 
 // Authoritative inventory list — must match `INVENTORY.md`. Update both in
 // lockstep when adding/removing handlers.
@@ -121,5 +121,74 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("pm_create_work_item")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("pm_transition_work_item")?.requiresWrite).toBe(true);
     expect(TOOLS.get("pm_transition_work_item")?.requiresConfirmation).toBe(true);
+  });
+
+  // ── TOOLS-08 — cross-cutting invariants over the WHOLE registry ──
+  // The per-tool spot-checks above only pin a handful of tools. WRITE_TOOLS
+  // and the RBAC narrowing in the orchestrator are DERIVED from these two
+  // booleans, so a single mis-flagged tool silently drops its role gate.
+  // These property tests enforce the invariants for every registered tool.
+
+  it("every tool requiring confirmation also requires write (confirm ⇒ write)", () => {
+    const offenders = Array.from(TOOLS.values())
+      .filter((t) => t.requiresConfirmation && !t.requiresWrite)
+      .map((t) => t.name);
+    expect(offenders).toEqual([]);
+  });
+
+  it("every tool whose name starts with a mutating verb is flagged requiresWrite", () => {
+    // Prefixes that are unambiguously mutating in this codebase. Verbs that
+    // have read-only members (scan_, detect_, discover_, get_, list_,
+    // search_) are deliberately NOT here. If a genuinely read-only tool ever
+    // needs one of these prefixes, add it to READ_ONLY_EXCEPTIONS with a
+    // comment — that makes the carve-out explicit rather than silent.
+    const MUTATING_PREFIXES = [
+      "set_",
+      "add_",
+      "delete_",
+      "block_",
+      "unblock_",
+      "commission_",
+      "decommission_",
+      "approve_",
+      "send_",
+      "run_",
+      "write_",
+      "move_",
+      "copy_",
+      "rename_",
+      "create_",
+      "transition_",
+      "complete_",
+      "accept_",
+      "setup_",
+      "export_",
+      "share_",
+    ];
+    const READ_ONLY_EXCEPTIONS = new Set<string>([
+      // (intentionally empty — no read-only tool currently uses a
+      // mutating-verb prefix)
+    ]);
+
+    const offenders = Array.from(TOOLS.values())
+      .filter(
+        (t) =>
+          MUTATING_PREFIXES.some((p) => t.name.startsWith(p)) &&
+          !READ_ONLY_EXCEPTIONS.has(t.name) &&
+          !t.requiresWrite,
+      )
+      .map((t) => t.name);
+    // A mutating-verb tool with requiresWrite:false is exactly the WARP-466
+    // email_draft_reply regression class — fail loudly.
+    expect(offenders).toEqual([]);
+  });
+
+  it("TOOL_CATALOG is in 1:1 correspondence with TOOLS (completeness)", () => {
+    // Catalog completeness is enforced at module load by a throw; this pins
+    // it as a regression test and guards against drift.
+    expect(TOOL_CATALOG.length).toBe(TOOLS.size);
+    const catalogNames = TOOL_CATALOG.map((e) => e.name).sort();
+    const toolNames = Array.from(TOOLS.keys()).sort();
+    expect(catalogNames).toEqual(toolNames);
   });
 });

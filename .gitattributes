@@ -14,3 +14,15 @@ Dockerfile text eol=lf
 # doesn't catch them — pin explicitly so a Windows checkout never ships
 # CRLF and breaks the shebang (203/EXEC) on the appliance.
 scripts/host/usr-local-sbin/* text eol=lf
+
+# Anchor codegen artifacts. schemas/__tests__/codegen-drift.test.ts re-runs
+# scripts/gen-anchor-schema.mjs and byte-compares its output against the
+# checked-in TS + Python mirrors. The generator always emits LF (Node
+# normalizes template-literal newlines to LF), and the Python mirror is
+# already pinned by `*.py text eol=lf` above — but the generated TS had no
+# pin, so a Windows checkout (core.autocrlf=true) materialized it as CRLF
+# and the byte-compare failed (LF regen vs CRLF on disk). Pin the whole
+# anchor codegen triplet to LF so the comparison holds on every platform.
+schemas/anchor.schema.json text eol=lf
+scripts/gen-anchor-schema.mjs text eol=lf
+packages/shared-types/src/anchor.ts text eol=lf

@@ -64,6 +64,7 @@ import {
 import type { ApDeviceInfo, ApDeviceStatus } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 
 // ────────────────────────────────────────────────────────────────────
 // Status display metadata. Centralised so the panel and any future
@@ -409,6 +410,17 @@ export function CoverageExtendersPanel() {
             reason: op.reason,
           });
           await mutate("/api/aps");
+        } else if (op.state === "unknown") {
+          // DASH-07: 404 from the orchestrator — indeterminate, not a success.
+          // Present as unconfirmed (rolled_back banner) and re-check the AP
+          // list rather than reporting the change as applied.
+          setOpStatus({
+            state: "rolled_back",
+            id: op.id,
+            mac: opStatus.mac,
+            reason: op.reason ?? "We couldn't confirm this change — re-check the device list.",
+          });
+          await mutate("/api/aps");
         } else if (Date.now() - startedAt > 70_000) {
           setOpStatus({
             state: "rolled_back",
@@ -461,10 +473,7 @@ export function CoverageExtendersPanel() {
       setApproveDialogOpen(false);
       setApproveTarget(null);
     } catch (err) {
-      const copy = copyForError(
-        err,
-        err instanceof Error ? err.message : undefined,
-      );
+      const copy = copyForError(err, translateError(err, "network"));
       setErrorCopy(copy);
       setErrorMsg(`${copy.title}. ${copy.body}`);
       throw err; // keep dialog open so user can retry
@@ -489,10 +498,7 @@ export function CoverageExtendersPanel() {
         });
       }
     } catch (err) {
-      const copy = copyForError(
-        err,
-        err instanceof Error ? err.message : undefined,
-      );
+      const copy = copyForError(err, translateError(err, "network"));
       setErrorCopy(copy);
       setErrorMsg(`${copy.title}. ${copy.body}`);
       throw err;
@@ -791,11 +797,7 @@ function ApproveExtenderDialog({
       // The parent surfaces the friendly error in the panel banner;
       // here we keep the dialog open AND show the error inline so the
       // user can re-type the password without losing context.
-      setLocalError(
-        err instanceof Error
-          ? err.message
-          : "Couldn't set up the extender. Try again.",
-      );
+      setLocalError(translateError(err, "network"));
     } finally {
       setSubmitting(false);
     }

@@ -23,6 +23,8 @@ vi.mock("../config.js", () => ({
     STORAGE_BACKEND: "legacy",
     AI_GATEWAY_GRPC_URL: "localhost:50051",
     JWT_SECRET: "test-jwt-secret-for-oauth2-tests",
+    FRIGATE_URL: "http://localhost:5000",
+    DROPLET_PM_WEB_URL: "https://droplet-ai.local/pm",
   },
 }));
 

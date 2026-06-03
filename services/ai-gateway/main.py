@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
@@ -72,6 +73,22 @@ from scheduler import InferenceScheduler, QueueFullError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _provider_error_detail(exc: Exception, context: str) -> str:
+    """GW-08: log the full provider/LiteLLM exception server-side and return a
+    generic, non-leaky message to the client.
+
+    LiteLLM/provider exceptions frequently embed the upstream provider's raw
+    error body, request URL, and model names; echoing ``str(exc)`` to the
+    caller leaks internal endpoints and turns the gateway into a provider-state
+    oracle. We attach a short correlation id so an operator can tie the opaque
+    client message back to the detailed server-side log line.
+    """
+    correlation_id = uuid.uuid4().hex[:12]
+    logger.error("%s [correlation_id=%s]: %s", context, correlation_id, exc)
+    return f"Upstream provider error (ref: {correlation_id})"
+
 
 # Global instances
 provider_router: ProviderRouter | None = None
@@ -155,18 +172,31 @@ async def health():
 async def readiness():
     """Reflect the underlying appliance health for orchestration purposes.
 
-    Pulls /health from the Jetson appliance (ollama-manager) so the orchestrator
-    can decide whether to accept inference traffic. Distinct from /ai/health,
-    which only reports gateway-side liveness.
+    Pulls /health from ollama-manager (:8002) so the orchestrator can decide
+    whether to accept inference traffic. Distinct from /ai/health, which only
+    reports gateway-side liveness.
+
+    XR-05: /health lives on ollama-manager, not on Ollama (:11434). On the
+    direct chat path (single-box default) no manager is wired, so we report
+    "ok" with appliance=None instead of GETting a non-existent /health and
+    reporting a perpetual "degraded".
     """
     if provider_router is None:
         return {"status": "starting", "appliance": None}
-    provider = provider_router.ollama
+    health_url = provider_router.ollama._limits.health_url
+    if health_url is None:
+        # No ollama-manager configured (direct path). Gateway-side readiness is
+        # governed by /ai/health; nothing to probe here.
+        return {
+            "status": "ok",
+            "appliance": None,
+            "detail": "ollama-manager not configured (direct path); "
+            "set OLLAMA_MANAGER_URL to surface appliance health.",
+        }
     appliance: dict | None = None
     try:
         async with httpx.AsyncClient(timeout=3.0) as c:
-            root = provider.base_url.removesuffix("/proxy")
-            resp = await c.get(f"{root}/health")
+            resp = await c.get(health_url)
             if resp.status_code == 200:
                 appliance = resp.json()
     except Exception as e:
@@ -213,20 +243,59 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             headers={"Retry-After": str(e.retry_after)},
         )
 
+    # The scheduler slot is now held. It MUST stay held until the work is
+    # actually done — and for a streaming response the work isn't done when
+    # provider_router.chat() returns (it hands back an async generator that
+    # hasn't touched the model yet). Releasing here would let the scheduler
+    # admit the next request while N streams are still flowing against the
+    # model, defeating max_concurrent for streaming (GW-06). So:
+    #   - non-streaming: release as soon as chat() returns (work is complete).
+    #   - streaming: hand the slot's release to a wrapper that fires it when
+    #     the generator is exhausted OR closed (client disconnect / error /
+    #     GC). Exactly one release per acquired slot, in both paths.
+    released = False
+
+    async def _release_once() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            await inference_scheduler.release()
+
     try:
         result = await provider_router.chat(request)
     except ValueError as e:
+        await _release_once()
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Chat error: %s", e)
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
-    finally:
-        await inference_scheduler.release()
+    except BaseException as e:
+        # GW-06: release the held slot on ANY exit from the awaited chat() —
+        # including asyncio.CancelledError (a BaseException, raised when the
+        # client disconnects mid-await), which a bare `except Exception` would
+        # miss, leaking the slot and eventually deadlocking the scheduler at
+        # max_concurrent=1. _release_once is idempotent. There is deliberately
+        # NO `finally` here: on the streaming SUCCESS path the slot must stay
+        # held until the stream drains (released by _slot_held_stream below),
+        # so a finally would free it too early.
+        await _release_once()
+        if isinstance(e, Exception):
+            # GW-08: don't echo upstream/LiteLLM error text to the client.
+            raise HTTPException(
+                status_code=502, detail=_provider_error_detail(e, "Chat error")
+            )
+        raise  # re-raise CancelledError / KeyboardInterrupt after releasing
 
-    # Streaming response
+    # Streaming response — hold the slot for the lifetime of the stream.
     if request.stream:
+        async def _slot_held_stream():
+            try:
+                async for chunk in result:
+                    yield chunk
+            finally:
+                # Fires when the generator is exhausted, or when Starlette
+                # calls aclose() on client disconnect / mid-stream error.
+                await _release_once()
+
         return StreamingResponse(
-            result,
+            _slot_held_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -235,7 +304,8 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             },
         )
 
-    # Non-streaming response
+    # Non-streaming response — work is complete, release the slot now.
+    await _release_once()
     return result
 
 
@@ -374,29 +444,73 @@ async def session_chat(session_id: str, body: SessionChatRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error("Session chat error: %s", e)
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+        # GW-08: generic message + correlation id; full error logged server-side.
+        raise HTTPException(
+            status_code=502, detail=_provider_error_detail(e, "Session chat error")
+        )
 
     if body.stream:
-        # For streaming, we collect tokens to save the full response afterward
+        # For streaming, we collect tokens to save the full response afterward.
+        #
+        # GW-07: the assistant turn is persisted in a `finally`, not only after
+        # the generator fully drains. A client disconnect (browser close, nginx
+        # timeout) closes the generator with GeneratorExit, and an upstream
+        # error raises mid-stream — in both cases the previous code never
+        # reached the save line, so the user turn was stored with NO assistant
+        # reply (silent history loss) and the partial text the user already saw
+        # was lost. We now save whatever was collected exactly once, whether the
+        # stream finished normally or was cut short.
         async def stream_and_save():
-            collected = []
-            async for chunk in result:
-                yield chunk
-                # Extract content from SSE data for persistence
-                if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
-                    try:
-                        import json
-                        parsed = json.loads(chunk[6:].strip())
-                        delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
-                        if delta:
-                            collected.append(delta)
-                    except (json.JSONDecodeError, IndexError, KeyError):
-                        pass
-            # Save the full assistant response
-            full_response = "".join(collected)
-            if full_response:
-                await session_store.add_message(session_id, "assistant", full_response)
+            collected: list[str] = []
+            completed = False
+            saved = False
+
+            async def _persist() -> None:
+                nonlocal saved
+                if saved:
+                    return
+                saved = True
+                full_response = "".join(collected)
+                if not full_response:
+                    return
+                if not completed:
+                    logger.warning(
+                        "session %s: stream ended early (client disconnect or "
+                        "upstream error) — persisting partial assistant reply "
+                        "(%d chars)",
+                        session_id,
+                        len(full_response),
+                    )
+                try:
+                    await session_store.add_message(
+                        session_id, "assistant", full_response
+                    )
+                except Exception:
+                    # Never let a cleanup-time store failure mask the original
+                    # disconnect/error; just log it.
+                    logger.exception(
+                        "session %s: failed to persist assistant reply", session_id
+                    )
+
+            try:
+                async for chunk in result:
+                    yield chunk
+                    # Extract content from SSE data for persistence
+                    if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
+                        try:
+                            import json
+                            parsed = json.loads(chunk[6:].strip())
+                            delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
+                            if delta:
+                                collected.append(delta)
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            pass
+                completed = True
+            finally:
+                # Runs on normal completion, on client disconnect (GeneratorExit),
+                # and on a mid-stream upstream error — so the assistant turn is
+                # never silently dropped.
+                await _persist()
 
         return StreamingResponse(
             stream_and_save(),

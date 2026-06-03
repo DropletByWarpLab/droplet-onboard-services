@@ -18,6 +18,7 @@ import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
+import { useAuth } from "@/lib/auth";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -33,6 +34,12 @@ export default function ChatPage() {
   // WARP-203's `chatId` (the brain-memory originating-chat tag) lives on
   // alongside; consolidating with `conversationId` is left as a follow-up.
   const [chatId, setChatId] = useState(() => `chat-${Date.now()}`);
+  // DASH-04: gate the chat WS bridge on an authenticated user so it doesn't
+  // open + reconnect-with-backoff against `/api/ws/events` before auth
+  // resolves (or after the session expires). AuthGate only renders this
+  // page when `user` is set, but passing it explicitly keeps the gate
+  // correct if that ever changes and mirrors NotificationToaster.
+  const { user } = useAuth();
   const {
     messages,
     isStreaming,
@@ -48,7 +55,7 @@ export default function ChatPage() {
     conversationId,
     loadConversation,
     messagesEpoch,
-  } = useChat({ chatId, historyHandleRef });
+  } = useChat({ chatId, historyHandleRef, authReady: Boolean(user) });
 
   // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
   // sync, both directions. The history panel calls router.push("/chat?c=X")
@@ -133,6 +140,13 @@ export default function ChatPage() {
   }, [models, selectedModel]);
 
   // If the home-page hero handed off a prompt, send it once a model is ready.
+  //
+  // DASH-02: only consume the hero prompt for a genuinely fresh chat. If the
+  // user landed on a deep-linked thread (`/chat?c=<id>`) — or any conversation
+  // already has messages — a stale `pendingPrompt` left in sessionStorage from
+  // an earlier, interrupted hero hand-off must NOT be appended to that existing
+  // conversation. We still clear the stored prompt so it can't fire later, but
+  // we drop it instead of sending it into a non-empty / deep-linked thread.
   useEffect(() => {
     if (!selectedModel) return;
     let pending: string | null = null;
@@ -142,11 +156,15 @@ export default function ChatPage() {
       pending = null;
     }
     if (!pending) return;
+    // One-shot: always remove it so a stale hero prompt can't resurface.
     try {
       window.sessionStorage.removeItem("droplet.pendingPrompt");
     } catch {
       /* ignore */
     }
+    // Gate the auto-send on a fresh chat: no `?c=` deep link in the URL and no
+    // messages already present (a loaded/hydrated thread). Otherwise discard.
+    if (urlConversationId || messages.length > 0) return;
     sendMessage(pending, selectedModel, systemPrompt || undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
