@@ -1131,6 +1131,33 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
 
 DUCKDNS_SECTION = "duckdns"
 
+# Order DuckDNS prefers to bind its watch `interface` to. `wan` first (the
+# router/multi-box shape's uplink), falling back to `lan` for a LAN-only
+# single-box where `wan` isn't a logical interface at all (root-caused live on
+# 192.168.1.87 — its bridges are `br-lan` + a host-carried mgmt uplink). The
+# binding only governs which hotplug events trigger an immediate re-check, so
+# any PRESENT interface is a valid trigger; the published IP itself comes from
+# the `web` ip_source regardless (see `ddns_duckdns_set`).
+_DUCKDNS_INTERFACE_PREFERENCE = ("wan", "lan")
+
+
+def _select_ddns_interface(router) -> str | None:
+    """Pick a logical interface for the DuckDNS section that is PRESENT on this
+    deployment shape, or ``None`` if none of the candidates exist.
+
+    Presence is read from `NetworkApi.get_all_interface_statuses()` — the same
+    shape-detection mechanism `get_network_summary` uses (ADR-011) — so we never
+    invent a second presence path or a new env var. An interface is "present"
+    when its status carries `present: True`; a shape that lacks it returns the
+    `interface_stub(present=False)` placeholder. Returning ``None`` lets the
+    caller omit `interface` entirely rather than bind to a phantom one.
+    """
+    statuses = router.network.get_all_interface_statuses()
+    for name in _DUCKDNS_INTERFACE_PREFERENCE:
+        if statuses.get(name, {}).get("present") is True:
+            return name
+    return None
+
 
 def _read_duckdns(router) -> dict:
     """Read the duckdns ddns section, returning a redacted view.
@@ -1191,6 +1218,15 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             else:
                 raise
 
+        # Bind the section's watch `interface` to one that's actually PRESENT on
+        # this deployment shape (ADR-011). Hardcoding `wan` broke the LAN-only
+        # single-box (192.168.1.87 has no `wan` logical interface), so
+        # ddns-scripts watched a phantom interface and the update path was dead.
+        # Prefer `wan`, fall back to the LAN-facing interface, omit entirely if
+        # neither is present (the `web` ip_source + timer below still drives
+        # updates — `interface` only gates the immediate hotplug re-check).
+        watch_interface = _select_ddns_interface(r)
+
         # When the caller omits the token, keep the value already on disk
         # (the wizard's "keep stored token" path so returning customers
         # don't have to re-type it). Only seed `password` when we have a
@@ -1200,8 +1236,6 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "service_name": "duckdns.org",
             "domain": req.subdomain,
             "enabled": "1" if req.enabled else "0",
-            # Watch WAN for IP changes; DuckDNS is for IPv4 by default.
-            "interface": "wan",
             # Use `web` (not `network`): the WAN interface address may itself
             # be a private IP behind another NAT layer (common when the
             # Droplet is plugged into a home router as a downstream device).
@@ -1220,6 +1254,12 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "force_interval": "72",
             "force_unit": "hours",
         }
+
+        # Only set `interface` when one is present on this shape; omitting it on
+        # a shape with neither `wan` nor `lan` is preferable to binding a phantom
+        # interface (the `web` ip_source + timer above still drive updates).
+        if watch_interface is not None:
+            values["interface"] = watch_interface
 
         if req.token is not None:
             values["password"] = req.token
