@@ -28,7 +28,13 @@ import {
   fetchNetworkSummary,
   fetchOperation,
   blockDevice,
+  healthCheck,
+  hasReachedRouter,
+  routerErrorLogLevel,
+  ROUTER_COLDSTART_GRACE_MS,
+  _resetRouterContactForTests,
 } from "../services/openwrt.client.js";
+import { RouterError } from "../types/router-error.js";
 
 function mockResponse(init: {
   ok: boolean;
@@ -402,5 +408,157 @@ describe("openwrt.client public wrappers", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+});
+
+// WARP cold-start log hygiene: on a fresh boot the in-container OpenWrt is
+// unreachable for ~1 min while it provisions. UNREACHABLE errors during that
+// window are EXPECTED warmup, not an outage — they must log at `debug`, not
+// `warn`. The decision is gated on an explicit "first successful contact" flag
+// (never inferred from absence) AND a bounded uptime grace, so a genuinely-down
+// router still escalates to `warn` once the grace expires.
+describe("openwrt.client cold-start log hygiene", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    // Reset to the cold-start baseline: never contacted, start reference = now.
+    _resetRouterContactForTests();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    _resetRouterContactForTests();
+    vi.restoreAllMocks();
+  });
+
+  it("starts in the not-yet-contacted state", () => {
+    expect(hasReachedRouter()).toBe(false);
+  });
+
+  it("flips hasReachedRouter() to true after the first successful routingFetch (res.ok)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    expect(hasReachedRouter()).toBe(false);
+    await routingFetch("/network/summary", {
+      retry: { attempts: 1, delaysMs: [], sleep: noSleep, random: stableRandom },
+    });
+    expect(hasReachedRouter()).toBe(true);
+  });
+
+  it("does NOT mark contact when every attempt fails (UNREACHABLE)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      routingFetch("/network/summary", {
+        retry: { attempts: 1, delaysMs: [], sleep: noSleep, random: stableRandom },
+      }),
+    ).rejects.toBeInstanceOf(RouterError);
+    expect(hasReachedRouter()).toBe(false);
+  });
+
+  // AC #6(a): cold start, not yet contacted, within grace + UNREACHABLE → debug.
+  it("UNREACHABLE within the grace window, never contacted → debug", () => {
+    _resetRouterContactForTests({ startRef: 0 });
+    const err = RouterError.unreachable("router warming up");
+    // now = grace - 1ms → still inside the window.
+    const now = () => ROUTER_COLDSTART_GRACE_MS - 1;
+    expect(routerErrorLogLevel(err, now)).toBe("debug");
+  });
+
+  // AC #6(b): after a prior success, UNREACHABLE → warn (a real blip, not warmup).
+  it("UNREACHABLE after a prior successful contact → warn (even within grace)", async () => {
+    _resetRouterContactForTests({ startRef: 0 });
+    const okFetch = vi.fn().mockResolvedValue(mockResponse({ ok: true, status: 200 }));
+    global.fetch = okFetch as unknown as typeof fetch;
+    await routingFetch("/network/summary", {
+      retry: { attempts: 1, delaysMs: [], sleep: noSleep, random: stableRandom },
+    });
+    expect(hasReachedRouter()).toBe(true);
+
+    const err = RouterError.unreachable("router blip");
+    const now = () => ROUTER_COLDSTART_GRACE_MS - 1; // still inside grace
+    expect(routerErrorLogLevel(err, now)).toBe("warn");
+  });
+
+  // AC #6(c) / AC #5: never contacted but uptime exceeded the grace → warn.
+  // A genuinely-down router must not be silently hidden forever.
+  it("UNREACHABLE after the grace window expires, never contacted → warn", () => {
+    _resetRouterContactForTests({ startRef: 0 });
+    const err = RouterError.unreachable("router still down");
+    const now = () => ROUTER_COLDSTART_GRACE_MS + 1; // past the window
+    expect(routerErrorLogLevel(err, now)).toBe("warn");
+  });
+
+  // Boundary: exactly at the grace edge is NOT "less than" → warn.
+  it("UNREACHABLE exactly at the grace boundary → warn", () => {
+    _resetRouterContactForTests({ startRef: 0 });
+    const err = RouterError.unreachable("router at edge");
+    const now = () => ROUTER_COLDSTART_GRACE_MS;
+    expect(routerErrorLogLevel(err, now)).toBe("warn");
+  });
+
+  // AC #6(d): a non-UNREACHABLE RouterError is never warmup → always warn.
+  it("AUTH within the grace window, never contacted → warn", () => {
+    _resetRouterContactForTests({ startRef: 0 });
+    const err = RouterError.auth("bad token", { status: 401 });
+    const now = () => 0; // freshest possible cold start
+    expect(routerErrorLogLevel(err, now)).toBe("warn");
+  });
+
+  it.each(["TIMEOUT", "DISABLED", "ROLLED_BACK", "UNKNOWN"] as const)(
+    "%s within the grace window, never contacted → warn",
+    (code) => {
+      _resetRouterContactForTests({ startRef: 0 });
+      const err = new RouterError(code, `code ${code}`);
+      expect(routerErrorLogLevel(err, () => 0)).toBe("warn");
+    },
+  );
+
+  // A non-RouterError (e.g. a bare TypeError, schema parse blowup) → warn.
+  it("a non-RouterError thrown value → warn regardless of uptime", () => {
+    _resetRouterContactForTests({ startRef: 0 });
+    expect(routerErrorLogLevel(new Error("schema parse failed"), () => 0)).toBe("warn");
+    expect(routerErrorLogLevel("a string", () => 0)).toBe("warn");
+    expect(routerErrorLogLevel(undefined, () => 0)).toBe("warn");
+  });
+
+  it("defaults the clock to Date.now() when no clock is injected", () => {
+    // Fresh cold start (startRef = now); an immediate UNREACHABLE must be debug
+    // because real wall-clock uptime is ~0ms, well inside the grace.
+    _resetRouterContactForTests();
+    const err = RouterError.unreachable("just booted");
+    expect(routerErrorLogLevel(err)).toBe("debug");
+  });
+
+  it("exposes the grace window as a plain const default of 120_000ms", () => {
+    expect(ROUTER_COLDSTART_GRACE_MS).toBe(120_000);
+  });
+
+  // healthCheck must not prematurely flip routerContacted when the routing
+  // service returns HTTP 200 with connected:false (OpenWrt still provisioning).
+  it("healthCheck with connected:false does NOT flip hasReachedRouter()", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: true, status: 200, json: { connected: false } }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    expect(hasReachedRouter()).toBe(false);
+    const result = await healthCheck();
+    expect(result).toBe(false);
+    expect(hasReachedRouter()).toBe(false);
+  });
+
+  it("healthCheck with connected:true DOES flip hasReachedRouter()", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: true, status: 200, json: { connected: true } }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    expect(hasReachedRouter()).toBe(false);
+    const result = await healthCheck();
+    expect(result).toBe(true);
+    expect(hasReachedRouter()).toBe(true);
   });
 });

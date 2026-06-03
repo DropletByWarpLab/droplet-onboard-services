@@ -33,6 +33,7 @@ import type {
   FirewallRule,
 } from "../types/network.js";
 import { RouterError } from "../types/router-error.js";
+import { logRouterError } from "./openwrt.client.js";
 
 const log = pino({ name: "device-reconcile-poller" });
 
@@ -80,11 +81,12 @@ export function createDeviceReconcilePoller(
       // fine — the next poll recovers.
       const [leases, wireless, firewallRules] = await Promise.all([
         openwrt.fetchDhcpLeases().catch((err: unknown) => {
-          log.warn({ err }, "fetchDhcpLeases failed; using empty list");
+          // Cold-start-aware: UNREACHABLE during the boot grace logs at debug.
+          logRouterError(log, err, "fetchDhcpLeases failed; using empty list");
           return [] as OpenwrtDhcpLease[];
         }),
         openwrt.fetchWirelessClients().catch((err: unknown) => {
-          log.warn({ err }, "fetchWirelessClients failed; using empty list");
+          logRouterError(log, err, "fetchWirelessClients failed; using empty list");
           return [] as OpenwrtWirelessClient[];
         }),
         // Firewall: pass the RouterError through to the reconciler so
@@ -93,7 +95,7 @@ export function createDeviceReconcilePoller(
           .fetchFirewallRules()
           .then((rules) => toRejectRules(rules))
           .catch((err: unknown): FirewallRejectRule[] | RouterError => {
-            log.warn({ err }, "fetchFirewallRules failed; preserving last isBlocked");
+            logRouterError(log, err, "fetchFirewallRules failed; preserving last isBlocked");
             if (err instanceof RouterError) return err;
             return RouterError.unknown("fetchFirewallRules failed", {
               label: "Firewall rules",
