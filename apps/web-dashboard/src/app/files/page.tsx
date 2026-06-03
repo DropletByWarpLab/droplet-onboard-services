@@ -38,6 +38,7 @@ import {
   bulkCopyFiles,
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
 function formatBytes(bytes: number): string {
@@ -109,7 +110,7 @@ export default function FilesPage() {
         await refresh();
         setUploadProgress(null);
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Upload failed");
+        toast(translateError(err, "files"));
         setUploadProgress(null);
       } finally {
         setIsUploading(false);
@@ -166,7 +167,7 @@ export default function FilesPage() {
       setPendingDeletePath(null);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed");
+      toast(translateError(err, "files"));
       throw err;
     }
   }, [pendingDeletePath, selectedFile, refresh, toast, fm]);
@@ -188,7 +189,7 @@ export default function FilesPage() {
       setPendingBulkDelete(false);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Bulk delete failed");
+      toast(translateError(err, "files"));
       throw err;
     }
   }, [fm, refresh, toast]);
@@ -206,7 +207,7 @@ export default function FilesPage() {
       setShowNewFolder(false);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to create folder");
+      toast(translateError(err, "files"));
     }
   }, [currentPath, newFolderName, refresh, toast]);
 
@@ -230,7 +231,7 @@ export default function FilesPage() {
         if (selectedFile?.path === file.path) setSelectedFile(null);
         await refresh();
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Rename failed");
+        toast(translateError(err, "files"));
         fm.endRename();
       }
     },
@@ -255,7 +256,7 @@ export default function FilesPage() {
         setMoveDialog(null);
         await refresh();
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Operation failed");
+        toast(translateError(err, "files"));
       }
     },
     [moveDialog, fm, refresh, toast]
@@ -277,7 +278,7 @@ export default function FilesPage() {
       fm.clearSelection();
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Paste failed");
+      toast(translateError(err, "files"));
     }
   }, [fm, currentPath, refresh, toast]);
 

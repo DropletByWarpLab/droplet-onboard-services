@@ -64,6 +64,7 @@ import {
 import type { ApDeviceInfo, ApDeviceStatus } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 
 // ────────────────────────────────────────────────────────────────────
 // Status display metadata. Centralised so the panel and any future
@@ -472,10 +473,7 @@ export function CoverageExtendersPanel() {
       setApproveDialogOpen(false);
       setApproveTarget(null);
     } catch (err) {
-      const copy = copyForError(
-        err,
-        err instanceof Error ? err.message : undefined,
-      );
+      const copy = copyForError(err, translateError(err, "network"));
       setErrorCopy(copy);
       setErrorMsg(`${copy.title}. ${copy.body}`);
       throw err; // keep dialog open so user can retry
@@ -500,10 +498,7 @@ export function CoverageExtendersPanel() {
         });
       }
     } catch (err) {
-      const copy = copyForError(
-        err,
-        err instanceof Error ? err.message : undefined,
-      );
+      const copy = copyForError(err, translateError(err, "network"));
       setErrorCopy(copy);
       setErrorMsg(`${copy.title}. ${copy.body}`);
       throw err;
@@ -802,11 +797,7 @@ function ApproveExtenderDialog({
       // The parent surfaces the friendly error in the panel banner;
       // here we keep the dialog open AND show the error inline so the
       // user can re-type the password without losing context.
-      setLocalError(
-        err instanceof Error
-          ? err.message
-          : "Couldn't set up the extender. Try again.",
-      );
+      setLocalError(translateError(err, "network"));
     } finally {
       setSubmitting(false);
     }

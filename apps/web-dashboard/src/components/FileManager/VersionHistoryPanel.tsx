@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { History, RotateCcw } from "lucide-react";
 import { fetchVersions, restoreVersion } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileVersionInfo } from "@/lib/types";
 
 interface VersionHistoryPanelProps {
@@ -60,7 +61,7 @@ export function VersionHistoryPanel({ filePath, onRestored }: VersionHistoryPane
         }
       } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load versions");
+        setError(translateError(err, "files"));
       }
     })();
 
@@ -80,7 +81,7 @@ export function VersionHistoryPanel({ filePath, onRestored }: VersionHistoryPane
       const res = await fetchVersions(filePath);
       setVersions(res.versions);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Restore failed");
+      setError(translateError(err, "files"));
     } finally {
       setRestoringId(null);
     }

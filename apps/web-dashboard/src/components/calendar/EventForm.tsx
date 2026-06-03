@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
@@ -141,8 +142,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
       onSaved();
       onClose();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Save failed";
-      toast(msg, "error");
+      toast(translateError(err, "calendar"), "error");
     } finally {
       setSaving(false);
     }
@@ -163,8 +163,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
       onSaved();
       onClose();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Delete failed";
-      toast(msg, "error");
+      toast(translateError(err, "calendar"), "error");
       throw err;
     } finally {
       setSaving(false);

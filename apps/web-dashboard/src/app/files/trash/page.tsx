@@ -10,6 +10,7 @@ import {
   deleteTrashItem,
   emptyTrash,
 } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 
 export default function TrashPage() {
   const { items, isLoading, refresh } = useTrash();
@@ -20,7 +21,7 @@ export default function TrashPage() {
       await restoreTrashItem(name);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Restore failed");
+      toast(translateError(err, "files"));
     }
   };
 
@@ -29,7 +30,7 @@ export default function TrashPage() {
       await deleteTrashItem(name);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed");
+      toast(translateError(err, "files"));
     }
   };
 
@@ -38,7 +39,7 @@ export default function TrashPage() {
       await emptyTrash();
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Empty trash failed");
+      toast(translateError(err, "files"));
     }
   };
 
