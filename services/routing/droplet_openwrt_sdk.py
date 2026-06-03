@@ -31,11 +31,56 @@ import os
 import time
 import logging
 from contextlib import contextmanager
+from enum import Enum
 from typing import Any, Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 logger = logging.getLogger("droplet.openwrt")
+
+
+# ---------------------------------------------------------------------------
+# Deployment topology (ADR-018 Decision 2)
+# ---------------------------------------------------------------------------
+class DeploymentTopology(str, Enum):
+    """How this Droplet box sits on the network — an EXPLICIT, indexable state,
+    never derived from the absence of a field (rule 10; mirrors the
+    ``ApDeviceStatus`` / ``BrainMemoryItemStatus`` enum pattern, and the
+    ``interface_stub(present=…)`` presence signal).
+
+    * ``PRIMARY_ROUTER`` — the box owns the WAN uplink (ISP): the WAN-facing
+      interface is present and up, with no upstream router handing it a default
+      gateway. It IS the edge.
+    * ``DOWNSTREAM_ROUTER`` — the box is plugged into an existing upstream
+      network; its WAN-facing interface has an upstream default-route gateway
+      (it is a DHCP client of the home/ISP router). It keeps its own LAN for
+      devices and NATs them out the WAN. The upstream network is NEVER mutated —
+      detection is read-only probing only.
+    * ``UNKNOWN`` — the WAN-facing interface is not present on this deployment
+      shape (the LAN-only single-box that motivated ADR-018), so the posture
+      cannot be determined. We refuse to GUESS one of the two real postures from
+      that absence; this is the explicit "undetermined" member, with the
+      evidence dict carrying ``wan_present=False`` so the caller knows why.
+
+    ``str``-valued so it round-trips cleanly through JSON on the endpoint and is
+    indexable by name (``DeploymentTopology["PRIMARY_ROUTER"]``).
+    """
+
+    PRIMARY_ROUTER = "PRIMARY_ROUTER"
+    DOWNSTREAM_ROUTER = "DOWNSTREAM_ROUTER"
+    UNKNOWN = "UNKNOWN"
+
+
+# The logical interface the SDK treats as the WAN uplink across every shape —
+# the same one `get_all_interface_statuses()`, `_resolve_wan_device`, and the
+# DuckDNS interface selection already interrogate. Named so the probe never
+# invents a second "which interface is the WAN" path.
+WAN_INTERFACE_NAME = "wan"
+
+# Default-route targets that mean "upstream gateway" on the WAN interface's
+# ubus `route` list. OpenWrt reports a default route as target 0.0.0.0/0 (IPv4)
+# or ::/0 (IPv6) with a `nexthop` pointing at the upstream router.
+_DEFAULT_ROUTE_TARGETS = frozenset({"0.0.0.0", "::"})
 
 
 # ---------------------------------------------------------------------------
@@ -1649,6 +1694,100 @@ def get_network_summary(router: DropletRouter) -> dict:
         "wireless": _section_or(router.wireless.status, {}),
         "dhcp_leases": _section_or(router.dhcp.active_leases, []),
         "firewall_zones": _section_or(router.firewall.get_zones, {}),
+    }
+
+
+def _find_upstream_gateway(wan_status: dict) -> Optional[str]:
+    """Return the upstream default-route gateway on the WAN interface, or None.
+
+    Reads the interface's ubus ``route`` list (same status shape
+    `get_all_interface_statuses()` returns; `interface_stub` declares
+    ``route: []``). An upstream gateway is a default route — target 0.0.0.0/0
+    (IPv4) or ::/0 (IPv6) — carrying a non-empty ``nexthop``. The presence of
+    such a route is the evidence that *something upstream* is routing for us,
+    i.e. the box is plugged into an existing network rather than owning the edge.
+
+    Read-only: this only inspects status the SDK already fetched; it never
+    issues a write or touches the upstream.
+    """
+    routes = wan_status.get("route")
+    if not isinstance(routes, list):
+        return None
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        target = route.get("target")
+        # A default route has mask 0; tolerate the field being absent on odd
+        # builds by keying primarily on the 0.0.0.0 / :: target.
+        mask = route.get("mask", 0)
+        nexthop = route.get("nexthop")
+        if (
+            target in _DEFAULT_ROUTE_TARGETS
+            and (mask in (0, "0") or mask == 0)
+            and isinstance(nexthop, str)
+            and nexthop
+        ):
+            return nexthop
+    return None
+
+
+def detect_deployment_topology(router: DropletRouter) -> dict:
+    """Determine this box's :class:`DeploymentTopology` by probing the WAN-facing
+    interface for an upstream gateway — ADR-018 Decision 2.
+
+    Reuses ``NetworkApi.get_all_interface_statuses()`` (the SAME shape-detection
+    mechanism `get_network_summary` and the DuckDNS interface selection use, per
+    ADR-011) so there is exactly one "which interfaces are present" path. The
+    posture is an EXPLICIT enum, never inferred from a null/absent field
+    (rule 10):
+
+    * WAN present + up + an upstream default-route gateway → ``DOWNSTREAM_ROUTER``.
+    * WAN present + no upstream gateway → ``PRIMARY_ROUTER`` (the box owns the edge).
+    * WAN not present on this shape → ``UNKNOWN`` (we do not guess a posture from
+      absence; the LAN-only single-box case).
+
+    Returns ``{"posture": DeploymentTopology, "evidence": {...}}``. The evidence
+    surfaces *why* the posture was chosen: which interface is the WAN, whether it
+    is present/up, and whether an upstream gateway was found. This is detection
+    only — it issues no writes and never mutates the upstream network. Genuine
+    ubus faults (e.g. PERMISSION_DENIED) and transport loss propagate to the
+    caller rather than being masked as a posture.
+    """
+    statuses = router.network.get_all_interface_statuses()
+    wan = statuses.get(WAN_INTERFACE_NAME)
+
+    # Absent WAN — either no entry at all, or the explicit present:False stub a
+    # LAN-only shape returns. Either way the posture is undetermined, NOT guessed.
+    wan_present = isinstance(wan, dict) and wan.get("present") is True
+    if not wan_present:
+        return {
+            "posture": DeploymentTopology.UNKNOWN,
+            "evidence": {
+                "wan_interface": WAN_INTERFACE_NAME,
+                "wan_present": False,
+                "wan_up": False,
+                "wan_device": "",
+                "upstream_gateway_present": False,
+                "upstream_gateway": None,
+            },
+        }
+
+    gateway = _find_upstream_gateway(wan)
+    posture = (
+        DeploymentTopology.DOWNSTREAM_ROUTER
+        if gateway is not None
+        else DeploymentTopology.PRIMARY_ROUTER
+    )
+    return {
+        "posture": posture,
+        "evidence": {
+            "wan_interface": WAN_INTERFACE_NAME,
+            "wan_present": True,
+            "wan_up": bool(wan.get("up")),
+            "wan_device": wan.get("l3_device") or wan.get("device") or "",
+            "upstream_gateway_present": gateway is not None,
+            "upstream_gateway": gateway,
+        },
     }
 
 
