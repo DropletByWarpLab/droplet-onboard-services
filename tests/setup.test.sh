@@ -184,6 +184,34 @@ else
   fail "DROPLET_AP_MODE duplicated/changed on second call (found ${AP_MODE_COUNT2})"
 fi
 
+# --- Shape-aware CAMERA_SUBNET (ADR-018 Decision 4 / T5) ------------------
+# The compose default CAMERA_SUBNET is 192.168.100.0/24 — the multi-box
+# OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). On the
+# single-box shape the cameras live on the box's own LAN (br-lan,
+# 192.168.20.0/24 per scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf),
+# NOT on a separate VLAN — so the multi-box default would scan an empty
+# subnet and find nothing (the live "camera scan finds nothing" symptom).
+# configure_single_box_env must pin CAMERA_SUBNET to the single-box camera
+# network so camera-discovery scans where the cameras actually are.
+# Two calls already ran above, so this also asserts idempotency.
+CAM_SUBNET_COUNT=$(grep -cE '^CAMERA_SUBNET=192\.168\.20\.0/24$' "$TMP_ROOT/.env" || true)
+if [ "$CAM_SUBNET_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets CAMERA_SUBNET=192.168.20.0/24 (single occurrence, idempotent)"
+else
+  fail "expected exactly one 'CAMERA_SUBNET=192.168.20.0/24' in .env, found ${CAM_SUBNET_COUNT}"
+fi
+
+# The last-wins CAMERA_SUBNET (what docker-compose env_file actually uses)
+# must be the single-box network, not the inherited multi-box default. This
+# guards against an append-without-strip regression that would leave the
+# 192.168.100.0/24 default as the effective value.
+CAM_SUBNET_EFFECTIVE=$( { grep -E '^CAMERA_SUBNET=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$CAM_SUBNET_EFFECTIVE" = "192.168.20.0/24" ]; then
+  pass "effective (last-wins) CAMERA_SUBNET is the single-box network 192.168.20.0/24"
+else
+  fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected 192.168.20.0/24)"
+fi
+
 # =============================================================================
 # Phase 4: install-device-bridge.sh provisions host pairing-QR deps (WARP-654)
 # =============================================================================
@@ -234,6 +262,46 @@ if grep -q 'no host pip deps to gate on' "$BRIDGE_INSTALL"; then
   fail "install-device-bridge.sh still claims 'no host pip deps to gate on' (stale after WARP-654 QR feature)"
 else
   pass "install-device-bridge.sh comment no longer claims zero host pip deps"
+fi
+
+# =============================================================================
+# Phase 5: camera-discovery is part of the single-box shape (ADR-018 T5)
+# =============================================================================
+# Static assertion on docker/docker-compose.yml: the camera-discovery service
+# must be reachable on the single-box deployment, which activates the
+# COMPOSE_PROFILES set { linux, display, single-box } (see Phase 3 +
+# scripts/lib/single-box.sh). The service was previously gated to `full`
+# ONLY, which the single-box never activates — so no camera-discovery
+# container ran and the camera scan found nothing (the live symptom #5 root
+# cause). A compose service runs when ANY of its profiles is active, so the
+# fix is to add `single-box` to the service's profile list (NOT to drop the
+# profile guard, which would force it onto macOS dev installs).
+echo "--- Phase 5: camera-discovery enabled on single-box (compose profile) ---"
+
+COMPOSE_FILE_REAL="$REPO_ROOT_REAL/docker/docker-compose.yml"
+
+# Extract the `profiles:` line that belongs to the camera-discovery service.
+# The service block starts at `  camera-discovery:` and ends at the next
+# top-level (2-space-indented) service key. awk captures the profiles line
+# within that window.
+CAM_PROFILES_LINE=$(awk '
+  /^  camera-discovery:[[:space:]]*$/ { in_svc=1; next }
+  in_svc && /^  [a-z]/               { in_svc=0 }
+  in_svc && /^[[:space:]]+profiles:/ { print; exit }
+' "$COMPOSE_FILE_REAL")
+
+if printf '%s' "$CAM_PROFILES_LINE" | grep -q 'single-box'; then
+  pass "camera-discovery profiles include single-box (runs on the single-box shape)"
+else
+  fail "camera-discovery profiles do NOT include single-box — orphaned on single-box (found: '${CAM_PROFILES_LINE}')"
+fi
+
+# Defence against scope-creep / regression: the service must STILL keep the
+# `full` profile so the multi-box / explicit-full path is unchanged.
+if printf '%s' "$CAM_PROFILES_LINE" | grep -q 'full'; then
+  pass "camera-discovery still keeps the full profile (multi-box path unchanged)"
+else
+  fail "camera-discovery lost the full profile (regressed the multi-box/full path)"
 fi
 
 # =============================================================================
