@@ -104,6 +104,17 @@ const USER_KEY = "droplet-auth-user";
 const AUTH_INIT_TIMEOUT_MS = 6_000;
 
 /**
+ * Fresh budget for `authFetch`'s post-refresh retry (onboard#477 review). The
+ * retry must NOT inherit the caller's `init.signal`: that signal (e.g.
+ * `restoreSession`'s `AUTH_INIT_TIMEOUT_MS` cold-boot budget) may already be
+ * consumed by the initial request + the token refresh, so reusing it fires the
+ * retry with an already-aborted signal → instant `AbortError` → a valid-but-slow
+ * session is wrongly treated as unauthenticated. A fresh, self-contained budget
+ * keeps the single retry bounded without depending on the caller's clock.
+ */
+const AUTHFETCH_RETRY_TIMEOUT_MS = 6_000;
+
+/**
  * An AbortSignal that fires after `ms`, with a jsdom/older-runtime fallback for
  * environments where `AbortSignal.timeout` isn't implemented (keeps unit tests
  * from crashing on `AbortSignal.timeout is not a function`).
@@ -161,7 +172,15 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
 
   const refreshed = await attemptRefresh();
   if (refreshed) {
-    return fetch(url, { ...init, credentials: "same-origin" });
+    // Give the retry a FRESH timeout instead of inheriting `init.signal`
+    // (onboard#477): the caller's signal may already be spent by the initial
+    // request + refresh, and spreading it here would abort the retry instantly.
+    const { signal: _staleSignal, ...rest } = init ?? {};
+    return fetch(url, {
+      ...rest,
+      signal: timeoutSignal(AUTHFETCH_RETRY_TIMEOUT_MS),
+      credentials: "same-origin",
+    });
   }
 
   // Refresh failed — session is truly dead. Drop cached user and bounce to
@@ -384,7 +403,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // M3 — retry affordance for the lifecycle probe.
   const retrySetupProbe = useCallback(async () => {
-    await probeSetupState();
+    // Bound the retry the same way init() does (onboard#477): without a signal a
+    // still-hung /api/setup/state leaves setupProbeError set + probeBlocked true
+    // while isLoading is already false, freezing the retry screen with no escape.
+    await probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
   }, [probeSetupState]);
 
   const completeTour = useCallback(async () => {
