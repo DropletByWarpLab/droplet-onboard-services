@@ -15,7 +15,9 @@ export function useDrives() {
     drives: data?.drives ?? [],
     isLoading,
     error,
-    bridgeError: data?.error,
+    bridgeError:
+      data?.error ??
+      (data?.reason === "bridge_unavailable" ? "bridge_unavailable" : undefined),
     refresh: mutate,
   };
 }

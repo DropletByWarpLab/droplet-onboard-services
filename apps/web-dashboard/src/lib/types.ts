@@ -426,6 +426,7 @@ export interface DrivesResponse {
   count: number;
   snapshot_at?: string;
   error?: string;
+  reason?: string;
 }
 
 /** PR #373 — one subsystem descriptor in the onboarding Claim hardware card. */
