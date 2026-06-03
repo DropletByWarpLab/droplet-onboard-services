@@ -58,18 +58,21 @@ describe("run_scene", () => {
     expect(calledPath).not.toContain("confirm");
   });
 
-  // TOOLS-01: a 409 confirmation_required from the route must be relayed
-  // as a confirmation_required ToolResult (not a hard SCENE_RUN_FAILED),
-  // exactly like every other write tool's confirmation pass-through.
-  it("relays the route's 409 confirmation_required as status=confirmation_required", async () => {
+  // WARP-640: a 202 confirmation_required from the route is relayed as a
+  // confirmation_required ToolResult that FORWARDS the single-use token (in
+  // error.details), so the dashboard chip can render "Approve & run" — not a
+  // hard SCENE_RUN_FAILED.
+  it("relays the route's 202 confirmation_required and forwards the token", async () => {
     const post = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          error: "confirmation_required",
-          detail: "scene runs are confirm-required — re-POST with ?confirm=true",
+          status: "confirmation_required",
+          confirmationToken: "tok-abc123",
           sceneId: SCENE_UUID,
+          message:
+            'Running "Movie night" will run 2 device action(s). Approve to run it.',
         }),
-        { status: 409, headers: { "content-type": "application/json" } },
+        { status: 202, headers: { "content-type": "application/json" } },
       ),
     );
     const r = await runScene.handler({ scene: SCENE_UUID }, ctxWith(post));
@@ -77,7 +80,14 @@ describe("run_scene", () => {
     if (!r.ok) {
       expect(r.status).toBe("confirmation_required");
       expect(r.error.code).toBe("CONFIRMATION_REQUIRED");
+      expect(r.error.details).toMatchObject({
+        type: "scene_run",
+        sceneId: SCENE_UUID,
+        confirmationToken: "tok-abc123",
+      });
     }
+    // Still never pre-satisfies the gate.
+    expect(post.mock.calls[0][0]).toBe(`/api/scenes/${SCENE_UUID}/run`);
   });
 
   it("resolves a scene by name via GET /api/scenes before running it", async () => {
