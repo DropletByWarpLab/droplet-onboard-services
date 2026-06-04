@@ -31,7 +31,6 @@ import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
-import { SwitchPortMap } from "@/components/network/SwitchPortMap";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -1038,12 +1037,6 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
-
-      {/* ADR-018 item 9: the managed switch is part of the box's network
-          fabric ("Droplet replaces the router, switch, NVR" — FEATURES §2.6).
-          Read-only port/VLAN/PoE map; writes stay on the orchestrator Tier-2
-          confirmation path. */}
-      <SwitchPortMap />
     </div>
   );
 }
