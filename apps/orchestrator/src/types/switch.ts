@@ -65,8 +65,8 @@ export interface CameraSetupResult {
 // These are the shapes the dashboard switch panel (PR-B) binds to. The
 // orchestrator aggregation joins the switch-service raw reads (system-info +
 // poe + provision-config + port-status + vlan_port_stat + vlan_membership)
-// into these. They mirror the prototype's static SWITCH_STATUS / buildPorts()
-// in src/network-switch.jsx exactly.
+// into these. They mirror the design handoff's static SWITCH_STATUS /
+// buildPorts() reference shapes exactly.
 // ===========================================================================
 
 /** "flat-lan" → cameras share the LAN; "segmented" → cameras isolated on VLAN 100. */
