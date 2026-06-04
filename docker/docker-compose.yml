@@ -1337,7 +1337,14 @@ services:
       AWS_S3_ENDPOINT_URL: http://pm-minio:9000
       AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
       FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
-    mem_limit: ${PM_API_MEM_LIMIT:-768m}
+      # The api entrypoint runs `exec gunicorn -w "$GUNICORN_WORKERS" ...`, so an
+      # unset value passes `-w ''` → "invalid int value" → gunicorn never starts
+      # and pm-api restart-loops. Plane's variables.env defaults this; the bare
+      # image does not. Single-box default 2 (override via DROPLET_PM_GUNICORN_WORKERS).
+      GUNICORN_WORKERS: ${DROPLET_PM_GUNICORN_WORKERS:-2}
+    # 1g (was 768m): pm-api now actually runs gunicorn workers (it never did before
+    # the command fix); 2 uvicorn workers + the Django app need the headroom.
+    mem_limit: ${PM_API_MEM_LIMIT:-1g}
     cpus: ${PM_API_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
