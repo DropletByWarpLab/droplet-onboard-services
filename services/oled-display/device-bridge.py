@@ -1403,10 +1403,6 @@ _POOL_OPS = frozenset({
     "pool_set_level",
     "pool_add_spare",
     "pool_remove_disk",
-    # WARP-662: adopt (wipe + reformat + mount) a previously-used disk. Same
-    # auth + single-use-confirm-token + host-script-only posture as the pool
-    # ops; the host script enforces the OS-disk refusal.
-    "drive_adopt",
 })
 
 # Path to the repo-tracked host script, installed by setup.sh via
