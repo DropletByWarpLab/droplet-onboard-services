@@ -607,7 +607,8 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
 
       {/* ADR-018 item 12 — managed-switch panel. Sits below the KPI strip
           (the design's "throughput chart" anchor doesn't exist on this tabbed
-          page; Overview is visible in both Simple + Advanced modes). Renders
+          page; Overview is only visible in Advanced mode — in Simple mode the
+          wrapper div is hidden and NetworkSimple renders instead). Renders
           its own empty/loading/error states and self-gates RBAC. */}
       <SwitchPanel />
     </div>

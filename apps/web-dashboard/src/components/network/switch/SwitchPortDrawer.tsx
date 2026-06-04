@@ -207,7 +207,9 @@ export function SwitchPortDrawer({
                         port,
                         enabled: !poeDelivering,
                         what: poeDelivering ? `Cut PoE on ${port.label}?` : `Restore PoE on ${port.label}?`,
-                        blast: `${name} is powered over this port — cutting PoE powers it off immediately.`,
+                        blast: poeDelivering
+                          ? `${name} is powered over this port — cutting PoE powers it off immediately.`
+                          : `PoE power will be restored on this port — ${name} will power back on.`,
                       })
                     }
                     className="flex items-center gap-2.5 p-3 border border-separator rounded-[10px] bg-surface-primary text-left w-full transition-all duration-150 hover:border-accent/40 hover:bg-accent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
