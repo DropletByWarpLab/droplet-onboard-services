@@ -12,13 +12,18 @@ verify the release `manifest.json`. This is the FIPS-approved primitive per
 | `droplet-release.pub` | **Yes** | The PUBLIC verify key. `droplet-image verify` reads it (or `--pubkey`) to check a manifest signature. Safe to distribute — it can only verify, never sign. |
 | `droplet-release.key` | **NEVER** | The PRIVATE signing key. Never committed; `.gitignore`d. Referenced only via `$DROPLET_RELEASE_SIGNING_KEY` at sign time. |
 
-> **The `droplet-release.pub` checked in today is a PLACEHOLDER.** It was
-> generated with `openssl` and its matching private key was destroyed
-> immediately — it signs nothing. The real release keypair is minted and
-> escrowed at the **deferred, confirmation-gated first publish** (ADR-020 §D3:
-> creating `DropletByWarpLab/releases`, generating the keypair, and the first
-> `publish` are out of scope for WARP-663). When that happens, replace this file
-> with the real public key in the same commit that performs the first publish.
+> **The `droplet-release.pub` checked in here is the REAL release trust anchor.**
+> Minted 2026-06-04 for the v0.2.0 first publish. Key id (SHA-256 of the SPKI
+> public key): `f797b7c207780951d651f697eeadb2452722d7f3bcc2fc4ac0d770f364d154ea`.
+>
+> **Private-key custody — ACTION REQUIRED.** The matching private key currently
+> lives at `C:\Users\stefa\.droplet-secrets\droplet-release-signing.key` on the
+> signing host, with the ACL restricted to the owner. This is **interim escrow**
+> — it must be moved into the org's proper key store (password manager / vault /
+> HSM) and removed from the local disk once escrowed. It is outside every repo
+> and OneDrive-synced path; it is never committed (referenced only via
+> `$DROPLET_RELEASE_SIGNING_KEY`). If this key is lost, rotate per the section
+> below; if it is exposed, rotate immediately and re-sign every live manifest.
 
 ## Generating the real release keypair (first-publish step)
 
