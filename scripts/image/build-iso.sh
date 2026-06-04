@@ -170,17 +170,18 @@ echo "  SHA256 OK (${UBUNTU_ISO_SHA256})"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 4: repack with the embedded autoinstall seed (dockerized xorriso)
+# Step 4: inject the autoinstall seed into the ISO (dockerized xorriso)
 # ---------------------------------------------------------------------------
-# We do the unpack -> inject -> xorriso repack INSIDE an Ubuntu container so the
-# host needs no xorriso/rsync. The seed goes to /server/{user-data,meta-data};
-# the GRUB menu is replaced so the default entry boots `autoinstall
-# ds=nocloud;s=/cdrom/server/`.
-echo "[4/5] Repacking ISO with the autoinstall seed (dockerized xorriso)..."
+# We modify the ISO IN PLACE rather than extract + mkisofs-rebuild: load the
+# upstream ISO, add the nocloud seed at /server/, swap in our GRUB menu, and
+# write a new ISO. `-boot_image any replay` re-creates BOTH boot images (the
+# BIOS El-Torito image AND the UEFI GPT-appended ESP) at the new, correct
+# offsets. This matters because Ubuntu stores the hybrid boot blobs OUTSIDE the
+# ISO9660 tree — a plain extract loses them and a hand-rolled mkisofs recipe is
+# fragile; replay reads them from the loaded image and reproduces them exactly.
+# xorriso runs in a container so the host needs no xorriso.
+echo "[4/5] Injecting the autoinstall seed (dockerized xorriso, boot replay)..."
 
-# The inner script runs as root in the container. /src is the build dir
-# (read-only), /out is output/. We extract the ISO, drop the seed in, rewrite
-# grub.cfg, then xorriso-rebuild an EFI+BIOS bootable ISO.
 # MSYS_NO_PATHCONV stops Git-Bash from rewriting the container-side mount
 # targets (/work, /seed, /out, …) into Windows paths. No-op on a Linux host.
 MSYS_NO_PATHCONV=1 docker run --rm \
@@ -190,40 +191,32 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${OUTPUT_DIR}:/out" \
   -e "UBUNTU_ISO=${UBUNTU_ISO}" \
   -e "OUT_ISO_NAME=$(basename "$OUT_ISO")" \
+  -e "DROPLET_VERSION=${VERSION}" \
   ubuntu:24.04 \
   bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null
-    apt-get install -y -qq --no-install-recommends xorriso rsync >/dev/null
+    apt-get install -y -qq --no-install-recommends xorriso >/dev/null
 
-    mkdir -p /work/extract
-    # Extract the source ISO contents.
-    xorriso -osirrox on -indev "/work/${UBUNTU_ISO}" -extract / /work/extract
-    chmod -R u+w /work/extract
+    rm -f "/out/${OUT_ISO_NAME}"
+    # ISO9660 volume id: strict d-characters only (A-Z 0-9 _), <= 32 chars, so
+    # dots in the version become underscores (DROPLET_0_2_0).
+    volid="DROPLET_${DROPLET_VERSION//./_}"
 
-    # Inject the nocloud seed at /server/ and replace the GRUB menu.
-    mkdir -p /work/extract/server
-    cp /seed/user-data /work/extract/server/user-data
-    cp /seed/meta-data /work/extract/server/meta-data
-    cp /grub-autoinstall.cfg /work/extract/boot/grub/grub.cfg
-
-    # Repack a hybrid EFI/BIOS bootable ISO. The El Torito + GPT-appended-
-    # partition flags below are the canonical recipe for a modern Ubuntu
-    # live-server repack (efi.img is the appended EFI system partition).
-    xorriso -as mkisofs \
-      -r -V "DROPLET_${OUT_ISO_NAME}" \
-      -o "/out/${OUT_ISO_NAME}" \
-      --grub2-mbr /work/extract/boot/grub/i386-pc/boot_hybrid.img \
-      -partition_offset 16 \
-      --mbr-force-bootable \
-      -append_partition 2 0xEF /work/extract/EFI/boot/efi.img \
-      -appended_part_as_gpt \
-      -c /boot.catalog \
-      -b /boot/grub/i386-pc/eltorito.img \
-        -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info \
-      -eltorito-alt-boot \
-      -e --interval:appended_partition_2:all:: -no-emul-boot \
-      /work/extract
+    # In-place modify: replay the upstream boot setup, add the nocloud seed at
+    # /server/, and replace the GRUB menu (-overwrite on lets the map replace
+    # the existing grub.cfg). No extract, no fragile boot-image reconstruction.
+    xorriso \
+      -indev "/work/${UBUNTU_ISO}" \
+      -outdev "/out/${OUT_ISO_NAME}" \
+      -boot_image any replay \
+      -volid "$volid" \
+      -compliance no_emul_toc \
+      -overwrite on \
+      -map /seed/user-data /server/user-data \
+      -map /seed/meta-data /server/meta-data \
+      -map /grub-autoinstall.cfg /boot/grub/grub.cfg \
+      -commit -end
     echo "repack complete: /out/${OUT_ISO_NAME}"
   '
 echo ""
