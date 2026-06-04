@@ -179,17 +179,21 @@ export function StorageStep({
     if (!chosenLevel || !chosenOption?.selectable) return;
     setCreateError(null);
     setCreating(true);
+    const members = poolMembers.map((d) => d.device);
     try {
       const token = await requestCreatePool({
         // md device name is owner-agnostic — first pool is md0 on a fresh box
         // (the host script + bridge are authoritative; this is the request).
         device: "md0",
         level: chosenLevel,
-        members: poolMembers.map((d) => d.device),
-        // The host-script's typed double-confirm phrase. The dashboard owner
-        // has already passed role + token gates; the phrase satisfies the
-        // script's last-line check (ADR-019 D4.3).
-        confirmPhrase: "ERASE AND CREATE",
+        members,
+        // The host-script's typed double-confirm gate (ADR-019 D4.3) refuses
+        // to run unless the phrase NAMES every member's short device — that's
+        // the "never run blind" check. The owner has already passed role +
+        // confirm-token gates and acknowledged the destructive ConfirmDialog
+        // (which names each drive + size); this phrase is the machine token
+        // that satisfies the last-line script check by listing the members.
+        confirmPhrase: buildConfirmPhrase(members),
       });
       setPendingToken({
         confirmationToken: token.confirmationToken,
@@ -535,6 +539,21 @@ function friendlyCreateError(err: unknown): string {
     return "These drives have data on them — back them up first. Droplet won't erase a drive that's in use.";
   }
   return "We couldn't create that pool right now. Try again in a moment.";
+}
+
+/**
+ * Build the host-script confirm phrase (ADR-019 D4.3). The script's "never
+ * run blind" gate requires the phrase to contain every member's SHORT device
+ * basename (case-sensitive substring), e.g. for ["/dev/sda1","/dev/sda2"] →
+ * "ERASE sda1 sda2". The owner-facing confirmation (role + token +
+ * destructive ConfirmDialog naming each drive) is the human gate; this is the
+ * machine token that satisfies the last-line script check.
+ */
+export function buildConfirmPhrase(members: string[]): string {
+  const shorts = members
+    .map((m) => m.split("/").filter(Boolean).pop() ?? "")
+    .filter(Boolean);
+  return `ERASE ${shorts.join(" ")}`.trim();
 }
 
 /** Customer-facing drive name: friendly displayName, then FS label, then the

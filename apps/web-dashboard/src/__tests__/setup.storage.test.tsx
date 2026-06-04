@@ -97,6 +97,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
+import { buildConfirmPhrase } from "@/components/setup/steps/StorageStep";
 import { passClaimStep } from "./helpers/claim-step";
 import { passOrgStep } from "./helpers/org-step";
 
@@ -517,6 +518,11 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
       expect.arrayContaining(["/dev/sda1", "/dev/sda2"]),
     );
     expect(arg.device).toMatch(/^md\d+$/);
+    // The confirm phrase MUST name every member's short device — the host
+    // script's "never run blind" gate (ADR-019 D4.3) refuses otherwise, even
+    // on empty drives.
+    expect(arg.confirmPhrase).toContain("sda1");
+    expect(arg.confirmPhrase).toContain("sda2");
 
     // The confirm dialog states plainly that the drives get erased, and names
     // them with their sizes. (The blast-radius wording also appears inline in
@@ -609,5 +615,24 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     // Merely turning the toggle on and picking a level must never auto-create.
     expect(requestCreatePoolMock).not.toHaveBeenCalled();
     expect(confirmPoolCommandMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildConfirmPhrase (ADR-019 D4.3 — host-script never-run-blind gate)", () => {
+  it("names every member's short device so confirm_names() passes", () => {
+    const phrase = buildConfirmPhrase(["/dev/sda1", "/dev/sda2"]);
+    // The host script does a case-sensitive substring match per member.
+    expect(phrase).toContain("sda1");
+    expect(phrase).toContain("sda2");
+  });
+
+  it("uses the basename, not the full /dev path", () => {
+    const phrase = buildConfirmPhrase(["/dev/nvme0n1", "/dev/nvme1n1"]);
+    expect(phrase).toContain("nvme0n1");
+    expect(phrase).toContain("nvme1n1");
+  });
+
+  it("tolerates an empty member list without throwing", () => {
+    expect(buildConfirmPhrase([])).toBe("ERASE");
   });
 });
