@@ -1148,8 +1148,8 @@ run_check_lifecycle_naming() {
   #   stable prose, few, and not a naming surface — they describe the
   #   single-box deployment's history). Each is a comment, none names a
   #   profile/env/flag/service:
-  #     docker/docker-compose.yml:174   "The dev/POC compromise: override …"
-  #     docker/docker-compose.yml:1093  "Defaults verified live on POC 2026-05-15."
+  #     docker/docker-compose.yml:181   "The dev/POC compromise: override …"
+  #     docker/docker-compose.yml:1131  "Defaults verified live on POC 2026-05-15."
   #     .env.example:33                 "Single-box PoC (Ollama in the bundled …"
   #     scripts/lib/secrets.sh:117      "(single-box PoC). Override before …"
   #     scripts/lib/secrets.sh:159      "works out of the box on the single-box PoC"
@@ -1195,8 +1195,8 @@ run_check_lifecycle_naming() {
 
   # --- Tier 2 per-line allowlist (file:line → 1). Documented above. --------
   declare -A allowlist
-  allowlist["docker/docker-compose.yml:174"]=1
-  allowlist["docker/docker-compose.yml:1093"]=1
+  allowlist["docker/docker-compose.yml:181"]=1
+  allowlist["docker/docker-compose.yml:1131"]=1
   allowlist[".env.example:33"]=1
   allowlist["scripts/lib/secrets.sh:117"]=1
   allowlist["scripts/lib/secrets.sh:159"]=1
