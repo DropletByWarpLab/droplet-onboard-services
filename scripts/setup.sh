@@ -230,6 +230,8 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  single-box: would install /usr/local/sbin/droplet-openwrt-attach +"
     log_info "                  droplet-poc-host-net + 2 systemd units + /etc/default/"
     log_info "                  configs + /etc/avahi/services/droplet.service"
+    log_info "  single-box: would install automount udev rule → /etc/udev/rules.d/99-droplet-automount.rules"
+    log_info "                  + droplet-automount@.service + mnt-droplet.mount → /etc/systemd/system/"
   fi
 
   log_step 5 $TOTAL_STEPS "Build container images"
@@ -363,6 +365,19 @@ main() {
     if [ -x "$SCRIPT_DIR/install-device-bridge.sh" ]; then
       "$SCRIPT_DIR/install-device-bridge.sh" \
         || log_warn "front-panel host integration had issues (continuing)"
+    fi
+    # USB/NVMe hot-plug auto-mount. Installs the udev rule +
+    # droplet-automount@.service so a drive added or swapped at runtime
+    # auto-mounts under /mnt/droplet and surfaces in the dashboard (the
+    # device-bridge merges the automount state with /proc/mounts). Idempotent;
+    # needs root for /etc/udev + /etc/systemd, so run under sudo. Non-fatal —
+    # the box still serves without hot-plug mounting. install.sh deliberately
+    # does NOT sweep already-attached drives (a provisioning foot-gun); the
+    # first mount of an existing drive happens on the next hot-plug/reboot, and
+    # the opt-in setup "adopt drives" step handles deliberate wipe+adopt.
+    if [ -f "$REPO_ROOT/services/automount/install.sh" ]; then
+      sudo bash "$REPO_ROOT/services/automount/install.sh" \
+        || log_warn "USB auto-mount install had issues (continuing)"
     fi
   fi
 
