@@ -227,3 +227,10 @@ curl -s https://releases.ubuntu.com/24.04/SHA256SUMS | grep live-server-amd64.is
 
 CI runs the first three via `.github/workflows/image-pipeline-tests.yml`
 (`workflow_dispatch`-only, matching the repo's other manual-only workflows).
+
+> **Note (WARP-663 handoff):** the Dev push token lacked the GitHub `workflow`
+> OAuth scope, so the workflow file could not be pushed from the Dev branch. Its
+> exact content is staged at
+> [`docs/image-pipeline-tests.workflow.yml.txt`](image-pipeline-tests.workflow.yml.txt);
+> the Manager (with a `workflow`-scoped token) moves it to
+> `.github/workflows/image-pipeline-tests.yml` when opening the PR.
