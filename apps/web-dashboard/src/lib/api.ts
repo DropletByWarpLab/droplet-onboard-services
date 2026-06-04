@@ -37,6 +37,8 @@ import type {
   NetworkOverview,
   StorageStats,
   DrivesResponse,
+  PoolsResponse,
+  PoolInfo,
   DriveLabel,
   WirelessScanResult,
   AuthUser,
@@ -710,6 +712,84 @@ export async function fetchStorage(): Promise<StorageStats> {
 export async function fetchDrives(): Promise<DrivesResponse> {
   const res = await authFetch(`${BASE}/api/storage/drives`);
   if (!res.ok) throw new Error(`Failed to fetch drives: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * BUG-3 / ADR-019: read-only mdadm pool inventory. Returns an honest empty
+ * list when no pool exists — never a fabricated pooled-storage sum.
+ */
+export async function fetchPools(): Promise<PoolsResponse> {
+  const res = await authFetch(`${BASE}/api/storage/pools`);
+  if (!res.ok) throw new Error(`Failed to fetch pools: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * BUG-3 / ADR-019: destructive pool ops are TWO-STEP. Step 1 evaluates and
+ * returns a single-use confirm token (202); step 2 confirms it to execute.
+ * Owner/admin only (enforced server-side). Never auto, never AI.
+ */
+export interface PoolCommandToken {
+  status: "confirmation_required";
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+  reason?: string;
+  expiresIn?: number;
+}
+
+/** Step 1: create a pool — returns a confirm token (does NOT create yet). */
+export async function requestCreatePool(input: {
+  device: string;
+  level: PoolInfo["level"];
+  members: string[];
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/pools`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool creation: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Step 1: destroy a pool — returns a confirm token (does NOT destroy yet). */
+export async function requestDestroyPool(
+  device: string,
+  confirmPhrase: string,
+): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/pools/${encodeURIComponent(device)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmPhrase }),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool removal: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Step 2: confirm + execute a queued destructive pool op. */
+export async function confirmPoolCommand(input: {
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`${BASE}/api/storage/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not complete the operation: ${res.status}`);
+  }
   return res.json();
 }
 

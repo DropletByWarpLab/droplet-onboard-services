@@ -70,6 +70,22 @@ fi
 install -m 0755 "$SHUTDOWN_SCRIPT_SRC" "$SHUTDOWN_SCRIPT_DST"
 log "installed $SHUTDOWN_SCRIPT_DST"
 
+# --- 1c) Install the storage-pool host script (BUG-3 / ADR-019) ---
+# The device-bridge's POST /pools/command shells this to run mdadm/mkfs — the
+# ONLY place those run. It lives on the host (root + real block devices, can't
+# run from a container) per architecture-guard rule 20; installed here (never
+# hand-placed) so factory-reset removes it cleanly. It is data-destroying and
+# carries its own hard pre-flight (refuse mounted / has-data / OS-disk; require
+# a typed double-confirm). Repo source is scripts/host/.
+POOL_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-storage-pool.sh"
+POOL_SCRIPT_DST="/usr/local/sbin/droplet-storage-pool.sh"
+if [[ ! -f "$POOL_SCRIPT_SRC" ]]; then
+  log "missing source: $POOL_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$POOL_SCRIPT_SRC" "$POOL_SCRIPT_DST"
+log "installed $POOL_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

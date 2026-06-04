@@ -56,6 +56,8 @@ const EXPECTED_TOOL_NAMES = [
   "list_clips",
   "list_discovered_cameras",
   "list_drives",
+  // BUG-3 — read-only mdadm pool inventory (destructive ops are NOT tools).
+  "list_storage_pools",
   "list_events",
   "list_notifications",
   "list_reminders",

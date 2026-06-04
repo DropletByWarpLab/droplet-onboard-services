@@ -41,6 +41,88 @@ model Drive {
   updatedAt   DateTime @updatedAt
 }
 
+/// BUG-3 / ADR-019: software-RAID (mdadm) storage pool.
+///
+/// Pools are OPTIONAL and owner-driven — nothing auto-creates a row here.
+/// The box runs fine with zero StoragePool rows; "no pool" is the ABSENCE
+/// of any row, which is distinct from a row whose `status` is `none`.
+///
+/// `status` / `level` are EXPLICIT enum columns, never derived from absence
+/// (handbook rule 10; canonical precedent WARP-218 BrainMemoryItemStatus).
+/// Live array state (active/degraded/resyncing) is read from /proc/mdstat by
+/// the device-bridge; the row carries the owner's chosen name/notes + the
+/// last-known status, mirroring how the `Drive` table carries owner labels
+/// alongside the bridge's live inventory.
+///
+/// `device` is the md device the owner created (e.g. "md0") — never a
+/// host-specific default (rule 12); the owner chooses members + level at
+/// create time.
+model StoragePool {
+  /// md device name without the /dev/ prefix (e.g. "md0"). Stable id.
+  device      String        @id
+  displayName String
+  level       ArrayLevel
+  status      PoolStatus    @default(none)
+  notes       String?
+  members     PoolMember[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([status])
+}
+
+/// BUG-3 / ADR-019: one disk's membership in a StoragePool.
+///
+/// `role` is an EXPLICIT enum (active/spare/failed/unassigned), never guessed
+/// from null. A member's identity is the block device path the owner assigned
+/// at create time; `uuid` (FS/array UUID) is recorded when known so the
+/// dashboard can cross-reference the `Drive`/bridge inventory.
+model PoolMember {
+  id         String      @id @default(uuid())
+  pool       StoragePool @relation(fields: [poolDevice], references: [device], onDelete: Cascade)
+  poolDevice String
+  /// Block device path of this member (e.g. "/dev/sda"). Owner-chosen.
+  device     String
+  /// FS/array UUID when known (from the bridge inventory); null until resolved.
+  uuid       String?
+  role       DiskRole    @default(unassigned)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@unique([poolDevice, device])
+  @@index([poolDevice])
+}
+
+/// BUG-3 / ADR-019: live pool health. EXPLICIT (rule 10), never derived from
+/// absence. `none` is a first-class value for a pre-create / torn-down record;
+/// "no pool at all" is the absence of any StoragePool row.
+enum PoolStatus {
+  active
+  degraded
+  resyncing
+  failed
+  none
+}
+
+/// BUG-3 / ADR-019: a disk's role within an array. EXPLICIT (rule 10).
+enum DiskRole {
+  active
+  spare
+  failed
+  unassigned
+}
+
+/// BUG-3 / ADR-019: the RAID level of an array. Owner-chosen at create time —
+/// never a host-specific default (rule 12). `jbod` = linear/concat (no RAID).
+enum ArrayLevel {
+  raid0
+  raid1
+  raid5
+  raid6
+  raid10
+  jbod
+}
+
 /// WARP-304: per-user persistent chat sessions for the /chat page.
 /// `userId` is the Nextcloud username from the auth middleware. The dashboard
 /// only ever lists / reads sessions for the requesting user — owner/admin do

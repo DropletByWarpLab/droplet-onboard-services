@@ -442,6 +442,28 @@ export interface DrivesResponse {
   reason?: string;
 }
 
+/** BUG-3 / ADR-019: one mdadm software-RAID pool as the bridge reports it,
+ *  joined with the owner's chosen displayName / notes. `status` / `level` are
+ *  the explicit ADR-019 enum values (never raw mdstat). */
+export interface PoolInfo {
+  /** md device name without /dev/ (e.g. "md0"). */
+  device: string;
+  level: "raid0" | "raid1" | "raid5" | "raid6" | "raid10" | "jbod";
+  status: "active" | "degraded" | "resyncing" | "failed" | "none";
+  members: string[];
+  /** Owner-chosen name from the StoragePool row; null until set. */
+  displayName?: string | null;
+  notes?: string | null;
+}
+
+export interface PoolsResponse {
+  pools: PoolInfo[];
+  count: number;
+  snapshot_at?: string;
+  error?: string;
+  reason?: string;
+}
+
 /** PR #373 — one subsystem descriptor in the onboarding Claim hardware card. */
 export interface ApplianceSpec {
   label: string;

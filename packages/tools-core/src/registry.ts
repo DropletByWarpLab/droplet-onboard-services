@@ -83,6 +83,9 @@ import listNotifications from "./handlers/notifications/list-notifications.js";
 // system
 import getSystemHealth from "./handlers/system/get-system-health.js";
 import listDrives from "./handlers/system/list-drives.js";
+// BUG-3: read-only storage-pool (mdadm) inventory. Destructive pool ops are
+// deliberately NOT registered here (ADR-019 D5 — AI-blocked entirely).
+import listStoragePools from "./handlers/system/list-storage-pools.js";
 // WARP-461: durable memory facts (Phase B4)
 import memoryRecall from "./handlers/memory/recall.js";
 import memoryExtractFact from "./handlers/memory/extract.js";
@@ -184,6 +187,7 @@ const allTools: Tool[] = [
   // system
   getSystemHealth,
   listDrives,
+  listStoragePools,
   // WARP-466: D2 email
   emailSearch,
   emailRead,
