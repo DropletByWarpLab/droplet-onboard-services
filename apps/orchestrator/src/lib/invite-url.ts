@@ -226,9 +226,12 @@ export async function buildInviteUrl(req: Request, token: string): Promise<strin
   const picked = pickInviteHost(req, origin);
 
   if (picked) {
-    // A canonical host (or an allowlisted host that came from an https origin)
-    // is served over https; a same-host request that arrived over http keeps
-    // http only when it wasn't promoted from a canonical/https origin.
+    // The canonical origin is always https. An allowlisted request host is
+    // https when the request arrived over TLS (direct or via `x-forwarded-proto`)
+    // or when it matches one of the box's trusted origins — which, in every
+    // production case, is the https LAN/public origin. (The only non-https
+    // trusted origin is the dev dashboard at http://localhost:3001, which is
+    // never an invite-email target.) Upgrading to https is the safe direction.
     const https =
       origin.canonicalHost === picked
         ? origin.canonicalIsHttps
