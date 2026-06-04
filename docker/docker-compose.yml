@@ -838,7 +838,15 @@ services:
     # frigate as best-effort over its localhost HTTP client.
     depends_on:
       - broker
-    profiles: ["full"]
+    # ADR-018 Decision 4 / T5: also active on the `single-box` shape. A compose
+    # service runs when ANY of its profiles is active; the single-box brings up
+    # { linux, display, single-box } (scripts/lib/single-box.sh), so without
+    # `single-box` here camera-discovery was orphaned — no container ran and the
+    # camera scan found nothing (live symptom #5). `full` is retained so the
+    # multi-box / explicit-`full` path is unchanged. The shape's actual camera
+    # network is set via the CAMERA_SUBNET knob (single-box → 192.168.20.0/24),
+    # not by dropping the profile guard onto macOS dev installs.
+    profiles: ["full", "single-box"]
     restart: always
     mem_limit: ${CAMERA_DISCOVERY_MEM_LIMIT:-256m}
     cpus: ${CAMERA_DISCOVERY_CPUS:-1.0}

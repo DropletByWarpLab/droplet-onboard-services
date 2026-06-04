@@ -335,7 +335,11 @@ configure_single_box_env() {
 # Single-box deployment knobs (managed by scripts/lib/single-box.sh —
 # re-run setup.sh --regenerate-env to reset; see docs/SINGLE_BOX.md).
 #   COMPOSE_PROFILES     linux (Frigate) + display (OLED sim) + single-box
+#                        (single-box also activates camera-discovery, which
+#                        is otherwise gated to `full`)
 #   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
+#   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
+#                        overrides the multi-box VLAN default 192.168.100.0/24
 #   OLLAMA_URL           compose-internal `ollama` service
 #   OPENSSL_CONF/FIPS/TPM consumer x86 has no FIPS OpenSSL / TPM 2.0
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
@@ -351,6 +355,17 @@ EOF
 
   upsert_env COMPOSE_PROFILES    "$merged_profiles"
   upsert_env FRIGATE_RENDER_NODE /dev/dri/renderD129
+  # CAMERA_SUBNET: the compose default (192.168.100.0/24) is the multi-box
+  # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
+  # single-box shape has no separate camera VLAN today — cameras attach to
+  # the box's own LAN (br-lan, 192.168.20.0/24; see
+  # scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf). Pinning the subnet
+  # to the actual single-box camera network is what makes camera discovery
+  # scan where the cameras are instead of an empty multi-box VLAN (ADR-018
+  # Decision 4). When the OpenWrt single-box unification (ADR-018 T3) lands a
+  # real isolated camera VLAN on this shape, this value moves to that VLAN's
+  # network in lockstep.
+  upsert_env CAMERA_SUBNET       192.168.20.0/24
   upsert_env OLLAMA_URL          http://ollama:11434
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
@@ -366,5 +381,5 @@ EOF
   # fresh box renders a pairing QR without a manual step (WARP-654).
   upsert_env DROPLET_AP_MODE     hostapd
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd)"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd)"
 }
