@@ -145,7 +145,10 @@ mkdir -p "$OUTPUT_DIR" "$WORK_DIR"
 SRC_ISO="${WORK_DIR}/${UBUNTU_ISO}"
 echo "[2/5] Fetching pinned Ubuntu ${UBUNTU_VERSION} live-server ISO..."
 if [ ! -f "$SRC_ISO" ]; then
-  curl -fSL --retry 3 -o "$SRC_ISO" "$UBUNTU_ISO_URL"
+  # Write with a bare filename from inside WORK_DIR. A native curl on a
+  # Git-Bash/Windows host can't open an MSYS-style absolute path ("/c/…");
+  # a bare name in the CWD is portable across Linux and Git-Bash alike.
+  ( cd "$WORK_DIR" && curl -fSL --retry 3 -o "$UBUNTU_ISO" "$UBUNTU_ISO_URL" )
 else
   echo "  Already downloaded: ${SRC_ISO#"$REPO_ROOT"/}"
 fi
@@ -178,7 +181,9 @@ echo "[4/5] Repacking ISO with the autoinstall seed (dockerized xorriso)..."
 # The inner script runs as root in the container. /src is the build dir
 # (read-only), /out is output/. We extract the ISO, drop the seed in, rewrite
 # grub.cfg, then xorriso-rebuild an EFI+BIOS bootable ISO.
-docker run --rm \
+# MSYS_NO_PATHCONV stops Git-Bash from rewriting the container-side mount
+# targets (/work, /seed, /out, …) into Windows paths. No-op on a Linux host.
+MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${WORK_DIR}:/work" \
   -v "${AUTOINSTALL_DIR}:/seed:ro" \
   -v "${GRUB_CFG}:/grub-autoinstall.cfg:ro" \
