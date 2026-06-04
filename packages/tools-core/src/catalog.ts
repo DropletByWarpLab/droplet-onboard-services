@@ -146,7 +146,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "pm_get_work_item",
     "pm_search_work_items",
   ],
-  system: ["get_system_health", "list_drives"],
+  system: ["get_system_health", "list_drives", "list_storage_pools"],
 };
 
 /** Ordered domain list — drives the filter-chip order in the dashboard. */
@@ -240,6 +240,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // System
   get_system_health: "Check that your Droplet is running smoothly",
   list_drives: "See your storage drives and free space",
+  list_storage_pools: "Check your storage pools and whether any need attention",
   // Memory
   memory_recall: "Recall things your Droplet remembers about you",
   memory_extract_fact: "Remember a preference so your Droplet recalls it later",
