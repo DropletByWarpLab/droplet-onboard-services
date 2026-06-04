@@ -209,8 +209,13 @@ async def reconcile_switch(
 
     if cfg.profile not in VALID_PROFILES:
         logger.error(
-            "provisioner: unknown SWITCH_VLAN_PROFILE=%r; staying flat-lan.",
+            "provisioner: unknown SWITCH_VLAN_PROFILE=%r; refusing to provision.",
             cfg.profile,
+        )
+        return _result(
+            "refused",
+            cfg.profile,
+            skipped_reason=f"unknown SWITCH_VLAN_PROFILE={cfg.profile!r}",
         )
 
     # ----- profile gate: segmented is DOUBLE-gated ------------------------

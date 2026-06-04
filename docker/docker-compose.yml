@@ -728,6 +728,10 @@ services:
       - SWITCH_CAMERA_PORTS=${SWITCH_CAMERA_PORTS:-}
       - SWITCH_AP_PORTS=${SWITCH_AP_PORTS:-}
       - SWITCH_CLIENT_PORTS=${SWITCH_CLIENT_PORTS:-}
+      # ADR-018 item 10: plan-only by default; set SWITCH_LIVE_WRITES=1 after
+      # one-time supervised confirmation of the write shape per firmware.
+      - SWITCH_LIVE_WRITES=${SWITCH_LIVE_WRITES:-0}
+      - SWITCH_PROVISION_TIMEOUT=${SWITCH_PROVISION_TIMEOUT:-30}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
     # single-box bundles the managed switch so a plugged-in AP auto-provisions
     # onto the LAN instead of stranding on an isolated VLAN (ADR-018 item 9);
