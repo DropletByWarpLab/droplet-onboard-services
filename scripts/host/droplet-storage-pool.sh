@@ -155,7 +155,7 @@ is_os_disk() {
   # Real: the disk (or a partition of it) that backs the root or /boot mount
   # must never be a RAID member. Resolve the backing source of / and /boot and
   # compare its parent disk to this device's parent disk.
-  local root_src boot_src this_disk
+  local this_disk
   this_disk="$(lsblk -ndo PKNAME "$dev" 2>/dev/null || true)"
   [ -n "$this_disk" ] || this_disk="$(basename "$dev")"
   for mp in / /boot /boot/efi; do
@@ -253,7 +253,6 @@ case "$OP" in
   pool_destroy)
     # Stop the array, then wipe each member's md superblock so the disk is
     # reusable and no stale array re-assembles on the next boot.
-    mapfile -t _live < <(lsblk -rno NAME "$MD" 2>/dev/null || true)
     mdadm --stop "$MD"
     for slave in /sys/block/"$DEVICE"/slaves/*; do
       [ -e "$slave" ] || continue

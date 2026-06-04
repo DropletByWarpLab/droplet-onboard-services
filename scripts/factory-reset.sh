@@ -384,6 +384,15 @@ if [ -f /etc/systemd/system/droplet-shutdown-screen.service ] || \
   log_success "Removed shutdown-screen unit and host script"
 fi
 
+# Storage-pool host script (BUG-3 / ADR-019). Remove so a factory reset truly
+# returns to out-of-box; install-device-bridge.sh reinstalls it on
+# re-provision. NOTE: this removes the executor only — it never touches any
+# array/disk; data on a pool is the owner's, not factory state.
+if [ -f /usr/local/sbin/droplet-storage-pool.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-storage-pool.sh 2>/dev/null || true
+  log_success "Removed storage-pool host script"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
