@@ -1,0 +1,5 @@
+# Droplet single-box appliance — nocloud meta-data (WARP-663 / ADR-020).
+# subiquity's nocloud datasource requires a meta-data file to exist alongside
+# user-data, but the appliance pins identity (hostname `droplet`) in user-data's
+# `identity:` block, so this stays intentionally empty. Do NOT add a per-device
+# instance-id or any secret here — every built ISO must be byte-identical.
