@@ -1053,6 +1053,95 @@ test_pm_profile_strip_symmetric_disable() {
 }
 
 # =============================================================================
+# Test: image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)
+# =============================================================================
+#
+# Bug class this guards (WARP-663 / ADR-020): the appliance image pipeline
+# ships as a versioned, signed artifact (`droplet-image build|manifest|sign|
+# verify|...`). The single most likely regression is `scripts/build-image.sh`
+# silently reverting to (or never leaving) its historical five-line stub
+# (`echo "TODO: Implement Pi image build (pi-gen)"`) — which would make
+# `droplet-image build` a no-op that produces no ISO while every other check
+# stays green. The `image-pipeline` check fails when build-image.sh is a stub,
+# so this regression proves it.
+#
+# Synthetic-worktree pattern (not in-place): the `image-pipeline` check reads a
+# small, fixed set of files (scripts/build-image.sh, scripts/droplet-image,
+# scripts/image/*, scripts/lib/image.sh). We copy exactly those into a mktemp
+# worktree, plus a `.git` marker so ship-check's git-repo precondition holds,
+# then (1) assert the check PASSES on the faithfully-copied tree and (2) clobber
+# build-image.sh with the legacy stub and assert it FAILS. No real-tree mutation,
+# so a SIGKILL mid-test can't leave the repo dirty.
+test_image_pipeline_catches_stubbed_build_image() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  shellcheck not on PATH — install via apt/brew\n"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  python3 not on PATH — required for manifest schema validation\n"
+    return 0
+  fi
+
+  # Required source files must exist in the real tree (they land across the
+  # WARP-663 GREEN steps). If any is missing this test fails loudly rather
+  # than skipping — the check cannot be exercised without them.
+  local needed=(
+    "scripts/build-image.sh"
+    "scripts/droplet-image"
+    "scripts/lib/image.sh"
+    "scripts/image/manifest.schema.json"
+    "scripts/image/manifest.json"
+    "scripts/image/gen-manifest.py"
+    "scripts/image/build-iso.sh"
+  )
+  local rel
+  for rel in "${needed[@]}"; do
+    if [ ! -f "$REPO_ROOT_REAL/$rel" ]; then
+      printf "    required file missing from tree: %s\n" "$rel" >&2
+      return 1
+    fi
+  done
+
+  local synth
+  synth="$(mktemp -d)"
+  # shellcheck disable=SC2064  # capture $synth at trap-set time
+  trap "rm -rf '$synth'" RETURN
+
+  # ship-check's main() requires a .git marker (dir or file) at REPO_ROOT.
+  mkdir -p "$synth/.git"
+
+  # Copy exactly the surface the check inspects, preserving paths.
+  mkdir -p "$synth/scripts/image"
+  cp "$REPO_ROOT_REAL/scripts/build-image.sh"             "$synth/scripts/build-image.sh"
+  cp "$REPO_ROOT_REAL/scripts/droplet-image"             "$synth/scripts/droplet-image"
+  mkdir -p "$synth/scripts/lib"
+  cp "$REPO_ROOT_REAL/scripts/lib/image.sh"              "$synth/scripts/lib/image.sh"
+  cp "$REPO_ROOT_REAL/scripts/lib/logging.sh"            "$synth/scripts/lib/logging.sh"
+  cp "$REPO_ROOT_REAL/scripts/image/manifest.schema.json" "$synth/scripts/image/manifest.schema.json"
+  cp "$REPO_ROOT_REAL/scripts/image/manifest.json"        "$synth/scripts/image/manifest.json"
+  cp "$REPO_ROOT_REAL/scripts/image/gen-manifest.py"      "$synth/scripts/image/gen-manifest.py"
+  cp "$REPO_ROOT_REAL/scripts/image/build-iso.sh"         "$synth/scripts/image/build-iso.sh"
+
+  # 1. Faithful copy → check PASSES.
+  if ! _assert_check_passes "$synth" image-pipeline; then
+    printf "    baseline image-pipeline failed against a faithful copy of the tree\n" >&2
+    return 1
+  fi
+
+  # 2. Regression: clobber build-image.sh with the historical stub. The check
+  #    must FAIL — a stub builder produces no ISO.
+  cat > "$synth/scripts/build-image.sh" <<'STUB'
+#!/usr/bin/env bash
+# Builds the full Pi SD card image using pi-gen or similar tooling.
+set -euo pipefail
+
+echo "TODO: Implement Pi image build (pi-gen)"
+STUB
+
+  _assert_check_fails "$synth" image-pipeline
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -1100,6 +1189,9 @@ _run_test "Plane PM stack excluded when DROPLET_PM_ENABLED=0 (WARP-496)" \
 
 _run_test "Disabling PM strips a previously-appended pm profile (symmetric opt-out, WARP-496)" \
   test_pm_profile_strip_symmetric_disable
+
+_run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
+  test_image_pipeline_catches_stubbed_build_image
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
