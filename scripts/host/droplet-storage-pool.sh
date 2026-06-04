@@ -299,14 +299,18 @@ case "$OP" in
     ;;
   drive_adopt)
     # 1) Unmount the target disk + any of its partitions if currently mounted
-    #    (e.g. it was auto-mounted on plug). Adopt is allowed to reclaim it.
-    if findmnt -rn --source "$MD" >/dev/null 2>&1; then
-      umount "$MD" 2>/dev/null || umount -l "$MD" 2>/dev/null || true
+    #    (e.g. it was auto-mounted on plug). FAIL LOUDLY on a busy device — a
+    #    destructive wipe must never lazy-unmount a drive with open file handles
+    #    (mirrors eject_drive's refuse-if-mounted policy; adopt is MORE
+    #    destructive). Uses is_mounted so the DROPLET_POOL_TEST_MOUNTED hook
+    #    reaches this path from the unit tests. (review #499)
+    if is_mounted "$MD"; then
+      umount "$MD" || die "refusing to adopt $MD: unmount failed (drive busy?) — close open files and retry"
     fi
     for part in "$MD"?*; do
       [ -b "$part" ] || continue
-      if findmnt -rn --source "$part" >/dev/null 2>&1; then
-        umount "$part" 2>/dev/null || umount -l "$part" 2>/dev/null || true
+      if is_mounted "$part"; then
+        umount "$part" || die "refusing to adopt $MD: unmount of $part failed (busy?) — close open files and retry"
       fi
     done
     # 2) Wipe. quick = clear fs/partition signatures (wipefs); secure = discard
