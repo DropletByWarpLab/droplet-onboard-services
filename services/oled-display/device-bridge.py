@@ -1233,6 +1233,218 @@ def eject_drive(uuid):
     return True, {"ejected": uuid, "mount": mp}
 
 
+# ---------------------------------------------------------------------------
+# Storage pools (mdadm software RAID) — READ-ONLY (BUG-3 / ADR-019)
+# ---------------------------------------------------------------------------
+# Reads /proc/mdstat (+ mdadm --detail --scan) and maps the raw md state onto
+# the ADR-019 explicit enums. NEVER mutates an array — create/destroy/format
+# live behind the auth-gated destructive POST (run_pool_command) which shells
+# the repo-tracked host script, never mdadm directly. Returns [] honestly when
+# md has no arrays (the owner's "no fake pool" constraint at the read layer).
+
+_pools_cache = {"snap": None, "at": 0}
+
+# md raid token (from /proc/mdstat) -> ADR-019 ArrayLevel enum value.
+_MD_LEVEL_MAP = {
+    "raid0": "raid0",
+    "raid1": "raid1",
+    "raid4": "raid5",   # raid4 is a parity variant; surface as raid5-class
+    "raid5": "raid5",
+    "raid6": "raid6",
+    "raid10": "raid10",
+    "linear": "jbod",   # md calls JBOD/concat "linear"
+}
+
+
+def _array_level_from_md(token):
+    """Map a raw md raid token to an ADR-019 ArrayLevel value.
+
+    Unknown tokens fall back to 'jbod' (the safest "we don't model this as
+    real RAID" bucket) rather than guessing a parity level."""
+    return _MD_LEVEL_MAP.get((token or "").strip().lower(), "jbod")
+
+
+def _pool_status_from_md(md_state, health_block, resyncing=False):
+    """Map raw md status onto an ADR-019 PoolStatus value.
+
+    - resyncing (a rebuild/resync line present) wins over everything — the
+      array is being repaired right now.
+    - an inactive/failed/empty md_state is `failed`.
+    - a `[U_U]`-style health block with any '_' (a down member) is `degraded`.
+    - an all-`U` (or absent) health block on an active array is `active`.
+
+    Always returns one of the five explicit enum values, never a raw md string
+    (rule 10 — the dashboard branches on the enum, never parses mdstat)."""
+    state = (md_state or "").strip().lower()
+    if resyncing:
+        return "resyncing"
+    if state in ("inactive", "failed", "broken", ""):
+        return "failed"
+    if "_" in (health_block or ""):
+        return "degraded"
+    return "active"
+
+
+def _parse_mdstat(text):
+    """Parse /proc/mdstat into a list of pool dicts.
+
+    Each entry: {device, level, status, members:[bare disk names]}. The status
+    is an explicit PoolStatus enum value (never a raw md string). A trailing
+    `resync`/`recovery` progress line on a device flips it to `resyncing`.
+
+    Pure text parsing — no subprocess — so it's cheap and host-independent
+    (the fixture-driven tests feed it canned mdstat text)."""
+    pools = []
+    current = None
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        # Device header lines start at column 0 and look like
+        #   "md0 : active raid1 sdb[1] sda[0]"
+        if line and not line[0].isspace() and " : " in line:
+            name, _, rest = line.partition(" : ")
+            name = name.strip()
+            if not name.startswith("md"):
+                current = None
+                continue
+            toks = rest.split()
+            # toks[0] = md_state (active/inactive/...), toks[1] = raid token
+            md_state = toks[0] if toks else ""
+            level_token = ""
+            members = []
+            for t in toks[1:]:
+                if t.startswith("raid") or t == "linear":
+                    level_token = t
+                    continue
+                # member entries look like "sdb[1]" / "nvme0n1[0]" / with (S)/(F)
+                base = t.split("[")[0]
+                if base and base not in ("level",):
+                    members.append(base)
+            current = {
+                "device": name,
+                "_md_state": md_state,
+                "level": _array_level_from_md(level_token),
+                "members": members,
+                "_health": "",
+                "_resyncing": False,
+            }
+            pools.append(current)
+            continue
+        if current is None:
+            continue
+        # Continuation lines (indented): capture the [U_U] health block and
+        # any resync/recovery progress marker.
+        if "[" in stripped and "]" in stripped:
+            # The health block is the last [..] token made only of U/_ chars.
+            for chunk in stripped.replace("]", "] ").split():
+                inner = chunk.strip("[]")
+                if inner and set(inner) <= {"U", "_"}:
+                    current["_health"] = "[" + inner + "]"
+        low = stripped.lower()
+        if "resync" in low or "recovery" in low or "rebuild" in low:
+            current["_resyncing"] = True
+
+    # Finalise: compute the explicit status, drop internal scratch fields.
+    out = []
+    for p in pools:
+        status = _pool_status_from_md(p["_md_state"], p["_health"], p["_resyncing"])
+        out.append({
+            "device": p["device"],
+            "level": p["level"],
+            "status": status,
+            "members": p["members"],
+        })
+    return out
+
+
+def _read_mdstat():
+    """Return the raw /proc/mdstat text, or None if md isn't present on this
+    host. Read-only. Isolated so tests can feed canned text without a real
+    md stack."""
+    try:
+        with open("/proc/mdstat") as f:
+            return f.read()
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
+def pools_snapshot(invalidate=False):
+    """Return {pools, count, snapshot_at} for the md arrays on this host.
+
+    READ-ONLY. Returns an empty list honestly when md has no arrays (or no md
+    at all) — it NEVER synthesises a pool from loose drives. Cached ~10s like
+    the drives snapshot so the front panel / dashboard poll is cheap."""
+    now = time.time()
+    if not invalidate and _pools_cache["snap"] and now - _pools_cache["at"] < 10:
+        return _pools_cache["snap"]
+
+    pools = _parse_mdstat(_read_mdstat())
+    snap = {
+        "pools": pools,
+        "count": len(pools),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc)
+                              .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _pools_cache["snap"] = snap
+    _pools_cache["at"] = now
+    return snap
+
+
+# Destructive pool operations the bridge will forward to the host script.
+# This is an allow-list — anything else is refused before we shell out. These
+# are Tier-3-class (data-destroying); they are owner-only + confirm-token-gated
+# at the orchestrator and reach this bridge route only with the bridge auth
+# token. The bridge NEVER runs mdadm/mkfs itself; the host script does, behind
+# its own hard pre-flight.
+_POOL_OPS = frozenset({
+    "pool_create",
+    "pool_destroy",
+    "pool_format",
+    "pool_set_level",
+    "pool_add_spare",
+    "pool_remove_disk",
+})
+
+# Path to the repo-tracked host script, installed by setup.sh via
+# install-device-bridge.sh. Overridable for tests / non-standard installs.
+POOL_SCRIPT = os.environ.get(
+    "DROPLET_POOL_SCRIPT", "/usr/local/sbin/droplet-storage-pool.sh").strip()
+
+
+def run_pool_command(operation, params):
+    """Forward an owner-confirmed destructive pool op to the host script.
+
+    The bridge does NOT run mdadm/mkfs — it execs droplet-storage-pool.sh,
+    passing the operation and the params as a single JSON argument. The host
+    script's hard pre-flight (refuse if a target disk is mounted / holds data /
+    is the OS disk; require the typed double-confirm) is the real safety gate;
+    this function only (a) refuses operations outside the allow-list and (b)
+    surfaces the script's exit code honestly. Returns (ok, info); never raises
+    — mirrors eject_drive()."""
+    if operation not in _POOL_OPS:
+        return False, "unknown pool operation: {}".format(operation)
+    payload = json.dumps(params or {})
+    try:
+        # The host script runs `mdadm`/`mkfs` which can take a while on a large
+        # array; allow a generous timeout but still bounded.
+        rc, out, err = _run([POOL_SCRIPT, operation, payload], timeout=600)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s failed to exec host script: %s",
+                       operation, e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("pool command %s refused/failed (rc=%s): %s",
+                       operation, rc, msg)
+        return False, msg
+    # Invalidate the pools cache so the next GET /pools reflects the change.
+    pools_snapshot(invalidate=True)
+    try:
+        return True, json.loads(out or "{}")
+    except (ValueError, TypeError):
+        return True, {"message": (out or "").strip()}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
@@ -1327,6 +1539,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, cameras_snapshot())
             if path == "/drives":
                 return self._send(200, drives_snapshot())
+            if path == "/pools":
+                # BUG-3 / ADR-019: read-only mdadm array inventory. Returns []
+                # honestly when no array exists — never a fabricated pool.
+                return self._send(200, pools_snapshot())
             if path == "/health":
                 return self._send(200, {"ok": True})
         except Exception as e:                                       # noqa: BLE001
@@ -1353,6 +1569,30 @@ class Handler(BaseHTTPRequestHandler):
                 # caller surfaces the message and the user retries.
                 return self._send(409, {"ok": False, "error": info})
             return self._send(200, {"ok": True, **(info if isinstance(info, dict) else {})})
+        if self.path == "/pools/command":
+            # BUG-3 / ADR-019: destructive mdadm op. Auth-gated exactly like
+            # /drives/:uuid/eject. The orchestrator only reaches here after an
+            # owner session + a valid single-use confirm-token; the bridge
+            # requires its own auth token on top, and run_pool_command() shells
+            # the host script (whose hard pre-flight is the last safety gate) —
+            # it never runs mdadm/mkfs itself.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            operation = j.get("operation", "")
+            params = j.get("params", {})
+            ok, info = run_pool_command(operation, params)
+            if not ok:
+                # 422 — the host-script pre-flight refused (mounted/has-data/
+                # OS-disk/bad confirm) or the op was outside the allow-list.
+                return self._send(422, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
