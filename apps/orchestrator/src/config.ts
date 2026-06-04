@@ -237,6 +237,23 @@ const envSchema = z.object({
   // container would never resolve to it, so default to the host gateway.
   DISPLAY_SERVICE_URL: z.string().default("http://host.docker.internal:8082"),
 
+  // --- Device-bridge (host-side wifi/drives/QR API) ---
+  // The device-bridge (services/oled-display/device-bridge.py) runs on the
+  // host (systemd, port 9090) and serves the auto-mounted drive snapshot
+  // (storage.ts) and the Wi-Fi/pairing QR (screen-qr.service.ts). Same
+  // host-gateway rationale as the URLs above: the orchestrator is on the
+  // bridge network, so `localhost`/`172.17.0.1` (docker0 — DOWN on the
+  // single-box, whose gateway is 172.18.0.1) never reach the host bridge.
+  // `host.docker.internal` resolves via the orchestrator's
+  // `extra_hosts: host-gateway` mapping and IS reachable — but ONLY once the
+  // bridge binds an interface the gateway can hit (BRIDGE_BIND=0.0.0.0 in
+  // droplet-device-bridge.service; a 127.0.0.1 bind refuses the gateway
+  // connection). This single key replaces the two divergent hardcoded
+  // defaults storage.ts (BRIDGE_URL → 172.17.0.1) and screen-qr
+  // (DEVICE_BRIDGE_URL) used to carry. `BRIDGE_URL` is honored as a
+  // backward-compatible alias for any deployment that already set it.
+  DEVICE_BRIDGE_URL: z.string().default("http://host.docker.internal:9090"),
+
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
 
@@ -328,7 +345,26 @@ const envSchema = z.object({
   JIRA_API_TOKEN: z.string().default(""),
 });
 
-const parsed = envSchema.parse(process.env);
+// Backward-compat: storage.ts historically read `BRIDGE_URL`; screen-qr read
+// `DEVICE_BRIDGE_URL`. We standardize on `DEVICE_BRIDGE_URL` (config key
+// above) but honor a legacy `BRIDGE_URL` when the canonical key is unset, so
+// an existing deployment that set `BRIDGE_URL` in .env isn't silently
+// repointed at the default. Mirrors the JETSON_OLLAMA_URL → OLLAMA_URL
+// rename courtesy.
+// Treat an empty/whitespace value as unset so a templated `.env` with a bare
+// `DEVICE_BRIDGE_URL=` (or `BRIDGE_URL=`) line falls through to the alias and
+// then the schema default, rather than parsing as an empty URL.
+const firstNonEmpty = (...vals: (string | undefined)[]): string | undefined =>
+  vals.find((v) => v !== undefined && v.trim() !== "");
+const envForParse: NodeJS.ProcessEnv = {
+  ...process.env,
+  DEVICE_BRIDGE_URL: firstNonEmpty(
+    process.env.DEVICE_BRIDGE_URL,
+    process.env.BRIDGE_URL,
+  ),
+};
+
+const parsed = envSchema.parse(envForParse);
 
 // --- WARP-562: resolve the CORS origin allowlist ---
 // Comma-separated → trimmed, empties dropped. When the operator hasn't set

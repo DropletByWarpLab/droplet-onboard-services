@@ -75,9 +75,13 @@ const PEER_DISPLAY_WINDOW_MS = 60_000;
 const PEER_QR_ENABLED =
   (process.env.SCREEN_PEER_QR_ENABLED ?? "false").toLowerCase() === "true";
 
-/** device-bridge runs on the host with network_mode: host (port 9090). */
-const DEVICE_BRIDGE_URL =
-  process.env.DEVICE_BRIDGE_URL || "http://host.docker.internal:9090";
+/**
+ * device-bridge runs on the host (systemd, port 9090). Shared with
+ * storage.ts via `config.DEVICE_BRIDGE_URL` (default
+ * `http://host.docker.internal:9090`) so both bridge consumers resolve the
+ * one host-gateway address instead of two divergent hardcoded URLs.
+ */
+const DEVICE_BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 
 export type ScreenQRMode = "setup" | "peer" | "wifi" | "system" | "none";
 
@@ -354,9 +358,18 @@ async function fetchWifiQRFromBridge(): Promise<
   { payload: string; ssid: string } | null
 > {
   try {
+    // WARP-659: /openwrt/qr now requires the bridge shared secret (it returns
+    // the Wi-Fi PSK). Same env precedence as storage.ts's bridgeAuthToken();
+    // read per-call so a secret injected after boot is picked up.
+    const token = (
+      process.env.BRIDGE_AUTH_TOKEN ||
+      process.env.SERVICE_TOKEN_DISPLAY ||
+      ""
+    ).trim();
     const res = await fetch(`${DEVICE_BRIDGE_URL}/openwrt/qr`, {
       // device-bridge is local-only; short timeout.
       signal: AbortSignal.timeout(2_000),
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { payload?: string; ssid?: string };
