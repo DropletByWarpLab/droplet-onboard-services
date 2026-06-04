@@ -169,9 +169,16 @@ else
   fail "sign did not produce a signature (DROPLET_RELEASE_SIGNING_KEY=$PRIV)"
 fi
 
-# Verify the untampered manifest against the throwaway public key.
+# Verify the untampered manifest against the throwaway public key. Point at a
+# dedicated EMPTY assets dir so the run is hermetic — verify defaults assets_dir
+# to OUTPUT_DIR (output/), which holds the real multi-GB ISO after a `build`,
+# and that asset's sha256 would (correctly) mismatch this throwaway manifest.
+# We exercise the per-asset path explicitly in (b2) below; here we isolate the
+# signature path. (review #501)
+EMPTY_ASSETS="$WORK/empty-assets"
+mkdir -p "$EMPTY_ASSETS"
 if bash "$DROPLET_IMAGE" verify \
-     --manifest "$MANIFEST" --sig "$SIG" --pubkey "$PUB" >/dev/null 2>&1; then
+     --manifest "$MANIFEST" --sig "$SIG" --pubkey "$PUB" --assets-dir "$EMPTY_ASSETS" >/dev/null 2>&1; then
   pass "verify accepts the untampered manifest"
 else
   fail "verify rejected the untampered manifest (false negative)"
@@ -183,7 +190,7 @@ cp "$MANIFEST" "$TAMPERED"
 # Append a byte (changes the digest without breaking the file for openssl).
 printf ' ' >> "$TAMPERED"
 if bash "$DROPLET_IMAGE" verify \
-     --manifest "$TAMPERED" --sig "$SIG" --pubkey "$PUB" >/dev/null 2>&1; then
+     --manifest "$TAMPERED" --sig "$SIG" --pubkey "$PUB" --assets-dir "$EMPTY_ASSETS" >/dev/null 2>&1; then
   fail "verify ACCEPTED a tampered manifest (fail-OPEN — security bug)"
 else
   pass "verify rejects a tampered manifest (fail-closed)"
@@ -197,6 +204,48 @@ if openssl pkey -pubin -in "$PUB" -text -noout 2>/dev/null \
   pass "signing key is ECDSA P-256 (FIPS-approved; not Ed25519)"
 else
   fail "signing key is not ECDSA P-256 — FIPS policy violation"
+fi
+
+# =============================================================================
+# (b2) per-asset sha256 verification — a PRESENT asset must match the manifest
+#      sha256, and a swapped/corrupt asset under an otherwise-valid signature
+#      MUST fail closed. This is the primary supply-chain guard before a
+#      destructive flash; previously only the signature path was asserted, so a
+#      tampered ISO that kept the manifest+sig intact slipped through. (review #501)
+# =============================================================================
+echo "--- (b2) verify checks per-asset sha256, fail-closed on a swapped asset ---"
+ASSETS_DIR="$WORK/assets"
+mkdir -p "$ASSETS_DIR"
+# Follow whatever the signed manifest above declares (filename + sha256) rather
+# than hard-coding shape details — keeps this test honest if the manifest
+# constructor changes.
+ASSET_NAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["images"][0]["file"])' "$MANIFEST" 2>/dev/null)"
+ASSET_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["images"][0]["sha256"])' "$MANIFEST" 2>/dev/null)"
+EXPECT_SHA="$(printf 'test-iso-bytes' | openssl dgst -sha256 -r | cut -d' ' -f1)"
+
+if [ -n "$ASSET_NAME" ] && [ "$ASSET_SHA" = "$EXPECT_SHA" ]; then
+  # Positive: a present asset whose bytes hash to the manifest sha256 -> verify OK.
+  printf 'test-iso-bytes' > "$ASSETS_DIR/$ASSET_NAME"
+  if bash "$DROPLET_IMAGE" verify \
+       --manifest "$MANIFEST" --sig "$SIG" --pubkey "$PUB" --assets-dir "$ASSETS_DIR" >/dev/null 2>&1; then
+    pass "verify accepts a present asset whose sha256 matches the manifest"
+  else
+    fail "verify rejected a correct present asset (false negative on the sha256 path)"
+  fi
+
+  # Negative: corrupt one byte of the asset. The manifest + signature are
+  # untouched, so the signature check still passes — only the per-asset sha256
+  # check can catch this, and it MUST fail closed (the supply-chain guard).
+  printf 'X' >> "$ASSETS_DIR/$ASSET_NAME"
+  if bash "$DROPLET_IMAGE" verify \
+       --manifest "$MANIFEST" --sig "$SIG" --pubkey "$PUB" --assets-dir "$ASSETS_DIR" >/dev/null 2>&1; then
+    fail "verify ACCEPTED a tampered asset under a valid manifest signature (fail-OPEN — supply-chain bug)"
+  else
+    pass "verify rejects a present asset whose sha256 != manifest (fail-closed)"
+  fi
+else
+  fail "could not derive asset file/sha256 from the manifest — asset sha256 path left UNTESTED" \
+       "ASSET_NAME='$ASSET_NAME' ASSET_SHA='$ASSET_SHA' EXPECT='$EXPECT_SHA'"
 fi
 
 # =============================================================================

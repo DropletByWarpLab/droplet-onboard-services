@@ -76,7 +76,22 @@ autoinstall:
   # ---------------------------------------------------------------------------
   late-commands:
     # Clone the platform into the operator's home on the TARGET filesystem.
-    - curtin in-target --target=/target -- bash -c "git clone --depth 1 https://github.com/DropletByWarpLab/droplet-onboard-services.git /home/droplet/edge-platform || true"
+    # Retry up to 3x (autoinstall networking is racy just after the NIC comes
+    # up), then FAIL THE INSTALL loudly if the clone never lands. The old
+    # `|| true` swallowed a network failure: the install exited 0, the next
+    # chown no-op'd on a missing dir, and droplet-firstboot.service then crash-
+    # looped forever on a non-existent WorkingDirectory — a booted box with no
+    # Droplet stack and no error shown at install time. (review #501)
+    - |
+      curtin in-target --target=/target -- bash -c '
+        for attempt in 1 2 3; do
+          rm -rf /home/droplet/edge-platform
+          git clone --depth 1 https://github.com/DropletByWarpLab/droplet-onboard-services.git /home/droplet/edge-platform && break
+          echo "droplet: clone attempt $attempt failed; retrying in 5s" >&2
+          sleep 5
+        done
+        test -d /home/droplet/edge-platform/.git || { echo "FATAL: droplet platform clone failed during autoinstall; aborting so this surfaces now, not as a crash-looping first boot." >&2; exit 1; }
+      '
     - curtin in-target --target=/target -- chown -R droplet:droplet /home/droplet/edge-platform
     # Install a oneshot systemd unit that runs setup.sh --single-box --systemd
     # on the FIRST real boot, then disables itself. setup.sh is the single
