@@ -159,9 +159,9 @@ export function StepShell({
   const showKicker = idx >= 1 && idx <= total - 2;
 
   return (
-    <div className="grid min-h-dvh bg-surface-primary lg:grid-cols-[288px_1fr]">
+    <div className="grid h-dvh grid-rows-1 overflow-hidden bg-surface-primary lg:grid-cols-[288px_1fr]">
       {/* Aurora step rail (lg+) */}
-      <aside className="aurora-brand hidden flex-col overflow-hidden p-7 text-white lg:flex xl:p-8">
+      <aside className="aurora-brand hidden flex-col overflow-y-auto p-7 text-white lg:flex xl:p-8">
         <div className="mb-9 flex items-center gap-2.5">
           <DropletMark size={24} className="text-white" />
           <span className="text-[18px] font-bold tracking-tight">Droplet</span>
@@ -189,7 +189,7 @@ export function StepShell({
       </aside>
 
       {/* Content + footer */}
-      <div className="flex min-w-0 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-col">
         {/* Compact progress header (below lg, where the rail is hidden) */}
         <div className="lg:hidden">
           <div className="flex items-center justify-between px-6 pt-6 sm:px-10">

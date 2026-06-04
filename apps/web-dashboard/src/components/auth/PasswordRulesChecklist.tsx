@@ -29,7 +29,7 @@ export function PasswordRulesChecklist({
         <li
           key={row.label}
           className={`flex items-center gap-2 type-caption-1 ${
-            row.ok ? "text-system-green" : "text-label-quaternary"
+            row.ok ? "text-system-green" : "text-label-secondary"
           }`}
         >
           {row.ok ? (
