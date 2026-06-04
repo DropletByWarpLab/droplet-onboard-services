@@ -55,6 +55,7 @@ import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createSettingsRouter } from "./routes/settings.js";
+import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
@@ -282,6 +283,14 @@ export function createApp(prisma: PrismaClient) {
   // of `/settings/workspace` into the broader WARP-457 settings tree
   // is a follow-up; this ordering keeps both routers working until then.
   app.use("/api", createSettingsWorkspaceRouter(prisma));
+
+  // BUG-11: SMTP outbound-channel config (/api/settings/email) + the
+  // failed-invite resend endpoint (/api/people/invites/:id/resend). MUST mount
+  // BEFORE createSettingsRouter — that router's GET /settings/:section would
+  // otherwise match the literal `email` path as a section and 404. Same
+  // first-match ordering rationale as the off-lan router. No transportFactory
+  // is injected, so the real nodemailer SMTP transport is used in production.
+  app.use("/api", createSettingsEmailRouter(prisma));
 
   // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
   // PATCH section with per-type validation). Mutations emit ActivityRow

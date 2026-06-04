@@ -37,8 +37,24 @@ import {
   InvalidInviteEmailError,
   InvalidInviteRoleError,
 } from "../services/onboarding-team-invite.service.js";
+import {
+  sendInviteEmail,
+  type SendOptions,
+} from "../services/email-channel.service.js";
 
 const logger = pino({ name: "people-route" });
+
+/**
+ * Build the absolute accept URL for an invite token. Mirrors auth.ts's
+ * `buildInviteUrl` so the email link matches the dashboard's `/invite/:token`
+ * accept route (honours x-forwarded-* behind the reverse proxy).
+ */
+function buildInviteAcceptUrl(req: Request, token: string): string {
+  const protocol =
+    req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
+  return `${protocol}://${host}/invite/${token}`;
+}
 
 // Canonical role + scope sets — duplicated as TS literals (mirroring
 // what middleware/scope.ts does) so this file compiles standalone
@@ -160,7 +176,10 @@ const PERMISSIONS_MATRIX = {
   },
 } as const;
 
-export function createPeopleRouter(prisma: PrismaClient): Router {
+export function createPeopleRouter(
+  prisma: PrismaClient,
+  sendOptions: SendOptions = {},
+): Router {
   const router = Router();
 
   // ── GET /api/people ─────────────────────────────────────────
@@ -257,13 +276,30 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
           throw err;
         }
 
-        // Audit the issuance. We record WHO invited WHOM at WHAT role — but
-        // NEVER the token (it's a bearer credential; an audit row is not the
-        // place for it). Lifecycle events go on the `auth` kind (matches the
-        // DELETE /people/:id "User removed" convention above).
+        // BUG-11 — actually deliver the invite. The row is created above; the
+        // email is a separate, fallible step. `sendInviteEmail` flips the
+        // invite's `sendStatus` to sent/failed and NEVER throws, so a relay
+        // outage can't 500 the create. A failed send leaves a valid, retryable
+        // invite (POST /api/people/invites/:id/resend) — no silent success.
+        const acceptUrl = buildInviteAcceptUrl(req, invite.token);
+        const send = await sendInviteEmail(
+          prisma,
+          {
+            inviteId: invite.id,
+            to: invite.email,
+            acceptUrl,
+            role: invite.role,
+          },
+          sendOptions,
+        );
+
+        // Audit the issuance. We record WHO invited WHOM at WHAT role + the
+        // delivery outcome — but NEVER the token (it's a bearer credential; an
+        // audit row is not the place for it). Lifecycle events go on the `auth`
+        // kind (matches the DELETE /people/:id "User removed" convention above).
         await recordActivity({
           kind: "auth",
-          severity: "ok",
+          severity: send.status === "sent" ? "ok" : "warn",
           sourceIcon: "user-plus",
           what: "Teammate invited",
           sub: `${invite.email} · ${invite.role}`,
@@ -271,6 +307,7 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
             actor: req.user?.username ?? null,
             email: invite.email,
             role: invite.role,
+            sendStatus: send.status,
           },
         });
 
@@ -280,6 +317,7 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
           email: invite.email,
           role: invite.role,
           expires_at: invite.expiresAt,
+          send_status: send.status,
         });
       } catch (err) {
         next(err);

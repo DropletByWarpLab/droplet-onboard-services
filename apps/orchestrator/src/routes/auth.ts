@@ -9,6 +9,7 @@ import {
   isUsed,
   isRevoked,
 } from "../services/invite.service.js";
+import { sendInviteEmail } from "../services/email-channel.service.js";
 import {
   ncCheckSetupRequired,
   ncInstallAndCreateAdmin,
@@ -1280,6 +1281,7 @@ export function createPublicAuthRouter(
 // ────────────────────────────────────────────────────────────────
 export function createProtectedAuthRouter(
   prisma?: import("@prisma/client").PrismaClient,
+  sendOptions: import("../services/email-channel.service.js").SendOptions = {},
 ): Router {
   const router = Router();
 
@@ -1983,10 +1985,33 @@ export function createProtectedAuthRouter(
         "User invite created",
       );
 
+      // BUG-11 — deliver the invite email. The row is created above; the email
+      // is a separate, fallible step over the operator's SMTP relay.
+      // `sendInviteEmail` flips the invite's `sendStatus` and NEVER throws, so a
+      // relay outage can't 500 the create. A failed send leaves a valid,
+      // retryable invite (POST /api/people/invites/:id/resend) — explicit state,
+      // no silent success. Skipped only when the invite carries no email (which
+      // can't happen here: email is required above) or prisma isn't wired.
+      let sendStatus: "sent" | "failed" = "failed";
+      if (prisma && parsed.data.email) {
+        const sendResult = await sendInviteEmail(
+          prisma,
+          {
+            inviteId: created.id,
+            to: parsed.data.email,
+            acceptUrl: buildInviteUrl(req, created.token),
+            role: created.role,
+          },
+          sendOptions,
+        );
+        sendStatus = sendResult.status;
+      }
+
       res.json({
         token: created.token,
         url: buildInviteUrl(req, created.token),
         expiresAt: created.expiresAt,
+        send_status: sendStatus,
       });
     } catch (err) {
       next(err);

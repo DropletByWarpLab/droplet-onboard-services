@@ -151,6 +151,8 @@ export interface TeamInviteInput {
 
 /** What {@link createTeamInvite} returns to the route. */
 export interface TeamInviteResult {
+  /** The UserInvite row id — needed by BUG-11 to drive the email-send state. */
+  id: string;
   token: string;
   email: string;
   role: InviteRole;
@@ -201,6 +203,7 @@ export async function createTeamInvite(
   });
 
   return {
+    id: created.id,
     token: created.token,
     email,
     role: input.role,
