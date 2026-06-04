@@ -2037,6 +2037,54 @@ export async function deleteProviderKey(provider: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete key: ${res.status}`);
 }
 
+// --- Outbound email channel (BUG-11) ---
+
+/** The redacted SMTP-channel config the orchestrator returns (no secret). */
+export interface EmailChannelConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  fromAddress: string;
+  fromName: string;
+  security: "starttls" | "tls" | "none";
+  /** Whether a password is stored — the password itself is never returned. */
+  hasPassword: boolean;
+}
+
+/** What the operator submits. `password` is write-only: omit to keep existing. */
+export interface EmailChannelUpdate {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  fromAddress: string;
+  fromName: string;
+  security: "starttls" | "tls" | "none";
+}
+
+export async function getEmailChannel(): Promise<EmailChannelConfig> {
+  const res = await authFetch(`${BASE}/api/settings/email`);
+  if (!res.ok) throw new Error(`Failed to load email settings: ${res.status}`);
+  return res.json();
+}
+
+export async function saveEmailChannel(
+  update: EmailChannelUpdate,
+): Promise<EmailChannelConfig> {
+  const res = await authFetch(`${BASE}/api/settings/email`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to save email settings: ${body}`);
+  }
+  return res.json();
+}
+
 // WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
 // listSessions, getSession, updateSessionTitle, deleteSession,
 // sendSessionChat) targeted the orchestrator's removed
