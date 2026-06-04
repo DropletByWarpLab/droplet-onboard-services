@@ -432,6 +432,14 @@ class LantronixDriver(SwitchDriver):
     # --- Port Management ---
 
     async def get_ports(self) -> list[dict]:
+        # TODO(ADR-018-item9): verify/correct the VLAN/port read endpoint
+        # against SM8TAT2SA v1.04.0079 (live). A live probe found `/stat/port`
+        # returns 404 on this firmware (while `/stat/sysinfo` + `/stat/poe_status`
+        # are 200), so the PVID read used by the bring-up provisioner is
+        # currently unavailable. The provisioner already treats a 404/empty read
+        # as a no-op (provisioner._read_access_pvids), so this is non-fatal — but
+        # the correct path/shape must be confirmed in a supervised live session
+        # before flat-lan can actually move a stranded port on real hardware.
         data = await self._request("GET", "/stat/port")
         raw_ports = data.get("data", data.get("portStatus", []))
 
@@ -511,6 +519,11 @@ class LantronixDriver(SwitchDriver):
     # --- VLAN Management ---
 
     async def get_vlans(self) -> list[dict]:
+        # TODO(ADR-018-item9): verify/correct VLAN read endpoint against
+        # SM8TAT2SA v1.04.0079 (live). A live probe found `/stat/vlan` returns
+        # 404 on this firmware. The bring-up provisioner tolerates this (logs +
+        # no-op, never a blind write); the real path/shape must be confirmed in
+        # a supervised live session — do NOT guess it here.
         data = await self._request("GET", "/stat/vlan")
         raw = data.get("data", data.get("vlans", []))
 
@@ -557,6 +570,14 @@ class LantronixDriver(SwitchDriver):
         logger.info("Deleted VLAN %d", vlan_id)
 
     async def get_vlan_membership(self, vlan_id: int) -> dict:
+        # TODO(ADR-018-item9): verify/correct VLAN-membership read+write
+        # endpoints against SM8TAT2SA v1.04.0079 (live). A live probe found
+        # `/stat/vlan_membership` returns 404 on this firmware; the matching
+        # write path (`/config/vlan_membership`, see set_vlan_membership) is
+        # therefore also unverified for v1.04. The provisioner's read-back
+        # verify depends on this read, so until the live shape is confirmed in a
+        # supervised session it treats the 404 as unreadable and no-ops rather
+        # than issuing an unverifiable write.
         data = await self._request("GET", f"/stat/vlan_membership")
         # Parse membership for the requested VLAN
         raw = data.get("data", data)
@@ -576,6 +597,13 @@ class LantronixDriver(SwitchDriver):
     async def set_vlan_membership(
         self, vlan_id: int, membership: list[dict]
     ) -> None:
+        # TODO(ADR-018-item9): verify/correct the VLAN-membership WRITE endpoint
+        # against SM8TAT2SA v1.04.0079 (live). Its read counterpart
+        # (`/stat/vlan_membership`) 404s on this firmware, so `/config/vlan_membership`
+        # is likewise unverified for v1.04. The bring-up provisioner read-back
+        # verifies every write and reports an error on mismatch, so an incorrect
+        # endpoint here surfaces as a verification failure rather than a silent
+        # mis-provision — but the correct path must be confirmed live.
         await self._request(
             "POST",
             "/config/vlan_membership",
