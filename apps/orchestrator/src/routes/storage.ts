@@ -5,6 +5,11 @@ import type { PrismaClient } from "@prisma/client";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
+import { requireRole } from "../middleware/auth.js";
+import {
+  evaluateStorageCommand,
+  confirmStorageCommand,
+} from "../services/storage-safety.service.js";
 
 // Drive labels are device-wide config that any user (incl. family
 // accounts) shares, so PATCH is admin-only — mirrors the gate around
@@ -104,6 +109,75 @@ interface BridgeDrivesSnapshot {
   drives: BridgeDrive[];
   count: number;
   snapshot_at: string;
+}
+
+// ── BUG-3 / ADR-019: storage pools ──
+
+/** One md array as the device-bridge reports it (read-only, from /proc/mdstat).
+ *  `status` / `level` are the ADR-019 enum *values* the bridge already mapped —
+ *  the orchestrator never re-parses mdstat. */
+interface BridgePool {
+  device: string;
+  level: string;
+  status: string;
+  members: string[];
+}
+
+interface BridgePoolsSnapshot {
+  pools: BridgePool[];
+  count: number;
+  snapshot_at?: string;
+}
+
+/** Destructive storage operations, mapped to the bridge `/pools/command`
+ *  `operation` field. Keep in lock-step with STORAGE_TIER_3_OPERATIONS and the
+ *  host script's allow-list. */
+const STORAGE_OPS = [
+  "pool_create",
+  "pool_destroy",
+  "pool_format",
+  "pool_set_level",
+  "pool_add_spare",
+  "pool_remove_disk",
+] as const;
+type StorageOp = (typeof STORAGE_OPS)[number];
+
+/**
+ * Forward an owner-confirmed destructive op to the device-bridge's auth-gated
+ * POST /pools/command. Mirrors the eject path's auth + connection-error
+ * handling. Returns the bridge's parsed body; throws on a non-ok bridge reply
+ * so the route can surface it.
+ */
+async function bridgePoolCommand(
+  operation: StorageOp,
+  params: Record<string, unknown>,
+): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+  const bridgeToken = bridgeAuthToken();
+  if (!bridgeToken) {
+    // Fail closed: with no bridge auth token we cannot safely invoke a
+    // data-destroying host action.
+    const err = new Error("bridge_auth_unconfigured");
+    (err as { code?: string }).code = "BRIDGE_AUTH_UNCONFIGURED";
+    throw err;
+  }
+  const ctrl = new AbortController();
+  // The host script runs mdadm/mkfs which can take minutes on a large array.
+  const timer = setTimeout(() => ctrl.abort(), 600_000);
+  try {
+    const r = await fetch(`${BRIDGE_URL}/pools/command`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Droplet-Auth": bridgeToken,
+      },
+      body: JSON.stringify({ operation, params }),
+      signal: ctrl.signal,
+    });
+    const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ok: r.ok, body };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -413,6 +487,326 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       return res
         .status(502)
         .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  // =====================================================================
+  // BUG-3 / ADR-019 — storage pools (mdadm software RAID)
+  // =====================================================================
+
+  /**
+   * GET /api/storage/pools — read-only mdadm array inventory.
+   *
+   * Reads from the device-bridge GET /pools (which parses /proc/mdstat
+   * read-only) and joins the owner-chosen displayName / notes from the
+   * StoragePool table, exactly as /storage/drives joins the Drive table.
+   *
+   * Returns an HONEST empty list when no array exists — never a fabricated
+   * "pooled storage" sum of loose drives (ADR-019 D2). No role gate: reading
+   * array health is safe and is the source for the dashboard's degraded banner.
+   */
+  router.get("/storage/pools", async (_req, res) => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!r.ok) {
+        res.status(502).json({ pools: [], count: 0, error: `bridge returned ${r.status}` });
+        return;
+      }
+      const snap = (await r.json()) as BridgePoolsSnapshot;
+      const rows = await prisma.storagePool.findMany();
+      const byDevice = new Map(rows.map((p) => [p.device, p]));
+
+      const pools = (snap.pools ?? []).map((p) => {
+        const row = byDevice.get(p.device);
+        return {
+          ...p,
+          displayName: row?.displayName ?? null,
+          notes: row?.notes ?? null,
+        };
+      });
+      res.json({ pools, count: pools.length, snapshot_at: snap.snapshot_at });
+    } catch (err) {
+      // Same optional-bridge degradation as /storage/drives: a connection
+      // refusal means the bridge simply isn't running on this host — report
+      // "no pools" honestly rather than 500.
+      if (isBridgeConnectionError(err)) {
+        logger.info({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable; reporting no pools");
+        res.json({ pools: [], count: 0, reason: "bridge_unavailable" });
+        return;
+      }
+      logger.warn({ err }, "Failed to fetch pools from device-bridge");
+      res.json({ pools: [], count: 0, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  /**
+   * Execute a confirmed destructive storage op against the bridge and surface
+   * the result. Shared by the confirm route. The bridge (and the host script
+   * behind it) is the real executor + last-line pre-flight; here we only
+   * forward and translate the bridge's reply.
+   */
+  async function executeStorageOp(
+    res: import("express").Response,
+    service: StorageOp,
+    resourceId: string,
+    params: Record<string, unknown>,
+  ) {
+    try {
+      const { ok, body } = await bridgePoolCommand(service, {
+        ...params,
+        device: resourceId,
+      });
+      if (!ok) {
+        // The host-script pre-flight refused (mounted / has-data / OS-disk /
+        // bad confirm) — surface its message; it's owner-actionable.
+        logger.warn({ service, resourceId, body }, "Storage op refused by host script");
+        return res.status(422).json({
+          ok: false,
+          error: (body.error as string) || "The storage service refused this operation.",
+        });
+      }
+      return res.json({ ok: true, status: "ok", operation: service, device: resourceId, ...body });
+    } catch (err) {
+      if ((err as { code?: string }).code === "BRIDGE_AUTH_UNCONFIGURED") {
+        return res.status(503).json({
+          ok: false,
+          error: "Storage management is unavailable — the device-bridge auth token is not configured.",
+        });
+      }
+      if (isBridgeConnectionError(err)) {
+        logger.warn({ err, service, resourceId }, "device-bridge not reachable for storage op");
+        return res.status(503).json({
+          ok: false,
+          reason: "bridge_unavailable",
+          error: "The storage service isn't reachable right now.",
+        });
+      }
+      logger.warn({ err, service, resourceId }, "Failed to run storage op");
+      return res.status(502).json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  }
+
+  /**
+   * POST /api/storage/command/confirm — confirm + execute a destructive
+   * storage op. Owner/admin only (confirming EXECUTES, so it carries the same
+   * guard as the routes that mint the token — mirrors switch.ts WARP-559).
+   *
+   * The caller MUST echo {service, resourceId}; a mismatch or an
+   * unknown/expired token is refused and never reaches the bridge.
+   */
+  router.post(
+    "/storage/command/confirm",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { confirmationToken, service, resourceId } = req.body || {};
+        if (!confirmationToken) {
+          return res.status(400).json({ error: "Missing confirmationToken" });
+        }
+        const result = await confirmStorageCommand(prisma, confirmationToken, req.user?.id, {
+          service,
+          resourceId,
+        });
+        if (!result.confirmed) {
+          return res.status(400).json({ error: result.reason, code: result.code });
+        }
+        return executeStorageOp(
+          res,
+          result.service as StorageOp,
+          result.resourceId,
+          (result.params as Record<string, unknown>) || {},
+        );
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── Destructive routes: each EVALUATES (mints a confirm token), never
+  //    executes directly. Owner/admin only. The AI never reaches these
+  //    (and the ops aren't in tools-core at all). ──
+
+  /** md device name must look like md<N> — never a host-specific default. */
+  function validMdDevice(d: unknown): d is string {
+    return typeof d === "string" && /^md\d{1,3}$/.test(d);
+  }
+  /** Member block-device path allow-list (no shell metacharacters). */
+  function validMember(m: unknown): m is string {
+    return typeof m === "string" && /^\/dev\/[A-Za-z0-9/_-]{1,64}$/.test(m);
+  }
+  const VALID_LEVELS = new Set(["raid0", "raid1", "raid5", "raid6", "raid10", "jbod"]);
+
+  function evalAndRespond(
+    res: import("express").Response,
+    prismaArg: PrismaClient,
+    service: StorageOp,
+    resourceId: string,
+    params: Record<string, unknown>,
+    userId?: string,
+  ) {
+    return evaluateStorageCommand(prismaArg, service, resourceId, params, userId, "api").then(
+      (result) => {
+        // `requiresConfirmation` is the positive discriminant on the union;
+        // anything else is the blocked branch (e.g. too many pending).
+        if (!("requiresConfirmation" in result)) {
+          return res.status(403).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+        // Tier 3 via dashboard → 202 + token. Caller confirms to execute.
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          service,
+          resourceId,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      },
+    );
+  }
+
+  // POST /api/storage/pools — create a pool (DESTRUCTIVE).
+  router.post("/storage/pools", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device, level, members, confirmPhrase } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device (expected md<N>)" });
+      }
+      if (typeof level !== "string" || !VALID_LEVELS.has(level)) {
+        return res.status(400).json({ error: "Invalid RAID level" });
+      }
+      if (!Array.isArray(members) || members.length < 1 || !members.every(validMember)) {
+        return res.status(400).json({ error: "Invalid members — expected /dev/* paths" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_create",
+        device,
+        { level, members, confirm_phrase: confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // DELETE /api/storage/pools/:device — destroy a pool (DESTRUCTIVE).
+  router.delete("/storage/pools/:device", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_destroy",
+        device,
+        { confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/format — format the array (DESTRUCTIVE).
+  router.post("/storage/pools/:device/format", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      const fstype = req.body?.fstype;
+      if (fstype !== undefined && !/^[a-z0-9]{1,12}$/.test(String(fstype))) {
+        return res.status(400).json({ error: "Invalid fstype" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_format",
+        device,
+        { fstype, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/level — change RAID level (DESTRUCTIVE).
+  router.post("/storage/pools/:device/level", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      const { level } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      if (typeof level !== "string" || !VALID_LEVELS.has(level)) {
+        return res.status(400).json({ error: "Invalid RAID level" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_set_level",
+        device,
+        { level, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/spare — add a spare disk (DESTRUCTIVE — wipes the new disk).
+  router.post("/storage/pools/:device/spare", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      const { member } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      if (!validMember(member)) {
+        return res.status(400).json({ error: "Invalid member device" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_add_spare",
+        device,
+        { member, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/remove-disk — fail+remove a member (DESTRUCTIVE).
+  router.post("/storage/pools/:device/remove-disk", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      const { member } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      if (!validMember(member)) {
+        return res.status(400).json({ error: "Invalid member device" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_remove_disk",
+        device,
+        { member, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
     }
   });
 
