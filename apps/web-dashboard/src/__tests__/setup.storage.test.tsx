@@ -15,7 +15,14 @@
  * setup tests use.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  act,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import React from "react";
 
 vi.mock("framer-motion", async () => {
@@ -90,6 +97,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
+import { buildConfirmPhrase } from "@/components/setup/steps/StorageStep";
 import { passClaimStep } from "./helpers/claim-step";
 import { passOrgStep } from "./helpers/org-step";
 
@@ -342,5 +350,289 @@ describe("setup Storage step (WARP-174)", () => {
 
     expect(screen.getByText(/can't share the name/i)).toBeInTheDocument();
     expect(updateDriveLabelMock).not.toHaveBeenCalled();
+  });
+});
+
+// =====================================================================
+// BUG-3 / ADR-019 — RAID on/off toggle + live calculator + gated create
+//
+// RAID is OPTIONAL and default-OFF. OFF leaves the step exactly as the
+// WARP-174 naming step (covered above). These tests cover the new ON
+// path: the calculator, the level chooser, and wiring a chosen level
+// through #489's requestCreatePool → confirm → confirmPoolCommand flow,
+// including the calm data-present refusal.
+// =====================================================================
+describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", () => {
+  beforeEach(() => {
+    fetchDrivesMock.mockReset();
+    updateDriveLabelMock.mockReset();
+    requestCreatePoolMock.mockReset();
+    requestDestroyPoolMock.mockReset();
+    confirmPoolCommandMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** Find the RAID on/off switch by its accessible role. */
+  function raidSwitch() {
+    return screen.getByRole("switch", { name: /storage pool/i });
+  }
+
+  /** Click "Create pool" INSIDE the confirm dialog (the step footer has a
+   *  same-named button, so scope to the modal). */
+  function clickConfirmInDialog() {
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^create pool$/i }),
+    );
+  }
+
+  it("defaults the RAID toggle OFF — no level chooser, no create action visible", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    const toggle = raidSwitch();
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    // The RAID-level chooser is hidden while OFF.
+    expect(screen.queryByRole("radiogroup", { name: /raid level/i })).toBeNull();
+    // The default primary is still the naming step's "Save and continue".
+    expect(
+      screen.getByRole("button", { name: /save and continue/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("OFF keeps the step skippable and creates no pool", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    // Toggle stays OFF; Skip advances to discovery with zero pool calls.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    expect(requestCreatePoolMock).not.toHaveBeenCalled();
+    expect(confirmPoolCommandMock).not.toHaveBeenCalled();
+  });
+
+  it("turning the toggle ON reveals the RAID-level chooser", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    await act(async () => {
+      fireEvent.click(raidSwitch());
+    });
+
+    expect(raidSwitch()).toHaveAttribute("aria-checked", "true");
+    const group = screen.getByRole("radiogroup", { name: /raid level/i });
+    expect(group).toBeInTheDocument();
+    // FIXTURE_DRIVES is 2 drives → JBOD / RAID 0 / RAID 1 selectable.
+    expect(screen.getByRole("radio", { name: /JBOD/i })).toBeEnabled();
+    expect(screen.getByRole("radio", { name: /RAID 0/i })).toBeEnabled();
+    expect(screen.getByRole("radio", { name: /RAID 1 —/i })).toBeEnabled();
+  });
+
+  it("greys out RAID 5/6/10 at 2 drives with a needs-N-drives reason", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(raidSwitch());
+    });
+
+    for (const name of [/RAID 5/i, /RAID 6/i, /RAID 10/i]) {
+      const radio = screen.getByRole("radio", { name });
+      expect(radio).toBeDisabled();
+    }
+    // The plain-language "needs N+ drives" copy is shown for the unavailable
+    // levels (3 for RAID 5, 4 for RAID 6/10).
+    expect(screen.getByText(/needs 3\+ drives/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/needs 4\+ drives/i).length).toBeGreaterThan(0);
+  });
+
+  it("shows the usable capacity for the box's real 2×1.8TB shape", async () => {
+    fetchDrivesMock.mockResolvedValue({
+      drives: [
+        {
+          ...FIXTURE_DRIVES.drives[0],
+          uuid: "UUID-A",
+          device: "/dev/sda",
+          size_bytes: 1_800_000_000_000,
+        },
+        {
+          ...FIXTURE_DRIVES.drives[1],
+          uuid: "UUID-B",
+          device: "/dev/sdb",
+          size_bytes: 1_800_000_000_000,
+        },
+      ],
+      count: 2,
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(raidSwitch());
+    });
+
+    // JBOD/RAID0 = 3.6 TB, RAID1 = 1.8 TB. Sizes render in the mono font.
+    expect(screen.getAllByText(/3\.6 TB/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1\.8 TB/).length).toBeGreaterThan(0);
+  });
+
+  it("ON + a chosen level + confirm wires through requestCreatePool then confirmPoolCommand", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    requestCreatePoolMock.mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-123",
+      service: "pool_create",
+      resourceId: "md0",
+      expiresIn: 60,
+    });
+    confirmPoolCommandMock.mockResolvedValue({ ok: true });
+
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(raidSwitch());
+    });
+    // Pick RAID 1 (mirror).
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
+    });
+    // Kick off creation — this evaluates (step 1) and opens the confirm.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create pool/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // requestCreatePool got the chosen level + the real drive devices as members.
+    expect(requestCreatePoolMock).toHaveBeenCalledTimes(1);
+    const arg = requestCreatePoolMock.mock.calls[0][0];
+    expect(arg.level).toBe("raid1");
+    expect(arg.members).toEqual(
+      expect.arrayContaining(["/dev/sda1", "/dev/sda2"]),
+    );
+    expect(arg.device).toMatch(/^md\d+$/);
+    // The confirm phrase MUST name every member's short device — the host
+    // script's "never run blind" gate (ADR-019 D4.3) refuses otherwise, even
+    // on empty drives.
+    expect(arg.confirmPhrase).toContain("sda1");
+    expect(arg.confirmPhrase).toContain("sda2");
+
+    // The confirm dialog states plainly that the drives get erased, and names
+    // them with their sizes. (The blast-radius wording also appears inline in
+    // the step, which is intentional — honest in both places.)
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByText(/erase|erased|permanently/i),
+    ).toBeInTheDocument();
+    // The drive names + sizes appear in the dialog's verification block.
+    expect(within(dialog).getByText(/TOSHIBA EXT/i)).toBeInTheDocument();
+
+    // Confirm executes step 2.
+    await act(async () => {
+      clickConfirmInDialog();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(confirmPoolCommandMock).toHaveBeenCalledWith({
+        confirmationToken: "tok-123",
+        service: "pool_create",
+        resourceId: "md0",
+      }),
+    );
+    // On success the wizard advances to discovery.
+    await waitFor(() =>
+      expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("surfaces a calm back-up message (not a raw error) when the drives hold data", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    requestCreatePoolMock.mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-xyz",
+      service: "pool_create",
+      resourceId: "md0",
+      expiresIn: 60,
+    });
+    // #489 host pre-flight refuses a populated disk → confirmPoolCommand throws
+    // with the bridge's raw 422 message. We must NOT show that raw string.
+    confirmPoolCommandMock.mockRejectedValue(
+      new Error("mdadm: /dev/sda1 appears to contain an ext4 filesystem"),
+    );
+
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(raidSwitch());
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create pool/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      clickConfirmInDialog();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Calm, honest copy — back it up first; Droplet won't erase a drive in use.
+    await waitFor(() =>
+      expect(screen.getByText(/back (it|them) up/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/in use|have data|won't erase/i)).toBeInTheDocument();
+    // The raw mdadm/ext4 string never reaches the screen.
+    expect(screen.queryByText(/ext4 filesystem/i)).toBeNull();
+    expect(screen.queryByText(/mdadm/i)).toBeNull();
+    // The wizard did NOT advance — the owner stays on the storage step.
+    expect(screen.queryByText(/discovering your devices/i)).toBeNull();
+  });
+
+  it("does not call requestCreatePool until the owner explicitly creates", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(raidSwitch());
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
+    });
+    // Merely turning the toggle on and picking a level must never auto-create.
+    expect(requestCreatePoolMock).not.toHaveBeenCalled();
+    expect(confirmPoolCommandMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildConfirmPhrase (ADR-019 D4.3 — host-script never-run-blind gate)", () => {
+  it("names every member's short device so confirm_names() passes", () => {
+    const phrase = buildConfirmPhrase(["/dev/sda1", "/dev/sda2"]);
+    // The host script does a case-sensitive substring match per member.
+    expect(phrase).toContain("sda1");
+    expect(phrase).toContain("sda2");
+  });
+
+  it("uses the basename, not the full /dev path", () => {
+    const phrase = buildConfirmPhrase(["/dev/nvme0n1", "/dev/nvme1n1"]);
+    expect(phrase).toContain("nvme0n1");
+    expect(phrase).toContain("nvme1n1");
+  });
+
+  it("tolerates an empty member list without throwing", () => {
+    expect(buildConfirmPhrase([])).toBe("ERASE");
   });
 });
