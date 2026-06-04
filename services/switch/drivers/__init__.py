@@ -37,11 +37,26 @@ def create_driver() -> SwitchDriver:
         # default (with a warning). Honoured in LantronixDriver.connect().
         ca_cert = os.environ.get("SWITCH_CA_CERT", "").strip() or None
 
+        # ADR-018 item 10: the WebStaX write shape (POST /config/<name>) is
+        # pattern-inferred and NOT yet confirmed on firmware v1.04.0079. The
+        # driver therefore runs PLAN-ONLY by default — writes compute the
+        # intended change without POSTing. SWITCH_LIVE_WRITES must be explicitly
+        # truthy to apply writes, and only after a one-time supervised
+        # confirmation of the write shape per firmware. Default-safe posture
+        # (matches SWITCH_AUTOPROVISION defaulting off).
+        plan_only = os.environ.get("SWITCH_LIVE_WRITES", "0").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
         if not password:
             logger.warning("SWITCH_PASSWORD not set — switch auth may fail")
 
         logger.info(
-            "Creating managed switch driver for %s:%d (user: %s)", host, port, username
+            "Creating managed switch driver for %s:%d (user: %s, writes: %s)",
+            host, port, username, "PLAN-ONLY" if plan_only else "LIVE",
         )
         return LantronixDriver(
             host=host,
@@ -49,6 +64,7 @@ def create_driver() -> SwitchDriver:
             username=username,
             password=password,
             ca_cert=ca_cert,
+            plan_only=plan_only,
         )
 
     # Future: custom ASIC driver
