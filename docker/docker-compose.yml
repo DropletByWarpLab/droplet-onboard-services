@@ -42,7 +42,9 @@ name: droplet
 # Profile-gated services are sized for their provisioned hardware and are
 # NOT counted in the 6 GB default budget:
 #   linux:       frigate 1 GB, voice-io 512 MB, whisper 1 GB, piper 512 MB
-#   single-box:  ollama 4 GB, openwrt 512 MB
+#   single-box:  ollama 4 GB, openwrt 512 MB, switch 128 MB (ADR-018 item 9:
+#                the managed switch auto-provisions a plugged-in AP onto the
+#                LAN — shared with the `full` profile, +128 MB on single-box)
 #   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 768 MB,
 #                pm-worker 512 MB, pm-web 384 MB, pm-health 128 MB
 #   eval:        rag-eval 1 GB
@@ -715,7 +717,26 @@ services:
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
       - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
       - PORT=8081
-    profiles: ["full"]
+      # ADR-018 item 9: bring-up provisioning. Off unless explicitly enabled
+      # (single-box sets SWITCH_AUTOPROVISION=1 + SWITCH_VLAN_PROFILE=flat-lan
+      # in .env). flat-lan only pulls a stranded access port back to VLAN 1;
+      # segmented isolation is double-gated on the routing cameras.present
+      # cross-check (item 9 depends on item 3).
+      - SWITCH_AUTOPROVISION=${SWITCH_AUTOPROVISION:-0}
+      - SWITCH_VLAN_PROFILE=${SWITCH_VLAN_PROFILE:-flat-lan}
+      - SWITCH_PROTECTED_PORT=${SWITCH_PROTECTED_PORT:-0}
+      - SWITCH_CAMERA_PORTS=${SWITCH_CAMERA_PORTS:-}
+      - SWITCH_AP_PORTS=${SWITCH_AP_PORTS:-}
+      - SWITCH_CLIENT_PORTS=${SWITCH_CLIENT_PORTS:-}
+      # ADR-018 item 10: plan-only by default; set SWITCH_LIVE_WRITES=1 after
+      # one-time supervised confirmation of the write shape per firmware.
+      - SWITCH_LIVE_WRITES=${SWITCH_LIVE_WRITES:-0}
+      - SWITCH_PROVISION_TIMEOUT=${SWITCH_PROVISION_TIMEOUT:-30}
+      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
+    # single-box bundles the managed switch so a plugged-in AP auto-provisions
+    # onto the LAN instead of stranding on an isolated VLAN (ADR-018 item 9);
+    # `full` is the multi-box/explicit-managed shape.
+    profiles: ["full", "single-box"]
     restart: always
     mem_limit: ${SWITCH_MEM_LIMIT:-128m}
     cpus: ${SWITCH_CPUS:-0.5}

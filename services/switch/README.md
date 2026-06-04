@@ -100,6 +100,7 @@ This creates VLAN 100, assigns ports 1-8 as untagged access ports (cameras), and
 | `SWITCH_PASSWORD` | (required) | Switch admin password |
 | `SWITCH_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the switch. When set, the HTTPS session to the switch is verified against it. When unset, verification is disabled (the embedded switch ships a self-signed cert) and a warning is logged. A configured-but-missing path fails closed (the driver refuses to start) rather than silently downgrading to unverified TLS. |
 | `SWITCH_DRIVER` | `lantronix` | Driver implementation (`lantronix` or `asic`) |
+| `SWITCH_LIVE_WRITES` | `0` (off) | ADR-018 item 10: the WebStaX write shape (`POST /config/<name>`) is pattern-inferred and not yet confirmed on firmware v1.04.0079. The Lantronix driver runs **plan-only** by default — writes compute the intended change and log it without POSTing. Set truthy (`1`/`true`/`yes`/`on`) ONLY after a one-time supervised confirmation of the write shape per firmware; live writes are then read-back-verified and raise on mismatch. |
 | `PORT` | `8081` | Service listen port |
 
 ## Running Locally
