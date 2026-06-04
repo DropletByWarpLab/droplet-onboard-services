@@ -5,6 +5,8 @@ import { Network, RefreshCw, ShieldCheck, WifiOff } from "lucide-react";
 import { useSwitch } from "@/lib/hooks/useSwitch";
 import { useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
 import type { SwitchPort } from "@/lib/types/switch";
 import { PoeBudget } from "./PoeBudget";
 import { Faceplate } from "./Faceplate";
@@ -48,6 +50,7 @@ export function SwitchPanel() {
   const { status, ports, vlans, isLoading, error, connected, changeVlan, togglePoe, setPortEnabled, reapplyConfig } =
     useSwitch();
   const { user } = useAuth();
+  const { toast } = useToast();
   const canWrite = user?.role === "owner" || user?.role === "admin";
 
   const [layout, setLayout] = useState<Layout>("face");
@@ -95,10 +98,19 @@ export function SwitchPanel() {
   // Run the confirmed write through the matching useSwitch action.
   async function applyAction() {
     if (!action) return;
-    if (action.kind === "vlan") await changeVlan(action.port.port, action.vlanId);
-    else if (action.kind === "poe") await togglePoe(action.port.port, action.enabled);
-    else if (action.kind === "enable") await setPortEnabled(action.port.port, action.enabled);
-    else if (action.kind === "provision") await reapplyConfig();
+    try {
+      if (action.kind === "vlan") await changeVlan(action.port.port, action.vlanId);
+      else if (action.kind === "poe") await togglePoe(action.port.port, action.enabled);
+      else if (action.kind === "enable") await setPortEnabled(action.port.port, action.enabled);
+      else if (action.kind === "provision") await reapplyConfig();
+    } catch (err) {
+      // Surface the failure as a toast (mirrors DeviceDetailPanel's
+      // translateError pattern); re-throw so ConfirmDialog stays open by
+      // contract and the owner can retry. Without this a failed switch write
+      // was silent — UX review finding on item 12 (PR-B).
+      toast(translateError(err, "network"), "error");
+      throw err;
+    }
   }
 
   return (

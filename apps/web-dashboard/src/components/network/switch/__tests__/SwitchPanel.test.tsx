@@ -27,6 +27,11 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => useAuthMock(),
 }));
 
+const toastMock = vi.fn();
+vi.mock("@/components/Toast", () => ({
+  useToast: () => ({ toast: toastMock }),
+}));
+
 import { SwitchPanel } from "../SwitchPanel";
 
 const STATUS: SwitchStatus = {
@@ -201,6 +206,21 @@ describe("SwitchPanel — confirm-on-write flow", () => {
     fireEvent.click(confirm);
 
     await waitFor(() => expect(togglePoe).toHaveBeenCalledWith(4, false));
+  });
+
+  it("surfaces an error toast when a write fails — never silent", async () => {
+    const togglePoe = vi.fn().mockRejectedValue(new Error("Switch poe: 500"));
+    useSwitchMock.mockReturnValue(makeHook({ togglePoe }));
+    render(<SwitchPanel />);
+
+    fireEvent.click(screen.getByTitle("Living-room AP"));
+    fireEvent.click(await screen.findByRole("button", { name: /cut poe power/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm & apply/i }));
+
+    await waitFor(() => expect(togglePoe).toHaveBeenCalledWith(4, false));
+    // The failure is surfaced as a friendly error toast (the gap UX flagged),
+    // not swallowed silently.
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.any(String), "error"));
   });
 
   it("re-apply config opens a confirm and calls reapplyConfig", async () => {
