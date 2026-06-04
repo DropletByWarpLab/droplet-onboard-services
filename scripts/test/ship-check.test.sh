@@ -1015,6 +1015,44 @@ test_pm_stack_disabled_via_env_gate() {
 }
 
 # =============================================================================
+# Test: disabling PM strips a previously-appended `pm` (symmetric opt-out) — WARP-496
+# =============================================================================
+#
+# PR #487 code-review follow-up: the gate-OFF path must STRIP an already-present
+# `pm` token so DROPLET_PM_ENABLED=0 + a re-run drops the stack on an
+# already-PM-provisioned box (not only on a fresh provision). Unit-tests the
+# pure `_strip_pm_profile` helper the disable branch calls. Substring-safe: a
+# profile named `pmx`/`xpm` must be preserved. No docker needed (single-box.sh
+# is define-only; sourced in a subshell so its funcs don't leak into the runner).
+test_pm_profile_strip_symmetric_disable() {
+  (
+    set +e
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT_REAL/scripts/lib/single-box.sh" >/dev/null 2>&1 || { printf "    could not source single-box.sh\n" >&2; exit 2; }
+    type _strip_pm_profile >/dev/null 2>&1 || { printf "    _strip_pm_profile not defined\n" >&2; exit 3; }
+    local cases=(
+      "linux,display,single-box,pm|linux,display,single-box"
+      "single-box,pm|single-box"
+      "pm,single-box|single-box"
+      "pm|"
+      "linux,display,single-box|linux,display,single-box"
+      "linux,pmx,single-box,pm|linux,pmx,single-box"
+      "linux,xpm,single-box|linux,xpm,single-box"
+    )
+    local c in exp got
+    for c in "${cases[@]}"; do
+      in="${c%%|*}"; exp="${c#*|}"
+      got="$(_strip_pm_profile "$in")"
+      if [ "$got" != "$exp" ]; then
+        printf "    _strip_pm_profile '%s' -> '%s' (expected '%s')\n" "$in" "$got" "$exp" >&2
+        exit 1
+      fi
+    done
+    exit 0
+  )
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -1059,6 +1097,9 @@ _run_test "Plane PM stack is active by default on single-box (bug #10, WARP-496)
 
 _run_test "Plane PM stack excluded when DROPLET_PM_ENABLED=0 (WARP-496)" \
   test_pm_stack_disabled_via_env_gate
+
+_run_test "Disabling PM strips a previously-appended pm profile (symmetric opt-out, WARP-496)" \
+  test_pm_profile_strip_symmetric_disable
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

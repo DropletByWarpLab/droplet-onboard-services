@@ -306,6 +306,18 @@ _droplet_pm_enabled() {
   esac
 }
 
+# Strip the `pm` token from a comma-separated COMPOSE_PROFILES value ($1).
+# Used by the gate-OFF path so DROPLET_PM_ENABLED=0 + a re-run actually drops
+# the Plane stack on an already-PM-provisioned box (symmetric with the enable
+# path's append). Comma-wrapped param-expansion replace (no sed) is
+# substring-safe: a profile named e.g. `pmx`/`xpm` is preserved.
+_strip_pm_profile() {
+  local wrapped=",${1:-},"
+  wrapped="${wrapped//,pm,/,}"
+  wrapped="${wrapped#,}"; wrapped="${wrapped%,}"
+  printf '%s' "$wrapped"
+}
+
 configure_single_box_env() {
   local env_file="$REPO_ROOT/.env"
   if [ ! -f "$env_file" ]; then
@@ -363,6 +375,10 @@ configure_single_box_env() {
     esac
     log_info "Plane PM stack ENABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val:-<unset, default on>})"
   else
+    # Gate OFF: STRIP any previously-appended `pm` token so disabling is
+    # symmetric — DROPLET_PM_ENABLED=0 + a re-run actually drops the stack on an
+    # already-PM-provisioned box, not only on a fresh provision.
+    merged_profiles="$(_strip_pm_profile "$merged_profiles")"
     log_info "Plane PM stack DISABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val}) — ~2.5 GB freed"
   fi
 
