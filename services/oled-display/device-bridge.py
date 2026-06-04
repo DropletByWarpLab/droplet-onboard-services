@@ -1532,12 +1532,25 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/wifi":
                 return self._send(200, wifi_snapshot())
             if path == "/openwrt/qr":
+                # WARP-659: this read endpoint returns the LAN SSID + PSK
+                # (credential material). With BRIDGE_BIND=0.0.0.0 it is
+                # LAN-reachable, so it MUST require the shared secret — a
+                # wired/mgmt client without the token can no longer lift the
+                # Wi-Fi password. Local display + orchestrator both send it.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, qr_snapshot())
             if path == "/files":
                 return self._send(200, files_snapshot())
             if path == "/cameras":
                 return self._send(200, cameras_snapshot())
             if path == "/drives":
+                # WARP-659: drive inventory (labels, mount points, usage) is
+                # box-internal; gate it like /openwrt/qr now that the bridge
+                # binds all interfaces. Both consumers (display, orchestrator)
+                # send the token.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, drives_snapshot())
             if path == "/pools":
                 # BUG-3 / ADR-019: read-only mdadm array inventory. Returns []

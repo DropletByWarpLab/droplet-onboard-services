@@ -275,3 +275,70 @@ def test_multibox_error_path_unchanged(monkeypatch: pytest.MonkeyPatch):
     assert snap["ok"] is False
     assert snap["matrix"] is None
     assert snap["error"] == "ssh failed"
+
+
+# ---------------------------------------------------------------------------
+# WARP-659 — credential-bearing GET reads (/openwrt/qr, /drives) require the
+# bridge shared secret now that BRIDGE_BIND=0.0.0.0 makes them LAN-reachable.
+# /wifi /health stay open (no credential material).
+# ---------------------------------------------------------------------------
+
+_AUTH = {"X-Droplet-Auth": "pytest-bridge-token"}
+
+
+def _do_get(bridge, monkeypatch, path, headers):
+    """Drive Handler.do_GET for `path`+`headers`, returning (status, body).
+
+    Builds the handler without its socket __init__, stubs the snapshot
+    producers (no SSH / no /proc), and captures the single _send call.
+    """
+    monkeypatch.setattr(bridge, "qr_snapshot",
+                        lambda: {"ok": True, "payload": "WIFI:S:Droplet;;",
+                                 "ssid": "Droplet"})
+    monkeypatch.setattr(bridge, "drives_snapshot",
+                        lambda invalidate=False: {"drives": [], "count": 0})
+    monkeypatch.setattr(bridge, "wifi_snapshot", lambda: {"networks": []})
+    h = bridge.Handler.__new__(bridge.Handler)
+    h.headers = headers
+    h.path = path
+    captured = {}
+    h._send = lambda status, obj: captured.update(status=status, body=obj)
+    h.do_GET()
+    return captured["status"], captured.get("body")
+
+
+def test_openwrt_qr_requires_token(monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch)
+    # No token → 401: a wired/mgmt LAN client can no longer lift the Wi-Fi PSK.
+    assert _do_get(bridge, monkeypatch, "/openwrt/qr", {})[0] == 401
+    # Correct token → 200 with the QR payload.
+    status, body = _do_get(bridge, monkeypatch, "/openwrt/qr", dict(_AUTH))
+    assert status == 200
+    assert body["ssid"] == "Droplet"
+
+
+def test_openwrt_qr_rejects_wrong_token(monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch)
+    assert _do_get(bridge, monkeypatch, "/openwrt/qr",
+                   {"X-Droplet-Auth": "wrong"})[0] == 401
+
+
+def test_drives_requires_token(monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch)
+    assert _do_get(bridge, monkeypatch, "/drives", {})[0] == 401
+    assert _do_get(bridge, monkeypatch, "/drives", dict(_AUTH))[0] == 200
+
+
+def test_open_reads_stay_unauthenticated(monkeypatch: pytest.MonkeyPatch):
+    # Non-credential reads must remain reachable without a token: /wifi (a scan
+    # of nearby networks) and /health (docker healthcheck).
+    bridge = _load_bridge(monkeypatch)
+    assert _do_get(bridge, monkeypatch, "/wifi", {})[0] == 200
+    assert _do_get(bridge, monkeypatch, "/health", {})[0] == 200
+
+
+def test_qr_accepts_bearer_token(monkeypatch: pytest.MonkeyPatch):
+    # _authed also honors the orchestrator's Authorization: Bearer style.
+    bridge = _load_bridge(monkeypatch)
+    assert _do_get(bridge, monkeypatch, "/openwrt/qr",
+                   {"Authorization": "Bearer pytest-bridge-token"})[0] == 200

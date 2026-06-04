@@ -358,9 +358,18 @@ async function fetchWifiQRFromBridge(): Promise<
   { payload: string; ssid: string } | null
 > {
   try {
+    // WARP-659: /openwrt/qr now requires the bridge shared secret (it returns
+    // the Wi-Fi PSK). Same env precedence as storage.ts's bridgeAuthToken();
+    // read per-call so a secret injected after boot is picked up.
+    const token = (
+      process.env.BRIDGE_AUTH_TOKEN ||
+      process.env.SERVICE_TOKEN_DISPLAY ||
+      ""
+    ).trim();
     const res = await fetch(`${DEVICE_BRIDGE_URL}/openwrt/qr`, {
       // device-bridge is local-only; short timeout.
       signal: AbortSignal.timeout(2_000),
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { payload?: string; ssid?: string };

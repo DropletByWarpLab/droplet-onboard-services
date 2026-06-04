@@ -260,7 +260,13 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(`${BRIDGE_URL}/drives`, { signal: ctrl.signal });
+      // WARP-659: /drives is now token-gated on the bridge (it's LAN-reachable
+      // via BRIDGE_BIND=0.0.0.0). Send the same shared secret the eject path uses.
+      const token = bridgeAuthToken();
+      const r = await fetch(`${BRIDGE_URL}/drives`, {
+        signal: ctrl.signal,
+        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      });
       clearTimeout(timer);
       if (!r.ok) {
         res.status(502).json({ drives: [], count: 0,

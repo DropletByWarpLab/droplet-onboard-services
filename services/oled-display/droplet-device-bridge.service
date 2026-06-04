@@ -9,13 +9,11 @@ Wants=network-online.target docker.service
 Type=simple
 User=droplet
 Group=droplet
-# Runtime config is loaded from an operator-managed env file. The file
-# is created by `setup.sh` with 0600 perms and holds the OpenWrt SSH
-# password, Frigate URL, etc. Keeping these out of the committed unit
-# file so git history never carries live credentials.
-EnvironmentFile=-/etc/droplet/device-bridge.env
 # Sensible defaults for endpoints that are always the same on a Droplet
-# deployment. Credentials come from EnvironmentFile above.
+# deployment. The operator env file is loaded AFTER these (see below) so it
+# can OVERRIDE any of them — including BRIDGE_BIND (WARP-659): systemd applies
+# Environment/EnvironmentFile in source order, last wins, so the file must come
+# last or an operator's setting is silently ignored.
 Environment=OPENWRT_HOST=192.168.50.1
 Environment=OPENWRT_USER=root
 Environment=OPENWRT_IFACE=wlan0
@@ -36,12 +34,19 @@ Environment=BRIDGE_PORT=9090
 # storage step show nothing. This mirrors the oled-display service, which
 # binds 0.0.0.0:8082 for the same cross-container reachability. Safe because
 # every mutating endpoint (/wifi/connect, /openwrt/wifi/rotate,
-# /drives/<uuid>/eject) is gated on BRIDGE_AUTH_TOKEN and the bridge refuses
-# to start without that token (see device-bridge.py _boot_banner); the
-# read/idempotent endpoints carry no credential material. The in-code
-# default stays 127.0.0.1 — set this here so the shipped box is reachable.
+# /drives/<uuid>/eject) AND every credential-bearing read (/openwrt/qr — the
+# Wi-Fi PSK — plus /drives) is gated on BRIDGE_AUTH_TOKEN (WARP-659), and the
+# bridge refuses to start without that token (see device-bridge.py
+# _boot_banner). The remaining open reads (/wifi scan, /files, /cameras,
+# /health) carry no credential material. The in-code default stays 127.0.0.1;
+# an operator can re-pin the bind via the env file below (loaded last).
 Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
+# Operator-managed runtime config, loaded LAST so it overrides the inline
+# defaults above (BRIDGE_BIND, OPENWRT_*, etc.). Created by `setup.sh` with
+# 0600 perms; holds the OpenWrt SSH password, BRIDGE_AUTH_TOKEN, Frigate URL.
+# Kept out of the committed unit so git history never carries live credentials.
+EnvironmentFile=-/etc/droplet/device-bridge.env
 # @REPO_ROOT@ is filled in with the real repo path by
 # scripts/install-device-bridge.sh at install time, so the unit is not pinned
 # to one clone location. The old hardcoded
