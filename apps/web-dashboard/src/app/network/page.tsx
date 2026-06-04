@@ -31,6 +31,7 @@ import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
+import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -572,35 +573,44 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const memUsedPct = memTotal > 0 ? Math.round(((memTotal - memFree) / memTotal) * 100) : 0;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      <StatusCard
-        icon={Globe}
-        title="WAN"
-        value={wanIp}
-        subtitle={`Protocol: ${wanProto}`}
-        status={wan?.up ? "ok" : "error"}
-      />
-      <StatusCard
-        icon={Router}
-        title="LAN"
-        value={lanIp}
-        subtitle={`${overview?.connectedDeviceCount ?? 0} devices`}
-        status={lan?.up ? "ok" : "error"}
-      />
-      <StatusCard
-        icon={Wifi}
-        title="WiFi"
-        value={overview?.wireless ? "Active" : "Inactive"}
-        subtitle={Object.keys(overview?.wireless ?? {}).length + " radio(s)"}
-        status={Object.keys(overview?.wireless ?? {}).length > 0 ? "ok" : "warning"}
-      />
-      <StatusCard
-        icon={Monitor}
-        title="Uptime"
-        value={uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`}
-        subtitle={`Memory: ${memUsedPct}% used`}
-        status="ok"
-      />
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatusCard
+          icon={Globe}
+          title="WAN"
+          value={wanIp}
+          subtitle={`Protocol: ${wanProto}`}
+          status={wan?.up ? "ok" : "error"}
+        />
+        <StatusCard
+          icon={Router}
+          title="LAN"
+          value={lanIp}
+          subtitle={`${overview?.connectedDeviceCount ?? 0} devices`}
+          status={lan?.up ? "ok" : "error"}
+        />
+        <StatusCard
+          icon={Wifi}
+          title="WiFi"
+          value={overview?.wireless ? "Active" : "Inactive"}
+          subtitle={Object.keys(overview?.wireless ?? {}).length + " radio(s)"}
+          status={Object.keys(overview?.wireless ?? {}).length > 0 ? "ok" : "warning"}
+        />
+        <StatusCard
+          icon={Monitor}
+          title="Uptime"
+          value={uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`}
+          subtitle={`Memory: ${memUsedPct}% used`}
+          status="ok"
+        />
+      </div>
+
+      {/* ADR-018 item 12 — managed-switch panel. Sits below the KPI strip
+          (the design's "throughput chart" anchor doesn't exist on this tabbed
+          page; Overview is only visible in Advanced mode — in Simple mode the
+          wrapper div is hidden and NetworkSimple renders instead). Renders
+          its own empty/loading/error states and self-gates RBAC. */}
+      <SwitchPanel />
     </div>
   );
 }

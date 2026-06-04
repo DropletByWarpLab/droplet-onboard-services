@@ -1052,6 +1052,71 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+// --- Managed switch writes (ADDON-network-switch-management.md §7) ---------
+//
+// Each is a Tier-2 (Write) command: the POST returns a 202 with a
+// confirmation token (`requiresConfirmation: true`), which the caller then
+// echoes back through `confirmNetworkCommand` to actually apply. We mirror
+// the firewall block/unblock contract precisely — a non-ok response is only
+// an error when the server did NOT ask for confirmation (the 202 itself is
+// the happy path, not a failure). See useSwitch for the dance.
+
+export async function switchSetPortVlan(
+  port: number,
+  vlanId: number,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/ports/${port}/vlan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vlan_id: vlanId }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to change VLAN: ${res.status}`);
+  return data;
+}
+
+export async function switchSetPortPoe(
+  port: number,
+  enabled: boolean,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/ports/${port}/poe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to toggle PoE: ${res.status}`);
+  return data;
+}
+
+export async function switchSetPortEnabled(
+  port: number,
+  enabled: boolean,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/ports/${port}/enable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to set port state: ${res.status}`);
+  return data;
+}
+
+export async function switchProvision(): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/provision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to re-apply switch config: ${res.status}`);
+  return data;
+}
+
 export type NetworkOperation = {
   id: string;
   // DASH-07: "unknown" is a distinct, non-success terminal state used when the
