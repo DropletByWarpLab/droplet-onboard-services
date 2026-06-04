@@ -105,6 +105,7 @@ ALL_CHECKS=(
   stale-repo-names
   pm-invariants
   lifecycle-naming
+  image-pipeline
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -130,7 +131,7 @@ SUBCOMMAND
                         tsc-full, compose-config, frigate-env-scan,
                         shellcheck, matter-env-allowlist, exec-bits,
                         stale-repo-names, pm-invariants, lifecycle-naming,
-                        docker-build-smoke
+                        image-pipeline, docker-build-smoke
                       Useful for iterating on a single failure.
 
 EXAMPLES
@@ -254,6 +255,17 @@ CHECKS
                         Prevents: ADR-018 §13 class — a new `profiles: [poc]`,
                         `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or
                         `droplet-poc-*` service shipping to a customer box.
+
+  image-pipeline        WARP-663 / ADR-020 appliance image pipeline. Asserts
+                        scripts/build-image.sh is NOT the historical TODO stub
+                        (it must dispatch to scripts/image/build-iso.sh),
+                        scripts/image/manifest.schema.json is valid JSON, the
+                        tracked sample scripts/image/manifest.json validates
+                        against it (via gen-manifest.py's stdlib validator),
+                        and shellcheck passes on the new pipeline scripts
+                        (build-image.sh, droplet-image, build-iso.sh,
+                        lib/image.sh). Does NOT run a real ISO build or flash —
+                        those are the documented manual Linux/hardware gate.
 
   docker-build-smoke    (--full only) Spin up an Ubuntu 24.04 container,
                         mount the repo read-only, run
@@ -755,6 +767,13 @@ run_check_exec_bits() {
     "scripts/test/ship-check.sh"
     "scripts/test/ship-check.test.sh"
     "openwrt/scripts/upgrade-router.sh"
+    # WARP-663 / ADR-020 — operator-facing appliance-image entry points.
+    # `droplet-image` is the CLI dispatcher; build-image.sh / build-iso.sh /
+    # gen-manifest.py are invoked as `./<path>` per docs/IMAGE_PIPELINE.md.
+    "scripts/droplet-image"
+    "scripts/build-image.sh"
+    "scripts/image/build-iso.sh"
+    "scripts/image/gen-manifest.py"
   )
 
   local violations=""
@@ -1276,6 +1295,115 @@ run_check_lifecycle_naming() {
   return 1
 }
 
+run_check_image_pipeline() {
+  # WARP-663 / ADR-020: the appliance image pipeline (`droplet-image
+  # build|manifest|sign|verify|list|publish|flash`) ships a versioned, signed
+  # ISO artifact. This static check guards the three regressions that would
+  # ship green otherwise:
+  #
+  #   1. scripts/build-image.sh reverting to (or never leaving) its historical
+  #      five-line stub (`echo "TODO: Implement Pi image build (pi-gen)"`), so
+  #      `droplet-image build` becomes a no-op that produces no ISO.
+  #   2. scripts/image/manifest.schema.json drifting to invalid JSON, or the
+  #      tracked sample scripts/image/manifest.json no longer validating against
+  #      it — which would let `verify` accept a malformed manifest and break the
+  #      M3.4 OTA substrate that consumes this contract.
+  #   3. a shellcheck regression in the new pipeline scripts (build-image.sh,
+  #      droplet-image, scripts/image/build-iso.sh, scripts/lib/image.sh) — the
+  #      same bash bug class the `shellcheck` check guards for setup.sh + lib/,
+  #      but those targets don't include the image scripts.
+  #
+  # We do NOT run a real ISO build or a real flash here — both require a Linux
+  # host with xorriso + a writable Docker socket + real hardware (the documented
+  # manual flash+boot acceptance gate in docs/IMAGE_PIPELINE.md). This check is
+  # the static counterpart: structure + schema + shellcheck.
+  local label="image-pipeline"
+  local failures=0
+
+  local build_image="$REPO_ROOT/scripts/build-image.sh"
+  local droplet_image="$REPO_ROOT/scripts/droplet-image"
+  local image_lib="$REPO_ROOT/scripts/lib/image.sh"
+  local build_iso="$REPO_ROOT/scripts/image/build-iso.sh"
+  local schema="$REPO_ROOT/scripts/image/manifest.schema.json"
+  local sample_manifest="$REPO_ROOT/scripts/image/manifest.json"
+  local gen_manifest="$REPO_ROOT/scripts/image/gen-manifest.py"
+
+  # ----- Presence: every pipeline file must exist -------------------------
+  local required_files=(
+    "$build_image" "$droplet_image" "$image_lib"
+    "$build_iso" "$schema" "$sample_manifest" "$gen_manifest"
+  )
+  local missing=""
+  local file
+  for file in "${required_files[@]}"; do
+    [ -f "$file" ] || missing+="    ${file#$REPO_ROOT/}: not present\n"
+  done
+  if [ -n "$missing" ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — pipeline file(s) missing\n" "$label"
+    printf '%b' "$missing" >&2
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # ----- build-image.sh must NOT be a stub --------------------------------
+  # The historical stub was a 5-line script whose only action was an echo of
+  # "TODO: Implement Pi image build". Treat as a stub if it (a) still contains
+  # that TODO line, OR (b) never execs the real builder (scripts/image/build-iso.sh).
+  if grep -qE 'TODO: Implement Pi image build' "$build_image"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/build-image.sh is still the TODO stub\n" "$label" >&2
+    printf "    | It must dispatch to scripts/image/build-iso.sh, not echo a TODO.\n" >&2
+    failures=$((failures + 1))
+  elif ! grep -qE 'build-iso\.sh' "$build_image"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/build-image.sh does not exec scripts/image/build-iso.sh\n" "$label" >&2
+    failures=$((failures + 1))
+  fi
+
+  # ----- manifest.schema.json must be valid JSON --------------------------
+  if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$schema" 2>/dev/null; then
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/image/manifest.schema.json is not valid JSON\n" "$label" >&2
+    failures=$((failures + 1))
+  fi
+
+  # ----- sample manifest.json must validate against the schema ------------
+  # gen-manifest.py exposes a `validate` subcommand (pure-stdlib draft-07
+  # subset) that exits 0 on a valid manifest, non-zero otherwise. Reusing it
+  # keeps one validation implementation, not two.
+  if [ "$failures" -eq 0 ] || [ -f "$gen_manifest" ]; then
+    local vout
+    if ! vout="$(python3 "$gen_manifest" validate --schema "$schema" "$sample_manifest" 2>&1)"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — sample manifest.json does not validate against the schema\n" "$label" >&2
+      printf '%s\n' "$vout" | sed 's/^/    | /' >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
+  # ----- shellcheck the new pipeline scripts ------------------------------
+  # Same severity + no-global-exclude policy as run_check_shellcheck. These
+  # scripts are NOT in that check's target set, so they're covered here.
+  if command -v shellcheck >/dev/null 2>&1; then
+    local sc_out sc_rc
+    sc_out="$(shellcheck --severity=warning --external-sources \
+      "$build_image" "$droplet_image" "$image_lib" "$build_iso" 2>&1)" && sc_rc=0 || sc_rc=$?
+    if [ "$sc_rc" -ne 0 ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — shellcheck flagged the pipeline scripts\n" "$label" >&2
+      printf '%s\n' "$sc_out" | head -40 | sed 's/^/    | /' >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — shellcheck not on PATH (required to lint pipeline scripts)\n" "$label" >&2
+    failures=$((failures + 1))
+  fi
+
+  if [ "$failures" -gt 0 ]; then
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  printf "  ${_GREEN}PASS${_RESET}  %s (build-image non-stub; schema + sample manifest valid; scripts clean)\n" "$label"
+  CHECK_RESULTS[$label]=pass
+  return 0
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -1513,6 +1641,7 @@ _dispatch_check() {
     stale-repo-names)     run_check_stale_repo_names ;;
     pm-invariants)        run_check_pm_invariants ;;
     lifecycle-naming)     run_check_lifecycle_naming ;;
+    image-pipeline)       run_check_image_pipeline ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
