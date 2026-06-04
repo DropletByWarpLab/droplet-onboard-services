@@ -46,6 +46,7 @@ import {
   type RedactedEmailChannelConfig,
   type SendOptions,
 } from "../services/email-channel.service.js";
+import { isExpired } from "../services/invite.service.js";
 
 const logger = pino({ name: "settings-email-route" });
 
@@ -216,6 +217,7 @@ export function createSettingsEmailRouter(
               role: string;
               acceptedAt: Date | null;
               revokedAt: Date | null;
+              expiresAt: Date;
             }
           | null;
 
@@ -232,6 +234,14 @@ export function createSettingsEmailRouter(
           return res.status(409).json({
             error: "Invite has been revoked",
             code: "INVITE_REVOKED",
+          });
+        }
+        // Don't re-send an accept link that will 410 the instant it's clicked —
+        // mirror the accept route's expiry guard (auth.ts → isExpired). (onboard#486)
+        if (isExpired(invite)) {
+          return res.status(410).json({
+            error: "Invite has expired",
+            code: "INVITE_EXPIRED",
           });
         }
         if (!invite.email) {

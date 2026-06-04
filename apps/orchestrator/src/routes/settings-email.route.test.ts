@@ -287,6 +287,7 @@ describe("POST /api/people/invites/:id/resend", () => {
       sendAttempts: 1,
       revokedAt: null,
       acceptedAt: null,
+      expiresAt: new Date(Date.now() + 86_400_000),
     });
     const { app, sendMail } = buildApp(prisma);
 
@@ -296,6 +297,30 @@ describe("POST /api/people/invites/:id/resend", () => {
     expect(res.body.sendStatus).toBe("sent");
     expect(sendMail).toHaveBeenCalledTimes(1);
     expect(prisma._invites.get("inv-1")!.sendStatus).toBe("sent");
+  });
+
+  it("410s a resend on an expired invite — the accept link would 410 on click (onboard#486)", async () => {
+    const prisma = createPrismaMock(
+      seedConfig({ enabled: true, host: "smtp.acme.co", fromAddress: "d@acme.co" }),
+    );
+    prisma._invites.set("inv-exp", {
+      id: "inv-exp",
+      token: "TOK-EXP",
+      email: "old@acme.co",
+      role: "family",
+      sendStatus: "failed",
+      sendAttempts: 1,
+      revokedAt: null,
+      acceptedAt: null,
+      expiresAt: new Date(Date.now() - 1_000), // already past
+    });
+    const { app, sendMail } = buildApp(prisma);
+
+    const res = await request(app).post("/api/people/invites/inv-exp/resend");
+
+    expect(res.status).toBe(410);
+    expect(res.body.code).toBe("INVITE_EXPIRED");
+    expect(sendMail).not.toHaveBeenCalled();
   });
 
   it("404s an unknown invite", async () => {
@@ -334,6 +359,7 @@ describe("POST /api/people/invites/:id/resend", () => {
       sendAttempts: 1,
       acceptedAt: null,
       revokedAt: null,
+      expiresAt: new Date(Date.now() + 86_400_000),
     });
     const failingSend = vi.fn().mockRejectedValue(new Error("ETIMEDOUT"));
     const { app } = buildApp(prisma, undefined, failingSend);
