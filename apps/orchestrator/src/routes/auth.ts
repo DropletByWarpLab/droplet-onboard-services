@@ -11,6 +11,7 @@ import {
 } from "../services/invite.service.js";
 import { sendInviteEmail } from "../services/email-channel.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
+import { buildInviteUrl } from "../lib/invite-url.js";
 import {
   ncCheckSetupRequired,
   ncInstallAndCreateAdmin,
@@ -211,12 +212,10 @@ function getRequestIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
-/** Build the absolute invite URL for the issued token. */
-function buildInviteUrl(req: Request, token: string): string {
-  const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
-  return `${protocol}://${host}/invite/${token}`;
-}
+// The invite-accept URL is built by the shared, host-validated
+// `buildInviteUrl` in lib/invite-url.ts (PR #486 review finding 2). The old
+// local copy trusted `x-forwarded-host` blindly, embedding an unvalidated host
+// into a token-bearing email link — a token-exfiltration vector.
 
 const updateUserSchema = z
   .object({
@@ -2008,6 +2007,10 @@ export function createProtectedAuthRouter(
       // retryable invite (POST /api/people/invites/:id/resend) — explicit state,
       // no silent success. Skipped only when the invite carries no email (which
       // can't happen here: email is required above) or prisma isn't wired.
+      // Resolve the host-validated accept URL once (the canonical-origin
+      // lookup is cached, but one call keeps the email + response consistent).
+      const acceptUrl = await buildInviteUrl(req, created.token);
+
       let sendStatus: "sent" | "failed" = "failed";
       if (prisma && parsed.data.email) {
         const sendResult = await sendInviteEmail(
@@ -2015,7 +2018,7 @@ export function createProtectedAuthRouter(
           {
             inviteId: created.id,
             to: parsed.data.email,
-            acceptUrl: buildInviteUrl(req, created.token),
+            acceptUrl,
             role: created.role,
           },
           sendOptions,
@@ -2025,7 +2028,7 @@ export function createProtectedAuthRouter(
 
       res.json({
         token: created.token,
-        url: buildInviteUrl(req, created.token),
+        url: acceptUrl,
         expiresAt: created.expiresAt,
         send_status: sendStatus,
       });

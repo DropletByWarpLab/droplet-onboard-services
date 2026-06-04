@@ -20,6 +20,11 @@ vi.mock("../config.js", () => ({
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     REDIS_URL: "redis://localhost:6379",
+    // PR #486 finding 2: fields the shared invite-url helper reads. Routing
+    // disabled so the DuckDNS sidecar is never dialed in this unit test.
+    ROUTING_MODE: "disabled",
+    WIREGUARD_ENDPOINT_HOST: "",
+    corsAllowedOrigins: ["https://droplet-ai.local"],
   },
 }));
 
@@ -143,6 +148,26 @@ describe("POST /api/auth/invites — email delivery (BUG-11)", () => {
     expect(msg.text).toContain(`/invite/${res.body.token}`);
     const [row] = [...prisma._invites.values()];
     expect(row.sendStatus).toBe("sent");
+  });
+
+  it("excludes a forged X-Forwarded-Host from the issued URL + email (PR #486 finding 2)", async () => {
+    const prisma = createPrismaMock(readyChannel());
+    const { app, sendMail } = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/invites")
+      .set("Host", "droplet-ai.local")
+      .set("X-Forwarded-Host", "evil.example")
+      .set("X-Forwarded-Proto", "https")
+      .send({ email: "victim@warp.test", role: "family" });
+
+    expect(res.status).toBe(200);
+    // The forged host is in neither the response URL nor the emailed link.
+    expect(res.body.url).not.toContain("evil.example");
+    expect(res.body.url).toContain(`https://droplet-ai.local/invite/${res.body.token}`);
+    const msg = sendMail.mock.calls[0][0];
+    expect(msg.text).not.toContain("evil.example");
+    expect(msg.html).not.toContain("evil.example");
   });
 
   it("still creates the invite (200) and reports failed when the transport errors", async () => {

@@ -47,6 +47,7 @@ import {
   type SendOptions,
 } from "../services/email-channel.service.js";
 import { isExpired } from "../services/invite.service.js";
+import { buildInviteUrl } from "../lib/invite-url.js";
 
 const logger = pino({ name: "settings-email-route" });
 
@@ -251,7 +252,7 @@ export function createSettingsEmailRouter(
           });
         }
 
-        const acceptUrl = buildInviteAcceptUrl(req, invite.token);
+        const acceptUrl = await buildInviteUrl(req, invite.token);
         const result = await sendInviteEmail(
           prisma,
           {
@@ -297,15 +298,8 @@ export function createSettingsEmailRouter(
   return router;
 }
 
-/**
- * Build the absolute accept URL for an invite token. Mirrors auth.ts's
- * `buildInviteUrl` (host-relative, honours x-forwarded-* behind the reverse
- * proxy) so the link in the email matches the dashboard's `/invite/:token`
- * accept route. Kept local to avoid importing the large auth route module.
- */
-function buildInviteAcceptUrl(req: Request, token: string): string {
-  const protocol =
-    req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
-  return `${protocol}://${host}/invite/${token}`;
-}
+// The invite-accept URL is built by the shared, host-validated `buildInviteUrl`
+// in lib/invite-url.ts (PR #486 review finding 2). The old local
+// `buildInviteAcceptUrl` trusted `x-forwarded-host` blindly, embedding an
+// unvalidated host into a token-bearing email link — a token-exfiltration
+// vector. All three invite-send paths now route through the one validated helper.

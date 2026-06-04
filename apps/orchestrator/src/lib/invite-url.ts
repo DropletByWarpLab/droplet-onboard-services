@@ -96,6 +96,24 @@ function hostFromOrigin(origin: string): string | null {
   }
 }
 
+/** The box's own LAN dashboard origin — the safe default + permanent allowlist
+ *  entry. Matches `config.ts`'s `resolveCorsAllowedOrigins` default so the
+ *  invite link and CORS agree on the box's identity. */
+const DEFAULT_TRUSTED_ORIGIN = "https://droplet-ai.local";
+
+/**
+ * The box's trusted origins. Reads `config.corsAllowedOrigins` (its own
+ * LAN/dashboard origins, operator-overridable via CORS_ALLOWED_ORIGINS) and
+ * always includes the LAN default so an under-specified config can never leave
+ * the allowlist empty (which would otherwise let a forged host through).
+ */
+function trustedOrigins(): string[] {
+  const configured = Array.isArray(config.corsAllowedOrigins)
+    ? config.corsAllowedOrigins
+    : [];
+  return configured.length > 0 ? configured : [DEFAULT_TRUSTED_ORIGIN];
+}
+
 /**
  * Resolve the canonical public origin + the host allowlist for invite links.
  *
@@ -111,18 +129,19 @@ export async function resolveInviteOrigin(): Promise<InviteOrigin> {
 
   // Always trust the box's own configured origins (LAN dashboard origin etc.).
   const allowedHosts = new Set<string>();
-  for (const origin of config.corsAllowedOrigins) {
+  for (const origin of trustedOrigins()) {
     const h = hostFromOrigin(origin);
     if (h) allowedHosts.add(h);
   }
 
   // 1. Operator-set public DNS name wins, verbatim, without a network call.
   let canonicalHost: string | null = null;
-  const envHost = config.WIREGUARD_ENDPOINT_HOST.trim();
+  const envHost = (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
   if (envHost) {
     canonicalHost = bareHost(envHost);
-  } else {
-    // 2. Else derive from an enabled DuckDNS config.
+  } else if (config.ROUTING_MODE !== "disabled") {
+    // 2. Else derive from an enabled DuckDNS config. Skipped when routing
+    //    supervision is disabled (the call would just throw RouterError.disabled).
     try {
       const ddns = await fetchDuckDnsStatus();
       if (ddns.configured && ddns.enabled) {
@@ -219,7 +238,7 @@ export async function buildInviteUrl(req: Request, token: string): Promise<strin
   }
 
   // Safe default: the box's first trusted origin. Never the forged header.
-  const fallback = config.corsAllowedOrigins[0] ?? "https://droplet-ai.local";
+  const fallback = trustedOrigins()[0] ?? DEFAULT_TRUSTED_ORIGIN;
   const base = fallback.replace(/\/+$/, "");
   return `${base}/invite/${token}`;
 }

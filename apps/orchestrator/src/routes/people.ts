@@ -41,20 +41,15 @@ import {
   sendInviteEmail,
   type SendOptions,
 } from "../services/email-channel.service.js";
+import { buildInviteUrl } from "../lib/invite-url.js";
 
 const logger = pino({ name: "people-route" });
 
-/**
- * Build the absolute accept URL for an invite token. Mirrors auth.ts's
- * `buildInviteUrl` so the email link matches the dashboard's `/invite/:token`
- * accept route (honours x-forwarded-* behind the reverse proxy).
- */
-function buildInviteAcceptUrl(req: Request, token: string): string {
-  const protocol =
-    req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
-  return `${protocol}://${host}/invite/${token}`;
-}
+// The invite-accept URL is built by the shared, host-validated
+// `buildInviteUrl` in lib/invite-url.ts (PR #486 review finding 2). The old
+// local `buildInviteAcceptUrl` trusted `x-forwarded-host` blindly, embedding an
+// unvalidated host into a token-bearing email link — a token-exfiltration
+// vector. Host resolution now goes through the one validated helper.
 
 // Canonical role + scope sets — duplicated as TS literals (mirroring
 // what middleware/scope.ts does) so this file compiles standalone
@@ -281,7 +276,7 @@ export function createPeopleRouter(
         // invite's `sendStatus` to sent/failed and NEVER throws, so a relay
         // outage can't 500 the create. A failed send leaves a valid, retryable
         // invite (POST /api/people/invites/:id/resend) — no silent success.
-        const acceptUrl = buildInviteAcceptUrl(req, invite.token);
+        const acceptUrl = await buildInviteUrl(req, invite.token);
         const send = await sendInviteEmail(
           prisma,
           {
