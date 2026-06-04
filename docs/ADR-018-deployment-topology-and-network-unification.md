@@ -56,3 +56,36 @@ Wi-Fi coverage and AP onboarding stay on **ADR-005**'s `dawn` + mDNS auto-onboar
 6. [ ] WAN passthrough verification: masquerade / forwarding / DNS in `DOWNSTREAM_ROUTER` posture (pytest + ship-check).
 7. [ ] AP: verify TEW-932DAP OpenWrt support + document the flash path (reuse ADR-005); recommend a supported AP otherwise.
 8. [ ] Update `docs/ROADMAP.md`; add a ship-check assertion that no new `poc-*` tokens are introduced.
+9. [x] **Switch auto-provisioning on bring-up (shape-aware, camera-safe).** See the addendum below.
+
+## Addendum — Action item 9: switch auto-provisioning on bring-up (shape-aware, camera-safe)
+
+**Problem.** The managed-switch service (`services/switch/`) was gated behind the `full` compose profile, so on the `single-box` shape it never ran. Nothing reconciled the switch on bring-up, so a plugged-in AP (or any device) on an access port that the switch had left on a non-LAN VLAN sat **stranded on an isolated VLAN — invisible to the LAN, the dashboard, and Matter commissioning.**
+
+**Decision.** Add an idempotent bring-up provisioner that reconciles the switch to an **explicit desired VLAN state** (`services/switch/provisioner.py`), gated by env and safe by default.
+
+### Two profiles, explicit (never inferred — rule 10)
+
+- **`flat-lan`** (default; the `single-box` value). Every access port — *including camera ports* — belongs untagged on VLAN 1; the uplink is the trunk. The ONLY action is moving an access port that's currently on a non-LAN VLAN back to untagged VLAN 1 (this is what un-strands the AP). It **never creates VLAN 100/50**, and a camera already on VLAN 1 is a no-op. This is correct for the single-box because it runs a flat `br-lan` with **no inter-VLAN routing yet** (item 3 has not landed); isolating the camera VLAN there would cut the working camera + Frigate off.
+- **`segmented`** (multi-box / once item 3 lands). VLAN 1 LAN + isolated camera VLAN 100 + AP-downstream VLAN 50, per the openwrt/handbook posture. **Double-gated:** isolation is applied only if (a) `SWITCH_VLAN_PROFILE=segmented` AND (b) a live cross-check of the routing service confirms the camera-VLAN routing exists. If segmented is requested but cameras are not present, the provisioner **refuses to isolate, stays flat-lan, and logs an ERROR** — a misconfiguration is surfaced, not honoured.
+
+### The routing `cameras.present` cross-check (item 9 → item 3 dependency)
+
+The segmented gate reads the routing service (`ROUTING_SERVICE_URL`, `GET /network/interfaces`) for the **explicit** `cameras.present` flag — the same shape-detection presence mechanism ADR-018 T2 added (`get_all_interface_statuses()` / `interface_stub(present=…)`), never inferred from a missing key. **Item 9 therefore depends on item 3:** until the camera VLAN + inter-VLAN routing is real on a shape, `cameras.present` is not `true` there and the provisioner will not isolate — exactly the camera-safety guarantee the single-box needs today.
+
+### System path, distinct from the orchestrator Tier-2 human-confirmation path
+
+This is the **system** provisioning path: it runs unattended on bring-up and on an event-driven re-run, so it is deliberately conservative — read live state before writing, `driver.backup_config()` before the first write, and **read-back-verify after every write** (a silent write failure surfaces as an error). It is **distinct from the orchestrator's Tier-2 human-confirmation switch path** (`apps/orchestrator/src/routes/switch.ts`), where a human confirms each mutation through the network-safety tier system. The bring-up reconcile has no human in the loop, hence the extra guards; it never reuses or bypasses the Tier-2 path.
+
+### Lifespan + event-driven re-run (no polling — rule 9)
+
+- The switch service `lifespan` schedules the reconcile as a **non-blocking background task**, gated by `SWITCH_AUTOPROVISION` (default `0`/off) AND only when the driver connected (switch-absent = no-op). Boot/health are never delayed; the task is bounded by a hard timeout (`SWITCH_PROVISION_TIMEOUT`) and **no exception escapes** (logged WARNING/ERROR). The task is cancelled on shutdown.
+- `POST /provision` re-runs the reconcile on demand (e.g. a switch coming online after the service started, or an AP being plugged in) — an **event-driven one-shot, not a busy loop.**
+
+### Configuration (explicit env; no host-specific defaults — rule 12)
+
+`SWITCH_AUTOPROVISION` (gate), `SWITCH_VLAN_PROFILE` (`flat-lan` | `segmented`), `SWITCH_PROTECTED_PORT` (the uplink/trunk port — **never moved off LAN/trunk**; no value is baked because the port map is host-specific), and the optional `SWITCH_{CAMERA,AP,CLIENT}_PORTS` (empty = safe default). `single-box` enablement: the `switch` service joins `profiles: ["full", "single-box"]`, and `scripts/lib/single-box.sh` upserts `SWITCH_AUTOPROVISION=1` + `SWITCH_VLAN_PROFILE=flat-lan` (segmented is never baked on single-box).
+
+### Driver caveat (separate supervised live step)
+
+A live probe found the Lantronix driver's VLAN read/write endpoints (`/stat/port`, `/stat/vlan`, `/stat/vlan_membership`, `/config/vlan_membership`) **return 404 on SM8TAT2SA firmware v1.04.0079** (while `/stat/sysinfo` + `/stat/poe_status` are 200). The affected driver methods carry a `TODO(ADR-018-item9)` marking them for verification against real hardware in a **separate supervised live session** — not corrected here. The provisioner is tolerant of these 404s (it logs and no-ops on an unreadable VLAN subsystem rather than crash or issue a blind write), and read-back-verify means an incorrect endpoint surfaces as a verification failure rather than a silent mis-provision.
