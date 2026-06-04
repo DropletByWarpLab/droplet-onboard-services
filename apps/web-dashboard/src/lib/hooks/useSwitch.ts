@@ -28,9 +28,12 @@ import type { NetworkCommandResult } from "@/lib/types";
  *
  * Writes (owner/admin, Tier-2 confirm-gated, Activity-logged server-side):
  * each POST returns a 202 confirm token, then we echo it back through
- * `confirmNetworkCommand` — the same dance the router writes use. The caller
+ * `confirmNetworkCommand`. The §7 per-port writes apply **synchronously** on
+ * confirm (no async apply-then-rollback), so — unlike the router's safe-apply
+ * writes — there is no operation-status poll: the confirm call's result IS the
+ * outcome (a failure rejects, and SwitchPanel toasts it). The caller
  * (SwitchPanel) shows the <ConfirmDialog> blast-radius copy between the two
- * calls; this hook owns the actual two-step network choreography.
+ * calls; this hook owns the two-step confirm choreography + the post-write refresh.
  */
 
 const PORTS_REFRESH_MS = 10_000;
@@ -89,15 +92,16 @@ export function useSwitch(): UseSwitchResult {
   }, [statusSwr, portsSwr, vlansSwr]);
 
   // The shared Tier-2 dance: POST → if the server issued a confirm token,
-  // echo it back through the canonical confirm endpoint. Re-fetch after a
-  // confirmed write so the panel reflects the new state without a manual
-  // refresh. `mutate` lives on the SWR handles; capture them in the closure.
+  // echo it back through the canonical confirm endpoint. Re-fetch after ANY
+  // successful write — a confirmed Tier-2 write OR an immediate apply (no
+  // token) — so the panel always reflects new state without a manual refresh.
+  // (A failed write rejects before reaching here and SwitchPanel toasts it.)
   const runWrite = useCallback(
     async (result: NetworkCommandResult) => {
       if (result.requiresConfirmation && result.confirmationToken && result.operation) {
         await confirmNetworkCommand(result.confirmationToken, result.operation);
-        refresh();
       }
+      refresh();
     },
     [refresh],
   );
