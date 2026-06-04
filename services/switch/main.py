@@ -23,10 +23,12 @@ except ImportError:
     pass
 
 import os
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -40,12 +42,15 @@ from drivers.base import (
     SwitchAPIError,
     InvalidPortError,
 )
+from provisioner import ProvisionConfig, reconcile_switch
 from schemas import (
     HealthResponse,
     CreateVlanRequest,
     SetVlanMembershipRequest,
     CameraSetupRequest,
     CameraSetupResult,
+    ProvisionRequest,
+    ProvisionResult,
 )
 
 logger = logging.getLogger("droplet.switch")
@@ -86,9 +91,137 @@ SWITCH_PORT = int(os.environ.get("SWITCH_PORT", "443"))
 SWITCH_DRIVER = os.environ.get("SWITCH_DRIVER", "lantronix")
 
 # ---------------------------------------------------------------------------
+# Bring-up provisioning config (ADR-018 item 9)
+# ---------------------------------------------------------------------------
+# This is the SYSTEM provisioning path (runs once on bring-up + on POST
+# /provision). It is distinct from the orchestrator's Tier-2 human-confirmation
+# switch path (apps/orchestrator/src/routes/switch.ts). All desired state is
+# read from EXPLICIT env (never inferred from absence — rule 10):
+#   SWITCH_AUTOPROVISION   "0"/off (default) — gates the on-boot reconcile.
+#   SWITCH_VLAN_PROFILE    flat-lan (default) | segmented.
+#   SWITCH_PROTECTED_PORT  uplink/trunk port — NEVER moved off LAN/trunk. No
+#                          host-specific value is baked (rule 12); 0 = none.
+#   SWITCH_{CAMERA,AP,CLIENT}_PORTS  comma-separated; empty = safe default.
+#   SWITCH_PROVISION_TIMEOUT  hard timeout (s) for one reconcile (default 30).
+# The segmented profile additionally cross-checks ROUTING_SERVICE_URL for
+# `cameras.present === true` before isolating (item 9 depends on item 3).
+SWITCH_PROVISION_TIMEOUT = float(os.environ.get("SWITCH_PROVISION_TIMEOUT", "30"))
+# The switch service runs network_mode: host, so reach routing on loopback.
+ROUTING_SERVICE_URL = os.environ.get("ROUTING_SERVICE_URL", "http://localhost:8080")
+
+
+def autoprovision_enabled() -> bool:
+    """True when SWITCH_AUTOPROVISION is explicitly truthy. Default off."""
+    return os.environ.get("SWITCH_AUTOPROVISION", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _parse_ports(env_value: str) -> list[int]:
+    """Parse a comma-separated port list; blank/whitespace -> empty list."""
+    ports: list[int] = []
+    for tok in env_value.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            ports.append(int(tok))
+        except ValueError:
+            logger.warning("provisioner: ignoring non-integer port %r", tok)
+    return ports
+
+
+def build_provision_config() -> ProvisionConfig:
+    """Build the desired-state config from env. Safe defaults throughout."""
+    return ProvisionConfig(
+        profile=os.environ.get("SWITCH_VLAN_PROFILE", "flat-lan").strip() or "flat-lan",
+        protected_port=int(os.environ.get("SWITCH_PROTECTED_PORT", "0") or "0"),
+        camera_ports=_parse_ports(os.environ.get("SWITCH_CAMERA_PORTS", "")),
+        ap_ports=_parse_ports(os.environ.get("SWITCH_AP_PORTS", "")),
+        client_ports=_parse_ports(os.environ.get("SWITCH_CLIENT_PORTS", "")),
+    )
+
+
+class RoutingCamerasCrossCheck:
+    """Reads the explicit camera-interface presence flag from the routing
+    service (ADR-018 Decision 2/4). Used only by the segmented profile to
+    double-gate isolation. Read-only; never mutates the router."""
+
+    def __init__(self, base_url: str):
+        self._base_url = base_url.rstrip("/")
+
+    async def cameras_present(self) -> Optional[bool]:
+        """Return cameras.present from /network/interfaces, or None if it can't
+        be determined. Presence is the explicit `present` flag — never inferred
+        from a missing key."""
+        headers = {}
+        if SERVICE_SECRET:
+            headers["Authorization"] = f"Bearer {SERVICE_SECRET}"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{self._base_url}/network/interfaces", headers=headers
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        cameras = data.get("cameras") if isinstance(data, dict) else None
+        if isinstance(cameras, dict) and "present" in cameras:
+            return bool(cameras["present"])
+        return None
+
+
+async def run_provisioner_safe(profile_override: Optional[str] = None) -> ProvisionResult:
+    """Run one reconcile against the current driver, swallowing ALL failures.
+
+    This is the single entry both the lifespan background task and POST
+    /provision call. No exception escapes (logged WARNING/ERROR) and the whole
+    run is bounded by SWITCH_PROVISION_TIMEOUT so a hung switch can never block
+    boot or wedge a request. Switch-absent and any error resolve to a
+    ProvisionResult, never a raise.
+    """
+    cfg = build_provision_config()
+    if profile_override:
+        cfg.profile = profile_override
+    routing = (
+        RoutingCamerasCrossCheck(ROUTING_SERVICE_URL)
+        if cfg.profile == "segmented"
+        else None
+    )
+    try:
+        result = await asyncio.wait_for(
+            reconcile_switch(driver_instance, cfg, routing_client=routing),
+            timeout=SWITCH_PROVISION_TIMEOUT,
+        )
+        return ProvisionResult(**result)
+    except asyncio.TimeoutError:
+        logger.error(
+            "provisioner: reconcile exceeded the %.0fs hard timeout — aborting "
+            "(boot not blocked).",
+            SWITCH_PROVISION_TIMEOUT,
+        )
+        return ProvisionResult(
+            status="error",
+            profile_applied=cfg.profile,
+            skipped_reason=f"reconcile exceeded {SWITCH_PROVISION_TIMEOUT:.0f}s timeout",
+        )
+    except Exception as exc:  # never let provisioning escape into boot
+        logger.error("provisioner: unexpected failure (%s) — no-op.", exc)
+        return ProvisionResult(
+            status="error",
+            profile_applied=cfg.profile,
+            skipped_reason=f"unexpected provisioner failure: {exc}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Driver singleton
 # ---------------------------------------------------------------------------
 driver_instance: Optional[SwitchDriver] = None
+# Background bring-up provisioning task — created in lifespan when
+# SWITCH_AUTOPROVISION is on and the driver connected; cancelled on shutdown.
+_provision_task: Optional["asyncio.Task[ProvisionResult]"] = None
 
 
 def get_driver() -> SwitchDriver:
@@ -120,7 +253,7 @@ def handle_switch_error(exc: SwitchError):
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global driver_instance
+    global driver_instance, _provision_task
     try:
         driver_instance = create_driver()
         await driver_instance.connect()
@@ -129,7 +262,35 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to switch at %s: %s", SWITCH_HOST, exc)
         driver_instance = None
 
+    # ADR-018 item 9: bring-up provisioning. Gated by SWITCH_AUTOPROVISION
+    # (default off) AND only when the driver connected (switch-absent = no-op).
+    # Runs as a NON-BLOCKING background task — the service finishes boot and
+    # serves /health immediately; the reconcile is bounded by a hard timeout in
+    # run_provisioner_safe and never raises. This is an event-driven one-shot
+    # (boot), not a polling loop (rule 9).
+    if autoprovision_enabled() and driver_instance is not None:
+        logger.info(
+            "provisioner: SWITCH_AUTOPROVISION on — scheduling bring-up reconcile "
+            "(profile=%s) as a background task.",
+            os.environ.get("SWITCH_VLAN_PROFILE", "flat-lan"),
+        )
+        _provision_task = asyncio.create_task(run_provisioner_safe())
+    elif autoprovision_enabled():
+        logger.info(
+            "provisioner: SWITCH_AUTOPROVISION on but switch not connected — "
+            "no-op (will run on POST /provision once reachable)."
+        )
+
     yield
+
+    # Cancel an in-flight provisioning task so shutdown isn't blocked by a
+    # reconcile that's still waiting on the switch.
+    if _provision_task is not None and not _provision_task.done():
+        _provision_task.cancel()
+        try:
+            await _provision_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     if driver_instance:
         await driver_instance.disconnect()
@@ -378,3 +539,21 @@ async def setup_cameras(req: CameraSetupRequest):
         handle_switch_error(exc)
         # handle_switch_error always raises, but type checker needs this
         raise  # unreachable
+
+
+# ---------------------------------------------------------------------------
+# Bring-up Provisioning (ADR-018 item 9) — event-driven re-run
+# ---------------------------------------------------------------------------
+@app.post("/provision", response_model=ProvisionResult)
+async def provision(req: Optional[ProvisionRequest] = None):
+    """Re-run the bring-up provisioner on demand (event-driven, no busy loop).
+
+    Reconciles the switch to the explicit desired VLAN state. This is the same
+    routine the lifespan runs on boot; exposing it lets an event (e.g. a switch
+    coming online after the service started, or an AP being plugged in) trigger
+    a fresh reconcile without polling. Best-effort: a missing/unreadable switch
+    returns a `skipped` result with HTTP 200, never a 503 — provisioning is not
+    a request the caller needs to succeed synchronously.
+    """
+    profile_override = req.profile if req else None
+    return await run_provisioner_safe(profile_override=profile_override)

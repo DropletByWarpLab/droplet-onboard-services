@@ -94,3 +94,39 @@ class CameraSetupResult(BaseModel):
     camera_ports: list[int]
     uplink_ports: list[int]
     message: str
+
+
+# --- Bring-up provisioning (ADR-018 item 9) ---
+
+class ProvisionRequest(BaseModel):
+    """Optional overrides for an event-driven re-run of the bring-up
+    provisioner via POST /provision. All fields default to the env-derived
+    config (build_provision_config); a caller can force a one-off profile
+    without changing the service env."""
+
+    profile: Optional[str] = Field(
+        default=None,
+        description="flat-lan | segmented. Defaults to SWITCH_VLAN_PROFILE.",
+    )
+
+
+class ProvisionResult(BaseModel):
+    """Outcome of a reconcile_switch run.
+
+    status: noop | applied | refused | skipped | error
+      - noop:    already at desired state
+      - applied: one or more ports moved
+      - refused: segmented requested but camera-VLAN routing absent (stayed
+                 flat-lan)
+      - skipped: switch absent / unreadable
+      - error:   a write didn't verify on read-back
+    profile_applied: the profile actually enforced (segmented downgrades to
+                     flat-lan on a refusal).
+    ports_changed: access ports moved to their desired VLAN.
+    skipped_reason: human-readable cause for refused/skipped/error.
+    """
+
+    status: str
+    profile_applied: str
+    ports_changed: list[int] = []
+    skipped_reason: Optional[str] = None
