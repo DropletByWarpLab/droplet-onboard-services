@@ -144,6 +144,7 @@ if [ ! -s "$MANIFEST" ]; then
     {
       "shape": "single-box",
       "version": "0.2.0",
+      "format": "iso",
       "file": "droplet-single-box-0.2.0.iso",
       "url": "https://example.invalid/droplet-single-box-0.2.0.iso",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
