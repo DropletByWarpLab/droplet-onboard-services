@@ -1250,7 +1250,7 @@ run_check_lifecycle_naming() {
       lineno="${line%%:*}"
       content="${line#*:}"
       violations+="    ${f}:${lineno}: ${content}"$'\n'
-    done < <(grep -nE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null || true)
+    done < <({ grep -nE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; grep -nE 'profiles:[[:space:]]*\[[^]]*"(dev|test|prototype)"|COMPOSE_PROFILES=([^[:space:]]*,)?(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; } | sort -t: -k1,1n -u || true)
   done
 
   if [ -z "$violations" ]; then
