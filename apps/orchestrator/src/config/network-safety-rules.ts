@@ -48,6 +48,8 @@ const TIER_2_OPERATIONS = new Set([
   "switch_wan_detect",
   // Switch — camera setup (bulk VLAN change)
   "switch_setup_cameras",
+  // Switch — re-apply the managed provisioning layout (§7 POST /provision)
+  "switch_provision",
 ]);
 
 /** Operations blocked for AI — require manual web UI interaction. */

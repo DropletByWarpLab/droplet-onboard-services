@@ -17,6 +17,11 @@ import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import * as switchClient from "../services/switch.client.js";
 import {
+  fetchSwitchStatus,
+  fetchSwitchPorts,
+  fetchSwitchVlans,
+} from "../services/switch-aggregation.service.js";
+import {
   evaluateNetworkCommand,
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
@@ -110,10 +115,22 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
   // READ-ONLY (Tier 1 — no confirmation needed)
   // =====================================================================
 
+  // §7 GET /api/switch/status — aggregated system-info + poe + provision-config.
+  router.get("/switch/status", async (_req, res, next) => {
+    try {
+      res.json(await fetchSwitchStatus());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // §7 GET /api/switch/ports — aggregated per-port shape (bare array, per the
+  // contract). Joins port_status (link/speed) + vlan_port_stat + membership +
+  // poe + provision-config (role/status). Distinct from the raw
+  // /switch/ports/:port passthrough below.
   router.get("/switch/ports", async (_req, res, next) => {
     try {
-      const ports = await switchClient.fetchPorts();
-      res.json({ ports });
+      res.json(await fetchSwitchPorts());
     } catch (err) {
       next(err);
     }
@@ -132,10 +149,11 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // §7 GET /api/switch/vlans — aggregated {vlan_id,name,isolated,ports[]} (bare
+  // array). `isolated` reflects the camera VLAN under the segmented profile.
   router.get("/switch/vlans", async (_req, res, next) => {
     try {
-      const vlans = await switchClient.fetchVlans();
-      res.json({ vlans });
+      res.json(await fetchSwitchVlans());
     } catch (err) {
       next(err);
     }
@@ -232,6 +250,9 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
             p.uplink_ports as number[],
           );
           break;
+        case "switch_provision":
+          await switchClient.provisionSwitch();
+          break;
         default:
           return res.status(400).json({ error: `Unknown operation: ${operation}` });
       }
@@ -247,22 +268,11 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
   // =====================================================================
 
   // --- Port enable/disable ---
-
-  router.post("/switch/ports/:port/enable", requireRole("owner", "admin"), async (req, res, next) => {
-    try {
-      const userId = requireUserId(req.user?.id);
-      const port = parseInt(req.params.port);
-      if (isNaN(port) || port < 1 || port > 10) {
-        return res.status(400).json({ error: "Invalid port number" });
-      }
-      const result = await evalSwitchCommand(prisma, "switch_port_enable", { port }, userId);
-      if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
-      await switchClient.enablePort(port);
-      res.json({ status: "ok", port, enabled: true });
-    } catch (err) {
-      next(err);
-    }
-  });
+  // NOTE: the §7-shaped `POST /switch/ports/:port/enable { enabled }` route
+  // (which supersedes the legacy no-body enable and also handles disable via
+  // the body) is registered in the §7 WRITE ROUTES block below. The legacy
+  // `POST /switch/ports/:port/disable` is kept here (the §7 contract folds
+  // disable into /enable, but existing callers + the RBAC matrix use /disable).
 
   router.post("/switch/ports/:port/disable", requireRole("owner", "admin"), async (req, res, next) => {
     try {
@@ -414,6 +424,122 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
       if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
       const setupResult = await switchClient.setupCameraPorts(resolvedVlanId, resolvedCameraPorts, resolvedUplinkPorts);
       res.json(setupResult);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // =====================================================================
+  // §7 WRITE ROUTES (ADDON §7) — the shapes the dashboard panel calls.
+  //
+  // Each translates the §7 request into the existing Tier-2 op + evaluates
+  // it through the safety tier (Tier-2 → 202 + confirmation token; the
+  // /switch/command/confirm endpoint executes on confirm). The actual
+  // hardware write is dry-run while the driver is plan_only=True (the
+  // deferred item-11 supervised live-write flip): confirm → the driver logs
+  // the plan and the read-back is unchanged. RBAC + Activity reuse the
+  // existing path (requireRole + evalSwitchCommand's audit/activity write).
+  // =====================================================================
+
+  // POST /api/switch/ports/:port/vlan { vlan_id } — move a port's access VLAN.
+  // Translates to set-vlan-membership(vlan_id, [{port, untagged}]). The
+  // protected/uplink port is never moved off its VLAN → Tier-3 block branch.
+  router.post("/switch/ports/:port/vlan", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const userId = requireUserId(req.user?.id);
+      const port = parseInt(req.params.port);
+      if (isNaN(port) || port < 1 || port > 10) {
+        return res.status(400).json({ error: "Invalid port number (1-10)" });
+      }
+      const { vlan_id } = req.body || {};
+      if (typeof vlan_id !== "number" || vlan_id < 1 || vlan_id > 4094) {
+        return res.status(400).json({ error: "vlan_id must be a number 1-4094" });
+      }
+      // Moving the protected port off its VLAN would sever the appliance —
+      // route it through the Tier-3 protected-port op (blocked for AI).
+      if (isProtectedPort(port)) {
+        const result = await evalSwitchCommand(prisma, "switch_disable_protected_port", { port, vlan_id }, userId);
+        if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
+        // (Unreachable for Tier-3 web UI, which always needs confirmation; the
+        // confirm endpoint owns execution.)
+        return res.json({ status: "ok", port, vlan_id });
+      }
+      const ports = [{ port, tagged: false, member: true }];
+      const result = await evalSwitchCommand(
+        prisma, "switch_set_vlan_membership", { vlan_id, ports }, userId
+      );
+      if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
+      await switchClient.setVlanMembership(vlan_id, ports);
+      res.json({ status: "ok", port, vlan_id });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/switch/ports/:port/poe { enabled } — toggle PoE on a copper port.
+  router.post("/switch/ports/:port/poe", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const userId = requireUserId(req.user?.id);
+      const port = parseInt(req.params.port);
+      if (isNaN(port) || port < 1 || port > 8) {
+        return res.status(400).json({ error: "PoE port must be 1-8 (copper only)" });
+      }
+      const { enabled } = req.body || {};
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "enabled must be a boolean" });
+      }
+      const operation = enabled ? "switch_poe_enable" : "switch_poe_disable";
+      const result = await evalSwitchCommand(prisma, operation, { port }, userId);
+      if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
+      if (enabled) await switchClient.enablePortPoe(port);
+      else await switchClient.disablePortPoe(port);
+      res.json({ status: "ok", port, poe_enabled: enabled });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/switch/ports/:port/enable { enabled } — admin enable/disable.
+  // Disabling the protected port is Tier-3 (blocked for AI) — keep that branch.
+  router.post("/switch/ports/:port/enable", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const userId = requireUserId(req.user?.id);
+      const port = parseInt(req.params.port);
+      if (isNaN(port) || port < 1 || port > 10) {
+        return res.status(400).json({ error: "Invalid port number" });
+      }
+      // §7: a body { enabled } selects enable vs disable. Absent body defaults
+      // to enable (backward-compatible with the legacy no-body /enable route
+      // exercised by rbac.test.ts).
+      const enabled = req.body && typeof req.body.enabled === "boolean" ? req.body.enabled : true;
+
+      if (!enabled && isProtectedPort(port)) {
+        const result = await evalSwitchCommand(prisma, "switch_disable_protected_port", { port }, userId);
+        if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
+        await switchClient.disablePort(port);
+        return res.json({ status: "ok", port, enabled: false });
+      }
+      const operation = enabled ? "switch_port_enable" : "switch_port_disable";
+      const result = await evalSwitchCommand(prisma, operation, { port }, userId);
+      if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
+      if (enabled) await switchClient.enablePort(port);
+      else await switchClient.disablePort(port);
+      res.json({ status: "ok", port, enabled });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/switch/provision — re-apply the managed switch layout.
+  // New `switch_provision` Tier-2 op; the confirm endpoint proxies the service
+  // /provision via provisionSwitch().
+  router.post("/switch/provision", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const userId = requireUserId(req.user?.id);
+      const result = await evalSwitchCommand(prisma, "switch_provision", {}, userId);
+      if (!("allowed" in result && result.allowed)) return safetyResponse(res, result);
+      const provisionResult = await switchClient.provisionSwitch();
+      res.json(provisionResult);
     } catch (err) {
       next(err);
     }
