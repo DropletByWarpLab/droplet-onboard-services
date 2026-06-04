@@ -88,19 +88,29 @@ describe("redactChannelConfig", () => {
 });
 
 describe("buildTransportOptions", () => {
-  it("starttls → secure:false on the configured port with decrypted auth", () => {
+  it("starttls → secure:false + requireTLS:true (enforced STARTTLS, no cleartext AUTH)", () => {
     const cfg = baseConfig({ security: "starttls", port: 587 });
     const opts = buildTransportOptions(cfg, "hunter2");
     expect(opts.host).toBe("smtp.example.com");
     expect(opts.port).toBe(587);
     expect(opts.secure).toBe(false);
+    // Enforced STARTTLS: nodemailer fails rather than sending AUTH in cleartext
+    // if the server doesn't advertise STARTTLS (or a MITM strips it).
+    expect(opts.requireTLS).toBe(true);
     expect(opts.auth).toEqual({ user: "postmaster@example.com", pass: "hunter2" });
   });
 
-  it("tls → secure:true (implicit TLS, e.g. port 465)", () => {
+  it("tls → secure:true (implicit TLS, e.g. port 465); no requireTLS needed", () => {
     const opts = buildTransportOptions(baseConfig({ security: "tls", port: 465 }), "pw");
     expect(opts.secure).toBe(true);
     expect(opts.port).toBe(465);
+    expect(opts.requireTLS).toBeUndefined();
+  });
+
+  it("none → explicit plaintext: secure:false and NOT requireTLS (distinct from starttls)", () => {
+    const opts = buildTransportOptions(baseConfig({ security: "none", port: 25 }), "pw");
+    expect(opts.secure).toBe(false);
+    expect(opts.requireTLS).toBeUndefined();
   });
 
   it("omits auth entirely when there is no username (open relay on LAN)", () => {

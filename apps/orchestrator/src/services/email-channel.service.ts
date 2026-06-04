@@ -109,15 +109,24 @@ export interface TransportOptions {
   port: number;
   /** Implicit TLS from connect (port 465). starttls/none → false. */
   secure: boolean;
+  /**
+   * Enforce STARTTLS upgrade before AUTH for `starttls` mode. When true,
+   * nodemailer fails the send if the server does not offer STARTTLS instead of
+   * silently falling back to plaintext — so a configured "STARTTLS" relay can
+   * never leak SMTP-AUTH credentials in cleartext (incl. against a STARTTLS-strip
+   * MITM). Omitted for `tls` (already implicit-TLS) and `none` (explicit plaintext).
+   */
+  requireTLS?: boolean;
   auth?: { user: string; pass: string };
 }
 
 /**
  * Derive nodemailer transport options from the config + the already-decrypted
- * password. `tls` mode is implicit-TLS (secure:true); `starttls`/`none` connect
- * plaintext (nodemailer upgrades via STARTTLS automatically when the server
- * advertises it). Auth is omitted entirely for an unauthenticated relay (no
- * username) so we don't send an empty AUTH command a LAN Postfix may reject.
+ * password. `tls` mode is implicit-TLS (secure:true); `starttls` connects on the
+ * submission port and is upgraded via an ENFORCED STARTTLS (requireTLS:true) so
+ * AUTH is never sent in cleartext; `none` is explicit plaintext (LAN relay only).
+ * Auth is omitted entirely for an unauthenticated relay (no username) so we don't
+ * send an empty AUTH command a LAN Postfix may reject.
  */
 export function buildTransportOptions(
   cfg: EmailChannelConfig,
@@ -128,6 +137,12 @@ export function buildTransportOptions(
     port: cfg.port,
     secure: cfg.security === "tls",
   };
+  // Enforce STARTTLS for `starttls` mode so SMTP-AUTH is never sent in cleartext
+  // if the server doesn't advertise STARTTLS (or a MITM strips it). `none` stays
+  // explicit-plaintext; `tls` is already implicit-TLS.
+  if (cfg.security === "starttls") {
+    opts.requireTLS = true;
+  }
   if (cfg.username.length > 0) {
     opts.auth = { user: cfg.username, pass: password };
   }
