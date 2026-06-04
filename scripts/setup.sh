@@ -364,19 +364,6 @@ main() {
       "$SCRIPT_DIR/install-device-bridge.sh" \
         || log_warn "front-panel host integration had issues (continuing)"
     fi
-    # USB/NVMe hot-plug auto-mount. Installs the udev rule +
-    # droplet-automount@.service so a drive added or swapped at runtime
-    # auto-mounts under /mnt/droplet and surfaces in the dashboard (the
-    # device-bridge merges the automount state with /proc/mounts). Idempotent;
-    # needs root for /etc/udev + /etc/systemd, so run under sudo. Non-fatal —
-    # the box still serves without hot-plug mounting. install.sh deliberately
-    # does NOT sweep already-attached drives (a provisioning foot-gun); the
-    # first mount of an existing drive happens on the next hot-plug/reboot, and
-    # the opt-in setup "adopt drives" step handles deliberate wipe+adopt.
-    if [ -f "$REPO_ROOT/services/automount/install.sh" ]; then
-      sudo bash "$REPO_ROOT/services/automount/install.sh" \
-        || log_warn "USB auto-mount install had issues (continuing)"
-    fi
   fi
 
   # --- Phase 5: Build ---
