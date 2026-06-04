@@ -25,6 +25,13 @@ REQUIRED_ENV_VARS=(
   DROPLET_PM_DB_PASSWORD
   DROPLET_PM_SECRET_KEY
   DROPLET_PM_WEB_URL
+  # Plane v0.24.1 broker + object storage. Used WITHOUT `:-` fallbacks in
+  # docker-compose.yml (AMQP_URL, MINIO_ROOT_USER/PASSWORD), so a box that
+  # updates code WITHOUT running setup.sh (no migrate_env backfill) must fail
+  # validation here, not start with empty RabbitMQ / MinIO credentials.
+  DROPLET_PM_MQ_PASSWORD
+  DROPLET_PM_MINIO_ACCESS_KEY
+  DROPLET_PM_MINIO_SECRET_KEY
 )
 
 _validate_env() {

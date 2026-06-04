@@ -47,11 +47,14 @@ name: droplet
 #                LAN — shared with the `full` profile, +128 MB on single-box).
 #                scripts/lib/single-box.sh ALSO appends `pm` to COMPOSE_PROFILES
 #                by default (opt-OUT gate, DROPLET_PM_ENABLED), so the `pm` row
-#                below (~2.5 GB) is normally part of the single-box footprint —
+#                below (~4.8 GB) is normally part of the single-box footprint —
 #                set DROPLET_PM_ENABLED=0 on a memory-constrained box to drop it.
-#   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 768 MB,
-#                pm-worker 512 MB, pm-web 384 MB, pm-health 128 MB (~2.5 GB
-#                total; pm-migrator is a one-shot that exits — not always-on)
+#   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 1 GB, pm-worker 1 GB,
+#                pm-web 384 MB, pm-health 128 MB, pm-mq 512 MB, pm-minio 512 MB,
+#                pm-beat 512 MB (~4.8 GB total; pm-migrator is a one-shot that
+#                exits — not always-on). Plane v0.24.1 added the broker (pm-mq),
+#                object storage (pm-minio) + beat scheduler; pm-api/worker raised
+#                to 1 GB now that they actually run gunicorn/celery.
 #   eval:        rag-eval 1 GB
 #   full:        email-indexer 256 MB, switch 128 MB, camera-discovery 256 MB
 #   ops:         ops-console 256 MB
@@ -1319,6 +1322,10 @@ services:
         condition: service_healthy
       pm-migrator:
         condition: service_completed_successfully
+      # Django's Celery bootstrap connects to the broker on startup; gate on it
+      # so a cold start doesn't hit the pm-mq start_period window. (review #500)
+      pm-mq:
+        condition: service_healthy
     env_file:
       - path: ../.env
         required: false
@@ -1363,6 +1370,10 @@ services:
         condition: service_started
       pm-migrator:
         condition: service_completed_successfully
+      # Celery worker consumes from the broker; gate on it so a cold start
+      # doesn't hit the pm-mq start_period window + restart-loop. (review #500)
+      pm-mq:
+        condition: service_healthy
     env_file:
       - path: ../.env
         required: false
@@ -1507,6 +1518,14 @@ services:
       REDIS_URL: redis://redis-pm:6379
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
       AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage — beat dispatches S3 tasks (delete_old_s3_link, exports);
+      # without these they fail at runtime, not startup. (review #500)
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
     mem_limit: ${PM_BEAT_MEM_LIMIT:-512m}
     cpus: ${PM_BEAT_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
