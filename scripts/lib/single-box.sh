@@ -349,7 +349,11 @@ configure_single_box_env() {
   # `single-box` (bundled ollama + openwrt). The old overwrite silently
   # dropped `display`.
   local existing_profiles merged_profiles
-  existing_profiles=$(grep -E '^COMPOSE_PROFILES=' "$env_file" | tail -1 | cut -d= -f2-)
+  # `|| true`: grep exits 1 when the key is absent. Under `set -euo pipefail`
+  # that bare assignment would abort setup (and silently — this runs inside a
+  # function, so the top-level ERR trap isn't inherited). Empty is handled by
+  # the case below. Same guard sync_openwrt_password_secret() documents.
+  existing_profiles=$(grep -E '^COMPOSE_PROFILES=' "$env_file" | tail -1 | cut -d= -f2- || true)
   case ",${existing_profiles}," in
     *,single-box,*) merged_profiles="$existing_profiles" ;;
     ,,)             merged_profiles="single-box" ;;
@@ -366,7 +370,11 @@ configure_single_box_env() {
   # enabled, and the disabled set is an explicit token list (architecture-guard
   # rules 10/12: no host-specific default, no guessing from IS NULL).
   local pm_enabled_val
-  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$env_file" | tail -1 | cut -d= -f2-)
+  # `|| true`: a fresh .env has no DROPLET_PM_ENABLED line, so grep exits 1 and
+  # would abort under `set -euo pipefail` (silently — inside a function, no ERR
+  # trap). Empty → enabled-by-default via _droplet_pm_enabled. This is the bug
+  # that bricked the first single-box reflash after the Plane-PM work landed.
+  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$env_file" | tail -1 | cut -d= -f2- || true)
   if _droplet_pm_enabled "$pm_enabled_val"; then
     case ",${merged_profiles}," in
       *,pm,*) : ;;                                  # already present — idempotent

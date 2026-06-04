@@ -47,11 +47,14 @@ name: droplet
 #                LAN — shared with the `full` profile, +128 MB on single-box).
 #                scripts/lib/single-box.sh ALSO appends `pm` to COMPOSE_PROFILES
 #                by default (opt-OUT gate, DROPLET_PM_ENABLED), so the `pm` row
-#                below (~2.5 GB) is normally part of the single-box footprint —
+#                below (~4.8 GB) is normally part of the single-box footprint —
 #                set DROPLET_PM_ENABLED=0 on a memory-constrained box to drop it.
-#   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 768 MB,
-#                pm-worker 512 MB, pm-web 384 MB, pm-health 128 MB (~2.5 GB
-#                total; pm-migrator is a one-shot that exits — not always-on)
+#   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 1 GB, pm-worker 1 GB,
+#                pm-web 384 MB, pm-health 128 MB, pm-mq 512 MB, pm-minio 512 MB,
+#                pm-beat 512 MB (~4.8 GB total; pm-migrator is a one-shot that
+#                exits — not always-on). Plane v0.24.1 added the broker (pm-mq),
+#                object storage (pm-minio) + beat scheduler; pm-api/worker raised
+#                to 1 GB now that they actually run gunicorn/celery.
 #   eval:        rag-eval 1 GB
 #   full:        email-indexer 256 MB, switch 128 MB, camera-discovery 256 MB
 #   ops:         ops-console 256 MB
@@ -1304,6 +1307,11 @@ services:
     # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
     # per-Droplet-release decision; do not bump without spec update.
     image: makeplane/plane-backend:v0.24.1
+    # The backend image's default CMD is bare `python3` (a REPL). The API server
+    # must be started explicitly via its bundled entrypoint — exactly as
+    # pm-worker/pm-migrator do. Without this pm-api ran `python3`, hit EOF on no
+    # stdin, exited 0, and restart-looped (never serving the API).
+    command: ["./bin/docker-entrypoint-api.sh"]
     container_name: droplet-pm-api
     profiles: ["pm"]
     restart: unless-stopped
@@ -1314,6 +1322,10 @@ services:
         condition: service_healthy
       pm-migrator:
         condition: service_completed_successfully
+      # Django's Celery bootstrap connects to the broker on startup; gate on it
+      # so a cold start doesn't hit the pm-mq start_period window. (review #500)
+      pm-mq:
+        condition: service_healthy
     env_file:
       - path: ../.env
         required: false
@@ -1322,7 +1334,24 @@ services:
       REDIS_URL: redis://redis-pm:6379
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
       WEB_URL: ${DROPLET_PM_WEB_URL:-}
-    mem_limit: ${PM_API_MEM_LIMIT:-768m}
+      # Celery broker (RabbitMQ). Plane builds CELERY_BROKER_URL from AMQP_URL
+      # (plane/settings/common.py); pm-mq is the broker service below.
+      AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage (MinIO, S3-compatible) for file uploads/attachments.
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+      # The api entrypoint runs `exec gunicorn -w "$GUNICORN_WORKERS" ...`, so an
+      # unset value passes `-w ''` → "invalid int value" → gunicorn never starts
+      # and pm-api restart-loops. Plane's variables.env defaults this; the bare
+      # image does not. Single-box default 2 (override via DROPLET_PM_GUNICORN_WORKERS).
+      GUNICORN_WORKERS: ${DROPLET_PM_GUNICORN_WORKERS:-2}
+    # 1g (was 768m): pm-api now actually runs gunicorn workers (it never did before
+    # the command fix); 2 uvicorn workers + the Django app need the headroom.
+    mem_limit: ${PM_API_MEM_LIMIT:-1g}
     cpus: ${PM_API_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
@@ -1341,6 +1370,10 @@ services:
         condition: service_started
       pm-migrator:
         condition: service_completed_successfully
+      # Celery worker consumes from the broker; gate on it so a cold start
+      # doesn't hit the pm-mq start_period window + restart-loop. (review #500)
+      pm-mq:
+        condition: service_healthy
     env_file:
       - path: ../.env
         required: false
@@ -1352,12 +1385,28 @@ services:
       # worker app init (the API having it does not cover the worker process).
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
       WEB_URL: ${DROPLET_PM_WEB_URL:-}
-    mem_limit: ${PM_WORKER_MEM_LIMIT:-512m}
+      # Celery broker (RabbitMQ) — the worker consumes tasks from here.
+      AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage — workers generate/process attachments (exports, thumbnails).
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+    # Plane's celery worker loads the full Django app + task registry at startup;
+    # 512m cgroup-OOM-killed it (exit 137) on a box with 24 GB free. 1g clears
+    # startup + light single-box task load. Override via PM_WORKER_MEM_LIMIT.
+    mem_limit: ${PM_WORKER_MEM_LIMIT:-1g}
     cpus: ${PM_WORKER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   pm-web:
     image: makeplane/plane-frontend:v0.24.1
+    # The frontend image's default CMD is bare `node` (a REPL). The Next.js
+    # standalone server must be started explicitly. Without this pm-web ran
+    # `node`, hit EOF, exited 0, and restart-looped (never serving the UI).
+    command: ["node", "web/server.js"]
     container_name: droplet-pm-web
     profiles: ["pm"]
     restart: unless-stopped
@@ -1393,6 +1442,92 @@ services:
       - "8090"
     mem_limit: ${PM_HEALTH_MEM_LIMIT:-128m}
     cpus: ${PM_HEALTH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Plane PM broker + object storage + scheduler (completes the v0.24.1 stack) ---
+  # #487 wired Plane with only postgres-pm + redis-pm. Plane v0.24.1 ALSO requires
+  # a RabbitMQ broker for Celery and uses MinIO for file storage, plus a beat
+  # scheduler for periodic tasks. All three are internal-only (no host ports);
+  # Nginx already reverse-proxies the user-facing /pm/ surface (WARP-502).
+  pm-mq:
+    # Celery broker — pinned to match Plane v0.24.1's selfhost compose. User is
+    # `plane` (NOT the default `guest`, which RabbitMQ restricts to loopback and
+    # would refuse cross-container celery connections).
+    image: rabbitmq:3.13.6-management-alpine
+    container_name: droplet-pm-mq
+    profiles: ["pm"]
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${DROPLET_PM_MQ_USER:-plane}
+      RABBITMQ_DEFAULT_PASS: ${DROPLET_PM_MQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${DROPLET_PM_MQ_VHOST:-plane}
+    volumes:
+      - pm-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    expose:
+      - "5672"
+    mem_limit: ${PM_MQ_MEM_LIMIT:-512m}
+    cpus: ${PM_MQ_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-minio:
+    # S3-compatible object storage for Plane file uploads/attachments. Pinned
+    # (Plane upstream floats :latest; Droplet pins). Internal-only — Plane proxies
+    # asset URLs, so neither the dashboard nor the LLM ever reaches this directly.
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: server /export --console-address ":9090"
+    container_name: droplet-pm-minio
+    profiles: ["pm"]
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${DROPLET_PM_MINIO_SECRET_KEY}
+    volumes:
+      - pm-minio-data:/export
+    expose:
+      - "9000"
+    mem_limit: ${PM_MINIO_MEM_LIMIT:-512m}
+    cpus: ${PM_MINIO_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-beat:
+    # Celery beat scheduler (periodic tasks: token cleanup, exports, digests).
+    # Same backend image + bundled entrypoint as pm-worker; needs DB + broker.
+    image: makeplane/plane-backend:v0.24.1
+    command: ["./bin/docker-entrypoint-beat.sh"]
+    container_name: droplet-pm-beat
+    profiles: ["pm"]
+    restart: unless-stopped
+    depends_on:
+      pm-api:
+        condition: service_started
+      pm-migrator:
+        condition: service_completed_successfully
+      pm-mq:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage — beat dispatches S3 tasks (delete_old_s3_link, exports);
+      # without these they fail at runtime, not startup. (review #500)
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+    mem_limit: ${PM_BEAT_MEM_LIMIT:-512m}
+    cpus: ${PM_BEAT_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ==========================================================================
@@ -1535,6 +1670,8 @@ volumes:
   # factory-reset granularity are per-volume.
   postgres-pm-data:
   redis-pm-data:
+  pm-rabbitmq-data:
+  pm-minio-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.

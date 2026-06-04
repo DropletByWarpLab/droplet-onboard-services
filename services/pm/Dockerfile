@@ -22,4 +22,8 @@ ENV DROPLET_PM_PLANE_VERSION=${PLANE_PIN_SHA}
 
 EXPOSE 8090
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8090", "--log-config", "/dev/null"]
+# `--no-access-log` quiets the per-request access log (the orchestrator + ship-check
+# poll /health frequently). The previous `--log-config /dev/null` crashed uvicorn on
+# startup: logging.config.fileConfig() rejects an empty file
+# ("RuntimeError: /dev/null is an empty file").
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8090", "--no-access-log"]
