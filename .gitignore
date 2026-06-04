@@ -57,3 +57,5 @@ services/oled-display/device-bridge.env
 scripts/image/keys/*.key
 # Built appliance images (large; published as GitHub release assets, not tracked).
 output/
+# build-iso.sh's transient working dir (upstream ISO download + extract tree).
+scripts/image/.build/
