@@ -40,7 +40,10 @@ _validate_env() {
   local var val
 
   for var in "${REQUIRED_ENV_VARS[@]}"; do
-    val=$(grep -E "^${var}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)
+    # `|| true`: a missing var makes grep exit 1, which under `set -euo
+    # pipefail` would abort here instead of recording it in missing[] (the
+    # whole point of this loop). Empty val → flagged as missing below.
+    val=$(grep -E "^${var}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2- || true)
     if [ -z "$val" ] || [ "$val" = "change-me" ]; then
       missing+=("$var")
     fi
@@ -170,7 +173,11 @@ prepare_and_build() {
   # scripts/lib/single-box.sh): enabled unless the value is 0/false/no.
   local build_pm_health=1
   local pm_enabled_val
-  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$COMPOSE_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]')
+  # `|| true`: DROPLET_PM_ENABLED is opt-out/default-on, so a fresh .env has no
+  # such line; grep exits 1 and (the `2>/dev/null` only hides stderr, not the
+  # exit code) under `set -euo pipefail` aborts build_images() silently — this
+  # is the bug that killed the reflash at "Building application containers".
+  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$COMPOSE_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]' || true)
   case "$pm_enabled_val" in
     0|false|no) build_pm_health=0 ;;
   esac
