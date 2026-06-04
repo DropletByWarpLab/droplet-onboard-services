@@ -349,6 +349,21 @@ configure_single_box_env() {
 #                        reads pairing-QR creds in hostapd mode. Mirrored into
 #                        /etc/droplet/device-bridge.env by
 #                        install-device-bridge.sh (WARP-654).
+#   SWITCH_AUTOPROVISION on — the bundled managed switch reconciles itself on
+#                        bring-up (ADR-018 item 9) so a plugged-in AP lands on
+#                        the LAN instead of stranding on an isolated VLAN.
+#   SWITCH_VLAN_PROFILE  flat-lan — single-box runs a flat br-lan with NO
+#                        inter-VLAN routing yet (ADR-018 item 3 not landed), so
+#                        the switch must NOT isolate the camera VLAN (it would
+#                        cut the working camera + Frigate off). flat-lan only
+#                        pulls stray access ports back to untagged VLAN 1.
+#   SWITCH_PROTECTED_PORT (NOT baked) — the uplink/trunk port that must never be
+#                        moved off the LAN/trunk. The single-box switch port map
+#                        is host-specific and not yet known here (rule 12: no
+#                        host-specific default), so it is left for the operator
+#                        / a supervised live step. With it unset (0) flat-lan is
+#                        still safe — it only ever moves a port ONTO VLAN 1, the
+#                        LAN, so it cannot strand the uplink.
 # ============================================================================
 EOF
   fi
@@ -380,6 +395,13 @@ EOF
   # uci). install-device-bridge.sh mirrors this knob into the bridge env so a
   # fresh box renders a pairing QR without a manual step (WARP-654).
   upsert_env DROPLET_AP_MODE     hostapd
+  # ADR-018 item 9: bundled managed switch auto-provisions on bring-up so a
+  # plugged-in AP joins the LAN. flat-lan ONLY (single-box has no inter-VLAN
+  # routing yet — item 3); never isolate the camera VLAN here. SWITCH_PROTECTED_PORT
+  # is intentionally NOT baked (host-specific port map unknown — rule 12);
+  # flat-lan stays safe without it (it only moves ports onto the LAN).
+  upsert_env SWITCH_AUTOPROVISION 1
+  upsert_env SWITCH_VLAN_PROFILE  flat-lan
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd)"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan)"
 }

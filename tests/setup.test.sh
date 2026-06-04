@@ -212,6 +212,39 @@ else
   fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected 192.168.20.0/24)"
 fi
 
+# ADR-018 item 9: single-box enables switch bring-up auto-provisioning in the
+# flat-lan profile (NOT segmented — single-box has no inter-VLAN routing yet,
+# item 3). Assert both knobs are written exactly once and stay idempotent
+# across the second call above (no duplicate, value unchanged).
+SWITCH_AP_COUNT=$(grep -cE '^SWITCH_AUTOPROVISION=1$' "$TMP_ROOT/.env" || true)
+if [ "$SWITCH_AP_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets SWITCH_AUTOPROVISION=1 (single, idempotent)"
+else
+  fail "expected exactly one 'SWITCH_AUTOPROVISION=1' in .env, found ${SWITCH_AP_COUNT}"
+fi
+
+SWITCH_PROFILE_COUNT=$(grep -cE '^SWITCH_VLAN_PROFILE=flat-lan$' "$TMP_ROOT/.env" || true)
+if [ "$SWITCH_PROFILE_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets SWITCH_VLAN_PROFILE=flat-lan (single, idempotent)"
+else
+  fail "expected exactly one 'SWITCH_VLAN_PROFILE=flat-lan' in .env, found ${SWITCH_PROFILE_COUNT}"
+fi
+
+# Camera-safety guard: single-box must NEVER bake the segmented profile (it
+# would isolate the camera VLAN and cut the working camera + Frigate off).
+if grep -qE '^SWITCH_VLAN_PROFILE=segmented$' "$TMP_ROOT/.env"; then
+  fail "single-box .env must not set SWITCH_VLAN_PROFILE=segmented (camera-isolation hazard)"
+else
+  pass "single-box .env does not enable segmented isolation (camera-safe)"
+fi
+
+# Rule 12: no host-specific default baked for the protected/uplink port.
+if grep -qE '^SWITCH_PROTECTED_PORT=[1-9]' "$TMP_ROOT/.env"; then
+  fail "single-box .env must not bake a host-specific SWITCH_PROTECTED_PORT value"
+else
+  pass "single-box .env does not bake a host-specific SWITCH_PROTECTED_PORT (rule 12)"
+fi
+
 # =============================================================================
 # Phase 4: install-device-bridge.sh provisions host pairing-QR deps (WARP-654)
 # =============================================================================
