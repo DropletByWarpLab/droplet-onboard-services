@@ -775,6 +775,30 @@ export async function requestDestroyPool(
   return res.json();
 }
 
+/** WARP-662 step 1: adopt (wipe + reformat + mount) a previously-used disk —
+ *  returns a confirm token (does NOT wipe yet). `device` is the WHOLE-disk
+ *  kernel name (e.g. "sdb" / "nvme0n1"), never a partition. The owner confirms
+ *  via confirmPoolCommand to actually execute. The OS disk is refused
+ *  server-side by the host script. */
+export async function requestAdoptDrive(input: {
+  device: string;
+  wipeMethod: "quick" | "secure";
+  fstype?: string;
+  label?: string;
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/drives/adopt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start drive adopt: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** Step 2: confirm + execute a queued destructive pool op. */
 export async function confirmPoolCommand(input: {
   confirmationToken: string;
