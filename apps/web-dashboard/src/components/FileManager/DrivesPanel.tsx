@@ -1,13 +1,28 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { HardDrive, Usb, MemoryStick, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import {
+  HardDrive,
+  Usb,
+  MemoryStick,
+  RefreshCw,
+  Layers,
+  AlertTriangle,
+  Loader2,
+} from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
+import { usePools } from "@/lib/hooks/usePools";
 import { ejectDrive, rescanDrives } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
-import type { DriveInfo } from "@/lib/types";
+import type { DriveInfo, PoolInfo } from "@/lib/types";
+import {
+  levelLabel,
+  levelBlurb,
+  poolStatusBadge,
+  worstPoolAlarm,
+} from "./pool-display";
 
 // Binary units, matching the rest of the dashboard (VolumesPanel etc.).
 function fmtBytes(bytes: number): string {
@@ -73,17 +88,13 @@ function busLabel(bus?: string): string {
 
 export function DrivesPanel() {
   const { drives, isLoading, bridgeError, refresh } = useDrives();
+  // BUG-3 / ADR-019: real mdadm pools replace the old client-side byte-sum
+  // "pooled storage" fiction. Pools are OPTIONAL — `pools` is [] when none.
+  const { pools, refresh: refreshPools } = usePools();
   const { toast } = useToast();
   const [rescanning, setRescanning] = useState(false);
   const [ejectTarget, setEjectTarget] = useState<DriveInfo | null>(null);
   const [ejecting, setEjecting] = useState<string | null>(null);
-
-  const pool = useMemo(() => {
-    const size = drives.reduce((a, d) => a + (d.size_bytes || 0), 0);
-    const used = drives.reduce((a, d) => a + (d.used_bytes || 0), 0);
-    const free = drives.reduce((a, d) => a + (d.free_bytes || 0), 0);
-    return { size, used, free, count: drives.length };
-  }, [drives]);
 
   async function onRescan() {
     setRescanning(true);
@@ -91,6 +102,8 @@ export function DrivesPanel() {
       await rescanDrives();
       // SWR refetches on the 30s interval; nudge an immediate refresh by
       // toasting success — the next poll picks up new/removed drives.
+      refresh();
+      refreshPools();
       toast("Rescanning drives — the list refreshes shortly", "success");
     } catch (err) {
       toast(translateError(err, "files"), "error");
@@ -151,57 +164,72 @@ export function DrivesPanel() {
     );
   }
 
+  const alarm = worstPoolAlarm(pools);
+
   return (
     <div className="flex flex-col gap-5">
-      {/* Pool summary */}
-      <section className="dp-card p-5">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <p className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-1">
-              Total pooled storage
-            </p>
-            <p className="type-title-2 text-label-primary tabular-nums">
-              {fmtBytes(pool.used)}
-              <span className="type-subheadline text-label-tertiary font-normal">
-                {" "}
-                of {fmtBytes(pool.size)} used
-              </span>
-            </p>
-          </div>
-          <div className="flex items-center gap-6">
-            <div className="text-right">
-              <p className="type-title-3 text-label-primary tabular-nums">{pool.count}</p>
-              <p className="type-caption-2 text-label-tertiary">mounted</p>
-            </div>
-            <div className="text-right">
-              <p className="type-title-3 text-label-primary tabular-nums">{fmtBytes(pool.free)}</p>
-              <p className="type-caption-2 text-label-tertiary">free</p>
-            </div>
-            <button
-              onClick={onRescan}
-              disabled={rescanning}
-              className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
-              aria-label="Rescan drives"
-            >
-              <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
-              <span className="type-subheadline">Rescan</span>
-            </button>
-          </div>
-        </div>
-        <div className="mt-3 flex items-center justify-between type-caption-1 text-label-tertiary">
-          <span>
+      {/* Degraded / rebuild banner — only when a real pool needs attention. */}
+      {alarm && <PoolAlarmBanner alarm={alarm} pools={pools} />}
+
+      {/* Header: section title + Rescan. */}
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h2 className="type-title-3 text-label-primary">Storage</h2>
+          <p className="type-caption-1 text-label-tertiary">
             Mount base <span className="font-mono">/mnt/droplet/</span>
-          </span>
+          </p>
         </div>
+        <button
+          onClick={onRescan}
+          disabled={rescanning}
+          className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
+          aria-label="Rescan drives"
+        >
+          <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
+          <span className="type-subheadline">Rescan</span>
+        </button>
+      </div>
+
+      {/* Storage pools (mdadm software RAID). Pools are OPTIONAL — when none
+          exists we say so honestly rather than fabricating a pooled sum. */}
+      <section aria-label="Storage pools">
+        {pools.length === 0 ? (
+          <div className="dp-card p-5 flex items-start gap-3">
+            <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-tertiary flex items-center justify-center">
+              <Layers className="h-5 w-5" />
+            </span>
+            <div>
+              <p className="type-headline text-label-primary">No storage pool configured</p>
+              <p className="type-subheadline text-label-secondary mt-0.5">
+                Your drives work on their own. A pool combines drives for more
+                space or redundancy — optional, and you can set one up anytime.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div
+            className="grid grid-cols-1 gap-4"
+            role="list"
+            aria-label="Storage pools"
+          >
+            {pools.map((p) => (
+              <PoolCard key={p.device} pool={p} />
+            ))}
+          </div>
+        )}
       </section>
 
       {/* Per-drive cards */}
-      <div
-        className="grid grid-cols-1 sm:grid-cols-2 gap-4"
-        role="list"
-        aria-label="Mounted drives"
-      >
-        {drives.map((d) => {
+      <div>
+        <h3 className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-2">
+          Drives
+        </h3>
+        <div
+          className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+          role="list"
+          aria-label="Mounted drives"
+        >
+          {drives.map((d) => {
           const p = usagePct(d);
           const st = statusOf(d);
           return (
@@ -289,6 +317,7 @@ export function DrivesPanel() {
             </div>
           );
         })}
+        </div>
       </div>
 
       <ConfirmDialog
@@ -300,6 +329,119 @@ export function DrivesPanel() {
         confirmLabel="Eject"
         variant="destructive"
       />
+    </div>
+  );
+}
+
+/** Page-level banner for a pool that needs attention. Uses role="alert" so it
+ *  is announced; tokens-only colours. Blast-radius copy is plain-language. */
+function PoolAlarmBanner({
+  alarm,
+  pools,
+}: {
+  alarm: "degraded" | "resyncing" | "failed";
+  pools: PoolInfo[];
+}) {
+  const affected = pools
+    .filter((p) =>
+      alarm === "failed"
+        ? p.status === "failed"
+        : alarm === "degraded"
+          ? p.status === "degraded"
+          : p.status === "resyncing",
+    )
+    .map((p) => p.displayName || p.device)
+    .join(", ");
+
+  if (alarm === "resyncing") {
+    return (
+      <div
+        role="alert"
+        className="dp-card p-4 flex items-start gap-3 border border-system-blue/30 bg-system-blue/5"
+      >
+        <Loader2 size={18} className="mt-0.5 flex-none text-system-blue motion-safe:animate-spin" />
+        <div>
+          <p className="type-subheadline text-label-primary">Rebuilding {affected}</p>
+          <p className="type-caption-1 text-label-secondary mt-0.5">
+            A drive is being resynced. Your data stays available — leave the
+            Droplet on until the rebuild finishes.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const failed = alarm === "failed";
+  return (
+    <div
+      role="alert"
+      className={`dp-card p-4 flex items-start gap-3 border ${
+        failed
+          ? "border-system-red/30 bg-system-red/5"
+          : "border-system-orange/30 bg-system-orange/5"
+      }`}
+    >
+      <AlertTriangle
+        size={18}
+        className={`mt-0.5 flex-none ${failed ? "text-system-red" : "text-system-orange"}`}
+      />
+      <div>
+        <p className="type-subheadline text-label-primary">
+          {failed ? `${affected} has failed` : `${affected} is degraded`}
+        </p>
+        <p className="type-caption-1 text-label-secondary mt-0.5">
+          {failed
+            ? "This pool is offline and its data may be at risk. Check the drives and contact support before making changes."
+            : "A drive has dropped out of this pool. Your data is still here, but replace the drive soon — another failure could lose it."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** One storage-pool card: name, level + plain-language blurb, health badge,
+ *  and member chips. Read-only — destructive actions live behind the Tier-2
+ *  confirm flow (not surfaced here in the read-only view). */
+function PoolCard({ pool }: { pool: PoolInfo }) {
+  const badge = poolStatusBadge(pool.status);
+  const name = pool.displayName || pool.device;
+  return (
+    <div role="listitem" className="dp-card p-4">
+      <div className="flex items-start gap-3">
+        <span className="flex-none h-10 w-10 rounded-[10px] bg-accent/10 text-accent flex items-center justify-center">
+          <Layers className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h4 className="type-headline text-label-primary truncate" title={name}>
+              {name}
+            </h4>
+            <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+              {levelLabel(pool.level)}
+            </span>
+          </div>
+          <p className="type-caption-1 text-label-tertiary">{levelBlurb(pool.level)}</p>
+        </div>
+        <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${badge.cls}`}>
+          {badge.label}
+        </span>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">
+        <span className="font-mono px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+          /dev/{pool.device}
+        </span>
+        {pool.members.map((m) => (
+          <span
+            key={m}
+            className="font-mono px-1.5 py-0.5 rounded border border-separator text-label-tertiary"
+          >
+            {m}
+          </span>
+        ))}
+      </div>
+
+      {pool.notes && <p className="mt-2 type-caption-1 text-label-tertiary">{pool.notes}</p>}
     </div>
   );
 }

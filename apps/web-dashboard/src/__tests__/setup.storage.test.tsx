@@ -30,6 +30,12 @@ vi.mock("@/lib/auth", () => ({
 
 const fetchDrivesMock = vi.fn();
 const updateDriveLabelMock = vi.fn();
+// BUG-3 / ADR-019: the wizard must NEVER create or format a pool. We mock the
+// pool-create/destroy/confirm APIs purely to assert they are never called from
+// the setup flow — the owner's hard "optional, never auto" constraint.
+const requestCreatePoolMock = vi.fn();
+const requestDestroyPoolMock = vi.fn();
+const confirmPoolCommandMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
@@ -57,6 +63,11 @@ vi.mock("@/lib/api", () => ({
   fetchDrives: () => fetchDrivesMock(),
   updateDriveLabel: (uuid: string, patch: unknown) =>
     updateDriveLabelMock(uuid, patch),
+  // Pool APIs — present so the test can assert the wizard never touches them.
+  fetchPools: vi.fn(async () => ({ pools: [], count: 0 })),
+  requestCreatePool: (...a: unknown[]) => requestCreatePoolMock(...a),
+  requestDestroyPool: (...a: unknown[]) => requestDestroyPoolMock(...a),
+  confirmPoolCommand: (...a: unknown[]) => confirmPoolCommandMock(...a),
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
   fetchVpnStatus: vi.fn(async () => ({
@@ -158,6 +169,9 @@ describe("setup Storage step (WARP-174)", () => {
   beforeEach(() => {
     fetchDrivesMock.mockReset();
     updateDriveLabelMock.mockReset();
+    requestCreatePoolMock.mockReset();
+    requestDestroyPoolMock.mockReset();
+    confirmPoolCommandMock.mockReset();
   });
 
   afterEach(() => {
@@ -251,6 +265,63 @@ describe("setup Storage step (WARP-174)", () => {
 
     expect(updateDriveLabelMock).not.toHaveBeenCalled();
     expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+  });
+
+  // ── BUG-3 / ADR-019: the owner's hard constraint, pinned at the wizard ──
+
+  it("OPTIONAL: skipping the storage step creates no pool and formats nothing", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // The box completed past Storage with NO pool created/formatted, and the
+    // step is presented as optional (a Skip affordance exists and works).
+    expect(requestCreatePoolMock).not.toHaveBeenCalled();
+    expect(confirmPoolCommandMock).not.toHaveBeenCalled();
+    expect(requestDestroyPoolMock).not.toHaveBeenCalled();
+    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+  });
+
+  it("OPTIONAL: even Save-and-continue (naming drives) never creates a pool", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    updateDriveLabelMock.mockResolvedValue({
+      uuid: "UUID-MAIN",
+      displayName: "Wedding Photos",
+      icon: null,
+      notes: null,
+      createdAt: "now",
+      updatedAt: "now",
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    const inputs = screen.getAllByPlaceholderText(/e\.g\. wedding photos/i);
+    fireEvent.change(inputs[0], { target: { value: "Wedding Photos" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save and continue/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Naming a drive is the ONLY storage write the wizard does — it never
+    // reaches a pool-create/format path.
+    expect(requestCreatePoolMock).not.toHaveBeenCalled();
+    expect(confirmPoolCommandMock).not.toHaveBeenCalled();
+  });
+
+  it("OPTIONAL: a no-drive box auto-skips storage and still creates no pool", async () => {
+    fetchDrivesMock.mockResolvedValue({ drives: [], count: 0 });
+    render(<SetupPage />);
+    await advanceToStorage();
+    // Auto-skipped to Discovery with zero storage writes of any kind.
+    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    expect(requestCreatePoolMock).not.toHaveBeenCalled();
+    expect(updateDriveLabelMock).not.toHaveBeenCalled();
   });
 
   it("blocks save when two drives share a name", async () => {
