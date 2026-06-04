@@ -53,6 +53,18 @@ vi.mock("../services/push-dispatch.service.js", () => ({
   getPublicVapidKey: vi.fn(() => "vapid-pub"),
 }));
 
+// PR #486 finding 2: webdavBaseUrl now resolves the host via the shared
+// trusted-origin resolver. Mock config so ROUTING_MODE=disabled (the resolver
+// then never dials the DuckDNS sidecar) and provide the box's trusted origin;
+// the WebDAV URL falls back to it for the test's localhost request host.
+vi.mock("../config.js", () => ({
+  config: {
+    ROUTING_MODE: "disabled",
+    WIREGUARD_ENDPOINT_HOST: "",
+    corsAllowedOrigins: ["https://droplet-ai.local"],
+  },
+}));
+
 import {
   ncGenerateAppPassword,
   ncDeleteAppPassword,

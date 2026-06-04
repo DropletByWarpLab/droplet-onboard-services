@@ -16,6 +16,7 @@ import {
   dispatchToUser,
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
+import { trustedOriginUrl } from "../lib/trusted-origin.js";
 
 const logger = pino({ name: "device-clients-route" });
 
@@ -96,14 +97,27 @@ async function rateLimit(
 }
 
 /**
+ * The box's mDNS hostname. A native client reaching the appliance over Bonjour/
+ * Avahi uses this host, and it is in the TLS cert SANs (see
+ * scripts/trust-droplet-cert.sh), so it is a legitimate served host even though
+ * it is not in the CORS allowlist. Passed to the trusted-origin resolver as an
+ * extra allowed host so the WebDAV URL keeps working over mDNS.
+ */
+const MDNS_HOST = "droplet.local";
+
+/**
  * Return the external URL clients should reach for WebDAV. The orchestrator
  * lives behind Nginx which proxies /nextcloud/ to the Nextcloud container,
  * so clients talk to https://<droplet>/nextcloud/ and append /remote.php/dav/.
+ *
+ * PR #486 review finding 2: the host is sourced from the shared trusted-origin
+ * resolver (canonical origin -> allowlisted request host -> safe default)
+ * instead of a blindly-trusted `x-forwarded-host`, so a forged header can't
+ * poison the server URL a paired client is told to talk to. The legitimate
+ * mDNS host is allowlisted so on-LAN pairing over Bonjour is unaffected.
  */
-function webdavBaseUrl(req: Request): string {
-  const proto = (req.headers["x-forwarded-proto"] as string) ?? "https";
-  const host = (req.headers["x-forwarded-host"] as string) ?? req.headers.host ?? "droplet.local";
-  return `${proto}://${host}/nextcloud`;
+export async function webdavBaseUrl(req: Request): Promise<string> {
+  return trustedOriginUrl(req, "/nextcloud", [MDNS_HOST]);
 }
 
 export function createDeviceClientsRouter(prisma: PrismaClient): Router {
@@ -148,7 +162,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         data: { code, userId: user, expiresAt },
       });
 
-      const server = webdavBaseUrl(req).replace(/\/nextcloud$/, "");
+      const server = (await webdavBaseUrl(req)).replace(/\/nextcloud$/, "");
       const pairUrl = `droplet://pair?server=${encodeURIComponent(server)}&code=${code}`;
 
       // Stash pending metadata so /pair/claim knows what device the user
@@ -362,7 +376,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         platform,
       });
 
-      const webdavUrl = `${webdavBaseUrl(req)}/remote.php/dav/files/${callerUser}/`;
+      const webdavUrl = `${await webdavBaseUrl(req)}/remote.php/dav/files/${callerUser}/`;
       res.json({
         deviceId: client.id,
         ncUsername: callerUser,

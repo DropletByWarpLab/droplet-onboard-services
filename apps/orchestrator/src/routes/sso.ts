@@ -46,6 +46,7 @@ import {
 } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
 
 const logger = pino({ name: "sso-oidc-route" });
 
@@ -259,6 +260,25 @@ function isHttps(req: Request): boolean {
   return req.secure || req.headers["x-forwarded-proto"] === "https";
 }
 
+/**
+ * Reconstruct the callback URL handed to openid-client's
+ * `authorizationCodeGrant`.
+ *
+ * PR #486 review finding 2: the origin previously came from `req.headers.host`
+ * verbatim. openid-client extracts the authorization-response query params
+ * (code/state/iss) from this URL and validates state/nonce/PKCE against the
+ * server-side row — the HOST is NOT compared against the redirect_uri (that is
+ * the provider-config `redirectUri`). So we source the origin from the shared
+ * trusted-origin resolver (a forged X-Forwarded-Host is never reflected) while
+ * preserving `req.originalUrl`'s path + query exactly, which is where the
+ * validated params live. Exported for unit testing.
+ */
+export async function buildSsoCallbackUrl(req: Request): Promise<URL> {
+  const origin = await resolveTrustedOriginUrl(req);
+  // origin has no trailing slash; req.originalUrl always begins with "/".
+  return new URL(`${origin}${req.originalUrl}`);
+}
+
 export function createSsoRouter(prisma?: PrismaClient): Router {
   const router = Router();
 
@@ -376,9 +396,11 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         return;
       }
 
-      // Reconstruct the exact callback URL openid-client validates against.
-      const proto = isHttps(req) ? "https" : "http";
-      const currentUrl = new URL(`${proto}://${req.headers.host}${req.originalUrl}`);
+      // Reconstruct the callback URL openid-client extracts the response
+      // params from. Origin comes from the canonical trusted origin (not a
+      // forged Host header); the path + query — where code/state live and are
+      // validated — are preserved verbatim. (PR #486 finding 2.)
+      const currentUrl = await buildSsoCallbackUrl(req);
 
       // Exchange + validate the ID token (signature/iss/aud/exp + nonce +
       // state + PKCE). Any failure throws → 401, no session.

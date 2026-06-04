@@ -10,6 +10,7 @@ import {
   isRevoked,
 } from "../services/invite.service.js";
 import { sendInviteEmail } from "../services/email-channel.service.js";
+import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import {
   ncCheckSetupRequired,
   ncInstallAndCreateAdmin,
@@ -237,10 +238,24 @@ const updateUserSchema = z
     { message: "At least one field is required" }
   );
 
-/** Build the OAuth2 callback redirect URI from the current request. */
-function getRedirectUri(req: import("express").Request): string {
-  const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-  return `${protocol}://${req.headers.host}/api/auth/callback`;
+/**
+ * Build the OAuth2 callback `redirect_uri` from the box's canonical origin.
+ *
+ * PR #486 review finding 2: this previously trusted `req.headers.host`
+ * verbatim, so a forged Host/X-Forwarded-Host poisoned the redirect_uri sent
+ * to the IdP. It now delegates to the shared trusted-origin resolver (canonical
+ * origin -> allowlisted request host -> safe default), so a forged header is
+ * never embedded. The IdP here is the box's own Nextcloud, fronted by the same
+ * Nginx on the same host, so the canonical origin is the correct redirect_uri.
+ *
+ * Exported so the OAuth2 round-trip's two redirect_uri call sites (authorize +
+ * token-exchange) share one definition — they MUST be byte-identical for the
+ * IdP to accept the exchange.
+ */
+export async function getRedirectUri(
+  req: import("express").Request,
+): Promise<string> {
+  return trustedOriginUrl(req, "/api/auth/callback");
 }
 
 /**
@@ -742,14 +757,14 @@ export function createPublicAuthRouter(
   });
 
   // ── OAuth2: Redirect to Nextcloud authorization ──
-  router.get("/auth/authorize", (req, res) => {
+  router.get("/auth/authorize", async (req, res) => {
     if (config.AUTH_MODE !== "oauth2" || !config.OAUTH2_CLIENT_ID) {
       res.status(400).json({ error: "OAuth2 is not configured. Set AUTH_MODE=oauth2 and provide OAUTH2_CLIENT_ID." });
       return;
     }
 
     const state = randomBytes(16).toString("hex");
-    const redirectUri = getRedirectUri(req);
+    const redirectUri = await getRedirectUri(req);
 
     // Store state in a short-lived cookie for CSRF protection
     const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
@@ -789,8 +804,9 @@ export function createPublicAuthRouter(
         return;
       }
 
-      const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-      const redirectUri = `${protocol}://${req.headers.host}/api/auth/callback`;
+      // Same shared, host-validated redirect_uri the authorize step used — the
+      // OAuth2 token exchange requires it to be byte-identical (PR #486 finding 2).
+      const redirectUri = await getRedirectUri(req);
 
       const tokens = await ncOAuth2ExchangeCode(
         code,
