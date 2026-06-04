@@ -1304,6 +1304,11 @@ services:
     # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
     # per-Droplet-release decision; do not bump without spec update.
     image: makeplane/plane-backend:v0.24.1
+    # The backend image's default CMD is bare `python3` (a REPL). The API server
+    # must be started explicitly via its bundled entrypoint — exactly as
+    # pm-worker/pm-migrator do. Without this pm-api ran `python3`, hit EOF on no
+    # stdin, exited 0, and restart-looped (never serving the API).
+    command: ["./bin/docker-entrypoint-api.sh"]
     container_name: droplet-pm-api
     profiles: ["pm"]
     restart: unless-stopped
@@ -1352,12 +1357,19 @@ services:
       # worker app init (the API having it does not cover the worker process).
       SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
       WEB_URL: ${DROPLET_PM_WEB_URL:-}
-    mem_limit: ${PM_WORKER_MEM_LIMIT:-512m}
+    # Plane's celery worker loads the full Django app + task registry at startup;
+    # 512m cgroup-OOM-killed it (exit 137) on a box with 24 GB free. 1g clears
+    # startup + light single-box task load. Override via PM_WORKER_MEM_LIMIT.
+    mem_limit: ${PM_WORKER_MEM_LIMIT:-1g}
     cpus: ${PM_WORKER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   pm-web:
     image: makeplane/plane-frontend:v0.24.1
+    # The frontend image's default CMD is bare `node` (a REPL). The Next.js
+    # standalone server must be started explicitly. Without this pm-web ran
+    # `node`, hit EOF, exited 0, and restart-looped (never serving the UI).
+    command: ["node", "web/server.js"]
     container_name: droplet-pm-web
     profiles: ["pm"]
     restart: unless-stopped
