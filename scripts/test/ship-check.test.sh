@@ -873,66 +873,141 @@ test_lifecycle_naming_catches_new_poc_token() {
 }
 
 # =============================================================================
-# Test: the embedded Plane PM stack is active on the single-box shape
+# Shared helpers for the PM-gate tests (WARP-496 / bug #10)
 # =============================================================================
 #
-# Original bug (bug #10 — "project management missing"): the seven Plane PM
-# services (postgres-pm, redis-pm, pm-migrator, pm-api, pm-worker, pm-web,
-# pm-health) were gated behind `profiles: ["pm"]` only. The single-box shape
-# activates COMPOSE_PROFILES=linux,display,single-box (scripts/lib/single-box.sh)
-# and never adds `pm`, so the whole stack was orphaned on single-box — no
-# pm-web container ran and the always-present nginx /pm/ route (which resolves
-# its upstream at request time) returned 502.
-#
-# The fix mirrors the camera-discovery precedent (ADR-018 Decision 4 / PR #485
-# for `switch`): `profiles: ["pm"]` → `profiles: ["pm", "single-box"]` on every
-# PM service, so the stack runs whenever EITHER profile is active.
-#
-# This test asserts the post-fix invariant directly against the real compose
-# tree: `docker compose config --profile single-box --services` must list all
-# seven PM services. It fails (the bug) if any PM service is missing from the
-# single-box profile, and guards against a future regression that strips
-# `single-box` back off the PM profiles.
-test_pm_stack_active_on_single_box() {
-  if ! command -v docker >/dev/null 2>&1; then
-    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
-    return 0
-  fi
+# The seven Plane PM services (postgres-pm, redis-pm, pm-migrator, pm-api,
+# pm-worker, pm-web, pm-health) carry `profiles: ["pm"]`. On the single-box
+# shape they are reached not by a `single-box` profile membership but by
+# scripts/lib/single-box.sh conditionally APPENDING `pm` to COMPOSE_PROFILES —
+# an opt-OUT gate (default ON) keyed on DROPLET_PM_ENABLED. So the truest
+# invariant to assert is "the active profile set that single-box.sh composes
+# for a given gate state resolves PM in/out", which is exactly what
+# `docker compose config` does when it honors COMPOSE_PROFILES.
+_PM_SERVICES="postgres-pm redis-pm pm-migrator pm-api pm-worker pm-web pm-health"
 
-  local compose="$REPO_ROOT_REAL/docker/docker-compose.yml"
-  if [ ! -f "$compose" ]; then
-    printf "    compose file missing: %s\n" "$compose" >&2
-    return 1
-  fi
-
-  # Prefer .env.example (in-repo, no secrets); fall back to a provisioned .env.
-  local env_file=""
+# Echo the compose `config --services` list for an explicit COMPOSE_PROFILES
+# value (passed as $1, may be empty for the bare default profile). Mirrors how
+# `docker compose up` reads COMPOSE_PROFILES from the env on a provisioned box,
+# rather than passing --profile flags (which is the build-time path).
+_pm_services_for_profiles() {
+  local profiles="$1" compose="$REPO_ROOT_REAL/docker/docker-compose.yml" env_file=""
   if [ -f "$REPO_ROOT_REAL/.env.example" ]; then
     env_file="$REPO_ROOT_REAL/.env.example"
   elif [ -f "$REPO_ROOT_REAL/.env" ]; then
     env_file="$REPO_ROOT_REAL/.env"
   else
-    printf "    neither .env.example nor .env found at repo root\n" >&2
-    return 1
+    return 2
   fi
+  COMPOSE_PROFILES="$profiles" \
+    docker compose -f "$compose" --env-file "$env_file" config --services 2>/dev/null
+}
 
-  local services
-  if ! services="$(docker compose -f "$compose" --env-file "$env_file" \
-      --profile single-box config --services 2>/dev/null)"; then
-    printf "    docker compose config --profile single-box failed\n" >&2
-    return 1
-  fi
-
-  local svc missing=()
-  for svc in postgres-pm redis-pm pm-migrator pm-api pm-worker pm-web pm-health; do
-    if ! printf '%s\n' "$services" | grep -qx "$svc"; then
-      missing+=("$svc")
-    fi
+# Count how many of the 7 PM services appear in a `config --services` listing.
+_pm_count_present() {
+  local services="$1" svc n=0
+  for svc in $_PM_SERVICES; do
+    if printf '%s\n' "$services" | grep -qx "$svc"; then n=$((n + 1)); fi
   done
+  printf '%s' "$n"
+}
 
-  if [ "${#missing[@]}" -gt 0 ]; then
-    printf "    PM services absent from the single-box profile: %s\n" "${missing[*]}" >&2
-    printf "    (add \"single-box\" to each PM service's profiles in docker-compose.yml)\n" >&2
+# =============================================================================
+# Test: PM stack present by DEFAULT on single-box (gate unset / =1) — WARP-496
+# =============================================================================
+#
+# Bug #10 ("project management missing"): the PM stack was orphaned on the
+# single-box shape, so the always-present nginx /pm/ route returned 502.
+#
+# Design (refined from PR #487's always-on `["pm","single-box"]`): PM is an
+# opt-OUT, DEFAULT-ON gate. scripts/lib/single-box.sh appends `pm` to
+# COMPOSE_PROFILES UNLESS DROPLET_PM_ENABLED is 0/false/no. The owner wants PM
+# working out-of-the-box on capable boxes, so the default (gate unset, or =1)
+# MUST resolve the full PM stack.
+#
+# This asserts the default-ON invariant against the real compose tree: the
+# single-box ACTIVE profile set (`linux,display,single-box,pm` — what
+# single-box.sh composes when the gate is enabled) must list all seven PM
+# services. Mirrors the camera-discovery profile precedent (ADR-018 Decision 4).
+test_pm_stack_active_when_gate_default() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT_REAL/docker/docker-compose.yml" ]; then
+    printf "    compose file missing\n" >&2
+    return 1
+  fi
+
+  # The active profile set single-box.sh composes when PM is ENABLED (the
+  # default): linux + display + single-box + pm.
+  local services
+  if ! services="$(_pm_services_for_profiles "linux,display,single-box,pm")"; then
+    printf "    docker compose config (gate-default profiles) failed\n" >&2
+    return 1
+  fi
+
+  local present
+  present="$(_pm_count_present "$services")"
+  if [ "$present" -ne 7 ]; then
+    printf "    expected all 7 PM services in the default single-box profile set, got %s\n" "$present" >&2
+    printf "    (PM is default-ON: single-box.sh must append 'pm' to COMPOSE_PROFILES unless DROPLET_PM_ENABLED=0)\n" >&2
+    return 1
+  fi
+  return 0
+}
+
+# =============================================================================
+# Test: PM stack EXCLUDED when DROPLET_PM_ENABLED=0 — WARP-496
+# =============================================================================
+#
+# The opt-OUT half of the gate: a resource-constrained (~6 GB) single-box must
+# be able to drop the ~2.5 GB always-on Plane stack by setting
+# DROPLET_PM_ENABLED=0. With PM gated OFF, scripts/lib/single-box.sh does NOT
+# append `pm` to COMPOSE_PROFILES, so the active profile set is
+# `linux,display,single-box` and — because the PM services carry `["pm"]` ONLY
+# (PR #487's `single-box` membership reverted) — NONE of the 7 resolve.
+#
+# Asserts BOTH:
+#   (a) the single-box active set WITHOUT `pm` excludes all 7 PM services, and
+#   (b) a bare default-profile run (no COMPOSE_PROFILES at all) also excludes
+#       them — proving the revert to `["pm"]` keeps PM off the default profile.
+test_pm_stack_disabled_via_env_gate() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT_REAL/docker/docker-compose.yml" ]; then
+    printf "    compose file missing\n" >&2
+    return 1
+  fi
+
+  # (a) PM gated OFF → single-box active set is linux,display,single-box (no pm).
+  local services_off present_off
+  if ! services_off="$(_pm_services_for_profiles "linux,display,single-box")"; then
+    printf "    docker compose config (gate-off profiles) failed\n" >&2
+    return 1
+  fi
+  present_off="$(_pm_count_present "$services_off")"
+  if [ "$present_off" -ne 0 ]; then
+    local svc leaked=()
+    for svc in $_PM_SERVICES; do
+      if printf '%s\n' "$services_off" | grep -qx "$svc"; then leaked+=("$svc"); fi
+    done
+    printf "    PM services leaked into the gated-OFF single-box set: %s\n" "${leaked[*]}" >&2
+    printf "    (revert PM services to profiles: [\"pm\"] so 'single-box' alone never resolves them)\n" >&2
+    return 1
+  fi
+
+  # (b) Bare default profile (no COMPOSE_PROFILES) must also exclude PM.
+  local services_default present_default
+  if ! services_default="$(_pm_services_for_profiles "")"; then
+    printf "    docker compose config (default profile) failed\n" >&2
+    return 1
+  fi
+  present_default="$(_pm_count_present "$services_default")"
+  if [ "$present_default" -ne 0 ]; then
+    printf "    PM services present in the bare default profile (expected 0, got %s)\n" "$present_default" >&2
     return 1
   fi
 
@@ -979,8 +1054,11 @@ _run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)"
 _run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
   test_lifecycle_naming_catches_new_poc_token
 
-_run_test "Plane PM stack is active on the single-box shape (bug #10)" \
-  test_pm_stack_active_on_single_box
+_run_test "Plane PM stack is active by default on single-box (bug #10, WARP-496)" \
+  test_pm_stack_active_when_gate_default
+
+_run_test "Plane PM stack excluded when DROPLET_PM_ENABLED=0 (WARP-496)" \
+  test_pm_stack_disabled_via_env_gate
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

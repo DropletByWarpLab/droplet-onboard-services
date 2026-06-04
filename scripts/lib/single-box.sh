@@ -289,6 +289,23 @@ provision_single_box_openwrt() {
 # multi-box / v2-6 deployments get a slimmer .env. Idempotent —
 # duplicate appends are safe because the LAST occurrence of a key
 # wins in docker-compose env_file parsing.
+# ----------------------------------------------------------------------------
+# DROPLET_PM_ENABLED gate (WARP-496) — the embedded Plane PM stack is opt-OUT,
+# DEFAULT ON. Returns 0 (enabled) for an unset/empty value or anything that is
+# NOT an explicit disable token; returns 1 (disabled) only for the explicit
+# tokens 0 / false / no (case-insensitive). Explicit token list, no host-
+# specific default (architecture-guard rules 10/12). Canonical definition;
+# scripts/lib/compose.sh inlines the same token check for its build gate
+# (kept in sync — see the comment there).
+_droplet_pm_enabled() {
+  local v
+  v=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+  case "$v" in
+    0|false|no) return 1 ;;
+    *)          return 0 ;;
+  esac
+}
+
 configure_single_box_env() {
   local env_file="$REPO_ROOT/.env"
   if [ ! -f "$env_file" ]; then
@@ -327,6 +344,28 @@ configure_single_box_env() {
     *)              merged_profiles="${existing_profiles},single-box" ;;
   esac
 
+  # Embedded Plane PM stack — opt-OUT gate, DEFAULT ON (WARP-496 / bug #10).
+  # The 7 PM services carry `profiles: ["pm"]` ONLY (compose profiles are
+  # static), so PM is reached on the single-box shape by APPENDING `pm` to
+  # COMPOSE_PROFILES here. The owner wants project management working out-of-
+  # the-box on capable boxes, so PM is enabled by default; a resource-
+  # constrained (~6 GB) box drops the ~2.5 GB always-on stack by setting
+  # DROPLET_PM_ENABLED=0 (or false/no) in .env. Explicit state — absence means
+  # enabled, and the disabled set is an explicit token list (architecture-guard
+  # rules 10/12: no host-specific default, no guessing from IS NULL).
+  local pm_enabled_val
+  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$env_file" | tail -1 | cut -d= -f2-)
+  if _droplet_pm_enabled "$pm_enabled_val"; then
+    case ",${merged_profiles}," in
+      *,pm,*) : ;;                                  # already present — idempotent
+      ,,)     merged_profiles="pm" ;;
+      *)      merged_profiles="${merged_profiles},pm" ;;
+    esac
+    log_info "Plane PM stack ENABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val:-<unset, default on>})"
+  else
+    log_info "Plane PM stack DISABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val}) — ~2.5 GB freed"
+  fi
+
   # One-time descriptive header (idempotent — only on the first write).
   if ! grep -q 'Single-box deployment knobs' "$env_file"; then
     cat >> "$env_file" << 'EOF'
@@ -336,12 +375,17 @@ configure_single_box_env() {
 # re-run setup.sh --regenerate-env to reset; see docs/SINGLE_BOX.md).
 #   COMPOSE_PROFILES     linux (Frigate) + display (OLED sim) + single-box
 #                        (single-box also activates camera-discovery — gated
-#                        to `full` otherwise — and the embedded Plane PM stack
-#                        at /pm/, which is `["pm","single-box"]`-profiled so
-#                        project management works on the single-box shape;
-#                        bug #10. Its DROPLET_PM_* secrets are generated
-#                        unconditionally by scripts/lib/secrets.sh, so no
-#                        single-box-specific PM env upsert is needed here.)
+#                        to `full` otherwise). single-box.sh ALSO appends `pm`
+#                        by DEFAULT so the embedded Plane PM stack at /pm/ runs
+#                        out-of-the-box (bug #10) — see DROPLET_PM_ENABLED.
+#   DROPLET_PM_ENABLED   opt-OUT gate for the Plane PM stack, DEFAULT ON. The
+#                        7 PM services are `["pm"]`-profiled, so this knob
+#                        decides whether `pm` is appended to COMPOSE_PROFILES
+#                        above. Set to 0 (or false/no) on a memory-constrained
+#                        (~6 GB) box to drop the ~2.5 GB always-on Plane stack;
+#                        unset/anything-else keeps PM enabled. Its DROPLET_PM_*
+#                        secrets are generated unconditionally by
+#                        scripts/lib/secrets.sh regardless of this gate.
 #   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
 #   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
 #                        overrides the multi-box VLAN default 192.168.100.0/24

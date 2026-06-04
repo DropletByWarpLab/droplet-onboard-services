@@ -154,22 +154,41 @@ prepare_and_build() {
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
-    # pm / single-box profile: the Plane PM stack runs upstream pre-built
-    # images (makeplane/*) which `up -d` pulls, EXCEPT pm-health, which is the
-    # Droplet-side /health sidecar built from services/pm/Dockerfile. It is
-    # profiled `["pm", "single-box"]`, so on the single-box shape `up -d` tries
-    # to start it; `up` does not build on demand, so without a build here the
-    # start fails with "No such image: docker-pm-health". Build it explicitly.
-    pm-health
   )
-  # All profiles that carry a buildable service must be active so compose sees
-  # every one of them. Without --profile linux, `build voice-io` errors out
-  # because the service is invisible to compose's view of the project; without
-  # --profile single-box (or pm) the same is true for pm-health. Default-
-  # profile services are visible regardless of --profile flags.
+
+  # pm profile: the Plane PM stack runs upstream pre-built images (makeplane/*)
+  # which `up -d` pulls, EXCEPT pm-health, the Droplet-side /health sidecar
+  # built from services/pm/Dockerfile. pm-health is `["pm"]`-profiled, so when
+  # `pm` is in the active set `up -d` tries to start it; `up` does not build on
+  # demand, so without a pre-build the start fails with "No such image:
+  # docker-pm-health". Build it ONLY when PM is enabled for this deployment —
+  # the same opt-OUT gate scripts/lib/single-box.sh uses (DROPLET_PM_ENABLED,
+  # default ON). A disabled-PM single-box (DROPLET_PM_ENABLED=0) never appends
+  # `pm` to COMPOSE_PROFILES, so it must NOT pull/build the Plane sidecar either.
+  #
+  # Gate token check inlined (kept in sync with _droplet_pm_enabled in
+  # scripts/lib/single-box.sh): enabled unless the value is 0/false/no.
+  local build_pm_health=1
+  local pm_enabled_val
+  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$COMPOSE_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]')
+  case "$pm_enabled_val" in
+    0|false|no) build_pm_health=0 ;;
+  esac
+  if [ "$build_pm_health" -eq 1 ]; then
+    build_services+=(pm-health)
+  else
+    log_info "Plane PM disabled (DROPLET_PM_ENABLED=$pm_enabled_val) — skipping pm-health build"
+  fi
+
+  # All profiles that carry a buildable service in the list above must be active
+  # so compose can see every one. Without --profile linux, `build voice-io`
+  # errors out because the service is invisible to compose's view of the
+  # project; without --profile pm the same is true for pm-health. (pm-health is
+  # only in build_services when PM is enabled, so --profile pm is harmless
+  # otherwise.) Default-profile services are visible regardless of --profile.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux --profile single-box --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --profile pm --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"
