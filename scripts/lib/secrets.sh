@@ -38,6 +38,8 @@ generate_env() {
   local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
+  # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
+  local pm_mq_password pm_minio_access_key pm_minio_secret_key
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -106,6 +108,12 @@ generate_env() {
   pm_secret_key=$(openssl rand -hex 50)
   pm_admin_token=$(openssl rand -hex 32)
   pm_webhook_secret=$(openssl rand -hex 32)
+  #   pm_mq_password    — RabbitMQ password for user `plane` (Celery broker).
+  #   pm_minio_*        — MinIO root creds (S3-compatible object storage for
+  #                       Plane file uploads/attachments). All internal-only.
+  pm_mq_password=$(_gen_password 24)
+  pm_minio_access_key=$(openssl rand -hex 16)
+  pm_minio_secret_key=$(_gen_password 32)
   # pm_web_url — LAN-facing URL Plane bakes into generated emails / share
   # links. Default uses the canonical mDNS hostname covered by the TLS cert
   # SANs; override BEFORE running setup.sh if the customer uses a different
@@ -267,6 +275,20 @@ DROPLET_PM_API_URL=http://pm-api:8000
 # tags. Override BEFORE running setup.sh for non-default LAN hostnames.
 DROPLET_PM_WEB_URL=$pm_web_url
 
+# Plane v0.24.1 Celery broker (RabbitMQ) — internal-only, no host port. Plane
+# builds CELERY_BROKER_URL from these (plane/settings/common.py). User is
+# `plane` (NOT the default `guest`, which RabbitMQ restricts to loopback and
+# would refuse cross-container celery connections).
+DROPLET_PM_MQ_USER=plane
+DROPLET_PM_MQ_PASSWORD=$pm_mq_password
+DROPLET_PM_MQ_VHOST=plane
+
+# Plane v0.24.1 object storage (MinIO, S3-compatible) — file uploads/attachments.
+# Internal-only. Plane reads AWS_* + USE_MINIO; bucket auto-created on first use.
+DROPLET_PM_MINIO_ACCESS_KEY=$pm_minio_access_key
+DROPLET_PM_MINIO_SECRET_KEY=$pm_minio_secret_key
+DROPLET_PM_MINIO_BUCKET=uploads
+
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -318,6 +340,8 @@ EOF
   log_info "  PM_ADMIN_TOKEN    : ${pm_admin_token:0:8}****"
   log_info "  PM_WEBHOOK_SECRET : ${pm_webhook_secret:0:8}****"
   log_info "  PM_WEB_URL        : $pm_web_url"
+  log_info "  PM_MQ_PASSWORD    : ${pm_mq_password:0:4}****"
+  log_info "  PM_MINIO_KEY      : ${pm_minio_access_key:0:4}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -442,6 +466,13 @@ migrate_env() {
   _migrate_ensure_key DROPLET_PM_WEBHOOK_SECRET "$(openssl rand -hex 32)"
   _migrate_ensure_key DROPLET_PM_API_URL "http://pm-api:8000"
   _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
+  # Plane v0.24.1 broker + object storage (completing the #487 integration).
+  _migrate_ensure_key DROPLET_PM_MQ_USER "plane"
+  _migrate_ensure_key DROPLET_PM_MQ_PASSWORD "$(_gen_password 24)"
+  _migrate_ensure_key DROPLET_PM_MQ_VHOST "plane"
+  _migrate_ensure_key DROPLET_PM_MINIO_ACCESS_KEY "$(openssl rand -hex 16)"
+  _migrate_ensure_key DROPLET_PM_MINIO_SECRET_KEY "$(_gen_password 32)"
+  _migrate_ensure_key DROPLET_PM_MINIO_BUCKET "uploads"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — hosts with a TPM hit 'real', everything else hits
