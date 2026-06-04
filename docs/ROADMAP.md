@@ -201,6 +201,28 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 
 ---
 
+## Architecture initiatives (ADR-driven, cross-cutting)
+
+Work that doesn't map to a single GTM milestone number but cuts across several. Each is anchored by an ADR in `docs/`; status mirrors the ADR's action-item checklist.
+
+### NET-UNIFY Deployment-topology auto-detection + single-box network unification + WAN passthrough
+- **ADR:** [`docs/ADR-018-deployment-topology-and-network-unification.md`](ADR-018-deployment-topology-and-network-unification.md) (builds on ADR-002 network persona, ADR-005 AP auto-onboarding, ADR-009 canonical architecture, ADR-011 hardware-agnostic shapes).
+- **Scope:** Make Droplet a true auto-configuring router in either posture — `PRIMARY_ROUTER` (owns the ISP uplink) or `DOWNSTREAM_ROUTER` (plugged into an existing upstream; keeps its own LAN for devices and NATs them out the WAN, never touching the upstream network). Detect the posture as explicit state (a `DeploymentTopology` enum, event-driven re-eval — never guessed from absence). Unify the `single-box` shape onto the same OpenWrt-owned network model the `multi-box` reference already uses (OpenWrt owns `br-lan` DHCP / client list / Wi-Fi / camera VLAN), retiring the ad-hoc host dnsmasq. Root-fixes the dashboard "0 connected devices" and "camera-not-found" symptoms and makes Wi-Fi usable via ADR-005 AP onboarding instead of the on-board radio.
+- **This repo's slice:** spans the routing service (WAN-probe + topology enum), the OpenWrt overlay + `setup.sh` host provisioning (retire `droplet-poc-host-net`; de-`poc` naming sweep), the orchestrator + dashboard client/lease list and network-page posture, and camera-discovery enablement + `CAMERA_SUBNET` alignment.
+- **Files involved (by action item — see the ADR for the authoritative list):**
+  - `services/routing/` — `DeploymentTopology` WAN probe + explicit-state enum + event-driven re-eval + pytest mock-router fixtures *(item 2)*
+  - `openwrt/` overlay + `scripts/setup.sh` + `scripts/lib/single-box.sh` + `scripts/host/` — OpenWrt owns `br-lan`; retire `droplet-poc-host-net`; fold into `setup.sh` *(item 3, largest — may split)*
+  - `apps/orchestrator/src/routes/` (client/lease list) + `apps/web-dashboard/` network page — unified OpenWrt source on all shapes; render topology posture *(item 4)*
+  - `services/camera-discovery/` + `docker/docker-compose.yml` (`camera-discovery` enablement) + `CAMERA_SUBNET` *(item 5)*
+  - `services/routing/` masquerade / forwarding / DNS verification in `DOWNSTREAM_ROUTER` posture *(item 6)*
+  - `openwrt/` AP flash path (reuse ADR-005) for the TEW-932DAP / a supported AP *(item 7)*
+  - `docs/ROADMAP.md` + `scripts/test/ship-check.sh` (`lifecycle-naming` check guarding new `poc`-style naming) *(item 8 — this entry)*
+- **Status:** `[~]` Partial — ADR-018 proposed (pending human-gate review); action item 8 (this ROADMAP entry + the `lifecycle-naming` ship-check guard against new `poc`-style naming) done. Items 1–7 are scoped harness tickets, not yet started.
+- **Blockers:** ADR-018 acceptance (human gate). Item 3 is invasive (changes LAN/DHCP ownership on a deployed box) — staged rollout with `safe_apply` rollback required; validated via `./scripts/test/ship-check.sh --full`, never a live hand-edit.
+- **Next action:** Land the ADR review, then execute items 2→3→4→5→6→7 through the harness in dependency order (topology enum first; the single-box unification is the root-fix the device-list + camera + Wi-Fi symptoms all hang off).
+
+---
+
 ## Cross-cutting risks (from GTM §5)
 
 Each risk is reproduced from the GTM doc with severity, and mapped to the component in **this repo** that owns its mitigation. Risks that live entirely outside this repo are noted as such.

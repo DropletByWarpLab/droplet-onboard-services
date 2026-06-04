@@ -10,7 +10,8 @@
 #   - any apps/*/src or services/*/src TypeScript that ships in a container
 #
 # Each check independently passes or fails. The script exits non-zero if any
-# check failed. Default mode runs seven static checks in ~2 minutes. Adding
+# check failed. Default mode runs the static checks (see ALL_CHECKS) in
+# ~2 minutes. Adding
 # `--full` runs an additional Ubuntu-container docker-build smoke test that
 # takes ~10-15 minutes.
 #
@@ -45,6 +46,18 @@
 #                           Allowlists `inference-engine.local` (mDNS
 #                           hostname) and the docker-compose project-name
 #                           explanation block.
+#   lifecycle-naming      — ADR-018 / architecture-guard rule 17: every
+#                           Droplet box is the SHIPPING PRODUCT, so NO
+#                           `poc`/`prototype`/`-dev`/`-test` framing in
+#                           user-facing surfaces (compose profile names,
+#                           env-var names, CLI flags, service/file names,
+#                           log strings). Repo-wide net (docker-compose.yml,
+#                           .env.example, scripts/*.sh, scripts/lib/*.sh);
+#                           the services/pm/-scoped rule-17 sub-check lives
+#                           in pm-invariants. Grandfathers the KNOWN
+#                           droplet-poc-host-net debt (retired by ADR-018
+#                           action item 3) + a few "PoC" prose comments —
+#                           fails on any NEW occurrence.
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -91,6 +104,7 @@ ALL_CHECKS=(
   exec-bits
   stale-repo-names
   pm-invariants
+  lifecycle-naming
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -115,11 +129,12 @@ SUBCOMMAND
   CHECK_NAME          Run only the named check. One of:
                         tsc-full, compose-config, frigate-env-scan,
                         shellcheck, matter-env-allowlist, exec-bits,
-                        stale-repo-names, docker-build-smoke
+                        stale-repo-names, pm-invariants, lifecycle-naming,
+                        docker-build-smoke
                       Useful for iterating on a single failure.
 
 EXAMPLES
-  ./scripts/test/ship-check.sh             # seven static checks (~2min)
+  ./scripts/test/ship-check.sh             # all static checks (~2min)
   ./scripts/test/ship-check.sh --full      # static + ubuntu smoke (~15min)
   ./scripts/test/ship-check.sh tsc-full    # only the tsc check
   ./scripts/test/ship-check.sh shellcheck  # only the shellcheck check
@@ -219,6 +234,26 @@ CHECKS
                         "see related repo" note and reaching for the
                         old name out of habit, silently re-introducing
                         a stale reference that ships to a customer.
+
+  lifecycle-naming      Walk the user-facing surfaces (docker-compose.yml,
+                        .env.example, top-level scripts/*.sh, scripts/lib/*.sh)
+                        and FAIL on any NEW `poc`/`prototype` token (whole
+                        word, case-insensitive) or `-dev`/`-test`/`-prototype`
+                        framing used as a compose profile entry,
+                        COMPOSE_PROFILES= value, or --flag. Every Droplet box
+                        is the shipping product (architecture-guard rule 17 +
+                        ADR-018), so surfaces are named by what the deployment
+                        IS, not its lifecycle stage. Grandfathers the KNOWN
+                        legacy debt as TRACKED exceptions (NOT silent): the
+                        `droplet-poc-host-net` host-net service/file/path
+                        (retired by ADR-018 action item 3, matched as a
+                        substring so it survives line moves) plus a handful of
+                        free-text "PoC" prose comments (per-line allowlist).
+                        Distinct from pm-invariants' rule-17 sub-check, which
+                        owns services/pm/ with zero tolerance.
+                        Prevents: ADR-018 §13 class — a new `profiles: [poc]`,
+                        `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or
+                        `droplet-poc-*` service shipping to a customer box.
 
   docker-build-smoke    (--full only) Spin up an Ubuntu 24.04 container,
                         mount the repo read-only, run
@@ -1053,6 +1088,194 @@ run_check_pm_invariants() {
   return 0
 }
 
+run_check_lifecycle_naming() {
+  # ADR-018 action item 8 + architecture-guard rule 17: every Droplet box is
+  # the SHIPPING PRODUCT, so user-facing surfaces must be named by what the
+  # deployment IS, not by its lifecycle stage. No `poc` / `prototype` /
+  # `-dev` / `-test` framing in compose profile names, env-var names, CLI
+  # flags, service/file names, or operator-facing log strings. The canonical
+  # replacements: `profiles: ["poc"]` → `profiles: ["single-box"]`,
+  # `setup.sh --poc` → `setup.sh --single-box`, `COMPOSE_PROFILES=poc` →
+  # `COMPOSE_PROFILES=single-box`.
+  #
+  # SCOPE vs pm-invariants: run_check_pm_invariants enforces the SAME rule 17
+  # but ONLY inside services/pm/, with ZERO tolerance (the Plane stack landed
+  # clean and must stay clean). This check is the REPO-WIDE net across the
+  # broad user-facing surface set below. The two never overlap — pm-invariants
+  # owns services/pm/; this check owns everything else listed here. We did not
+  # fold one into the other because their grandfather policies differ: pm has
+  # none; this surface carries the KNOWN droplet-poc-host-net debt.
+  #
+  # COVERED SURFACES (curated — mirrors stale-repo-names' surface philosophy):
+  #   docker/docker-compose.yml   (profile names, service names, env, comments)
+  #   .env.example                (env-var names + the operator-facing catalogue)
+  #   scripts/*.sh                (top-level operator entry points — CLI flags,
+  #                                log strings; NOT scripts/lib/, NOT scripts/test/,
+  #                                NOT scripts/host/)
+  #   scripts/lib/*.sh            (sourced helpers — service/file names + logs)
+  #
+  # NOT covered (intentional exemptions):
+  #   docs/ + ADRs + specs        Historical record; ADR-018 itself names the
+  #                               `poc-host-net` debt to retire it — flagging
+  #                               the doc that schedules the cleanup is noise.
+  #   scripts/test/               This check's own regex + the regression test's
+  #                               synthetic `poc` mutation strings live here;
+  #                               scanning them would self-trip the gate.
+  #   scripts/host/               The captured droplet-sys host artifacts
+  #                               (docker-compose.poc.yml, etc-systemd-system/
+  #                               droplet-poc-host-net.service, usr-local-sbin/
+  #                               droplet-poc-host-net, …) are a point-in-time
+  #                               CAPTURE of what shipped to the box (rule 20 /
+  #                               ADR-018 §13). They ARE the tracked debt, not a
+  #                               new leak; ADR-018 action item 3 retires them.
+  #   CLAUDE.md / package.json    Not operator-facing product surfaces.
+  #
+  # GRANDFATHERED LEGACY DEBT (tracked, NOT a silent exception — every entry
+  # below is real tech debt with a retirement owner):
+  #
+  #   Tier 1 — the `droplet-poc-host-net` host-net debt (a SUBSTRING grandfather,
+  #   robust to line moves). The single-box host-integration installer and its
+  #   setup.sh log line reference the legacy `droplet-poc-host-net` service /
+  #   file / path / leasefile. ADR-018 action item 3 ("retire droplet-poc-host-net;
+  #   fold into the OpenWrt overlay + setup.sh; de-poc naming sweep") owns the
+  #   removal. Until then these literal identifiers are allowed wherever they
+  #   appear: we strip the known token and only flag a RESIDUAL lifecycle token
+  #   on the same line (same technique stale-repo-names uses for
+  #   inference-engine.local). Affected files: scripts/lib/single-box.sh,
+  #   scripts/setup.sh.
+  #
+  #   Tier 2 — free-text "PoC" comment mentions (per-line allowlist; these are
+  #   stable prose, few, and not a naming surface — they describe the
+  #   single-box deployment's history). Each is a comment, none names a
+  #   profile/env/flag/service:
+  #     docker/docker-compose.yml:174   "The dev/POC compromise: override …"
+  #     docker/docker-compose.yml:1093  "Defaults verified live on POC 2026-05-15."
+  #     .env.example:33                 "Single-box PoC (Ollama in the bundled …"
+  #     scripts/lib/secrets.sh:117      "(single-box PoC). Override before …"
+  #     scripts/lib/secrets.sh:159      "works out of the box on the single-box PoC"
+  #     scripts/lib/secrets.sh:164      "which is why every fresh PoC …"
+  #
+  # TOKEN PATTERN: whole-word `poc` / `prototype` (case-insensitive — catches
+  # `poc`, `POC`, `PoC`, `prototype`) PLUS structural `-dev` / `-test` /
+  # `_dev` / `_test` framing where it is a compose `profiles:` entry, a
+  # `COMPOSE_PROFILES=` value, or a `--flag`. We deliberately do NOT match bare
+  # `-test` / `-dev` everywhere (it would false-positive on *.test.ts,
+  # scripts/test/, `npm test`, `latest`, `device`) — the ticket scopes the
+  # dev/test framing to lifecycle naming of profiles/env/flags, so we match it
+  # only in those structural positions.
+  local label="lifecycle-naming"
+
+  # --- Build the surface file list (find, not globstar — portable). --------
+  local files=()
+  local f
+
+  for f in "docker/docker-compose.yml" ".env.example"; do
+    [ -f "$REPO_ROOT/$f" ] && files+=("$f")
+  done
+
+  # Top-level scripts/*.sh only (NOT scripts/lib, scripts/test, scripts/host).
+  if [ -d "$REPO_ROOT/scripts" ]; then
+    while IFS= read -r f; do
+      files+=("${f#$REPO_ROOT/}")
+    done < <(find "$REPO_ROOT/scripts" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  # scripts/lib/*.sh (sourced helpers).
+  if [ -d "$REPO_ROOT/scripts/lib" ]; then
+    while IFS= read -r f; do
+      files+=("${f#$REPO_ROOT/}")
+    done < <(find "$REPO_ROOT/scripts/lib" -mindepth 1 -maxdepth 1 -type f -name '*.sh' 2>/dev/null | sort)
+  fi
+
+  if [ "${#files[@]}" -eq 0 ]; then
+    printf "  ${_RED}FAIL${_RESET}  %s — no covered surfaces found in tree (REPO_ROOT layout drift?)\n" "$label"
+    CHECK_RESULTS[$label]=fail
+    return 1
+  fi
+
+  # --- Tier 2 per-line allowlist (file:line → 1). Documented above. --------
+  declare -A allowlist
+  allowlist["docker/docker-compose.yml:174"]=1
+  allowlist["docker/docker-compose.yml:1093"]=1
+  allowlist[".env.example:33"]=1
+  allowlist["scripts/lib/secrets.sh:117"]=1
+  allowlist["scripts/lib/secrets.sh:159"]=1
+  allowlist["scripts/lib/secrets.sh:164"]=1
+
+  # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
+  # the token re-scan, so they're allowed wherever they appear (robust to
+  # line moves). Retirement owner: ADR-018 action item 3.
+  local -a grandfathered_tokens=(
+    "droplet-poc-host-net"
+    "droplet-poc-lan"
+  )
+
+  # --- Scan. -----------------------------------------------------------------
+  # Primary token: whole-word poc|prototype, case-insensitive. grep -nE gives
+  # "<lineno>:<text>". We post-filter each hit through the grandfather tiers.
+  local violations=""
+  local line lineno content residual t
+  for f in "${files[@]}"; do
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      lineno="${line%%:*}"
+      content="${line#*:}"
+
+      # Tier 1: strip every grandfathered legacy identifier, then re-test the
+      # residual for a lifecycle token. If nothing remains, this line's only
+      # hit was the known debt → allow.
+      residual="$content"
+      for t in "${grandfathered_tokens[@]}"; do
+        residual="${residual//$t/}"
+      done
+      if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
+        continue
+      fi
+
+      # Tier 2: explicit per-line comment allowlist.
+      if [ -n "${allowlist[$f:$lineno]:-}" ]; then
+        continue
+      fi
+
+      violations+="    ${f}:${lineno}: ${content}"$'\n'
+    done < <(grep -niwE '(poc|prototype)' "$REPO_ROOT/$f" 2>/dev/null || true)
+  done
+
+  # Structural dev/test framing: only in compose profile entries, a
+  # COMPOSE_PROFILES= value, or a --flag. No grandfather entries exist for
+  # this class today, so any hit is a violation.
+  for f in "${files[@]}"; do
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      lineno="${line%%:*}"
+      content="${line#*:}"
+      violations+="    ${f}:${lineno}: ${content}"$'\n'
+    done < <({ grep -nE '(profiles:[[:space:]]*\[[^]]*|COMPOSE_PROFILES=[^[:space:]]*|--[a-z0-9-]*)(-|_)(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; grep -nE 'profiles:[[:space:]]*\[[^]]*"(dev|test|prototype)"|COMPOSE_PROFILES=([^[:space:]]*,)?(dev|test|prototype)\b' "$REPO_ROOT/$f" 2>/dev/null; } | sort -t: -k1,1n -u || true)
+  done
+
+  if [ -z "$violations" ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (%d surface(s) scanned, no NEW lifecycle-stage naming)\n" "$label" "${#files[@]}"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+
+  printf "  ${_RED}FAIL${_RESET}  %s — NEW lifecycle-stage naming in user-facing surface(s)\n" "$label"
+  printf '%s' "$violations" >&2
+  printf "    | Every Droplet box is the SHIPPING PRODUCT (architecture-guard\n" >&2
+  printf "    | rule 17 + ADR-018). Name things by what the deployment IS, not\n" >&2
+  printf "    | by its lifecycle stage:\n" >&2
+  printf "    |   profiles: [\"poc\"]      → profiles: [\"single-box\"]\n" >&2
+  printf "    |   COMPOSE_PROFILES=poc    → COMPOSE_PROFILES=single-box\n" >&2
+  printf "    |   setup.sh --poc          → setup.sh --single-box\n" >&2
+  printf "    |   droplet-poc-* service   → name it by its role (e.g. -host-net)\n" >&2
+  printf "    | If your reference is the KNOWN droplet-poc-host-net debt (retired\n" >&2
+  printf "    | by ADR-018 action item 3) or another tracked exception, add it to\n" >&2
+  printf "    | the grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
+  printf "    | retirement owner — never as a silent exception.\n" >&2
+  CHECK_RESULTS[$label]=fail
+  return 1
+}
+
 run_check_docker_build_smoke() {
   # `--full` only. Spins up an Ubuntu 24.04 container, copies the repo
   # into it (NOT mount — avoids mutating the operator's tree), installs
@@ -1289,6 +1512,7 @@ _dispatch_check() {
     exec-bits)            run_check_exec_bits ;;
     stale-repo-names)     run_check_stale_repo_names ;;
     pm-invariants)        run_check_pm_invariants ;;
+    lifecycle-naming)     run_check_lifecycle_naming ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2
