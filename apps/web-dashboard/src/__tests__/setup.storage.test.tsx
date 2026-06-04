@@ -43,6 +43,8 @@ const updateDriveLabelMock = vi.fn();
 const requestCreatePoolMock = vi.fn();
 const requestDestroyPoolMock = vi.fn();
 const confirmPoolCommandMock = vi.fn();
+// WARP-662 — adopt (wipe + reformat + mount) a previously-used drive.
+const requestAdoptDriveMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
@@ -75,6 +77,7 @@ vi.mock("@/lib/api", () => ({
   requestCreatePool: (...a: unknown[]) => requestCreatePoolMock(...a),
   requestDestroyPool: (...a: unknown[]) => requestDestroyPoolMock(...a),
   confirmPoolCommand: (...a: unknown[]) => confirmPoolCommandMock(...a),
+  requestAdoptDrive: (...a: unknown[]) => requestAdoptDriveMock(...a),
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
   fetchVpnStatus: vi.fn(async () => ({
@@ -97,7 +100,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
-import { buildConfirmPhrase } from "@/components/setup/steps/StorageStep";
+import { buildConfirmPhrase, wholeDiskName } from "@/components/setup/steps/StorageStep";
 import { passClaimStep } from "./helpers/claim-step";
 import { passOrgStep } from "./helpers/org-step";
 
@@ -634,5 +637,114 @@ describe("buildConfirmPhrase (ADR-019 D4.3 — host-script never-run-blind gate)
 
   it("tolerates an empty member list without throwing", () => {
     expect(buildConfirmPhrase([])).toBe("ERASE");
+  });
+});
+
+describe("wholeDiskName helper (WARP-662)", () => {
+  it("strips partition suffixes down to the whole disk", () => {
+    expect(wholeDiskName("/dev/sda1")).toBe("sda");
+    expect(wholeDiskName("/dev/sdb")).toBe("sdb");
+    expect(wholeDiskName("/dev/nvme0n1p2")).toBe("nvme0n1");
+    expect(wholeDiskName("/dev/nvme0n1")).toBe("nvme0n1");
+    expect(wholeDiskName("/dev/mmcblk0p1")).toBe("mmcblk0");
+  });
+});
+
+// WARP-662 — opt-in "reclaim existing drives": wipe + reformat + mount a
+// previously-used disk, through the SAME owner-gated confirm-token flow as the
+// pool ops. Default-OFF; the OS disk is never listed + refused server-side.
+describe("setup Storage step — adopt existing drives (WARP-662)", () => {
+  beforeEach(() => {
+    fetchDrivesMock.mockReset();
+    requestAdoptDriveMock.mockReset();
+    confirmPoolCommandMock.mockReset();
+    requestCreatePoolMock.mockReset();
+    updateDriveLabelMock.mockReset();
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function adoptSwitch() {
+    return screen.getByRole("switch", { name: /reclaim existing drives/i });
+  }
+
+  it("defaults the adopt toggle OFF — no drive list, no adopt action", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    render(<SetupPage />);
+    await advanceToStorage();
+    expect(adoptSwitch()).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByTestId("adopt-list")).toBeNull();
+    expect(requestAdoptDriveMock).not.toHaveBeenCalled();
+  });
+
+  it("ON reveals a per-drive Erase & adopt list; confirming wipes the WHOLE disk via the gated flow", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    requestAdoptDriveMock.mockResolvedValue({
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sda",
+    });
+    confirmPoolCommandMock.mockResolvedValue({ ok: true });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    expect(adoptSwitch()).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("adopt-list")).toBeInTheDocument();
+
+    // Click the first drive's "Erase & adopt" → mints a token for the WHOLE
+    // disk (sda, derived from /dev/sda1) — never a partition.
+    const rowButtons = screen.getAllByRole("button", { name: /erase & adopt/i });
+    await act(async () => {
+      fireEvent.click(rowButtons[0]);
+    });
+    expect(requestAdoptDriveMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        device: "sda",
+        wipeMethod: "quick",
+        confirmPhrase: "ERASE sda",
+      }),
+    );
+
+    // Confirm inside the destructive dialog → executes via the shared gated confirm.
+    const dialog = screen.getByRole("dialog");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: /erase & adopt/i }));
+    });
+    expect(confirmPoolCommandMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        confirmationToken: "tok-adopt",
+        service: "drive_adopt",
+        resourceId: "sda",
+      }),
+    );
+  });
+
+  it("honors the per-drive secure-erase choice", async () => {
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    requestAdoptDriveMock.mockResolvedValue({
+      confirmationToken: "t",
+      service: "drive_adopt",
+      resourceId: "sda",
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    const selects = screen.getAllByRole("combobox", { name: /wipe method/i });
+    await act(async () => {
+      fireEvent.change(selects[0], { target: { value: "secure" } });
+    });
+    const rowButtons = screen.getAllByRole("button", { name: /erase & adopt/i });
+    await act(async () => {
+      fireEvent.click(rowButtons[0]);
+    });
+    expect(requestAdoptDriveMock).toHaveBeenCalledWith(
+      expect.objectContaining({ device: "sda", wipeMethod: "secure" }),
+    );
   });
 });
