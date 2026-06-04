@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# scripts/droplet-image — WARP-663 / ADR-020 appliance image pipeline CLI.
+#
+# The single operator surface for "loading and version control" of the
+# appliance image: build it, catalogue + sign + verify the release manifest,
+# list/publish versions, and flash an image to a disk behind the ADR-019
+# destructive-op safety guard.
+#
+# Dispatches to handlers in scripts/lib/image.sh (mirrors scripts/droplet-admin).
+#
+# Usage: droplet-image <subcommand> [flags]
+#
+# Signing is OpenSSL ECDSA-P256 (FIPS-approved). See
+# scripts/image/keys/README.md for key custody + rotation, and
+# docs/IMAGE_PIPELINE.md for the full CLI contract + the manual flash+boot gate.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export REPO_ROOT
+
+# shellcheck source=lib/logging.sh
+source "$SCRIPT_DIR/lib/logging.sh"
+# shellcheck source=lib/image.sh
+source "$SCRIPT_DIR/lib/image.sh"
+
+_usage() {
+  cat <<'EOF'
+Usage: droplet-image <subcommand> [flags]
+
+Subcommands:
+  build      Build the appliance image.
+               --shape <single-box>   (default: single-box)
+               --version <X.Y.Z>      (default: root package.json version)
+             Emits output/droplet-<shape>-<version>.iso.
+
+  manifest   Add/refresh this build's entry in scripts/image/manifest.json.
+               --version <X.Y.Z>      (required)
+               --shape, --file, --url, --min-disk-gib  (optional)
+
+  sign       Detached ECDSA-P256 signature over the manifest.
+               --manifest <path>      (default: scripts/image/manifest.json)
+               --sig <path>           (default: <manifest>.sig)
+             Private key path comes from $DROPLET_RELEASE_SIGNING_KEY.
+
+  verify     Verify the manifest signature (+ each local asset's sha256),
+             fail-closed.
+               --manifest, --sig, --pubkey, --assets-dir
+
+  list       List available versions from a manifest.
+               --manifest <path>
+
+  publish    Push artifact + signed manifest to DropletByWarpLab/releases via
+             `gh release`. REFUSES (never creates the repo) if the repo / asset
+             / credentials are absent — first publish is a deferred,
+             confirmation-gated step (ADR-020 §D3).
+               --version <X.Y.Z>      (required)
+
+  flash      Verify, then write an image to a disk — behind the ADR-019 safety
+             guard (typed confirm-phrase that NAMES the device + mounted/OS/
+             has-data refusal).
+               --image <path>   --device <path>   --confirm "<phrase>"
+             Unit-testable via DROPLET_IMAGE_DRY_RUN=1 +
+             DROPLET_IMAGE_TEST_{MOUNTED,OSDISK,HASDATA}.
+
+Signing:    OpenSSL ECDSA P-256 only (FIPS-approved; Ed25519/minisign forbidden).
+Docs:       docs/IMAGE_PIPELINE.md ; key custody: scripts/image/keys/README.md
+EOF
+}
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  build)    image_build "$@" ;;
+  manifest) image_manifest "$@" ;;
+  sign)     image_sign "$@" ;;
+  verify)   image_verify "$@" ;;
+  list)     image_list "$@" ;;
+  publish)  image_publish "$@" ;;
+  flash)    image_flash "$@" ;;
+  help|--help|-h|"")
+    _usage
+    ;;
+  *)
+    log_error "Unknown subcommand: $CMD"
+    _usage >&2
+    exit 64
+    ;;
+esac
