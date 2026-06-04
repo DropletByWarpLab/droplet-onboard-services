@@ -47,7 +47,6 @@ export default function ChatPage() {
     stop,
     retryMessage,
     regenerate,
-    approveScene,
     clearMessages,
     attachments,
     attach,
@@ -426,7 +425,6 @@ export default function ChatPage() {
               onCopy={handleCopy}
               onQuote={handleQuote}
               onRegenerate={handleRegenerate}
-              onApproveScene={approveScene}
             />
           ))}
         </div>

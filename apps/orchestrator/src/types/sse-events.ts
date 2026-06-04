@@ -18,19 +18,6 @@ export type SSEEvent =
       data?: unknown;
       status?: string;
       message?: string;
-      /**
-       * WARP-640 — when `status === "confirmation_required"` and the tool
-       * supports a one-click re-issue (e.g. `run_scene`), the single-use
-       * confirmation token + target so the dashboard chip can render an
-       * "Approve & run" button that completes the action without leaving
-       * chat. Absent for tools whose confirmation is resolved on a dedicated
-       * dashboard surface.
-       */
-      confirmation?: {
-        kind: string;
-        sceneId?: string;
-        confirmationToken: string;
-      };
     }
   /**
    * WARP-458 — one step of the assistant's deep-reasoning trace. Emitted

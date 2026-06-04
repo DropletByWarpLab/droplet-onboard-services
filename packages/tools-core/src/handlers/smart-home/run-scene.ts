@@ -11,7 +11,6 @@
  * resolved id so a follow-up call can disambiguate).
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-import { confirmationRequired } from "../../confirmation.js";
 
 interface SceneRunResult {
   sceneId: string;
@@ -48,33 +47,6 @@ const inputSchema = {
 } as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * The scenes route signals "needs confirmation" with the standard
- * `202 { status: "confirmation_required", confirmationToken, message, … }`
- * shape (WARP-640) — same family as the firewall tools. Parse it (cloning so
- * the body of success/other-error responses below is untouched) and surface
- * the single-use token so the chat chip's "Approve & run" button can echo it
- * back to actually run the scene.
- */
-async function parseSceneConfirmation(
-  res: Response,
-): Promise<{ confirmationToken: string; message: string } | null> {
-  if (res.status !== 202) return null;
-  const body = (await res.clone().json().catch(() => null)) as
-    | { status?: string; confirmationToken?: string; message?: string }
-    | null;
-  if (
-    body?.status !== "confirmation_required" ||
-    typeof body.confirmationToken !== "string"
-  ) {
-    return null;
-  }
-  return {
-    confirmationToken: body.confirmationToken,
-    message: body.message ?? "Running this scene needs your approval.",
-  };
-}
 
 async function resolveSceneId(
   ctx: ToolContext,
@@ -118,28 +90,17 @@ async function handler(
     };
   }
 
-  // Do NOT hard-code `?confirm=true`. A scene can batch Tier-2 device actions
-  // (locks, thermostat), so it must honor the orchestrator's server-side
-  // confirmation gate like every other write tool — never pre-satisfy it from
-  // inside the handler (TOOLS-01). The scenes route replies
-  // `202 { confirmation_required, confirmationToken }` on the unconfirmed call
-  // (WARP-640). We relay that as a `confirmation_required` ToolResult carrying
-  // the single-use token in `details`; the dashboard chat chip renders an
-  // "Approve & run" button that re-POSTs `/api/scenes/:id/run` with the token
-  // to actually execute it. The tool itself never forges confirmation.
+  // `?confirm=true` is the server-side mirror of `requiresConfirmation:
+  // true` on the tool definition. The agent loop has already shown the
+  // user a confirm card by the time we get here; flagging the request
+  // satisfies the orchestrator route's gate. Without this every
+  // run_scene call would 409 confirmation_required and the agent loop
+  // would think the scene failed to run.
   const res = await ctx.http.orchestrator.post(
-    `/api/scenes/${sceneId}/run`,
+    `/api/scenes/${sceneId}/run?confirm=true`,
     {},
     { headers: { Accept: "application/json" } },
   );
-  const confirmation = await parseSceneConfirmation(res);
-  if (confirmation) {
-    return confirmationRequired(confirmation.message, {
-      type: "scene_run",
-      sceneId,
-      confirmationToken: confirmation.confirmationToken,
-    });
-  }
   if (!res.ok) {
     return {
       ok: false,

@@ -15,19 +15,6 @@ export interface ChatToolCall {
   data?: unknown;
   status?: string;
   message?: string;
-  /**
-   * WARP-640 — one-click re-issue handle for a confirmation the chat chip can
-   * complete itself (e.g. `run_scene`). When present, the chip renders an
-   * "Approve & run" button that re-POSTs with the single-use token to finish
-   * the action. Absent for tools confirmed on a dedicated dashboard surface.
-   */
-  confirmation?: {
-    kind: string;
-    sceneId?: string;
-    confirmationToken: string;
-  };
-  /** Local approve-button state: undefined = idle, then running → ran/failed. */
-  confirmState?: "running" | "ran" | "failed";
 }
 
 export interface ChatMessage {
