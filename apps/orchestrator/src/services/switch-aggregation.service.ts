@@ -248,18 +248,22 @@ export async function fetchSwitchStatus(): Promise<SwitchStatus> {
   const [connected, systemInfo, poe, config] = await Promise.all([
     switchClient.healthCheck(),
     safeSystemInfo(),
-    switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>,
+    // /poe raises 503 on a disconnected driver — the §7 status must still
+    // answer (connected:false) from health + provision-config, so tolerate it.
+    safe(switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>, []),
     switchClient.fetchProvisionConfig(),
   ]);
   return aggregateStatus({ connected, systemInfo, poe, config });
 }
 
 export async function fetchSwitchPorts(): Promise<SwitchPort[]> {
+  // A disconnected switch raises 503 on these reads; the panel gates the port
+  // map on status.connected, so degrade to an empty list rather than 500.
   const [rawPorts, portStatus, poe, vlans, config] = await Promise.all([
-    switchClient.fetchPorts() as Promise<SwitchRawPort[]>,
-    switchClient.fetchPortStatus(),
-    switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>,
-    switchClient.fetchVlans() as Promise<RawVlan[]>,
+    safe(switchClient.fetchPorts() as Promise<SwitchRawPort[]>, []),
+    safe(switchClient.fetchPortStatus(), []),
+    safe(switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>, []),
+    safe(switchClient.fetchVlans() as Promise<RawVlan[]>, []),
     switchClient.fetchProvisionConfig(),
   ]);
   return aggregatePorts({ rawPorts, portStatus, poe, vlans, config });
@@ -267,22 +271,29 @@ export async function fetchSwitchPorts(): Promise<SwitchPort[]> {
 
 export async function fetchSwitchVlans(): Promise<SwitchVlan[]> {
   const [vlans, config] = await Promise.all([
-    switchClient.fetchVlans() as Promise<RawVlan[]>,
+    safe(switchClient.fetchVlans() as Promise<RawVlan[]>, []),
     switchClient.fetchProvisionConfig(),
   ]);
   return aggregateVlans(vlans, config);
 }
 
 /**
- * system-info read that tolerates a disconnected switch. The service returns
- * 503 on /system/info when the driver isn't connected; the §7 status must
- * still answer (connected:false, model:null) using provision-config, so a
- * failed read resolves to null rather than throwing.
+ * Resolve a switch-dependent read to a fallback when the driver is
+ * disconnected. The switch service raises 503 (an HTTPException, NOT a
+ * SwitchError) on /poe, /ports, /port_status, /vlans, /system/info when no
+ * switch is attached — so the §7 reads must tolerate it and still answer
+ * (status connected:false, empty port/vlan lists) so the dashboard renders its
+ * calm "no managed switch" empty state instead of an error card. The health
+ * check and /provision/config are disconnect-safe by design and stay unwrapped.
  */
-async function safeSystemInfo(): Promise<RawSystemInfo | null> {
+async function safe<T>(p: Promise<T>, fallback: T): Promise<T> {
   try {
-    return (await switchClient.fetchSystemInfo()) as RawSystemInfo;
+    return await p;
   } catch {
-    return null;
+    return fallback;
   }
+}
+
+async function safeSystemInfo(): Promise<RawSystemInfo | null> {
+  return safe(switchClient.fetchSystemInfo() as Promise<RawSystemInfo | null>, null);
 }
