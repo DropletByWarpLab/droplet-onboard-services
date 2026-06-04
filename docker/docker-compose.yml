@@ -44,9 +44,14 @@ name: droplet
 #   linux:       frigate 1 GB, voice-io 512 MB, whisper 1 GB, piper 512 MB
 #   single-box:  ollama 4 GB, openwrt 512 MB, switch 128 MB (ADR-018 item 9:
 #                the managed switch auto-provisions a plugged-in AP onto the
-#                LAN — shared with the `full` profile, +128 MB on single-box)
+#                LAN — shared with the `full` profile, +128 MB on single-box).
+#                scripts/lib/single-box.sh ALSO appends `pm` to COMPOSE_PROFILES
+#                by default (opt-OUT gate, DROPLET_PM_ENABLED), so the `pm` row
+#                below (~2.5 GB) is normally part of the single-box footprint —
+#                set DROPLET_PM_ENABLED=0 on a memory-constrained box to drop it.
 #   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 768 MB,
-#                pm-worker 512 MB, pm-web 384 MB, pm-health 128 MB
+#                pm-worker 512 MB, pm-web 384 MB, pm-health 128 MB (~2.5 GB
+#                total; pm-migrator is a one-shot that exits — not always-on)
 #   eval:        rag-eval 1 GB
 #   full:        email-indexer 256 MB, switch 128 MB, camera-discovery 256 MB
 #   ops:         ops-console 256 MB
@@ -1176,21 +1181,35 @@ services:
   # ==========================================================================
   # Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
   # pinned by SHA per spec OQ3) plus a Droplet-side health sidecar.
-  #
-  # No profile attribute — Plane is a core customer service like Nextcloud,
-  # runs on the orchestrator host regardless of deployment shape (single-box
-  # OR multi-box). The `services/pm/PATCHES.md` ledger tracks any local
-  # modifications per ADR-010 AGPL §13 posture.
+  # The `services/pm/PATCHES.md` ledger tracks any local modifications per
+  # ADR-010 AGPL §13 posture.
   #
   # OQ1 resolution: dedicated postgres-pm + redis-pm — backup/restore
   # granularity + Plane schema-migration quarantine outweigh ~200MB RAM cost.
-
-  # PM/Plane services are gated behind the `pm` compose profile so they are
-  # opt-in. PM_PILOT deploys them by NAME (which starts a profiled service
-  # regardless of profile activation), so the pilot flow is unaffected.
-  # Without this gate they sit in the default profile, so a plain
-  # `docker compose up` / setup.sh tries to start them on EVERY box and
-  # incur the full Plane image download on non-PM provisions. WARP-496 / ADR-010.
+  #
+  # Profiles: `["pm"]` on every PM service. Compose profiles are STATIC (a
+  # service runs iff one of its declared profiles is in the active set), so
+  # the single-box opt-OUT gate cannot live here — it lives in the COMPOSE_
+  # PROFILES composition done by scripts/lib/single-box.sh:
+  #   * `pm` is activated explicitly on a multi-box / `--profile pm` deploy.
+  #     PM_PILOT also deploys these by NAME (which starts a profiled service
+  #     regardless of profile activation), so the pilot flow is unaffected.
+  #   * On the single-box shape, scripts/lib/single-box.sh APPENDS `pm` to
+  #     COMPOSE_PROFILES (=linux,display,single-box,pm) by DEFAULT, so PM
+  #     works out-of-the-box (bug #10: without it the always-present nginx
+  #     /pm/ route returned 502). That append is an opt-OUT, default-ON gate
+  #     keyed on DROPLET_PM_ENABLED — a resource-constrained (~6 GB) box sets
+  #     DROPLET_PM_ENABLED=0 to drop the ~2.5 GB always-on Plane stack, and
+  #     single-box.sh then omits `pm` so none of these services start.
+  # Keeping `single-box` OFF these profiles (vs PR #487's `["pm","single-box"]`)
+  # is what makes the gate possible: when single-box.sh withholds `pm`, the
+  # `single-box` profile alone must NOT resolve the PM stack.
+  # Resource cost when enabled: see the "Profile-gated services" budget at the
+  # top of this file (`pm:` row — ~2.5 GB always-on: postgres-pm 512M +
+  # redis-pm 256M + pm-api 768M + pm-worker 512M + pm-web 384M + pm-health
+  # 128M; pm-migrator is one-shot). The `pm` gate also keeps these OFF the
+  # default profile so a plain `docker compose up` on a shape that wants
+  # neither profile never pulls the heavy Plane images. WARP-496 / ADR-010.
   postgres-pm:
     image: postgres:15-alpine
     container_name: droplet-postgres-pm
