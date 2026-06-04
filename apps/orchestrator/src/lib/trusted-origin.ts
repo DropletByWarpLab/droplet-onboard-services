@@ -187,15 +187,27 @@ function requestHost(req: Request): string | null {
  *   - The canonical host always wins (it does not depend on the request).
  *   - Otherwise the request host is honoured ONLY if it is on the allowlist.
  *   - Otherwise null (caller applies the safe default).
+ *
+ * `extraAllowedHosts` lets a specific surface widen the allowlist with hosts
+ * the box legitimately serves but that aren't in `corsAllowedOrigins` — e.g.
+ * the mDNS `droplet.local` (a TLS cert SAN) for the device-pairing WebDAV URL.
+ * They are matched bare + case-insensitively, like the base allowlist.
  */
 export function pickTrustedHost(
   req: Request,
   origin: Pick<TrustedOrigin, "canonicalHost" | "allowedHosts">,
+  extraAllowedHosts?: readonly string[],
 ): string | null {
   if (origin.canonicalHost) return origin.canonicalHost;
 
   const candidate = requestHost(req);
   if (candidate && origin.allowedHosts.has(candidate)) {
+    return candidate;
+  }
+  if (
+    candidate &&
+    extraAllowedHosts?.some((h) => bareHost(h) === candidate)
+  ) {
     return candidate;
   }
 
@@ -219,10 +231,15 @@ function requestIsHttps(req: Request): boolean {
  * Applies the canonical-origin → allowlisted-request-host → safe-default order
  * documented in the module header. A forged or unknown request host is never
  * embedded. Returns an origin with NO trailing slash.
+ *
+ * `extraAllowedHosts` — see `pickTrustedHost`.
  */
-export async function resolveTrustedOriginUrl(req: Request): Promise<string> {
+export async function resolveTrustedOriginUrl(
+  req: Request,
+  extraAllowedHosts?: readonly string[],
+): Promise<string> {
   const origin = await resolveTrustedOrigin();
-  const picked = pickTrustedHost(req, origin);
+  const picked = pickTrustedHost(req, origin, extraAllowedHosts);
 
   if (picked) {
     // The canonical origin is always https. An allowlisted request host is
@@ -251,12 +268,15 @@ export async function resolveTrustedOriginUrl(req: Request): Promise<string> {
  * slash (a missing leading slash is added; the origin never carries a trailing
  * one). Use this for every orchestrator-generated absolute URL whose host would
  * otherwise come straight from the request header.
+ *
+ * `extraAllowedHosts` — see `pickTrustedHost`.
  */
 export async function trustedOriginUrl(
   req: Request,
   path: string,
+  extraAllowedHosts?: readonly string[],
 ): Promise<string> {
-  const base = await resolveTrustedOriginUrl(req);
+  const base = await resolveTrustedOriginUrl(req, extraAllowedHosts);
   const suffix = path.startsWith("/") ? path : `/${path}`;
   return `${base}${suffix}`;
 }
