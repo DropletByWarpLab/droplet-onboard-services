@@ -149,6 +149,7 @@ const STORAGE_OPS = [
   "pool_set_level",
   "pool_add_spare",
   "pool_remove_disk",
+  "drive_adopt", // WARP-662: wipe + reformat + mount a previously-used disk
 ] as const;
 type StorageOp = (typeof STORAGE_OPS)[number];
 
@@ -654,6 +655,15 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     return typeof m === "string" && /^\/dev\/[A-Za-z0-9/_-]{1,64}$/.test(m);
   }
   const VALID_LEVELS = new Set(["raid0", "raid1", "raid5", "raid6", "raid10", "jbod"]);
+  // WARP-662 drive_adopt: a WHOLE-disk kernel name (never a partition, never
+  // md<N>). The host script + bridge add the OS-disk refusal; this is just a
+  // shape/allow-list guard against shell-metacharacter injection.
+  function validAdoptDevice(d: unknown): d is string {
+    return typeof d === "string" &&
+      /^(sd[a-z]{1,2}|nvme\d+n\d+|mmcblk\d+|vd[a-z]{1,2})$/.test(d);
+  }
+  const VALID_FSTYPES = new Set(["ext4", "xfs", "btrfs"]);
+  const VALID_WIPE = new Set(["quick", "secure"]);
 
   function evalAndRespond(
     res: import("express").Response,
@@ -703,6 +713,47 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         "pool_create",
         device,
         { level, members, confirm_phrase: confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/drives/adopt — wipe + reformat + mount a previously-used
+  // disk into the Droplet (DESTRUCTIVE, WARP-662). Owner/admin only; mints a
+  // confirm token. The OS/boot disk is refused server-side by the host script —
+  // this route never trusts the client's device choice for that guard.
+  router.post("/storage/drives/adopt", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device, fstype, wipeMethod, label, confirmPhrase } = req.body || {};
+      if (!validAdoptDevice(device)) {
+        return res.status(400).json({
+          error: "Invalid drive (expected a whole-disk name like sdb or nvme0n1)",
+        });
+      }
+      const fs = typeof fstype === "string" && fstype ? fstype : "ext4";
+      if (!VALID_FSTYPES.has(fs)) {
+        return res.status(400).json({ error: "Invalid filesystem type" });
+      }
+      const wipe = typeof wipeMethod === "string" && wipeMethod ? wipeMethod : "quick";
+      if (!VALID_WIPE.has(wipe)) {
+        return res.status(400).json({ error: "Invalid wipe method (expected quick or secure)" });
+      }
+      if (label != null && !/^[A-Za-z0-9_-]{1,16}$/.test(String(label))) {
+        return res.status(400).json({ error: "Invalid label (1-16 chars: letters, digits, _ or -)" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "drive_adopt",
+        device,
+        {
+          fstype: fs,
+          wipe_method: wipe,
+          ...(label != null ? { label: String(label) } : {}),
+          confirm_phrase: confirmPhrase ?? "",
+        },
         req.user?.id,
       );
     } catch (err) {

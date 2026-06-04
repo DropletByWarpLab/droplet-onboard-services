@@ -61,6 +61,28 @@ def test_pool_create_invokes_host_script_not_mdadm(monkeypatch):
     assert "pool_create" in cmd
 
 
+def test_drive_adopt_invokes_host_script_not_mkfs(monkeypatch):
+    # WARP-662: drive_adopt is in the allow-list and shells the host script —
+    # the bridge never runs wipefs/mkfs/blkdiscard itself.
+    bridge = _load_bridge(monkeypatch)
+    captured = {}
+
+    def fake_run(cmd, timeout=15):
+        captured["cmd"] = cmd
+        return 0, '{"ok": true, "device": "sdb"}', ""
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    ok, info = bridge.run_pool_command("drive_adopt", {
+        "device": "sdb", "fstype": "ext4", "wipe_method": "quick",
+        "confirm_phrase": "ERASE sdb",
+    })
+    assert ok is True
+    cmd = captured["cmd"]
+    assert any("droplet-storage-pool.sh" in str(part) for part in cmd)
+    assert "mkfs" not in cmd and "wipefs" not in cmd and "blkdiscard" not in cmd
+    assert "drive_adopt" in cmd
+
+
 def test_pool_command_rejects_unknown_operation(monkeypatch):
     bridge = _load_bridge(monkeypatch)
 
