@@ -6,6 +6,7 @@ import { Topbar } from "@/components/Topbar";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
+import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -254,6 +255,10 @@ export default function SettingsPage() {
           )}
         </div>
       </section>
+
+      {/* Outbound email (BUG-11) — SMTP relay for invite delivery. Sits with
+          the people/account config since its primary consumer is invites. */}
+      <EmailChannelSection />
 
       {/* Device Info */}
       <section className="mb-10">
