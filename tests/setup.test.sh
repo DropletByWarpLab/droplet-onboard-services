@@ -338,6 +338,55 @@ else
 fi
 
 # =============================================================================
+# Phase 6: USB/NVMe hot-plug auto-mount is installed by setup (single-box)
+# =============================================================================
+# The udev rule + droplet-automount@.service are what make a drive added or
+# swapped at runtime auto-mount under /mnt/droplet and surface in the dashboard
+# (the device-bridge merges the automount state with /proc/mounts). They ship
+# under services/automount/ but only become active once installed — setup.sh
+# must invoke services/automount/install.sh in the single-box host-integration
+# block, or a fresh box never auto-mounts a hot-plugged drive.
+echo "--- Phase 6: automount installed on setup + safe by default ---"
+
+SETUP_SH_REAL="$REPO_ROOT_REAL/scripts/setup.sh"
+AUTOMOUNT_INSTALL="$REPO_ROOT_REAL/services/automount/install.sh"
+AUTOMOUNT_RULES="$REPO_ROOT_REAL/services/automount/99-droplet-automount.rules"
+
+# (1) setup.sh must wire the automount installer in the single-box flow.
+if grep -qE 'services/automount/install\.sh' "$SETUP_SH_REAL"; then
+  pass "setup.sh installs the USB auto-mount service (services/automount/install.sh)"
+else
+  fail "setup.sh does NOT install services/automount/install.sh — hot-plug drives won't auto-mount on a fresh box"
+fi
+
+# (2) Privileged linear script — not executed here, but syntax must be valid
+# (same posture as install-device-bridge.sh in Phase 4).
+if bash -n "$AUTOMOUNT_INSTALL" 2>/dev/null; then
+  pass "services/automount/install.sh passes bash -n syntax check"
+else
+  fail "services/automount/install.sh has a bash syntax error"
+fi
+
+# (3) Safety: the installer must NOT sweep/adopt already-attached drives at
+# install time (a provisioning foot-gun — a stray drive plugged in during setup
+# must not be silently mounted). First mount happens on the next hot-plug;
+# deliberate wipe+adopt is the opt-in setup step, never install.
+if grep -qE 'udevadm[[:space:]]+trigger' "$AUTOMOUNT_INSTALL"; then
+  fail "services/automount/install.sh runs 'udevadm trigger' — sweeps attached drives at install (foot-gun)"
+else
+  pass "services/automount/install.sh does not sweep attached drives at install"
+fi
+
+# (4) Safety: the udev rule must never auto-mount the OS/boot disk — assert the
+# EFI/BOOT system-partition label exclusions are present.
+if grep -q 'ID_FS_LABEL}=="EFI"' "$AUTOMOUNT_RULES" \
+   && grep -q 'ID_FS_LABEL}=="BOOT"' "$AUTOMOUNT_RULES"; then
+  pass "automount udev rule excludes EFI/BOOT system partitions (never mounts the OS disk)"
+else
+  fail "automount udev rule is missing the EFI/BOOT system-partition exclusions"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
