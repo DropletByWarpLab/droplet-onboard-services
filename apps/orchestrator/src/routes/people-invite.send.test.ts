@@ -17,7 +17,17 @@ import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: {
+    AUTH_ENABLED: false,
+    // PR #486 finding 2: the shared invite-url helper reads these. The accept
+    // link's host is validated against `corsAllowedOrigins` (the box's trusted
+    // origins) and resolved from the canonical origin (WIREGUARD_ENDPOINT_HOST
+    // -> DuckDNS); a forged X-Forwarded-Host is never embedded. Routing is
+    // disabled so the helper never hits the DuckDNS sidecar in this unit test.
+    ROUTING_MODE: "disabled",
+    WIREGUARD_ENDPOINT_HOST: "",
+    corsAllowedOrigins: ["https://droplet-ai.local"],
+  },
 }));
 
 const { recordActivityMock } = vi.hoisted(() => ({
@@ -133,6 +143,28 @@ describe("POST /api/people/invite — email delivery (BUG-11)", () => {
     expect(msg.text).toContain(`https://droplet-ai.local/invite/${row.token}`);
     expect(msg.html).toContain(`href="https://droplet-ai.local/invite/${row.token}"`);
     expect(row.sendStatus).toBe("sent");
+  });
+
+  it("excludes a forged X-Forwarded-Host from the accept link (PR #486 finding 2)", async () => {
+    const prisma = createPrismaMock(readyChannel());
+    const { app, sendMail } = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/people/invite")
+      // A forged X-Forwarded-Host must never end up in the token-bearing link.
+      .set("Host", "droplet-ai.local")
+      .set("X-Forwarded-Host", "evil.example")
+      .set("X-Forwarded-Proto", "https")
+      .send({ email: "victim@acme.co", role: "family" });
+
+    expect(res.status).toBe(200);
+    const msg = sendMail.mock.calls[0][0];
+    const [row] = [...prisma._invites.values()];
+    // The attacker host is rejected; the link falls back to the box's trusted
+    // origin, preserving the /invite/:token contract.
+    expect(msg.text).not.toContain("evil.example");
+    expect(msg.html).not.toContain("evil.example");
+    expect(msg.text).toContain(`https://droplet-ai.local/invite/${row.token}`);
   });
 
   it("still creates the invite (200) and reports failed when the transport errors", async () => {

@@ -22,7 +22,14 @@ import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
 vi.mock("../config.js", () => ({
-  config: { AUTH_ENABLED: false },
+  config: {
+    AUTH_ENABLED: false,
+    // PR #486 finding 2: fields the shared invite-url helper reads. Routing
+    // disabled so the DuckDNS sidecar is never dialed in this unit test.
+    ROUTING_MODE: "disabled",
+    WIREGUARD_ENDPOINT_HOST: "",
+    corsAllowedOrigins: ["https://droplet-ai.local"],
+  },
 }));
 
 const { recordActivityMock } = vi.hoisted(() => ({
@@ -297,6 +304,36 @@ describe("POST /api/people/invites/:id/resend", () => {
     expect(res.body.sendStatus).toBe("sent");
     expect(sendMail).toHaveBeenCalledTimes(1);
     expect(prisma._invites.get("inv-1")!.sendStatus).toBe("sent");
+  });
+
+  it("excludes a forged X-Forwarded-Host from the resent accept link (PR #486 finding 2)", async () => {
+    const prisma = createPrismaMock(
+      seedConfig({ enabled: true, host: "smtp.acme.co", fromAddress: "d@acme.co" }),
+    );
+    prisma._invites.set("inv-1", {
+      id: "inv-1",
+      token: "TOK-FORGE",
+      email: "victim@acme.co",
+      role: "family",
+      sendStatus: "failed",
+      sendAttempts: 1,
+      revokedAt: null,
+      acceptedAt: null,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const { app, sendMail } = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/people/invites/inv-1/resend")
+      .set("Host", "droplet-ai.local")
+      .set("X-Forwarded-Host", "evil.example")
+      .set("X-Forwarded-Proto", "https");
+
+    expect(res.status).toBe(200);
+    const msg = sendMail.mock.calls[0][0];
+    expect(msg.text).not.toContain("evil.example");
+    expect(msg.html).not.toContain("evil.example");
+    expect(msg.text).toContain("https://droplet-ai.local/invite/TOK-FORGE");
   });
 
   it("410s a resend on an expired invite — the accept link would 410 on click (onboard#486)", async () => {
