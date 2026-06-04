@@ -110,6 +110,24 @@ class ProvisionRequest(BaseModel):
     )
 
 
+class ProvisionConfigResponse(BaseModel):
+    """Read-only echo of the bring-up provisioning config + persisted state.
+
+    Feeds the orchestrator §7 /api/switch/status aggregation (ADR-018 item 12).
+    All desired-state values are EXPLICIT (env-derived); last_provisioned_at is
+    the persisted reconcile stamp (None until the first successful reconcile).
+    """
+
+    vlan_profile: str
+    auto_managed: bool
+    protected_port: int
+    camera_ports: list[int] = []
+    ap_ports: list[int] = []
+    client_ports: list[int] = []
+    poe_budget_w: int
+    last_provisioned_at: Optional[str] = None
+
+
 class ProvisionResult(BaseModel):
     """Outcome of a reconcile_switch run.
 

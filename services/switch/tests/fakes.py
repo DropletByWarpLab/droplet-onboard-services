@@ -109,6 +109,14 @@ class FakeSwitchDriver(SwitchDriver):
                 return entry
         raise SwitchAPIError(404, f"Port {port} not found")
 
+    async def get_port_status(self) -> list[dict]:
+        # Mirror the real Lantronix get_port_status shape (the §7 link/speed
+        # source): every port up at "1 Gb", SFP flag by position.
+        return [
+            {"port": p, "link_up": True, "speed": "1 Gb", "is_sfp": p >= 9}
+            for p in range(1, 11)
+        ]
+
     async def set_port_enabled(self, port: int, enabled: bool) -> None:
         return None
 

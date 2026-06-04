@@ -43,6 +43,7 @@ from drivers.base import (
     InvalidPortError,
 )
 from provisioner import ProvisionConfig, reconcile_switch
+import provision_state
 from schemas import (
     HealthResponse,
     CreateVlanRequest,
@@ -51,7 +52,17 @@ from schemas import (
     CameraSetupResult,
     ProvisionRequest,
     ProvisionResult,
+    ProvisionConfigResponse,
 )
+
+# ---------------------------------------------------------------------------
+# Model constants (no firmware read exposes these)
+# ---------------------------------------------------------------------------
+# The SM8TAT2SA's PoE power budget. The firmware's poe_status read reports
+# per-port draw but no total budget, so it is a documented model constant
+# (130 W for the 8-port PoE+ SM8TAT2SA). Surfaced in watts on the §7 status
+# contract as poe_budget_w.
+POE_BUDGET_W = 130
 
 logger = logging.getLogger("droplet.switch")
 logging.basicConfig(level=logging.INFO)
@@ -194,6 +205,12 @@ async def run_provisioner_safe(profile_override: Optional[str] = None) -> Provis
             reconcile_switch(driver_instance, cfg, routing_client=routing),
             timeout=SWITCH_PROVISION_TIMEOUT,
         )
+        # Stamp last_provisioned_at only when the switch was actually confirmed
+        # at the managed layout: `applied` (ports moved) or `noop` (already
+        # correct). `refused`/`skipped`/`error` did not leave the switch in a
+        # known-good provisioned state, so we don't fabricate a stamp (rule 10).
+        if result.get("status") in ("applied", "noop"):
+            provision_state.stamp_provisioned_now()
         return ProvisionResult(**result)
     except asyncio.TimeoutError:
         logger.error(
@@ -348,6 +365,20 @@ async def list_ports():
     try:
         ports = await get_driver().get_ports()
         return {"ports": ports}
+    except SwitchError as exc:
+        handle_switch_error(exc)
+
+
+# NOTE: this static route MUST be declared before `/ports/{port}` so the
+# integer path param doesn't capture the literal "status".
+@app.get("/ports/status")
+async def list_port_status():
+    """Live link/speed per port (the real link source the §7 aggregation joins
+    in — `/ports` carries only PVID/tagging on the Lantronix WebStaX firmware).
+    """
+    try:
+        rows = await get_driver().get_port_status()
+        return {"ports": rows}
     except SwitchError as exc:
         handle_switch_error(exc)
 
@@ -539,6 +570,32 @@ async def setup_cameras(req: CameraSetupRequest):
         handle_switch_error(exc)
         # handle_switch_error always raises, but type checker needs this
         raise  # unreachable
+
+
+# ---------------------------------------------------------------------------
+# Provision config echo (ADR-018 item 12) — read-only, feeds §7 /api/switch/status
+# ---------------------------------------------------------------------------
+@app.get("/provision/config", response_model=ProvisionConfigResponse)
+async def provision_config():
+    """Echo the parsed bring-up provisioning config + persisted state.
+
+    Pure config/state read — answers even when the switch is disconnected, so
+    the orchestrator can render the panel header (model/profile/budget/auto)
+    without a live switch. All desired-state values come from EXPLICIT env
+    (build_provision_config); auto_managed mirrors SWITCH_AUTOPROVISION;
+    last_provisioned_at is the persisted reconcile stamp (None if never run).
+    """
+    cfg = build_provision_config()
+    return ProvisionConfigResponse(
+        vlan_profile=cfg.profile,
+        auto_managed=autoprovision_enabled(),
+        protected_port=cfg.protected_port,
+        camera_ports=cfg.camera_ports,
+        ap_ports=cfg.ap_ports,
+        client_ports=cfg.client_ports,
+        poe_budget_w=POE_BUDGET_W,
+        last_provisioned_at=provision_state.read_last_provisioned_at(),
+    )
 
 
 # ---------------------------------------------------------------------------
