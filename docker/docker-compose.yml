@@ -741,6 +741,10 @@ services:
     # single-box bundles the managed switch so a plugged-in AP auto-provisions
     # onto the LAN instead of stranding on an isolated VLAN (ADR-018 item 9);
     # `full` is the multi-box/explicit-managed shape.
+    volumes:
+      # ADR-018 item 12: persist last_provisioned_at across container restarts.
+      # provision_state.py writes to SWITCH_STATE_DIR (default /var/lib/droplet/switch).
+      - switch-state:/var/lib/droplet/switch
     profiles: ["full", "single-box"]
     restart: always
     mem_limit: ${SWITCH_MEM_LIMIT:-128m}
@@ -1537,6 +1541,8 @@ volumes:
   whisper-models:
   # WARP-154 — Piper voice cache (~70 MB per voice).
   piper-voices:
+  # ADR-018 item 12: switch provision-state persistence (last_provisioned_at).
+  switch-state:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
   # ollama + openwrt services are active. Declared unconditionally so
   # `docker volume ls` shows the names whether the profile is on or off;

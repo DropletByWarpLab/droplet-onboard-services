@@ -60,6 +60,22 @@ vi.mock("../services/switch.client.js", () => ({
   disablePortPoe: vi.fn().mockResolvedValue(undefined),
   detectWanPort: vi.fn().mockResolvedValue({ wan_port: 9 }),
   setupCameraPorts: vi.fn().mockResolvedValue({ status: "ok" }),
+  // §7 additions (ADDON §7).
+  fetchPortStatus: vi.fn().mockResolvedValue([]),
+  fetchProvisionConfig: vi.fn().mockResolvedValue({
+    vlan_profile: "flat-lan", auto_managed: false, protected_port: 0,
+    camera_ports: [], ap_ports: [], client_ports: [], poe_budget_w: 130,
+    last_provisioned_at: null,
+  }),
+  provisionSwitch: vi.fn().mockResolvedValue({ status: "applied" }),
+}));
+
+// §7 read routes call the aggregation service; mock it so the RBAC wiring test
+// exercises only the guard, not the join (covered in switch-aggregation.test).
+vi.mock("../services/switch-aggregation.service.js", () => ({
+  fetchSwitchStatus: vi.fn().mockResolvedValue({ connected: true }),
+  fetchSwitchPorts: vi.fn().mockResolvedValue([]),
+  fetchSwitchVlans: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../services/network-safety.service.js", () => ({
@@ -413,6 +429,10 @@ describe("switch router RBAC wiring (WARP-559)", () => {
       body: { vlan_id: 100, camera_ports: [1], uplink_ports: [9] },
     },
     { method: "post", path: "/api/switch/command/confirm", body: { confirmationToken: "tok" } },
+    // §7 write routes (ADDON §7) — the dashboard panel's write surface.
+    { method: "post", path: "/api/switch/ports/4/vlan", body: { vlan_id: 100 } },
+    { method: "post", path: "/api/switch/ports/3/poe", body: { enabled: true } },
+    { method: "post", path: "/api/switch/provision", body: {} },
   ];
 
   /** Read GETs must stay open to every authenticated role. */

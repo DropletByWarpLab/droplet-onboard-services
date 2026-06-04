@@ -12,6 +12,7 @@ Endpoint -> payload map:
   GET /stat/vlan_membership_stat -> VLAN_MEMBERSHIP_STAT
   GET /stat/vlan_port_stat       -> VLAN_PORT_STAT
   GET /stat/poe_status           -> POE_STATUS
+  GET /stat/port_status          -> PORT_STATUS
 
 The legacy prototype endpoints (/stat/vlan, /stat/port,
 /stat/vlan_membership) 404 on this firmware and are intentionally absent.
@@ -147,5 +148,30 @@ POE_STATUS: dict = {
             "Class": "",
             "Max Power(mW)": 30000,
         },
+    ]
+}
+
+# GET /stat/port_status — the newly-confirmed REAL link/speed source on
+# v1.04.0079 (ADR-018 item 12). One row per physical port (1-10):
+#   link  : "up" | "down"
+#   speed : Mbps (0 = down; 1000 -> "1 Gb"; 10000 -> "10 Gb")
+#   media : "copper" | "fiber" (SFP ports 9-10 report fiber when an SFP is in)
+#   olink : operational-link flag (0/1) — informational, not consumed for link_up
+# This is what the aggregation joins to fill link_up/speed (vlan_port_stat
+# carries only PVID/tagging). The shape mirrors the recorded device payload:
+# ports 1,4,7,8 up at 1 Gb copper; port 9 up at 10 Gb fiber (the uplink);
+# the rest down. Down ports report speed 0 / media copper.
+PORT_STATUS: dict = {
+    "data": [
+        {"port": 1, "link": "up", "media": "copper", "speed": 1000, "olink": 1},
+        {"port": 2, "link": "down", "media": "copper", "speed": 0, "olink": 0},
+        {"port": 3, "link": "down", "media": "copper", "speed": 0, "olink": 0},
+        {"port": 4, "link": "up", "media": "copper", "speed": 1000, "olink": 1},
+        {"port": 5, "link": "down", "media": "copper", "speed": 0, "olink": 0},
+        {"port": 6, "link": "down", "media": "copper", "speed": 0, "olink": 0},
+        {"port": 7, "link": "up", "media": "copper", "speed": 1000, "olink": 1},
+        {"port": 8, "link": "up", "media": "copper", "speed": 1000, "olink": 1},
+        {"port": 9, "link": "up", "media": "fiber", "speed": 10000, "olink": 1},
+        {"port": 10, "link": "down", "media": "copper", "speed": 0, "olink": 0},
     ]
 }

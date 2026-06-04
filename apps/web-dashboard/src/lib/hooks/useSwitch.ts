@@ -38,8 +38,7 @@ export interface SwitchData {
 async function fetchSwitchPorts(): Promise<SwitchPort[]> {
   const res = await authFetch("/api/switch/ports");
   if (!res.ok) throw new Error(`Switch ports: ${res.status}`);
-  const data = await res.json();
-  return data.ports ?? [];
+  return res.json();
 }
 
 async function fetchSwitchPoe(): Promise<SwitchPoEPort[]> {
@@ -52,8 +51,7 @@ async function fetchSwitchPoe(): Promise<SwitchPoEPort[]> {
 async function fetchSwitchVlans(): Promise<SwitchVlan[]> {
   const res = await authFetch("/api/switch/vlans");
   if (!res.ok) throw new Error(`Switch VLANs: ${res.status}`);
-  const data = await res.json();
-  return data.vlans ?? [];
+  return res.json();
 }
 
 export function useSwitch() {

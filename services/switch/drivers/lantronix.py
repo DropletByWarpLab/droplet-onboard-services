@@ -81,6 +81,25 @@ _REAUTH_BACKOFF_S = 5.0
 _TRUNK_TXTAG = "All except-native"
 
 
+def _format_speed_mbps(speed_mbps: int) -> str:
+    """Render a link speed (Mbps from /stat/port_status) as the §7 label.
+
+    0 (or anything falsy) -> "" so the dashboard shows "—" for a down link.
+    Clean 1000-multiples render as "N Gb" (1000 -> "1 Gb", 10000 -> "10 Gb");
+    anything else renders as "N Mb" rather than fabricating a fractional Gb
+    label the firmware never reported.
+    """
+    try:
+        mbps = int(speed_mbps)
+    except (TypeError, ValueError):
+        return ""
+    if mbps <= 0:
+        return ""
+    if mbps % 1000 == 0:
+        return f"{mbps // 1000} Gb"
+    return f"{mbps} Mb"
+
+
 def _parse_vlan_membership_stat(data: dict) -> dict[int, dict]:
     """Parse a GET /stat/vlan_membership_stat payload into a per-VLAN map.
 
@@ -605,6 +624,60 @@ class LantronixDriver(SwitchDriver):
             if p["port"] == port:
                 return p
         raise SwitchAPIError(404, f"Port {port} not found")
+
+    async def get_port_status(self) -> list[dict]:
+        """Read live link state + speed from GET /stat/port_status.
+
+        Newly confirmed on v1.04.0079 (ADR-018 item 12) — this is the REAL
+        link/speed source. `/stat/vlan_port_stat` (consumed by ``get_ports``)
+        carries only PVID/tagging, so ``get_ports`` cannot report link state;
+        the orchestrator aggregation joins this read in to fill it.
+
+        Firmware row shape::
+
+            {"port": int, "link": "up"|"down", "media": "copper"|"fiber",
+             "speed": int (Mbps; 0 = down), "olink": 0|1}
+
+        Returns one dict per physical port (1-10), sorted by port::
+
+            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool}
+
+        ``speed`` is the §7 label ("1 Gb"/"10 Gb"/"" when down). All ports are
+        represented even if the firmware omits a row (omitted -> down).
+        """
+        data = await self._request("GET", "/stat/port_status")
+        raw_rows = data.get("data", []) if isinstance(data, dict) else []
+
+        by_port: dict[int, dict] = {}
+        if isinstance(raw_rows, list):
+            for entry in raw_rows:
+                if not isinstance(entry, dict):
+                    continue
+                port_num = entry.get("port")
+                try:
+                    port_num = int(port_num)
+                except (TypeError, ValueError):
+                    continue
+                link_up = str(entry.get("link", "")).strip().lower() == "up"
+                speed = _format_speed_mbps(entry.get("speed", 0)) if link_up else ""
+                by_port[port_num] = {
+                    "port": port_num,
+                    "link_up": link_up,
+                    "speed": speed,
+                    "is_sfp": port_num >= SFP_PORT_MIN,
+                }
+
+        # Represent every physical port even when the firmware omits a row;
+        # an omitted port is reported down (never inferred as up from absence).
+        for i in range(PORT_MIN, PORT_MAX + 1):
+            by_port.setdefault(i, {
+                "port": i,
+                "link_up": False,
+                "speed": "",
+                "is_sfp": i >= SFP_PORT_MIN,
+            })
+
+        return [by_port[i] for i in range(PORT_MIN, PORT_MAX + 1)]
 
     async def set_port_enabled(self, port: int, enabled: bool) -> None:
         self._validate_port(port)

@@ -83,6 +83,7 @@ _READ_ROUTES: dict[tuple[str, str], Any] = {
     ("GET", "/stat/vlan_membership_stat"): fx.VLAN_MEMBERSHIP_STAT,
     ("GET", "/stat/vlan_port_stat"): fx.VLAN_PORT_STAT,
     ("GET", "/stat/poe_status"): fx.POE_STATUS,
+    ("GET", "/stat/port_status"): fx.PORT_STATUS,
 }
 
 
@@ -221,6 +222,72 @@ async def test_get_ports_parses_pvid_and_trunk_detection():
 
     assert rec.gets_to("/stat/vlan_port_stat")
     assert not rec.gets_to("/stat/port")
+
+
+# --- Port status (port_status) — the real link/speed source -----------------
+
+
+async def test_get_port_status_parses_link_speed_media():
+    rec = _Recorder(dict(_READ_ROUTES))
+    driver = _make_driver(rec)
+
+    statuses = await driver.get_port_status()
+
+    by_port = {p["port"]: p for p in statuses}
+    assert set(by_port) == set(range(1, 11)), "all 10 ports represented"
+
+    # Up copper port: link_up True, speed normalised to "1 Gb".
+    assert by_port[1]["link_up"] is True
+    assert by_port[1]["speed"] == "1 Gb"
+    assert by_port[1]["is_sfp"] is False
+
+    # Down port: link_up False, speed "" (the panel renders "—").
+    assert by_port[2]["link_up"] is False
+    assert by_port[2]["speed"] == ""
+
+    # SFP uplink port 9: 10 Gb on fiber media -> is_sfp True.
+    assert by_port[9]["link_up"] is True
+    assert by_port[9]["speed"] == "10 Gb"
+    assert by_port[9]["is_sfp"] is True
+
+    # Reads the newly-confirmed endpoint, not the legacy 404 ones.
+    assert rec.gets_to("/stat/port_status")
+    assert not rec.gets_to("/stat/port")
+
+
+async def test_get_port_status_backfills_missing_ports_as_down():
+    # Firmware omits a port row -> the driver still represents all 10, down.
+    partial = {"data": [{"port": 1, "link": "up", "media": "copper", "speed": 1000}]}
+    routes = dict(_READ_ROUTES)
+    routes[("GET", "/stat/port_status")] = partial
+    rec = _Recorder(routes)
+    driver = _make_driver(rec)
+
+    statuses = await driver.get_port_status()
+
+    by_port = {p["port"]: p for p in statuses}
+    assert set(by_port) == set(range(1, 11))
+    assert by_port[1]["link_up"] is True
+    # Omitted port 5 -> safe down default, copper, not SFP.
+    assert by_port[5]["link_up"] is False
+    assert by_port[5]["speed"] == ""
+    # Ports 9-10 are SFP by position even when absent from the payload.
+    assert by_port[10]["is_sfp"] is True
+
+
+async def test_get_port_status_unusual_speed_renders_mbps():
+    # A 100 Mbps link (not a clean Gb multiple) is rendered without fabricating
+    # a Gb label — we never invent data the firmware didn't report.
+    odd = {"data": [{"port": 3, "link": "up", "media": "copper", "speed": 100}]}
+    routes = dict(_READ_ROUTES)
+    routes[("GET", "/stat/port_status")] = odd
+    rec = _Recorder(routes)
+    driver = _make_driver(rec)
+
+    statuses = await driver.get_port_status()
+    by_port = {p["port"]: p for p in statuses}
+    assert by_port[3]["link_up"] is True
+    assert by_port[3]["speed"] == "100 Mb"
 
 
 # --- PoE --------------------------------------------------------------------
