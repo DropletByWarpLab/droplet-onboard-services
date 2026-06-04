@@ -57,9 +57,6 @@ die() { err "$*"; exit 1; }
 # --- Operation allow-list ----------------------------------------------------
 case "$OP" in
   pool_create|pool_destroy|pool_format|pool_set_level|pool_add_spare|pool_remove_disk) ;;
-  # WARP-662: adopt a previously-used disk — deliberately wipe + reformat +
-  # mount it into the Droplet ("like a new OS install"). Data-destroying.
-  drive_adopt) ;;
   "") die "no operation given" ;;
   *)  die "unknown operation: $OP" ;;
 esac
@@ -92,8 +89,6 @@ LEVEL="$(json_field level)"
 FSTYPE="$(json_field fstype)"
 MEMBER="$(json_field member)"
 CONFIRM="$(json_field confirm_phrase)"
-WIPE_METHOD="$(json_field wipe_method)"   # WARP-662 drive_adopt: quick|secure
-LABEL="$(json_field label)"               # WARP-662 drive_adopt: optional fs label
 mapfile -t MEMBERS < <(json_field members)
 
 [ -n "$DEVICE" ] || die "missing 'device'"
@@ -122,10 +117,8 @@ if [ "$OP" = "pool_create" ]; then
       || die "confirm_phrase must name every disk being erased (missing $(short "$m"))"
   done
 else
-  # Array-level pool ops AND drive_adopt: the phrase must name the single
-  # target device (the array, or the disk being adopted/wiped).
   confirm_names "$(short "$DEVICE")" \
-    || die "confirm_phrase must name the target being erased ($(short "$DEVICE"))"
+    || die "confirm_phrase must name the array being changed ($(short "$DEVICE"))"
 fi
 
 # --- Disk safety probes ------------------------------------------------------
@@ -205,18 +198,6 @@ case "$OP" in
     # Acting on the assembled array device. Refuse if the OS lives on it.
     if is_os_disk "/dev/$DEVICE"; then die "refusing: /dev/$DEVICE backs the OS disk"; fi
     ;;
-  drive_adopt)
-    # Adopt = deliberately reclaim a previously-used disk: wipe + reformat +
-    # mount it into the Droplet. The OS/boot/system disk is NEVER eligible —
-    # this is the last-line, server-side guard (the dashboard also excludes it,
-    # but we must never trust the client). Unlike the pool ops, we do NOT refuse
-    # on has_data: erasing existing data is the whole point and is gated by the
-    # typed confirm_phrase naming this disk above. A mounted target is unmounted
-    # in the execute step (it's the "reclaim this disk" intent), not refused.
-    if is_os_disk "/dev/$DEVICE"; then
-      die "refusing: /dev/$DEVICE is (or backs) the OS/boot/system disk — never adoptable"
-    fi
-    ;;
 esac
 
 # --- Build the real command --------------------------------------------------
@@ -243,13 +224,6 @@ build_cmd() {
       ;;
     pool_remove_disk)
       printf 'mdadm %s --fail %s --remove %s' "$MD" "$MEMBER" "$MEMBER"
-      ;;
-    drive_adopt)
-      # unmount (if mounted) → wipe (quick: wipefs / secure: blkdiscard) →
-      # mkfs → mount under /mnt/droplet.
-      printf 'adopt %s: unmount -> wipe(%s) -> mkfs.%s%s -> mount /mnt/droplet' \
-        "$MD" "${WIPE_METHOD:-quick}" "${FSTYPE:-ext4}" \
-        "$([ -n "$LABEL" ] && printf ' -L %s' "$LABEL")"
       ;;
   esac
 }
@@ -296,38 +270,6 @@ case "$OP" in
     ;;
   pool_remove_disk)
     mdadm "$MD" --fail "$MEMBER" --remove "$MEMBER"
-    ;;
-  drive_adopt)
-    # 1) Unmount the target disk + any of its partitions if currently mounted
-    #    (e.g. it was auto-mounted on plug). Adopt is allowed to reclaim it.
-    if findmnt -rn --source "$MD" >/dev/null 2>&1; then
-      umount "$MD" 2>/dev/null || umount -l "$MD" 2>/dev/null || true
-    fi
-    for part in "$MD"?*; do
-      [ -b "$part" ] || continue
-      if findmnt -rn --source "$part" >/dev/null 2>&1; then
-        umount "$part" 2>/dev/null || umount -l "$part" 2>/dev/null || true
-      fi
-    done
-    # 2) Wipe. quick = clear fs/partition signatures (wipefs); secure = discard
-    #    the whole device first (TRIM-based erase for flash), then wipefs.
-    case "${WIPE_METHOD:-quick}" in
-      secure) blkdiscard -f "$MD" 2>/dev/null || true; wipefs -a "$MD" ;;
-      *)      wipefs -a "$MD" ;;
-    esac
-    # 3) Fresh whole-device filesystem (no partition table — matches how the
-    #    automount enumerates by-uuid). Optional owner-chosen label.
-    if [ -n "$LABEL" ]; then
-      "mkfs.${FSTYPE:-ext4}" -L "$LABEL" "$MD"
-    else
-      "mkfs.${FSTYPE:-ext4}" "$MD"
-    fi
-    # 4) Mount under the shared /mnt/droplet namespace so it's usable now and
-    #    the device-bridge surfaces it; the udev automount re-mounts on reboot.
-    adopt_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
-    adopt_mnt="/mnt/droplet/${LABEL:-${adopt_uuid:-$(basename "$MD")}}"
-    mkdir -p "$adopt_mnt"
-    mount "$MD" "$adopt_mnt"
     ;;
 esac
 

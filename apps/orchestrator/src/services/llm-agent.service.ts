@@ -594,27 +594,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       };
       if (isConfirmation) {
         evt.status = "confirmation_required";
-        const errObj = (parsed as {
-          error?: { message?: string; details?: unknown };
-        }).error;
-        evt.message =
-          typeof errObj?.message === "string" ? errObj.message : undefined;
-        // WARP-640 — if the tool surfaced a one-click re-issue token (e.g.
-        // run_scene returns { type, sceneId, confirmationToken }), forward it so
-        // the dashboard chip can render an "Approve & run" button that completes
-        // the action. Tools without a token (firewall etc.) omit this and the
-        // chip stays display-only.
-        const details = errObj?.details as
-          | { type?: string; sceneId?: string; confirmationToken?: string }
-          | undefined;
-        if (details && typeof details.confirmationToken === "string") {
-          evt.confirmation = {
-            kind: typeof details.type === "string" ? details.type : "generic",
-            sceneId:
-              typeof details.sceneId === "string" ? details.sceneId : undefined,
-            confirmationToken: details.confirmationToken,
-          };
-        }
+        const errObj = (parsed as { error?: { message?: string } }).error;
+        evt.message = typeof errObj?.message === "string" ? errObj.message : undefined;
       } else {
         evt.data = parsed;
       }

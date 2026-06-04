@@ -775,30 +775,6 @@ export async function requestDestroyPool(
   return res.json();
 }
 
-/** WARP-662 step 1: adopt (wipe + reformat + mount) a previously-used disk —
- *  returns a confirm token (does NOT wipe yet). `device` is the WHOLE-disk
- *  kernel name (e.g. "sdb" / "nvme0n1"), never a partition. The owner confirms
- *  via confirmPoolCommand to actually execute. The OS disk is refused
- *  server-side by the host script. */
-export async function requestAdoptDrive(input: {
-  device: string;
-  wipeMethod: "quick" | "secure";
-  fstype?: string;
-  label?: string;
-  confirmPhrase: string;
-}): Promise<PoolCommandToken> {
-  const res = await authFetch(`${BASE}/api/storage/drives/adopt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (res.status !== 202) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive adopt: ${res.status}`);
-  }
-  return res.json();
-}
-
 /** Step 2: confirm + execute a queued destructive pool op. */
 export async function confirmPoolCommand(input: {
   confirmationToken: string;
@@ -1885,57 +1861,6 @@ export async function sendChat(
     body: JSON.stringify(body),
     signal,
   });
-}
-
-/**
- * WARP-640 — outcome of a confirmed scene run, i.e. the 200 body from
- * `POST /api/scenes/:id/run` once the single-use confirmation token has been
- * accepted. `successCount < actionCount` means a partial run (some device
- * actions failed); the per-action breakdown rides along in `results`.
- */
-export interface SceneRunOutcome {
-  sceneId: string;
-  successCount: number;
-  actionCount: number;
-  results: Array<{
-    idx: number;
-    deviceNodeId: string;
-    command: string;
-    ok: boolean;
-    status?: string;
-    error?: string;
-  }>;
-}
-
-/**
- * WARP-640 — complete an in-chat `run_scene` confirmation. The chat chip mints
- * nothing itself: the orchestrator already replied `202 confirmation_required`
- * with a single-use `confirmationToken`, which the "Approve & run" button
- * echoes straight back here. The route consumes the token (replay-proof) and
- * runs the scene server-side, so the dashboard never has to forge the
- * `?confirm=true` gate the way an operator-initiated run would. A non-2xx
- * (expired/replayed token → 403, pressure → 429, run failure → 5xx) throws so
- * the chip can flip to its failed state and let the user re-ask.
- */
-export async function runSceneConfirmed(
-  sceneId: string,
-  confirmationToken: string,
-): Promise<SceneRunOutcome> {
-  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ confirmationToken }),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    const err = new Error(
-      data.error || data.message || `Failed to run scene (${res.status})`,
-    ) as Error & { code?: string; status?: number };
-    err.code = data.code;
-    err.status = res.status;
-    throw err;
-  }
-  return res.json();
 }
 
 /**

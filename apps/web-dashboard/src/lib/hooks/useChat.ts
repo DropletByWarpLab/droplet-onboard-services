@@ -1,12 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
-import {
-  sendChat,
-  uploadBrainFile,
-  fetchConversation,
-  runSceneConfirmed,
-} from "../api";
+import { sendChat, uploadBrainFile, fetchConversation } from "../api";
 import type {
   ChatAttachment,
   ChatCitation,
@@ -168,17 +163,6 @@ interface ToolResultEvent extends SSEEventBase {
   data?: unknown;
   status?: string;
   message?: string;
-  /**
-   * WARP-640 — one-click re-issue handle forwarded by the orchestrator when a
-   * tool returns `confirmation_required` and supports completing in chat (e.g.
-   * `run_scene`). The chip renders an "Approve & run" button that re-POSTs with
-   * this single-use token.
-   */
-  confirmation?: {
-    kind: string;
-    sceneId?: string;
-    confirmationToken: string;
-  };
 }
 
 interface DoneEvent extends SSEEventBase {
@@ -891,79 +875,6 @@ export function useChat(options: UseChatOptions = {}) {
   );
 
   /**
-   * WARP-640: complete an in-chat `run_scene` confirmation. The chip's
-   * "Approve & run" button calls this with the assistant message id + the
-   * tool-call id; we read the single-use `confirmationToken` the tool_result
-   * stamped onto that call and echo it back to `POST /api/scenes/:id/run`.
-   *
-   * The chip walks idle → running → ran/failed. On success the approval block
-   * dismisses and the chip flips green (all actions ran) or red (partial). On
-   * failure the block stays but flips to a failed note: the token is single-use
-   * and already spent server-side, so there's no dead "retry same token"
-   * affordance — the copy tells the user to ask again, which mints a fresh one.
-   *
-   * Guards against double-submit (ignores a call already running/ran) and
-   * against a malformed/absent confirmation handle.
-   */
-  const approveScene = useCallback(
-    async (messageId: string, toolCallId: string) => {
-      const snapshot = messagesRef.current;
-      const msg = snapshot.find((m) => m.id === messageId);
-      const call = msg?.toolCalls?.find((c) => c.id === toolCallId);
-      const confirmation = call?.confirmation;
-      if (
-        !call ||
-        !confirmation ||
-        confirmation.kind !== "scene_run" ||
-        !confirmation.sceneId
-      ) {
-        return;
-      }
-      if (call.confirmState === "running" || call.confirmState === "ran") return;
-
-      const patchCall = (patch: Partial<ChatToolCall>) =>
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id !== messageId
-              ? m
-              : {
-                  ...m,
-                  toolCalls: m.toolCalls?.map((c) =>
-                    c.id === toolCallId ? { ...c, ...patch } : c,
-                  ),
-                },
-          ),
-        );
-
-      patchCall({ confirmState: "running" });
-      try {
-        const outcome = await runSceneConfirmed(
-          confirmation.sceneId,
-          confirmation.confirmationToken,
-        );
-        const allSucceeded = outcome.successCount === outcome.actionCount;
-        patchCall({
-          confirmState: "ran",
-          // Clearing confirmation_required dismisses the amber approval block;
-          // `ok` flips the chip green (all ran) / red (partial).
-          status: allSucceeded ? "ok" : "error",
-          ok: allSucceeded,
-          message: allSucceeded
-            ? `Ran all ${outcome.actionCount} action(s).`
-            : `Ran ${outcome.successCount} of ${outcome.actionCount} action(s) — ${outcome.actionCount - outcome.successCount} failed.`,
-        });
-      } catch (e) {
-        patchCall({
-          confirmState: "failed",
-          message:
-            e instanceof Error ? e.message : "Couldn't run the scene.",
-        });
-      }
-    },
-    [],
-  );
-
-  /**
    * WARP-331: increments every time the messages array is replaced
    * wholesale (loadConversation, clearMessages) rather than appended/
    * mutated by a streaming chunk. The chat page watches this to force a
@@ -1155,7 +1066,6 @@ export function useChat(options: UseChatOptions = {}) {
     stop,
     retryMessage,
     regenerate,
-    approveScene,
     clearMessages,
     attachments,
     attach,
@@ -1221,9 +1131,6 @@ function applyEvent(
           data: evt.data,
           status: evt.status,
           message: evt.message,
-          // WARP-640: carry the re-issue token onto the chip so the
-          // "Approve & run" button can complete the action in-chat.
-          ...(evt.confirmation ? { confirmation: evt.confirmation } : {}),
         };
         const updated = [...prev];
         // WARP-295: when the matching tool is a retrieval tool, fold

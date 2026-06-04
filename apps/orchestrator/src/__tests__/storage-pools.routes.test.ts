@@ -183,53 +183,6 @@ describe("destructive pool routes — no execution without a valid confirm token
     expect(calledBridgeCommand).toBe(false);
   });
 
-  // WARP-662 — drive_adopt goes through the SAME gated flow as the pool ops.
-  it("drive adopt returns 202 + a confirm token, and does NOT touch the bridge yet", async () => {
-    const prisma = createPrismaMock();
-    const bridge = bridgePoolsResponse([]);
-    const app = makeApp(prisma, bridge);
-    const res = await request(app)
-      .post("/api/storage/drives/adopt")
-      .send({ device: "sdb", fstype: "ext4", wipeMethod: "quick", confirmPhrase: "ERASE sdb" });
-    expect(res.status).toBe(202);
-    expect(res.body.confirmationToken).toBeTruthy();
-    expect(res.body.service).toBe("drive_adopt");
-    const hit = (bridge as any).mock.calls.some((c: any[]) =>
-      String(c[0]).endsWith("/pools/command"),
-    );
-    expect(hit).toBe(false);
-  });
-
-  it("drive adopt confirm with a matching token reaches the bridge and executes", async () => {
-    const prisma = createPrismaMock();
-    const bridge = bridgePoolsResponse([]);
-    const app = makeApp(prisma, bridge);
-    const create = await request(app)
-      .post("/api/storage/drives/adopt")
-      .send({ device: "sdb", wipeMethod: "secure", confirmPhrase: "ERASE sdb" });
-    const token = create.body.confirmationToken;
-    const confirm = await request(app)
-      .post("/api/storage/command/confirm")
-      .send({ confirmationToken: token, service: "drive_adopt", resourceId: "sdb" });
-    expect(confirm.status).toBe(200);
-    const hit = (bridge as any).mock.calls.some((c: any[]) =>
-      String(c[0]).endsWith("/pools/command"),
-    );
-    expect(hit).toBe(true);
-  });
-
-  it("drive adopt rejects a partition / md / injection device (whole-disk only)", async () => {
-    const prisma = createPrismaMock();
-    const bridge = bridgePoolsResponse([]);
-    const app = makeApp(prisma, bridge);
-    for (const bad of ["sdb1", "md0", "/dev/sdb", "sdb; rm -rf /"]) {
-      const res = await request(app)
-        .post("/api/storage/drives/adopt")
-        .send({ device: bad, confirmPhrase: `ERASE ${bad}` });
-      expect(res.status).toBe(400);
-    }
-  });
-
   it("confirm with no/invalid token is refused", async () => {
     const prisma = createPrismaMock();
     const bridge = bridgePoolsResponse([]);

@@ -15,7 +15,6 @@ import {
   RotateCcw,
   StopCircle,
   Ghost,
-  Play,
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CitationCard } from "@/components/citations/CitationCard";
@@ -41,13 +40,6 @@ interface ChatMessageProps {
   onCopy?: (text: string) => void | Promise<void>;
   onQuote?: (text: string) => void;
   onRegenerate?: (messageId: string) => void;
-  /**
-   * WARP-640: complete an in-chat scene-run confirmation. Wired by the page
-   * to `useChat.approveScene`. When present and the pending confirmation is a
-   * `scene_run`, the approval block renders an "Approve & run" button that
-   * re-issues the action with the single-use token the chip is carrying.
-   */
-  onApproveScene?: (messageId: string, toolCallId: string) => void;
 }
 
 export const ChatMessage = memo(function ChatMessage({
@@ -58,7 +50,6 @@ export const ChatMessage = memo(function ChatMessage({
   onCopy,
   onQuote,
   onRegenerate,
-  onApproveScene,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
   const toolCalls = message.toolCalls;
@@ -144,50 +135,8 @@ export const ChatMessage = memo(function ChatMessage({
                 role="alert"
                 data-confirm-message-for={confirmCall.id}
               >
-                <p>
-                  {confirmCall.message ??
-                    "This action needs your approval in the Droplet dashboard."}
-                </p>
-                {/* WARP-640: scene runs can be approved right here — the chip
-                    carries a single-use token, so "Approve & run" completes the
-                    action without leaving chat. Other tools (no `confirmation`
-                    handle) still resolve on their dedicated dashboard surface. */}
-                {confirmCall.confirmation?.kind === "scene_run" && onApproveScene ? (
-                  confirmCall.confirmState === "failed" ? (
-                    <p
-                      className="mt-1.5 type-caption-2 text-system-red"
-                      data-testid="scene-approve-failed"
-                    >
-                      That didn’t go through — ask again to retry.
-                    </p>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={confirmCall.confirmState === "running"}
-                      onClick={() => onApproveScene(message.id, confirmCall.id)}
-                      data-testid="scene-approve-run"
-                      className="mt-1.5 inline-flex items-center gap-1 px-3 py-2 rounded-md
-                        type-caption-1 font-medium
-                        bg-system-orange/15 hover:bg-system-orange/25 text-system-orange
-                        disabled:opacity-60 disabled:cursor-not-allowed
-                        focus:outline-none focus:ring-2 focus:ring-system-orange/40
-                        transition-colors"
-                      aria-label="Approve and run this scene"
-                    >
-                      {confirmCall.confirmState === "running" ? (
-                        <>
-                          <Loader2 size={12} className="animate-spin" aria-hidden="true" />
-                          Running…
-                        </>
-                      ) : (
-                        <>
-                          <Play size={12} aria-hidden="true" />
-                          Approve &amp; run
-                        </>
-                      )}
-                    </button>
-                  )
-                ) : null}
+                {confirmCall.message ??
+                  "This action needs your approval in the Droplet dashboard."}
               </div>
             )}
             {message.content && (

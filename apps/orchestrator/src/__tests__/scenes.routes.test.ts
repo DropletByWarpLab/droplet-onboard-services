@@ -194,9 +194,7 @@ beforeEach(() => {
 describe("WARP-474 — Scenes CRUD", () => {
   it("creates a scene with ordered actions; emits ActivityRow", async () => {
     const prisma = createPrismaMock();
-    // ADR-005: scene authoring is owner/admin (family reads only), so the
-    // create route requires an authorized role — use admin here.
-    const app = buildApp(prisma, noopMatter, mkUser("admin"));
+    const app = buildApp(prisma, noopMatter, mkUser("family"));
     const res = await request(app)
       .post("/api/scenes")
       .send({
@@ -294,8 +292,7 @@ describe("WARP-474 — Scenes CRUD", () => {
 
   it("rejects scene creation with empty actions[] (zod schema requires min 1)", async () => {
     const prisma = createPrismaMock();
-    // Authorized role so the request reaches zod validation (owner/admin author).
-    const app = buildApp(prisma, noopMatter, mkUser("admin"));
+    const app = buildApp(prisma, noopMatter, mkUser("family"));
     const res = await request(app)
       .post("/api/scenes")
       .send({ name: "Empty", actions: [] });
@@ -331,10 +328,7 @@ describe("WARP-474 — POST /api/scenes/:id/run", () => {
       ]),
     ]);
     const app = buildApp(prisma, matter, mkUser("family"));
-    // ?confirm=true is the dashboard scenes-page path (kept working).
-    const res = await request(app)
-      .post("/api/scenes/scene-run/run?confirm=true")
-      .send({});
+    const res = await request(app).post("/api/scenes/scene-run/run").send({});
     expect(res.status).toBe(200);
     expect(res.body.successCount).toBe(2);
     expect(res.body.actionCount).toBe(2);
@@ -364,9 +358,7 @@ describe("WARP-474 — POST /api/scenes/:id/run", () => {
       ]),
     ]);
     const app = buildApp(prisma, matter, mkUser("family"));
-    const res = await request(app)
-      .post("/api/scenes/scene-run/run?confirm=true")
-      .send({});
+    const res = await request(app).post("/api/scenes/scene-run/run").send({});
     expect(res.status).toBe(200);
     expect(res.body.successCount).toBe(2);
     expect(res.body.actionCount).toBe(3);
@@ -376,69 +368,6 @@ describe("WARP-474 — POST /api/scenes/:id/run", () => {
     expect(res.body.results[2].ok).toBe(true);
     // Activity emitted with severity=warn because successCount < actionCount.
     expect(recordActivityMock.mock.calls[0][0].severity).toBe("warn");
-  });
-
-  it("unconfirmed run mints a 202 confirmation_required token and does NOT execute (TOOLS-01/WARP-640)", async () => {
-    const matter: MatterDispatcher = {
-      sendCommand: vi.fn(async () => ({ status: "ok" })),
-    };
-    const prisma = createPrismaMock([
-      sceneWithActions([
-        { id: "a1", sceneId: "scene-run", idx: 0, deviceNodeId: "1", command: "turn_on", args: null },
-      ]),
-    ]);
-    const app = buildApp(prisma, matter, mkUser("family"));
-    const res = await request(app).post("/api/scenes/scene-run/run").send({});
-    expect(res.status).toBe(202);
-    expect(res.body.status).toBe("confirmation_required");
-    expect(typeof res.body.confirmationToken).toBe("string");
-    expect(res.body.confirmationToken.length).toBeGreaterThan(20);
-    expect(res.body.sceneId).toBe("scene-run");
-    expect(matter.sendCommand).not.toHaveBeenCalled(); // nothing fired
-  });
-
-  it("a valid confirmationToken runs the scene, and is single-use (chat Approve & run)", async () => {
-    const matter: MatterDispatcher = {
-      sendCommand: vi.fn(async () => ({ status: "ok" })),
-    };
-    const prisma = createPrismaMock([
-      sceneWithActions([
-        { id: "a1", sceneId: "scene-run", idx: 0, deviceNodeId: "1", command: "turn_on", args: null },
-      ]),
-    ]);
-    const app = buildApp(prisma, matter, mkUser("family"));
-    const minted = await request(app).post("/api/scenes/scene-run/run").send({});
-    const token = minted.body.confirmationToken as string;
-    const run = await request(app)
-      .post("/api/scenes/scene-run/run")
-      .send({ confirmationToken: token });
-    expect(run.status).toBe(200);
-    expect(run.body.successCount).toBe(1);
-    expect(matter.sendCommand).toHaveBeenCalledTimes(1);
-    // Replaying the same token is rejected (single-use, replay-proof).
-    const replay = await request(app)
-      .post("/api/scenes/scene-run/run")
-      .send({ confirmationToken: token });
-    expect(replay.status).toBe(403);
-    expect(matter.sendCommand).toHaveBeenCalledTimes(1); // no second run
-  });
-
-  it("an invalid confirmationToken is rejected with 403 and does NOT execute", async () => {
-    const matter: MatterDispatcher = {
-      sendCommand: vi.fn(async () => ({ status: "ok" })),
-    };
-    const prisma = createPrismaMock([
-      sceneWithActions([
-        { id: "a1", sceneId: "scene-run", idx: 0, deviceNodeId: "1", command: "turn_on", args: null },
-      ]),
-    ]);
-    const app = buildApp(prisma, matter, mkUser("family"));
-    const res = await request(app)
-      .post("/api/scenes/scene-run/run")
-      .send({ confirmationToken: "not-a-real-token" });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe("confirmation_invalid");
-    expect(matter.sendCommand).not.toHaveBeenCalled();
   });
 
   it("returns 404 for an unknown scene", async () => {
@@ -455,9 +384,7 @@ describe("WARP-474 — POST /api/scenes/:id/run", () => {
       ]),
     ]);
     const app = buildApp(prisma, noopMatter, mkUser("family"));
-    const res = await request(app)
-      .post("/api/scenes/scene-run/run?confirm=true")
-      .send({});
+    const res = await request(app).post("/api/scenes/scene-run/run").send({});
     expect(res.status).toBe(200);
     expect(recordActivityMock.mock.calls[0][0].severity).toBe("ok");
     expect(recordActivityMock.mock.calls[0][0].refs.sceneName).toBe("Test");
