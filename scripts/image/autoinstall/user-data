@@ -1,0 +1,125 @@
+#cloud-config
+# =============================================================================
+# Droplet single-box appliance — Ubuntu 24.04 autoinstall seed (WARP-663)
+# =============================================================================
+#
+# subiquity `nocloud` autoinstall. Embedded on the repacked live-server ISO at
+# /server/user-data (GRUB passes `autoinstall ds=nocloud;s=/cdrom/server/`).
+# On first boot Ubuntu installs unattended, then late-commands clone this repo
+# and run scripts/setup.sh --single-box --systemd — replicating the documented
+# docs/SINGLE_BOX.md quick-start with zero human keystrokes.
+#
+# SECURITY (ADR-020 §D6): NO per-device secret is baked. The `droplet` identity
+# below uses a LOCKED initial password (the `!` hash = no valid password) that
+# MUST be set on first console/SSH access. Every real secret (JWT_SECRET,
+# DEVICE_SECRET, DB/MQTT/Nextcloud passwords, TLS) is generated at first boot by
+# scripts/lib/secrets.sh, exactly as on a `setup.sh` install today — so every
+# built ISO is byte-identical and safe to distribute.
+autoinstall:
+  version: 1
+
+  # Keyboard / locale — generic, no host-specific assumptions.
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  # Network: DHCP on any wired link. The appliance needs network on first boot
+  # to clone the repo + pull container images (ISO is Phase 1; offline golden
+  # raw .img is Phase 2). No host-specific addressing (ADR-011).
+  network:
+    version: 2
+    ethernets:
+      any-eth:
+        match:
+          name: "en*"
+        dhcp4: true
+
+  # Identity. Hostname names the deployment shape, not a lifecycle stage.
+  # The password hash is the LOCKED sentinel `!` (no valid password). The
+  # operator sets a real password on first login; SSH key auth is the intended
+  # path (see ssh: below). NOTE: this is NOT a secret — it grants no access.
+  identity:
+    hostname: droplet
+    username: droplet
+    # `!` = locked account password (crypt sentinel). NOT a real credential.
+    password: "!"
+
+  # SSH: install the server, do NOT bake any authorized key (no secret). The
+  # operator adds their key on first local-console access, or via the setup
+  # wizard. Password auth stays off by default (locked password anyway).
+  ssh:
+    install-server: true
+    allow-pw: false
+
+  # Storage: use the whole target disk with the default LVM layout. The flasher
+  # (`droplet-image flash`) chose the device; subiquity lays it out.
+  storage:
+    layout:
+      name: lvm
+
+  # Base packages the first-boot clone + setup.sh need before Docker is
+  # installed by setup.sh itself. Kept minimal — setup.sh owns the rest.
+  packages:
+    - git
+    - curl
+    - ca-certificates
+    - openssl
+
+  # Keep the installed system current at install time.
+  updates: security
+
+  # ---------------------------------------------------------------------------
+  # First-boot provisioning. Runs in the installer environment with the target
+  # mounted at /target; we clone into the target's /home/droplet and run setup
+  # via systemd on first real boot (NOT here — setup.sh needs the booted system,
+  # Docker, and the real network stack, not the installer's).
+  # ---------------------------------------------------------------------------
+  late-commands:
+    # Clone the platform into the operator's home on the TARGET filesystem.
+    # Retry up to 3x (autoinstall networking is racy just after the NIC comes
+    # up), then FAIL THE INSTALL loudly if the clone never lands. The old
+    # `|| true` swallowed a network failure: the install exited 0, the next
+    # chown no-op'd on a missing dir, and droplet-firstboot.service then crash-
+    # looped forever on a non-existent WorkingDirectory — a booted box with no
+    # Droplet stack and no error shown at install time. (review #501)
+    - |
+      curtin in-target --target=/target -- bash -c '
+        for attempt in 1 2 3; do
+          rm -rf /home/droplet/edge-platform
+          git clone --depth 1 https://github.com/DropletByWarpLab/droplet-onboard-services.git /home/droplet/edge-platform && break
+          echo "droplet: clone attempt $attempt failed; retrying in 5s" >&2
+          sleep 5
+        done
+        test -d /home/droplet/edge-platform/.git || { echo "FATAL: droplet platform clone failed during autoinstall; aborting so this surfaces now, not as a crash-looping first boot." >&2; exit 1; }
+      '
+    - curtin in-target --target=/target -- chown -R droplet:droplet /home/droplet/edge-platform
+    # Install a oneshot systemd unit that runs setup.sh --single-box --systemd
+    # on the FIRST real boot, then disables itself. setup.sh is the single
+    # source of provisioning truth (ADR-020 §D1) — no second copy of the
+    # install logic here.
+    - |
+      curtin in-target --target=/target -- bash -c 'cat > /etc/systemd/system/droplet-firstboot.service <<UNIT
+      [Unit]
+      Description=Droplet single-box first-boot provisioning (runs setup.sh once)
+      Wants=network-online.target
+      After=network-online.target
+      ConditionPathExists=!/var/lib/droplet/.firstboot-done
+
+      [Service]
+      Type=oneshot
+      User=droplet
+      WorkingDirectory=/home/droplet/edge-platform
+      ExecStart=/bin/bash -lc "./scripts/setup.sh --single-box --systemd"
+      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done"
+      RemainAfterExit=yes
+      TimeoutStartSec=0
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT'
+    - curtin in-target --target=/target -- systemctl enable droplet-firstboot.service
+    # Passwordless sudo for the firstboot unit's setup.sh (setup.sh installs
+    # Docker + systemd units). Scoped to the droplet user; the locked password
+    # still gates interactive login.
+    - |
+      curtin in-target --target=/target -- bash -c 'echo "droplet ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/droplet-firstboot && chmod 440 /etc/sudoers.d/droplet-firstboot'

@@ -162,12 +162,12 @@ Status legend:
 - **Next action:** Add output schema validation for tool-call responses; audit for remaining prompt-injection vectors.
 
 ### M2.8 SD card image
-- **GTM scope:** Downloadable `.img` file with Ubuntu + Docker + Droplet pre-installed.
-- **This repo's slice:** `openwrt/build.sh` builds an OpenWrt image for the router path. An Ubuntu/Pi-OS image-build flow for the full stack does not exist yet. `scripts/build-image.sh` is related but scope needs confirmation.
-- **Files involved:** `openwrt/build.sh`, `scripts/build-image.sh`, `scripts/setup.sh`
-- **Status:** `[~]` Partial — OpenWrt image builder exists; full appliance image (Ubuntu + preloaded containers) does not.
-- **Blockers:** Architecture call: OpenWrt-only image vs. dual-image (OpenWrt for networking core + Ubuntu for app stack).
-- **Next action:** Inspect `scripts/build-image.sh`; decide image topology; document in `openwrt/README.md`.
+- **GTM scope:** Downloadable image with Ubuntu + Docker + Droplet pre-installed.
+- **This repo's slice:** **Phase 1 landed** (WARP-663 / ADR-020). The appliance and the OpenWrt router are orthogonal images for orthogonal layers, each with its own pinned builder (no combined "dual image"). The appliance ships as an Ubuntu 24.04 autoinstall ISO built by `scripts/image/build-iso.sh` and driven by the `scripts/droplet-image` CLI (build|manifest|sign|verify|list|publish|flash); first boot runs `setup.sh --single-box --systemd`, so provisioning stays single-sourced. Phase 2 (preinstalled golden raw `.img`, offline flash-and-boot) is the follow-on.
+- **Files involved:** `scripts/droplet-image`, `scripts/lib/image.sh`, `scripts/image/build-iso.sh`, `scripts/image/autoinstall/{user-data,meta-data}`, `scripts/image/grub-autoinstall.cfg`, `scripts/image/{manifest.schema.json,manifest.json,gen-manifest.py}`, `scripts/image/keys/`, `scripts/build-image.sh`, `openwrt/build.sh` (router, separate), `scripts/setup.sh`, `docs/IMAGE_PIPELINE.md`, `docs/ADR-020-appliance-image-build-and-flash-pipeline.md`.
+- **Status:** `[~]` Partial — Phase 1 (autoinstall ISO + signed-manifest + `droplet-image` CLI) shipped; Phase 2 (golden raw `.img`) + the first live publish remain.
+- **Blockers:** Resolved by ADR-020 — the image-topology call is made (orthogonal appliance ISO + router image; ISO-first).
+- **Next action:** Phase 2 golden raw `.img` (`--format raw`); validate the manual flash+boot gate on a Linux host; then **M3.4** consumes the signed manifest/verify substrate this built.
 
 ---
 
@@ -185,11 +185,11 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 
 ### M3.4 OTA update system
 - **GTM scope:** Secure update mechanism for the entire stack (containers, configs, models).
-- **This repo's slice:** `releases/` repo (external) holds manifests. This repo needs an update agent/endpoint that pulls a signed manifest, verifies it, and applies container + OpenWrt image updates atomically.
-- **Files involved:** `openwrt/` (A/B partition hooks), `apps/orchestrator/src/routes/` (new `updates.ts`), `scripts/` (new update runner)
-- **Status:** `[ ]` Not started
-- **Blockers:** Signing key infrastructure; A/B partition scheme choice.
-- **Next action:** ADR on update protocol; prototype a read-only `/api/updates/check` endpoint against a static manifest.
+- **This repo's slice:** The external `DropletByWarpLab/releases` repo holds the signed manifests + release assets. ADR-020 / WARP-663 already built the **substrate this consumes**: the `manifest.json` schema, `droplet-image sign`/`verify` (detached ECDSA-P256 over the manifest + per-asset sha256, fail-closed), and the releases-repo layout. M3.4 adds the update **agent/endpoint** that pulls a signed manifest, `verify`s it, and applies container + OpenWrt image updates atomically (A/B partitions are M3.4's to add).
+- **Files involved:** `scripts/image/` (manifest + verify substrate — done), `openwrt/` (A/B partition hooks), `apps/orchestrator/src/routes/` (new `updates.ts`), `scripts/` (new update runner)
+- **Status:** `[ ]` Not started (the signed-manifest/verify substrate from ADR-020 is in place).
+- **Blockers:** Signing key infrastructure (the ECDSA-P256 key custody + rotation model is defined by ADR-020 / `scripts/image/keys/README.md`; the real keypair is minted at first publish); A/B partition scheme choice.
+- **Next action:** ADR on update protocol; prototype a read-only `/api/updates/check` endpoint against the signed manifest in `DropletByWarpLab/releases`.
 
 ### M3.6 Community marketplace
 - **GTM scope:** Framework for community-contributed tool extensions and integrations.

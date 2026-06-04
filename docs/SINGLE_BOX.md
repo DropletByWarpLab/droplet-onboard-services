@@ -60,6 +60,32 @@ Detection sources (in order — see `scripts/lib/single-box.sh::detect_single_bo
 2. **2+ DRM render nodes + dGPU silicon present** → single-box.
 3. **Anything else** → not single-box; setup.sh continues in standard mode.
 
+### Install from the autoinstall ISO (zero keystrokes)
+
+The clone-then-`setup.sh` flow above presumes you've already installed Ubuntu
+and cloned the repo. The **appliance autoinstall ISO** (WARP-663 / ADR-020) does
+all of that for you: flash an SSD, boot, and the box installs Ubuntu 24.04
+unattended, clones this repo to `/home/droplet/edge-platform`, and runs
+`setup.sh --single-box --systemd` on first boot — replicating this quick-start
+with zero human keystrokes.
+
+```bash
+# On a Linux build host with Docker (the ISO repack uses dockerized xorriso):
+./scripts/droplet-image build --version <X.Y.Z>      # -> output/droplet-single-box-<X.Y.Z>.iso
+
+# Flash it (the confirm phrase MUST name the target device):
+./scripts/droplet-image flash \
+    --image output/droplet-single-box-<X.Y.Z>.iso \
+    --device /dev/sdX \
+    --confirm "ERASE /dev/sdX"
+```
+
+No per-device secret is baked into the ISO — the initial `droplet` login
+password is locked and every real secret is generated at first boot by
+`secrets.sh`, exactly as on a manual install. Full pipeline (manifest, signing,
+key custody, the manual flash+boot acceptance gate):
+[`IMAGE_PIPELINE.md`](IMAGE_PIPELINE.md).
+
 ## What the `single-box` profile activates
 
 From `docker/docker-compose.yml`:

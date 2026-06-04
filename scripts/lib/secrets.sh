@@ -396,6 +396,7 @@ migrate_env() {
   if grep -qE '^JETSON_OLLAMA_URL=' "$env_file" 2>/dev/null \
      && ! grep -qE '^OLLAMA_URL=' "$env_file" 2>/dev/null; then
     if [ "$backed_up" = "false" ]; then
+      # shellcheck disable=SC2155  # Same rationale as lines 29, 352: `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
       local backup="$env_file.bak.$(date +%s)"
       cp "$env_file" "$backup"
       log_info "Backed up existing .env to $backup before migration"

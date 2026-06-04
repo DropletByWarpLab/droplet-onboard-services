@@ -124,6 +124,7 @@ detect_single_box_mode() {
     return 1
   fi
 
+  # shellcheck disable=SC2034  # global: set across this fn, read by the caller (scripts/setup.sh:124,127) after `source`. shellcheck checks this lib standalone and can't see the cross-file read; the directive sits on the last assignment, where SC2034 anchors.
   SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, inference_host=${jetson_reachable}) — declining to auto-enable"
   return 1
 }
