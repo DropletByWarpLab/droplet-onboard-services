@@ -267,8 +267,36 @@ model UserInvite {
   revokedAt    DateTime?
   createdAt    DateTime  @default(now())
 
+  // BUG-11 — invite-email delivery state. Issuing an invite WRITES the row;
+  // delivering the accept-link email is a separate, fallible step over the
+  // operator's SMTP relay (EmailChannelSetting). Per the no-guessing rule
+  // (CLAUDE.md): delivery is an explicit enum column, NOT derived from a
+  // nullable timestamp — `sendStatus = 'failed'` is a first-class, queryable,
+  // retryable state. A send that fails NEVER rolls back the invite (the row is
+  // still valid and the link still works if delivered out-of-band); the
+  // dashboard surfaces `failed` with a Retry affordance.
+  sendStatus   InviteSendStatus @default(pending)
+  sentAt       DateTime?
+  sendError    String? // last SMTP error (operator-facing; never the token)
+  sendAttempts Int              @default(0)
+
   @@index([token])
   @@index([expiresAt])
+  @@index([sendStatus])
+}
+
+/// BUG-11 — invite-email delivery lifecycle. Mirrors the EmailDraftStatus
+/// pattern (draft → queued → sent → failed) but for the outbound INVITE
+/// channel. Explicit enum so "this invite's email bounced" is a queryable
+/// state the dashboard can filter + retry, never inferred from a null
+/// `sentAt`. Values:
+///   - pending — row created, email not yet attempted (or SMTP unconfigured).
+///   - sent    — SMTP relay accepted the message for delivery.
+///   - failed  — the relay rejected it / transport errored; retryable.
+enum InviteSendStatus {
+  pending
+  sent
+  failed
 }
 
 /// WARP-171: canonical role enum for the orchestrator. Mirrors the
@@ -1784,6 +1812,49 @@ enum EmailDraftStatus {
   queued
   sent
   failed
+}
+
+/// BUG-11 — operator-supplied OUTBOUND SMTP relay config (the appliance is a
+/// self-hosted box; the owner brings their own mail provider's SMTP — Gmail
+/// app-password, Fastmail, a corporate relay, etc. — we never run an MTA).
+/// Single-row table (id is pinned to a constant by the service) so the
+/// dashboard edits one channel; `@@unique` is unnecessary for a singleton but
+/// the service enforces the constant id on every upsert.
+///
+/// SECRET HANDLING (CLAUDE.md rule 19): `passwordEnc` is the SMTP password
+/// encrypted at rest with aes-256-gcm via encryption.service (the same
+/// DEVICE_SECRET_KEY-backed primitive that protects per-device Nextcloud app
+/// passwords). The plaintext password is NEVER stored, NEVER returned by the
+/// settings API (GET redacts to a `hasPassword` boolean), and NEVER logged.
+/// Nothing secret lives in a tracked file — only the operator-entered,
+/// at-rest-encrypted blob in this DB row.
+model EmailChannelSetting {
+  id           String                @id
+  enabled      Boolean               @default(false)
+  host         String                @default("")
+  port         Int                   @default(587)
+  username     String                @default("")
+  // aes-256-gcm blob (encryption.service). Empty string = no password set.
+  passwordEnc  String                @default("")
+  fromAddress  String                @default("")
+  fromName     String                @default("Droplet")
+  security     EmailChannelSecurity  @default(starttls)
+  // Last verify/send outcome for the dashboard banner (operator-facing only).
+  lastError    String?
+  lastTestedAt DateTime?
+  updatedAt    DateTime              @updatedAt
+  updatedBy    String?
+}
+
+/// BUG-11 — SMTP transport security mode. `starttls` (default, port 587) opens
+/// plaintext then upgrades; `tls` (port 465) is implicit TLS from connect;
+/// `none` is plaintext (a LAN relay only — discouraged, but some self-hosted
+/// Postfix relays expect it). Explicit enum so the transport builder can't
+/// drift from a free-form string.
+enum EmailChannelSecurity {
+  starttls
+  tls
+  none
 }
 
 /// WARP-462 — Phase C1. Productized workflow spec ("call carrier-delay
