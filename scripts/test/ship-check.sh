@@ -1364,17 +1364,34 @@ run_check_image_pipeline() {
     failures=$((failures + 1))
   fi
 
-  # ----- sample manifest.json must validate against the schema ------------
+  # ----- tracked manifest.json must validate against the schema -----------
   # gen-manifest.py exposes a `validate` subcommand (pure-stdlib draft-07
   # subset) that exits 0 on a valid manifest, non-zero otherwise. Reusing it
   # keeps one validation implementation, not two.
-  if [ "$failures" -eq 0 ] || [ -f "$gen_manifest" ]; then
-    local vout
-    if ! vout="$(python3 "$gen_manifest" validate --schema "$schema" "$sample_manifest" 2>&1)"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — sample manifest.json does not validate against the schema\n" "$label" >&2
-      printf '%s\n' "$vout" | sed 's/^/    | /' >&2
-      failures=$((failures + 1))
-    fi
+  local vout
+  if ! vout="$(python3 "$gen_manifest" validate --schema "$schema" "$sample_manifest" 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — tracked manifest.json does not validate against the schema\n" "$label" >&2
+    printf '%s\n' "$vout" | sed 's/^/    | /' >&2
+    failures=$((failures + 1))
+  fi
+
+  # ----- the schema must ACCEPT a fully-populated entry -------------------
+  # The tracked seed is intentionally an empty catalogue (no image is published
+  # in Phase 1 — first publish is the deferred, confirmation-gated step). So we
+  # separately prove the schema + validator accept a well-formed populated entry
+  # by round-tripping one through `gen-manifest.py build` (which validates before
+  # writing) to stdout. Guards against a schema that's vacuously satisfiable.
+  local bout
+  if ! bout="$(python3 "$gen_manifest" build \
+        --schema "$schema" --shape single-box --version 0.0.0 --format iso \
+        --file droplet-single-box-0.0.0.iso \
+        --url 'https://example.com/droplet-single-box-0.0.0.iso' \
+        --size 1 --sha256 "$(printf '' | python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')" \
+        --git-sha 0000000000000000000000000000000000000000 \
+        --build-date 2026-01-01T00:00:00Z --min-disk-gib 32 --out - 2>&1)"; then
+    printf "  ${_RED}FAIL${_RESET}  %s — schema rejects a well-formed populated manifest entry\n" "$label" >&2
+    printf '%s\n' "$bout" | sed 's/^/    | /' >&2
+    failures=$((failures + 1))
   fi
 
   # ----- shellcheck the new pipeline scripts ------------------------------

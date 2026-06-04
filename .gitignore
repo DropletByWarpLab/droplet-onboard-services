@@ -50,3 +50,10 @@ docker/secrets/
 # device-bridge runtime env (live credentials). Only .example is tracked.
 services/oled-display/device-bridge.env
 /etc/droplet/device-bridge.env
+
+# WARP-663 / ADR-020 — the appliance image-release PRIVATE signing key is
+# NEVER committed (referenced only via $DROPLET_RELEASE_SIGNING_KEY). Only the
+# public verify key (scripts/image/keys/droplet-release.pub) is tracked.
+scripts/image/keys/*.key
+# Built appliance images (large; published as GitHub release assets, not tracked).
+output/
