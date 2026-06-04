@@ -46,6 +46,28 @@ The `droplet-ai` user created by this build matches the credentials expected by:
 - `services/routing/droplet_openwrt_sdk.py` — the Python SDK
 - `apps/orchestrator/src/services/openwrt.client.ts` — the orchestrator HTTP client
 
+## Appliance image topology
+
+This `build.sh` builds the **router** image (Raspberry Pi 5 OpenWrt SD card).
+That is a **different layer** from the **appliance host** image (the x86
+single-box: Ubuntu + Docker + the Droplet stack). Per
+[ADR-018](../docs/ADR-018-deployment-topology-and-network-unification.md) the
+router and the host are orthogonal deployment elements, and per
+[ADR-020](../docs/ADR-020-appliance-image-build-and-flash-pipeline.md) they are
+**orthogonal images, each with its own pinned builder** — there is no combined
+"dual image":
+
+| Image | Built by | Artifact |
+|---|---|---|
+| **Router** (this dir) | `openwrt/build.sh` | `openwrt/output/*-droplet-*.img.gz` |
+| **Appliance host** | `scripts/image/build-iso.sh` (CLI: `scripts/droplet-image`) | `output/droplet-single-box-<version>.iso` |
+
+The appliance ISO autoinstalls Ubuntu and runs `setup.sh --single-box --systemd`
+on first boot; on the single-box shape it brings the router up *in a container*,
+so the two images are still independently versioned. See
+[`docs/IMAGE_PIPELINE.md`](../docs/IMAGE_PIPELINE.md) for the appliance pipeline,
+CLI contract, signed-manifest format, key custody, and the manual flash+boot gate.
+
 ## Quick Start
 
 ### 1. Build the Image (on Linux x86_64)
