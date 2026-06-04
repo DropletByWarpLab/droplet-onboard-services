@@ -154,14 +154,22 @@ prepare_and_build() {
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
+    # pm / single-box profile: the Plane PM stack runs upstream pre-built
+    # images (makeplane/*) which `up -d` pulls, EXCEPT pm-health, which is the
+    # Droplet-side /health sidecar built from services/pm/Dockerfile. It is
+    # profiled `["pm", "single-box"]`, so on the single-box shape `up -d` tries
+    # to start it; `up` does not build on demand, so without a build here the
+    # start fails with "No such image: docker-pm-health". Build it explicitly.
+    pm-health
   )
-  # Both profiles active so compose sees every profile-gated service.
-  # Without --profile linux, `build voice-io` errors out because
-  # the service is invisible to compose's view of the project. The default-
+  # All profiles that carry a buildable service must be active so compose sees
+  # every one of them. Without --profile linux, `build voice-io` errors out
+  # because the service is invisible to compose's view of the project; without
+  # --profile single-box (or pm) the same is true for pm-health. Default-
   # profile services are visible regardless of --profile flags.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --profile single-box --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"

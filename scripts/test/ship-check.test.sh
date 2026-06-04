@@ -873,6 +873,73 @@ test_lifecycle_naming_catches_new_poc_token() {
 }
 
 # =============================================================================
+# Test: the embedded Plane PM stack is active on the single-box shape
+# =============================================================================
+#
+# Original bug (bug #10 — "project management missing"): the seven Plane PM
+# services (postgres-pm, redis-pm, pm-migrator, pm-api, pm-worker, pm-web,
+# pm-health) were gated behind `profiles: ["pm"]` only. The single-box shape
+# activates COMPOSE_PROFILES=linux,display,single-box (scripts/lib/single-box.sh)
+# and never adds `pm`, so the whole stack was orphaned on single-box — no
+# pm-web container ran and the always-present nginx /pm/ route (which resolves
+# its upstream at request time) returned 502.
+#
+# The fix mirrors the camera-discovery precedent (ADR-018 Decision 4 / PR #485
+# for `switch`): `profiles: ["pm"]` → `profiles: ["pm", "single-box"]` on every
+# PM service, so the stack runs whenever EITHER profile is active.
+#
+# This test asserts the post-fix invariant directly against the real compose
+# tree: `docker compose config --profile single-box --services` must list all
+# seven PM services. It fails (the bug) if any PM service is missing from the
+# single-box profile, and guards against a future regression that strips
+# `single-box` back off the PM profiles.
+test_pm_stack_active_on_single_box() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
+    return 0
+  fi
+
+  local compose="$REPO_ROOT_REAL/docker/docker-compose.yml"
+  if [ ! -f "$compose" ]; then
+    printf "    compose file missing: %s\n" "$compose" >&2
+    return 1
+  fi
+
+  # Prefer .env.example (in-repo, no secrets); fall back to a provisioned .env.
+  local env_file=""
+  if [ -f "$REPO_ROOT_REAL/.env.example" ]; then
+    env_file="$REPO_ROOT_REAL/.env.example"
+  elif [ -f "$REPO_ROOT_REAL/.env" ]; then
+    env_file="$REPO_ROOT_REAL/.env"
+  else
+    printf "    neither .env.example nor .env found at repo root\n" >&2
+    return 1
+  fi
+
+  local services
+  if ! services="$(docker compose -f "$compose" --env-file "$env_file" \
+      --profile single-box config --services 2>/dev/null)"; then
+    printf "    docker compose config --profile single-box failed\n" >&2
+    return 1
+  fi
+
+  local svc missing=()
+  for svc in postgres-pm redis-pm pm-migrator pm-api pm-worker pm-web pm-health; do
+    if ! printf '%s\n' "$services" | grep -qx "$svc"; then
+      missing+=("$svc")
+    fi
+  done
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    printf "    PM services absent from the single-box profile: %s\n" "${missing[*]}" >&2
+    printf "    (add \"single-box\" to each PM service's profiles in docker-compose.yml)\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -911,6 +978,9 @@ _run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)"
 
 _run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
   test_lifecycle_naming_catches_new_poc_token
+
+_run_test "Plane PM stack is active on the single-box shape (bug #10)" \
+  test_pm_stack_active_on_single_box
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

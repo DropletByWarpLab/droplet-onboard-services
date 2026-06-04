@@ -335,8 +335,13 @@ configure_single_box_env() {
 # Single-box deployment knobs (managed by scripts/lib/single-box.sh —
 # re-run setup.sh --regenerate-env to reset; see docs/SINGLE_BOX.md).
 #   COMPOSE_PROFILES     linux (Frigate) + display (OLED sim) + single-box
-#                        (single-box also activates camera-discovery, which
-#                        is otherwise gated to `full`)
+#                        (single-box also activates camera-discovery — gated
+#                        to `full` otherwise — and the embedded Plane PM stack
+#                        at /pm/, which is `["pm","single-box"]`-profiled so
+#                        project management works on the single-box shape;
+#                        bug #10. Its DROPLET_PM_* secrets are generated
+#                        unconditionally by scripts/lib/secrets.sh, so no
+#                        single-box-specific PM env upsert is needed here.)
 #   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
 #   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
