@@ -1403,6 +1403,10 @@ _POOL_OPS = frozenset({
     "pool_set_level",
     "pool_add_spare",
     "pool_remove_disk",
+    # WARP-662: adopt (wipe + reformat + mount) a previously-used disk. Same
+    # auth + single-use-confirm-token + host-script-only posture as the pool
+    # ops; the host script enforces the OS-disk refusal.
+    "drive_adopt",
 })
 
 # Path to the repo-tracked host script, installed by setup.sh via
@@ -1439,6 +1443,12 @@ def run_pool_command(operation, params):
         return False, msg
     # Invalidate the pools cache so the next GET /pools reflects the change.
     pools_snapshot(invalidate=True)
+    # drive_adopt mounts a freshly-formatted disk under /mnt/droplet, so the
+    # drives cache must also be refreshed — otherwise GET /drives returns a
+    # stale snapshot for up to the cache TTL and StorageStep's immediate
+    # post-adopt load() shows the disk as not-yet-mounted. (review #499)
+    if operation == "drive_adopt":
+        drives_snapshot(invalidate=True)
     try:
         return True, json.loads(out or "{}")
     except (ValueError, TypeError):
