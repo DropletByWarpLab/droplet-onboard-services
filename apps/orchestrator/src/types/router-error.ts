@@ -24,6 +24,7 @@ export type RouterErrorCode =
   | "AUTH"
   | "ROLLED_BACK"
   | "DISABLED"
+  | "SCAN_UNSUPPORTED"
   | "UNKNOWN";
 
 export class RouterError extends Error {
@@ -75,6 +76,25 @@ export class RouterError extends Error {
     // is intentionally unavailable. A WRITE that needs it gets 503 (the wizard
     // surfaces "finish this from Settings later" + keeps Skip), not a 500.
     return new RouterError("DISABLED", "Router supervision is disabled", { label, status: 503 });
+  }
+  /**
+   * WARP-816: a Wi-Fi scan can't run because the radio is in an AP/Master role
+   * (the single-box broadcasts its own network on its only radio, so it can't
+   * station-scan). Distinct from a successful scan that finds zero networks —
+   * the routing service signals this with HTTP 409 + code `SCAN_UNSUPPORTED`.
+   *
+   * 409 (not 503): the dependency is reachable and working — this is a stable,
+   * terminal capability fact about the hardware shape, not a reachability
+   * outage. The dashboard branches on the code to render calm "scanning
+   * unavailable while broadcasting" copy + disable the Scan control, never the
+   * raw code. The `message` is surfaced verbatim, so it must read as
+   * user-facing prose.
+   */
+  static scanUnsupported(
+    message = "Scanning isn't available while your Droplet is broadcasting its own Wi-Fi network.",
+    opts?: { label?: string; cause?: unknown },
+  ): RouterError {
+    return new RouterError("SCAN_UNSUPPORTED", message, { ...opts, status: 409 });
   }
 
   /** Shape sent over the wire to the dashboard. */
