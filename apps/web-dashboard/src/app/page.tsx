@@ -23,6 +23,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import useSWR from "swr";
 import {
   Check,
   LayoutGrid,
@@ -34,6 +35,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { useDevice } from "@/lib/hooks/useDevice";
+import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
+import { resolveHealthCopy } from "./health-copy";
 import { BentoBoard } from "@/components/home/BentoBoard";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { WIDGETS, CATALOG } from "@/components/home/widgets";
@@ -42,9 +45,9 @@ import "@/components/home/home-bento.css";
 import "@/components/home/home-widgets.css";
 
 /* The chat capsule carries `focus-within:ring-2 focus-within:ring-accent/40`
-   and the textarea an `aria-label="Ask Droplet"` (WARP-298) — defined in
-   components/home/widgets.tsx (ChatWidget). Referenced here so the source
-   guard test can see the contract on the home page entry point. */
+   and the textarea an `aria-label="Ask Droplet"` (WARP-298) — both defined in
+   components/home/widgets.tsx (ChatWidget), which is also where the WARP-298
+   source-guard test (home.hero-focus.test.tsx) asserts the contract. */
 
 type DensityKey = "balanced" | "dense" | "airy";
 
@@ -97,8 +100,19 @@ function loadLayout(dir: DensityKey): LayoutItem[] {
   try {
     const raw = JSON.parse(window.localStorage.getItem(LS + dir) ?? "null");
     if (Array.isArray(raw) && raw.length) {
+      // Bound w/h so a corrupted or crafted entry can't blow up the board:
+      // width never exceeds the grid; height capped well above any real widget.
+      const cols = DIRECTIONS[dir].cols;
       const clean = raw.filter(
-        (it) => it && VALID_IDS.includes(it.id) && it.w > 0 && it.h > 0,
+        (it) =>
+          it &&
+          VALID_IDS.includes(it.id) &&
+          Number.isFinite(it.w) &&
+          it.w > 0 &&
+          it.w <= cols &&
+          Number.isFinite(it.h) &&
+          it.h > 0 &&
+          it.h <= 20,
       );
       if (clean.length) return clean;
     }
@@ -318,6 +332,18 @@ export default function DashboardPage() {
   });
   const host = device?.hostname || "droplet";
 
+  // Live rolled-up system health (WARP-43) drives the always-visible toolbar
+  // chip — dot colour + label track ok / degraded / down rather than being
+  // hardcoded green. `unknown` covers loading, fetch errors, and any status
+  // outside the union (resolveHealthCopy is total — see app/health-copy.ts).
+  const { data: systemHealth } = useSWR<SystemHealth>(
+    "/api/orchestrator/health",
+    fetchSystemHealth,
+    { refreshInterval: 15_000 },
+  );
+  const healthStatus = systemHealth?.status ?? "unknown";
+  const healthCopy = resolveHealthCopy(healthStatus);
+
   if (isMobile) {
     return (
       <div className="droplet-home dh-mobile">
@@ -346,11 +372,11 @@ export default function DashboardPage() {
 
         <span className="dh-spring" />
 
-        <span className="dh-status-chip">
+        <span className={"dh-status-chip is-" + healthStatus}>
           <span className="dot" />
           <span className="host">{host}</span>
           <span className="mid extra">·</span>
-          <span className="extra">All systems operational</span>
+          <span className="extra">{healthCopy.label}</span>
         </span>
 
         <button
