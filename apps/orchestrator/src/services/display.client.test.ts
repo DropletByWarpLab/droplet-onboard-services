@@ -47,7 +47,54 @@ describe("pushClaimCode (WARP-632)", () => {
     expect(url).toMatch(/\/display\/claim$/);
     expect(init.method).toBe("POST");
     const body = JSON.parse(init.body as string);
+    // Backward-compatible (WARP-819): omitting the optional `wifi` arg must
+    // still produce EXACTLY the original claim-only payload — no empty/null
+    // wifi_* keys leaking onto the wire for older render paths.
     expect(body).toEqual({ code: "DRPL-7K2Q-9F4M", setup_url: "https://192.168.1.87/setup" });
+  });
+
+  it("includes wifi_qr_matrix / wifi_ssid / wifi_psk when a wifi arg is supplied (WARP-819)", async () => {
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const matrix = [
+      [1, 0, 1],
+      [0, 1, 0],
+      [1, 0, 1],
+    ];
+    const ok = await pushClaimCode("DRPL-7K2Q-9F4M", "https://192.168.1.87/setup", {
+      matrix,
+      ssid: "Droplet",
+      psk: "7gpz4k9m2njq8wxr",
+    });
+
+    expect(ok).toBe(true);
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body).toEqual({
+      code: "DRPL-7K2Q-9F4M",
+      setup_url: "https://192.168.1.87/setup",
+      wifi_qr_matrix: matrix,
+      wifi_ssid: "Droplet",
+      wifi_psk: "7gpz4k9m2njq8wxr",
+    });
+  });
+
+  it("omits wifi_* keys entirely when the wifi arg is undefined (graceful degradation)", async () => {
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) => new Response("{}", { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await pushClaimCode("DRPL-7K2Q-9F4M", "https://host/setup", undefined);
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body).not.toHaveProperty("wifi_qr_matrix");
+    expect(body).not.toHaveProperty("wifi_ssid");
+    expect(body).not.toHaveProperty("wifi_psk");
   });
 
   it("sends the SERVICE_TOKEN_DISPLAY bearer token", async () => {

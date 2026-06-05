@@ -36,6 +36,7 @@ import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { pushClaimCode, pushCustomImage, showSystem } from "./display.client.js";
+import type { ClaimWifi } from "./display.client.js";
 import { ensureClaimCode, isClaimed } from "./claim-code.service.js";
 import { renderQRToScreenPng } from "./qr-render.js";
 
@@ -119,6 +120,7 @@ const claimScreenDeps: ClaimScreenDeps = {
   ensureClaimCode,
   pushClaimCode,
   setupUrl,
+  fetchWifiQR: fetchClaimWifiFromBridge,
 };
 
 /** The signature of whatever's currently on screen (avoids re-pushes). */
@@ -253,8 +255,16 @@ export async function decideScreenQR(
 export interface ClaimScreenDeps {
   isClaimed: (prisma: PrismaClient) => Promise<boolean>;
   ensureClaimCode: (prisma: PrismaClient) => Promise<string | null>;
-  pushClaimCode: (code: string, setupUrl: string) => Promise<boolean>;
+  pushClaimCode: (code: string, setupUrl: string, wifi?: ClaimWifi) => Promise<boolean>;
   setupUrl: () => string;
+  /**
+   * WARP-819: fetch the box's Wi-Fi-connect QR matrix + ssid + psk so the claim
+   * screen can also show "join this box's Wi-Fi" creds. Returns null when the
+   * bridge is down / the AP creds aren't available yet — the claim code still
+   * renders (graceful degradation). Injected so the claim decision stays
+   * unit-testable with no network.
+   */
+  fetchWifiQR: () => Promise<ClaimWifi | null>;
 }
 
 export interface ClaimScreenResult {
@@ -305,7 +315,20 @@ export async function decideClaimScreen(
     // stale claim screen — fall through.
     return { handled: false };
   }
-  const pushed = await deps.pushClaimCode(code, deps.setupUrl());
+  // WARP-819: also surface the box's Wi-Fi-connect QR + creds on the claim
+  // screen so the user can join with zero prior config (scan, or type the
+  // SSID/password for a camera-less PC). The bridge fetch is best-effort: any
+  // failure (bridge down, AP not up yet, thrown error) degrades to a claim-only
+  // push — the claim code is the load-bearing element and must never be blocked
+  // by a Wi-Fi-QR hiccup.
+  let wifi: ClaimWifi | undefined;
+  try {
+    wifi = (await deps.fetchWifiQR()) ?? undefined;
+  } catch (err) {
+    logger.warn({ err }, "screen-qr: claim WiFi-QR fetch failed; pushing claim code only");
+    wifi = undefined;
+  }
+  const pushed = await deps.pushClaimCode(code, deps.setupUrl(), wifi);
   return { handled: true, pushed, signature: claimSignature(code) };
 }
 
@@ -350,13 +373,18 @@ function lanHostname(): string {
 }
 
 /**
- * Fetch the WiFi-hotspot QR payload from device-bridge.
- * Returns null on any error — the poller treats null as "skip this
- * tick, leave the screen alone".
+ * Raw `/openwrt/qr` fetch from device-bridge. Returns the parsed body (which
+ * carries `payload`, `ssid`, `key`, and the QR `matrix`) or null on any error.
+ * Both the steady-state WiFi-QR decision and the WARP-819 claim-screen WiFi
+ * creds source from this one call so the auth/timeout posture stays in one place.
  */
-async function fetchWifiQRFromBridge(): Promise<
-  { payload: string; ssid: string } | null
-> {
+async function fetchBridgeQR(): Promise<{
+  payload?: string;
+  ssid?: string;
+  key?: string;
+  matrix?: number[][];
+  ok?: boolean;
+} | null> {
   try {
     // WARP-659: /openwrt/qr now requires the bridge shared secret (it returns
     // the Wi-Fi PSK). Same env precedence as storage.ts's bridgeAuthToken();
@@ -372,12 +400,46 @@ async function fetchWifiQRFromBridge(): Promise<
       ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as { payload?: string; ssid?: string };
-    if (!data.payload || !data.ssid) return null;
-    return { payload: data.payload, ssid: data.ssid };
+    return (await res.json()) as {
+      payload?: string;
+      ssid?: string;
+      key?: string;
+      matrix?: number[][];
+      ok?: boolean;
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Fetch the WiFi-hotspot QR payload from device-bridge.
+ * Returns null on any error — the poller treats null as "skip this
+ * tick, leave the screen alone".
+ */
+async function fetchWifiQRFromBridge(): Promise<
+  { payload: string; ssid: string } | null
+> {
+  const data = await fetchBridgeQR();
+  if (!data || !data.payload || !data.ssid) return null;
+  return { payload: data.payload, ssid: data.ssid };
+}
+
+/**
+ * WARP-819: fetch the box's Wi-Fi-connect QR for the CLAIM screen — the QR
+ * bit-matrix (the firmware paints it; it never encodes on-device) plus the
+ * SSID and plaintext PSK so the panel can show readable "type-it" creds under
+ * the QR. Returns null unless the bridge gave us a usable matrix + ssid + key;
+ * the claim code still renders without it (graceful degradation).
+ */
+async function fetchClaimWifiFromBridge(): Promise<ClaimWifi | null> {
+  const data = await fetchBridgeQR();
+  if (!data || data.ok === false) return null;
+  const { matrix, ssid, key } = data;
+  if (!matrix || !Array.isArray(matrix) || matrix.length === 0 || !ssid || !key) {
+    return null;
+  }
+  return { matrix, ssid, psk: key };
 }
 
 /**
