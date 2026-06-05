@@ -51,7 +51,10 @@ describe("AccountStep", () => {
 
     expect(cta()).toBeDisabled();
     // The length requirement is shown as unmet, not silently hidden.
-    const lengthRow = screen.getByText(/Between 12 and 128/i).closest("li");
+    // Anchored: WARP-668 also adds an up-front hint ("Use at least 12 characters
+    // with a mix…"), so an unanchored match is now ambiguous — target the
+    // checklist row's exact label.
+    const lengthRow = screen.getByText(/^At least 12 characters$/i).closest("li");
     expect(lengthRow).toHaveTextContent(/not satisfied/i);
     // And the disabled button is no longer an unexplained dead end.
     expect(
