@@ -9,9 +9,22 @@ set +e
 
 # --- Customer-facing knobs (override via env) -----------------------------
 AP_SSID="${DROPLET_AP_SSID:-Droplet}"
-AP_PSK="${DROPLET_AP_PSK:-droplet-default-wifi}"
+# WARP-819: AP_PSK is resolved by resolve_ap_psk() below — NEVER a shared
+# hardcoded default. An explicit DROPLET_AP_PSK (real, non-placeholder) wins;
+# otherwise a strong per-box PSK is generated ONCE, persisted 0600, and re-read
+# on every subsequent boot. Seed it from the env here so the resolver can honor
+# an operator override; the resolver overwrites it with the persisted/generated
+# value when no real override is set.
+AP_PSK="${DROPLET_AP_PSK:-}"
 AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
 AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
+# Where the per-box AP PSK is persisted host-side (0600). Stable across reboots;
+# generated once if absent. Overridable for tests.
+AP_PSK_FILE="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
+# The device-bridge env file the bridge reads DROPLET_AP_PSK from. We mirror the
+# resolved PSK into it so the pairing QR/text the bridge renders ALWAYS equals
+# the PSK hostapd actually serves (WARP-819 coherence AC). Overridable for tests.
+DEVICE_BRIDGE_ENV_FILE="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
 # Which wireless phy to move into the container netns, and what interface
 # name it surfaces with. On the photo-studio Ryzen box the MT7922 is phy0
 # (named wlp14s0) and supports Wi-Fi 6 at full 22 dBm on 2.4 GHz; the AX210
@@ -24,6 +37,91 @@ GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-gateway-1}"
 # the routing service also reads, so both sides stay in lockstep.
 OPENWRT_PASSWORD_FILE="${OPENWRT_PASSWORD_FILE:-/home/droplet/edge-platform/docker/secrets/openwrt_password}"
 # --------------------------------------------------------------------------
+
+# WARP-819: resolve the per-box AP PSK. Replaces the old shared hardcoded
+# fallback (`droplet-default-wifi`) so every box ships a UNIQUE Wi-Fi password
+# with zero prior config. Priority:
+#   1. an explicit, REAL DROPLET_AP_PSK env (operator override) — used verbatim;
+#   2. the persisted 0600 secret file ($AP_PSK_FILE) if present + non-empty
+#      — read it (NEVER regenerate; the SSID/PSK must be stable across reboots);
+#   3. otherwise GENERATE a strong 16-char passphrase ONCE, persist it 0600,
+#      and use it.
+# Placeholder/shared sentinels (empty, the old shared default, the setup-wizard
+# placeholder) are treated as "not set" so a stale .env can't reinstate a shared
+# password. The resolved value is mirrored into the device-bridge env so the
+# pairing QR/text the bridge renders always equals the PSK hostapd serves
+# (coherence AC). Idempotent; sentinel-delimited so it is unit-testable in
+# isolation (tests/openwrt-attach-ap-psk.test.sh).
+# >>> resolve_ap_psk (WARP-819)
+resolve_ap_psk() {
+  psk_file="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
+  bridge_env="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
+
+  # Is the candidate a real PSK, or a placeholder/shared sentinel to ignore?
+  _is_placeholder() {
+    case "$1" in
+      ""|droplet-default-wifi|CHANGE_ME_VIA_SETUP_WIZARD|changeme|CHANGEME)
+        return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # 1) Explicit operator override (real value only).
+  if ! _is_placeholder "${AP_PSK:-}"; then
+    : # keep AP_PSK as-is
+  # 2) Persisted per-box secret.
+  elif [ -r "$psk_file" ] && [ -s "$psk_file" ]; then
+    AP_PSK="$(tr -d '\r\n' < "$psk_file")"
+  fi
+
+  # 3) Still nothing real → generate once.
+  if _is_placeholder "${AP_PSK:-}"; then
+    # 16 chars from a url-safe-ish alphabet (no quotes/backslash/$ so it is a
+    # safe hostapd wpa_passphrase + safe to single-quote downstream). First char
+    # forced to a digit so iOS/Android password fields don't auto-capitalize it
+    # (silent auto-cap → user types lowercase, submits capitalized → PSK
+    # mismatch). ~80 bits of entropy — far past any practical WPA2 attack.
+    gen="$( { openssl rand -base64 24 2>/dev/null || head -c 48 /dev/urandom 2>/dev/null | base64; } \
+            | tr -dc 'A-Za-z0-9' | cut -c1-15 )"
+    # Fallback if both openssl and urandom were unavailable (should never happen
+    # on the box): derive from the awk PRNG seeded by epoch+pid. Still 15 chars.
+    if [ -z "$gen" ]; then
+      gen="$(awk -v seed="$$$(date +%s)" 'BEGIN{srand(seed);
+        a="abcdefghjkmnpqrstuvwxyz23456789"; s="";
+        for(i=0;i<15;i++){s=s substr(a,int(rand()*length(a))+1,1)}; print s}')"
+    fi
+    # Prefix a digit so the passphrase starts numeric (auto-cap guard) → 16 chars.
+    first="$(awk 'BEGIN{srand('"$$"'+systime()); d="23456789"; print substr(d,int(rand()*length(d))+1,1)}')"
+    [ -n "$first" ] || first="7"
+    AP_PSK="${first}${gen}"
+  fi
+
+  # Persist the resolved PSK 0600 so subsequent boots read the SAME value.
+  # mkdir -p the parent (idempotent); write atomically; tighten perms.
+  if [ -n "${AP_PSK:-}" ]; then
+    psk_dir="$(dirname "$psk_file")"
+    mkdir -p "$psk_dir" 2>/dev/null || true
+    umask 077
+    printf '%s\n' "$AP_PSK" > "$psk_file.tmp" 2>/dev/null && mv "$psk_file.tmp" "$psk_file" 2>/dev/null || true
+    chmod 0600 "$psk_file" 2>/dev/null || true
+
+    # Mirror into the device-bridge env (coherence AC): upsert the
+    # DROPLET_AP_PSK line so the bridge's pairing QR/text matches the live AP.
+    bridge_dir="$(dirname "$bridge_env")"
+    mkdir -p "$bridge_dir" 2>/dev/null || true
+    umask 077
+    if [ -f "$bridge_env" ]; then
+      grep -v '^DROPLET_AP_PSK=' "$bridge_env" > "$bridge_env.tmp" 2>/dev/null || true
+    else
+      : > "$bridge_env.tmp"
+    fi
+    printf 'DROPLET_AP_PSK=%s\n' "$AP_PSK" >> "$bridge_env.tmp"
+    mv "$bridge_env.tmp" "$bridge_env" 2>/dev/null || true
+    chmod 0600 "$bridge_env" 2>/dev/null || true
+  fi
+}
+resolve_ap_psk
+# <<< resolve_ap_psk (WARP-819)
 
 for i in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)

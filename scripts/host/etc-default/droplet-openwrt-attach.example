@@ -5,11 +5,15 @@
 # POC AP without touching the script body.
 #
 # DROPLET_AP_SSID         — SSID broadcast inside the openwrt container.
-# DROPLET_AP_PSK          — WPA2-PSK passphrase. PER-DEVICE SECRET; set
-#                           via setup wizard, NOT committed to the repo.
-#                           The .example version of this file uses a
-#                           placeholder; the live /etc/default/... on a
-#                           provisioned box contains the rotated value.
+# DROPLET_AP_PSK          — WPA2-PSK passphrase. PER-DEVICE SECRET, NOT committed
+#                           to the repo. WARP-819: leave this UNSET (or at the
+#                           placeholder below) and droplet-openwrt-attach will
+#                           GENERATE a strong per-box passphrase on first boot,
+#                           persist it 0600 at /etc/droplet/ap-psk, and re-read
+#                           it every boot (stable across reboots). Set a real
+#                           value here ONLY to force a specific passphrase; the
+#                           placeholder is treated as "unset" so it never
+#                           reinstates a shared password.
 # DROPLET_AP_PHY          — phy index to move into the container netns.
 #                           Default "phy1" suits iwlwifi/AX210. Set to
 #                           "phy0" on the photo-studio Ryzen box (MT7922

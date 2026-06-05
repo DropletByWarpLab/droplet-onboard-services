@@ -38,7 +38,7 @@ def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
     # Clear the AP-mode knobs so a leaked value from the process env can't
     # change a test's deployment shape; each test sets exactly what it needs.
     for key in ("DROPLET_AP_MODE", "DROPLET_AP_SSID", "DROPLET_AP_PSK",
-                "WIFI_KEY_ROTATION_ENABLED"):
+                "DROPLET_AP_PSK_FILE", "WIFI_KEY_ROTATION_ENABLED"):
         monkeypatch.delenv(key, raising=False)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
@@ -207,6 +207,52 @@ def test_hostapd_env_creds_take_priority_over_conf(
     snap = bridge.qr_snapshot()
     assert snap["ssid"] == "EnvNet"
     assert snap["payload"] == "WIFI:T:WPA;S:EnvNet;P:envpass;;"
+
+
+# ---------------------------------------------------------------------------
+# WARP-819 — persisted per-box PSK file is a coherent creds source
+# ---------------------------------------------------------------------------
+# droplet-openwrt-attach generates a per-box PSK and persists it to a 0600 file
+# (/etc/droplet/ap-psk) which it ALSO mirrors into the bridge env. To guarantee
+# the pairing QR/text ALWAYS equals the PSK hostapd serves even if the bridge
+# process started before its env was refreshed, the bridge reads that same
+# persisted file when DROPLET_AP_PSK isn't in its env. The file path is
+# overridable (DROPLET_AP_PSK_FILE) so this is testable without touching /etc.
+
+def test_hostapd_reads_psk_from_persisted_file_when_env_psk_absent(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    psk_file = tmp_path / "ap-psk"
+    psk_file.write_text("480M4GnTS7wPfF36\n")  # trailing newline must be stripped
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        # No DROPLET_AP_PSK in env on purpose — the file is the source.
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    # Must not shell out to the container when the persisted file answers.
+    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("docker exec used despite persisted PSK file")))
+
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is True
+    assert snap["ssid"] == "Droplet"
+    assert snap["key"] == "480M4GnTS7wPfF36"
+    assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:480M4GnTS7wPfF36;;"
+
+
+def test_hostapd_env_psk_takes_priority_over_persisted_file(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # An explicit env PSK is the cleanest source and must win over the file.
+    psk_file = tmp_path / "ap-psk"
+    psk_file.write_text("file-psk-value99\n")
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        "DROPLET_AP_PSK": "envwins123456",
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    snap = bridge.qr_snapshot()
+    assert snap["key"] == "envwins123456"
 
 
 # ---------------------------------------------------------------------------
