@@ -105,9 +105,9 @@ export function AccountStep({
               below tracks progress against it. */}
           <p
             id="account-password-hint"
-            className="type-caption-1 text-label-tertiary mb-1.5"
+            className="type-caption-1 text-label-secondary mb-1.5"
           >
-            Use at least {PASSWORD_MIN} characters, with a mix of letters,
+            Use at least {PASSWORD_MIN} characters with a mix of letters,
             numbers, and symbols.
           </p>
           <div className="relative">
