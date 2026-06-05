@@ -366,12 +366,18 @@ export async function scanWireless(
 ): Promise<WirelessScanResult[]> {
   const query = device ? `?device=${encodeURIComponent(device)}` : "";
   // WARP-816: a scan on an AP/Master-mode radio (single-box) can't run — the
-  // routing service returns 409 + `{ code: "SCAN_UNSUPPORTED", message }`. Use
-  // the raw-Response helper so we can read that body and rethrow as the typed
-  // RouterError the dashboard branches on, instead of the generic UNKNOWN that
-  // `routerErrorFromResponse` maps every non-auth 4xx to (which would leak
-  // "Wireless scan: 409 Error" to the UI). Every other status keeps its
-  // existing classification (a real fault is never relabelled as unsupported).
+  // routing service returns 409 + `{ code: "SCAN_UNSUPPORTED", message }`.
+  // `routingFetch` already throws on any 4xx, converting the response via
+  // `routerErrorFromResponse` into a RouterError that PRESERVES the HTTP
+  // `status` (a non-auth 4xx maps to code UNKNOWN with `status: res.status`).
+  // So we detect the unsupported case by the STATUS CODE on the thrown error
+  // (`err.status === 409`) in the catch below — the 409 body itself is never
+  // read — and rethrow as the typed `SCAN_UNSUPPORTED` RouterError the
+  // dashboard branches on, instead of the generic UNKNOWN that would leak
+  // "Wireless scan: 409 Error" to the UI. (This relies on
+  // `routerErrorFromResponse` keeping `status` on unknown 4xx — see
+  // types/router-error.ts.) Every other status keeps its existing
+  // classification (a real fault is never relabelled as unsupported).
   let res: Response;
   try {
     res = await routingFetch(`/wireless/scan${query}`, {
