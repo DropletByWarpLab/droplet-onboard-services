@@ -91,7 +91,7 @@ export class RouterError extends Error {
    * user-facing prose.
    */
   static scanUnsupported(
-    message = "Scanning isn't available while your Droplet is broadcasting its own Wi-Fi network.",
+    message = "Your Droplet can't scan for other Wi-Fi networks while it's broadcasting its own. That's expected on this setup — nothing's wrong.",
     opts?: { label?: string; cause?: unknown },
   ): RouterError {
     return new RouterError("SCAN_UNSUPPORTED", message, { ...opts, status: 409 });
