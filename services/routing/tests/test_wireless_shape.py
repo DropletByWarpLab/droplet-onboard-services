@@ -248,6 +248,111 @@ def test_scan_empty_stays_empty_when_mode_probe_itself_fails():
     assert wifi.scan("wlp14s0") == []
 
 
+def _null_scan_then_info(info):
+    """Responder where `iwinfo scan` replies the literal null shape
+    `{"results": null}` (key present, value null) before `iwinfo info`."""
+
+    def responder(obj, method, args=None):
+        assert obj == "iwinfo"
+        if method == "scan":
+            return {"results": None}
+        if method == "info":
+            return dict(info)
+        raise AssertionError(f"unexpected iwinfo method {method!r}")
+
+    return responder
+
+
+def test_scan_coerces_null_results_to_empty_list():
+    """`iwinfo scan` can reply `{"results": null}` (key present, value null).
+    `dict.get("results", [])` returns the default ONLY when the key is ABSENT,
+    so a present-but-null value would leak `None` and break the `list[dict]`
+    contract. The `or []` coalesce must turn it into `[]` — and, like any empty
+    result, still trigger the AP-mode probe (here the probe finds Master → the
+    "can't scan here" signal, NOT a `None` return)."""
+    router = _FakeRouter(_null_scan_then_info({"mode": "Master"}))
+    wifi = WirelessApi(router)
+    with pytest.raises(ScanUnsupportedError):
+        wifi.scan("wlp14s0")
+    # null result is treated exactly like `[]`: it probes the mode once.
+    assert router.calls == [("iwinfo", "scan"), ("iwinfo", "info")]
+
+
+def test_scan_null_results_on_scannable_radio_returns_empty_list():
+    """A `{"results": null}` reply on a *scannable* radio (mode "Client") must
+    coalesce to `[]` — never `None`. Guards the return contract on the happy
+    empty-state path, not just the unsupported one."""
+    router = _FakeRouter(_null_scan_then_info({"mode": "Client"}))
+    wifi = WirelessApi(router)
+    out = wifi.scan("wlp14s0")
+    assert out == []
+    assert out is not None
+
+
+# ---------------------------------------------------------------------------
+# scan() — WARP-816 review (Romain): the probed mode must reach the raised
+# error WITHOUT a shared instance/class side-channel. `WirelessApi` is a
+# module-level singleton (`get_router().wireless`) and FastAPI runs the sync
+# `/wireless/scan` route in a threadpool, so a `self._last_probed_mode`
+# write-then-read races: a second concurrent scan could reset it to `None`
+# before the first reads it, dropping the `(radio mode: …)` detail. The mode
+# is now RETURNED as a local from `_scan_blocked_by_ap_mode` and unpacked at
+# the call site — never stashed on `self`.
+# ---------------------------------------------------------------------------
+def test_scan_unsupported_error_carries_probed_mode():
+    """The raised `ScanUnsupportedError` must name the mode it actually saw
+    (`"Master"`), and that mode must come from the call's own return value, not
+    a shared attribute. Asserting `.mode` (which the pre-fix tests never did) is
+    what makes the race observable: a dropped mode surfaces as `mode is None`."""
+    router = _FakeRouter(_scan_then_info([], {"mode": "Master"}))
+    wifi = WirelessApi(router)
+    with pytest.raises(ScanUnsupportedError) as excinfo:
+        wifi.scan("wlp14s0")
+    assert excinfo.value.mode == "Master"
+    # The detail string the dashboard/orchestrator may echo must include it.
+    assert "Master" in str(excinfo.value)
+
+
+def test_scan_blocked_by_ap_mode_returns_blocked_and_mode_tuple():
+    """`_scan_blocked_by_ap_mode` returns `(blocked, mode)` as locals — the
+    classification AND the mode it read, with no reliance on instance state.
+    This is the contract the call site unpacks."""
+    wifi = WirelessApi(_FakeRouter(_scan_then_info([], {"mode": "Master"})))
+    assert wifi._scan_blocked_by_ap_mode("wlp14s0") == (True, "Master")
+
+    wifi2 = WirelessApi(_FakeRouter(_scan_then_info([], {"mode": "Client"})))
+    assert wifi2._scan_blocked_by_ap_mode("wlp14s0") == (False, "Client")
+
+
+def test_scan_blocked_by_ap_mode_keeps_no_shared_mode_attribute():
+    """Regression guard for Romain's finding: the probed mode must NOT be
+    parked on a shared `_last_probed_mode` attribute (the singleton side-channel
+    that raced across threadpool requests). It lives only in the return value."""
+    wifi = WirelessApi(_FakeRouter(_scan_then_info([], {"mode": "Master"})))
+    wifi._scan_blocked_by_ap_mode("wlp14s0")
+    assert not hasattr(wifi, "_last_probed_mode")
+    assert not hasattr(WirelessApi, "_last_probed_mode")
+
+
+def test_interleaved_probes_do_not_corrupt_each_others_mode():
+    """Two probes whose underlying calls interleave must each report THEIR OWN
+    mode from THEIR OWN return — proving the result is a local, not a shared
+    attribute a concurrent probe could overwrite. Simulates the threadpool race
+    deterministically: build B's call result in between starting and reading
+    A's, on the same singleton instance."""
+    wifi = WirelessApi(_FakeRouter(lambda *a, **k: {}))
+
+    def probe(mode: str):
+        return WirelessApi(_FakeRouter(_scan_then_info([], {"mode": mode})))._scan_blocked_by_ap_mode("dev")
+
+    # Resolve A, then B, then assert A's value is intact (a `self` write by B
+    # would have clobbered it under the old design).
+    blocked_a, mode_a = probe("Master")
+    blocked_b, mode_b = probe("Client")
+    assert (blocked_a, mode_a) == (True, "Master")
+    assert (blocked_b, mode_b) == (False, "Client")
+
+
 # ---------------------------------------------------------------------------
 # radio_info() — absent `iwinfo` device degrades to {} (mirrors the above)
 # ---------------------------------------------------------------------------
@@ -369,6 +474,10 @@ def test_wireless_scan_route_409_with_stable_code_when_ap_mode(connected_client,
     assert resp.status_code == 409
     body = resp.json()
     assert body["code"] == "SCAN_UNSUPPORTED"
+    # WARP-816 review: the probed mode must survive end-to-end (it travels in
+    # the message detail). A dropped mode — the singleton side-channel race —
+    # would leave the `(radio mode: …)` text out of the body.
+    assert "Master" in body["message"]
 
 
 def test_wireless_scan_route_200_empty_on_scannable_radio(connected_client, mock_router):

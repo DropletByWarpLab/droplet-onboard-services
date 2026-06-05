@@ -625,35 +625,45 @@ class WirelessApi:
             if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
                 return []
             raise
-        results = result.get("results", [])
-        if not results and self._scan_blocked_by_ap_mode(device):
-            raise ScanUnsupportedError(device, mode=self._last_probed_mode)
+        # `{"results": null}` (key present, value null) is a valid reply shape;
+        # `dict.get` only falls back to the default when the key is ABSENT, so
+        # coalesce the null to `[]` to preserve the `list[dict]` contract (and
+        # so a null result still triggers the AP-mode probe, like `[]`).
+        results = result.get("results", []) or []
+        if not results:
+            blocked, mode = self._scan_blocked_by_ap_mode(device)
+            if blocked:
+                raise ScanUnsupportedError(device, mode=mode)
         return results
 
-    #: Set by :meth:`_scan_blocked_by_ap_mode` so the raised error can name the
-    #: mode it saw. Instance-local, reset each probe.
-    _last_probed_mode: Optional[str] = None
+    def _scan_blocked_by_ap_mode(self, device: str) -> tuple[bool, Optional[str]]:
+        """Return ``(blocked, mode)`` for `device`'s current operating mode.
 
-    def _scan_blocked_by_ap_mode(self, device: str) -> bool:
-        """True when `device`'s operating mode means it can't station-scan.
+        ``blocked`` is True when the mode means the radio can't station-scan
+        (mode ∈ :data:`_AP_SCAN_BLOCKING_MODES`, case-insensitive); ``mode`` is
+        the raw mode string read (or ``None`` if it couldn't be read / wasn't a
+        string). The mode is RETURNED as a local — never stashed on ``self`` —
+        because ``WirelessApi`` is a module-level singleton (``get_router().
+        wireless``) and FastAPI runs the sync ``/wireless/scan`` route in a
+        threadpool: a shared ``self._last_probed_mode`` would race across
+        concurrent scans (WARP-816 review, Romain). The caller unpacks the tuple
+        and raises ``ScanUnsupportedError(device, mode=mode)`` from its own
+        local.
 
-        Reads ``iwinfo info`` → ``mode`` and tests it against
-        :data:`_AP_SCAN_BLOCKING_MODES` (case-insensitive). Defensive: if the
-        follow-up info call can't be read (device vanished between calls, a
-        transient ubus fault), return ``False`` — "couldn't prove it's AP-mode"
-        falls back to the historical empty-``[]`` behavior rather than inventing
-        an unsupported signal or crashing. Only called on an empty scan result.
+        Defensive: if the follow-up info call can't be read (device vanished
+        between calls, a transient ubus fault), return ``(False, None)`` —
+        "couldn't prove it's AP-mode" falls back to the historical empty-``[]``
+        behavior rather than inventing an unsupported signal or crashing. Only
+        called on an empty scan result.
         """
-        self._last_probed_mode = None
         try:
             info = self._r._call("iwinfo", "info", {"device": device})
         except (UbusError, ConnectionLost):
-            return False
+            return False, None
         mode = info.get("mode") if isinstance(info, dict) else None
-        self._last_probed_mode = mode if isinstance(mode, str) else None
         if not isinstance(mode, str):
-            return False
-        return mode.strip().lower() in _AP_SCAN_BLOCKING_MODES
+            return False, None
+        return mode.strip().lower() in _AP_SCAN_BLOCKING_MODES, mode
 
     def connected_clients(self, device: Optional[str] = None) -> list[dict]:
         """Get list of connected wireless clients for `device`.
