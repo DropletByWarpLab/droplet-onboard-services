@@ -54,6 +54,27 @@ def test_scan_uses_env_when_set(monkeypatch):
     assert r.last_args == {"device": "wlp14s0"}
 
 
+def test_scan_falls_back_to_literal_when_env_set_but_empty(monkeypatch):
+    # The single-box compose passes `DROPLET_WIFI_SCAN_DEVICE=${...:-}` so on a
+    # blank `.env` the routing container receives the var set-but-empty (""). A
+    # bare os.environ.get(key, "wlan0") would return "" here (the default only
+    # fires when the key is ABSENT), and iwinfo scan {"device": ""} raises ubus
+    # INVALID_ARGUMENT. Empty must coalesce to the literal, same as unset.
+    monkeypatch.setenv("DROPLET_WIFI_SCAN_DEVICE", "")
+    r = _CapturingRouter()
+    sdk.WirelessApi(r).scan()
+    assert r.last_args == {"device": "wlan0"}
+
+
+def test_scan_falls_back_to_literal_when_env_whitespace_only(monkeypatch):
+    # A whitespace-only value (e.g. a stray space in the env file) is just as
+    # invalid for iwinfo as empty — it must also fall back to the literal.
+    monkeypatch.setenv("DROPLET_WIFI_SCAN_DEVICE", "   ")
+    r = _CapturingRouter()
+    sdk.WirelessApi(r).scan()
+    assert r.last_args == {"device": "wlan0"}
+
+
 def test_radio_info_uses_env_when_set(monkeypatch):
     monkeypatch.setenv("DROPLET_WIFI_SCAN_DEVICE", "phy1-ap0")
     r = _CapturingRouter()

@@ -94,7 +94,13 @@ _DEFAULT_ROUTE_TARGETS = frozenset({"0.0.0.0", "::"})
 # active device from `wireless.status()` / `iwinfo` and drop the literal.
 # ---------------------------------------------------------------------------
 def _default_wifi_scan_device() -> str:
-    return os.environ.get("DROPLET_WIFI_SCAN_DEVICE", "wlan0")
+    # The single-box compose passes `DROPLET_WIFI_SCAN_DEVICE=${...:-}`, so on a
+    # blank `.env` the var arrives set-but-empty (""). A bare
+    # `os.environ.get(key, "wlan0")` only fires its default when the key is
+    # ABSENT, so an empty/whitespace value would slip through and
+    # `iwinfo scan {"device": ""}` raises ubus INVALID_ARGUMENT. Coalesce
+    # unset OR empty/whitespace → the last-resort literal.
+    return (os.environ.get("DROPLET_WIFI_SCAN_DEVICE") or "").strip() or "wlan0"
 
 
 # ---------------------------------------------------------------------------
