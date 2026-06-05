@@ -356,7 +356,7 @@ export async function fetchWirelessStatus(): Promise<WirelessStatus> {
 // WARP-815 (K4): `device` is OPTIONAL and has no default. When the caller
 // omits it we send no `device` query param so the routing service resolves the
 // radio from DROPLET_WIFI_SCAN_DEVICE (see services/routing/droplet_openwrt_sdk.py
-// `_default_scan_device`). A hardcoded `wlan0` default here always overrode that
+// `_default_wifi_scan_device`). A hardcoded `wlan0` default here always overrode that
 // env on the wire — and the single-box radio is `wlp14s0`, not `wlan0` — so the
 // scan hit a radio the box doesn't have. Rule 12: no host-specific defaults.
 // Explicit-device callers still get verbatim forwarding.
