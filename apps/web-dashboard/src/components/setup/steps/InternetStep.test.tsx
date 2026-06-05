@@ -260,7 +260,16 @@ describe("InternetStep — Home Wi-Fi is optional/skippable (WARP-809)", () => {
     // The notice text is split across an inline <span> (the monospaced
     // destination) and uses a typographic apostrophe (’), so assert on the
     // status region's normalized textContent rather than a single text node.
-    const region = await screen.findByRole("status");
+    //
+    // Merge reconciliation (WARP-808 ↔ #509): once an SSID is entered the
+    // collapsed-Wi-Fi disclosure also renders the disconnect *advisory* (its own
+    // role="status", aria-label="Wi-Fi change notice"), so a bare
+    // findByRole("status") now matches two regions. Target the wifi-write notice
+    // specifically — by its distinctive "couldn't set up…" copy — and walk up to
+    // its status container, rather than the generic role.
+    const region = (
+      await screen.findByText(/couldn.t set up the droplet.s wi-?fi right now/i)
+    ).closest("[role='status']")!;
     const text = (region.textContent ?? "").replace(/’/g, "'");
     expect(text).toMatch(/couldn't set up the droplet's wi-fi right now/i);
     // Points the customer at where they can finish later, and says they can skip.
