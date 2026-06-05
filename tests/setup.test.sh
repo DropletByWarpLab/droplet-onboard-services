@@ -150,6 +150,27 @@ echo "--- Phase 3: configure_single_box_env (single-box knobs) ---"
 # shellcheck source=../scripts/lib/single-box.sh
 source "$REPO_ROOT_REAL/scripts/lib/single-box.sh"
 
+# configure_single_box_env now derives the live droplet_default bridge gateway
+# via `docker network inspect` to pin the host-net SERVICE_URLs (WARP-806). Stub
+# `docker` on PATH for the whole of Phase 3 so the function is hermetic and runs
+# without a Docker daemon (CI has none — see setup-tests.yml "no Docker"). The
+# stub answers only the gateway inspection; everything else is a no-op success.
+SB_FAKE_GW="10.99.0.1"
+SB_STUB_BIN="$TMP_ROOT/sb-stub-bin"
+mkdir -p "$SB_STUB_BIN"
+cat > "$SB_STUB_BIN/docker" <<EOF
+#!/usr/bin/env bash
+# Minimal docker stub: answer the droplet_default gateway inspection only.
+if [ "\$1" = "network" ] && [ "\$2" = "inspect" ]; then
+  printf '%s\n' "$SB_FAKE_GW"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$SB_STUB_BIN/docker"
+SB_OLD_PATH="$PATH"
+PATH="$SB_STUB_BIN:$PATH"
+
 if configure_single_box_env >/dev/null 2>&1; then
   pass "configure_single_box_env completed without error"
 else
@@ -244,6 +265,90 @@ if grep -qE '^SWITCH_PROTECTED_PORT=[1-9]' "$TMP_ROOT/.env"; then
 else
   pass "single-box .env does not bake a host-specific SWITCH_PROTECTED_PORT (rule 12)"
 fi
+
+# --- Host-net service URLs point at the live droplet_default gateway (WARP-806) -
+# On the single-box, routing/switch/oled-display all run with network_mode: host
+# and bind the host's :8080/:8081/:8082. The orchestrator runs on the
+# droplet_default bridge (gateway 172.18.0.1); docker0 (172.17.0.1) is DOWN. The
+# compose default ROUTING/SWITCH/DISPLAY_SERVICE_URL is `host.docker.internal`,
+# which the orchestrator's `extra_hosts: host-gateway` resolves to docker0
+# (172.17.0.1) — UNREACHABLE — so /api/network, /api/ddns, /api/vpn all fail with
+# ECONNREFUSED 172.17.0.1:8080. configure_single_box_env must derive the LIVE
+# droplet_default gateway (stubbed to $SB_FAKE_GW at the top of Phase 3) and pin
+# these three URLs to it (NOT host.docker.internal, NOT the hardcoded
+# 172.17.0.1/172.18.0.1). The two earlier calls above already ran under the stub,
+# so these assertions also confirm the derived URLs are idempotent.
+
+# (1) ROUTING_SERVICE_URL — effective value must be the derived bridge gateway.
+ROUTING_URL_EFFECTIVE=$( { grep -E '^ROUTING_SERVICE_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$ROUTING_URL_EFFECTIVE" = "http://${SB_FAKE_GW}:8080" ]; then
+  pass "ROUTING_SERVICE_URL is the derived droplet_default gateway (http://${SB_FAKE_GW}:8080)"
+else
+  fail "ROUTING_SERVICE_URL is '${ROUTING_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8080)"
+fi
+
+# (2) SWITCH_SERVICE_URL — derived gateway, host port 8081.
+SWITCH_URL_EFFECTIVE=$( { grep -E '^SWITCH_SERVICE_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$SWITCH_URL_EFFECTIVE" = "http://${SB_FAKE_GW}:8081" ]; then
+  pass "SWITCH_SERVICE_URL is the derived droplet_default gateway (http://${SB_FAKE_GW}:8081)"
+else
+  fail "SWITCH_SERVICE_URL is '${SWITCH_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8081)"
+fi
+
+# (3) DISPLAY_SERVICE_URL — derived gateway, host port 8082.
+DISPLAY_URL_EFFECTIVE=$( { grep -E '^DISPLAY_SERVICE_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$DISPLAY_URL_EFFECTIVE" = "http://${SB_FAKE_GW}:8082" ]; then
+  pass "DISPLAY_SERVICE_URL is the derived droplet_default gateway (http://${SB_FAKE_GW}:8082)"
+else
+  fail "DISPLAY_SERVICE_URL is '${DISPLAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8082)"
+fi
+
+# (AC #2) None of the three may be left as host.docker.internal or docker0.
+if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=' "$TMP_ROOT/.env" || true; } \
+     | grep -qE 'host\.docker\.internal|172\.17\.0\.1'; then
+  fail "a host-net SERVICE_URL still points at host.docker.internal/172.17.0.1 (the unreachable docker0)"
+else
+  pass "no host-net SERVICE_URL points at host.docker.internal/172.17.0.1 (docker0 avoided)"
+fi
+
+# (AC #2) The gateway is DERIVED, never the hardcoded 172.18.0.1 literal — assert
+# the stubbed gateway (10.99.0.1) won, proving the value came from the inspect
+# call and not a baked-in constant.
+if { grep -E '^ROUTING_SERVICE_URL=' "$TMP_ROOT/.env" || true; } | grep -qE '172\.18\.0\.1'; then
+  fail "ROUTING_SERVICE_URL hardcodes 172.18.0.1 instead of deriving the live gateway"
+else
+  pass "ROUTING_SERVICE_URL is derived (not the hardcoded 172.18.0.1 literal)"
+fi
+
+# Idempotency: each derived URL appears exactly once (two calls already ran).
+ROUTING_URL_COUNT=$(grep -cE "^ROUTING_SERVICE_URL=http://${SB_FAKE_GW}:8080$" "$TMP_ROOT/.env" || true)
+if [ "$ROUTING_URL_COUNT" = "1" ]; then
+  pass "ROUTING_SERVICE_URL written exactly once (idempotent upsert)"
+else
+  fail "expected exactly one derived ROUTING_SERVICE_URL line, found ${ROUTING_URL_COUNT}"
+fi
+
+# Fail-loud guard: with NO droplet_default network resolvable, the function must
+# exit non-zero rather than silently leaving the unreachable host.docker.internal
+# default in place. Stub a docker that returns an empty gateway and confirm.
+cat > "$SB_STUB_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+# Empty-gateway stub: inspection returns nothing (network absent/misconfigured).
+if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
+  printf '%s\n' ""
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$SB_STUB_BIN/docker"
+if configure_single_box_env >/dev/null 2>&1; then
+  fail "configure_single_box_env must FAIL when the droplet_default gateway can't be derived (it returned success)"
+else
+  pass "configure_single_box_env fails loud when the droplet_default gateway can't be derived"
+fi
+
+# Restore PATH so Phase 4+ uses the real environment, not the docker stub.
+PATH="$SB_OLD_PATH"
 
 # =============================================================================
 # Phase 4: install-device-bridge.sh provisions host pairing-QR deps (WARP-654)
