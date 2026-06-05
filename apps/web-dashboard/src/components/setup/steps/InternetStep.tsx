@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertCircle,
+  ChevronRight,
   Eye,
   EyeOff,
   Globe,
@@ -27,18 +28,29 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 /**
  * Wizard step — "Set up your network" (WARP-657).
  *
- * Two sections, because the Droplet IS the home router:
+ * Two sections:
  *
- *   A · Home Wi-Fi — the SSID + password the box broadcasts. Every device at
- *       home joins this network. Wired to the existing, working network
- *       endpoints: POST /api/network/wifi/ssid (Tier 1) then
- *       POST /api/network/wifi/password (Tier 2 — may return a 202
- *       `confirmation_required` we auto-confirm, because the "Save and
- *       continue" click is itself the consent; there's no extra modal).
- *       Validation mirrors the routing service's Pydantic schema in
- *       `services/routing/schemas.py`: SSID 1–32 chars, PSK 8–63 chars.
- *       The whole section is optional — only validated/submitted when an SSID
- *       is entered.
+ *   A · Home Wi-Fi — OPTIONAL (WARP-809). The box always runs its own local
+ *       network for connected gear (switch, cameras); it does NOT have to be the
+ *       home router. Many deployments coexist on an existing network. So this
+ *       section is collapsed by default behind an "Add a Wi-Fi network"
+ *       disclosure and tagged "Optional" — the customer broadcasts a Wi-Fi from
+ *       the Droplet only if they want to. When opened and an SSID is entered, it
+ *       wires the existing network endpoints: POST /api/network/wifi/ssid
+ *       (Tier 1) then POST /api/network/wifi/password (Tier 2 — may return a 202
+ *       `confirmation_required` we auto-confirm, because the "Save and continue"
+ *       click is itself the consent; there's no extra modal). Validation mirrors
+ *       the routing service's Pydantic schema in `services/routing/schemas.py`:
+ *       SSID 1–32 chars, PSK 8–63 chars. Left collapsed (or opened-but-blank) =
+ *       skipped: no Wi-Fi write happens and the box stays reachable either way.
+ *
+ *       Safety net (WARP-809): WARP-808's hostapd write-fix is parked, so on the
+ *       single-box shape an SSID write still 500s with code ROLLED_BACK — which
+ *       is NOT in ROUTER_UNREACHABLE_CODES, so the WARP-807 routerUnreachable
+ *       notice doesn't catch it. A failed Wi-Fi write therefore surfaces its own
+ *       calm, actionable notice ("Couldn't set up the Droplet's Wi-Fi right
+ *       now — you can skip this and set it later from Network") instead of the
+ *       raw "Set SSID: 500 Internal Server Error".
  *
  *   B · Internet address · DuckDNS — unchanged. The customer signs up for a
  *       free DuckDNS account (their own, not a Droplet cloud feature) and
@@ -94,6 +106,11 @@ export function InternetStep({
   onSkip: () => void;
 }) {
   // --- Home Wi-Fi (Section A) ---
+  // WARP-809: optional + collapsed by default. The box runs its own LAN
+  // regardless; broadcasting a Wi-Fi is opt-in. `wifiExpanded` gates whether the
+  // SSID/password fields are mounted at all — collapsed means the customer
+  // can't accidentally trigger the box's Wi-Fi write.
+  const [wifiExpanded, setWifiExpanded] = useState(false);
   const [ssid, setSsid] = useState("");
   const [wifiPassword, setWifiPasswordValue] = useState("");
   const [showWifiPassword, setShowWifiPassword] = useState(false);
@@ -110,6 +127,14 @@ export function InternetStep({
   // a destructive validation error — render it in the calmer amber tone (like
   // the VPN step's "Internet not finished" gate) rather than alarm-red.
   const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
+  // WARP-809: which amber "notice" to render. "router-unreachable" is the
+  // WARP-807 503/UNREACHABLE case (covers DuckDNS + Wi-Fi alike); "wifi-write"
+  // is the parked-hostapd ROLLED_BACK/500 case that the unreachable classifier
+  // does NOT catch, so it needs its own actionable, Wi-Fi-specific copy. Only
+  // meaningful while `errorTone === "notice"`.
+  const [noticeKind, setNoticeKind] = useState<
+    "router-unreachable" | "wifi-write"
+  >("router-unreachable");
   // When the tone is "notice", the surface name to monospace inside the
   // sentence (e.g. "Network"). Kept separate from `error` (the prefix text) so
   // the destination can render as its own <span className="font-mono">.
@@ -250,10 +275,34 @@ export function InternetStep({
     setErrorTone("error");
     setSaving(true);
     try {
-      // Section A — Home Wi-Fi (only when an SSID was entered).
-      const wifiName = ssid.trim();
+      // Section A — Home Wi-Fi. Optional (WARP-809): only attempted when the
+      // section was opened AND an SSID was entered. Its own try/catch so a write
+      // failure surfaces the Wi-Fi-specific actionable notice (the ROLLED_BACK/
+      // 500 from parked-WARP-808 is NOT caught by routerUnreachableNotice) and
+      // stops the flow before DuckDNS / onComplete — rather than letting a raw
+      // "Set SSID: 500" reach the shared handler.
+      const wifiName = wifiExpanded ? ssid.trim() : "";
       if (wifiName) {
-        await applyWifi(wifiName);
+        try {
+          await applyWifi(wifiName);
+        } catch (wifiErr) {
+          // Router unreachable applies to Wi-Fi too — keep the WARP-807 notice.
+          const unreachable = routerUnreachableNotice(wifiErr, NETWORK_DESTINATION);
+          if (unreachable) {
+            setErrorTone("notice");
+            setNoticeKind("router-unreachable");
+            setError(unreachable.prefix);
+            setNoticeDestination(unreachable.destination);
+          } else {
+            // Parked-hostapd ROLLED_BACK / any other Wi-Fi write failure: calm,
+            // actionable, Wi-Fi-specific copy instead of the raw server error.
+            setErrorTone("notice");
+            setNoticeKind("wifi-write");
+            setNoticeDestination(NETWORK_DESTINATION);
+            setError(null);
+          }
+          return;
+        }
       }
 
       // Section B — DuckDNS (only when a subdomain was entered). Keeps the
@@ -284,6 +333,7 @@ export function InternetStep({
       const notice = routerUnreachableNotice(e, NETWORK_DESTINATION);
       if (notice) {
         setErrorTone("notice");
+        setNoticeKind("router-unreachable");
         setError(notice.prefix);
         setNoticeDestination(notice.destination);
       } else {
@@ -307,7 +357,7 @@ export function InternetStep({
     <StepShell
       current="internet"
       title="Set up your network"
-      subtitle="Name the Wi-Fi your Droplet broadcasts at home, then give it a web address you can reach from anywhere."
+      subtitle="Give your Droplet a web address you can reach from anywhere — and, if you like, a Wi-Fi network it can broadcast."
       primary={{
         label: nothingNewToSubmit ? "Continue" : "Save and continue",
         loadingLabel: "Saving…",
@@ -333,74 +383,110 @@ export function InternetStep({
         </div>
       )}
 
-      {/* Section A — Home Wi-Fi (the SSID + PSK the box broadcasts as your router) */}
-      <SectionLabel icon={Wifi}>Home Wi-Fi</SectionLabel>
-      <div className="space-y-4">
-        <div>
-          <label className="type-subheadline text-label-secondary block mb-1.5">
-            Network name (SSID)
-          </label>
-          <div className="relative">
-            <Wifi
-              size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-              aria-hidden="true"
-            />
-            <input
-              type="text"
-              value={ssid}
-              onChange={(e) => setSsid(e.target.value)}
-              placeholder="Studio Fotonia"
-              className="dp-input pl-10"
-              maxLength={SSID_MAX}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="type-subheadline text-label-secondary block mb-1.5">
-            Wi-Fi password
-          </label>
-          <div className="relative">
-            <Lock
-              size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-              aria-hidden="true"
-            />
-            <input
-              type={showWifiPassword ? "text" : "password"}
-              value={wifiPassword}
-              onChange={(e) => setWifiPasswordValue(e.target.value)}
-              placeholder="Wi-Fi password"
-              className="dp-input pl-10 pr-10"
-              maxLength={PSK_MAX}
-              autoComplete="off"
-            />
-            <button
-              type="button"
-              onClick={() => setShowWifiPassword((s) => !s)}
-              aria-label={
-                showWifiPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"
-              }
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
-            >
-              {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">
-          <ShieldCheck
-            size={14}
-            className="text-system-green flex-shrink-0"
-            aria-hidden="true"
-          />
-          WPA2 / WPA3 · broadcast on 2.4 &amp; 5 GHz — this becomes your home
-          network
-        </div>
+      {/* Section A — Home Wi-Fi · OPTIONAL (WARP-809). The box runs its own LAN
+          regardless; broadcasting a Wi-Fi is opt-in, so the fields stay collapsed
+          behind a disclosure and the section is tagged "Optional". */}
+      <div className="flex items-center gap-2 mb-3">
+        <Wifi size={15} className="text-accent flex-shrink-0" aria-hidden="true" />
+        <span className="type-caption-1 font-bold uppercase tracking-[0.06em] text-label-secondary">
+          Home Wi-Fi
+        </span>
+        <span className="type-caption-2 font-medium uppercase tracking-[0.04em] text-label-tertiary border border-separator rounded-full px-2 py-0.5">
+          Optional
+        </span>
       </div>
+
+      <p className="type-footnote text-label-secondary mb-3">
+        Your Droplet always runs a local network for connected gear (your switch,
+        cameras). If you&rsquo;d also like it to broadcast its own Wi-Fi for
+        devices to join, add it here. Already on a home network? Skip this — your
+        Droplet stays reachable either way.
+      </p>
+
+      <button
+        type="button"
+        onClick={() => setWifiExpanded((open) => !open)}
+        aria-expanded={wifiExpanded}
+        aria-controls="home-wifi-fields"
+        className="flex items-center gap-2 w-full text-left type-subheadline text-label-primary rounded-md px-1 py-1.5 transition-colors duration-200 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <ChevronRight
+          size={16}
+          className={`flex-shrink-0 text-label-tertiary transition-transform duration-200 ${
+            wifiExpanded ? "rotate-90" : ""
+          }`}
+          aria-hidden="true"
+        />
+        Add a Wi-Fi network
+      </button>
+
+      {wifiExpanded && (
+        <div id="home-wifi-fields" className="space-y-4 mt-3">
+          <div>
+            <label className="type-subheadline text-label-secondary block mb-1.5">
+              Network name (SSID)
+            </label>
+            <div className="relative">
+              <Wifi
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+                aria-hidden="true"
+              />
+              <input
+                type="text"
+                value={ssid}
+                onChange={(e) => setSsid(e.target.value)}
+                placeholder="Studio Fotonia"
+                className="dp-input pl-10"
+                maxLength={SSID_MAX}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="type-subheadline text-label-secondary block mb-1.5">
+              Wi-Fi password
+            </label>
+            <div className="relative">
+              <Lock
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+                aria-hidden="true"
+              />
+              <input
+                type={showWifiPassword ? "text" : "password"}
+                value={wifiPassword}
+                onChange={(e) => setWifiPasswordValue(e.target.value)}
+                placeholder="Wi-Fi password"
+                className="dp-input pl-10 pr-10"
+                maxLength={PSK_MAX}
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={() => setShowWifiPassword((s) => !s)}
+                aria-label={
+                  showWifiPassword ? "Hide Wi-Fi password" : "Show Wi-Fi password"
+                }
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
+              >
+                {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">
+            <ShieldCheck
+              size={14}
+              className="text-system-green flex-shrink-0"
+              aria-hidden="true"
+            />
+            WPA2 / WPA3 · broadcast on 2.4 &amp; 5 GHz from your Droplet
+          </div>
+        </div>
+      )}
 
       {/* Thin divider between the two sections */}
       <div className="my-5 h-px bg-separator" />
@@ -476,7 +562,7 @@ export function InternetStep({
         </label>
       </div>
 
-      {error && errorTone === "notice" && (
+      {errorTone === "notice" && (
         // Soft "do this later" notice. WARP-807 UX review:
         //  · a11y — role="status"/aria-live="polite" so a screen reader hears it
         //    without interrupting (a bare <div> was silent before).
@@ -484,6 +570,11 @@ export function InternetStep({
         //    amber wash) instead of text-system-orange (~2:1, failed AA). The
         //    AlertCircle glyph stays vivid system-orange to keep the amber
         //    semantic; non-text contrast doesn't gate a paired decorative icon.
+        // WARP-809: two variants share this calm amber treatment —
+        //  · router-unreachable (WARP-807): "…finish this from <Network> later."
+        //  · wifi-write (parked-WARP-808 ROLLED_BACK/500): a Wi-Fi-specific
+        //    "couldn't set it up, you can skip + do it later from <Network>"
+        //    so the customer never sees a raw "Set SSID: 500".
         <div
           role="status"
           aria-live="polite"
@@ -494,10 +585,18 @@ export function InternetStep({
             className="mt-0.5 flex-shrink-0 text-system-orange"
             aria-hidden="true"
           />
-          <span>
-            {error}{" "}
-            <span className="font-mono">{noticeDestination}</span> later.
-          </span>
+          {noticeKind === "wifi-write" ? (
+            <span>
+              Couldn&rsquo;t set up the Droplet&rsquo;s Wi-Fi right now — you can
+              skip this and set it later from{" "}
+              <span className="font-mono">{noticeDestination}</span>.
+            </span>
+          ) : (
+            <span>
+              {error}{" "}
+              <span className="font-mono">{noticeDestination}</span> later.
+            </span>
+          )}
         </div>
       )}
 
@@ -515,9 +614,11 @@ export function InternetStep({
 
       <LearnMoreCard helpAnchor="internet">
         <p>
-          Your <strong>Wi-Fi name and password</strong> are what every device at
-          home joins — the Droplet is your router now. Pick a network name and a
-          password (8 characters or more) and your home network is ready.
+          <strong>Home Wi-Fi is optional.</strong> Your Droplet always runs a
+          local network for connected gear (your switch, cameras). If you&rsquo;d
+          also like it to broadcast its own Wi-Fi for devices to join, name it
+          here (a password of 8 characters or more). Already on a home network?
+          Skip this — your Droplet stays reachable either way.
         </p>
         <p>
           <strong>DuckDNS</strong> then gives the box a permanent address on the
