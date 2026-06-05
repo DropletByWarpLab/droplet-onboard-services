@@ -32,6 +32,28 @@ export function AccountStep({
   const matchOk = password.length > 0 && password === confirmPassword;
   const canSubmit = emailOk && pwOk && matchOk && !isSubmitting;
 
+  // Spell out the first thing still blocking submission so the disabled CTA is
+  // never an unexplained dead end. A 10-char password clears the character-class
+  // rule but not the 12-char minimum — the exact stuck state from the field
+  // report (a disabled button + no error). The live checklist flags the
+  // password/match rules; this also covers the email (which isn't in the
+  // checklist) and ties the gate to the button. Only shown once the user has
+  // started filling the form in.
+  const engaged =
+    email.length > 0 || password.length > 0 || confirmPassword.length > 0;
+  const blockerHint =
+    !engaged || canSubmit
+      ? null
+      : !emailOk
+        ? email.length > 0
+          ? "That work email doesn't look right yet."
+          : "Add your work email to continue."
+        : !pwOk
+          ? "Your password doesn't meet all the requirements yet."
+          : !matchOk
+            ? "Re-enter the same password to confirm it."
+            : null;
+
   async function handleCreateAccount() {
     setError(null);
     if (!canSubmit) return;
@@ -147,6 +169,19 @@ export function AccountStep({
         </div>
 
         <PasswordRulesChecklist password={password} confirm={confirmPassword} />
+
+        {/* Polite live region: screen-reader users hear *why* the disabled CTA
+            is unavailable (a disabled button is otherwise silent). Kept mounted
+            — empty when there's nothing to say — so the region is registered
+            before its text changes and the hint's appearance causes no layout
+            shift. */}
+        <p
+          role="status"
+          aria-live="polite"
+          className="type-footnote text-label-secondary"
+        >
+          {blockerHint}
+        </p>
 
         {error && (
           <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
