@@ -477,5 +477,63 @@ EOF
   upsert_env SWITCH_AUTOPROVISION 1
   upsert_env SWITCH_VLAN_PROFILE  flat-lan
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan)"
+  # --- Host-net service URLs → live droplet_default gateway (WARP-806) -------
+  # routing (:8080), switch (:8081), and oled-display (:8082) all run with
+  # `network_mode: host` and bind those ports on the host. The orchestrator is
+  # on the `droplet_default` compose bridge; its `extra_hosts: host-gateway`
+  # resolves `host.docker.internal` to docker0 (172.17.0.1) — which is DOWN on
+  # the single-box (the box only ever brings up the droplet_default bridge,
+  # gateway 172.18.0.1). So the compose-default
+  # ROUTING/SWITCH/DISPLAY_SERVICE_URL of `http://host.docker.internal:<port>`
+  # is unreachable here and every /api/network, /api/ddns, /api/vpn call dies
+  # with `ECONNREFUSED 172.17.0.1:8080`. Fix: pin these three URLs to the LIVE
+  # droplet_default gateway so the bridged orchestrator reaches the host-bound
+  # services on the bridge the box actually has. The gateway is DERIVED from
+  # docker, never hardcoded — there is no top-level `networks:` block in the
+  # compose file, so Docker's IPAM auto-assigns the subnet (the next free
+  # 172.x.0.0/16) and it can legitimately differ per host. Same docker0-down
+  # precedent that moved DEVICE_BRIDGE_URL off 172.17.0.1
+  # (apps/orchestrator/src/config.ts + routes/storage.ts). Multi-box keeps the
+  # host.docker.internal default — this override is written ONLY on the
+  # single-box path (this function). The .env is consumed by `start_stack`
+  # (compose --env-file), so writing it here, before bring-up, means the
+  # orchestrator boots with the correct URLs (no restart needed).
+  #
+  # Ordering note: this runs in setup Phase 4 (Secrets), BEFORE Phase 6 brings
+  # the stack up — so on a FRESH install the droplet_default network does not
+  # exist yet to inspect. We therefore CREATE it first when absent (idempotent;
+  # a plain bridge stamped with compose's default-network labels, which compose
+  # then adopts on `up` without recreating it) and read back the gateway
+  # Docker's IPAM assigned. On a re-provision the network already exists and the
+  # create is a harmless no-op. We only fail loud if, after ensuring it exists,
+  # the gateway still can't be read (a genuine Docker fault) — never silently
+  # leave the unreachable host.docker.internal default in place.
+  local bridge_net="droplet_default" bridge_gw=""
+  # Create the bridge if absent so the gateway is derivable at Phase-4 time.
+  # `|| true` on each docker call: under `set -euo pipefail` a non-zero exit
+  # inside this function would abort setup silently (no inherited ERR trap); we
+  # validate the derived value explicitly below and fail loud with context.
+  if ! docker network inspect "$bridge_net" >/dev/null 2>&1; then
+    docker network create \
+      --label com.docker.compose.network=default \
+      --label com.docker.compose.project=droplet \
+      "$bridge_net" >/dev/null 2>&1 || true
+    log_info "Pre-created the $bridge_net bridge so the host-net gateway is derivable before stack bring-up (compose adopts it on \`up\`)."
+  fi
+  bridge_gw=$(docker network inspect "$bridge_net" \
+    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+  # Trim stray whitespace/newlines the Go template can emit for multi-config nets.
+  bridge_gw=$(printf '%s' "$bridge_gw" | tr -d '[:space:]')
+  if [ -z "$bridge_gw" ]; then
+    # Fail loud — do NOT silently leave the unreachable host.docker.internal
+    # default. An empty gateway here is the difference between a working router
+    # page and a box-wide ECONNREFUSED, so surface it with a clear next step.
+    log_error "configure_single_box_env: could not derive the ${bridge_net} bridge gateway (\`docker network inspect ${bridge_net}\` returned no gateway, even after attempting to create it). Refusing to leave ROUTING/SWITCH/DISPLAY_SERVICE_URL at the unreachable host.docker.internal (docker0) default. Check the Docker daemon (\`docker network ls\`) and re-run setup.sh --single-box."
+    return 1
+  fi
+  upsert_env ROUTING_SERVICE_URL "http://${bridge_gw}:8080"
+  upsert_env SWITCH_SERVICE_URL  "http://${bridge_gw}:8081"
+  upsert_env DISPLAY_SERVICE_URL "http://${bridge_gw}:8082"
+
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY_SERVICE_URL → ${bridge_net} gateway ${bridge_gw})"
 }
