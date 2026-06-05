@@ -360,12 +360,41 @@ export async function fetchWirelessStatus(): Promise<WirelessStatus> {
 // env on the wire — and the single-box radio is `wlp14s0`, not `wlan0` — so the
 // scan hit a radio the box doesn't have. Rule 12: no host-specific defaults.
 // Explicit-device callers still get verbatim forwarding.
-export async function scanWireless(device?: string): Promise<WirelessScanResult[]> {
+export async function scanWireless(
+  device?: string,
+  opts?: { retry?: RoutingFetchInit["retry"] },
+): Promise<WirelessScanResult[]> {
   const query = device ? `?device=${encodeURIComponent(device)}` : "";
-  const data = await routingFetchJson<{ results: WirelessScanResult[] }>(
-    `/wireless/scan${query}`,
-    { label: "Wireless scan" },
-  );
+  // WARP-816: a scan on an AP/Master-mode radio (single-box) can't run — the
+  // routing service returns 409 + `{ code: "SCAN_UNSUPPORTED", message }`.
+  // `routingFetch` already throws on any 4xx, converting the response via
+  // `routerErrorFromResponse` into a RouterError that PRESERVES the HTTP
+  // `status` (a non-auth 4xx maps to code UNKNOWN with `status: res.status`).
+  // So we detect the unsupported case by the STATUS CODE on the thrown error
+  // (`err.status === 409`) in the catch below — the 409 body itself is never
+  // read — and rethrow as the typed `SCAN_UNSUPPORTED` RouterError the
+  // dashboard branches on, instead of the generic UNKNOWN that would leak
+  // "Wireless scan: 409 Error" to the UI. (This relies on
+  // `routerErrorFromResponse` keeping `status` on unknown 4xx — see
+  // types/router-error.ts.) Every other status keeps its existing
+  // classification (a real fault is never relabelled as unsupported).
+  let res: Response;
+  try {
+    res = await routingFetch(`/wireless/scan${query}`, {
+      label: "Wireless scan",
+      retry: opts?.retry,
+    });
+  } catch (err) {
+    // The routing service reserves 409 on /wireless/scan for the AP-mode
+    // "can't scan here" signal. Rethrow as the typed RouterError carrying the
+    // orchestrator's own user-facing copy (the factory default) so the
+    // dashboard never sees the generic "Wireless scan: 409 Error" text.
+    if (err instanceof RouterError && err.status === 409) {
+      throw RouterError.scanUnsupported(undefined, { label: err.label, cause: err });
+    }
+    throw err;
+  }
+  const data = (await res.json()) as { results: WirelessScanResult[] };
   return data.results;
 }
 

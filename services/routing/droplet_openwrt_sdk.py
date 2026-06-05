@@ -167,6 +167,42 @@ class ConnectionLost(Exception):
     pass
 
 
+# WARP-816: radio operating modes (from `iwinfo info` → `mode`) in which a
+# single-radio card is broadcasting an AP and therefore CANNOT station-scan.
+# On the single-box `wlp14s0` is `mode == "Master"` (hostapd AP for the Droplet
+# network); `iw dev wlp14s0 scan` returns "Not supported (-95)", but ubus
+# `iwinfo scan` swallows that to `{"results": []}` with no error — so the radio
+# mode is the only reliable discriminator between "can't scan here" and
+# "scanned, found nothing". Matched case-insensitively; "AP" is included for
+# builds/drivers that label the role that way instead of "Master".
+_AP_SCAN_BLOCKING_MODES = frozenset({"master", "ap"})
+
+
+class ScanUnsupportedError(Exception):
+    """Raised when a Wi-Fi scan can't run on this radio in its current mode.
+
+    Distinct from a successful scan that finds zero networks (which returns
+    `[]`): this means the radio is in an AP/Master role and physically cannot
+    station-scan. The `/wireless/scan` route maps it to a typed HTTP 409 +
+    stable ``code`` so the orchestrator can surface a RouterError and the
+    dashboard can explain "scanning isn't available while broadcasting" instead
+    of rendering an empty results list.
+    """
+
+    #: Stable, wire-facing classification — mirrored verbatim by the
+    #: orchestrator RouterError and the dashboard copy map. Never renumber.
+    code = "SCAN_UNSUPPORTED"
+
+    def __init__(self, device: str, mode: Optional[str] = None):
+        self.device = device
+        self.mode = mode
+        detail = f" (radio mode: {mode})" if mode else ""
+        super().__init__(
+            f"Wi-Fi scan is not available on {device}{detail} — the radio is "
+            "broadcasting its own network and can't scan while it does."
+        )
+
+
 def _ubus_object_absent(exc: UbusError) -> bool:
     """True when a UbusError means "this object isn't present on this deployment".
 
@@ -574,6 +610,17 @@ class WirelessApi:
         ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
         other code propagate, so a real fault is never masked as "no networks".
 
+        WARP-816: an *empty* result on a radio that's in an AP/Master role is
+        NOT "found nothing" — the card is broadcasting its own network and
+        physically can't station-scan (``iw … scan`` → "Not supported (-95)",
+        which ubus ``iwinfo scan`` silently degrades to ``{"results": []}``).
+        Since the empty list is indistinguishable from a genuine zero-network
+        scan at the scan call, classify by the radio's operating mode
+        (``iwinfo info`` → ``mode``): an AP-role mode raises
+        :class:`ScanUnsupportedError` (→ typed 409 at the route), while any
+        scannable mode that finds nothing keeps returning ``[]``. The mode is
+        probed ONLY on an empty result — the happy path stays a single call.
+
         ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
         ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
         """
@@ -584,7 +631,45 @@ class WirelessApi:
             if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
                 return []
             raise
-        return result.get("results", [])
+        # `{"results": null}` (key present, value null) is a valid reply shape;
+        # `dict.get` only falls back to the default when the key is ABSENT, so
+        # coalesce the null to `[]` to preserve the `list[dict]` contract (and
+        # so a null result still triggers the AP-mode probe, like `[]`).
+        results = result.get("results", []) or []
+        if not results:
+            blocked, mode = self._scan_blocked_by_ap_mode(device)
+            if blocked:
+                raise ScanUnsupportedError(device, mode=mode)
+        return results
+
+    def _scan_blocked_by_ap_mode(self, device: str) -> tuple[bool, Optional[str]]:
+        """Return ``(blocked, mode)`` for `device`'s current operating mode.
+
+        ``blocked`` is True when the mode means the radio can't station-scan
+        (mode ∈ :data:`_AP_SCAN_BLOCKING_MODES`, case-insensitive); ``mode`` is
+        the raw mode string read (or ``None`` if it couldn't be read / wasn't a
+        string). The mode is RETURNED as a local — never stashed on ``self`` —
+        because ``WirelessApi`` is a module-level singleton (``get_router().
+        wireless``) and FastAPI runs the sync ``/wireless/scan`` route in a
+        threadpool: a shared ``self._last_probed_mode`` would race across
+        concurrent scans (WARP-816 review, Romain). The caller unpacks the tuple
+        and raises ``ScanUnsupportedError(device, mode=mode)`` from its own
+        local.
+
+        Defensive: if the follow-up info call can't be read (device vanished
+        between calls, a transient ubus fault), return ``(False, None)`` —
+        "couldn't prove it's AP-mode" falls back to the historical empty-``[]``
+        behavior rather than inventing an unsupported signal or crashing. Only
+        called on an empty scan result.
+        """
+        try:
+            info = self._r._call("iwinfo", "info", {"device": device})
+        except (UbusError, ConnectionLost):
+            return False, None
+        mode = info.get("mode") if isinstance(info, dict) else None
+        if not isinstance(mode, str):
+            return False, None
+        return mode.strip().lower() in _AP_SCAN_BLOCKING_MODES, mode
 
     def connected_clients(self, device: Optional[str] = None) -> list[dict]:
         """Get list of connected wireless clients for `device`.

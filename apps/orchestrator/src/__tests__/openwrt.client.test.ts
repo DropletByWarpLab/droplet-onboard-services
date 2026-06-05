@@ -474,6 +474,85 @@ describe("openwrt.client public wrappers", () => {
       expect(url).toBe("http://routing.test/wireless/clients?device=phy1-ap0");
     });
   });
+
+  // WARP-816: the routing service returns 409 + `{ code: "SCAN_UNSUPPORTED" }`
+  // when the radio is in AP/Master mode and can't station-scan (single-box).
+  // scanWireless() maps it to a typed RouterError (code SCAN_UNSUPPORTED) so the
+  // dashboard renders calm copy instead of an empty list — mirroring the
+  // UNREACHABLE/DISABLED precedent (WARP-807). It is NOT retried (terminal 4xx)
+  // and is DISTINCT from a 200 empty scan, which still returns [].
+  describe("scanWireless SCAN_UNSUPPORTED mapping (WARP-816)", () => {
+    it("409 with code SCAN_UNSUPPORTED → RouterError.scanUnsupported, no retry", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: false,
+          status: 409,
+          json: { code: "SCAN_UNSUPPORTED", message: "Wi-Fi scan is not available on wlp14s0" },
+        }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        scanWireless(undefined, {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy(
+        (e) =>
+          e instanceof RouterError && e.code === "SCAN_UNSUPPORTED" && e.status === 409,
+      );
+
+      // Terminal — a 4xx capability fact, never retried.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(noSleep).not.toHaveBeenCalled();
+    });
+
+    it("carries the orchestrator's user-facing message (no raw code/status leak)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: false,
+          status: 409,
+          json: { code: "SCAN_UNSUPPORTED", message: "Wi-Fi scan is not available on wlp14s0" },
+        }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(scanWireless()).rejects.toSatisfy(
+        (e) =>
+          e instanceof RouterError &&
+          e.code === "SCAN_UNSUPPORTED" &&
+          typeof e.message === "string" &&
+          e.message.length > 0 &&
+          // the user-facing message must be prose, not the bare machine code or
+          // the routerErrorFromResponse "… 409 Error" stub the generic path emits
+          e.message !== "SCAN_UNSUPPORTED" &&
+          !e.message.includes("409"),
+      );
+    });
+
+    it("a 200 empty scan is NOT unsupported — returns [] (distinct from the 409 signal)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { results: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(scanWireless()).resolves.toEqual([]);
+    });
+
+    it("a non-409 4xx is left as its normal classification (not coerced to SCAN_UNSUPPORTED)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: false, status: 400, json: { error: "bad request" } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        scanWireless(undefined, {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy(
+        (e) => e instanceof RouterError && e.code !== "SCAN_UNSUPPORTED",
+      );
+    });
+  });
 });
 
 // WARP cold-start log hygiene: on a fresh boot the in-container OpenWrt is
