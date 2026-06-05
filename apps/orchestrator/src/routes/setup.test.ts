@@ -43,9 +43,14 @@ import { createSetupRouter } from "./setup.js";
 // for the `ready` transition). Defaults to 1 (admin present) so the
 // pre-existing happy-path cases keep exercising the claim; the M1/M2 cases
 // seed 0 explicitly to drive the pre-claim rejection.
-function createPrismaMock(opts: { userCount?: number } = {}) {
+function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } = {}) {
   let row: Record<string, unknown> | null = null;
   let userCount = opts.userCount ?? 1;
+  // WARP-804 — how many `consumed` ClaimCode rows exist (whether the box is
+  // claimed; `isClaimed` counts `state="consumed"`). Defaults to 0 so every
+  // pre-existing case keeps its exact behaviour — the claim-satisfied
+  // short-circuit only fires when a `claim` step meets a claimed box.
+  let consumedClaims = opts.consumedClaims ?? 0;
   return {
     _seed: (r: Record<string, unknown> | null) => {
       row = r;
@@ -53,8 +58,18 @@ function createPrismaMock(opts: { userCount?: number } = {}) {
     _setUserCount: (n: number) => {
       userCount = n;
     },
+    // WARP-804 — simulate a claimed box (a consumed ClaimCode exists).
+    _setConsumedClaims: (n: number) => {
+      consumedClaims = n;
+    },
     user: {
       count: async () => userCount,
+    },
+    // WARP-804 — the `claimCode` slice `isClaimed` reads: count of `consumed`
+    // rows. Mirrors `prisma.claimCode.count({ where: { state: "consumed" } })`.
+    claimCode: {
+      count: async ({ where }: { where?: { state?: string } } = {}) =>
+        where?.state === "consumed" ? consumedClaims : 0,
     },
     applianceSetup: {
       findUnique: async ({ where }: { where: { id: string } }) =>
@@ -324,5 +339,70 @@ describe("GET /api/setup/state — read is side-effect-free (M5)", () => {
       user_tour_completed: false,
     });
     expect(upsertSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-804 — a persisted `claim` step on an ALREADY-CLAIMED box is an
+// unsatisfiable dead-end: the consumed code's plaintext is gone, so the
+// re-presented claim step can never be satisfied (→ CLAIM_CODE_INVALID → 429
+// lockout) and AuthGate keeps the dashboard gated. `GET /api/setup/state` must
+// report the post-claim step (NOT `claim`) once the box is claimed, and a PATCH
+// back to `claim` on a claimed box must not re-park it there. The post-claim
+// step is `account` (STEP_AFTER_CLAIM). ──
+describe("WARP-804 — claim step is satisfied once the box is claimed", () => {
+  it("GET reports the post-claim step (account), not `claim`, when a consumed code exists", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    // The dead-end the bug parks the box on: setupStep=claim while claimed.
+    prisma._seed({
+      id: "singleton",
+      state: "unclaimed",
+      setupStep: "claim",
+      userTourCompleted: false,
+    });
+    const res = await request(buildApp(prisma)).get("/api/setup/state");
+    expect(res.status).toBe(200);
+    expect(res.body.setup_step).toBe("account");
+    expect(res.body.setup_step).not.toBe("claim");
+  });
+
+  it("GET stays side-effect-free while healing the claimed claim step (M5)", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    prisma._seed({
+      id: "singleton",
+      state: "unclaimed",
+      setupStep: "claim",
+      userTourCompleted: false,
+    });
+    const upsertSpy = vi.spyOn(prisma.applianceSetup, "upsert");
+    const res = await request(buildApp(prisma)).get("/api/setup/state");
+    expect(res.body.setup_step).toBe("account");
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  it("PATCH setup_step:claim on a claimed box does NOT persist `claim` — it advances to account", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    const app = buildApp(prisma);
+    const patch = await request(app)
+      .patch("/api/setup/state")
+      .send({ setup_step: "claim" });
+    expect(patch.status).toBe(200);
+    expect(patch.body.setup_step).toBe("account");
+
+    // A subsequent GET (hard refresh) must NOT re-trap the owner on `claim`.
+    const get = await request(app).get("/api/setup/state");
+    expect(get.body.setup_step).toBe("account");
+  });
+
+  it("REGRESSION: on an UNCLAIMED box the claim step is preserved end-to-end", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 0 });
+    const app = buildApp(prisma);
+    const patch = await request(app)
+      .patch("/api/setup/state")
+      .send({ setup_step: "claim" });
+    expect(patch.status).toBe(200);
+    expect(patch.body.setup_step).toBe("claim");
+
+    const get = await request(app).get("/api/setup/state");
+    expect(get.body.setup_step).toBe("claim");
   });
 });

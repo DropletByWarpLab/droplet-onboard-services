@@ -52,6 +52,7 @@ import {
   markApplianceReady,
   markTourCompleted,
   isSetupStep,
+  STEP_AFTER_CLAIM,
   InvalidSetupStepError,
   SetupNotCompleteError,
   type SetupState,
@@ -73,14 +74,13 @@ import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
 
 const logger = pino({ name: "setup-route" });
 
-/**
- * PR #373 — the wizard step the customer lands on after a successful claim.
- * Claim slots FIRST (welcome → claim → account, #371 handoff §1), so binding
- * the appliance advances the resumable wizard to `account`. This is the ONLY
- * place that step name is written for the claim flow; keep it in sync with the
- * dashboard `STEPS` array.
- */
-const STEP_AFTER_CLAIM = "account";
+// PR #373 / WARP-804 — STEP_AFTER_CLAIM (the wizard step the customer lands on
+// after a successful claim: `account`, since claim slots FIRST) is now owned by
+// the setup state machine (`services/setup.service.ts`) and imported above, so
+// the route, getSetupState, and setSetupStep all read the SAME constant. WARP-804
+// also makes the state machine treat a `claim` step on an already-claimed box as
+// satisfied (→ STEP_AFTER_CLAIM), closing the lockout where a re-presented claim
+// step could never be satisfied.
 
 /**
  * PR #380 — the wizard step the customer lands on after naming their workspace.

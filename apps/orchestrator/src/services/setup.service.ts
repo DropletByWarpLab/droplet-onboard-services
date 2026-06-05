@@ -13,9 +13,29 @@
  *   { appliance: "unclaimed" | "ready", setupStep, userTourCompleted }
  */
 import { type SetupStep, type PrismaClient } from "@prisma/client";
+import { isClaimed } from "./claim-code.service.js";
 
 /** The fixed primary key of the singleton row. Mirrors `Workspace.id = 1`. */
 export const APPLIANCE_SETUP_ID = "singleton";
+
+/**
+ * WARP-804 — the wizard step the customer resumes on once the appliance is
+ * CLAIMED. `claim` slots FIRST (welcome → claim → account, #371 handoff §1), so
+ * a claimed box belongs on `account`. This is the SINGLE source of truth for
+ * that step name: the claim route (`routes/setup.ts`) imports it instead of
+ * redefining it, and the state machine below uses it to heal a `claim` step
+ * that was persisted on (or is being written to) an already-claimed box.
+ *
+ * WHY this lives here, in the state-machine module: a `claim` step on a claimed
+ * box is unsatisfiable — the consumed code's plaintext is gone (memo-only,
+ * rotates), so a re-presented claim step can never be satisfied and the
+ * dashboard stays gated. `claim` must therefore be treated as SATISFIED once
+ * `isClaimed` is true, and the only place that decision can be made for BOTH
+ * the read (`getSetupState`) and the write (`setSetupStep`) is here.
+ *
+ * Typed against the Prisma enum via the SETUP_STEPS tuple membership.
+ */
+export const STEP_AFTER_CLAIM: SetupStep = "account";
 
 /**
  * The SHIPPED wizard steps, in WIZARD ORDER. Mirrors the dashboard wizard's
@@ -150,18 +170,39 @@ const DEFAULT_STATE: SetupState = {
  * (`INSERT ... ON CONFLICT DO NOTHING`) and by the authenticated writers
  * below, so a real appliance always has a concrete row to resume from; the
  * in-memory default only covers the pre-migration / fresh-mock edge.
+ *
+ * WARP-804 — if the persisted step is `claim` but the box is ALREADY claimed,
+ * that step is unsatisfiable (the consumed code's plaintext is gone), so the
+ * EFFECTIVE step is resolved IN MEMORY to STEP_AFTER_CLAIM. The healing is
+ * read-only: we never write here (M5 is preserved — `setSetupStep` durably
+ * heals the row on the next wizard write). The `isClaimed` count is only
+ * issued when the step is actually `claim`, so non-claim reads (the
+ * overwhelming majority) keep their exact single-query behaviour.
  */
 export async function getSetupState(prisma: PrismaClient): Promise<SetupState> {
   const row = await prisma.applianceSetup.findUnique({
     where: { id: APPLIANCE_SETUP_ID },
   });
-  return row ? toSetupState(row) : DEFAULT_STATE;
+  const state = row ? toSetupState(row) : DEFAULT_STATE;
+  if (state.setupStep === "claim" && (await isClaimed(prisma))) {
+    return { ...state, setupStep: STEP_AFTER_CLAIM };
+  }
+  return state;
 }
 
 /**
  * Persist the wizard step the customer is on. This is the resumability
  * write: the dashboard calls it as the wizard advances so a refresh
  * routes back to the same step. Rejects unknown steps.
+ *
+ * WARP-804 — a write that would park the box on `claim` while it is ALREADY
+ * claimed is refused: `claim` is unsatisfiable on a claimed box (the consumed
+ * code's plaintext is gone), so persisting it would re-create the dead-end the
+ * dashboard gets gated on. Instead we DURABLY advance to STEP_AFTER_CLAIM and
+ * return that — self-healing the row so a later read resumes on `account`. The
+ * `isClaimed` check is gated behind `step === "claim"`, so every other step
+ * write keeps its exact single-write behaviour. When NOT claimed, `claim` is
+ * persisted unchanged (the claim step still shows on a fresh box).
  */
 export async function setSetupStep(
   prisma: PrismaClient,
@@ -170,10 +211,12 @@ export async function setSetupStep(
   if (!isSetupStep(step)) {
     throw new InvalidSetupStepError(step);
   }
+  const effectiveStep: SetupStep =
+    step === "claim" && (await isClaimed(prisma)) ? STEP_AFTER_CLAIM : step;
   const row = await prisma.applianceSetup.upsert({
     where: { id: APPLIANCE_SETUP_ID },
-    create: { id: APPLIANCE_SETUP_ID, setupStep: step },
-    update: { setupStep: step },
+    create: { id: APPLIANCE_SETUP_ID, setupStep: effectiveStep },
+    update: { setupStep: effectiveStep },
   });
   return toSetupState(row);
 }
