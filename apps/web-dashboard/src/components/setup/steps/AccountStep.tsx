@@ -6,7 +6,7 @@ import { setupAdmin, loginUser } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { translateError } from "@/lib/friendly-errors";
-import { validatePassword, isValidEmail } from "@droplet/auth-policy";
+import { validatePassword, isValidEmail, PASSWORD_MIN } from "@droplet/auth-policy";
 
 /**
  * Create-owner step. ADR-013: the directory login key is the work email;
@@ -97,9 +97,19 @@ export function AccountStep({
         </div>
 
         <div>
-          <label className="type-subheadline text-label-secondary block mb-1.5">
+          <label className="type-subheadline text-label-secondary block mb-1">
             Password
           </label>
+          {/* WARP-668 — state the requirement up front, before the user types,
+              derived from the policy so it can't drift. The live checklist
+              below tracks progress against it. */}
+          <p
+            id="account-password-hint"
+            className="type-caption-1 text-label-tertiary mb-1.5"
+          >
+            Use at least {PASSWORD_MIN} characters, with a mix of letters,
+            numbers, and symbols.
+          </p>
           <div className="relative">
             <Lock
               size={16}
@@ -111,6 +121,7 @@ export function AccountStep({
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Create a password"
               autoComplete="new-password"
+              aria-describedby="account-password-hint"
               className="dp-input pl-10 pr-10"
             />
             <button

@@ -7,7 +7,7 @@ describe("PasswordRulesChecklist", () => {
     render(<PasswordRulesChecklist password="Abcdefghijk1" />);
     const items = screen.getAllByRole("listitem");
     expect(items).toHaveLength(2);
-    expect(screen.getByText(/Between 12 and 128/)).toBeInTheDocument();
+    expect(screen.getByText(/At least 12 characters/)).toBeInTheDocument();
   });
 
   it("shows a 'passwords match' row when confirm is provided", () => {
