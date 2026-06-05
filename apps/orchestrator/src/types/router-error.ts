@@ -45,10 +45,16 @@ export class RouterError extends Error {
   }
 
   static unreachable(message: string, opts?: { label?: string; cause?: unknown }): RouterError {
-    return new RouterError("UNREACHABLE", message, opts);
+    // WARP-807: the routing service / OpenWrt is an upstream dependency. When it
+    // can't be reached the correct HTTP status is 503 Service Unavailable, not a
+    // bare 500. Carrying it here lets the global error handler's `resolveStatus`
+    // return 503 (instead of null → 500) and surface the actionable message.
+    return new RouterError("UNREACHABLE", message, { ...opts, status: 503 });
   }
   static timeout(message: string, opts?: { label?: string; cause?: unknown }): RouterError {
-    return new RouterError("TIMEOUT", message, opts);
+    // WARP-807: a timeout talking to the upstream router is also a 503 — the
+    // dependency is unavailable (slow / not responding), not an orchestrator bug.
+    return new RouterError("TIMEOUT", message, { ...opts, status: 503 });
   }
   static auth(message: string, opts?: { label?: string; status?: number }): RouterError {
     return new RouterError("AUTH", message, opts);
@@ -65,7 +71,10 @@ export class RouterError extends Error {
    * dashboard renders a "Router supervision disabled" banner.
    */
   static disabled(label = "router"): RouterError {
-    return new RouterError("DISABLED", "Router supervision is disabled", { label });
+    // WARP-807: `ROUTING_MODE=disabled` means the router-supervision dependency
+    // is intentionally unavailable. A WRITE that needs it gets 503 (the wizard
+    // surfaces "finish this from Settings later" + keeps Skip), not a 500.
+    return new RouterError("DISABLED", "Router supervision is disabled", { label, status: 503 });
   }
 
   /** Shape sent over the wire to the dashboard. */
