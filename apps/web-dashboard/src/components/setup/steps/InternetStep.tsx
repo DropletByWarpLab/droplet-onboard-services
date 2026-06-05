@@ -15,6 +15,7 @@ import {
   confirmNetworkCommand,
   fetchDuckDnsStatus,
   fetchNetworkOperation,
+  routerUnreachableNotice,
   setDuckDnsConfig,
   setWifiPassword,
   setWifiSsid,
@@ -105,6 +106,19 @@ export function InternetStep({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-807: a router-reachability notice is a soft "do this later" state, not
+  // a destructive validation error — render it in the calmer amber tone (like
+  // the VPN step's "Internet not finished" gate) rather than alarm-red.
+  const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
+  // When the tone is "notice", the surface name to monospace inside the
+  // sentence (e.g. "Network"). Kept separate from `error` (the prefix text) so
+  // the destination can render as its own <span className="font-mono">.
+  const [noticeDestination, setNoticeDestination] = useState<string | null>(null);
+  // The dashboard surface this step's settings live on. Surfaced in the
+  // unreachable notice ("…finish this from Network later") so we send the
+  // customer to the page that actually has the Wi-Fi/DuckDNS controls — NOT
+  // Settings (WARP-807 UX review). Rendered monospaced, like the LearnMoreCards.
+  const NETWORK_DESTINATION = "Network";
 
   // Load any prior DuckDNS config so we can pre-fill the form (and let
   // the customer know they don't have to redo the work). 403 just means
@@ -228,10 +242,12 @@ export function InternetStep({
   async function handleSave() {
     const v = validate();
     if (v) {
+      setErrorTone("error");
       setError(v);
       return;
     }
     setError(null);
+    setErrorTone("error");
     setSaving(true);
     try {
       // Section A — Home Wi-Fi (only when an SSID was entered).
@@ -261,9 +277,21 @@ export function InternetStep({
 
       onComplete();
     } catch (e) {
-      const msg =
-        e instanceof Error ? e.message : "Could not save. Try again in a moment.";
-      setError(msg);
+      // WARP-807: when the router/routing service is unreachable the write
+      // throws a RouterStatusError (503 / UNREACHABLE). Surface the actionable
+      // "finish from Settings later" notice instead of the raw error, and tone
+      // it as a soft notice. Everything else keeps its real message.
+      const notice = routerUnreachableNotice(e, NETWORK_DESTINATION);
+      if (notice) {
+        setErrorTone("notice");
+        setError(notice.prefix);
+        setNoticeDestination(notice.destination);
+      } else {
+        setErrorTone("error");
+        setError(
+          e instanceof Error ? e.message : "Could not save. Try again in a moment.",
+        );
+      }
     } finally {
       setSaving(false);
     }
@@ -448,9 +476,39 @@ export function InternetStep({
         </label>
       </div>
 
-      {error && (
-        <div className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
-          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+      {error && errorTone === "notice" && (
+        // Soft "do this later" notice. WARP-807 UX review:
+        //  · a11y — role="status"/aria-live="polite" so a screen reader hears it
+        //    without interrupting (a bare <div> was silent before).
+        //  · contrast — the message text is text-label-primary (≈19:1 on the
+        //    amber wash) instead of text-system-orange (~2:1, failed AA). The
+        //    AlertCircle glyph stays vivid system-orange to keep the amber
+        //    semantic; non-text contrast doesn't gate a paired decorative icon.
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+        >
+          <AlertCircle
+            size={14}
+            className="mt-0.5 flex-shrink-0 text-system-orange"
+            aria-hidden="true"
+          />
+          <span>
+            {error}{" "}
+            <span className="font-mono">{noticeDestination}</span> later.
+          </span>
+        </div>
+      )}
+
+      {error && errorTone === "error" && (
+        // Hard validation/write failure — urgent, so role="alert" (assertive).
+        // Pre-existing red tone retained.
+        <div
+          role="alert"
+          className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+        >
+          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
           <span>{error}</span>
         </div>
       )}

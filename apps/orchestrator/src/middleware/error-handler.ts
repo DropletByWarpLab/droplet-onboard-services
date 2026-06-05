@@ -128,19 +128,41 @@ export function errorHandler(
     code?: string;
     details?: unknown;
   } = {
-    error: status >= 500 ? "Internal server error" : "Request failed",
+    // WARP-807: distinguish 503 (an upstream dependency — the router/routing
+    // service — is unavailable) from a genuine 500. The wizard keys off `code`
+    // + `message`, but the coarse `error` category shouldn't mislabel a
+    // reachability problem as "Internal server error".
+    error:
+      status === 503
+        ? "Service unavailable"
+        : status >= 500
+          ? "Internal server error"
+          : "Request failed",
     message: "",
   };
 
-  if (status >= 500) {
-    // Server faults: redact outside development so we never leak stack/internal
-    // detail to clients.
+  if (trusted) {
+    // Our own typed errors (`HttpError` / `RouterError` / `DeviceRegistryError`,
+    // `ZodError`, `http-errors`) carry a deliberately client-facing message —
+    // surface it verbatim, regardless of status.
+    //
+    // WARP-807 (K3): this notably covers a `RouterError` at the 5xx tier. When
+    // OpenWrt/routing is unreachable a WRITE route throws
+    // `RouterError.unreachable()` / `.timeout()` / `.disabled()` (now status
+    // 503). Those carry an actionable message ("Router summary: fetch failed",
+    // "Router supervision is disabled") + a stable `code` the wizard branches
+    // on. Redacting them to "Something went wrong" — the previous behavior,
+    // since they landed in the `status >= 500` branch below — made the
+    // internet/vpn steps render a dead "Internal server error". Trusted typed
+    // errors are leak-free by construction, so they bypass redaction.
+    body.message = rawMessage;
+  } else if (status >= 500) {
+    // Server faults from an UNTRUSTED error (a raw `Error`, a Prisma error
+    // mapped to 500, etc.): redact outside development so we never leak
+    // stack/internal detail to clients. The real text still reaches
+    // `logger.error` above.
     body.message =
       process.env.NODE_ENV === "development" ? rawMessage : "Something went wrong";
-  } else if (trusted) {
-    // Client errors from our own typed errors carry a client-facing message —
-    // surface it verbatim.
-    body.message = rawMessage;
   } else {
     // 4xx synthesized from an untrusted error (e.g. a raw Prisma error mapped
     // to 404/409): the raw message embeds persistence internals, so return a

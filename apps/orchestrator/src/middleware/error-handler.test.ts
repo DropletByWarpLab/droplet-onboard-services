@@ -3,6 +3,7 @@ import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { errorHandler } from "./error-handler.js";
 import { HttpError } from "../types/http-error.js";
+import { RouterError } from "../types/router-error.js";
 
 function mockRes(): Response {
   const res: Partial<Response> = {};
@@ -171,5 +172,63 @@ describe("errorHandler", () => {
     errorHandler(HttpError.badRequest("mac is required"), req, res, next);
     expect(statusOf(res)).toBe(400);
     expect(bodyOf(res).message).toBe("mac is required");
+  });
+
+  // WARP-807 (K3): when OpenWrt/routing is unreachable, network WRITE routes
+  // throw RouterError.unreachable()/.timeout()/.disabled(). These are trusted
+  // typed errors carrying a stable `code` + an actionable, client-facing
+  // message — they must surface as 503 with that code + message, NOT redacted
+  // to "Something went wrong" (the previous behavior, which made the wizard
+  // internet/vpn steps render a dead "Internal server error").
+  describe("RouterError at the server-fault tier (WARP-807)", () => {
+    it("surfaces a RouterError.unreachable() as 503 with code UNREACHABLE and a non-redacted message, even in production", () => {
+      process.env.NODE_ENV = "production";
+      const res = mockRes();
+      errorHandler(
+        RouterError.unreachable("Router summary: fetch failed"),
+        req,
+        res,
+        next,
+      );
+      expect(statusOf(res)).toBe(503);
+      expect(bodyOf(res).code).toBe("UNREACHABLE");
+      // The actionable message must reach the client — NOT redacted.
+      expect(bodyOf(res).message).toBe("Router summary: fetch failed");
+      expect(bodyOf(res).message).not.toBe("Something went wrong");
+    });
+
+    it("surfaces a RouterError.timeout() as 503 with code TIMEOUT and its message", () => {
+      process.env.NODE_ENV = "production";
+      const res = mockRes();
+      errorHandler(
+        RouterError.timeout("Set SSID: timed out"),
+        req,
+        res,
+        next,
+      );
+      expect(statusOf(res)).toBe(503);
+      expect(bodyOf(res).code).toBe("TIMEOUT");
+      expect(bodyOf(res).message).toBe("Set SSID: timed out");
+    });
+
+    it("surfaces a RouterError.disabled() as 503 with code DISABLED and its message", () => {
+      process.env.NODE_ENV = "production";
+      const res = mockRes();
+      errorHandler(RouterError.disabled("router"), req, res, next);
+      expect(statusOf(res)).toBe(503);
+      expect(bodyOf(res).code).toBe("DISABLED");
+      expect(bodyOf(res).message).toBe("Router supervision is disabled");
+    });
+
+    it("still redacts a GENUINE 500 from an untrusted generic Error (no leak)", () => {
+      process.env.NODE_ENV = "production";
+      const res = mockRes();
+      errorHandler(new Error("ECONNREFUSED secret internal detail"), req, res, next);
+      expect(statusOf(res)).toBe(500);
+      expect(bodyOf(res).message).toBe("Something went wrong");
+      expect(bodyOf(res).message).not.toContain("secret");
+      // No machine-readable code leaks for an untrusted error.
+      expect(bodyOf(res).code).toBeUndefined();
+    });
   });
 });

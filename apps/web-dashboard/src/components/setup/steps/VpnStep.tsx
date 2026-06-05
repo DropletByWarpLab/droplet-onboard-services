@@ -11,7 +11,7 @@ import {
   Globe,
   Smartphone,
 } from "lucide-react";
-import { fetchVpnStatus, createVpnPeer } from "@/lib/api";
+import { fetchVpnStatus, createVpnPeer, routerUnreachableNotice } from "@/lib/api";
 import type { VpnStatusInfo, VpnPeerCreatedInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
@@ -67,7 +67,17 @@ export function VpnStep({
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-807: a router-reachability notice is a soft "do this later" state —
+  // render it in amber (matching the preCheck gate) rather than alarm-red.
+  const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
+  // Surface name to monospace inside the notice when the tone is "notice".
+  const [noticeDestination, setNoticeDestination] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Where this step's settings live in the dashboard. WireGuard peers are
+  // managed at /remote-access ("Remote Access") — that, not Settings, is where
+  // we point the customer to finish later (WARP-807 UX review). The preCheck
+  // gate + LearnMoreCard already name "Remote Access"; keep this consistent.
+  const REMOTE_ACCESS_DESTINATION = "Remote Access";
 
   const load = useCallback(async () => {
     try {
@@ -88,17 +98,30 @@ export function VpnStep({
   async function handleCreate() {
     const trimmed = deviceLabel.trim();
     if (!trimmed) {
+      setErrorTone("error");
       setError("Give this device a name (e.g. \"Stefan's iPhone\")");
       return;
     }
     setError(null);
+    setErrorTone("error");
     setSubmitting(true);
     try {
       const result = await createVpnPeer(trimmed);
       setCreated(result);
       setPhase("ready");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create device");
+      // WARP-807: an unreachable router surfaces as a RouterStatusError
+      // (503 / UNREACHABLE). Show the actionable "finish from Settings later"
+      // notice in the soft amber tone; everything else keeps its real message.
+      const notice = routerUnreachableNotice(e, REMOTE_ACCESS_DESTINATION);
+      if (notice) {
+        setErrorTone("notice");
+        setError(notice.prefix);
+        setNoticeDestination(notice.destination);
+      } else {
+        setErrorTone("error");
+        setError(e instanceof Error ? e.message : "Failed to create device");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -271,9 +294,34 @@ export function VpnStep({
             </p>
           )}
 
-          {error && (
-            <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
-              <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+          {error && errorTone === "notice" && (
+            // Soft "do this later" notice — see InternetStep for the rationale.
+            // role="status"/aria-live for announcement; text-label-primary for
+            // WCAG-AA contrast on the amber wash; vivid system-orange glyph.
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+            >
+              <AlertCircle
+                size={14}
+                className="mt-0.5 flex-shrink-0 text-system-orange"
+                aria-hidden="true"
+              />
+              <span>
+                {error}{" "}
+                <span className="font-mono">{noticeDestination}</span> later.
+              </span>
+            </div>
+          )}
+
+          {error && errorTone === "error" && (
+            // Hard failure (e.g. blank/duplicate device name) — urgent → alert.
+            <div
+              role="alert"
+              className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+            >
+              <AlertCircle size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
               <span>{error}</span>
             </div>
           )}
