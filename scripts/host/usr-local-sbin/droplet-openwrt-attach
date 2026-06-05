@@ -178,6 +178,86 @@ docker exec -i \
   }
   trust_eth0_fw
 
+  # WARP-810: put the AP iface ($AP_IFACE, e.g. wlp14s0) into its own fw4
+  # firewall zone. Field-confirmed bug on the single-box: the AP comes up at
+  # 192.168.20.1/24 with dnsmasq-ap serving DHCP, but $AP_IFACE is in NO zone.
+  # The inet fw4 input chain is policy-drop and only accepts new input from the
+  # lan zone (eth0 + br-lan), so a client DHCP DISCOVER (new, not established)
+  # is DROPped -> the phone associates to hostapd but never gets a lease (~15s
+  # timeout, looks like "cannot connect"). The fix:
+  #   - a zone named "ap" covering $AP_IFACE with input=ACCEPT, so DHCP (:67)
+  #     and DNS (:53) reach dnsmasq-ap. This is the critical "get an IP" fix.
+  #   - forwarding ap -> lan, because on the single-box the real uplink is the
+  #     docker veth eth0, which trust_eth0_fw (above) places in the lan zone;
+  #     the baked lan->wan forwarding then chains AP egress onward when a wan
+  #     member exists. (The baked wan zone has no live member on this box, so
+  #     forwarding to wan would be a dead end here.)
+  #   - a fw4 NAT MASQUERADE scoped to the AP subnet (192.168.20.0/24) leaving
+  #     the lan zone, so AP clients reach the internet. Scoping to src_ip keeps
+  #     it from double-NATing the lan zone own clients on the multi-box shape
+  #     (their 192.168.50.x source never matches).
+  # Mechanism is UCI + fw4 reload, mirroring trust_eth0_fw. Idempotent: every
+  # section is upserted by a stable name (zone "ap" / forwarding
+  # "droplet_ap_fwd" / nat "droplet_ap_masq"), and the device list is guarded,
+  # so re-running the attach never duplicates config. Default-drop input stays
+  # intact for every other interface (no global defaults flip, no policy
+  # accept). NB: NO APOSTROPHES in this block (single-quoted docker exec body).
+  # >>> ap_firewall_zone (WARP-810)
+  ap_firewall_zone() {
+    apif="${AP_IFACE:-wlp14s0}"
+    # Egress zone = wherever the uplink iface lives. On the single-box eth0 is
+    # pulled into the lan zone by trust_eth0_fw; on multi-box lan is br-lan.
+    lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
+    if [ -z "$lansec" ]; then
+      echo "droplet-openwrt-attach: WARN: no lan firewall zone found; AP zone left unrouted (Wi-Fi clients get no internet)"
+    fi
+
+    # --- AP zone (named, so it is upsert-able) ---------------------------
+    if ! uci -q get firewall.droplet_ap >/dev/null 2>&1; then
+      uci set firewall.droplet_ap=zone
+    fi
+    uci set firewall.droplet_ap.name=ap
+    uci set firewall.droplet_ap.input=ACCEPT
+    uci set firewall.droplet_ap.output=ACCEPT
+    # forward=REJECT on the zone itself keeps AP clients from reaching the LAN
+    # unfiltered; cross-zone routing is opened explicitly via the forwarding
+    # section below (ap -> lan -> wan), never a blanket forward.
+    uci set firewall.droplet_ap.forward=REJECT
+    # Bind the AP iface to the zone by device. Guarded so a second run does not
+    # append a duplicate (uci add_list has list semantics and would dupe).
+    if ! uci -q get firewall.droplet_ap.device 2>/dev/null | grep -qw "$apif"; then
+      uci add_list "firewall.droplet_ap.device=$apif"
+    fi
+
+    # --- forwarding ap -> lan (egress path) ------------------------------
+    if [ -n "$lansec" ]; then
+      lanname=$(uci -q get "firewall.$lansec.name" 2>/dev/null)
+      [ -n "$lanname" ] || lanname=lan
+      if ! uci -q get firewall.droplet_ap_fwd >/dev/null 2>&1; then
+        uci set firewall.droplet_ap_fwd=forwarding
+      fi
+      uci set firewall.droplet_ap_fwd.src=ap
+      uci set firewall.droplet_ap_fwd.dest="$lanname"
+
+      # --- NAT: masquerade AP-subnet egress out the lan (uplink) zone ----
+      if ! uci -q get firewall.droplet_ap_masq >/dev/null 2>&1; then
+        uci set firewall.droplet_ap_masq=nat
+      fi
+      uci set firewall.droplet_ap_masq.name=droplet_ap_masq
+      uci set firewall.droplet_ap_masq.src="$lanname"
+      uci set firewall.droplet_ap_masq.src_ip=192.168.20.0/24
+      uci set firewall.droplet_ap_masq.target=MASQUERADE
+    fi
+
+    if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
+      echo "droplet-openwrt-attach: AP zone configured ($apif input=ACCEPT, forward ap->${lanname:-lan}, masq 192.168.20.0/24) — Wi-Fi clients can DHCP + reach internet"
+    else
+      echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; AP zone may not be active (Wi-Fi clients may not get a lease)"
+    fi
+  }
+  ap_firewall_zone
+  # <<< ap_firewall_zone (WARP-810)
+
   # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
   # rpcd login works. Idempotent: only re-set if the current password fails.
   if [ -n "$OPENWRT_ROOT_PW" ]; then
