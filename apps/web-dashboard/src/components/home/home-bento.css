@@ -1,0 +1,1175 @@
+/* ============================================================
+   Droplet Home — chat-centered bento dashboard.
+
+   Ported from the Claude Design handoff (board.css + widgets.css +
+   mobile.css). The handoff was dark-only indigo; per product direction
+   the indigo identity is kept but extended to BOTH light and dark.
+
+   Two layers of isolation keep this off the rest of the violet dashboard:
+   (1) the design tokens and every generic class name (.bento, .bento-head,
+   .bento-body, .bento--hero) plus the viewport-level .dh-modal-overlay are
+   descendant-scoped under `.droplet-home` so they can't leak or be leaked
+   into; (2) all remaining feature classes carry the `dh-` (droplet-home)
+   prefix, which is itself the namespace. The repo's ThemeProvider toggles
+   `.dark` on <html>, so the dark ramp hangs off `.dark .droplet-home`.
+   ============================================================ */
+
+.droplet-home {
+  /* ── Indigo identity — LIGHT (default) ─────────────────── */
+  --bg: #f5f6fb;
+  --surface: #ffffff;
+  --surface-2: #eef0f7;
+  --border: #e4e6f1;
+  --text: #1b1e2b;
+  --text-muted: #6b7180;
+  --brand: #6366f1;        /* indigo-500 — stronger on light */
+  --brand-hover: #4f46e5;
+  --brand-soft: #818cf8;
+  --brand-deep: #4338ca;
+  --success: #16a34a;
+  --danger: #b91c1c;
+  --user-bubble: #dbe4ff;
+  --font-ui: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius-input: 8px;
+  --radius-pill: 999px;
+
+  /* engine — a real ease-out-quint (not the browser default `ease`, which is
+     literally cubic-bezier(.25,.1,.25,1)); gives interactions a snappy start
+     and a soft settle. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --brand-subtle: rgba(99, 102, 241, 0.12);
+  --lift: 0 18px 40px -16px rgba(30, 30, 60, 0.22),
+    0 0 0 1px rgba(99, 102, 241, 0.25);
+  --card-bg: #ffffff;
+  --card-bd: rgba(20, 22, 45, 0.08);
+  --card-inner: rgba(20, 22, 45, 0.035);
+  --hero-aurora-opacity: 0.4;
+  --blob-a: 0.05;
+  --blob-b: 0.045;
+  --blob-c: 0.035;
+  --blob-d: 0.03;
+
+  color-scheme: light;
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.dark .droplet-home {
+  /* ── Indigo identity — DARK (the original handoff ramp) ── */
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface-2: #1f2937;
+  --border: #2a2d3a;
+  --text: #e4e4e7;
+  --text-muted: #8a8a94;
+  --brand: #818cf8;        /* indigo-400 — brighter on dark */
+  --brand-hover: #6366f1;
+  --brand-soft: #a5b4fc;
+  --brand-deep: #4f46e5;
+  --success: #22c55e;
+  --danger: #7f1d1d;
+  --user-bubble: #1e3a5f;
+
+  --brand-subtle: rgba(129, 140, 248, 0.15);
+  --lift: 0 18px 40px -16px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(129, 140, 248, 0.22);
+  --card-bg: #14161d;
+  --card-bd: rgba(255, 255, 255, 0.055);
+  --card-inner: rgba(255, 255, 255, 0.035);
+  --hero-aurora-opacity: 0.5;
+  --blob-a: 0.1;
+  --blob-b: 0.085;
+  --blob-c: 0.065;
+  --blob-d: 0.05;
+
+  color-scheme: dark;
+}
+
+/* ===========================================================
+   Shell — desktop fills the <main> viewport with an internal
+   scroll (fixed toolbar). Mobile flows naturally (the app shell
+   already supplies the bottom tab nav, so we add no chrome).
+   =========================================================== */
+.droplet-home {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: transparent;
+  overflow: hidden;
+}
+@media (min-width: 1024px) {
+  .droplet-home {
+    height: 100dvh;
+  }
+}
+
+.droplet-home *,
+.droplet-home *::before,
+.droplet-home *::after {
+  box-sizing: border-box;
+}
+.droplet-home button {
+  cursor: pointer;
+  font-family: inherit;
+}
+.droplet-home textarea,
+.droplet-home input {
+  font-family: inherit;
+}
+/* Visible keyboard focus for every interactive control on the Home surface.
+   The chat capsule keeps its own focus-within ring (WARP-298). */
+.droplet-home
+  :is(button, a, textarea, [role="switch"], [role="checkbox"], [role="radio"]):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+/* Tactile press feedback on the small action buttons (Emil tip #1). */
+.droplet-home :is(.dh-tray-chip, .w-sug, .w-scene, .dh-opt, .dh-reset-btn, .w-cal-nav):active {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .droplet-home :is(.dh-tray-chip, .w-sug, .w-scene, .dh-opt, .dh-reset-btn, .w-cal-nav):active {
+    transform: none;
+  }
+}
+
+/* ───────────── Top toolbar (56px, blurred) ───────────── */
+.dh-top {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  position: relative;
+  z-index: 40;
+}
+.dh-greet {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.dh-greet .g {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.dh-greet .g b {
+  color: var(--text);
+  font-weight: 600;
+}
+.dh-greet .d {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 1px;
+}
+.dh-spring {
+  flex: 1;
+}
+.dh-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.dh-status-chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--success);
+}
+/* Dot tracks live system health — green for ok, amber for degraded/unknown,
+   red for down (label copy comes from app/health-copy.ts). */
+.dh-status-chip.is-degraded .dot,
+.dh-status-chip.is-unknown .dot {
+  background: #f59e0b;
+}
+.dh-status-chip.is-down .dot {
+  background: #ef4444;
+}
+.dh-status-chip .host {
+  color: var(--text);
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+.dh-status-chip .mid {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+@media (max-width: 600px) {
+  .dh-status-chip .extra {
+    display: none;
+  }
+}
+
+/* edit toggle */
+.dh-edit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius-input);
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  transition: background 200ms var(--ease), border-color 200ms var(--ease),
+    opacity 150ms var(--ease);
+}
+.dh-edit-toggle:hover {
+  background: var(--surface-2);
+}
+.dh-edit-toggle:active {
+  transform: scale(0.97);
+}
+.dh-edit-toggle.on {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+.dark .dh-edit-toggle.on {
+  color: #0f1117;
+}
+.dh-edit-toggle.on:hover {
+  background: var(--brand-hover);
+}
+
+/* icon-only toolbar button (Settings gear) */
+.dh-icon-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-input);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  transition: background 200ms var(--ease), color 200ms var(--ease);
+}
+.dh-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.dh-icon-btn:active {
+  transform: scale(0.96);
+}
+
+/* ───────────── Edit toolbar (reveals under top bar) ───────────── */
+.dh-edit-bar {
+  flex-shrink: 0;
+  overflow: hidden;
+  max-height: 0;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  border-bottom: 1px solid transparent;
+  transition: max-height 250ms var(--ease), border-color 250ms var(--ease);
+}
+.droplet-home.editing .dh-edit-bar {
+  max-height: 160px;
+  border-bottom-color: var(--border);
+}
+.dh-edit-bar-pad {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 24px;
+  flex-wrap: wrap;
+}
+.dh-edit-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.dh-edit-hint .k {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-muted);
+}
+.dh-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+}
+.dh-tray-spring {
+  flex: 1;
+}
+.dh-reset-btn {
+  font-size: 13px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  height: 32px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 200ms var(--ease), color 200ms var(--ease);
+}
+.dh-reset-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.dh-tray {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dh-tray-label {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.dh-tray-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 11px 0 10px;
+  border-radius: var(--radius-input);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+  transition: border-color 200ms var(--ease), color 200ms var(--ease);
+}
+.dh-tray-chip:hover {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--brand) 50%, var(--border));
+  color: var(--text);
+}
+.dh-tray-chip svg {
+  color: var(--brand);
+}
+.dh-tray-chip .pl {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.dh-tray-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ───────────── Board scroll + grid ───────────── */
+.dh-board-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 28px 24px 96px;
+  position: relative;
+}
+@media (max-width: 1023px) {
+  .dh-board-scroll {
+    overflow: visible;
+  }
+}
+.dh-board {
+  position: relative;
+  margin: 0 auto;
+  width: 100%;
+  max-width: 1320px;
+}
+.dh-board::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 18px;
+  opacity: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+      color-mix(in srgb, var(--brand) 22%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--brand) 22%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: var(--cell-x) var(--cell-y);
+  transition: opacity 250ms var(--ease);
+}
+.droplet-home.editing .dh-board::before {
+  opacity: 1;
+}
+
+/* ───────────── Tile (positioned wrapper) ───────────── */
+.dh-tile {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transition: transform 280ms var(--ease), width 240ms var(--ease),
+    height 240ms var(--ease);
+  will-change: transform, width, height;
+}
+.dh-tile.dragging {
+  transition: none;
+  z-index: 30;
+}
+.dh-tile.settling {
+  z-index: 20;
+}
+.dh-tile.resizing {
+  transition: none;
+  z-index: 25;
+}
+
+.droplet-home .bento {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--card-bg);
+  border: 1px solid var(--card-bd);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 200ms var(--ease), box-shadow 240ms var(--ease),
+    transform 240ms var(--ease);
+}
+.droplet-home.editing .dh-tile .bento {
+  cursor: grab;
+}
+.dh-tile.dragging .bento {
+  box-shadow: var(--lift);
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  transform: scale(1.012);
+  cursor: grabbing;
+}
+.dh-tile.resizing .bento {
+  box-shadow: var(--lift);
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--border));
+}
+
+/* widget chrome */
+.droplet-home .bento-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 0;
+  flex-shrink: 0;
+}
+.droplet-home .bento-head .wi {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+.droplet-home .bento-head .wt {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .bento-head .wmeta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.droplet-home .bento-body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+}
+.droplet-home .bento-body.scroll {
+  overflow-y: auto;
+}
+
+/* remove (hide) button — edit mode */
+.dh-tile-x {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 200ms var(--ease), transform 200ms var(--ease),
+    background 180ms var(--ease), color 180ms var(--ease),
+    border-color 180ms var(--ease);
+}
+.droplet-home.editing .dh-tile .dh-tile-x {
+  opacity: 1;
+  transform: scale(1);
+}
+.dh-tile-x:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+/* resize handle */
+.dh-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 200ms var(--ease);
+}
+.dh-resize::after {
+  content: "";
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  border-bottom-right-radius: 3px;
+}
+.droplet-home.editing .dh-tile .dh-resize {
+  opacity: 1;
+}
+.droplet-home.editing .dh-tile .dh-resize:hover::after {
+  border-color: var(--brand);
+}
+
+/* drag handle dots in head (edit) */
+.dh-dots {
+  display: none;
+  gap: 2px;
+}
+.droplet-home.editing .dh-dots {
+  display: inline-grid;
+  grid-template-columns: repeat(2, 3px);
+  gap: 2px;
+}
+.dh-dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.6;
+}
+
+/* slot placeholder under a dragged tile */
+.dh-slot-ph {
+  position: absolute;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+  border: 1.5px dashed color-mix(in srgb, var(--brand) 40%, transparent);
+  z-index: 1;
+  pointer-events: none;
+  transition: transform 280ms var(--ease), width 240ms var(--ease),
+    height 240ms var(--ease);
+}
+
+/* tile being shrunk to share its row with the dragged tile */
+.dh-tile.split-target {
+  z-index: 2;
+}
+.dh-tile.split-target .bento {
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 26%, transparent);
+}
+
+/* dim widget body interactions while editing */
+.droplet-home.editing .bento-body {
+  pointer-events: none;
+}
+.droplet-home.editing .bento-body * {
+  user-select: none;
+}
+
+/* ───────────── Feature tile (the chat) — the page, not a card ───────────── */
+.droplet-home .bento--hero {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  border-radius: 18px;
+  overflow: visible;
+}
+.droplet-home .bento--hero .bento-head {
+  display: none;
+}
+.droplet-home .bento--hero .bento-body {
+  padding: 4px 6px 6px 4px;
+}
+.droplet-home .bento--hero .w-chat-aurora {
+  opacity: 1;
+  inset: -10% -8% -6% -10%;
+}
+.droplet-home .bento--hero .w-chat-capsule {
+  border-color: color-mix(in srgb, var(--brand) 22%, var(--card-bd));
+}
+.droplet-home.editing .bento--hero {
+  border: 1px dashed color-mix(in srgb, var(--brand) 28%, var(--border));
+  background: color-mix(in srgb, var(--brand) 4%, transparent);
+}
+.dh-tile.dragging .bento--hero,
+.dh-tile.resizing .bento--hero {
+  background: var(--card-bg);
+  border-color: color-mix(in srgb, var(--brand) 38%, var(--card-bd));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dh-tile,
+  .dh-slot-ph,
+  .droplet-home .bento,
+  .dh-edit-bar {
+    transition: none !important;
+  }
+}
+
+/* ============================================================
+   Settings modal (display density)
+   ============================================================ */
+.droplet-home .dh-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 9, 13, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: dh-modal-fade 160ms var(--ease);
+}
+@keyframes dh-modal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.dh-modal {
+  width: min(480px, calc(100vw - 48px));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  animation: dh-modal-rise 200ms var(--ease);
+}
+@keyframes dh-modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+/* Exit — subtler than the enter (Jakub): a small sink + fade, no scale pop. */
+.droplet-home .dh-modal-overlay.closing {
+  animation: dh-modal-fade-out 150ms var(--ease) forwards;
+}
+.droplet-home .dh-modal-overlay.closing .dh-modal {
+  animation: dh-modal-sink 150ms var(--ease) forwards;
+}
+@keyframes dh-modal-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes dh-modal-sink {
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(3px);
+  }
+}
+.dh-modal-head {
+  display: flex;
+  align-items: center;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.dh-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+}
+.dh-modal-x {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+.dh-modal-x:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.dh-modal-body {
+  padding: 18px;
+}
+.dh-set-h {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.dh-set-ico {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+.dh-set-h .t {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dh-set-h .d {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+.dh-density {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dh-opt {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 180ms var(--ease), background 180ms var(--ease);
+}
+.dh-opt:hover {
+  border-color: color-mix(in srgb, var(--brand) 35%, var(--border));
+}
+.dh-opt.active {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+}
+.dh-opt-txt {
+  flex: 1;
+  min-width: 0;
+}
+.dh-opt-txt .t {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dh-opt-txt .d {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.dh-radio {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  flex-shrink: 0;
+  position: relative;
+  transition: border-color 180ms var(--ease);
+}
+.dh-opt.active .dh-radio {
+  border-color: var(--brand);
+}
+.dh-opt.active .dh-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--brand);
+}
+.dh-prev {
+  width: 52px;
+  height: 40px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  padding: 4px;
+  display: grid;
+  gap: 3px;
+  flex-shrink: 0;
+  align-content: start;
+}
+.dh-prev i {
+  background: color-mix(in srgb, var(--brand) 45%, var(--border));
+  border-radius: 2px;
+  display: block;
+}
+.dh-prev.balanced {
+  grid-template-columns: repeat(3, 1fr);
+}
+.dh-prev.balanced i {
+  height: 13px;
+}
+.dh-prev.dense {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+}
+.dh-prev.dense i {
+  height: 9px;
+}
+.dh-prev.airy {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+.dh-prev.airy i {
+  height: 14px;
+}
+
+/* ============================================================
+   Ambient decorative layer (scoped, fixed, pointer-events none)
+   ============================================================ */
+.dh-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+/* Keep the ambient glow inside the content column so it never bleeds behind
+   the (separately rendered) sidebar and tint its translucent surface. */
+@media (min-width: 1024px) {
+  .dh-ambient {
+    left: 260px;
+  }
+}
+.dh-ambient .blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(95px);
+  will-change: transform;
+}
+.dh-ambient .b1 {
+  width: 540px;
+  height: 540px;
+  background: #4f46e5;
+  left: -140px;
+  top: -120px;
+  opacity: var(--blob-a);
+  animation: dh-blob1 28s ease-in-out infinite;
+}
+.dh-ambient .b2 {
+  width: 480px;
+  height: 480px;
+  background: #6366f1;
+  right: -120px;
+  top: 28%;
+  opacity: var(--blob-b);
+  animation: dh-blob2 34s ease-in-out infinite;
+}
+.dh-ambient .b3 {
+  width: 600px;
+  height: 600px;
+  background: #818cf8;
+  left: 32%;
+  bottom: -220px;
+  opacity: var(--blob-c);
+  animation: dh-blob3 31s ease-in-out infinite;
+}
+.dh-ambient .b4 {
+  width: 520px;
+  height: 520px;
+  background: #d9a35c;
+  right: 8%;
+  bottom: -200px;
+  opacity: var(--blob-d);
+  animation: dh-blob4 38s ease-in-out infinite;
+}
+@keyframes dh-blob1 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(70px, 50px) scale(1.08);
+  }
+}
+@keyframes dh-blob2 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-60px, 40px) scale(1.05);
+  }
+}
+@keyframes dh-blob3 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(50px, -60px) scale(1.1);
+  }
+}
+@keyframes dh-blob4 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-70px, -40px) scale(1.12);
+  }
+}
+
+/* bottom-right droplet — a LOAD indicator that fades once mounted */
+.dh-drop {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+  z-index: 55;
+  pointer-events: none;
+  width: 38px;
+  height: 44px;
+  filter: drop-shadow(0 8px 18px rgba(99, 102, 241, 0.45));
+  animation: dh-drop-bob 1.5s ease-in-out infinite;
+  transition: opacity 500ms ease;
+}
+@media (max-width: 1023px) {
+  .dh-drop {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+  } /* clear the mobile tab bar */
+}
+.dh-drop--done {
+  opacity: 0;
+}
+.dh-drop svg {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.dh-drop .ripple {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  bottom: -3px;
+  width: 30px;
+  height: 9px;
+  transform: translateX(-50%) scale(0.3);
+  border-radius: 50%;
+  border: 1.5px solid rgba(129, 140, 248, 0.5);
+  opacity: 0;
+  animation: dh-ripple 1.5s ease-in-out infinite;
+}
+.dh-drop .ripple2 {
+  animation-delay: 0.4s;
+}
+@keyframes dh-drop-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+@keyframes dh-ripple {
+  0%,
+  45% {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.3);
+  }
+  60% {
+    opacity: 0.7;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-50%) scale(1.6);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dh-ambient .blob,
+  .dh-drop,
+  .dh-drop .ripple {
+    animation: none;
+  }
+}
+
+/* ============================================================
+   Mobile single-column (≤760px). The app shell supplies the
+   top/bottom nav, so here we only stack the widgets.
+   ============================================================ */
+.dh-mobile {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  position: relative;
+  z-index: 1;
+}
+.dh-m-top {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(16px + env(safe-area-inset-top)) 16px 6px;
+}
+.dh-m-greet {
+  margin: 8px 4px 14px;
+  padding: 0 12px;
+}
+.dh-m-greet .g {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+.dh-m-greet .g b {
+  color: var(--brand);
+  font-weight: 700;
+}
+.dh-m-greet .d {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+.dh-m-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 12px 24px;
+}
+.dh-m-board .bento {
+  width: 100%;
+  height: auto;
+}
+.dh-m-board .bento--hero {
+  padding: 4px 2px;
+}
+.dh-m-board .bento--hero .w-chat-display {
+  font-size: 26px;
+}
+.dh-m-board .bento-body,
+.dh-m-board .bento-body.scroll {
+  overflow: visible !important;
+  height: auto;
+}
+.dh-m-board .w-list,
+.dh-m-board .timeline,
+.dh-m-board .w-tasks,
+.dh-m-board .w-dev-list,
+.dh-m-board .w-scenes {
+  height: auto !important;
+  overflow: visible !important;
+  max-height: none !important;
+}
+.dh-m-board .w-stat {
+  height: auto !important;
+  grid-template-rows: auto auto !important;
+}
+.dh-m-board .w-stat-cell {
+  min-height: 76px;
+}
+.dh-m-board .w-cams {
+  height: 188px !important;
+}
+.dh-m-board .w-cal {
+  height: 296px !important;
+}
+.dh-m-board .w-chat {
+  min-height: auto;
+  justify-content: center;
+}
+.dh-m-board .w-chat-capsule {
+  min-height: 24vh;
+}
+.dh-m-board .w-chat-capsule textarea {
+  flex: 1 1 auto;
+  max-height: none;
+}
+.dh-m-board .w-notes {
+  min-height: 96px;
+  height: auto !important;
+}
+/* Comfortable touch targets for the most-tapped mobile controls. */
+.dh-m-board .w-chat-send {
+  height: 44px;
+  padding: 0 20px;
+}
+.dh-m-board .w-scene {
+  padding: 10px 14px;
+}
+.dh-m-board .w-dev,
+.dh-m-board .w-task {
+  padding: 11px 2px;
+}
+
+/* thin scrollbars within widgets */
+.dh-board-scroll::-webkit-scrollbar,
+.droplet-home .bento-body::-webkit-scrollbar,
+.w-tasks::-webkit-scrollbar,
+.w-dev-list::-webkit-scrollbar,
+.w-cal-agenda::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.dh-board-scroll::-webkit-scrollbar-thumb,
+.droplet-home .bento-body::-webkit-scrollbar-thumb,
+.w-tasks::-webkit-scrollbar-thumb,
+.w-dev-list::-webkit-scrollbar-thumb,
+.w-cal-agenda::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 35%, transparent);
+  border-radius: 4px;
+}
