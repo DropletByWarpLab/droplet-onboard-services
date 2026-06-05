@@ -12,8 +12,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // PR #372 — route off the explicit `/setup/state` machine. The appliance
   // lifecycle ("unclaimed" | "ready") replaces the boolean `setupRequired`
   // that was derived from Nextcloud's `installed` flag.
-  const { user, isLoading, setupState, setupProbeError, retrySetupProbe } =
-    useAuth();
+  const {
+    user,
+    isLoading,
+    setupState,
+    setupProbeError,
+    setupAutoRetrying,
+    retrySetupProbe,
+  } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -137,27 +143,56 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // with a retry. A public page (/setup, /login) still renders so a deep-link
   // isn't blocked behind a transient probe failure.
   if (probeBlocked) {
+    // WARP-667 — while a bounded cold-boot auto-retry is still pending, show a
+    // calm "Reconnecting…" state (the box is usually just warming up) rather
+    // than immediately flashing an error + manual Retry. Once the auto-retries
+    // are exhausted we fall back to the explicit error + Retry affordance.
     return (
       <div className="min-h-screen bg-surface-primary flex items-center justify-center">
-        <div className="text-center max-w-sm px-6">
-          <div className="flex items-center justify-center mx-auto mb-3">
-            <DropletMark size={32} className="text-accent" aria-label="Droplet" />
-          </div>
-          <p className="type-headline text-label-primary mb-2">
-            Can&apos;t reach your appliance
-          </p>
-          <p className="type-subheadline text-label-tertiary mb-4">
-            {setupProbeError}
-          </p>
-          <button
-            type="button"
-            onClick={() => {
-              void retrySetupProbe();
-            }}
-            className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline"
+        <div
+          role="status"
+          aria-live="polite"
+          className="text-center max-w-sm px-6"
+        >
+          <div
+            className={`flex items-center justify-center mx-auto mb-3${
+              setupAutoRetrying ? " animate-pulse motion-reduce:animate-none" : ""
+            }`}
           >
-            Retry
-          </button>
+            {/* Decorative — the role="status" region + headline carry the
+                spoken status, so the mark stays out of the a11y tree (it sits
+                next to "…your Droplet" / the error copy). */}
+            <DropletMark size={32} className="text-accent" />
+          </div>
+          {setupAutoRetrying ? (
+            <>
+              <p className="type-headline text-label-primary mb-2">
+                Reconnecting to your Droplet…
+              </p>
+              <p className="type-subheadline text-label-tertiary mb-4">
+                Your Droplet is starting up. This can take a few seconds on the
+                first boot.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="type-headline text-label-primary mb-2">
+                Can&apos;t reach your appliance
+              </p>
+              <p className="type-subheadline text-label-tertiary mb-4">
+                {setupProbeError}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  void retrySetupProbe();
+                }}
+                className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline"
+              >
+                Retry
+              </button>
+            </>
+          )}
         </div>
       </div>
     );

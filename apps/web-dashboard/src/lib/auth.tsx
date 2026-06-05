@@ -60,6 +60,11 @@ interface AuthContextValue {
   setupProbeError: string | null;
   // M3 — re-run the lifecycle probe (used by a retry affordance).
   retrySetupProbe: () => Promise<void>;
+  // WARP-667 — true while a bounded cold-boot auto-retry of the setup-state
+  // probe is still pending/in-flight (the probe failed, no state yet, and
+  // attempts remain). AuthGate shows a "Reconnecting…" state while true and the
+  // explicit manual Retry only once it goes false (attempts exhausted).
+  setupAutoRetrying: boolean;
   // M4 (PR #372 re-review) — the wizard-FINISH PATCH can fail. When it does,
   // this carries the error and the optimistic in-memory `ready` flip is
   // rolled back, so the UI shows the failure + a retry instead of silently
@@ -102,6 +107,18 @@ const USER_KEY = "droplet-auth-user";
  * short enough that a stuck endpoint doesn't read as a hang to the user.
  */
 const AUTH_INIT_TIMEOUT_MS = 6_000;
+
+/**
+ * WARP-667 — cold-boot self-heal. When the first-run setup-state probe can't
+ * resolve because the orchestrator is still warming, auto-retry it on this
+ * backoff schedule BEFORE the owner has to hit the manual Retry. Bounded: a box
+ * still coming up self-heals within ~10s with no manual refresh, while a
+ * genuinely-unreachable box settles to the explicit Retry after the last
+ * attempt (no infinite spin, no guessing into the wizard). Only the setup-state
+ * probe is retried — a failed `/api/auth/me` just means "unauthenticated",
+ * which the login path already handles.
+ */
+const SETUP_PROBE_RETRY_DELAYS_MS = [1_500, 3_000, 6_000];
 
 /**
  * Fresh budget for `authFetch`'s post-refresh retry (onboard#477 review). The
@@ -203,6 +220,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [setupState, setSetupState] = useState<SetupStateInfo | null>(null);
   const [setupProbeError, setSetupProbeError] = useState<string | null>(null);
+  // WARP-667 — how many cold-boot auto-retries of the setup-state probe have
+  // fired so far. Walks the SETUP_PROBE_RETRY_DELAYS_MS backoff and, once it
+  // reaches the cap, stops the loop and lets AuthGate fall back to manual Retry.
+  const [setupRetryAttempt, setSetupRetryAttempt] = useState(0);
   const [completeSetupError, setCompleteSetupError] = useState<string | null>(
     null,
   );
@@ -306,6 +327,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     init();
   }, [probeSetupState, restoreSession]);
+
+  // WARP-667 — bounded cold-boot auto-retry of the setup-state probe. Fires
+  // only once init() has settled (isLoading false), the probe FAILED
+  // (setupProbeError set) and there's still no state to route off (setupState
+  // null). Each failure bumps setupRetryAttempt, which walks the backoff and
+  // re-arms this effect; a success populates setupState so the guard below
+  // short-circuits and the loop stops. `cancelled` guards the post-await bump so
+  // an unmount mid-flight can't re-arm a torn-down provider.
+  useEffect(() => {
+    if (isLoading) return;
+    if (setupProbeError === null || setupState !== null) return;
+    if (setupRetryAttempt >= SETUP_PROBE_RETRY_DELAYS_MS.length) return;
+
+    let cancelled = false;
+    const id = setTimeout(async () => {
+      const ok = await probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
+      if (cancelled || ok) return; // success → setupState set → effect stops
+      setSetupRetryAttempt((n) => n + 1); // failure → walk the backoff
+    }, SETUP_PROBE_RETRY_DELAYS_MS[setupRetryAttempt]);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  }, [isLoading, setupProbeError, setupState, setupRetryAttempt, probeSetupState]);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await fetch("/api/auth/login", {
@@ -431,6 +477,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const setupRequired: boolean | null =
     setupState === null ? null : setupState.appliance === "unclaimed";
 
+  // WARP-667 — true from the first failed boot probe through the last bounded
+  // auto-retry (probe failed, no state yet, attempts remain). AuthGate shows
+  // "Reconnecting…" while true and the manual Retry only once it's false.
+  const setupAutoRetrying =
+    setupProbeError !== null &&
+    setupState === null &&
+    setupRetryAttempt < SETUP_PROBE_RETRY_DELAYS_MS.length;
+
   return (
     <AuthContext.Provider
       value={{
@@ -440,6 +494,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setupRequired,
         setupProbeError,
         retrySetupProbe,
+        setupAutoRetrying,
         completeSetupError,
         login,
         // PR #377: passwordless passkey sign-in hydrates the context here.
