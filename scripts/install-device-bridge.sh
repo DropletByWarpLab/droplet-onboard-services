@@ -86,6 +86,25 @@ fi
 install -m 0755 "$POOL_SCRIPT_SRC" "$POOL_SCRIPT_DST"
 log "installed $POOL_SCRIPT_DST"
 
+# --- 1d) Install the single-box hostapd Wi-Fi-write host script (WARP-808) ---
+# The device-bridge's POST /openwrt/wifi/hostapd shells this to write the
+# customer's Wi-Fi SSID/PSK on the single-box shape — it upserts
+# DROPLET_AP_SSID/PSK in /etc/default/droplet-openwrt-attach and restarts
+# droplet-openwrt-attach.service (which regenerates /etc/hostapd.conf + respawns
+# hostapd). It lives on the host (writes a root-owned env file + runs systemctl,
+# can't run from a container) per architecture-guard rule 20; installed here
+# (never hand-placed) so factory-reset removes it cleanly. It validates
+# SSID 1-32 / PSK 8-63 before writing and never logs the PSK. Repo source is
+# scripts/host/.
+HOSTAPD_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-hostapd.sh"
+HOSTAPD_SCRIPT_DST="/usr/local/sbin/droplet-set-hostapd.sh"
+if [[ ! -f "$HOSTAPD_SCRIPT_SRC" ]]; then
+  log "missing source: $HOSTAPD_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
+log "installed $HOSTAPD_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

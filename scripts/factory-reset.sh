@@ -393,6 +393,16 @@ if [ -f /usr/local/sbin/droplet-storage-pool.sh ]; then
   log_success "Removed storage-pool host script"
 fi
 
+# Single-box hostapd Wi-Fi-write host script (WARP-808). Remove so a factory
+# reset truly returns to out-of-box; install-device-bridge.sh reinstalls it on
+# re-provision. The customer's SSID/PSK lives in the attach env file, which the
+# .env wipe + setup wizard re-seed handles separately; this removes the executor
+# only.
+if [ -f /usr/local/sbin/droplet-set-hostapd.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-set-hostapd.sh 2>/dev/null || true
+  log_success "Removed hostapd Wi-Fi-write host script"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then

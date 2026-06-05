@@ -166,6 +166,15 @@ services:
       # "Router supervision disabled" banner. `mock` is handled on the routing
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
+      # WARP-808: which deployment shape broadcasts the home Wi-Fi AP. `uci`
+      # (default, multi-box) routes Home Wi-Fi SSID/PSK writes through the
+      # routing service exactly as before; `hostapd` (single-box, set by
+      # single-box.sh's configure_single_box_env) routes them through the
+      # device-bridge's POST /openwrt/wifi/hostapd because the single-box AP is
+      # a raw host hostapd, not a UCI router. Read by network.service.ts. The
+      # .env (env_file above) also carries it; listing it here keeps the
+      # orchestrator's AP-mode dependency self-documenting, like ROUTING_MODE.
+      - DROPLET_AP_MODE=${DROPLET_AP_MODE:-uci}
       # WARP-562: credentialed CORS allowlist. Empty falls through to the safe
       # code default (https://droplet-ai.local). NEVER set this to '*' — the
       # orchestrator rejects a wildcard at startup.
