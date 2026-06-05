@@ -32,6 +32,7 @@ from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
     UbusError,
+    ScanUnsupportedError,
     UBUS_STATUS_NOT_FOUND,
     UBUS_STATUS_NO_DATA,
     _ubus_object_absent,
@@ -492,6 +493,17 @@ def wireless_scan(device: Optional[str] = None):
     # device=None → SDK resolves DROPLET_WIFI_SCAN_DEVICE (last-resort wlan0).
     try:
         return {"results": get_router().wireless.scan(device)}
+    except ScanUnsupportedError as exc:
+        # WARP-816: the radio is in an AP/Master role and can't station-scan
+        # (single-box `wlp14s0`). This is NOT a 200 `[]` (which the dashboard
+        # reads as "no networks") and NOT a retryable 5xx — it's a stable,
+        # terminal capability fact. Return 409 with a machine-readable `code`
+        # so the orchestrator maps it to a typed RouterError and the dashboard
+        # renders calm "scanning unavailable while broadcasting" copy.
+        return JSONResponse(
+            status_code=409,
+            content={"code": exc.code, "message": str(exc), "device": exc.device},
+        )
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
