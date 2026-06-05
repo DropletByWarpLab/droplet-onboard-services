@@ -11,7 +11,7 @@ import {
   Globe,
   Smartphone,
 } from "lucide-react";
-import { fetchVpnStatus, createVpnPeer } from "@/lib/api";
+import { fetchVpnStatus, createVpnPeer, routerUnreachableNotice } from "@/lib/api";
 import type { VpnStatusInfo, VpnPeerCreatedInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
@@ -67,6 +67,9 @@ export function VpnStep({
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-807: a router-reachability notice is a soft "do this later" state —
+  // render it in amber (matching the preCheck gate) rather than alarm-red.
+  const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
@@ -88,17 +91,29 @@ export function VpnStep({
   async function handleCreate() {
     const trimmed = deviceLabel.trim();
     if (!trimmed) {
+      setErrorTone("error");
       setError("Give this device a name (e.g. \"Stefan's iPhone\")");
       return;
     }
     setError(null);
+    setErrorTone("error");
     setSubmitting(true);
     try {
       const result = await createVpnPeer(trimmed);
       setCreated(result);
       setPhase("ready");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create device");
+      // WARP-807: an unreachable router surfaces as a RouterStatusError
+      // (503 / UNREACHABLE). Show the actionable "finish from Settings later"
+      // notice in the soft amber tone; everything else keeps its real message.
+      const notice = routerUnreachableNotice(e);
+      if (notice) {
+        setErrorTone("notice");
+        setError(notice);
+      } else {
+        setErrorTone("error");
+        setError(e instanceof Error ? e.message : "Failed to create device");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -272,7 +287,13 @@ export function VpnStep({
           )}
 
           {error && (
-            <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+            <div
+              className={
+                errorTone === "notice"
+                  ? "flex items-start gap-2 type-footnote text-system-orange bg-system-orange/10 rounded-sm px-3 py-2"
+                  : "flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+              }
+            >
               <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
               <span>{error}</span>
             </div>

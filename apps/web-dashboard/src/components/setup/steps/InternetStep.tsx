@@ -15,6 +15,7 @@ import {
   confirmNetworkCommand,
   fetchDuckDnsStatus,
   fetchNetworkOperation,
+  routerUnreachableNotice,
   setDuckDnsConfig,
   setWifiPassword,
   setWifiSsid,
@@ -105,6 +106,10 @@ export function InternetStep({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-807: a router-reachability notice is a soft "do this later" state, not
+  // a destructive validation error — render it in the calmer amber tone (like
+  // the VPN step's "Internet not finished" gate) rather than alarm-red.
+  const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
 
   // Load any prior DuckDNS config so we can pre-fill the form (and let
   // the customer know they don't have to redo the work). 403 just means
@@ -228,10 +233,12 @@ export function InternetStep({
   async function handleSave() {
     const v = validate();
     if (v) {
+      setErrorTone("error");
       setError(v);
       return;
     }
     setError(null);
+    setErrorTone("error");
     setSaving(true);
     try {
       // Section A — Home Wi-Fi (only when an SSID was entered).
@@ -261,9 +268,20 @@ export function InternetStep({
 
       onComplete();
     } catch (e) {
-      const msg =
-        e instanceof Error ? e.message : "Could not save. Try again in a moment.";
-      setError(msg);
+      // WARP-807: when the router/routing service is unreachable the write
+      // throws a RouterStatusError (503 / UNREACHABLE). Surface the actionable
+      // "finish from Settings later" notice instead of the raw error, and tone
+      // it as a soft notice. Everything else keeps its real message.
+      const notice = routerUnreachableNotice(e);
+      if (notice) {
+        setErrorTone("notice");
+        setError(notice);
+      } else {
+        setErrorTone("error");
+        setError(
+          e instanceof Error ? e.message : "Could not save. Try again in a moment.",
+        );
+      }
     } finally {
       setSaving(false);
     }
@@ -449,7 +467,13 @@ export function InternetStep({
       </div>
 
       {error && (
-        <div className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+        <div
+          className={
+            errorTone === "notice"
+              ? "mt-4 flex items-start gap-2 type-footnote text-system-orange bg-system-orange/10 rounded-sm px-3 py-2"
+              : "mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+          }
+        >
           <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>

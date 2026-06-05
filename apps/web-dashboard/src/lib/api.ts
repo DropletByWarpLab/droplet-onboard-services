@@ -946,6 +946,73 @@ export class RouterStatusError extends Error {
   }
 }
 
+/**
+ * WARP-807: codes that mean "the router/routing service can't be reached right
+ * now" — a soft, recoverable condition during onboarding (the box's AP may not
+ * be up yet), NOT a destructive failure the customer must fix. The orchestrator
+ * returns these at HTTP 503.
+ */
+const ROUTER_UNREACHABLE_CODES: ReadonlySet<RouterErrorCode> = new Set([
+  "UNREACHABLE",
+  "TIMEOUT",
+  "DISABLED",
+]);
+
+/** The single actionable line the wizard shows when the router isn't reachable. */
+export const ROUTER_UNREACHABLE_NOTICE =
+  "Your router isn't reachable yet — you can finish this from Settings later.";
+
+/**
+ * If `e` represents a router-reachability problem (a `RouterStatusError` with an
+ * UNREACHABLE/TIMEOUT/DISABLED code, or any error carrying HTTP 503), return the
+ * actionable notice the wizard should render in place of the raw message;
+ * otherwise return `null` so the caller falls back to the real error text.
+ */
+export function routerUnreachableNotice(e: unknown): string | null {
+  if (e instanceof RouterStatusError) {
+    if (ROUTER_UNREACHABLE_CODES.has(e.code) || e.status === 503) {
+      return ROUTER_UNREACHABLE_NOTICE;
+    }
+    return null;
+  }
+  // Defensive: a plain error that still carries a 503 status (shouldn't happen
+  // for the typed write paths, but keeps callers robust to other surfaces).
+  if (
+    e &&
+    typeof e === "object" &&
+    (e as { status?: unknown }).status === 503
+  ) {
+    return ROUTER_UNREACHABLE_NOTICE;
+  }
+  return null;
+}
+
+/**
+ * WARP-807: shared error-mapper for network WRITE endpoints. The orchestrator's
+ * global error handler returns a flat `{ error, message, code }` body. When a
+ * trusted RouterError surfaces (e.g. a 503 with code UNREACHABLE), throw a typed
+ * `RouterStatusError` so the wizard can branch on `code`/`status` and render an
+ * actionable message instead of the raw text. Falls back to a plain `Error`
+ * (preserving the prior behavior) for everything else.
+ *
+ * The caller must pass the already-parsed body (or `{}` on a non-JSON response).
+ */
+function throwNetworkWriteError(
+  body: { error?: unknown; message?: unknown; code?: unknown },
+  status: number,
+  fallback: string,
+): never {
+  const code = typeof body.code === "string" ? (body.code as RouterErrorCode) : undefined;
+  const message =
+    (typeof body.message === "string" && body.message) ||
+    (typeof body.error === "string" && body.error) ||
+    `${fallback}: ${status}`;
+  if (code) {
+    throw new RouterStatusError(code, message, status);
+  }
+  throw new Error(message);
+}
+
 export async function fetchNetworkStatus(): Promise<NetworkOverview> {
   const res = await authFetch(`${BASE}/api/network/status`);
   if (res.ok) return res.json();
@@ -991,8 +1058,8 @@ export async function setWifiSsid(ssid: string): Promise<NetworkCommandResult> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ssid }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set SSID: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set SSID");
   return data;
 }
 
@@ -1002,8 +1069,8 @@ export async function setWifiPassword(password: string): Promise<NetworkCommandR
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set password: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set password");
   return data;
 }
 
@@ -2881,7 +2948,7 @@ export async function createVpnPeer(deviceLabel: string): Promise<VpnPeerCreated
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to create peer: ${res.status}`);
+    throwNetworkWriteError(body, res.status, "Failed to create peer");
   }
   return res.json();
 }
@@ -2923,7 +2990,7 @@ export async function setDuckDnsConfig(opts: {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to update DuckDNS: ${res.status}`);
+    throwNetworkWriteError(body, res.status, "Failed to update DuckDNS");
   }
   return res.json();
 }
