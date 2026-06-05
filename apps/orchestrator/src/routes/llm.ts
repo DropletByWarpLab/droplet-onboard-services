@@ -634,6 +634,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               existing.status = e.status;
               existing.message = e.message;
               existing.data = e.data;
+              // WARP-640 — persist the confirmation handle so a page reload
+              // while the chip is in `confirmation_required` still renders the
+              // "Approve & run" button. The token rides on e.confirmation (not
+              // e.data) for a confirmation_required result. (review #497)
+              if (e.confirmation) existing.confirmation = e.confirmation;
             }
           }
         };

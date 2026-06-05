@@ -1022,6 +1022,12 @@ export function useChat(options: UseChatOptions = {}) {
                   status: c.status,
                   message: c.message,
                   data: c.data,
+                  // WARP-640 — restore the confirmation handle so a chip
+                  // reloaded in `confirmation_required` still renders the
+                  // "Approve & run" button (mirrors the live tool_result
+                  // path above). The amber block guards re-clicks via the
+                  // server's 403 on a consumed/expired token. (review #497)
+                  ...(c.confirmation ? { confirmation: c.confirmation } : {}),
                 })),
               }
             : {}),

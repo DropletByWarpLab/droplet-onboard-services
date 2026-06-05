@@ -31,6 +31,21 @@ export interface PersistedToolCall {
   status?: string;
   message?: string;
   data?: unknown;
+  /**
+   * WARP-640 — the one-click re-issue handle for a confirmation the chat chip
+   * can complete itself (e.g. `run_scene`). Persisted so that reloading a
+   * conversation while a chip is still in `confirmation_required` keeps the
+   * "Approve & run" button. A `confirmation_required` result carries the token
+   * on this field, NOT on `data`, so it has to be persisted explicitly. The
+   * single-use token is allowed to round-trip: it stays valid server-side for
+   * its TTL, and a consumed/expired token is rejected with 403 by
+   * `approveScene`, so replay-on-reload is safe. (review #497)
+   */
+  confirmation?: {
+    kind: string;
+    sceneId?: string;
+    confirmationToken: string;
+  };
 }
 
 export interface PersistedMessageInput {

@@ -1939,6 +1939,16 @@ export interface PersistedConversation {
           status?: string;
           message?: string;
           data?: unknown;
+          /**
+           * WARP-640 — re-issue handle for an in-chat confirmation (run_scene).
+           * Returned by the orchestrator so a reloaded chip in
+           * `confirmation_required` can still render "Approve & run". (review #497)
+           */
+          confirmation?: {
+            kind: string;
+            sceneId?: string;
+            confirmationToken: string;
+          };
         }>
       | null;
     toolCallId: string | null;
