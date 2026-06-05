@@ -149,18 +149,25 @@ export function AuthGate({ children }: { children: ReactNode }) {
     // are exhausted we fall back to the explicit error + Retry affordance.
     return (
       <div className="min-h-screen bg-surface-primary flex items-center justify-center">
-        <div className="text-center max-w-sm px-6">
+        <div
+          role="status"
+          aria-live="polite"
+          className="text-center max-w-sm px-6"
+        >
           <div
             className={`flex items-center justify-center mx-auto mb-3${
-              setupAutoRetrying ? " animate-pulse" : ""
+              setupAutoRetrying ? " animate-pulse motion-reduce:animate-none" : ""
             }`}
           >
-            <DropletMark size={32} className="text-accent" aria-label="Droplet" />
+            {/* Decorative — the role="status" region + headline carry the
+                spoken status, so the mark stays out of the a11y tree (it sits
+                next to "…your Droplet" / the error copy). */}
+            <DropletMark size={32} className="text-accent" />
           </div>
           {setupAutoRetrying ? (
             <>
               <p className="type-headline text-label-primary mb-2">
-                Reconnecting to your appliance…
+                Reconnecting to your Droplet…
               </p>
               <p className="type-subheadline text-label-tertiary mb-4">
                 Your Droplet is starting up. This can take a few seconds on the
