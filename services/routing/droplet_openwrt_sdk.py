@@ -7,7 +7,7 @@ OpenWrt routing layer via the ubus JSON-RPC API.
 Usage:
     from droplet_openwrt_sdk import DropletRouter
 
-    router = DropletRouter("10.0.0.1", username="droplet-ai", password="SECRET")
+    router = DropletRouter("192.168.50.1", username="droplet-ai", password="SECRET")
 
     # Get network status
     status = router.network.interface_status("lan")

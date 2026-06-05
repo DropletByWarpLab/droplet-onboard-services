@@ -14,6 +14,19 @@ Group=droplet
 # can OVERRIDE any of them — including BRIDGE_BIND (WARP-659): systemd applies
 # Environment/EnvironmentFile in source order, last wins, so the file must come
 # last or an operator's setting is silently ignored.
+#
+# WARP-815 (K2): OPENWRT_HOST/USER/IFACE below are the MULTI-BOX UCI defaults —
+# the Pi-5 OpenWrt router at 192.168.50.1, whose Wi-Fi radio surfaces as `wlan0`
+# in UCI. They feed the SSH `iwinfo <OPENWRT_IFACE> scan` path in
+# device-bridge.py (scan_via_openwrt). 192.168.50.1 is the single documented
+# OPENWRT_HOST default (matches docker/docker-compose.yml + services/routing/
+# main.py). On the SINGLE-BOX shape the bridge does NOT use these: setup.sh sets
+# DROPLET_AP_MODE=hostapd (via the EnvironmentFile below) and the bridge reads AP
+# creds from the host hostapd / the droplet-openwrt container's hostapd.conf
+# (hostapd_wifi_credentials), not from a UCI router — so the single-box radio
+# name (wlp14s0) is irrelevant here. These are NOT host-specific footguns: they
+# are the correct multi-box UCI values, and either shape can re-pin them via the
+# operator env file (loaded last).
 Environment=OPENWRT_HOST=192.168.50.1
 Environment=OPENWRT_USER=root
 Environment=OPENWRT_IFACE=wlan0
