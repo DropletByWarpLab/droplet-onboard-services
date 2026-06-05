@@ -958,20 +958,48 @@ const ROUTER_UNREACHABLE_CODES: ReadonlySet<RouterErrorCode> = new Set([
   "DISABLED",
 ]);
 
-/** The single actionable line the wizard shows when the router isn't reachable. */
-export const ROUTER_UNREACHABLE_NOTICE =
-  "Your router isn't reachable yet — you can finish this from Settings later.";
+/**
+ * The fixed lead-in of the wizard's "router isn't reachable" notice. The
+ * trailing destination is supplied per-surface (see {@link routerUnreachableNotice})
+ * because the place to finish the work later differs by step — Wi-Fi/DuckDNS
+ * live at the "Network" page, WireGuard peers at "Remote Access". The caller
+ * renders the destination as a monospaced span, so it is intentionally kept out
+ * of this prefix. (WARP-807 UX review: the old single string pointed everyone at
+ * "Settings", which has none of these controls — a dead end.)
+ */
+export const ROUTER_UNREACHABLE_PREFIX =
+  "Your router isn't reachable yet — you can finish this from";
+
+/** The actionable notice, split so the caller can monospace the destination. */
+export interface RouterUnreachableNotice {
+  /** Lead-in sentence up to (but excluding) the destination name. */
+  prefix: string;
+  /** The dashboard surface that owns this setting, e.g. "Network". */
+  destination: string;
+}
 
 /**
  * If `e` represents a router-reachability problem (a `RouterStatusError` with an
  * UNREACHABLE/TIMEOUT/DISABLED code, or any error carrying HTTP 503), return the
- * actionable notice the wizard should render in place of the raw message;
- * otherwise return `null` so the caller falls back to the real error text.
+ * actionable notice the wizard should render in place of the raw message — split
+ * into `{ prefix, destination }` so the caller can monospace the destination and
+ * append " later." Otherwise return `null` so the caller falls back to the real
+ * error text.
+ *
+ * @param destination the dashboard surface where this setting can be finished
+ *   later (e.g. "Network" for the Internet step, "Remote Access" for VPN).
  */
-export function routerUnreachableNotice(e: unknown): string | null {
+export function routerUnreachableNotice(
+  e: unknown,
+  destination: string,
+): RouterUnreachableNotice | null {
+  const notice = (): RouterUnreachableNotice => ({
+    prefix: ROUTER_UNREACHABLE_PREFIX,
+    destination,
+  });
   if (e instanceof RouterStatusError) {
     if (ROUTER_UNREACHABLE_CODES.has(e.code) || e.status === 503) {
-      return ROUTER_UNREACHABLE_NOTICE;
+      return notice();
     }
     return null;
   }
@@ -982,7 +1010,7 @@ export function routerUnreachableNotice(e: unknown): string | null {
     typeof e === "object" &&
     (e as { status?: unknown }).status === 503
   ) {
-    return ROUTER_UNREACHABLE_NOTICE;
+    return notice();
   }
   return null;
 }

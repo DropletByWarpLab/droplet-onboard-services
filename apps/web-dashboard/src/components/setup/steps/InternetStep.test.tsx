@@ -2,9 +2,14 @@
  * WARP-807 (K3): when the router/routing service is unreachable, the network
  * WRITE endpoints now return 503 + code UNREACHABLE (via RouterStatusError on
  * the client). The Internet step must render an actionable message
- * ("Your router isn't reachable yet — you can finish this from Settings
- * later") rather than the raw error text or a dead "Internal server error",
- * and must keep the Skip affordance available.
+ * ("Your router isn't reachable yet — you can finish this from Network later")
+ * rather than the raw error text or a dead "Internal server error", and must
+ * keep the Skip affordance available.
+ *
+ * UX review (droplet-ui-ux, CHANGES_REQUESTED): the destination must be the
+ * surface that actually owns this setting — Wi-Fi/DuckDNS live at /network
+ * ("Network"), NOT Settings — and the soft notice must be announced to screen
+ * readers (role="status" aria-live="polite").
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -65,14 +70,35 @@ describe("InternetStep — router unreachable (WARP-807)", () => {
     fillDuckDns("yourstudio", "tok1234567890");
     fireEvent.click(saveCta());
 
-    expect(
-      await screen.findByText(/router isn't reachable yet/i),
-    ).toBeInTheDocument();
-    // The raw RouterError message must not be what the customer sees.
+    const notice = await screen.findByText(/router isn't reachable yet/i);
+    expect(notice).toBeInTheDocument();
+    // Per-surface copy: the destination is "Network" (where Wi-Fi/DuckDNS live),
+    // NOT "Settings". The raw RouterError message must not surface either.
+    expect(notice).toHaveTextContent(/finish this from\s+Network later/i);
+    expect(notice).not.toHaveTextContent(/Settings/i);
     expect(screen.queryByText(/fetch failed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/internal server error/i)).not.toBeInTheDocument();
     // The step did not advance.
     expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("announces the soft notice to screen readers (role=status, aria-live=polite)", async () => {
+    setDuckDnsConfig.mockRejectedValueOnce(
+      new RouterStatusError("UNREACHABLE", "DuckDNS update: fetch failed", 503),
+    );
+    render(<InternetStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+
+    await waitFor(() => expect(saveCta()).toBeEnabled());
+    fillDuckDns("yourstudio", "tok1234567890");
+    fireEvent.click(saveCta());
+    await screen.findByText(/router isn't reachable yet/i);
+
+    // The amber "do this later" notice is non-urgent → status/polite, so a
+    // screen reader hears it without interrupting (mirrors AccountStep + the
+    // network/ dir). role="status" implies aria-live="polite".
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent(/router isn't reachable yet/i);
+    expect(region).toHaveAttribute("aria-live", "polite");
   });
 
   it("keeps the Skip affordance available on an UNREACHABLE failure", async () => {
@@ -100,9 +126,12 @@ describe("InternetStep — router unreachable (WARP-807)", () => {
     fillDuckDns("yourstudio", "tok1234567890");
     fireEvent.click(saveCta());
 
-    expect(
-      await screen.findByText(/subdomain already in use/i),
-    ).toBeInTheDocument();
+    const err = await screen.findByText(/subdomain already in use/i);
+    expect(err).toBeInTheDocument();
+    // An ordinary failure is urgent → role="alert" (assertive), not status.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /subdomain already in use/i,
+    );
     // And it does NOT mislabel an ordinary failure as a reachability problem.
     expect(
       screen.queryByText(/router isn't reachable yet/i),
