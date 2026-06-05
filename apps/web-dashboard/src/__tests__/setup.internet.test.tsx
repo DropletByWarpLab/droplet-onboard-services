@@ -130,6 +130,19 @@ async function advanceToInternet() {
   });
 }
 
+/**
+ * WARP-809 — the Home Wi-Fi section is now optional and collapsed by default
+ * behind an "Add a Wi-Fi network" disclosure. Tests that exercise the Wi-Fi
+ * SSID/password fields must open it first (the DuckDNS-only cases don't).
+ */
+async function openWifi() {
+  await act(async () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: /add a wi-fi network/i }),
+    );
+  });
+}
+
 describe("setup Internet step (WARP-174)", () => {
   beforeEach(() => {
     fetchDuckDnsStatusMock.mockReset();
@@ -278,12 +291,17 @@ describe("setup Internet step (WARP-174)", () => {
 });
 
 /**
- * WARP-657 — the network step now ALSO configures the Home Wi-Fi the Droplet
- * broadcasts (it's the home router). Section A = Home Wi-Fi (SSID + PSK), wired
- * to POST /api/network/wifi/{ssid,password}; Section B = the existing DuckDNS
- * inputs. Validation mirrors services/routing/schemas.py (SSID 1–32, PSK 8–63);
- * the password POST is Tier-2 and may return a 202 `confirmation_required`
- * body the step auto-confirms (the "Save and continue" click IS the consent).
+ * WARP-657 — the network step can ALSO configure a Home Wi-Fi the Droplet
+ * broadcasts. Section A = Home Wi-Fi (SSID + PSK), wired to POST
+ * /api/network/wifi/{ssid,password}; Section B = the existing DuckDNS inputs.
+ * Validation mirrors services/routing/schemas.py (SSID 1–32, PSK 8–63); the
+ * password POST is Tier-2 and may return a 202 `confirmation_required` body the
+ * step auto-confirms (the "Save and continue" click IS the consent).
+ *
+ * WARP-809 — the box does NOT have to be the home router; many deployments
+ * coexist on an existing network. So Section A is OPTIONAL and collapsed by
+ * default behind an "Add a Wi-Fi network" disclosure: these tests call
+ * `openWifi()` to opt in before exercising the SSID/password path.
  */
 describe("setup network step — Home Wi-Fi (WARP-657)", () => {
   beforeEach(() => {
@@ -301,31 +319,43 @@ describe("setup network step — Home Wi-Fi (WARP-657)", () => {
     vi.clearAllMocks();
   });
 
-  it("renders the two-section step with the Home Wi-Fi inputs and section labels", async () => {
+  it("renders the two-section step with the Home Wi-Fi section optional/collapsed (WARP-809) and DuckDNS visible", async () => {
     fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
     render(<SetupPage />);
     await advanceToInternet();
 
     // New title + subtitle.
     expect(screen.getByText(/set up your network/i)).toBeInTheDocument();
-    // Section A label + both Wi-Fi inputs.
-    expect(screen.getByText(/home wi-fi/i)).toBeInTheDocument();
+    // Section A label present, but the section is OPTIONAL and COLLAPSED by
+    // default (WARP-809): the Wi-Fi inputs are not mounted until the customer
+    // opts in via the disclosure.
+    // "Home Wi-Fi" appears in both the section label and the LearnMoreCard copy.
+    expect(screen.getAllByText(/home wi-fi/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/^optional$/i)).toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText(/studio fotonia/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText(/wi-fi password/i),
+    ).not.toBeInTheDocument();
+    // Section B label still present (DuckDNS) and its inputs visible up front —
+    // the address is the primary, useful action of this step.
+    expect(screen.getByText(/internet address/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/yourstudio/i)).toBeInTheDocument();
+
+    // Opening the disclosure reveals both Wi-Fi inputs.
+    await openWifi();
     expect(
       screen.getByPlaceholderText(/network name|studio fotonia/i),
     ).toBeInTheDocument();
-    expect(
-      screen.getByPlaceholderText(/wi-fi password/i),
-    ).toBeInTheDocument();
-    // Section B label still present (DuckDNS).
-    expect(screen.getByText(/internet address/i)).toBeInTheDocument();
-    // DuckDNS inputs unchanged.
-    expect(screen.getByPlaceholderText(/yourstudio/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/wi-fi password/i)).toBeInTheDocument();
   });
 
   it("rejects an SSID over 32 chars client-side without hitting the Wi-Fi API", async () => {
     fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
     render(<SetupPage />);
     await advanceToInternet();
+    await openWifi();
 
     fireEvent.change(
       screen.getByPlaceholderText(/network name|studio fotonia/i),
@@ -352,6 +382,7 @@ describe("setup network step — Home Wi-Fi (WARP-657)", () => {
     fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
     render(<SetupPage />);
     await advanceToInternet();
+    await openWifi();
 
     fireEvent.change(
       screen.getByPlaceholderText(/network name|studio fotonia/i),
@@ -385,6 +416,7 @@ describe("setup network step — Home Wi-Fi (WARP-657)", () => {
     });
     render(<SetupPage />);
     await advanceToInternet();
+    await openWifi();
 
     fireEvent.change(
       screen.getByPlaceholderText(/network name|studio fotonia/i),
@@ -450,6 +482,7 @@ describe("setup network step — Home Wi-Fi (WARP-657)", () => {
     });
     render(<SetupPage />);
     await advanceToInternet();
+    await openWifi();
 
     fireEvent.change(
       screen.getByPlaceholderText(/network name|studio fotonia/i),
@@ -483,6 +516,7 @@ describe("setup network step — Home Wi-Fi (WARP-657)", () => {
     fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
     render(<SetupPage />);
     await advanceToInternet();
+    await openWifi();
 
     const pwInput = screen.getByPlaceholderText(
       /wi-fi password/i,
