@@ -164,6 +164,48 @@ def test_claim_rejects_empty_code(client: TestClient):
     assert r.status_code == 422
 
 
+# --- /display/claim WiFi creds passthrough (WARP-819) -----------------------
+
+def test_claim_accepts_and_forwards_wifi_fields(client: TestClient):
+    # WARP-819: the orchestrator may include the box's Wi-Fi-connect QR matrix +
+    # SSID + PSK so the claim screen also shows "join this box's Wi-Fi" creds.
+    # The route must accept them and forward them to the display backend.
+    matrix = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+    r = client.post(
+        "/display/claim",
+        json={
+            "code": "DRPL-7K2Q-9F4M",
+            "setup_url": "https://192.168.1.87/setup",
+            "wifi_qr_matrix": matrix,
+            "wifi_ssid": "Droplet",
+            "wifi_psk": "7gpz4k9m2njq8wxr",
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    assert r.json()["mode"] == "claim"
+    assert main.display._current_mode == main.display.CLAIM
+    assert main.display._claim_code == "DRPL-7K2Q-9F4M"
+    assert main.display._claim_wifi_ssid == "Droplet"
+    assert main.display._claim_wifi_psk == "7gpz4k9m2njq8wxr"
+    assert main.display._claim_wifi_qr_matrix == matrix
+
+
+def test_claim_without_wifi_fields_still_ok(client: TestClient):
+    # Backward compatibility: a claim push with no wifi_* fields must still work
+    # exactly as before — the firmware/host falls back to the claim-only layout.
+    r = client.post(
+        "/display/claim",
+        json={"code": "DRPL-7K2Q-9F4M", "setup_url": "https://192.168.1.87/setup"},
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    assert main.display._claim_code == "DRPL-7K2Q-9F4M"
+    # No wifi → the backend's wifi fields are falsy (cleared/empty), not stale.
+    assert not main.display._claim_wifi_ssid
+    assert not main.display._claim_wifi_qr_matrix
+
+
 # --- Lifespan shutdown fallback (M1) ----------------------------------------
 
 def test_lifespan_shutdown_renders_shutdown_frame():

@@ -264,6 +264,66 @@ def test_render_claim_tolerates_empty_inputs(sim_display: TFTDisplay):
     assert img.size == (WIDTH, HEIGHT)
 
 
+# --- Claim screen WiFi-connect QR + creds (WARP-819) ------------------------
+#
+# On first boot a user must be able to join the box's Wi-Fi with zero prior
+# config — by scanning a Wi-Fi-connect QR on the claim screen OR reading the
+# SSID + password as text. So render_claim grows an optional stacked layout:
+# the claim code on top, a Wi-Fi QR card + readable creds below. Absent creds
+# => the original claim-only layout (graceful degradation).
+
+CLAIM_WIFI_MATRIX = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+CLAIM_WIFI_SSID = "Droplet"
+CLAIM_WIFI_PSK = "7gpz4k9m2njq8wxr"
+
+
+def test_render_claim_with_wifi_returns_full_frame(sim_display: TFTDisplay):
+    img = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL,
+        wifi_ssid=CLAIM_WIFI_SSID, wifi_psk=CLAIM_WIFI_PSK,
+        wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert isinstance(img, Image.Image)
+    assert img.size == (WIDTH, HEIGHT)
+
+
+def test_render_claim_wifi_layout_differs_from_claim_only(sim_display: TFTDisplay):
+    # Supplying the Wi-Fi creds must materially change the frame — the QR card +
+    # creds are actually drawn, not silently ignored.
+    claim_only = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    with_wifi = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL,
+        wifi_ssid=CLAIM_WIFI_SSID, wifi_psk=CLAIM_WIFI_PSK,
+        wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert claim_only.tobytes() != with_wifi.tobytes()
+
+
+def test_render_claim_psk_is_rendered(sim_display: TFTDisplay):
+    # The password is shown as readable text (camera-less PC setup), so changing
+    # it must change the frame.
+    a = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk=CLAIM_WIFI_PSK, wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    b = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk="different-passphrase9", wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert a.tobytes() != b.tobytes()
+
+
+def test_render_claim_falls_back_when_only_partial_wifi(sim_display: TFTDisplay):
+    # Matrix present but SSID missing (or vice versa) is not a usable Wi-Fi
+    # block — render the claim-only layout rather than a half-drawn band.
+    claim_only = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    no_ssid = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid="", wifi_psk=CLAIM_WIFI_PSK,
+        wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert no_ssid.tobytes() == claim_only.tobytes()
+
+
 # --- Backward-compat: existing boot/shutdown signatures still work ----------
 
 def test_render_boot_legacy_stage_signature_still_supported(sim_display: TFTDisplay):
