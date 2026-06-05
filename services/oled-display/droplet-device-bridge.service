@@ -14,6 +14,31 @@ Group=droplet
 # can OVERRIDE any of them — including BRIDGE_BIND (WARP-659): systemd applies
 # Environment/EnvironmentFile in source order, last wins, so the file must come
 # last or an operator's setting is silently ignored.
+#
+# WARP-815 (K2): OPENWRT_HOST/USER/IFACE below feed the SSH/UCI path in
+# device-bridge.py — the `iwinfo <OPENWRT_IFACE> scan` and credential lookups
+# that target an OpenWrt router at OPENWRT_HOST. 192.168.50.1 is the single
+# documented OPENWRT_HOST default (matches docker/docker-compose.yml +
+# services/routing/main.py).
+#
+# These are DEFAULTS, not a claim that they fit every shape:
+#   - The SINGLE-BOX shape has no router at 192.168.50.1. It relies on
+#     DROPLET_AP_MODE=hostapd (set via the EnvironmentFile below) so that AP
+#     credential resolution (hostapd_wifi_credentials / _use_hostapd_mode in
+#     device-bridge.py) reads from the host hostapd / the droplet-openwrt
+#     container's hostapd.conf instead of these UCI/SSH defaults. If that env
+#     is unset or hasn't been mirrored into the bridge before it starts, the
+#     UCI/SSH `scan_via_openwrt` path is used and the bridge tries to reach
+#     192.168.50.1 — which does not exist on single-box. So these are safe on
+#     single-box only when DROPLET_AP_MODE=hostapd is in effect, not
+#     unconditionally.
+#   - OPENWRT_IFACE is just the SSH-path default here; this unit is NOT the
+#     authority on radio/NIC naming. The interface name that is actually
+#     correct for a given shape is resolved by the routing SDK — see
+#     services/routing/droplet_openwrt_sdk.py (_default_wifi_scan_device and
+#     the surrounding NET-02 note), which documents why a single literal does
+#     not fit every shape.
+# Either shape can re-pin all three via the operator env file (loaded last).
 Environment=OPENWRT_HOST=192.168.50.1
 Environment=OPENWRT_USER=root
 Environment=OPENWRT_IFACE=wlan0

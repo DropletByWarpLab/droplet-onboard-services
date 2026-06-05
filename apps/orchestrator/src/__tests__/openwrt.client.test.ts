@@ -32,6 +32,8 @@ import {
   hasReachedRouter,
   routerErrorLogLevel,
   ROUTER_COLDSTART_GRACE_MS,
+  scanWireless,
+  fetchWirelessClients,
   _resetRouterContactForTests,
 } from "../services/openwrt.client.js";
 import { RouterError } from "../types/router-error.js";
@@ -408,6 +410,69 @@ describe("openwrt.client public wrappers", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+
+  // WARP-815 (K4): the orchestrator must NOT bake a host-specific Wi-Fi radio
+  // name into the scan/clients query string. The single-box radio is `wlp14s0`,
+  // not `wlan0`; the routing service already resolves the radio from
+  // DROPLET_WIFI_SCAN_DEVICE (services/routing/droplet_openwrt_sdk.py) when the
+  // `device` query param is absent. A hardcoded default here ALWAYS sends
+  // `device=wlan0`, overriding that env fallback and scanning a radio the box
+  // doesn't have. So: omit `device` when the caller doesn't pass one; forward it
+  // verbatim when they do (explicit-device callers keep working). Rule 12 — no
+  // host-specific defaults.
+  describe("wireless scan/clients device wiring (WARP-815 K4)", () => {
+    it("scanWireless() with no device sends NO device query param (routing resolves the env)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { results: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await scanWireless();
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/scan");
+      expect(url).not.toContain("device=");
+      expect(url).not.toContain("wlan0");
+    });
+
+    it("scanWireless(device) forwards an explicitly-provided device verbatim", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { results: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await scanWireless("wlp14s0");
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/scan?device=wlp14s0");
+    });
+
+    it("fetchWirelessClients() with no device sends NO device query param", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { clients: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await fetchWirelessClients();
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/clients");
+      expect(url).not.toContain("device=");
+      expect(url).not.toContain("wlan0");
+    });
+
+    it("fetchWirelessClients(device) forwards an explicitly-provided device verbatim", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { clients: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await fetchWirelessClients("phy1-ap0");
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/clients?device=phy1-ap0");
+    });
   });
 });
 

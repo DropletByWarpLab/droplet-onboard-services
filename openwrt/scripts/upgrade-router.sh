@@ -14,7 +14,7 @@
 #   ./scripts/upgrade-router.sh output/openwrt-*-sysupgrade.img.gz
 #
 # Options:
-#   --host <ip>         Router IP (default: from OPENWRT_HOST env or 10.0.0.1)
+#   --host <ip>         Router IP (default: from OPENWRT_HOST env or 192.168.50.1)
 #   --user <user>       SSH user (default: root)
 #   --no-preserve       Don't preserve config (clean flash with new defaults)
 #   --force             Skip compatibility check
@@ -41,7 +41,9 @@
 set -euo pipefail
 
 # --- Defaults ---
-ROUTER_HOST="${OPENWRT_HOST:-10.0.0.1}"
+# WARP-815: single documented OPENWRT_HOST default — the multi-box Pi-5 router
+# (matches docker/docker-compose.yml + services/routing/main.py + docs).
+ROUTER_HOST="${OPENWRT_HOST:-192.168.50.1}"
 ROUTER_USER="root"
 PRESERVE_CONFIG=true
 FORCE=false
