@@ -239,6 +239,45 @@ else
   fail "placeholder explicit value was accepted ('$GOT_PH') — shared password could persist"
 fi
 
+# --- WARP-821: hard-fail when no strong entropy source is available ----------
+echo "--- Phase 5: WARP-821 hard-fail on missing strong entropy (no weak PRNG) ---"
+
+# Force BOTH openssl and /dev/urandom reads to fail (shadow the commands), then
+# assert resolve_ap_psk exits non-zero and writes NO PSK file — it must refuse
+# to emit a weak password rather than fall back to a PRNG.
+rm -f "$PSK_FILE" "$BRIDGE_ENV"
+hardfail_rc=0
+DROPLET_AP_PSK="" \
+AP_PSK_FILE="$PSK_FILE" \
+DEVICE_BRIDGE_ENV_FILE="$BRIDGE_ENV" \
+bash -c '
+  openssl() { return 1; }
+  head() { return 1; }
+  AP_PSK="${DROPLET_AP_PSK:-}"
+  # shellcheck disable=SC1090
+  . "'"$WORK"'/func.sh"
+  resolve_ap_psk
+' >/dev/null 2>&1 || hardfail_rc=$?
+
+if [ "$hardfail_rc" -ne 0 ]; then
+  pass "no strong entropy source → resolve_ap_psk exits non-zero (refuses weak PSK)"
+else
+  fail "no strong entropy source → exited 0; must hard-fail, not emit a weak PSK"
+fi
+
+if [ ! -f "$PSK_FILE" ]; then
+  pass "no PSK file written when no strong entropy source is available"
+else
+  fail "a PSK file was written without a strong entropy source ('$(cat "$PSK_FILE" 2>/dev/null)')"
+fi
+
+# Guardrail: the weak awk-PRNG fallback alphabet must be GONE from the script.
+if grep -qF 'abcdefghjkmnpqrstuvwxyz23456789' "$ATTACH"; then
+  fail "awk-PRNG fallback alphabet still present (WARP-821 must remove the PRNG fallback)"
+else
+  pass "awk-PRNG fallback removed from PSK generation"
+fi
+
 echo ""
 echo "  $((TESTS - FAILURES))/$TESTS checks passed"
 if [ "$FAILURES" -ne 0 ]; then

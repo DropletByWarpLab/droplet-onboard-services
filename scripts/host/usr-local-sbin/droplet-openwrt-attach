@@ -81,18 +81,20 @@ resolve_ap_psk() {
     # forced to a digit so iOS/Android password fields don't auto-capitalize it
     # (silent auto-cap → user types lowercase, submits capitalized → PSK
     # mismatch). ~80 bits of entropy — far past any practical WPA2 attack.
-    gen="$( { openssl rand -base64 24 2>/dev/null || head -c 48 /dev/urandom 2>/dev/null | base64; } \
+    gen="$( { openssl rand -base64 48 2>/dev/null || head -c 96 /dev/urandom 2>/dev/null | base64; } \
             | tr -dc 'A-Za-z0-9' | cut -c1-15 )"
-    # Fallback if both openssl and urandom were unavailable (should never happen
-    # on the box): derive from the awk PRNG seeded by epoch+pid. Still 15 chars.
-    if [ -z "$gen" ]; then
-      gen="$(awk -v seed="$$$(date +%s)" 'BEGIN{srand(seed);
-        a="abcdefghjkmnpqrstuvwxyz23456789"; s="";
-        for(i=0;i<15;i++){s=s substr(a,int(rand()*length(a))+1,1)}; print s}')"
+    # WARP-821: STRONG entropy only. If neither openssl nor /dev/urandom produced
+    # a full-length key, HARD-FAIL rather than fall back to a weak PRNG — a
+    # low-entropy Wi-Fi password silently shipping is worse than a loud failure a
+    # human can fix. (Unreachable on the box; both sources are always present.)
+    if [ "${#gen}" -lt 15 ]; then
+      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to generate the AP PSK; refusing to ship a weak Wi-Fi password. Install openssl or make /dev/urandom readable, then retry." >&2
+      exit 1
     fi
-    # Prefix a digit so the passphrase starts numeric (auto-cap guard) → 16 chars.
-    first="$(awk 'BEGIN{srand('"$$"'+systime()); d="23456789"; print substr(d,int(rand()*length(d))+1,1)}')"
-    [ -n "$first" ] || first="7"
+    # Leading digit (2-9) drawn from the SAME strong source (no PRNG) so the
+    # passphrase starts numeric (mobile auto-cap guard) → 16 chars total.
+    dnum="$( { openssl rand -base64 8 2>/dev/null || head -c 16 /dev/urandom 2>/dev/null | base64; } | tr -dc '0-9' | cut -c1 )"
+    case "$dnum" in ""|0|1) first=7 ;; *) first="$dnum" ;; esac
     AP_PSK="${first}${gen}"
   fi
 
