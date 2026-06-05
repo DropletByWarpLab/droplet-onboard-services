@@ -23,7 +23,7 @@ function classCount(pw: string): number {
 export const PASSWORD_RULES: PasswordRule[] = [
   {
     id: "length",
-    label: `Between ${PASSWORD_MIN} and ${PASSWORD_MAX} characters`,
+    label: `At least ${PASSWORD_MIN} characters`,
     test: (pw) => pw.length >= PASSWORD_MIN && pw.length <= PASSWORD_MAX,
   },
   {
