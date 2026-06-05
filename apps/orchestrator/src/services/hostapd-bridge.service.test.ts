@@ -1,0 +1,154 @@
+/**
+ * WARP-808 — hostapd-bridge.service: the orchestrator side of the single-box
+ * Wi-Fi write. Reuses the storage.ts device-bridge pattern (DEVICE_BRIDGE_URL +
+ * the BRIDGE_AUTH_TOKEN/SERVICE_TOKEN_DISPLAY precedence, X-Droplet-Auth header,
+ * fail-closed on an empty token).
+ *
+ * Contract under test:
+ *   - stageSsid() just records the SSID in memory (no fetch).
+ *   - applyWifi(psk) POSTs { ssid, psk } to POST /openwrt/wifi/hostapd with the
+ *     X-Droplet-Auth header; uses the staged SSID, falling back to the bridge's
+ *     current SSID when nothing was staged (a password-only change).
+ *   - FAIL CLOSED: with no bridge token, applyWifi throws BRIDGE_AUTH_UNCONFIGURED
+ *     and never sends the request (we cannot safely mutate the host AP).
+ *   - A non-ok bridge reply throws so the route surfaces it.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+vi.mock("../config.js", () => ({
+  config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090" },
+}));
+
+import {
+  stageSsid,
+  applyWifi,
+  _resetForTests,
+} from "./hostapd-bridge.service.js";
+
+const ORIGINAL_ENV = { ...process.env };
+
+beforeEach(() => {
+  _resetForTests();
+  process.env.BRIDGE_AUTH_TOKEN = "tok-123";
+  delete process.env.SERVICE_TOKEN_DISPLAY;
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+});
+
+function mockFetchOnce(status: number, body: unknown) {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  return fetchSpy;
+}
+
+describe("applyWifi — happy path", () => {
+  it("POSTs staged SSID + PSK to /openwrt/wifi/hostapd with the auth header", async () => {
+    const fetchSpy = mockFetchOnce(200, { ok: true, ssid: "HomeNet" });
+    stageSsid("HomeNet");
+    const res = await applyWifi("supersecret1");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe("http://bridge.test:9090/openwrt/wifi/hostapd");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Record<string, string>)["X-Droplet-Auth"]).toBe("tok-123");
+    const sent = JSON.parse(String(init?.body));
+    expect(sent).toEqual({ ssid: "HomeNet", psk: "supersecret1" });
+    // hostapd has no safe-apply/rollback operation record.
+    expect(res).toEqual({ operationId: null });
+  });
+
+  it("clears the staged SSID after a successful apply (no leak into the next submit)", async () => {
+    mockFetchOnce(200, { ok: true });
+    stageSsid("HomeNet");
+    await applyWifi("supersecret1");
+
+    // Second apply with nothing staged → must fetch the current SSID.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      // first call: GET /openwrt/qr (current SSID), second: the POST
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ssid: "HomeNet", payload: "x" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await applyWifi("newsecret9");
+    const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.endsWith("/openwrt/qr"))).toBe(true);
+  });
+});
+
+describe("applyWifi — current-SSID fallback (password-only change)", () => {
+  it("fetches the live SSID from the bridge when none was staged", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ssid: "ExistingNet", payload: "x" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const res = await applyWifi("supersecret1");
+    expect(res).toEqual({ operationId: null });
+    // Second call is the POST carrying the fetched SSID.
+    const postCall = fetchSpy.mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCall).toBeTruthy();
+    const sent = JSON.parse(String((postCall![1] as RequestInit).body));
+    expect(sent).toEqual({ ssid: "ExistingNet", psk: "supersecret1" });
+  });
+});
+
+describe("applyWifi — FAIL CLOSED on missing bridge token", () => {
+  it("throws BRIDGE_AUTH_UNCONFIGURED and never sends the request", async () => {
+    delete process.env.BRIDGE_AUTH_TOKEN;
+    delete process.env.SERVICE_TOKEN_DISPLAY;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    stageSsid("HomeNet");
+    await expect(applyWifi("supersecret1")).rejects.toMatchObject({
+      code: "BRIDGE_AUTH_UNCONFIGURED",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("treats a whitespace-only token as unconfigured", async () => {
+    process.env.BRIDGE_AUTH_TOKEN = "   ";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    stageSsid("HomeNet");
+    await expect(applyWifi("supersecret1")).rejects.toMatchObject({
+      code: "BRIDGE_AUTH_UNCONFIGURED",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("honors SERVICE_TOKEN_DISPLAY when BRIDGE_AUTH_TOKEN is unset", async () => {
+    delete process.env.BRIDGE_AUTH_TOKEN;
+    process.env.SERVICE_TOKEN_DISPLAY = "display-tok";
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+    stageSsid("HomeNet");
+    await applyWifi("supersecret1");
+    const [, init] = fetchSpy.mock.calls[0];
+    expect((init?.headers as Record<string, string>)["X-Droplet-Auth"]).toBe("display-tok");
+  });
+});
+
+describe("applyWifi — surfaces a bridge refusal", () => {
+  it("throws when the bridge returns a non-ok status (e.g. 422 validation)", async () => {
+    mockFetchOnce(422, { ok: false, error: "Wi-Fi password must be 8-63 characters" });
+    stageSsid("HomeNet");
+    await expect(applyWifi("short")).rejects.toThrow(/8-63|password/i);
+  });
+
+  it("throws not_hostapd_mode when the bridge says 409 (defense in depth)", async () => {
+    mockFetchOnce(409, { ok: false, error: "not_hostapd_mode" });
+    stageSsid("HomeNet");
+    await expect(applyWifi("supersecret1")).rejects.toThrow(/not_hostapd_mode/i);
+  });
+});
