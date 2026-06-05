@@ -38,6 +38,7 @@ import {
   markTourCompleted,
   isSetupStep,
   SETUP_STEPS,
+  STEP_AFTER_CLAIM,
   InvalidSetupStepError,
   SetupNotCompleteError,
 } from "./setup.service.js";
@@ -47,19 +48,36 @@ import {
 // Mirrors the slice of PrismaClient the service touches: findUnique +
 // upsert keyed on the pinned `id`. The real model pins `id` to a fixed
 // singleton value the same way `Workspace` pins `id = 1`.
-function createPrismaMock(opts: { userCount?: number } = {}) {
+function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } = {}) {
   let row: Record<string, unknown> | null = null;
   let userCount = opts.userCount ?? 1;
+  // WARP-804 — how many `consumed` ClaimCode rows exist, i.e. whether the box
+  // is claimed (`isClaimed` counts `state="consumed"`). Defaults to 0 (NOT
+  // claimed) so every pre-existing case keeps its byte-for-byte behaviour: the
+  // claim-satisfied short-circuit in getSetupState/setSetupStep only fires when
+  // this is > 0, and these legacy cases never claim the box.
+  let consumedClaims = opts.consumedClaims ?? 0;
   return {
     _peek: () => row,
     _setUserCount: (n: number) => {
       userCount = n;
+    },
+    // WARP-804 — simulate the box being claimed (a consumed ClaimCode exists).
+    _setConsumedClaims: (n: number) => {
+      consumedClaims = n;
     },
     // M2 — `markApplianceReady` requires at least one admin (User) row
     // before it will claim the box. Defaults to 1 so the existing
     // happy-path cases keep flipping ready.
     user: {
       count: async () => userCount,
+    },
+    // WARP-804 — the slice of `claimCode` that `isClaimed` touches: a count of
+    // rows in the `consumed` state. Mirrors `prisma.claimCode.count({ where:
+    // { state: "consumed" } })`.
+    claimCode: {
+      count: async ({ where }: { where?: { state?: string } } = {}) =>
+        where?.state === "consumed" ? consumedClaims : 0,
     },
     applianceSetup: {
       findUnique: async ({ where }: { where: { id: string } }) =>
@@ -213,5 +231,70 @@ describe("setup.service — state machine", () => {
     for (const step of SETUP_STEPS) {
       expect(Object.values(SetupStep)).toContain(step);
     }
+  });
+});
+
+// ── WARP-804 — a persisted `claim` step on an ALREADY-CLAIMED box is an
+// unsatisfiable dead-end (the consumed code's plaintext is gone, so the claim
+// step can never be re-satisfied → CLAIM_CODE_INVALID → lockout). The state
+// machine must treat `claim` as SATISFIED once `isClaimed` is true and resolve
+// the effective step to STEP_AFTER_CLAIM, both on read and on write. Behaviour
+// when NOT claimed is unchanged (the claim step still shows). ──
+describe("setup.service — claim step is satisfied once the box is claimed (WARP-804)", () => {
+  it("exposes STEP_AFTER_CLAIM as the post-claim resume target (account)", () => {
+    // Single source of truth shared with the claim route. `account` slots
+    // immediately after `claim` in the wizard order.
+    expect(STEP_AFTER_CLAIM).toBe("account");
+    expect(isSetupStep(STEP_AFTER_CLAIM)).toBe(true);
+  });
+
+  it("getSetupState resolves a persisted `claim` step to STEP_AFTER_CLAIM when claimed", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    // Persist the dead-end state the bug parks the box on: setupStep=claim on a
+    // box that has already been claimed (a consumed ClaimCode exists).
+    await setSetupStep(prisma as never, STEP_AFTER_CLAIM); // materialize the row
+    prisma._peek(); // (no-op; row now exists)
+    // Force the persisted step back to `claim` directly via the mock to model a
+    // box that genuinely has `claim` persisted while claimed.
+    (prisma._peek() as Record<string, unknown>).setupStep = "claim";
+
+    const state = await getSetupState(prisma as never);
+    expect(state.setupStep).toBe(STEP_AFTER_CLAIM);
+    expect(state.setupStep).not.toBe("claim");
+  });
+
+  it("getSetupState is SIDE-EFFECT-FREE while resolving the claimed claim step (M5)", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    prisma.applianceSetup.upsert({
+      where: { id: "singleton" },
+      create: { id: "singleton", setupStep: "claim" },
+      update: { setupStep: "claim" },
+    } as never);
+    // Tripwire: the public read must not write, even while healing the step.
+    const upsertSpy = vi.spyOn(prisma.applianceSetup, "upsert");
+    const state = await getSetupState(prisma as never);
+    expect(state.setupStep).toBe(STEP_AFTER_CLAIM);
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  it("setSetupStep does NOT persist `claim` when claimed — it advances to STEP_AFTER_CLAIM", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    const returned = await setSetupStep(prisma as never, "claim");
+    // The returned (effective) step is the post-claim step, never `claim`.
+    expect(returned.setupStep).toBe(STEP_AFTER_CLAIM);
+    // And the PERSISTED row must not be parked on `claim` either.
+    expect((prisma._peek() as Record<string, unknown>).setupStep).toBe(
+      STEP_AFTER_CLAIM,
+    );
+  });
+
+  it("REGRESSION: when NOT claimed, the claim step is persisted and returned unchanged", async () => {
+    const prisma = createPrismaMock({ consumedClaims: 0 });
+    const returned = await setSetupStep(prisma as never, "claim");
+    expect(returned.setupStep).toBe("claim");
+    expect((prisma._peek() as Record<string, unknown>).setupStep).toBe("claim");
+    // A read of the same unclaimed box still reports `claim` (the step shows).
+    const state = await getSetupState(prisma as never);
+    expect(state.setupStep).toBe("claim");
   });
 });
