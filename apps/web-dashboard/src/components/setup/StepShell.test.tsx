@@ -112,3 +112,74 @@ describe("StepShell aurora rail (PR #384)", () => {
     expect(skipClicks).toBe(0);
   });
 });
+
+/**
+ * WARP-820 — viewport-locked, zero-scroll wizard shell.
+ *
+ * The shell was already `h-dvh overflow-hidden` (WARP-666); this ticket removes
+ * the two INNER page-scrollers (rail aside + main panel) so neither shows a
+ * scrollbar, and guarantees the title and CTA are always mounted (they pin
+ * outside any ScrollRegion). jsdom can't measure layout, so these are STRUCTURE
+ * assertions — the visual "fits on every device" proof is the UI/UX + on-box
+ * pass.
+ */
+describe("StepShell viewport-lock (WARP-820)", () => {
+  it("scopes the fluid type layer with the .setup-shell class on the shell root", () => {
+    const { container } = render(
+      <StepShell current="storage" title="Storage">
+        body
+      </StepShell>,
+    );
+    // The wizard-scoped fluid type overrides hang off this hook; the rest of
+    // the dashboard's type stays byte-for-byte fixed.
+    expect(container.querySelector(".setup-shell")).not.toBeNull();
+  });
+
+  it("does not let the rail scroll (overflow-hidden, not overflow-y-auto)", () => {
+    render(
+      <StepShell current="storage" title="Storage">
+        body
+      </StepShell>,
+    );
+    const rail = screen.getByTestId("setup-rail");
+    expect(rail.className).toContain("overflow-hidden");
+    expect(rail.className).not.toContain("overflow-y-auto");
+  });
+
+  it("does not let the main panel scroll (no overflow-y-auto)", () => {
+    render(
+      <StepShell current="storage" title="Storage">
+        body
+      </StepShell>,
+    );
+    const main = screen.getByTestId("setup-main");
+    expect(main.className).not.toContain("overflow-y-auto");
+  });
+
+  it("always mounts the step title regardless of the body content", () => {
+    // Even with a tall body, the title pins and stays in the document.
+    render(
+      <StepShell current="storage" title="Choose your storage">
+        <div style={{ height: 5000 }}>very tall body</div>
+      </StepShell>,
+    );
+    expect(
+      screen.getByRole("heading", { name: /choose your storage/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("always mounts the CTA when given, regardless of the body content", () => {
+    render(
+      <StepShell
+        current="storage"
+        title="Choose your storage"
+        primary={{ label: "Continue", onClick: () => {} }}
+      >
+        <div style={{ height: 5000 }}>very tall body</div>
+      </StepShell>,
+    );
+    expect(
+      screen.getByRole("button", { name: /continue/i }),
+    ).toBeInTheDocument();
+  });
+});
