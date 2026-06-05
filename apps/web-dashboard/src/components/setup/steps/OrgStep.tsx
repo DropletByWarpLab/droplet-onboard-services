@@ -331,7 +331,8 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
       </div>
 
       {/* Workspace URL (slug) with the droplet.local / prefix */}
-      <label htmlFor="org-slug" className="mt-4 block">
+      {/* WARP-820: fluid inter-section gaps so the form fits without scroll. */}
+      <label htmlFor="org-slug" className="mt-[clamp(10px,2vh,16px)] block">
         <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
           Workspace URL
         </span>
@@ -374,7 +375,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
       </label>
 
       {/* Time zone + industry + company size */}
-      <div className="mt-4 flex gap-3">
+      <div className="mt-[clamp(10px,2vh,16px)] flex gap-3">
         <SelectField
           id="org-tz"
           label="Time zone"
@@ -390,7 +391,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           options={INDUSTRIES}
         />
       </div>
-      <div className="mt-4">
+      <div className="mt-[clamp(10px,2vh,16px)]">
         <SelectField
           id="org-size"
           label="Company size"
@@ -401,7 +402,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
       </div>
 
       {/* Privacy footnote — the "nothing off the box" guarantee. */}
-      <p className="type-caption-1 text-label-tertiary mt-5 leading-relaxed">
+      <p className="type-caption-1 text-label-tertiary mt-[clamp(12px,2.4vh,20px)] leading-relaxed">
         We use industry and size only to pick smart defaults — example tools,
         folder structure, and camera policies. Nothing is sent off the box.
       </p>

@@ -335,7 +335,9 @@ export function StorageStep({
       primary={primary}
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
-      <div className="space-y-3">
+      {/* WARP-820: fluid gap between drive cards so a multi-drive box fits the
+          viewport before the list ever needs to scroll. */}
+      <div className="space-y-[clamp(8px,1.6vh,12px)]">
         {drives.map((drive) => (
           <div key={drive.uuid} className="dp-card !p-4">
             <div className="flex items-start gap-3 mb-3">

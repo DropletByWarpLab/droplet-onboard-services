@@ -163,8 +163,9 @@ export function TeamStep({
       }}
       skip={{ label: "I'll invite people later", onClick: onSkip }}
     >
-      {/* Directory sync (SSO) — the bulk alternative. */}
-      <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-6">
+      {/* Directory sync (SSO) — the bulk alternative. WARP-820: fluid bottom
+          gap so the SSO card + invite row + pending list fit without scroll. */}
+      <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-[clamp(16px,3vh,24px)]">
         <Users size={20} className="flex-shrink-0 text-accent" />
         <div className="min-w-0 flex-1">
           <p className="type-footnote font-semibold text-label-primary">

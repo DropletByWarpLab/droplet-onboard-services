@@ -517,8 +517,9 @@ export function InternetStep({
         </div>
       )}
 
-      {/* Thin divider between the two sections */}
-      <div className="my-5 h-px bg-separator" />
+      {/* Thin divider between the two sections. WARP-820: fluid gap so the two
+          sections + the Wi-Fi advisory fit a short viewport without scroll. */}
+      <div className="my-[clamp(12px,2.4vh,20px)] h-px bg-separator" />
 
       {/* Section B — Internet address · DuckDNS (unchanged behavior) */}
       <SectionLabel icon={Globe}>Internet address · DuckDNS</SectionLabel>
