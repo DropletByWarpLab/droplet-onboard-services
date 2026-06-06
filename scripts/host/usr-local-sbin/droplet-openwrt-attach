@@ -96,17 +96,44 @@ resolve_ap_psk() {
     AP_PSK="${first}${gen}"
   fi
 
-  # Persist the resolved PSK 0600 so subsequent boots read the SAME value.
+  # Persist the resolved PSK so subsequent boots read the SAME value.
   # mkdir -p the parent (idempotent); write atomically; tighten perms.
+  #
+  # WARP-819 finding 1: the file is read DIRECTLY by droplet-device-bridge
+  # (User=droplet, Group=droplet) via _read_persisted_psk(). A 0600 root-owned
+  # file gives the bridge a PermissionError (swallowed -> ""), breaking the
+  # coherence fallback during the boot race. So chgrp it to droplet + chmod
+  # 0640 (owner-rw, group-read) — readable by the bridge's group, still not
+  # world-readable. (The bridge ENV file below stays 0600: systemd reads it as
+  # root for EnvironmentFile=, the droplet process never opens it directly.)
+  #
+  # WARP-819 finding 7: do NOT swallow a persist write failure with `|| true`.
+  # A silent failure means a DIFFERENT generated PSK next boot with no
+  # breadcrumb; warn to stderr (matching the OPENWRT_ROOT_PW / firewall warns)
+  # so the operator can see why the SSID/PSK drifted.
   if [ -n "${AP_PSK:-}" ]; then
     psk_dir="$(dirname "$psk_file")"
     mkdir -p "$psk_dir" 2>/dev/null || true
     umask 077
-    printf '%s\n' "$AP_PSK" > "$psk_file.tmp" 2>/dev/null && mv "$psk_file.tmp" "$psk_file" 2>/dev/null || true
-    chmod 0600 "$psk_file" 2>/dev/null || true
+    if printf '%s\n' "$AP_PSK" > "$psk_file.tmp" 2>/dev/null \
+       && mv "$psk_file.tmp" "$psk_file" 2>/dev/null; then
+      # Group-readable for the bridge (User=droplet). chgrp/chmod are
+      # best-effort (a non-root invocation in tests can't chgrp) but a failure
+      # to PERSIST is the one we must surface — perms are re-asserted every
+      # attach run on the box (which runs as root).
+      chgrp droplet "$psk_file" 2>/dev/null || true
+      chmod 0640 "$psk_file" 2>/dev/null || true
+    else
+      rm -f "$psk_file.tmp" 2>/dev/null || true
+      echo "droplet-openwrt-attach: WARN: failed to persist AP PSK to $psk_file (read-only fs?) — a different PSK may be generated next boot" >&2
+    fi
 
     # Mirror into the device-bridge env (coherence AC): upsert the
     # DROPLET_AP_PSK line so the bridge's pairing QR/text matches the live AP.
+    # WARP-819 finding 5: single-quote the value (escaping any embedded single
+    # quote) so an operator passphrase with spaces survives systemd's
+    # EnvironmentFile= parsing instead of splitting on whitespace. Generated
+    # PSKs are alphanumeric (immune) but operator overrides are not.
     bridge_dir="$(dirname "$bridge_env")"
     mkdir -p "$bridge_dir" 2>/dev/null || true
     umask 077
@@ -115,9 +142,23 @@ resolve_ap_psk() {
     else
       : > "$bridge_env.tmp"
     fi
-    printf 'DROPLET_AP_PSK=%s\n' "$AP_PSK" >> "$bridge_env.tmp"
-    mv "$bridge_env.tmp" "$bridge_env" 2>/dev/null || true
-    chmod 0600 "$bridge_env" 2>/dev/null || true
+    # Single-quote the value so spaces survive systemd EnvironmentFile= parsing.
+    # Any embedded ' is escaped with the classic close/escaped-quote/reopen
+    # idiom ('\''), built from explicit literals to avoid backslash ambiguity.
+    # The persisted FILE ($psk_file) holds the raw value and is the bridge's
+    # authoritative source (_read_persisted_psk), so this mirror only needs to
+    # be coherent for the realistic case (alphanumeric generated PSK, or an
+    # operator passphrase with spaces) — both of which round-trip exactly here.
+    _sq="'"
+    _sq_esc="'\''"
+    psk_quoted="${AP_PSK//"$_sq"/$_sq_esc}"
+    printf "DROPLET_AP_PSK='%s'\n" "$psk_quoted" >> "$bridge_env.tmp"
+    if mv "$bridge_env.tmp" "$bridge_env" 2>/dev/null; then
+      chmod 0600 "$bridge_env" 2>/dev/null || true
+    else
+      rm -f "$bridge_env.tmp" 2>/dev/null || true
+      echo "droplet-openwrt-attach: WARN: failed to persist DROPLET_AP_PSK into $bridge_env — pairing QR/text may not match the live AP" >&2
+    fi
   fi
 }
 resolve_ap_psk
