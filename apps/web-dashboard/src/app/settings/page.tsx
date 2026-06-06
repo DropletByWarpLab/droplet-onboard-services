@@ -8,6 +8,7 @@ import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
+import { LogsSection } from "@/components/settings/LogsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -306,6 +307,9 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
+      <LogsSection />
+
       {/* AI Providers */}
       <section className="mb-10">
         <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
@@ -350,9 +354,11 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Danger zone (WARP-828) — owner-only home for irreversible device
-          actions; the section self-gates to the owner role internally. Placed
-          last so the destructive action sits apart from routine settings. */}
+      {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
+          device actions (reformat/remake storage AND factory reset). The
+          section self-gates to the owner role internally and renders nothing
+          for non-owners. Placed last so destructive actions sit apart from
+          routine settings, fenced off in system-red. */}
       <DangerZoneSection />
 
       <ConfirmDialog

@@ -30,7 +30,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 logger = logging.getLogger("droplet.bridge")
 
@@ -1736,6 +1736,72 @@ def run_factory_reset(params):
     return True, {"dispatched": True, "jobId": job_id}
 
 
+# ---------------------------------------------------------------------------
+# Diagnostics log bundle (WARP-823) — READ-ONLY, via the host collector script
+# ---------------------------------------------------------------------------
+#
+# The Settings → "Download diagnostics" feature ships the box's service logs
+# (journald units + container logs) to the owner. The bridge does NOT read
+# journald / `docker logs` itself — it execs the repo-tracked host collector
+# (scripts/host/droplet-collect-logs.sh, installed to /usr/local/sbin by
+# setup.sh / install-device-bridge.sh), which bounds the window + per-service
+# size AND redacts secrets on the host. The orchestrator redacts AGAIN before
+# zipping, so a stale collector can never leak past that gate.
+#
+# Mirrors run_pool_command()/run_set_hostapd(): allow-listed shape, host-script
+# only, surfaces the script's exit honestly, never raises.
+
+LOGS_SCRIPT = os.environ.get(
+    "DROPLET_LOGS_SCRIPT", "/usr/local/sbin/droplet-collect-logs.sh").strip()
+
+# Bounded look-back window the collector accepts (hours). Matches the
+# orchestrator route's cap so a client can't ask the host for an unbounded
+# journald history.
+_LOGS_MIN_HOURS = 1
+_LOGS_MAX_HOURS = 168  # 7 days
+
+
+def collect_logs(window_hours, service):
+    """Collect bounded, host-side-redacted service logs via the host script.
+
+    `window_hours` is clamped to [1, 168] BEFORE it reaches the script so the
+    bridge never requests an unbounded history. `service`, when set, is an
+    optional single-service filter passed through. The bridge execs
+    droplet-collect-logs.sh with the window as a positional arg and the service
+    as a second arg; the script returns a JSON bundle on stdout. Returns
+    (ok, info); never raises — mirrors run_pool_command()/eject_drive()."""
+    try:
+        hours = int(window_hours)
+    except (TypeError, ValueError):
+        hours = 24
+    hours = max(_LOGS_MIN_HOURS, min(_LOGS_MAX_HOURS, hours))
+    # Pass the service filter only when it is a sane, shell-safe token. The
+    # orchestrator already validates it, but the bridge is defense-in-depth: an
+    # empty/garbage value becomes "" (the script treats that as "all services").
+    svc = service if (isinstance(service, str)
+                      and service.replace("-", "").replace("_", "").isalnum()
+                      and 0 < len(service) <= 64) else ""
+    cmd = [LOGS_SCRIPT, str(hours), svc]
+    try:
+        # Collecting + redacting logs across services can take a moment on a busy
+        # box; allow a bounded window (the orchestrator fetch has its own outer
+        # timeout).
+        rc, out, err = _run(cmd, timeout=45)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("collect_logs failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("collect_logs refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    try:
+        return True, json.loads(out or "{}")
+    except (ValueError, TypeError):
+        # A 0-exit script that printed non-JSON: surface honestly rather than
+        # pretend it failed (mirrors run_pool_command()).
+        return True, {"message": (out or "").strip()}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
@@ -1847,6 +1913,24 @@ class Handler(BaseHTTPRequestHandler):
                 # BUG-3 / ADR-019: read-only mdadm array inventory. Returns []
                 # honestly when no array exists — never a fabricated pool.
                 return self._send(200, pools_snapshot())
+            if path == "/logs/bundle":
+                # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
+                # and /drives — the logs can carry box-internal (and, pre-host-
+                # redaction, secret) material, so a token is required even on a
+                # loopback bind. collect_logs() shells the repo-tracked host
+                # collector (which bounds + redacts); the orchestrator redacts
+                # again before zipping.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                q = parse_qs(urlparse(self.path).query)
+                hours = (q.get("hours") or ["24"])[0]
+                service = (q.get("service") or [""])[0] or None
+                ok, info = collect_logs(hours, service)
+                if not ok:
+                    # 502 — the host collector failed/refused (journalctl absent,
+                    # script error). The orchestrator maps this to a clean error.
+                    return self._send(502, {"error": info})
+                return self._send(200, info)
             if path == "/health":
                 return self._send(200, {"ok": True})
         except Exception as e:                                       # noqa: BLE001

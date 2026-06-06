@@ -58,6 +58,7 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
+import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
@@ -285,6 +286,9 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
   app.use("/api", createActivityRouter(prisma));
+  // WARP-823: owner/admin downloadable, secret-redacted diagnostics log
+  // bundle. Sources host logs through the device-bridge; audits the download.
+  app.use("/api", createLogsRouter());
   // WARP-455: A1 local user directory + role/scope mutations. Mutations
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
