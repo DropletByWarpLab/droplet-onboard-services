@@ -1653,6 +1653,89 @@ def run_set_hostapd(params):
         _HOSTAPD_LOCK.release()
 
 
+# ---------------------------------------------------------------------------
+# Factory reset (WARP-825)
+# ---------------------------------------------------------------------------
+#
+# A factory reset wipes every data volume + the generated secrets and bounces
+# the whole stack (scripts/factory-reset.sh runs `docker compose down -v`, which
+# kills the orchestrator AND eventually this device-bridge). So unlike every
+# other host action here — which shells a host script via the BLOCKING `_run`
+# and waits for the result — the reset MUST be spawned DETACHED: we hand the
+# wipe to the repo-tracked host script (scripts/host/droplet-factory-reset.sh,
+# installed to /usr/local/sbin by setup.sh) with a non-blocking Popen and return
+# ~immediately, so the wipe survives the bridge's own teardown.
+#
+# The bridge NEVER runs `docker compose down -v` itself — the host script (which
+# wraps scripts/factory-reset.sh --yes) is the real executor.
+
+RESET_SCRIPT = os.environ.get(
+    "DROPLET_FACTORY_RESET_SCRIPT",
+    "/usr/local/sbin/droplet-factory-reset.sh").strip()
+
+
+def _spawn_detached(cmd):
+    """Spawn a long-running host command fully detached from this process.
+
+    Returns (ok, error). `ok` means "the child was launched" — NOT "the wipe
+    finished" (we deliberately don't wait; the wipe outlives us). A launch
+    failure (script missing / not executable) returns (False, <reason>).
+
+    Detached so the child keeps running after the bridge is torn down by the
+    very wipe it kicked off: new session (setsid / new process group), stdio
+    redirected away from our pipes so the child isn't tied to our lifetime.
+    """
+    try:
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        # Detach into its own session so a teardown of the bridge's process
+        # group doesn't take the wipe down with it. start_new_session is the
+        # portable (POSIX) way; guard for platforms without it.
+        if hasattr(os, "setsid"):
+            kwargs["start_new_session"] = True
+        subprocess.Popen(cmd, **kwargs)  # noqa: S603 — fixed argv, no shell
+        return True, None
+    except FileNotFoundError:
+        return False, "host script not found"
+    except Exception as e:                                          # noqa: BLE001
+        return False, str(e)
+
+
+def run_factory_reset(params):
+    """Dispatch an owner-confirmed factory reset to the host script, DETACHED.
+
+    `params` is {"jobId": str, "targetName": str} (informational — the host
+    script wipes the whole box regardless; we pass them so the host log can
+    attribute the reset). The bridge does NOT touch docker/volumes/.env itself —
+    it spawns droplet-factory-reset.sh detached. Returns (ok, info); never raises
+    — mirrors run_pool_command()/run_set_hostapd().
+
+    `ok` means the wipe was LAUNCHED, not that it finished: a factory reset
+    cannot report completion (the stack it would report through is being wiped).
+    """
+    job_id = str((params or {}).get("jobId", ""))
+    payload = json.dumps({
+        "jobId": job_id,
+        "targetName": (params or {}).get("targetName", ""),
+    })
+    try:
+        # Pass the job context as a single JSON arg, same convention as the
+        # pool / hostapd host scripts.
+        ok, err = _spawn_detached([RESET_SCRIPT, payload])
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("factory reset failed to spawn host script: %s", e)
+        return False, "host script unavailable"
+    if not ok:
+        logger.warning("factory reset host script not launched: %s", err)
+        return False, (err or "host script refused")
+    logger.warning("factory reset dispatched to host script (job=%s)", job_id)
+    return True, {"dispatched": True, "jobId": job_id}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
@@ -1856,6 +1939,33 @@ class Handler(BaseHTTPRequestHandler):
                           else 422)
                 return self._send(status, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/system/factory-reset":
+            # WARP-825: owner-confirmed factory reset. Auth-gated exactly like
+            # /pools/command + /openwrt/wifi/hostapd. The orchestrator only
+            # reaches here after an owner session + the server-side
+            # type-to-confirm check; the bridge requires its own auth token on
+            # top, and run_factory_reset spawns the host script DETACHED (it
+            # NEVER runs `docker compose down -v` itself). Returns 202 the
+            # instant the wipe is launched — it does not (cannot) wait for the
+            # wipe, which is tearing down this very process.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            ok, info = run_factory_reset({
+                "jobId": j.get("jobId", ""),
+                "targetName": j.get("targetName", ""),
+            })
+            if not ok:
+                # 502 — the host script couldn't be launched (missing / not
+                # executable). The box is untouched.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():

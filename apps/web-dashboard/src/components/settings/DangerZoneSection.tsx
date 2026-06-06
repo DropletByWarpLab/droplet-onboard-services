@@ -1,33 +1,46 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, ShieldAlert } from "lucide-react";
+import { AlertCircle, AlertTriangle, RotateCcw, ShieldAlert } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { fetchDrives, adoptDrive, confirmStorageCommand } from "@/lib/api";
+import {
+  fetchDrives,
+  adoptDrive,
+  confirmStorageCommand,
+  getResetStatus,
+  triggerFactoryReset,
+  type ResetJob,
+} from "@/lib/api";
 import type { DriveInfo } from "@/lib/types";
 import {
   wholeDiskName,
   buildConfirmPhrase,
 } from "@/components/setup/steps/StorageStep";
 import { DestructiveConfirm } from "./DestructiveConfirm";
+import { DestructiveConfirm as FactoryResetConfirm } from "@/components/DestructiveConfirm";
 
 /**
- * WARP-828 — Settings "Danger zone".
+ * Settings "Danger zone" (WARP-828 + WARP-825).
  *
- * Owner-only home for the rare, irreversible device actions. v1 action:
- * reformat a data drive (wipe + reformat + re-mount), reusing the existing
- * owner-gated drive_adopt → confirm backend (storage.ts / WARP-662). Nothing
- * here is a new destructive capability — it surfaces the existing one behind
- * the type-to-confirm friction (<DestructiveConfirm/>).
+ * Owner-only home for the rare, irreversible device actions. Two actions live
+ * here, each fully self-contained:
+ *   1. Reformat a data drive (WARP-828) — wipe + reformat + re-mount, reusing
+ *      the existing owner-gated drive_adopt → confirm backend (storage.ts /
+ *      WARP-662). Surfaces an existing capability behind type-to-confirm
+ *      friction (<DestructiveConfirm/>).
+ *   2. Factory reset (WARP-825) — erase every account/file/message/setting and
+ *      return the box to first-run setup, through <DestructiveConfirm/> from
+ *      @/components/DestructiveConfirm (re-aliased here as FactoryResetConfirm).
  *
- * Two gates, defence in depth:
+ * Two gates, defence in depth, applied to BOTH actions:
  *   1. CLIENT (discovery only) — the section renders for the OWNER role only.
- *      Non-owners never see it and we never even probe the drives feed for
- *      them. This is a UX gate, not a security boundary.
+ *      Non-owners never see it and we never even probe the drives feed or the
+ *      reset-status feed for them. This is a UX gate, not a security boundary.
  *   2. SERVER (the real boundary) — the orchestrator independently enforces
- *      owner-role + a single-use confirm token bound to {service, resourceId},
- *      and the host script refuses the OS/boot disk. A forced request from a
- *      non-owner still can't execute (storage-pools.routes.test.ts).
+ *      owner-role + (for reformat) a single-use confirm token bound to
+ *      {service, resourceId}, and the host script refuses the OS/boot disk; the
+ *      factory-reset endpoint re-enforces the owner gate + typed-name check. A
+ *      forced request from a non-owner still can't execute.
  *
  * Visual: separated from the rest of Settings with system-red accents from the
  * existing token set — no new tokens, no invented colours (ADR-002 home-user).
@@ -37,13 +50,30 @@ export function DangerZoneSection() {
   const isOwner = user?.role === "owner";
 
   // Render absolutely nothing — and run no effects, no fetches — unless the
-  // viewer is the owner. The early return is BEFORE the data effect so a
-  // family/guest session never hits /api/storage/drives.
+  // viewer is the owner. The early return is BEFORE the data effects so a
+  // family/guest session never hits /api/storage/drives or the reset status.
   if (!isOwner) return null;
-  return <DangerZoneOwnerView />;
+  return (
+    <section className="mb-10" aria-labelledby="danger-zone-heading">
+      <h2
+        id="danger-zone-heading"
+        className="type-footnote text-system-red uppercase tracking-wider px-1 mb-2"
+      >
+        Danger zone
+      </h2>
+      <div className="space-y-3">
+        <ReformatDriveCard />
+        <FactoryResetCard />
+      </div>
+    </section>
+  );
 }
 
-function DangerZoneOwnerView() {
+/**
+ * WARP-828 — reformat-a-drive control. Self-contained card; owns its own drive
+ * feed + confirm flow.
+ */
+function ReformatDriveCard() {
   const [drives, setDrives] = useState<DriveInfo[]>([]);
   const [selectedUuid, setSelectedUuid] = useState<string>("");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -113,14 +143,7 @@ function DangerZoneOwnerView() {
   }
 
   return (
-    <section className="mb-10" aria-labelledby="danger-zone-heading">
-      <h2
-        id="danger-zone-heading"
-        className="type-footnote text-system-red uppercase tracking-wider px-1 mb-2"
-      >
-        Danger zone
-      </h2>
-
+    <>
       {/* System-red framed card — visually set apart from the neutral settings
           groups above it. Tokens only (border/text/bg system-red). */}
       <div className="rounded-xl border border-system-red/30 bg-system-red/[0.03] p-4">
@@ -232,7 +255,132 @@ function DangerZoneOwnerView() {
           onCancel={() => setConfirmOpen(false)}
         />
       )}
-    </section>
+    </>
+  );
+}
+
+/**
+ * WARP-825 — factory-reset control. Self-contained card; owns its own
+ * reset-status feed + confirm flow. Uses the @/components/DestructiveConfirm
+ * variant (aliased FactoryResetConfirm) shipped with this feature.
+ */
+function FactoryResetCard() {
+  const [targetName, setTargetName] = useState<string>("");
+  const [latestJob, setLatestJob] = useState<ResetJob | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  // Once a reset is dispatched the box is tearing down; we flip to a terminal
+  // "under way" notice rather than keep an actionable button live.
+  const [dispatched, setDispatched] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+  // The owner gate is enforced at the section level, but skipping the fetch
+  // here too keeps this card independently safe if ever reused.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await getResetStatus();
+        if (cancelled) return;
+        setTargetName(status.targetName);
+        setLatestJob(status.job);
+        if (status.job?.status === "dispatched") setDispatched(true);
+      } catch {
+        // Non-fatal — leave the entry without a target name; the confirm flow
+        // can't enable until we have one (the friction phrase would be empty),
+        // so a failed status read fails safe (reset can't be triggered blind).
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleConfirm = useCallback(async () => {
+    const res = await triggerFactoryReset(targetName);
+    // Success: the wipe is dispatched and the box is going down. Close the modal
+    // and switch the section to the terminal progress notice.
+    setLatestJob({
+      id: res.id,
+      status: res.status,
+      targetName: res.targetName,
+      failureReason: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    setDispatched(true);
+    setModalOpen(false);
+  }, [targetName]);
+
+  return (
+    <>
+      {/* Fenced, system-red-tinted card so it reads as categorically dangerous. */}
+      <div className="rounded-lg border border-system-red/30 bg-system-red/[0.04] overflow-hidden">
+        {dispatched ? (
+          // Terminal progress notice — the box is wiping and returning to setup.
+          <div className="flex items-start gap-3 p-4">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-system-red/10">
+              <RotateCcw size={18} className="text-system-red" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <p className="type-headline text-label-primary">Factory reset is under way</p>
+              <p className="type-footnote text-label-secondary mt-1 leading-relaxed">
+                The box is erasing all data and returning to first-run setup. This
+                takes a few minutes, and the dashboard will go offline while it
+                works. When it comes back, you&rsquo;ll start from the setup wizard.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-4 p-4">
+            <div className="flex items-start gap-3 min-w-0">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-system-red/10">
+                <AlertTriangle size={18} className="text-system-red" aria-hidden="true" />
+              </span>
+              <div className="min-w-0">
+                <p className="type-headline text-label-primary">Factory reset</p>
+                <p className="type-footnote text-label-secondary mt-1 leading-relaxed">
+                  Erase every account, file, message, and setting on this box and
+                  return it to first-run setup. This cannot be undone.
+                </p>
+                {latestJob?.status === "failed" && latestJob.failureReason && (
+                  <p className="type-caption-1 text-label-tertiary mt-1">
+                    Last attempt didn&rsquo;t start: {latestJob.failureReason}
+                  </p>
+                )}
+              </div>
+            </div>
+            <button
+              ref={triggerRef}
+              type="button"
+              onClick={() => setModalOpen(true)}
+              className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-sm border border-system-red/40 bg-transparent px-4 py-2.5 font-medium text-system-red type-subheadline transition-all duration-200 ease-smooth hover:bg-system-red/10 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/50"
+            >
+              Factory reset…
+            </button>
+          </div>
+        )}
+      </div>
+
+      <FactoryResetConfirm
+        open={modalOpen}
+        title="Factory reset this Droplet?"
+        consequence={
+          <>
+            This erases every account, file, message, smart-home setup, and
+            setting on the box, and returns it to first-run setup. Your data
+            cannot be recovered afterward. The dashboard will go offline while
+            the reset runs.
+          </>
+        }
+        confirmPhrase={targetName}
+        confirmLabel="Factory reset"
+        busyLabel="Resetting…"
+        targetSummary={targetName || undefined}
+        onConfirm={handleConfirm}
+        onCancel={() => setModalOpen(false)}
+        triggerRef={triggerRef}
+      />
+    </>
   );
 }
 

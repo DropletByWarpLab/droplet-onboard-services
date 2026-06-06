@@ -403,6 +403,18 @@ if [ -f /usr/local/sbin/droplet-set-hostapd.sh ]; then
   log_success "Removed hostapd Wi-Fi-write host script"
 fi
 
+# Factory-reset host executor (WARP-825). Remove so a reset truly returns to
+# out-of-box; install-device-bridge.sh reinstalls it on re-provision. This is
+# the executor the dashboard Danger Zone reaches via the device-bridge — it is
+# the script invoking us right now (we run via `exec`- less delegation, so by
+# the time this line runs the wrapper has already handed control to this
+# canonical script). Removing it is safe and self-cleaning; it reinstalls on
+# the next setup.sh.
+if [ -f /usr/local/sbin/droplet-factory-reset.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-factory-reset.sh 2>/dev/null || true
+  log_success "Removed factory-reset host executor"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then

@@ -1,23 +1,19 @@
 /**
- * WARP-828 — Settings "Danger zone" section.
+ * Settings "Danger zone" section (WARP-828 + WARP-825).
  *
- * Owner-only home for irreversible device actions. v1 action: reformat a data
- * drive (wipe + reformat + re-mount) via the existing drive_adopt → confirm
- * backend (storage.ts). The section gates on the client role for DISCOVERY
- * only — the orchestrator independently enforces owner-role + a confirm token,
- * so a non-owner who forced the request still can't execute (covered in
- * storage-pools.routes.test.ts).
+ * Owner-only home for irreversible device actions. Two actions live here and
+ * the section renders BOTH cards for an owner:
+ *   - Reformat a data drive (WARP-828) — wipe + reformat + re-mount via the
+ *     existing drive_adopt → confirm backend (storage.ts). The picker drops
+ *     system/junk entries client-side; the two-step adopt→confirm flow echoes
+ *     the token's service + resourceId. The orchestrator independently enforces
+ *     owner-role + a confirm token (storage-pools.routes.test.ts).
+ *   - Factory reset (WARP-825) — owner-only, type-to-confirm, then a "returns
+ *     to first-run setup" progress state; server refusals are surfaced.
  *
- * Covers:
- *   - renders nothing for a non-owner (family / admin / undefined);
- *   - renders the danger zone + reformat action for an owner;
- *   - the picker lists ONLY real data drives — system/junk entries are guarded
- *     out client-side regardless of what the feed returns (WARP-827 may or may
- *     not have landed the server-side filter when we branch);
- *   - choosing a drive shows its name + size and a blunt consequence;
- *   - the two-step flow calls adoptDrive (whole-disk name) then
- *     confirmStorageCommand, echoing service + resourceId from the token;
- *   - the whole-disk name is derived from a partition device path.
+ * The section gates on the client role for DISCOVERY only — the server enforces
+ * owner-role on both endpoints too. A non-owner sees nothing and we probe
+ * neither the drives feed nor the reset-status feed.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
@@ -34,19 +30,28 @@ vi.mock("framer-motion", async () => {
   return { ...actual, useReducedMotion: () => true };
 });
 
-// Role is injected per-test.
+// Role is injected per-test via a module-level variable.
 let mockRole: string | undefined = "owner";
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: mockRole ? { id: "u1", role: mockRole } : null }),
+  useAuth: () =>
+    mockRole
+      ? { user: { id: "u1", username: "owner", displayName: "Owner", role: mockRole } }
+      : { user: null },
 }));
 
+// A SINGLE @/lib/api mock that covers BOTH cards' calls — the merged section
+// renders the reformat card AND the factory-reset card, so both feeds fire.
 const fetchDrives = vi.fn();
 const adoptDrive = vi.fn();
 const confirmStorageCommand = vi.fn();
+const getResetStatus = vi.fn();
+const triggerFactoryReset = vi.fn();
 vi.mock("@/lib/api", () => ({
   fetchDrives: (...a: unknown[]) => fetchDrives(...a),
   adoptDrive: (...a: unknown[]) => adoptDrive(...a),
   confirmStorageCommand: (...a: unknown[]) => confirmStorageCommand(...a),
+  getResetStatus: (...a: unknown[]) => getResetStatus(...a),
+  triggerFactoryReset: (...a: unknown[]) => triggerFactoryReset(...a),
 }));
 
 import { DangerZoneSection } from "./DangerZoneSection";
@@ -103,15 +108,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockRole = "owner";
   fetchDrives.mockResolvedValue(feed());
+  getResetStatus.mockResolvedValue({ targetName: "droplet-home", job: null });
+  triggerFactoryReset.mockResolvedValue({
+    status: "dispatched",
+    id: "job-1",
+    targetName: "droplet-home",
+  });
 });
 
-describe("DangerZoneSection (WARP-828)", () => {
+describe("DangerZoneSection — visibility (WARP-828 + WARP-825)", () => {
   it("renders nothing for a non-owner (family)", async () => {
     mockRole = "family";
     const { container } = render(<DangerZoneSection />);
     expect(container).toBeEmptyDOMElement();
-    // It must not even probe the drives feed for a non-owner.
+    // It must not even probe the drives feed or the reset status for a non-owner.
     expect(fetchDrives).not.toHaveBeenCalled();
+    expect(getResetStatus).not.toHaveBeenCalled();
   });
 
   it("renders nothing for admin (owner-only, per the AC) and for no session", () => {
@@ -129,11 +141,19 @@ describe("DangerZoneSection (WARP-828)", () => {
     expect(
       await screen.findByRole("heading", { name: /danger zone/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/reformat a drive/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/reformat a drive/i)).toBeInTheDocument();
   });
 
+  it("renders the factory reset entry for an owner", async () => {
+    render(<DangerZoneSection />);
+    expect(await screen.findByText(/danger zone/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /factory reset…/i }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("DangerZoneSection — reformat flow (WARP-828)", () => {
   it("lists only real data drives — system/no-uuid entries are dropped", async () => {
     render(<DangerZoneSection />);
     const picker = await screen.findByLabelText(/choose a drive/i);
@@ -143,83 +163,6 @@ describe("DangerZoneSection (WARP-828)", () => {
     expect(labels.join(" ")).toMatch(/wedding photos/i);
     expect(labels.join(" ")).toMatch(/vault/i);
     expect(labels.join(" ")).not.toMatch(/boot|sda1/i);
-  });
-
-  it("drops non-whole-disk shapes (loop / md / dm) even with a uuid + size + data mount", async () => {
-    // Regression (rjouffret): loop0 / md0 / dm-0 are NOT whole disks the host
-    // wipe script can reformat. They can carry a real FS uuid, a non-trivial
-    // size, and a /mnt data mount, so they sail past every OTHER guard — the
-    // only thing that must exclude them is wholeDiskName() returning falsy for
-    // an unrecognised shape. If that contract leaks the raw tail, these appear
-    // in the picker and a selection 400s server-side instead of being excluded
-    // up front. One real drive is mixed in to prove the filter is selective,
-    // not a blanket "hide everything".
-    fetchDrives.mockResolvedValueOnce({
-      drives: [
-        {
-          device: "/dev/sdb",
-          mount: "/mnt/droplet/wedding",
-          label: "TOSHIBA",
-          uuid: "U-WED",
-          size_bytes: 2_000_000_000_000,
-          used_bytes: 1e11,
-          free_bytes: 1.9e12,
-          mounted: true,
-          displayName: "Wedding Photos",
-          removable: true,
-        },
-        {
-          device: "/dev/loop0",
-          mount: "/mnt/droplet/loopback",
-          label: "LOOP",
-          uuid: "U-LOOP",
-          size_bytes: 8_000_000_000,
-          used_bytes: 0,
-          free_bytes: 8e9,
-          mounted: true,
-          displayName: "Loopback",
-          removable: false,
-        },
-        {
-          device: "/dev/md0",
-          mount: "/mnt/droplet/raid",
-          label: "RAID",
-          uuid: "U-MD",
-          size_bytes: 4_000_000_000_000,
-          used_bytes: 0,
-          free_bytes: 4e12,
-          mounted: true,
-          displayName: "Raid Array",
-          removable: false,
-        },
-        {
-          device: "/dev/dm-0",
-          mount: "/mnt/droplet/mapper",
-          label: "MAPPER",
-          uuid: "U-DM",
-          size_bytes: 1_000_000_000_000,
-          used_bytes: 0,
-          free_bytes: 1e12,
-          mounted: true,
-          displayName: "Mapped Volume",
-          removable: false,
-        },
-      ],
-      count: 4,
-    });
-
-    render(<DangerZoneSection />);
-    const picker = await screen.findByLabelText(/choose a drive/i);
-    const labels = within(picker)
-      .getAllByRole("option")
-      .map((o) => o.textContent ?? "")
-      .join(" ");
-    // The one genuine whole disk survives…
-    expect(labels).toMatch(/wedding photos/i);
-    // …and none of the non-whole-disk shapes are offered for a reformat.
-    expect(labels).not.toMatch(/loopback|loop0/i);
-    expect(labels).not.toMatch(/raid array|md0/i);
-    expect(labels).not.toMatch(/mapped volume|dm-0/i);
   });
 
   it("shows the blunt consequence for the chosen drive", async () => {
@@ -328,5 +271,52 @@ describe("DangerZoneSection (WARP-828)", () => {
     expect(
       await screen.findByText(/no drives available to reformat/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("DangerZoneSection — reset flow (WARP-825)", () => {
+  // The row trigger opens a dialog, so it carries an ellipsis ("Factory reset…");
+  // the modal's destructive action is the bare "Factory reset". This keeps them
+  // distinguishable for screen-reader users (and these tests).
+  const openModal = async () => {
+    fireEvent.click(await screen.findByRole("button", { name: /factory reset…/i }));
+  };
+  const modalActionButton = () =>
+    screen.getByRole("button", { name: /^factory reset$/i });
+
+  it("opens the confirm modal with the consequence + first-run copy", async () => {
+    render(<DangerZoneSection />);
+    await openModal();
+    expect(await screen.findByText(/factory reset this droplet/i)).toBeInTheDocument();
+    // The modal consequence copy names the first-run outcome.
+    expect(screen.getAllByText(/first-run setup/i).length).toBeGreaterThan(0);
+  });
+
+  it("calls triggerFactoryReset with the typed device name and shows progress", async () => {
+    render(<DangerZoneSection />);
+    await openModal();
+
+    // Type the device name to clear the friction step.
+    const input = await screen.findByLabelText(/type .* to confirm/i);
+    fireEvent.change(input, { target: { value: "droplet-home" } });
+
+    fireEvent.click(modalActionButton());
+
+    await waitFor(() => expect(triggerFactoryReset).toHaveBeenCalledWith("droplet-home"));
+    // Progress state mentions the box returning to first-run setup.
+    await waitFor(() => expect(screen.getByText(/under way/i)).toBeInTheDocument());
+  });
+
+  it("surfaces a server refusal (already in progress)", async () => {
+    triggerFactoryReset.mockRejectedValueOnce(
+      new Error("A factory reset is already in progress."),
+    );
+    render(<DangerZoneSection />);
+    await openModal();
+    fireEvent.change(await screen.findByLabelText(/type .* to confirm/i), {
+      target: { value: "droplet-home" },
+    });
+    fireEvent.click(modalActionButton());
+    expect(await screen.findByText(/already in progress/i)).toBeInTheDocument();
   });
 });

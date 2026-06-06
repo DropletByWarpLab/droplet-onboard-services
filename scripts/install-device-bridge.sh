@@ -105,6 +105,23 @@ fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
 
+# --- 1d) Factory-reset host executor (WARP-825) ---
+# The host-side entry point for the dashboard's owner-confirmed factory reset.
+# Spawned (detached) by the device-bridge's auth-gated POST /system/factory-reset
+# after an owner session + the server-side type-to-confirm check. It is a thin
+# wrapper that delegates to the canonical scripts/factory-reset.sh --yes; the
+# bridge never runs `docker compose down -v` itself. Repo-tracked per
+# architecture-guard rule 20; installed here (never hand-placed) so
+# factory-reset.sh removes it cleanly on reset.
+RESET_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-factory-reset.sh"
+RESET_SCRIPT_DST="/usr/local/sbin/droplet-factory-reset.sh"
+if [[ ! -f "$RESET_SCRIPT_SRC" ]]; then
+  log "missing source: $RESET_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$RESET_SCRIPT_SRC" "$RESET_SCRIPT_DST"
+log "installed $RESET_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

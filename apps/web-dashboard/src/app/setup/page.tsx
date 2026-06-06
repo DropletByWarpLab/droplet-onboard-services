@@ -88,30 +88,16 @@ export default function SetupPage() {
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
-  // Move the wizard, then persist the new step ONLY when it advances the
-  // furthest point reached — so the persisted resume pointer is monotonic
-  // non-decreasing. Used for forward completion AND backward navigation (the
-  // rail rows + the Back button); `maxReachedIdx` only ever grows.
-  //
-  // Why guard the PATCH (PR #518 review, rjouffret): the orchestrator's
-  // `setupStep` is the single resume pointer, and on mount `maxReachedIdx`
-  // re-seeds from it via `resumeStepFrom(...)`. A backward jump (vpn → cameras)
-  // followed by a refresh would otherwise persist the EARLIER step, re-seed
-  // `maxReachedIdx` to it, and RE-LOCK every step past it — defeating the
-  // clickable rail. Persisting forward-only keeps the in-session rail free to
-  // move anywhere while a refresh always resumes at the customer's high-water
-  // mark. The PATCH stays fire-and-forget (patchSetupStep swallows network
-  // errors) — local progress must never be gated on the round-trip.
-  const setStep = useCallback(
-    (next: Step) => {
-      setStepState(next);
-      if (STEPS.indexOf(next) > maxReachedIdx) {
-        setMaxReachedIdx(STEPS.indexOf(next));
-        void patchSetupStep(next);
-      }
-    },
-    [maxReachedIdx],
-  );
+  // Move the wizard AND persist the new step so a refresh resumes here. The
+  // PATCH is fire-and-forget (patchSetupStep swallows network errors) — local
+  // progress must never be gated on the round-trip. Used for forward completion
+  // AND backward navigation (the rail rows + the Back button); `maxReachedIdx`
+  // only ever grows, so jumping back never relocks an already-completed step.
+  const setStep = useCallback((next: Step) => {
+    setStepState(next);
+    setMaxReachedIdx((prev) => Math.max(prev, STEPS.indexOf(next)));
+    void patchSetupStep(next);
+  }, []);
 
   // PR #384 — each step paints its own full-bleed aurora-rail `StepShell`, so
   // the page is just the step switch. The terminal `done` step is the
