@@ -59,7 +59,9 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      await setWifiSsid(radio, iface_section, ssid);
+      // WARP-808: pass userId so the single-box hostapd SSID stage is keyed per
+      // authenticated user (the password/confirm write consumes the same key).
+      await setWifiSsid(radio, iface_section, ssid, userId);
       res.json({ status: "ok", ssid, tier: result.tier });
     } catch (err) {
       next(err);
@@ -94,7 +96,9 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
         return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
       }
 
-      const op = await setWifiPassword(iface_section, password);
+      // WARP-808: same userId key so applyWifi consumes the SSID this user
+      // staged on the preceding /wifi/ssid call (single-box hostapd path).
+      const op = await setWifiPassword(iface_section, password, userId);
       res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);

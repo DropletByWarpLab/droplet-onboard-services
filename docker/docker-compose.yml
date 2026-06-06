@@ -651,7 +651,13 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - OPENWRT_HOST=${OPENWRT_HOST:-10.0.0.1}
+      # WARP-815 (K2): the documented default is 192.168.50.1 — the multi-box
+      # Pi-5 OpenWrt router (matches services/routing/main.py and the docs). The
+      # single-box shape talks to the in-container OpenWrt on 127.0.0.1:8181;
+      # scripts/lib/single-box.sh writes that override into .env before bring-up,
+      # so this default is only the multi-box / dev fallback. The previous
+      # 10.0.0.1 here matched no shape and was a rule-12 host-specific footgun.
+      - OPENWRT_HOST=${OPENWRT_HOST:-192.168.50.1}
       - OPENWRT_PORT=${OPENWRT_PORT:-80}
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
@@ -662,6 +668,12 @@ services:
       # so dev laptops without a router get a realistic UI. `disabled` is an
       # orchestrator-side concern; this service still runs fine with it.
       - ROUTING_MODE=${ROUTING_MODE:-real}
+      # WARP-815 (K4): the Wi-Fi scan radio. The orchestrator no longer hardcodes
+      # `wlan0` on the /wireless/scan call, so the SDK resolves the radio from
+      # this env (services/routing/droplet_openwrt_sdk.py). Empty default keeps
+      # the SDK's last-resort `wlan0` for multi-box/dev; scripts/lib/single-box.sh
+      # writes wlp14s0 (sourced from DROPLET_AP_IFACE) into .env on the single-box.
+      - DROPLET_WIFI_SCAN_DEVICE=${DROPLET_WIFI_SCAN_DEVICE:-}
       - PORT=8080
     secrets:
       - openwrt_password

@@ -20,14 +20,24 @@
  *
  * Apply model (drives "exactly one AP reload per submit", AC4): the wizard calls
  * setWifiSsid then setWifiPassword, but hostapd needs BOTH together. So the SSID
- * write only STAGES the value in memory here; the password write APPLIES the
- * staged SSID + the PSK in a single bridge POST. A password-only change (nothing
- * staged) falls back to the AP's current SSID read from the bridge.
+ * write only STAGES the value; the password write APPLIES the staged SSID + the
+ * PSK in a single bridge POST. A password-only change (nothing staged) falls
+ * back to the AP's current SSID read from the bridge.
+ *
+ * Staging is keyed by the authenticated user (review #2). The SSID write and the
+ * password/confirm write are SEPARATE HTTP requests, so the staged SSID can't be
+ * threaded through one call stack — it has to survive between requests. A single
+ * process-global slot meant two concurrent wizard sessions clobbered each other,
+ * and an error path could leave a stale value for a later unrelated apply. Keying
+ * the stage by userId isolates concurrent sessions, and applyWifi() CONSUMES the
+ * staged value (read-and-delete in one synchronous step, before any await) so it
+ * is used exactly once and never lingers after an error.
  */
 
 import pino from "pino";
 import { config } from "../config.js";
 import { RouterError } from "../types/router-error.js";
+import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 import type { WriteResult } from "./openwrt.client.js";
 
 const logger = pino({ name: "hostapd-bridge" });
@@ -47,29 +57,26 @@ function bridgeAuthToken(): string {
   ).trim();
 }
 
-/** In-memory staged SSID from the preceding setWifiSsid call. Cleared after a
- *  successful apply so it never leaks into the next submit. */
-let stagedSsid: string | null = null;
+/**
+ * Staged SSIDs from the preceding setWifiSsid call, keyed by the authenticated
+ * user (review #2). Each entry is consumed (deleted) by the matching
+ * applyWifi() so it never leaks into a later submit. Keyed (rather than a single
+ * global) so two concurrent wizard sessions can't clobber each other.
+ *
+ * A user with no id (unauthenticated / test) maps to ANON_KEY — still isolated
+ * from real per-user entries.
+ */
+const stagedSsidByUser = new Map<string, string>();
+const ANON_KEY = "__anon__";
+
+function stageKey(userId?: string | null): string {
+  return userId && userId.length > 0 ? userId : ANON_KEY;
+}
 
 /** Stage the SSID for the imminent password apply (no bridge call, no AP
  *  reload). The wizard sends the password next, which does the single reload. */
-export function stageSsid(ssid: string): void {
-  stagedSsid = ssid;
-}
-
-function bridgeConnErr(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const codes = new Set([
-    "ECONNREFUSED",
-    "ENOTFOUND",
-    "EHOSTUNREACH",
-    "ENETUNREACH",
-    "EAI_AGAIN",
-  ]);
-  const cause = (err as { cause?: { code?: string } }).cause;
-  if (cause?.code && codes.has(cause.code)) return true;
-  const direct = (err as { code?: string }).code;
-  return !!direct && codes.has(direct);
+export function stageSsid(ssid: string, userId?: string | null): void {
+  stagedSsidByUser.set(stageKey(userId), ssid);
 }
 
 /**
@@ -93,9 +100,19 @@ async function currentSsidFromBridge(): Promise<string | null> {
   }
 }
 
+/** A fetch/abort failure that means "the request didn't get a response" — a
+ *  dropped connection or a client-side timeout. AbortController.abort() throws
+ *  an AbortError; AbortSignal.timeout() throws a TimeoutError (review #6 — the
+ *  earlier check only matched AbortError and missed the timeout variant). */
+function isTimeoutOrAbort(err: unknown): boolean {
+  const name = (err as { name?: string })?.name;
+  return name === "AbortError" || name === "TimeoutError";
+}
+
 /**
  * Apply the staged SSID + this PSK to the host hostapd AP via the device-bridge.
- * Exactly one bridge POST → one AP reload. Clears the staged SSID on success.
+ * Exactly one bridge POST → one AP reload. Consumes (clears) the staged SSID for
+ * this user up front so it can't be reused.
  *
  * Returns `{ operationId: null }` — unlike the UCI safe-apply path there is no
  * rollback/operation record for a hostapd write; the wizard's poll loop is a
@@ -109,7 +126,17 @@ async function currentSsidFromBridge(): Promise<string | null> {
  *   - RouterError.unknown carrying the bridge's message on any other non-ok
  *     reply (e.g. the host script's 422 validation refusal).
  */
-export async function applyWifi(psk: string): Promise<WriteResult> {
+export async function applyWifi(
+  psk: string,
+  userId?: string | null,
+): Promise<WriteResult> {
+  // CONSUME the staged SSID atomically (read + delete in one synchronous step,
+  // before any await). This guarantees it is used exactly once and never lingers
+  // after an error path — even if the bridge POST below throws (review #2).
+  const key = stageKey(userId);
+  const staged = stagedSsidByUser.get(key) ?? null;
+  stagedSsidByUser.delete(key);
+
   const token = bridgeAuthToken();
   if (!token) {
     // Fail closed: with no bridge auth token we cannot safely mutate the host
@@ -123,7 +150,7 @@ export async function applyWifi(psk: string): Promise<WriteResult> {
 
   // Resolve the SSID: the staged value from the preceding setWifiSsid, or the
   // AP's live SSID for a password-only change.
-  let ssid = stagedSsid;
+  let ssid = staged;
   if (!ssid) {
     ssid = await currentSsidFromBridge();
   }
@@ -154,7 +181,7 @@ export async function applyWifi(psk: string): Promise<WriteResult> {
       clearTimeout(timer);
     }
   } catch (err) {
-    if (bridgeConnErr(err) || (err as Error)?.name === "AbortError") {
+    if (isBridgeConnectionError(err) || isTimeoutOrAbort(err)) {
       // Bridge unreachable / timed out — surface as UNREACHABLE so the wizard's
       // WARP-807 notice fires (and we never log the PSK).
       logger.warn({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable for hostapd Wi-Fi write");
@@ -187,12 +214,10 @@ export async function applyWifi(psk: string): Promise<WriteResult> {
     });
   }
 
-  // Applied — clear the stage so it doesn't leak into the next submit.
-  stagedSsid = null;
   return { operationId: null };
 }
 
-/** Test-only: reset the in-memory staged SSID between tests. */
+/** Test-only: reset the in-memory staged SSIDs between tests. */
 export function _resetForTests(): void {
-  stagedSsid = null;
+  stagedSsidByUser.clear();
 }

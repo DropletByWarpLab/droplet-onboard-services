@@ -152,3 +152,78 @@ describe("applyWifi — surfaces a bridge refusal", () => {
     await expect(applyWifi("supersecret1")).rejects.toThrow(/not_hostapd_mode/i);
   });
 });
+
+describe("applyWifi — per-user staging (review #2: no shared global slot)", () => {
+  it("isolates concurrent sessions — one user's stage never feeds another's apply", async () => {
+    // Two wizard sessions stage different SSIDs at the "same time". Each apply
+    // must POST its OWN user's SSID; with the old single global, user-B's stage
+    // would clobber user-A's.
+    stageSsid("NetA", "user-A");
+    stageSsid("NetB", "user-B");
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    await applyWifi("secretAAAA", "user-A");
+    await applyWifi("secretBBBB", "user-B");
+
+    const posts = fetchSpy.mock.calls
+      .filter((c) => (c[1] as RequestInit | undefined)?.method === "POST")
+      .map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(posts).toEqual([
+      { ssid: "NetA", psk: "secretAAAA" },
+      { ssid: "NetB", psk: "secretBBBB" },
+    ]);
+  });
+
+  it("CONSUMES the staged SSID even when the bridge POST throws — no stale reuse", async () => {
+    // A first apply staged-then-errors. The staged value must be cleared so a
+    // LATER unrelated apply (nothing staged) does NOT silently reuse it; it
+    // should fall back to the live AP SSID instead.
+    stageSsid("StaleNet", "user-A");
+
+    // First apply: connection refused → throws UNREACHABLE.
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+      Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }),
+    );
+    await expect(applyWifi("firstsecret", "user-A")).rejects.toMatchObject({
+      code: "UNREACHABLE",
+    });
+
+    // Second apply for the SAME user with nothing newly staged: must NOT reuse
+    // "StaleNet" — it has to ask the bridge for the current SSID.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ssid: "LiveNet" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await applyWifi("secondsecret", "user-A");
+
+    const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.endsWith("/openwrt/qr"))).toBe(true); // fell back
+    const postCall = fetchSpy.mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === "POST",
+    );
+    const sent = JSON.parse(String((postCall![1] as RequestInit).body));
+    expect(sent.ssid).toBe("LiveNet"); // the live SSID, NOT the stale staged one
+    expect(sent.ssid).not.toBe("StaleNet");
+  });
+});
+
+describe("applyWifi — timeout/abort classification (review #6)", () => {
+  it.each(["AbortError", "TimeoutError"])(
+    "maps a %s to UNREACHABLE (not a generic unknown error)",
+    async (errName) => {
+      stageSsid("HomeNet");
+      vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+        Object.assign(new Error("aborted"), { name: errName }),
+      );
+      await expect(applyWifi("supersecret1")).rejects.toMatchObject({
+        code: "UNREACHABLE",
+      });
+    },
+  );
+});

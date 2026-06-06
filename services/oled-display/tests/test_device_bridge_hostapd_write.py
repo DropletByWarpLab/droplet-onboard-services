@@ -109,6 +109,82 @@ def test_set_hostapd_never_raises(monkeypatch):
     assert ok is False
 
 
+def test_set_hostapd_serializes_concurrent_writes(monkeypatch):
+    """Two concurrent writes must NOT both reach the host script. The second to
+    arrive (while the first holds _HOSTAPD_LOCK) is rejected with an
+    'in progress' sentinel — mirrors rotate_wifi_key()'s non-blocking acquire.
+    Without the lock, both would exec the script + double-restart the AP."""
+    import threading
+
+    bridge = _load_bridge(monkeypatch)
+
+    in_script = threading.Event()      # signalled once thread-1 is inside _run
+    release = threading.Event()        # held until the test lets thread-1 finish
+    call_count = {"n": 0}
+
+    def blocking_run(cmd, timeout=15):
+        call_count["n"] += 1
+        in_script.set()
+        # Hold the lock open until the second attempt has had its chance.
+        release.wait(timeout=5)
+        return 0, '{"ok": true, "ssid": "HomeNet"}', ""
+
+    monkeypatch.setattr(bridge, "_run", blocking_run)
+
+    results = {}
+
+    def first():
+        results["first"] = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
+
+    t1 = threading.Thread(target=first)
+    t1.start()
+    assert in_script.wait(timeout=5), "first write never entered the host script"
+
+    # Second write while the first still holds the lock → rejected, host script
+    # NOT invoked a second time.
+    ok2, info2 = bridge.run_set_hostapd({"ssid": "Other", "psk": "anothersecret"})
+    assert ok2 is False
+    assert "in progress" in str(info2).lower()
+
+    release.set()
+    t1.join(timeout=5)
+    assert results["first"][0] is True        # the first write succeeded
+    assert call_count["n"] == 1               # host script ran exactly once
+
+
+def test_concurrent_hostapd_write_maps_to_409(monkeypatch):
+    """At the HTTP layer, the 'in progress' contention sentinel becomes 409
+    Conflict (not 422) — distinct from a validation refusal."""
+    import threading
+
+    bridge = _load_bridge(monkeypatch)
+    in_script = threading.Event()
+    release = threading.Event()
+
+    def blocking_run(cmd, timeout=15):
+        in_script.set()
+        release.wait(timeout=5)
+        return 0, '{"ok": true, "ssid": "HomeNet"}', ""
+
+    monkeypatch.setattr(bridge, "_run", blocking_run)
+
+    def first():
+        bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
+
+    t1 = threading.Thread(target=first)
+    t1.start()
+    assert in_script.wait(timeout=5)
+    try:
+        status, obj = _post(bridge, {"X-Droplet-Auth": "pytest-bridge-token"},
+                            {"ssid": "Other", "psk": "anothersecret"})
+        assert status == 409
+        assert obj.get("ok") is False
+        assert "in progress" in str(obj.get("error", "")).lower()
+    finally:
+        release.set()
+        t1.join(timeout=5)
+
+
 def test_set_hostapd_does_not_log_the_psk(monkeypatch, caplog):
     """The PSK is a per-device secret — it must never reach the bridge logs,
     even on the refusal path."""

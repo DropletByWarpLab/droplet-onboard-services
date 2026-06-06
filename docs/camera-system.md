@@ -122,8 +122,8 @@ curl -X POST http://localhost:3000/api/switch/setup/cameras
 
 **Manual on existing OpenWrt:**
 ```bash
-scp openwrt/scripts/setup-camera-subnet.sh root@10.0.0.1:/tmp/
-ssh root@10.0.0.1 'sh /tmp/setup-camera-subnet.sh'
+scp openwrt/scripts/setup-camera-subnet.sh root@192.168.50.1:/tmp/
+ssh root@192.168.50.1 'sh /tmp/setup-camera-subnet.sh'
 ```
 
 ## Remote Access

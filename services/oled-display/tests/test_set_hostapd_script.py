@@ -126,6 +126,81 @@ def test_accepts_boundary_lengths(tmp_path):
     assert _run({"ssid": "a", "psk": "z" * 63}, env_file2).returncode == 0
 
 
+# --- SECURITY: control characters → env-file injection (WARP-808) -------------
+# The SSID/PSK are written verbatim as `KEY=VALUE` lines in the systemd
+# EnvironmentFile. A newline-bearing SSID like "foo\nDROPLET_AP_PSK=injected"
+# passes a length-only check (the newline is one character) but would inject a
+# SECOND assignment that overrides DROPLET_AP_PSK (or any key). The script must
+# reject ANY control character (byte < 0x20, plus DEL) BEFORE writing.
+
+def test_rejects_newline_injection_in_ssid_before_writing(tmp_path):
+    env_file = tmp_path / "droplet-openwrt-attach"
+    # The classic env-file injection payload: a newline that opens a new
+    # KEY=VALUE line overriding the AP password.
+    proc = _run({"ssid": "foo\nDROPLET_AP_PSK=injected", "psk": "supersecret1"},
+                env_file)
+    assert proc.returncode != 0
+    combined = (proc.stderr + proc.stdout).lower()
+    assert "control character" in combined or "ssid" in combined
+    # Nothing written — the injected key never reaches the env file.
+    assert not env_file.exists()
+
+
+def test_injected_ssid_does_not_override_psk_key_even_if_file_exists(tmp_path):
+    # Pre-seed a real env file; an injection attempt must leave it untouched
+    # (the write is atomic-replace, and validation fails before the temp write).
+    env_file = tmp_path / "droplet-openwrt-attach"
+    env_file.write_text(
+        "DROPLET_AP_SSID=OldName\nDROPLET_AP_PSK=originalsecret\n",
+        encoding="utf-8",
+    )
+    proc = _run({"ssid": "evil\nDROPLET_AP_PSK=attacker", "psk": "supersecret1"},
+                env_file)
+    assert proc.returncode != 0
+    body = env_file.read_text(encoding="utf-8")
+    # The operator's original PSK survives; the attacker's value is nowhere.
+    assert "DROPLET_AP_PSK=originalsecret" in body
+    assert "attacker" not in body
+    assert body.count("DROPLET_AP_PSK=") == 1
+
+
+# NUL (\x00) is intentionally excluded: a POSIX shell variable cannot hold a NUL
+# byte, so bash command-substitution strips it before validation — it can never
+# survive into the env file to inject a line, so it isn't an attack vector here.
+# The injection-relevant control chars are the line terminators (\n, \r).
+@pytest.mark.parametrize("ctrl", ["\n", "\r", "\t", "\x0b", "\x1b", "\x7f"])
+def test_rejects_any_control_char_in_ssid(tmp_path, ctrl):
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run({"ssid": "Net" + ctrl + "work", "psk": "supersecret1"}, env_file)
+    assert proc.returncode != 0, f"control char {ctrl!r} was accepted"
+    assert not env_file.exists()
+
+
+@pytest.mark.parametrize("ctrl", ["\n", "\r", "\t", "\x1b"])
+def test_rejects_control_char_in_psk(tmp_path, ctrl):
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run({"ssid": "HomeNet", "psk": "secret" + ctrl + "more"}, env_file)
+    assert proc.returncode != 0, f"control char {ctrl!r} in PSK was accepted"
+    assert not env_file.exists()
+
+
+def test_accepts_utf8_ssid_with_accents(tmp_path):
+    # The control-char guard must NOT reject legitimate non-ASCII SSIDs — an
+    # 802.11 SSID can be UTF-8. Multi-byte printable runs are not control chars,
+    # so the script must ACCEPT them (returncode 0). We assert acceptance + that
+    # the write happened, decoding tolerantly: the script's stdout/file encoding
+    # follows the host locale (UTF-8 on the Linux box, cp1252 on a Windows dev
+    # host), so we don't pin the exact accented bytes — just that the SSID key
+    # landed and the PSK line is intact.
+    env_file = tmp_path / "droplet-openwrt-attach"
+    proc = _run({"ssid": "Café Réseau", "psk": "supersecret1"}, env_file)
+    assert proc.returncode == 0, proc.stderr
+    body = env_file.read_text(encoding="utf-8", errors="replace")
+    assert "DROPLET_AP_SSID=" in body
+    assert "DROPLET_AP_PSK=supersecret1" in body
+    assert body.count("DROPLET_AP_SSID=") == 1
+
+
 def test_upsert_is_idempotent(tmp_path):
     # Writing the same creds twice yields a byte-identical env file — no
     # duplicated DROPLET_AP_SSID/PSK lines, no churn. The "exactly one AP reload

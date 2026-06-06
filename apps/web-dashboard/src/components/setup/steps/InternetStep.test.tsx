@@ -232,6 +232,52 @@ describe("InternetStep — Home Wi-Fi is optional/skippable (WARP-809)", () => {
     expect(setWifiSsid).not.toHaveBeenCalled();
   });
 
+  it("surfaces the router's revert reason when a UCI safe-apply rolls back (review #4)", async () => {
+    // On the multi-box (UCI) shape the password change is a Tier-2 safe-apply:
+    // setWifiSsid ok → setWifiPassword returns 202 confirmation_required → we
+    // auto-confirm → poll the operation. When the router REVERTS, the op comes
+    // back rolled_back with a concrete `reason`, and pollOperation throws a
+    // PLAIN Error(reason). That reason is actionable (e.g. "Channel 149 is not
+    // permitted in your region") — it must be shown, not swallowed by the
+    // generic "couldn't set it up" notice.
+    setWifiSsid.mockResolvedValueOnce({ status: "ok" });
+    setWifiPassword.mockResolvedValueOnce({
+      status: "confirmation_required",
+      confirmationToken: "tok-confirm",
+      operation: "set_wifi_password",
+    });
+    confirmNetworkCommand.mockResolvedValueOnce({ operationId: "op-42" });
+    fetchNetworkOperation.mockResolvedValueOnce({
+      state: "rolled_back",
+      reason: "Channel 149 is not permitted in your region — the router reverted.",
+    });
+
+    const onComplete = vi.fn();
+    render(<InternetStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() => expect(saveCta()).toBeEnabled());
+
+    fireEvent.click(wifiExpander());
+    fireEvent.change(ssidInput()!, { target: { value: "Studio Fotonia" } });
+    fireEvent.change(screen.getByPlaceholderText(/wi-fi password/i), {
+      target: { value: "supersecret" },
+    });
+    fireEvent.click(saveCta());
+
+    // The concrete revert reason is surfaced (as a hard error / role=alert),
+    // NOT discarded for the generic wifi-write notice.
+    const err = await screen.findByText(/channel 149 is not permitted/i);
+    expect(err).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /channel 149 is not permitted/i,
+    );
+    // It must NOT be mislabeled as the generic "couldn't set up the Wi-Fi" copy.
+    expect(
+      screen.queryByText(/couldn.t set up the droplet.s wi-?fi right now/i),
+    ).not.toBeInTheDocument();
+    // And the step did not advance.
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("shows an actionable 'skip and set it later' message (not a raw 500) when a Wi-Fi write fails with ROLLED_BACK", async () => {
     // WARP-808's hostapd write-fix is parked, so on single-box an SSID write
     // 500s with code ROLLED_BACK — which is NOT in ROUTER_UNREACHABLE_CODES, so

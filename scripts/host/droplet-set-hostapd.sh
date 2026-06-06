@@ -98,6 +98,23 @@ PSK="$(json_field psk)"
 ssid_len=${#SSID}
 psk_len=${#PSK}
 
+# SECURITY (WARP-808): reject any control character (byte < 0x20, plus DEL) in
+# the SSID or PSK BEFORE writing. The value is written verbatim as a `KEY=VALUE`
+# line in the systemd EnvironmentFile; an embedded newline would inject a SECOND
+# assignment (e.g. an SSID of "foo\nDROPLET_AP_PSK=attacker" would override the
+# AP key — an env-file injection). Length validation alone does NOT catch this:
+# a newline counts as one "character". Control chars are never valid in an
+# 802.11 SSID or a WPA passphrase either, so this can't reject a legitimate
+# value (a UTF-8 SSID's multi-byte printable runs are NOT in [[:cntrl:]], which
+# resolves to the ASCII control range in both the C and UTF-8 locales).
+if [[ "$SSID" == *[[:cntrl:]]* ]]; then
+  die "network name (SSID) must not contain control characters (e.g. line breaks)"
+fi
+if [[ "$PSK" == *[[:cntrl:]]* ]]; then
+  # Never echo the value — only the reason.
+  die "Wi-Fi password must not contain control characters (e.g. line breaks)"
+fi
+
 if [ "$ssid_len" -lt "$SSID_MIN" ] || [ "$ssid_len" -gt "$SSID_MAX" ]; then
   die "network name (SSID) must be ${SSID_MIN}-${SSID_MAX} characters (got ${ssid_len})"
 fi
@@ -125,6 +142,16 @@ import os, sys
 path = os.environ["ENV_FILE"]
 ssid = os.environ["UP_SSID"]
 psk  = os.environ["UP_PSK"]
+# Defense in depth (WARP-808): the bash validation above already rejects control
+# characters, but this is the layer that actually builds the `KEY=VALUE` lines —
+# fail closed here too so a control char can never be written into the
+# EnvironmentFile (a newline would inject a second assignment / override another
+# key). Never print the value.
+for label, value in (("SSID", ssid), ("PSK", psk)):
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+        sys.stderr.write(
+            "droplet-set-hostapd: {} must not contain control characters\n".format(label))
+        sys.exit(2)
 updates = {"DROPLET_AP_SSID": ssid, "DROPLET_AP_PSK": psk}
 try:
     with open(path, "r", encoding="utf-8") as fh:

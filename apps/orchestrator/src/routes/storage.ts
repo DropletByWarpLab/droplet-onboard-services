@@ -11,6 +11,7 @@ import {
   confirmStorageCommand,
 } from "../services/storage-safety.service.js";
 import { config } from "../config.js";
+import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 
 // Drive labels are device-wide config that any user (incl. family
 // accounts) shares, so PATCH is admin-only — mirrors the gate around
@@ -89,31 +90,13 @@ function deriveBus(device: string): string {
   return "disk";
 }
 
-/**
- * The device-bridge only runs with the OLED/display compose profile. On a host
- * without it, the fetch fails with ECONNREFUSED ("fetch failed" + a
- * `cause.code` of ECONNREFUSED/ENOTFOUND/etc.). That's an EXPECTED condition —
- * not an error — so we degrade cleanly (200 + `reason: "bridge_unavailable"`)
- * and log at info level rather than warn/error. Real failures (a reachable
- * bridge that times out or returns garbage) still log louder.
- */
-function isBridgeConnectionError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const codes = new Set([
-    "ECONNREFUSED",
-    "ENOTFOUND",
-    "EHOSTUNREACH",
-    "ENETUNREACH",
-    "EAI_AGAIN",
-  ]);
-  // Node's undici wraps the socket error in `cause`; older paths put the code
-  // directly on the error. Check both.
-  const cause = (err as { cause?: { code?: string } }).cause;
-  if (cause?.code && codes.has(cause.code)) return true;
-  const directCode = (err as { code?: string }).code;
-  if (directCode && codes.has(directCode)) return true;
-  return false;
-}
+// The device-bridge only runs with the OLED/display compose profile. On a host
+// without it, the fetch fails with ECONNREFUSED ("fetch failed" + a
+// `cause.code` of ECONNREFUSED/ENOTFOUND/etc.). That's an EXPECTED condition —
+// not an error — so we degrade cleanly (200 + `reason: "bridge_unavailable"`)
+// and log at info level rather than warn/error. Real failures (a reachable
+// bridge that times out or returns garbage) still log louder.
+// (Classifier shared with hostapd-bridge.service.ts — see lib/bridge-errors.ts.)
 
 interface BridgeDrivesSnapshot {
   drives: BridgeDrive[];
