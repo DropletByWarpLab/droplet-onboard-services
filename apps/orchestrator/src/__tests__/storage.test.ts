@@ -459,6 +459,58 @@ describe("storage routes — data-drive inclusion filter (WARP-827)", () => {
     expect(res.body.drives).toEqual([]);
     expect(res.body.count).toBe(0);
   });
+
+  it("drops an OS-disk partition auto-mounted as a data drive (os_disk/parent_disk — the real .87 case)", async () => {
+    // The automounter mounted the install disk's EFI/boot partitions under
+    // /mnt/droplet/drive-<uuid>: they pass rules 2-3 (ext4/vfat, under /mnt/,
+    // not the bind) yet live on the OS disk. The bridge tags parent_disk +
+    // reports os_disk so the orchestrator drops them. Mirrors what the live
+    // single-box (.87) actually returned: nvme0n1p1/p2 -> nvme0n1 == root.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          os_disk: "nvme0n1",
+          drives: [
+            { device: "/dev/nvme0n1p1", parent_disk: "nvme0n1", mount: "/mnt/droplet/drive-13EE-1E3", label: "drive", uuid: "U-EFI-AUTO", size_bytes: 1_073_741_824, used_bytes: 5e7, free_bytes: 1e9, mounted: true, fs: "vfat" },
+            { device: "/dev/nvme0n1p2", parent_disk: "nvme0n1", mount: "/mnt/droplet/drive-538963df", label: "drive", uuid: "U-BOOT-AUTO", size_bytes: 2_147_483_648, used_bytes: 3e8, free_bytes: 1.8e9, mounted: true, fs: "ext4" },
+            { device: "/dev/sdb1", parent_disk: "sdb", mount: "/mnt/droplet/data2-1380a14d", label: "data2", uuid: "U-DATA-REAL", size_bytes: 2e12, used_bytes: 1e11, free_bytes: 1.9e12, mounted: true, fs: "ext4", removable: true },
+          ],
+          count: 3,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives.map((d: any) => d.uuid)).toEqual(["U-DATA-REAL"]);
+    expect(res.body.count).toBe(1);
+    const mounts = res.body.drives.map((d: any) => d.mount);
+    expect(mounts).not.toContain("/mnt/droplet/drive-13EE-1E3");
+    expect(mounts).not.toContain("/mnt/droplet/drive-538963df");
+  });
+
+  it("fails open: with no os_disk reported, a parent_disk tag never hides a real drive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sdb1", parent_disk: "sdb", mount: "/mnt/droplet/data2", label: "data2", uuid: "U-NO-OSDISK", size_bytes: 2e12, used_bytes: 1e11, free_bytes: 1.9e12, mounted: true, fs: "ext4", removable: true },
+          ],
+          count: 1,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives.map((d: any) => d.uuid)).toEqual(["U-NO-OSDISK"]);
+  });
 });
 
 describe("storage routes — device-bridge URL (WARP-660)", () => {

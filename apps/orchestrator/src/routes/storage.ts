@@ -54,6 +54,10 @@ function bridgeAuthToken(): string {
 
 interface BridgeDrive {
   device: string;
+  /** WARP-827: whole-disk kernel name backing `device` (e.g. nvme0n1), set by
+   *  the bridge so the orchestrator can drop partitions that live on the OS
+   *  disk. Optional — an older bridge omits it. */
+  parent_disk?: string;
   mount: string;
   label: string;
   uuid: string;
@@ -138,7 +142,7 @@ const OS_ROOT_BIND_MOUNT = "/mnt/droplet";
 
 /** Predicate: is this bridge drive a real, user-relevant DATA drive worth
  *  showing on the home-user storage page? See the rule block above. */
-function isUserDataDrive(d: BridgeDrive): boolean {
+function isUserDataDrive(d: BridgeDrive, osDisk?: string): boolean {
   if (!d.mounted) return false;
   const mount = (d.mount || "").replace(/\/+$/, "") || d.mount;
   // Rule 2: must be a real user-storage location under /mnt/, excluding the
@@ -147,6 +151,13 @@ function isUserDataDrive(d: BridgeDrive): boolean {
   if (mount === OS_ROOT_BIND_MOUNT) return false;
   // Rule 3: data fstype only (when the bridge reports one).
   if (d.fs && !DATA_FSTYPES.has(d.fs.toLowerCase())) return false;
+  // Rule 4 (WARP-827): never a partition that lives on the OS/root disk. The
+  // automounter can mount the install disk's EFI/boot partitions under /mnt/,
+  // where rules 2-3 would pass them. The bridge already drops these (primary
+  // gate); this is the defense-in-depth boundary check, exercised when the
+  // bridge tags drives (parent_disk) + reports os_disk. Fails open: with no
+  // os_disk we hide nothing, so a real data drive is never lost.
+  if (osDisk && d.parent_disk && d.parent_disk === osDisk) return false;
   return true;
 }
 
@@ -161,6 +172,10 @@ function isUserDataDrive(d: BridgeDrive): boolean {
 interface BridgeDrivesSnapshot {
   drives: BridgeDrive[];
   count: number;
+  /** WARP-827: whole-disk kernel name backing root "/" (e.g. nvme0n1); lets the
+   *  orchestrator exclude any drive whose parent_disk matches. Absent when the
+   *  bridge can't resolve it (then we hide nothing — fail open). */
+  os_disk?: string;
   snapshot_at: string;
 }
 
@@ -323,7 +338,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // at the orchestrator boundary so the home-user only ever sees real data
       // drives. See isUserDataDrive() for the documented rule. Done BEFORE the
       // Drive-table join so we never query labels for junk.
-      const dataDrives = (snap.drives ?? []).filter(isUserDataDrive);
+      const dataDrives = (snap.drives ?? []).filter((d) => isUserDataDrive(d, snap.os_disk));
 
       // Single batched lookup — Drive table is tiny (one row per
       // physical drive the customer has named), so an unfiltered
