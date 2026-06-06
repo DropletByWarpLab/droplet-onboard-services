@@ -12,7 +12,13 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { LearnMoreCard } from "./LearnMoreCard";
+
+/** The min-height query the card uses to decide its initial open state. Mirrors
+ *  the component's `TALL_ENOUGH` (kept private there); pinned here so the test
+ *  fails if the breakpoint query the effect reads ever drifts. */
+const TALL_ENOUGH = "(min-height: 760px)";
 
 /** Install a matchMedia stub where the given query strings report `matches`. */
 function mockMatchMedia(matches: (query: string) => boolean) {
@@ -71,6 +77,46 @@ describe("LearnMoreCard disclosure (WARP-820)", () => {
         <p>helpful body</p>
       </LearnMoreCard>,
     );
+    expect(container.querySelector("details")).not.toHaveAttribute("open");
+  });
+
+  it("renders EXPANDED on the server regardless of a short viewport (no hydration mismatch)", () => {
+    // Finding #2 (the SSR/hydration half) — the open state must NOT be computed
+    // from matchMedia during render. The previous lazy `useState(initialOpen)`
+    // read matchMedia in the initializer, so the SERVER (where the initializer
+    // had no `window`) emitted `open` while a short client recomputed `closed` on
+    // the lazy-init's single run — a hydration-attribute mismatch / open→closed
+    // flicker, and a card stuck expanded after hydration on short viewports.
+    //
+    // Effects never run during a server render, so SSR markup is a clean proxy
+    // for "the value committed before any post-mount effect". With a SHORT
+    // viewport in scope, the fix (start `true`, correct in an effect) still emits
+    // an OPEN <details>; a render-time read would emit a CLOSED one and fail.
+    mockMatchMedia(() => false); // short viewport visible to the render phase
+    const html = renderToStaticMarkup(
+      <LearnMoreCard>
+        <p>helpful body</p>
+      </LearnMoreCard>,
+    );
+    // `open` is a boolean attribute → React serialises it as `open=""` on the
+    // <details>. A render-time matchMedia read on this short viewport would emit
+    // a <details> with no `open` attribute at all.
+    expect(html).toMatch(/<details[^>]*\sopen=""/);
+  });
+
+  it("collapses on a short viewport after mount, via the post-mount effect", () => {
+    // The client half: once mounted on a short viewport, the post-mount effect
+    // re-derives the state and collapses the card (recovering the zero-scroll
+    // budget). Consulting matchMedia for the breakpoint query is the mechanism;
+    // ending collapsed is the result. Removing the effect → stays open → fails.
+    const spy = vi.fn((q: string) => !q.includes("min-height")); // SHORT
+    mockMatchMedia(spy);
+    const { container } = render(
+      <LearnMoreCard>
+        <p>helpful body</p>
+      </LearnMoreCard>,
+    );
+    expect(spy).toHaveBeenCalledWith(TALL_ENOUGH);
     expect(container.querySelector("details")).not.toHaveAttribute("open");
   });
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ExternalLink, HelpCircle } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 /**
  * Inline "how does this work?" callout, reused by every wizard step.
@@ -35,13 +35,6 @@ import { useState, type ReactNode } from "react";
  *  zero-scroll budget. Below this, the card starts collapsed. */
 const TALL_ENOUGH = "(min-height: 760px)";
 
-function initialOpen(): boolean {
-  // SSR / no matchMedia → default expanded (the desktop-first state); the
-  // client collapses it after mount on a short viewport.
-  if (typeof window === "undefined" || !window.matchMedia) return true;
-  return window.matchMedia(TALL_ENOUGH).matches;
-}
-
 export function LearnMoreCard({
   title = "How does this work?",
   children,
@@ -52,12 +45,31 @@ export function LearnMoreCard({
   /** Anchor in `/help` (e.g. "internet" for `/help#internet`). */
   helpAnchor?: string;
 }) {
-  const [open, setOpen] = useState(initialOpen);
+  // WARP-820 — start EXPANDED, unconditionally. This is the SSR-rendered value,
+  // so the server markup and the client's first paint agree (no hydration
+  // mismatch / open→closed flicker). A lazy `useState(initialOpen)` could NOT do
+  // this: its initializer runs once, on the server it has no `window` and
+  // returns `true`, and React never re-runs a lazy initializer on hydration — so
+  // on a SHORT client viewport the card stayed permanently expanded.
+  const [open, setOpen] = useState(true);
+
+  // …then re-derive the open state once, AFTER mount, from the viewport height.
+  // Tall viewports keep it open (desktop discoverability unchanged); short ones
+  // collapse it to recover the zero-scroll budget, where the customer can still
+  // open it on demand. matchMedia is guarded for the SSR/old-browser path
+  // (effects never run on the server, but the guard keeps it safe either way).
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    setOpen(window.matchMedia(TALL_ENOUGH).matches);
+  }, []);
 
   return (
     <details
       className="dp-card !p-4 mt-6 group"
       open={open}
+      // The open state is intentionally corrected on the client in a post-mount
+      // effect; suppress React's hydration-attribute warning for that one frame.
+      suppressHydrationWarning
       onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
       <summary className="flex cursor-pointer list-none items-center gap-3 [&::-webkit-details-marker]:hidden">
