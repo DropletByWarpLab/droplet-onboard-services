@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
+import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -30,6 +31,10 @@ export default function SettingsPage() {
   const [newEmail, setNewEmail] = useState("");
   const [newDisplayName, setNewDisplayName] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  // WARP-824: admin types a temp password and (by default) requires the new
+  // user to change it on first login. Default ON — an admin-minted account is
+  // a temp-credential handoff unless the operator opts out.
+  const [newMustChange, setNewMustChange] = useState(true);
   const [userError, setUserError] = useState<string | null>(null);
   const [deleteUserTarget, setDeleteUserTarget] = useState<string | null>(null);
 
@@ -72,10 +77,11 @@ export default function SettingsPage() {
     }
 
     try {
-      await createUser(newEmail, newPassword, newDisplayName || undefined);
+      await createUser(newEmail, newPassword, newDisplayName || undefined, newMustChange);
       setNewEmail("");
       setNewDisplayName("");
       setNewPassword("");
+      setNewMustChange(true);
       setShowAddUser(false);
       await loadUsers();
     } catch (err: any) {
@@ -193,6 +199,24 @@ export default function SettingsPage() {
               onKeyDown={(e) => e.key === "Enter" && handleCreateUser()}
             />
             <PasswordRulesChecklist password={newPassword} />
+            {/* WARP-824 — require the new user to replace the temporary
+                password on first login. On by default; the orchestrator
+                enforces the change server-side. */}
+            <label htmlFor="must-change-password" className="flex items-start gap-2.5 pt-1 cursor-pointer">
+              <input
+                id="must-change-password"
+                type="checkbox"
+                checked={newMustChange}
+                onChange={(e) => setNewMustChange(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-separator text-accent focus:ring-accent/40 cursor-pointer"
+              />
+              <span className="type-footnote text-label-secondary leading-snug">
+                Require password change on first login
+                <span className="block text-label-tertiary type-caption-1 mt-0.5">
+                  You set a temporary password now; they choose their own when they first sign in.
+                </span>
+              </span>
+            </label>
             <div className="flex items-center gap-2 pt-1">
               <button onClick={handleCreateUser} className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5">
                 Create
@@ -329,6 +353,13 @@ export default function SettingsPage() {
           />
         </div>
       </section>
+
+      {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
+          device actions (reformat/remake storage AND factory reset). The
+          section self-gates to the owner role internally and renders nothing
+          for non-owners. Placed last so destructive actions sit apart from
+          routine settings, fenced off in system-red. */}
+      <DangerZoneSection />
 
       <ConfirmDialog
         open={deleteUserTarget !== null}

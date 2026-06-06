@@ -656,8 +656,8 @@ export function CoverageExtendersPanel() {
         </div>
       )}
 
-      {/* WARP-446 (blocker #3): masked-PSK dialog replaces the old
-          window.prompt(). Read-only network name + show/hide eyeball
+      {/* WARP-446 (blocker #3): masked-PSK dialog that replaced the old
+          native browser prompt. Read-only network name + show/hide eyeball
           + inline 8–63-char validation. */}
       <ApproveExtenderDialog
         open={approveDialogOpen}

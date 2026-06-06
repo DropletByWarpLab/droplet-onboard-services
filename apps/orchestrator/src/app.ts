@@ -5,7 +5,11 @@ import cookieParser from "cookie-parser";
 import { PrismaClient } from "@prisma/client";
 import { config } from "./config.js";
 import { requestLogger } from "./middleware/request-logger.js";
-import { authMiddleware, setAuthPrisma } from "./middleware/auth.js";
+import {
+  authMiddleware,
+  setAuthPrisma,
+  requirePasswordChangeGate,
+} from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
@@ -16,6 +20,7 @@ import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
 import { createDeviceClientsRouter } from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
+import { createSystemResetRouter } from "./routes/system-reset.routes.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
 import { createSsoRouter } from "./routes/sso.js";
 import {
@@ -194,6 +199,14 @@ export function createApp(prisma: PrismaClient) {
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
+  // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
+  // req.user is populated) and BEFORE every protected router so an
+  // admin-created user holding a temporary password can only reach the
+  // change-password / me / logout / refresh surface until they pick a new
+  // one. Reads the explicit `User.mustChangePassword` flag FRESH from the
+  // DB on every request — server enforcement, not a client-trusted redirect.
+  app.use(requirePasswordChangeGate(prisma));
+
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
 
@@ -210,6 +223,10 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createFilesKnowledgeRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));
   app.use("/api", createStorageRouter(prisma));
+  // WARP-825 — Settings Danger Zone: owner-only factory reset. Dispatches the
+  // wipe through the device-bridge host executor (never a web-tier exec of
+  // factory-reset.sh).
+  app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   // WARP-507 — Plane onboarding endpoint for the setup wizard.
   app.use(createPmOnboardRouter());

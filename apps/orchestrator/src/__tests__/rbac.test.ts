@@ -18,6 +18,7 @@
  * service-principal flow still works after the guards are wired in.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import os from "node:os";
 import request from "supertest";
 import express, { Request, Response, NextFunction, Router } from "express";
 
@@ -88,6 +89,7 @@ vi.mock("../services/network-safety.service.js", () => ({
 import { requireRole, authMiddleware, type AuthUser } from "../middleware/auth.js";
 import type { Role } from "../services/jwt.service.js";
 import { createSwitchRouter } from "../routes/switch.js";
+import { createSystemResetRouter } from "../routes/system-reset.routes.js";
 
 // ── Test fixtures ──────────────────────────────────────────────────
 
@@ -170,6 +172,11 @@ const MATRIX: GuardedRoute[] = [
 
   // ── service restart ── (owner only — destructive, may interrupt the box) ──
   { method: "post", path: "/api/network/system/reboot", allowed: ["owner"] },
+
+  // WARP-825: factory reset — the single most destructive action on the box
+  // (wipes every data volume + secrets, returns to first-run). owner ONLY,
+  // strictest possible guard (ADR-004 §3 destructive-system-action posture).
+  { method: "post", path: "/api/system/reset", allowed: ["owner"] },
 
   // ── cameras / matter / smart-home ── (owner + admin + family) ──
   { method: "post", path: "/api/cameras", allowed: ["owner", "admin", "family"] },
@@ -510,6 +517,96 @@ describe("switch router RBAC wiring (WARP-559)", () => {
         const res = await request(app).get(path);
         expect(res.status).toBe(200);
       });
+    }
+  });
+});
+
+// ── Real createSystemResetRouter wiring (WARP-825) ─────────────────
+// Mounts the REAL factory-reset router to prove POST /api/system/reset (the
+// single most destructive box action) actually carries requireRole("owner") —
+// admin/family/guest/no-session are rejected at the guard before the service
+// (and the device-bridge dispatch) is ever reached. SAFETY: fetch is stubbed
+// and the typed confirm never matches for the denied roles, so no wipe is ever
+// dispatched here. Mirrors the switch-router wiring block above.
+
+describe("system-reset router RBAC wiring (WARP-825)", () => {
+  function buildResetApp(user: AuthUser | null): express.Express {
+    // Minimal prisma double: the owner-allowed path needs resetJob +
+    // commandAuditLog, but for the DENIED roles the guard short-circuits before
+    // any of these are touched.
+    const prisma = {
+      resetJob: {
+        count: vi.fn(async () => 0),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "job-rbac",
+          status: "requested",
+          requestedBy: data.requestedBy ?? null,
+          targetName: data.targetName,
+          failureReason: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "job-rbac",
+          status: data.status ?? "dispatched",
+          targetName: "x",
+          failureReason: data.failureReason ?? null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })),
+        findFirst: vi.fn(async () => null),
+      },
+      commandAuditLog: { create: vi.fn(async () => ({ id: "a" })) },
+    } as never;
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      if (user) (req as Request & { user: AuthUser }).user = user;
+      next();
+    });
+    app.use("/api", createSystemResetRouter(prisma));
+    return app;
+  }
+
+  const DENIED: Role[] = ["admin", "family", "guest"];
+
+  for (const role of DENIED) {
+    it(`POST /api/system/reset: ${role} → 403`, async () => {
+      const app = buildResetApp(mkUser(role));
+      const res = await request(app)
+        .post("/api/system/reset")
+        .send({ confirm: "anything" });
+      expect(res.status).toBe(403);
+    });
+  }
+
+  it("POST /api/system/reset: no session → 403", async () => {
+    const app = buildResetApp(null);
+    const res = await request(app).post("/api/system/reset").send({ confirm: "x" });
+    expect(res.status).toBe(403);
+  });
+
+  it("POST /api/system/reset: owner → not 403 (guard passes)", async () => {
+    // Owner passes the guard. Give it a bridge token + a stubbed-ok fetch and a
+    // matching confirm so the dispatch path completes to 202 rather than a 5xx.
+    const prevToken = process.env.BRIDGE_AUTH_TOKEN;
+    process.env.BRIDGE_AUTH_TOKEN = "tok-rbac";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true }),
+    } as unknown as Awaited<ReturnType<typeof fetch>>);
+    try {
+      const app = buildResetApp(mkUser("owner"));
+      const res = await request(app)
+        .post("/api/system/reset")
+        .send({ confirm: os.hostname() });
+      expect(res.status).not.toBe(403);
+      expect(res.status).toBeLessThan(500);
+    } finally {
+      fetchSpy.mockRestore();
+      if (prevToken === undefined) delete process.env.BRIDGE_AUTH_TOKEN;
+      else process.env.BRIDGE_AUTH_TOKEN = prevToken;
     }
   });
 });

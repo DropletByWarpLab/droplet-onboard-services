@@ -37,6 +37,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const probeBlocked =
     setupProbeError !== null && setupState === null && !isPublicPage;
 
+  // WARP-824 — forced password change. An admin-created user signs in with a
+  // temporary password and carries an explicit `mustChangePassword` flag (read
+  // fresh from the row by /auth/me). They must replace it before reaching any
+  // other surface. We require an explicit `true` so a profile that predates
+  // the field (no flag) is never trapped here. This takes precedence over the
+  // tour below — the user can't do anything useful until the temp password is
+  // gone. The server-side gate enforces the same rule regardless of the client.
+  const forcePasswordChange = user?.mustChangePassword === true;
+
   // Tour gate: the appliance is claimed ("ready") but the post-setup product
   // tour hasn't been completed yet. We require an explicit `false` (not just
   // a falsy/unresolved state) so a transient `/setup/state` failure leaves
@@ -70,13 +79,30 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
+    // WARP-824 — an authenticated must-change user is pinned to
+    // /change-password until they replace the temporary password. Runs BEFORE
+    // the tour branch (the temp password is a hard block) and only when
+    // they're not already there. A public page (login/setup) owns its own
+    // flow, so we don't yank them off it.
+    if (user && forcePasswordChange && !isPublicPage && pathname !== "/change-password") {
+      router.replace("/change-password");
+      return;
+    }
+
+    // The flag cleared (password changed) but the user is still parked on
+    // /change-password → let them into the dashboard.
+    if (user && !forcePasswordChange && pathname === "/change-password") {
+      router.replace("/");
+      return;
+    }
+
     // PR #382 — the spec's "ready + tour pending → tour" branch (plumbed but
     // left unwired by #372). An authenticated owner on a claimed appliance
     // who hasn't finished the post-setup tour is routed to /tour. We only
     // redirect when they're NOT already there and NOT on a public page
     // (login/setup own their own flow), so the tour shows exactly once and
     // refreshing mid-tour lands back on /tour rather than the dashboard.
-    if (user && tourPending && !isPublicPage && pathname !== "/tour") {
+    if (user && !forcePasswordChange && tourPending && !isPublicPage && pathname !== "/tour") {
       router.replace("/tour");
       return;
     }
@@ -99,6 +125,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     user,
     isLoading,
     applianceUnclaimed,
+    forcePasswordChange,
     tourPending,
     pathname,
     router,
@@ -207,6 +234,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // wizard) — render it without the sidebar/main chrome so the walkthrough
   // owns the viewport. It still requires `user`, unlike PUBLIC_PATHS.
   if (pathname === "/tour") {
+    return <>{children}</>;
+  }
+
+  // WARP-824 — the forced password-change screen is the same kind of
+  // authenticated, full-screen takeover: no sidebar/main chrome so the
+  // change form owns the viewport (matches the /login + /setup look). It
+  // requires `user` (it's the signed-in temp-password handoff), unlike the
+  // public login page.
+  if (pathname === "/change-password") {
     return <>{children}</>;
   }
 

@@ -36,6 +36,14 @@ interface ChatInputProps {
  */
 export interface ChatInputHandle {
   insertQuote: (text: string) => void;
+  /**
+   * WARP-829: seed the composer with a starter line and hand the user the
+   * caret. Unlike `insertQuote` (which prepends a `> quote` block ahead of
+   * any draft), `seed` REPLACES the value — it's used when `/tools` primes
+   * the chat with a tool's starter sentence for the user to finish and
+   * send. Seeding never sends; the user edits and submits themselves.
+   */
+  seed: (text: string) => void;
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
@@ -144,6 +152,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           if (!el) return;
           el.focus();
           // Cursor lands at the end of the new value.
+          const end = el.value.length;
+          el.setSelectionRange(end, end);
+          el.style.height = "auto";
+          el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+        });
+      },
+      // WARP-829: replace the composer value with a starter line (from the
+      // /tools "Use in chat" hand-off) and focus the textarea with the caret
+      // at the end so the user keeps typing. No send — the user submits.
+      seed: (text: string) => {
+        setValue(text);
+        queueMicrotask(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
           const end = el.value.length;
           el.setSelectionRange(end, end);
           el.style.height = "auto";

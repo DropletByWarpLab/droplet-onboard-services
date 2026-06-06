@@ -10,9 +10,16 @@ const { useDrivesMock, usePoolsMock, toastMock } = vi.hoisted(() => ({
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: toastMock }) }));
 vi.mock("@/lib/hooks/useDrives", () => ({ useDrives: useDrivesMock }));
 vi.mock("@/lib/hooks/usePools", () => ({ usePools: usePoolsMock }));
+// WARP-827: DrivesPanel now reads useAuth() (admin gate for inline rename) and
+// updateDriveLabel(); mock both so this pools-focused suite renders without an
+// AuthProvider. Default to an admin so the card structure is fully exercised.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", username: "u", displayName: "U", role: "owner" } }),
+}));
 vi.mock("@/lib/api", () => ({
   ejectDrive: vi.fn(),
   rescanDrives: vi.fn(),
+  updateDriveLabel: vi.fn(),
 }));
 
 import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
@@ -110,5 +117,50 @@ describe("DrivesPanel — real pools replace the fake pooled sum (BUG-3)", () =>
     render(<DrivesPanel />);
     // Drive cards remain (named from the mount tail when no displayName).
     expect(screen.getByRole("list", { name: /drives/i })).toBeInTheDocument();
+  });
+
+  it("never surfaces raw /dev paths or kernel device names in the pool card (ADR-002)", () => {
+    usePoolsMock.mockReturnValue({
+      pools: [
+        {
+          device: "md0",
+          level: "raid1",
+          status: "active",
+          members: ["sda", "sdb"],
+          displayName: "Vault",
+        },
+      ],
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    render(<DrivesPanel />);
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    // No raw kernel names — the user is non-technical (ADR-002).
+    expect(poolsList).not.toHaveTextContent("/dev/");
+    expect(poolsList).not.toHaveTextContent(/\bmd0\b/);
+    expect(poolsList).not.toHaveTextContent(/\bsda\b/);
+    expect(poolsList).not.toHaveTextContent(/\bsdb\b/);
+    // Friendly presentation instead: name + level + member count.
+    expect(poolsList).toHaveTextContent("Vault");
+    expect(poolsList).toHaveTextContent(/raid 1/i);
+    expect(poolsList).toHaveTextContent(/2 drives/i);
+  });
+
+  it("falls back to a friendly pool name (never md0) when there is no displayName", () => {
+    usePoolsMock.mockReturnValue({
+      pools: [
+        { device: "md0", level: "raid1", status: "active", members: ["sda"] },
+      ],
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    render(<DrivesPanel />);
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    expect(poolsList).toHaveTextContent(/storage pool/i);
+    expect(poolsList).not.toHaveTextContent(/\bmd0\b/);
+    // Singular member-count copy.
+    expect(poolsList).toHaveTextContent(/1 drive\b/i);
   });
 });

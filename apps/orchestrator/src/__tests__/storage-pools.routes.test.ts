@@ -239,4 +239,90 @@ describe("destructive pool routes — no execution without a valid confirm token
       .send({ confirmationToken: "garbage", service: "pool_create", resourceId: "md0" });
     expect(confirm.status).toBeGreaterThanOrEqual(400);
   });
+
+  // WARP-828 — the Settings "Danger Zone" reformat-a-drive flow reuses this
+  // same drive_adopt → confirm path. The owner gate has to hold on the SERVER,
+  // never on the client: a family/guest session must be refused at BOTH the
+  // mint (adopt) and the execute (confirm) step, and the bridge must never be
+  // touched. Mirrors the eject/rescan "forbids non-admins" tests, generalised
+  // to the two-step destructive flow these routes carry.
+  it("drive adopt is refused for a non-owner/non-admin (family) and never reaches the bridge", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    // Real requireRole gate: inject a family-role session, not the owner stub.
+    vi.stubGlobal("fetch", bridge);
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = { id: "fam-1", role: "family" };
+      next();
+    });
+    app.use("/api", createStorageRouter(prisma));
+
+    const res = await request(app)
+      .post("/api/storage/drives/adopt")
+      .send({ device: "sdb", wipeMethod: "quick", confirmPhrase: "ERASE sdb" });
+    expect(res.status).toBe(403);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  it("storage command confirm is refused for a non-owner/non-admin (family)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    vi.stubGlobal("fetch", bridge);
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = { id: "guest-1", role: "guest" };
+      next();
+    });
+    app.use("/api", createStorageRouter(prisma));
+
+    // Even with a plausible-looking token the role gate must reject before the
+    // token is ever evaluated, and the bridge must stay untouched.
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: "a".repeat(64), service: "drive_adopt", resourceId: "sdb" });
+    expect(confirm.status).toBe(403);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  // WARP-828 — an EXPIRED token must be refused (the Danger Zone holds the
+  // owner on screen for the type-to-confirm friction, which can outlive the
+  // 60s token). The safety service stamps expiresAt; we force the clock past it
+  // and assert the confirm is rejected and the bridge is never touched.
+  it("drive adopt confirm with an EXPIRED token is refused and never reaches the bridge", async () => {
+    vi.useFakeTimers();
+    try {
+      const prisma = createPrismaMock();
+      const bridge = bridgePoolsResponse([]);
+      const app = makeApp(prisma, bridge);
+      const create = await request(app)
+        .post("/api/storage/drives/adopt")
+        .send({ device: "sdb", wipeMethod: "quick", confirmPhrase: "ERASE sdb" });
+      expect(create.status).toBe(202);
+      const token = create.body.confirmationToken;
+
+      // STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS is 60s; jump well past it.
+      vi.advanceTimersByTime(120_000);
+
+      const confirm = await request(app)
+        .post("/api/storage/command/confirm")
+        .send({ confirmationToken: token, service: "drive_adopt", resourceId: "sdb" });
+      expect(confirm.status).toBe(400);
+      expect(confirm.body.code).toBe("TOKEN_EXPIRED");
+      const hit = (bridge as any).mock.calls.some((c: any[]) =>
+        String(c[0]).endsWith("/pools/command"),
+      );
+      expect(hit).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
