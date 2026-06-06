@@ -139,6 +139,13 @@ ROTATION_MIN_INTERVAL_S = int(os.environ.get(
 # takes ~4s and the HTTP server is threaded).
 _ROTATION_LOCK = threading.Lock()
 
+# In-process lock for the single-box hostapd WRITE (WARP-808). The HTTP server is
+# threaded, so two concurrent POST /openwrt/wifi/hostapd would both exec the host
+# script AND both `systemctl restart droplet-openwrt-attach` — interleaving the
+# env-file write + double-bouncing the AP. Serialize them exactly like
+# _ROTATION_LOCK does for rotation: non-blocking acquire, 409 on contention.
+_HOSTAPD_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Shell helper
@@ -1486,27 +1493,37 @@ def run_set_hostapd(params):
     ssid = (params or {}).get("ssid", "")
     psk = (params or {}).get("psk", "")
     payload = json.dumps({"ssid": ssid, "psk": psk})
+    # Serialize concurrent writes (mirrors rotate_wifi_key's _ROTATION_LOCK). Two
+    # threads racing here would interleave the env-file write and double-restart
+    # the attach service / bounce hostapd. Non-blocking: a second in-flight write
+    # is rejected (the handler maps "in progress" to 409) rather than queued.
+    if not _HOSTAPD_LOCK.acquire(blocking=False):
+        logger.warning("set_hostapd rejected: a Wi-Fi write is already in progress")
+        return False, "hostapd write already in progress"
     try:
-        # Writing the env file + restarting the attach service (which respawns
-        # hostapd) takes a few seconds; allow a bounded window.
-        rc, out, err = _run([HOSTAPD_SCRIPT, payload], timeout=60)
-    except Exception as e:                                          # noqa: BLE001
-        # Log the SSID only — never the params dict (it carries the PSK).
-        logger.warning("set_hostapd failed to exec host script (ssid=%r): %s",
-                       ssid, e)
-        return False, "host script unavailable"
-    if rc != 0:
-        msg = (err.strip() or out.strip() or "host script refused")
-        logger.warning("set_hostapd refused/failed (rc=%s, ssid=%r): %s",
-                       rc, ssid, msg)
-        return False, msg
-    # qr_snapshot() is computed fresh on every call (no cache) and the hostapd
-    # creds fall back to parsing the container's regenerated /etc/hostapd.conf,
-    # so the next GET /openwrt/qr reflects the new SSID with no invalidation.
-    try:
-        return True, json.loads(out or "{}")
-    except (ValueError, TypeError):
-        return True, {"message": (out or "").strip()}
+        try:
+            # Writing the env file + restarting the attach service (which respawns
+            # hostapd) takes a few seconds; allow a bounded window.
+            rc, out, err = _run([HOSTAPD_SCRIPT, payload], timeout=60)
+        except Exception as e:                                      # noqa: BLE001
+            # Log the SSID only — never the params dict (it carries the PSK).
+            logger.warning("set_hostapd failed to exec host script (ssid=%r): %s",
+                           ssid, e)
+            return False, "host script unavailable"
+        if rc != 0:
+            msg = (err.strip() or out.strip() or "host script refused")
+            logger.warning("set_hostapd refused/failed (rc=%s, ssid=%r): %s",
+                           rc, ssid, msg)
+            return False, msg
+        # qr_snapshot() is computed fresh on every call (no cache) and the hostapd
+        # creds fall back to parsing the container's regenerated /etc/hostapd.conf,
+        # so the next GET /openwrt/qr reflects the new SSID with no invalidation.
+        try:
+            return True, json.loads(out or "{}")
+        except (ValueError, TypeError):
+            return True, {"message": (out or "").strip()}
+    finally:
+        _HOSTAPD_LOCK.release()
 
 
 def cameras_snapshot():
@@ -1703,9 +1720,14 @@ class Handler(BaseHTTPRequestHandler):
                 "psk": j.get("psk", ""),
             })
             if not ok:
-                # 422 — the host-script validation refused (SSID/PSK out of
-                # range) or the write failed. Same shape as /pools/command.
-                return self._send(422, {"ok": False, "error": info})
+                # 409 Conflict when another Wi-Fi write is already in flight
+                # (lock contention) — same non-blocking-acquire posture as
+                # rotate_wifi_key. Everything else (host-script validation
+                # refusal: SSID/PSK out of range, write failure) is 422, same
+                # shape as /pools/command.
+                status = (409 if isinstance(info, str) and "in progress" in info
+                          else 422)
+                return self._send(status, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/openwrt/wifi/rotate":
