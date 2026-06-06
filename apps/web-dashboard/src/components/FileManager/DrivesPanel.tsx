@@ -42,6 +42,15 @@ function driveName(d: DriveInfo): string {
   return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
 
+// Customer-facing pool name: the owner's displayName, else a generic label —
+// never the raw md device path (ADR-002 home-user persona; follow-up to WARP-827
+// which gave DriveCard the same treatment).
+function poolName(pool: PoolInfo): string {
+  const raw = (pool.displayName || "").replace(/[-_]+/g, " ").trim();
+  if (!raw) return "Storage pool";
+  return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+}
+
 function usagePct(d: DriveInfo): number {
   if (!d.size_bytes) return 0;
   return Math.max(0, Math.min(100, (d.used_bytes / d.size_bytes) * 100));
@@ -350,7 +359,7 @@ function PoolAlarmBanner({
           ? p.status === "degraded"
           : p.status === "resyncing",
     )
-    .map((p) => p.displayName || p.device)
+    .map((p) => poolName(p))
     .join(", ");
 
   if (alarm === "resyncing") {
@@ -400,11 +409,15 @@ function PoolAlarmBanner({
 }
 
 /** One storage-pool card: name, level + plain-language blurb, health badge,
- *  and member chips. Read-only — destructive actions live behind the Tier-2
- *  confirm flow (not surfaced here in the read-only view). */
+ *  and a member-count chip. Read-only — destructive actions live behind the
+ *  Tier-2 confirm flow (not surfaced here in the read-only view).
+ *  Raw kernel device names (/dev/md*, member /dev/sd*) are deliberately NOT
+ *  surfaced — the target user is non-technical (ADR-002; follow-up to WARP-827,
+ *  which gave the per-drive DriveCard the same treatment). */
 function PoolCard({ pool }: { pool: PoolInfo }) {
   const badge = poolStatusBadge(pool.status);
-  const name = pool.displayName || pool.device;
+  const name = poolName(pool);
+  const memberCount = pool.members.length;
   return (
     <div role="listitem" className="dp-card p-4">
       <div className="flex items-start gap-3">
@@ -428,17 +441,9 @@ function PoolCard({ pool }: { pool: PoolInfo }) {
       </div>
 
       <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">
-        <span className="font-mono px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-          /dev/{pool.device}
+        <span className="px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+          {memberCount} {memberCount === 1 ? "drive" : "drives"}
         </span>
-        {pool.members.map((m) => (
-          <span
-            key={m}
-            className="font-mono px-1.5 py-0.5 rounded border border-separator text-label-tertiary"
-          >
-            {m}
-          </span>
-        ))}
       </div>
 
       {pool.notes && <p className="mt-2 type-caption-1 text-label-tertiary">{pool.notes}</p>}
