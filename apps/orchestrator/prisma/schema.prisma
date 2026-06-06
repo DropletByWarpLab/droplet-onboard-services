@@ -1157,6 +1157,20 @@ model User {
   // back to ACTIVE on re-activate. The login route + SSO callback fail
   // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
   directoryStatus   DirectoryUserStatus @default(ACTIVE)
+  // WARP-824: admin-created users get a temporary password and must change
+  // it on first login. This is the EXPLICIT persistent signal for that gate
+  // — never derived from password age, a null/sentinel hash, or "row was
+  // created by an admin" inference (project no-guessing rule; same posture
+  // as `directoryStatus` above and `TotpCredential.confirmedAt`). Set true
+  // by POST /auth/users when the operator leaves "require change on first
+  // login" on (the default), and by an admin password RESET via
+  // PUT /auth/users/:username; cleared to false by POST /auth/change-password
+  // once the user picks their own password. The post-auth gate
+  // (`requirePasswordChangeGate`) reads this FRESH from the row on every
+  // request, so it can't be bypassed by a stale/forged JWT. Defaults false so
+  // every existing row + self-service signup (/auth/setup, invite-accept) is
+  // unaffected.
+  mustChangePassword Boolean @default(false)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

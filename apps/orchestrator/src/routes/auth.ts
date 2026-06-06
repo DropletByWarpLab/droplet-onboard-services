@@ -161,6 +161,13 @@ const createUserSchema = z.object({
   password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
   email: emailField,
+  // WARP-824: the admin types a TEMPORARY password and (by default) requires
+  // the new user to change it on first login. This maps to the explicit
+  // `User.mustChangePassword` column the post-auth gate reads. Default true —
+  // an admin-minted account is a temp-credential handoff unless the operator
+  // explicitly opts out, so a client that omits the field gets the safe
+  // (forced-change) behaviour.
+  mustChangePassword: z.boolean().default(true),
 });
 
 // PR #375 — TOTP verify / re-challenge body: exactly six decimal digits.
@@ -1618,7 +1625,7 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const { email, password, displayName } = parsed.data;
+      const { email, password, displayName, mustChangePassword } = parsed.data;
 
       const token = await resolveNcToken(req);
       if (!token) {
@@ -1692,6 +1699,11 @@ export function createProtectedAuthRouter(
           displayName: displayName || username,
           email,
           passwordHash,
+          // WARP-824: a re-issued temp password (idempotent retry, or an
+          // operator re-creating the same account with a fresh temp secret)
+          // re-arms the forced-change gate — mirror the create branch so the
+          // flag never goes stale on the update path.
+          mustChangePassword,
         },
         create: {
           username,
@@ -1700,6 +1712,9 @@ export function createProtectedAuthRouter(
           nextcloudUsername: username,
           passwordHash,
           role: "family" as any,
+          // WARP-824: explicit forced-change-on-first-login flag (default
+          // true). The post-auth gate reads this fresh on every request.
+          mustChangePassword,
         },
       });
 
