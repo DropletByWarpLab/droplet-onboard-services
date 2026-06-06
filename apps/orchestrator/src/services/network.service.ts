@@ -7,7 +7,9 @@
 
 import pino from "pino";
 import * as openwrt from "./openwrt.client.js";
+import * as hostapdBridge from "./hostapd-bridge.service.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
+import { config } from "../config.js";
 import { RouterError } from "../types/router-error.js";
 import type {
   NetworkSummary,
@@ -213,8 +215,22 @@ export async function getSystemInfo(): Promise<RouterSystemInfo> {
 export async function setWifiSsid(
   radio: string,
   ifaceSection: string,
-  ssid: string
+  ssid: string,
+  // WARP-808 review #2: the per-user key for the staged SSID. The SSID write and
+  // the password/confirm write are separate HTTP requests, so the staged value
+  // is keyed by the authenticated user (isolating concurrent wizard sessions)
+  // rather than held in one shared global.
+  userId?: string | null
 ): Promise<openwrt.WriteResult> {
+  // WARP-808: on the single-box (hostapd) shape the AP is a raw host hostapd,
+  // not a UCI router — a UCI write 500s. STAGE the SSID instead; the password
+  // write (which hostapd needs alongside the SSID) does the single AP reload.
+  // Every other shape keeps the UCI path verbatim (AC2 regression guard).
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    hostapdBridge.stageSsid(ssid, userId);
+    // A stage isn't an operation record (no safe-apply/rollback for hostapd).
+    return { operationId: null };
+  }
   const result = await openwrt.setWirelessSsid(radio, ifaceSection, ssid);
   await invalidateNetworkCache();
   return result;
@@ -222,8 +238,19 @@ export async function setWifiSsid(
 
 export async function setWifiPassword(
   ifaceSection: string,
-  password: string
+  password: string,
+  // WARP-808 review #2: same per-user key used to stage the SSID; applyWifi
+  // consumes that user's staged value (or falls back to the live AP SSID).
+  userId?: string | null
 ): Promise<openwrt.WriteResult> {
+  // WARP-808: single-box hostapd shape — APPLY the staged SSID + this PSK via
+  // the device-bridge in one call (one AP reload per submit). Other shapes keep
+  // the UCI path verbatim.
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    const result = await hostapdBridge.applyWifi(password, userId);
+    await invalidateNetworkCache();
+    return result;
+  }
   const result = await openwrt.setWirelessPassword(ifaceSection, password);
   await invalidateNetworkCache();
   return result;

@@ -32,6 +32,8 @@ import {
   hasReachedRouter,
   routerErrorLogLevel,
   ROUTER_COLDSTART_GRACE_MS,
+  scanWireless,
+  fetchWirelessClients,
   _resetRouterContactForTests,
 } from "../services/openwrt.client.js";
 import { RouterError } from "../types/router-error.js";
@@ -408,6 +410,148 @@ describe("openwrt.client public wrappers", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+
+  // WARP-815 (K4): the orchestrator must NOT bake a host-specific Wi-Fi radio
+  // name into the scan/clients query string. The single-box radio is `wlp14s0`,
+  // not `wlan0`; the routing service already resolves the radio from
+  // DROPLET_WIFI_SCAN_DEVICE (services/routing/droplet_openwrt_sdk.py) when the
+  // `device` query param is absent. A hardcoded default here ALWAYS sends
+  // `device=wlan0`, overriding that env fallback and scanning a radio the box
+  // doesn't have. So: omit `device` when the caller doesn't pass one; forward it
+  // verbatim when they do (explicit-device callers keep working). Rule 12 — no
+  // host-specific defaults.
+  describe("wireless scan/clients device wiring (WARP-815 K4)", () => {
+    it("scanWireless() with no device sends NO device query param (routing resolves the env)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { results: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await scanWireless();
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/scan");
+      expect(url).not.toContain("device=");
+      expect(url).not.toContain("wlan0");
+    });
+
+    it("scanWireless(device) forwards an explicitly-provided device verbatim", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { results: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await scanWireless("wlp14s0");
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/scan?device=wlp14s0");
+    });
+
+    it("fetchWirelessClients() with no device sends NO device query param", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { clients: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await fetchWirelessClients();
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/clients");
+      expect(url).not.toContain("device=");
+      expect(url).not.toContain("wlan0");
+    });
+
+    it("fetchWirelessClients(device) forwards an explicitly-provided device verbatim", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { clients: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await fetchWirelessClients("phy1-ap0");
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      expect(url).toBe("http://routing.test/wireless/clients?device=phy1-ap0");
+    });
+  });
+
+  // WARP-816: the routing service returns 409 + `{ code: "SCAN_UNSUPPORTED" }`
+  // when the radio is in AP/Master mode and can't station-scan (single-box).
+  // scanWireless() maps it to a typed RouterError (code SCAN_UNSUPPORTED) so the
+  // dashboard renders calm copy instead of an empty list — mirroring the
+  // UNREACHABLE/DISABLED precedent (WARP-807). It is NOT retried (terminal 4xx)
+  // and is DISTINCT from a 200 empty scan, which still returns [].
+  describe("scanWireless SCAN_UNSUPPORTED mapping (WARP-816)", () => {
+    it("409 with code SCAN_UNSUPPORTED → RouterError.scanUnsupported, no retry", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: false,
+          status: 409,
+          json: { code: "SCAN_UNSUPPORTED", message: "Wi-Fi scan is not available on wlp14s0" },
+        }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        scanWireless(undefined, {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy(
+        (e) =>
+          e instanceof RouterError && e.code === "SCAN_UNSUPPORTED" && e.status === 409,
+      );
+
+      // Terminal — a 4xx capability fact, never retried.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(noSleep).not.toHaveBeenCalled();
+    });
+
+    it("carries the orchestrator's user-facing message (no raw code/status leak)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({
+          ok: false,
+          status: 409,
+          json: { code: "SCAN_UNSUPPORTED", message: "Wi-Fi scan is not available on wlp14s0" },
+        }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(scanWireless()).rejects.toSatisfy(
+        (e) =>
+          e instanceof RouterError &&
+          e.code === "SCAN_UNSUPPORTED" &&
+          typeof e.message === "string" &&
+          e.message.length > 0 &&
+          // the user-facing message must be prose, not the bare machine code or
+          // the routerErrorFromResponse "… 409 Error" stub the generic path emits
+          e.message !== "SCAN_UNSUPPORTED" &&
+          !e.message.includes("409"),
+      );
+    });
+
+    it("a 200 empty scan is NOT unsupported — returns [] (distinct from the 409 signal)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { results: [] } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(scanWireless()).resolves.toEqual([]);
+    });
+
+    it("a non-409 4xx is left as its normal classification (not coerced to SCAN_UNSUPPORTED)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        mockResponse({ ok: false, status: 400, json: { error: "bad request" } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        scanWireless(undefined, {
+          retry: { attempts: 3, delaysMs: [100, 250], sleep: noSleep, random: stableRandom },
+        }),
+      ).rejects.toSatisfy(
+        (e) => e instanceof RouterError && e.code !== "SCAN_UNSUPPORTED",
+      );
+    });
   });
 });
 

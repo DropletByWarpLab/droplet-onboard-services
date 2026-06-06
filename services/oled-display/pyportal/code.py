@@ -1695,9 +1695,16 @@ def handle(msg):
     elif mode == "claim":
         # WARP-632: merge so a partial push (e.g. just the code) keeps the URL.
         # WARP-819: the host may also send the Wi-Fi-connect QR matrix + ssid +
-        # psk so the claim screen shows how to join the box's Wi-Fi. Merge them
-        # too; a claim push without them leaves any prior values (cleared on the
-        # host side when absent, so this never shows stale creds).
+        # psk so the claim screen shows how to join the box's Wi-Fi. Unlike
+        # code/setup_url, the Wi-Fi creds must NOT persist across a push that
+        # omits them: when the bridge is down the host sends a {code,setup_url}-
+        # only frame, and a kept-over stale QR/password could no longer match
+        # the live AP. So RESET the wifi_* keys BEFORE the merge — absent keys
+        # then clear, present keys land. (The host already only puts a wifi_*
+        # key on the wire when it is non-empty.)
+        state["claim"]["wifi_qr_matrix"] = None
+        state["claim"]["wifi_ssid"] = ""
+        state["claim"]["wifi_psk"] = ""
         for k in ("code", "setup_url",
                   "wifi_qr_matrix", "wifi_ssid", "wifi_psk"):
             if k in data:

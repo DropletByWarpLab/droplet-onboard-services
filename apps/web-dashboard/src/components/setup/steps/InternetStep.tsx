@@ -16,6 +16,7 @@ import {
   confirmNetworkCommand,
   fetchDuckDnsStatus,
   fetchNetworkOperation,
+  RouterStatusError,
   routerUnreachableNotice,
   setDuckDnsConfig,
   setWifiPassword,
@@ -23,6 +24,7 @@ import {
 } from "@/lib/api";
 import type { DuckDnsStatus } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -293,6 +295,22 @@ export function InternetStep({
             setNoticeKind("router-unreachable");
             setError(unreachable.prefix);
             setNoticeDestination(unreachable.destination);
+          } else if (
+            // Review #4: a UCI safe-apply revert surfaces as a PLAIN Error whose
+            // message IS the router's revert reason (pollOperation throws
+            // `new Error(op.reason)` for a rolled_back/unknown op). That's not a
+            // RouterStatusError, so it isn't a reachability notice — and its
+            // message is actionable, NOT a raw 500. Surface it instead of the
+            // generic "couldn't set it up" copy, which would discard op.reason.
+            // (A RouterStatusError — e.g. a hostapd ROLLED_BACK 500 carrying raw
+            // server text — deliberately does NOT match here and still falls to
+            // the calm generic notice below.)
+            !(wifiErr instanceof RouterStatusError) &&
+            wifiErr instanceof Error &&
+            wifiErr.message.trim().length > 0
+          ) {
+            setErrorTone("error");
+            setError(wifiErr.message);
           } else {
             // Parked-hostapd ROLLED_BACK / any other Wi-Fi write failure: calm,
             // actionable, Wi-Fi-specific copy instead of the raw server error.
@@ -367,6 +385,15 @@ export function InternetStep({
       }}
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
+      {/* WARP-820 (finding #3): the body (the optional Home Wi-Fi disclosure,
+          the DuckDNS subdomain + token fields, the auto-update toggle, any
+          notice, and the help card) is taller than a short landscape phone and
+          the setup panel is now overflow-hidden, so the token field + help card
+          clipped off the bottom. The whole body lives in a <ScrollRegion> (the
+          wizard's single scroll surface) so it scrolls within the panel instead
+          of clipping; the title + CTA stay pinned in the StepShell. The WARP-808
+          / WARP-809 Wi-Fi write behaviour below is unchanged — only wrapped. */}
+      <ScrollRegion aria-label="Network setup">
       {alreadyConfigured && (
         <div className="dp-card !p-3 mb-4 flex items-start gap-2">
           <Globe size={14} className="text-system-green flex-shrink-0 mt-1" />
@@ -485,11 +512,41 @@ export function InternetStep({
             />
             WPA2 / WPA3 · broadcast on 2.4 &amp; 5 GHz from your Droplet
           </div>
+
+          {/* WARP-808: on the single-box shape the Droplet IS the router, so
+              changing the Wi-Fi name/key reconfigures the AP and drops every
+              connected device. Warn the customer BEFORE they save and tell them
+              how to get back on. Lives inside the (WARP-809) opt-in disclosure
+              and shows only once a network name is entered — an empty section
+              changes nothing. Calm amber advisory — same tokens as the WARP-807
+              unreachable notice (text-label-primary on a system-orange wash,
+              vivid AlertCircle), role=status/polite so a screen reader hears it
+              without an alert. */}
+          {ssid.trim() && (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-label="Wi-Fi change notice"
+              className="flex items-start gap-2 type-caption-1 text-label-primary bg-system-orange/10 rounded-md px-3 py-2"
+            >
+              <AlertCircle
+                size={14}
+                className="mt-0.5 flex-shrink-0 text-system-orange"
+                aria-hidden="true"
+              />
+              <span>
+                Saving a new Wi-Fi name or password disconnects every device on
+                your Droplet right now — including this phone. Rejoin with the new
+                name and password to get back on.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Thin divider between the two sections */}
-      <div className="my-5 h-px bg-separator" />
+      {/* Thin divider between the two sections. WARP-820: fluid gap so the two
+          sections + the Wi-Fi advisory fit a short viewport without scroll. */}
+      <div className="my-[clamp(12px,2.4vh,20px)] h-px bg-separator" />
 
       {/* Section B — Internet address · DuckDNS (unchanged behavior) */}
       <SectionLabel icon={Globe}>Internet address · DuckDNS</SectionLabel>
@@ -642,6 +699,7 @@ export function InternetStep({
           or Twitter account, pick a subdomain, and copy the token.
         </p>
       </LearnMoreCard>
+      </ScrollRegion>
     </StepShell>
   );
 }

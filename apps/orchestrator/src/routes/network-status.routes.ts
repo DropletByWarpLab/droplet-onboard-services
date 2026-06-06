@@ -248,9 +248,14 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           );
           break;
         case "set_wifi_password":
+          // WARP-808 review #2: the Tier-2 confirm runs in a SEPARATE request
+          // from the original /wifi/ssid stage; pass the same authenticated
+          // userId so applyWifi consumes THIS user's staged SSID (single-box
+          // hostapd path) rather than a process-global slot.
           writeResult = await setWifiPassword(
             (params?.iface_section as string) || "default_radio0",
-            params?.password as string
+            params?.password as string,
+            userId
           );
           break;
         case "reboot":

@@ -155,13 +155,13 @@ Options:
 - `--no-preserve` — clean flash with new defaults
 - `--dry-run` — upload only, don't flash
 - `--apply-defaults` — re-run uci-defaults scripts after upgrade (e.g., add new camera VLAN config)
-- `--host <ip>` — specify router IP (default: `OPENWRT_HOST` or `10.0.0.1`)
+- `--host <ip>` — specify router IP (default: `OPENWRT_HOST` or `192.168.50.1`)
 
 ### Adding Camera VLAN to Existing Router (No Firmware Flash)
 
 ```bash
-scp openwrt/scripts/setup-camera-subnet.sh root@10.0.0.1:/tmp/
-ssh root@10.0.0.1 'sh /tmp/setup-camera-subnet.sh'
+scp openwrt/scripts/setup-camera-subnet.sh root@192.168.50.1:/tmp/
+ssh root@192.168.50.1 'sh /tmp/setup-camera-subnet.sh'
 ```
 
 The script is idempotent (safe to re-run) and supports:

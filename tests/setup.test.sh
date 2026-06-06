@@ -328,6 +328,63 @@ else
   fail "expected exactly one derived ROUTING_SERVICE_URL line, found ${ROUTING_URL_COUNT}"
 fi
 
+# --- Wi-Fi scan radio device (WARP-815 K4) -------------------------------
+# The orchestrator no longer hardcodes `wlan0` on the /wireless/scan call, so
+# the routing service resolves the radio from DROPLET_WIFI_SCAN_DEVICE. The
+# single-box AP radio is `wlp14s0` (phy0 inside the openwrt container). The
+# value is SOURCED FROM DROPLET_AP_IFACE so it tracks the AP radio if an
+# operator overrode it — defaulting to wlp14s0 when unset (matching the AP
+# iface default in install_single_box_host_integration). Asserted once +
+# idempotent (two configure calls already ran) + effective last-wins value.
+WIFI_SCAN_COUNT=$(grep -cE '^DROPLET_WIFI_SCAN_DEVICE=wlp14s0$' "$TMP_ROOT/.env" || true)
+if [ "$WIFI_SCAN_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets DROPLET_WIFI_SCAN_DEVICE=wlp14s0 (single, idempotent)"
+else
+  fail "expected exactly one 'DROPLET_WIFI_SCAN_DEVICE=wlp14s0' in .env, found ${WIFI_SCAN_COUNT}"
+fi
+
+WIFI_SCAN_EFFECTIVE=$( { grep -E '^DROPLET_WIFI_SCAN_DEVICE=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$WIFI_SCAN_EFFECTIVE" = "wlp14s0" ]; then
+  pass "effective (last-wins) DROPLET_WIFI_SCAN_DEVICE is the single-box AP radio wlp14s0"
+else
+  fail "effective DROPLET_WIFI_SCAN_DEVICE is '${WIFI_SCAN_EFFECTIVE}' (expected wlp14s0)"
+fi
+
+# --- Single-box OpenWrt override is intact (WARP-815 K2 regression guard) ---
+# K2 reconciles the *documented compose default* OPENWRT_HOST to 192.168.50.1
+# (the multi-box Pi-5 router), but the single-box talks to the in-container
+# OpenWrt on 127.0.0.1:8181. configure_single_box_env owns that override and
+# MUST keep writing it — this guards against the K2 doc change accidentally
+# regressing the working single-box path. Asserted once + idempotent + the
+# effective (last-wins) host must NOT be the multi-box 192.168.50.1 default.
+OPENWRT_HOST_COUNT=$(grep -cE '^OPENWRT_HOST=127\.0\.0\.1$' "$TMP_ROOT/.env" || true)
+if [ "$OPENWRT_HOST_COUNT" = "1" ]; then
+  pass "configure_single_box_env keeps OPENWRT_HOST=127.0.0.1 override (single, idempotent)"
+else
+  fail "expected exactly one 'OPENWRT_HOST=127.0.0.1' in .env, found ${OPENWRT_HOST_COUNT}"
+fi
+
+OPENWRT_HOST_EFFECTIVE=$( { grep -E '^OPENWRT_HOST=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$OPENWRT_HOST_EFFECTIVE" = "127.0.0.1" ]; then
+  pass "effective (last-wins) OPENWRT_HOST is the single-box in-container 127.0.0.1 (not the 192.168.50.1 multi-box default)"
+else
+  fail "effective OPENWRT_HOST is '${OPENWRT_HOST_EFFECTIVE}' (expected single-box 127.0.0.1)"
+fi
+
+OPENWRT_PORT_EFFECTIVE=$( { grep -E '^OPENWRT_PORT=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$OPENWRT_PORT_EFFECTIVE" = "8181" ]; then
+  pass "effective (last-wins) OPENWRT_PORT is the single-box in-container 8181"
+else
+  fail "effective OPENWRT_PORT is '${OPENWRT_PORT_EFFECTIVE}' (expected single-box 8181)"
+fi
+
+OPENWRT_USER_EFFECTIVE=$( { grep -E '^OPENWRT_USERNAME=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$OPENWRT_USER_EFFECTIVE" = "root" ]; then
+  pass "effective (last-wins) OPENWRT_USERNAME is the single-box in-container root"
+else
+  fail "effective OPENWRT_USERNAME is '${OPENWRT_USER_EFFECTIVE}' (expected single-box root)"
+fi
+
 # Fail-loud guard: with NO droplet_default network resolvable, the function must
 # exit non-zero rather than silently leaving the unreachable host.docker.internal
 # default in place. Stub a docker that returns an empty gateway and confirm.

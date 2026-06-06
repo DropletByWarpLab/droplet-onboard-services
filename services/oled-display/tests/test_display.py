@@ -624,6 +624,43 @@ def test_show_claim_sends_claim_frame_to_firmware(
     assert data == {"code": CLAIM_CODE, "setup_url": CLAIM_URL}
 
 
+# --- WARP-819: only non-empty wifi_* keys go on the wire --------------------
+# show_claim's docstring promises "only the wifi_* keys actually present are put
+# on the wire" so the firmware's reset-before-merge can CLEAR an absent psk
+# rather than re-show a stale one. A None/empty psk must therefore be OMITTED
+# from the frame (not sent as wifi_psk:"").
+
+_CLAIM_MATRIX = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+
+
+def test_show_claim_omits_empty_psk_from_frame(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    # Matrix + ssid present, psk None -> the frame carries the matrix + ssid but
+    # MUST NOT carry a wifi_psk key (so the firmware clears any stale psk).
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL, wifi_ssid="Droplet",
+                           wifi_psk=None, wifi_qr_matrix=_CLAIM_MATRIX)
+    claim_frames = [d for (m, d) in sent if m == "claim"]
+    assert claim_frames
+    data = claim_frames[0]
+    assert data["wifi_ssid"] == "Droplet"
+    assert data["wifi_qr_matrix"] == _CLAIM_MATRIX
+    assert "wifi_psk" not in data, (
+        f"empty psk must be omitted, not sent as wifi_psk:''; got {data!r}")
+
+
+def test_show_claim_includes_nonempty_psk_in_frame(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL, wifi_ssid="Droplet",
+                           wifi_psk="7gpz4k9m2njq8wxr",
+                           wifi_qr_matrix=_CLAIM_MATRIX)
+    data = [d for (m, d) in sent if m == "claim"][0]
+    assert data["wifi_psk"] == "7gpz4k9m2njq8wxr"
+
+
 def test_show_claim_stores_state_for_rerender(sim_display: TFTDisplay):
     # The code + URL must be retained so a live re-render (cycle loop) of the
     # claim screen keeps showing them.

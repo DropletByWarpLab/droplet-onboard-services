@@ -933,6 +933,10 @@ export type RouterErrorCode =
   | "AUTH"
   | "ROLLED_BACK"
   | "DISABLED"
+  // WARP-816: the radio is broadcasting the Droplet's own Wi-Fi on its only
+  // radio and can't station-scan. A stable capability fact (HTTP 409), distinct
+  // from a successful scan that finds zero networks.
+  | "SCAN_UNSUPPORTED"
   | "UNKNOWN";
 
 export class RouterStatusError extends Error {
@@ -1075,7 +1079,26 @@ export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
 
 export async function scanWifiNetworks(): Promise<WirelessScanResult[]> {
   const res = await authFetch(`${BASE}/api/network/wifi/scan`);
-  if (!res.ok) throw new Error(`Failed to scan wifi: ${res.status}`);
+  if (!res.ok) {
+    // WARP-816: the orchestrator returns 409 with a flat typed body
+    // `{ code: "SCAN_UNSUPPORTED", message }` when the radio is in AP mode and
+    // can't station-scan. Surface it as a RouterStatusError so the WiFi panel
+    // renders calm "scanning unavailable while broadcasting" copy + disables
+    // Scan, instead of an empty list — and never the raw code (WARP-807).
+    let body: { code?: unknown; message?: unknown } = {};
+    try {
+      body = await res.json();
+    } catch {
+      /* non-JSON fallthrough */
+    }
+    const code = typeof body.code === "string" ? (body.code as RouterErrorCode) : undefined;
+    if (code) {
+      const message =
+        (typeof body.message === "string" && body.message) || `Failed to scan wifi: ${res.status}`;
+      throw new RouterStatusError(code, message, res.status);
+    }
+    throw new Error(`Failed to scan wifi: ${res.status}`);
+  }
   const data = await res.json();
   return data.results;
 }

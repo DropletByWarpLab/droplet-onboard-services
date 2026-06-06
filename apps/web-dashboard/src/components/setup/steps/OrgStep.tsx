@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ImageUp } from "lucide-react";
 import { postOrg, OrgError } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -257,179 +258,188 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
         isLoading: submitting,
       }}
     >
-      {/* Logo tile + workspace name */}
-      <div className="flex items-start gap-4">
-        <div className="flex-shrink-0">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            aria-label={
-              logoPreview && !logoError
-                ? "Change workspace logo"
-                : "Upload workspace logo"
-            }
+      {/* WARP-820 (finding #3): the form (logo + name, slug, three selects, the
+          privacy footnote, the help card) is taller than a short landscape phone
+          and the setup panel is now overflow-hidden, so the footnote + help card
+          clipped off the bottom. The whole form body lives in a <ScrollRegion>
+          (the wizard's single scroll surface) so it scrolls within the panel
+          instead of clipping; the title + CTA stay pinned in the StepShell. */}
+      <ScrollRegion aria-label="Workspace details">
+        {/* Logo tile + workspace name */}
+        <div className="flex items-start gap-4">
+          <div className="flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label={
+                logoPreview && !logoError
+                  ? "Change workspace logo"
+                  : "Upload workspace logo"
+              }
+              className={[
+                "flex h-[68px] w-[68px] items-center justify-center overflow-hidden rounded-2xl transition duration-200 ease-smooth",
+                logoPreview && !logoError
+                  ? "border border-separator hover:opacity-90"
+                  : "flex-col gap-1 border-2 border-dashed border-accent/40 bg-accent-subtle text-accent hover:bg-accent-subtle/70",
+              ].join(" ")}
+            >
+              {logoPreview && !logoError ? (
+                <img
+                  src={logoPreview}
+                  alt="Workspace logo preview"
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <>
+                  <ImageUp size={18} />
+                  <span className="type-caption-2 font-semibold">Logo</span>
+                </>
+              )}
+            </button>
+            <input
+              ref={fileInputRef}
+              data-testid="org-logo-input"
+              type="file"
+              accept={ACCEPTED_LOGO_TYPES.join(",")}
+              className="hidden"
+              onChange={handleLogoChange}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <label htmlFor="org-name" className="block">
+              <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
+                Workspace name
+              </span>
+              <input
+                id="org-name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Acme HQ"
+                autoComplete="organization"
+                className="dp-input"
+                autoFocus
+              />
+            </label>
+            {logoName && !logoError && (
+              <p className="type-caption-1 text-label-tertiary mt-1.5 truncate">
+                {logoName}
+              </p>
+            )}
+            {logoError && (
+              <p
+                role="alert"
+                className="type-caption-1 text-system-red mt-1.5 flex items-start gap-1.5"
+              >
+                <AlertCircle size={13} className="mt-px flex-shrink-0" />
+                <span>{logoError}</span>
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Workspace URL (slug) with the droplet.local / prefix */}
+        {/* WARP-820: fluid inter-section gaps so the form fits without scroll. */}
+        <label htmlFor="org-slug" className="mt-[clamp(10px,2vh,16px)] block">
+          <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
+            Workspace URL
+          </span>
+          <div
             className={[
-              "flex h-[68px] w-[68px] items-center justify-center overflow-hidden rounded-2xl transition duration-200 ease-smooth",
-              logoPreview && !logoError
-                ? "border border-separator hover:opacity-90"
-                : "flex-col gap-1 border-2 border-dashed border-accent/40 bg-accent-subtle text-accent hover:bg-accent-subtle/70",
+              "dp-input flex items-center gap-1 px-3",
+              slugError ? "ring-2 ring-system-red/40" : "",
             ].join(" ")}
           >
-            {logoPreview && !logoError ? (
-              <img
-                src={logoPreview}
-                alt="Workspace logo preview"
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <>
-                <ImageUp size={18} />
-                <span className="type-caption-2 font-semibold">Logo</span>
-              </>
-            )}
-          </button>
-          <input
-            ref={fileInputRef}
-            data-testid="org-logo-input"
-            type="file"
-            accept={ACCEPTED_LOGO_TYPES.join(",")}
-            className="hidden"
-            onChange={handleLogoChange}
-          />
-        </div>
-        <div className="min-w-0 flex-1">
-          <label htmlFor="org-name" className="block">
-            <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
-              Workspace name
+            <span className="type-subheadline whitespace-nowrap text-label-tertiary">
+              droplet.local /
             </span>
             <input
-              id="org-name"
+              id="org-slug"
               type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Acme HQ"
-              autoComplete="organization"
-              className="dp-input"
-              autoFocus
+              value={slug}
+              onChange={(e) => {
+                setSlug(e.target.value);
+                if (slugError) setSlugError(null);
+              }}
+              placeholder="acme"
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={slugError !== null}
+              className="min-w-0 flex-1 border-0 bg-transparent p-0 text-label-primary placeholder:text-label-tertiary focus:outline-none focus:ring-0"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !submitting) void handleContinue();
+              }}
             />
-          </label>
-          {logoName && !logoError && (
-            <p className="type-caption-1 text-label-tertiary mt-1.5 truncate">
-              {logoName}
-            </p>
-          )}
-          {logoError && (
+          </div>
+          {slugError && (
             <p
               role="alert"
               className="type-caption-1 text-system-red mt-1.5 flex items-start gap-1.5"
             >
               <AlertCircle size={13} className="mt-px flex-shrink-0" />
-              <span>{logoError}</span>
+              <span>{slugError}</span>
             </p>
           )}
-        </div>
-      </div>
+        </label>
 
-      {/* Workspace URL (slug) with the droplet.local / prefix */}
-      <label htmlFor="org-slug" className="mt-4 block">
-        <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
-          Workspace URL
-        </span>
-        <div
-          className={[
-            "dp-input flex items-center gap-1 px-3",
-            slugError ? "ring-2 ring-system-red/40" : "",
-          ].join(" ")}
-        >
-          <span className="type-subheadline whitespace-nowrap text-label-tertiary">
-            droplet.local /
-          </span>
-          <input
-            id="org-slug"
-            type="text"
-            value={slug}
-            onChange={(e) => {
-              setSlug(e.target.value);
-              if (slugError) setSlugError(null);
-            }}
-            placeholder="acme"
-            autoComplete="off"
-            spellCheck={false}
-            aria-invalid={slugError !== null}
-            className="min-w-0 flex-1 border-0 bg-transparent p-0 text-label-primary placeholder:text-label-tertiary focus:outline-none focus:ring-0"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !submitting) void handleContinue();
-            }}
+        {/* Time zone + industry + company size */}
+        <div className="mt-[clamp(10px,2vh,16px)] flex gap-3">
+          <SelectField
+            id="org-tz"
+            label="Time zone"
+            value={tz}
+            onChange={setTz}
+            options={TIME_ZONES}
+          />
+          <SelectField
+            id="org-industry"
+            label="Industry"
+            value={industry}
+            onChange={setIndustry}
+            options={INDUSTRIES}
           />
         </div>
-        {slugError && (
-          <p
-            role="alert"
-            className="type-caption-1 text-system-red mt-1.5 flex items-start gap-1.5"
-          >
-            <AlertCircle size={13} className="mt-px flex-shrink-0" />
-            <span>{slugError}</span>
-          </p>
-        )}
-      </label>
-
-      {/* Time zone + industry + company size */}
-      <div className="mt-4 flex gap-3">
-        <SelectField
-          id="org-tz"
-          label="Time zone"
-          value={tz}
-          onChange={setTz}
-          options={TIME_ZONES}
-        />
-        <SelectField
-          id="org-industry"
-          label="Industry"
-          value={industry}
-          onChange={setIndustry}
-          options={INDUSTRIES}
-        />
-      </div>
-      <div className="mt-4">
-        <SelectField
-          id="org-size"
-          label="Company size"
-          value={size}
-          onChange={setSize}
-          options={COMPANY_SIZES}
-        />
-      </div>
-
-      {/* Privacy footnote — the "nothing off the box" guarantee. */}
-      <p className="type-caption-1 text-label-tertiary mt-5 leading-relaxed">
-        We use industry and size only to pick smart defaults — example tools,
-        folder structure, and camera policies. Nothing is sent off the box.
-      </p>
-
-      {formError && (
-        <div
-          role="alert"
-          className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
-        >
-          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-          <span>{formError}</span>
+        <div className="mt-[clamp(10px,2vh,16px)]">
+          <SelectField
+            id="org-size"
+            label="Company size"
+            value={size}
+            onChange={setSize}
+            options={COMPANY_SIZES}
+          />
         </div>
-      )}
 
-      {/* Primary CTA lives in the StepShell footer — NOT skippable, so no
-          skip control is passed. */}
-      <LearnMoreCard helpAnchor="workspace">
-        <p>
-          Your workspace is the single &ldquo;company brain&rdquo; everyone you
-          invite shares. The URL — <span className="font-mono">droplet.local
-          /your-workspace</span> — only resolves on your own network.
+        {/* Privacy footnote — the "nothing off the box" guarantee. */}
+        <p className="type-caption-1 text-label-tertiary mt-[clamp(12px,2.4vh,20px)] leading-relaxed">
+          We use industry and size only to pick smart defaults — example tools,
+          folder structure, and camera policies. Nothing is sent off the box.
         </p>
-        <p>
-          Industry and company size never leave the appliance. They just let
-          Droplet pre-pick sensible folders, example tools, and camera
-          policies you can change anytime.
-        </p>
-      </LearnMoreCard>
+
+        {formError && (
+          <div
+            role="alert"
+            className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+          >
+            <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+            <span>{formError}</span>
+          </div>
+        )}
+
+        {/* Primary CTA lives in the StepShell footer — NOT skippable, so no
+            skip control is passed. */}
+        <LearnMoreCard helpAnchor="workspace">
+          <p>
+            Your workspace is the single &ldquo;company brain&rdquo; everyone you
+            invite shares. The URL — <span className="font-mono">droplet.local
+            /your-workspace</span> — only resolves on your own network.
+          </p>
+          <p>
+            Industry and company size never leave the appliance. They just let
+            Droplet pre-pick sensible folders, example tools, and camera
+            policies you can change anytime.
+          </p>
+        </LearnMoreCard>
+      </ScrollRegion>
     </StepShell>
   );
 }

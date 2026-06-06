@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import type { DriveInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -335,99 +336,111 @@ export function StorageStep({
       primary={primary}
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
-      <div className="space-y-3">
-        {drives.map((drive) => (
-          <div key={drive.uuid} className="dp-card !p-4">
-            <div className="flex items-start gap-3 mb-3">
-              <div className="w-9 h-9 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
-                <HardDrive size={18} className="text-accent" />
+      {/* WARP-820 (finding #3): on a short landscape phone the drive cards + the
+          optional RAID/Adopt sections + the help card are taller than the now
+          `overflow-hidden` panel, so the RAID/Adopt UI clipped off-screen with no
+          way to reach it. The whole body lives in a <ScrollRegion> (the wizard's
+          single scroll surface) so it scrolls within the panel instead of
+          clipping; the title + CTA stay pinned in the StepShell. The two
+          destructive ConfirmDialog overlays stay OUTSIDE — they're portaled
+          modals, not flow content. */}
+      <ScrollRegion aria-label="Storage options">
+        {/* WARP-820: fluid gap between drive cards so a multi-drive box fits the
+            viewport before the list ever needs to scroll. */}
+        <div className="space-y-[clamp(8px,1.6vh,12px)]">
+          {drives.map((drive) => (
+            <div key={drive.uuid} className="dp-card !p-4">
+              <div className="flex items-start gap-3 mb-3">
+                <div className="w-9 h-9 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
+                  <HardDrive size={18} className="text-accent" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="type-subheadline text-label-primary">
+                    {drive.label || drive.device}
+                  </p>
+                  <p className="type-caption-1 text-label-tertiary">
+                    <span className="font-mono">{formatBytes(drive.size_bytes)}</span>
+                    {drive.mount && ` · ${drive.mount}`}
+                  </p>
+                </div>
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="type-subheadline text-label-primary">
-                  {drive.label || drive.device}
-                </p>
-                <p className="type-caption-1 text-label-tertiary">
-                  <span className="font-mono">{formatBytes(drive.size_bytes)}</span>
-                  {drive.mount && ` · ${drive.mount}`}
-                </p>
-              </div>
+              <input
+                type="text"
+                value={names[drive.uuid] ?? ""}
+                onChange={(e) =>
+                  setNames((prev) => ({
+                    ...prev,
+                    [drive.uuid]: e.target.value,
+                  }))
+                }
+                placeholder="e.g. Wedding Photos"
+                className="dp-input"
+                maxLength={64}
+              />
             </div>
-            <input
-              type="text"
-              value={names[drive.uuid] ?? ""}
-              onChange={(e) =>
-                setNames((prev) => ({
-                  ...prev,
-                  [drive.uuid]: e.target.value,
-                }))
+          ))}
+
+          {error && (
+            <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+              <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+
+        {/* BUG-3 / ADR-019 — optional storage-pool (RAID) setup. Default OFF. */}
+        <RaidSection
+          raidOn={raidOn}
+          onToggle={() => {
+            setRaidOn((on) => {
+              const next = !on;
+              // Clear any in-flight create state when switching off.
+              if (!next) {
+                setChosenLevel(null);
+                setCreateError(null);
               }
-              placeholder="e.g. Wedding Photos"
-              className="dp-input"
-              maxLength={64}
-            />
-          </div>
-        ))}
+              return next;
+            });
+          }}
+          options={raidOptions}
+          chosenLevel={chosenLevel}
+          onChoose={setChosenLevel}
+          members={poolMembers}
+          createError={createError}
+        />
 
-        {error && (
-          <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
-            <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-            <span>{error}</span>
-          </div>
-        )}
-      </div>
+        {/* WARP-662 — optional "reclaim existing drives" (wipe + adopt). OFF. */}
+        <AdoptSection
+          adoptOn={adoptOn}
+          onToggle={() => {
+            setAdoptOn((on) => {
+              const next = !on;
+              if (!next) setAdoptError(null);
+              return next;
+            });
+          }}
+          drives={drives}
+          wipeMethods={adoptWipe}
+          onWipeMethodChange={(uuid, m) =>
+            setAdoptWipe((prev) => ({ ...prev, [uuid]: m }))
+          }
+          onAdopt={handleStartAdopt}
+          busyUuid={adoptBusy}
+          adoptError={adoptError}
+        />
 
-      {/* BUG-3 / ADR-019 — optional storage-pool (RAID) setup. Default OFF. */}
-      <RaidSection
-        raidOn={raidOn}
-        onToggle={() => {
-          setRaidOn((on) => {
-            const next = !on;
-            // Clear any in-flight create state when switching off.
-            if (!next) {
-              setChosenLevel(null);
-              setCreateError(null);
-            }
-            return next;
-          });
-        }}
-        options={raidOptions}
-        chosenLevel={chosenLevel}
-        onChoose={setChosenLevel}
-        members={poolMembers}
-        createError={createError}
-      />
-
-      {/* WARP-662 — optional "reclaim existing drives" (wipe + adopt). OFF. */}
-      <AdoptSection
-        adoptOn={adoptOn}
-        onToggle={() => {
-          setAdoptOn((on) => {
-            const next = !on;
-            if (!next) setAdoptError(null);
-            return next;
-          });
-        }}
-        drives={drives}
-        wipeMethods={adoptWipe}
-        onWipeMethodChange={(uuid, m) =>
-          setAdoptWipe((prev) => ({ ...prev, [uuid]: m }))
-        }
-        onAdopt={handleStartAdopt}
-        busyUuid={adoptBusy}
-        adoptError={adoptError}
-      />
-
-      <LearnMoreCard helpAnchor="storage">
-        <p>
-          Each drive can hold a different kind of file. Name them however
-          helps you find things later — &ldquo;Wedding Photos&rdquo;,
-          &ldquo;Client Backups&rdquo;, &ldquo;Camera Footage&rdquo;.
-        </p>
-        <p>
-          You can rename a drive anytime from Settings &rsaquo; Storage.
-          Names are stored on this Droplet — nothing leaves the box.
-        </p>
-      </LearnMoreCard>
+        <LearnMoreCard helpAnchor="storage">
+          <p>
+            Each drive can hold a different kind of file. Name them however
+            helps you find things later — &ldquo;Wedding Photos&rdquo;,
+            &ldquo;Client Backups&rdquo;, &ldquo;Camera Footage&rdquo;.
+          </p>
+          <p>
+            You can rename a drive anytime from Settings &rsaquo; Storage.
+            Names are stored on this Droplet — nothing leaves the box.
+          </p>
+        </LearnMoreCard>
+      </ScrollRegion>
 
       <ConfirmDialog
         open={confirmOpen}

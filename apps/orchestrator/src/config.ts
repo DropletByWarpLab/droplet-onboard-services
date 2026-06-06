@@ -221,6 +221,23 @@ const envSchema = z.object({
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
 
+  // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
+  // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
+  // and that single-box.sh's configure_single_box_env upserts into .env.
+  //   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI. Home
+  //              Wi-Fi SSID/PSK writes go through the routing service (UCI/SSH),
+  //              exactly as before. This is the back-compat default.
+  //   hostapd  — single-box: the host runs a raw hostapd AP (no UCI), so a UCI
+  //              write hits a nonexistent section (ubus NOT_FOUND → 500).
+  //              network.service routes the SSID/PSK write through the
+  //              device-bridge's POST /openwrt/wifi/hostapd instead.
+  //   auto     — reserved for the bridge's auto-detect; the orchestrator treats
+  //              anything other than "hostapd" as the UCI path (a box that wants
+  //              the hostapd write path sets DROPLET_AP_MODE=hostapd explicitly,
+  //              which single-box.sh does).
+  // Defaulting to `uci` keeps every multi-box install behaving exactly as before.
+  DROPLET_AP_MODE: z.enum(["uci", "hostapd", "auto"]).default("uci"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

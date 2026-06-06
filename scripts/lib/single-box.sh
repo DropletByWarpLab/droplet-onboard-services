@@ -467,6 +467,17 @@ EOF
   upsert_env OPENWRT_PORT        8181
   upsert_env OPENWRT_USERNAME    root
   upsert_env ROUTING_MODE        real
+  # WARP-815 (K4): the routing service resolves the Wi-Fi scan radio from
+  # DROPLET_WIFI_SCAN_DEVICE (the orchestrator no longer hardcodes wlan0 on the
+  # wire). The single-box AP radio is phy0 → wlp14s0 inside the openwrt
+  # container. SOURCE this from DROPLET_AP_IFACE so the scan radio tracks the AP
+  # radio if an operator overrode it; default to the same wlp14s0 the AP iface
+  # defaults to (install_single_box_host_integration writes
+  # DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-wlp14s0}). The AP radio in AP mode can't
+  # itself scan (iw scan -> Not supported -95); the graceful "scan unavailable"
+  # UX is a separate dashboard ticket. This only wires the config so the radio
+  # name is correct rather than the absent wlan0.
+  upsert_env DROPLET_WIFI_SCAN_DEVICE "${DROPLET_AP_IFACE:-wlp14s0}"
   # device-bridge pairing-QR source: the single-box AP is a host hostapd, not
   # a UCI router, so the bridge must read creds in hostapd mode (it defaults to
   # uci). install-device-bridge.sh mirrors this knob into the bridge env so a

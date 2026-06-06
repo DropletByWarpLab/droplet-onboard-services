@@ -256,6 +256,92 @@ def test_hostapd_env_psk_takes_priority_over_persisted_file(
 
 
 # ---------------------------------------------------------------------------
+# WARP-819 — empty-PSK boot race must NOT emit an unscannable (P:;;) QR.
+# On first boot the SSID env is set (DROPLET_AP_SSID=Droplet) but the PSK is
+# not yet known to the bridge — DROPLET_AP_PSK is absent and the persisted
+# 0600 file hasn't been written by droplet-openwrt-attach yet (or is empty).
+# Previously hostapd_wifi_credentials() returned {ssid, key:""} in that window,
+# so the claim QR encoded `WIFI:T:WPA;S:Droplet;P:;;` — an unjoinable
+# empty-passphrase network. The bridge must instead fall through to the live
+# hostapd.conf (the value hostapd actually serves); and if THAT is also
+# unavailable it must refuse to emit creds (better no QR than a broken one).
+# ---------------------------------------------------------------------------
+
+def test_hostapd_empty_env_and_file_psk_falls_through_to_conf(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # SSID set, env PSK absent, persisted file empty -> the function must read
+    # the live /etc/hostapd.conf rather than emit an empty-passphrase QR.
+    psk_file = tmp_path / "ap-psk"
+    psk_file.write_text("")  # exists but empty (mid-write / pre-attach race)
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        # No DROPLET_AP_PSK on purpose.
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+
+    def fake_run(cmd, timeout=15):
+        return 0, _HOSTAPD_CONF, ""
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is True
+    assert snap["ssid"] == "Droplet"
+    # The PSK came from hostapd.conf, NOT the empty env/file.
+    assert snap["key"] == "Droplet123!"
+    assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:Droplet123!;;"
+    # Hard guarantee: never an empty-passphrase QR.
+    assert ";P:;;" not in snap["payload"]
+
+
+def test_hostapd_credentials_falls_through_when_key_empty(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Unit-level: hostapd_wifi_credentials() with SSID-but-no-key must defer to
+    # _read_hostapd_conf_creds() rather than return {key: ""}.
+    psk_file = tmp_path / "ap-psk"  # absent on disk
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    monkeypatch.setattr(
+        bridge, "_read_hostapd_conf_creds",
+        lambda: ({"ssid": "Droplet", "key": "fromconf123456",
+                  "encryption": "psk2", "hidden": False,
+                  "disabled": False}, None))
+    creds, err = bridge.hostapd_wifi_credentials()
+    assert err is None
+    assert creds["key"] == "fromconf123456"
+
+
+def test_hostapd_empty_psk_everywhere_refuses_qr_no_empty_passphrase(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Worst case during the boot race: SSID set, env+file PSK empty, AND the
+    # hostapd.conf read also yields no key (container not up yet). The function
+    # must NOT emit {key: ""} — better no QR (ok=false) than a P:;; QR a phone
+    # silently joins as an open-but-named network and then can't reach the box.
+    psk_file = tmp_path / "ap-psk"  # absent
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    # hostapd.conf parsed but carries an empty wpa_passphrase.
+    monkeypatch.setattr(
+        bridge, "_read_hostapd_conf_creds",
+        lambda: ({"ssid": "Droplet", "key": "",
+                  "encryption": "psk2", "hidden": False,
+                  "disabled": False}, None))
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is False
+    assert snap["matrix"] is None
+    assert snap["error"]
+    # Crucially: no empty-passphrase payload leaked out.
+    assert snap["payload"] is None
+
+
+# ---------------------------------------------------------------------------
 # auto mode
 # ---------------------------------------------------------------------------
 

@@ -324,6 +324,49 @@ def test_render_claim_falls_back_when_only_partial_wifi(sim_display: TFTDisplay)
     assert no_ssid.tobytes() == claim_only.tobytes()
 
 
+# --- WiFi-QR payload escaping + matrix-faithful render (WARP-819) -----------
+# The sim's claim QR previously formatted `WIFI:T:WPA;S:{};P:{};;` raw — an
+# SSID/PSK carrying a WiFi-QR metachar (\ ; , : ") would corrupt the payload,
+# unlike device-bridge.py's escaped `_hostapd_wifi_payload`. The sim must apply
+# the same escaping, AND (production-faithful) paint the host-supplied matrix
+# directly when one is provided — the firmware never re-encodes on-device.
+
+def test_wifi_qr_payload_escapes_metacharacters():
+    # Mirrors device-bridge.py _hostapd_wifi_payload's esc(): \ ; , : " are
+    # backslash-escaped so a special-char SSID/PSK still scans.
+    payload = display_module._wifi_qr_payload("My;Net:2", "p\\a,s;s")
+    assert payload == r"WIFI:T:WPA;S:My\;Net\:2;P:p\\a\,s\;s;;"
+
+
+def test_wifi_qr_payload_plain_values_unchanged():
+    # No metachars -> identical to the simple format (back-compat with the
+    # common alphanumeric generated PSK).
+    assert (display_module._wifi_qr_payload("Droplet", "7gpz4k9m2njq8wxr")
+            == "WIFI:T:WPA;S:Droplet;P:7gpz4k9m2njq8wxr;;")
+
+
+def test_render_claim_paints_host_matrix_not_reencoded(
+        monkeypatch: pytest.MonkeyPatch, sim_display: TFTDisplay):
+    # When a wifi_qr_matrix is supplied, the claim screen must paint THAT matrix
+    # (the bytes the firmware will paint), never silently re-encode a payload —
+    # otherwise the sim preview and the device diverge. Spy on _draw_qr and
+    # assert it received the host matrix.
+    seen = {}
+    orig = sim_display._draw_qr
+
+    def spy(img, draw, x, y, size, payload=None, matrix=None):
+        seen["payload"] = payload
+        seen["matrix"] = matrix
+        return orig(img, draw, x, y, size, payload=payload, matrix=matrix)
+
+    monkeypatch.setattr(sim_display, "_draw_qr", spy)
+    sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk=CLAIM_WIFI_PSK, wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert seen.get("matrix") == CLAIM_WIFI_MATRIX
+
+
 # --- Backward-compat: existing boot/shutdown signatures still work ----------
 
 def test_render_boot_legacy_stage_signature_still_supported(sim_display: TFTDisplay):

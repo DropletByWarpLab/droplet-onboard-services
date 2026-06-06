@@ -12,7 +12,6 @@ import {
   Router,
   Shield,
   ShieldCheck,
-  Signal,
   SlidersHorizontal,
   Wifi,
   WifiOff,
@@ -32,10 +31,10 @@ import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPa
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
+import { WifiScanPanel } from "@/components/network/WifiScanPanel";
 import {
   setWifiSsid,
   setWifiChannel,
-  scanWifiNetworks,
   confirmNetworkCommand,
   fetchNetworkOperation,
   type NetworkOperation,
@@ -47,7 +46,6 @@ import type {
   FirewallRule,
   NetworkCommandResult,
   NetworkOverview,
-  WirelessScanResult,
 } from "@/lib/types";
 
 // WARP-40: poll /network/operations/:id every second until terminal.
@@ -838,21 +836,6 @@ function DevicesTab() {
 
 // --- WiFi Tab ---
 function WifiTab() {
-  const [scanResults, setScanResults] = useState<WirelessScanResult[] | null>(null);
-  const [scanning, setScanning] = useState(false);
-
-  async function handleScan() {
-    setScanning(true);
-    try {
-      const results = await scanWifiNetworks();
-      setScanResults(results);
-    } catch {
-      // ignore
-    } finally {
-      setScanning(false);
-    }
-  }
-
   return (
     <div className="space-y-4">
       <div className="dp-card">
@@ -863,60 +846,10 @@ function WifiTab() {
         </p>
       </div>
 
-      <div className="dp-card">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="type-headline text-label-primary">Nearby Networks</h3>
-          <button
-            onClick={handleScan}
-            disabled={scanning}
-            className="dp-btn-secondary flex items-center gap-2 text-sm"
-          >
-            <Signal size={14} className={scanning ? "animate-pulse" : ""} />
-            {scanning ? "Scanning..." : "Scan"}
-          </button>
-        </div>
-
-        {scanResults && scanResults.length > 0 ? (
-          <div className="space-y-2">
-            {scanResults.map((network, i) => (
-              <div
-                key={`${network.bssid}-${i}`}
-                className="flex items-center justify-between px-3 py-2 rounded-sm bg-surface-secondary/50"
-              >
-                <div className="flex items-center gap-3">
-                  <Wifi
-                    size={16}
-                    className={
-                      network.signal > -50
-                        ? "text-system-green"
-                        : network.signal > -70
-                        ? "text-system-orange"
-                        : "text-system-red"
-                    }
-                  />
-                  <div>
-                    <p className="type-subheadline text-label-primary">
-                      {network.ssid || "(Hidden)"}
-                    </p>
-                    <p className="type-caption-2 text-label-tertiary">
-                      Ch {network.channel} | {network.encryption.enabled ? "Encrypted" : "Open"}
-                    </p>
-                  </div>
-                </div>
-                <span className="type-caption-1 text-label-tertiary">
-                  {network.signal} dBm
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : scanResults ? (
-          <p className="type-subheadline text-label-tertiary">No networks found.</p>
-        ) : (
-          <p className="type-subheadline text-label-tertiary">
-            Click Scan to search for nearby WiFi networks.
-          </p>
-        )}
-      </div>
+      {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
+          AP-mode "scanning unavailable while broadcasting" state (typed
+          SCAN_UNSUPPORTED signal) from a genuine empty scan. */}
+      <WifiScanPanel />
     </div>
   );
 }
