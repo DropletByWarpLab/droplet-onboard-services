@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { ChatInput } from "@/components/ChatInput";
+import { createRef } from "react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import type { ChatAttachment } from "@/lib/types";
 
 describe("ChatInput", () => {
@@ -149,6 +150,60 @@ describe("ChatInput hit-targets (WARP-301)", () => {
     expect(svg).not.toBeNull();
     expect(svg!.getAttribute("width")).toBe("18");
     expect(svg!.getAttribute("height")).toBe("18");
+  });
+});
+
+// ── WARP-829: seed() imperative handle (prime the composer from /tools) ──
+
+describe("ChatInput seed (WARP-829)", () => {
+  it("seed() sets the textarea value to the seed text", () => {
+    const ref = createRef<ChatInputHandle>();
+    render(<ChatInput ref={ref} onSend={vi.fn()} />);
+    const textarea = screen.getByPlaceholderText(
+      "Send a message...",
+    ) as HTMLTextAreaElement;
+
+    // act() flushes the setValue state update + the deferred focus microtask
+    // the imperative handle schedules.
+    act(() => {
+      ref.current!.seed("Block a device from the internet for ");
+    });
+
+    expect(textarea.value).toBe("Block a device from the internet for ");
+  });
+
+  it("seed() focuses the textarea and puts the caret at the end", async () => {
+    const ref = createRef<ChatInputHandle>();
+    render(<ChatInput ref={ref} onSend={vi.fn()} />);
+    const textarea = screen.getByPlaceholderText(
+      "Send a message...",
+    ) as HTMLTextAreaElement;
+
+    act(() => {
+      ref.current!.seed("Set the wifi name to ");
+    });
+
+    // Focus + caret are scheduled in a microtask after the value flush; wait
+    // for the textarea to take focus.
+    await waitFor(() => expect(document.activeElement).toBe(textarea));
+    // Caret collapsed at the end so the user keeps typing after the seed.
+    expect(textarea.selectionStart).toBe("Set the wifi name to ".length);
+    expect(textarea.selectionEnd).toBe("Set the wifi name to ".length);
+  });
+
+  it("seed() REPLACES any existing value (it does not prepend like insertQuote)", () => {
+    const ref = createRef<ChatInputHandle>();
+    render(<ChatInput ref={ref} onSend={vi.fn()} />);
+    const textarea = screen.getByPlaceholderText(
+      "Send a message...",
+    ) as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: "leftover draft" } });
+    act(() => {
+      ref.current!.seed("Fresh starter line ");
+    });
+
+    expect(textarea.value).toBe("Fresh starter line ");
   });
 });
 
