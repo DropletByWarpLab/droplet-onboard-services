@@ -1251,11 +1251,25 @@ def drives_snapshot(invalidate=False):
     except Exception:
         pass
 
-    # Stable order: fstab first (usually the big data drives), then
-    # automount (hot-plug), each group sorted by mount path for a
-    # predictable on-screen list.
-    mounts = sorted(by_mount.values(),
-                    key=lambda d: (d["source"] != "fstab", d["mount"]))
+    # WARP-827: one card per PHYSICAL drive. A drive can be mounted at more than
+    # one path (e.g. a friendly /mnt/droplet/data + the automount
+    # /mnt/droplet/data-<uuid>), which otherwise shows the same disk twice.
+    # Collapse by backing device, keeping the friendliest mount (fstab first,
+    # then the shortest path), and preserve ejectability if any duplicate was
+    # removable.
+    ordered = sorted(
+        by_mount.values(),
+        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
+    )
+    by_device = {}
+    for e in ordered:
+        dev = e.get("device") or e.get("mount")
+        if dev in by_device:
+            if e.get("removable"):
+                by_device[dev]["removable"] = True
+            continue
+        by_device[dev] = e
+    mounts = list(by_device.values())
 
     snap = {
         "drives": mounts,
